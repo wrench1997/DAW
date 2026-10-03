@@ -1,0 +1,43 @@
+[package]
+name = "citrus-studio"
+version = "0.4.0"
+edition = "2024"
+description = "A fast, native Rust music production studio"
+license = "MIT"
+default-run = "citrus-studio"
+
+[[bin]]
+name = "vst3-host-helper"
+path = "src/bin/vst3-host-helper.rs"
+required-features = ["vst3"]
+
+[features]
+default = ["vst2", "vst3"]
+vst2 = ["dep:vst"]
+vst3 = ["dep:vst3-host"]
+
+[dependencies]
+anyhow = "1.0"
+cpal = "0.18"
+directories = "6.0"
+eframe = { version = "0.35", default-features = false, features = ["accesskit", "persistence", "wayland", "wgpu", "x11"] }
+egui = { version = "0.35", features = ["serde"] }
+object = { version = "0.38", features = ["read_core", "pe"] }
+rfd = "0.17"
+rtrb = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+walkdir = "2.5"
+vst = { version = "0.4", optional = true }
+vst3-host = { version = "0.9", optional = true, default-features = false, features = ["cpal-backend", "process-isolation"] }
+
+[target.'cfg(windows)'.dependencies]
+# Keep midir's default WinMM backend. In particular, do not enable its optional `winrt` feature.
+midir = { version = "0.11", default-features = false }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = "symbols"
