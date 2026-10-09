@@ -2,6 +2,8 @@
 """Strict source-built Windows VST3 editor acceptance; exit 77 means NOT VERIFIED."""
 
 import argparse
+import base64
+import binascii
 from collections import deque
 import ctypes
 import hashlib
@@ -196,6 +198,23 @@ class Session:
         payload = response_payload(self.request({"GetParameter": {"id": param_id}}), "ParameterValue")
         require(set(payload) == {"value"}, f"Malformed ParameterValue: {payload!r}")
         return number(payload["value"])
+
+    def native_revision(self):
+        payload = response_payload(self.request("NativeDirtyRevision"), "NativeDirtyRevision")
+        require(set(payload) == {"revision"} and type(payload["revision"]) is int
+                and payload["revision"] >= 0, f"Malformed native dirty revision: {payload!r}")
+        return payload["revision"]
+
+    def save_state(self):
+        payload = response_payload(self.request("SaveState"), "State")
+        require(set(payload) == {"data"} and isinstance(payload["data"], str)
+                and 0 < len(payload["data"]) <= 65536, "Invalid fixture state payload")
+        try:
+            decoded = base64.b64decode(payload["data"], validate=True)
+        except (binascii.Error, ValueError) as error:
+            raise SmokeError("Malformed base64 fixture state") from error
+        require(bool(decoded), "Empty fixture state")
+        return payload["data"]
 
     def finish(self, mode="Shutdown"):
         if mode == "EOF":
@@ -548,6 +567,7 @@ def assert_interaction(session, desktop, hwnd):
     require(desktop.text(button) == "Set Cutoff to 0.25", "Unexpected native fixture caption")
     before = desktop.painted_pixels(button)
     require(session.parameter(0) == 1.0, "Fixture did not start at default Cutoff")
+    revision = session.native_revision()
     require(response_payload(session.request("TakeParameterEdits"), "ParameterEdits").get("edits") == [],
             "Unexpected pre-click parameter gestures")
     require(response_payload(session.request("TakeHostNotifications"), "HostNotifications").get("notifications") == [],
@@ -562,12 +582,32 @@ def assert_interaction(session, desktop, hwnd):
         {"id": 0, "kind": "ValueChange", "value": 0.25},
         {"id": 0, "kind": "EndGesture", "value": None},
     ], f"Native edit callback sequence mismatch: {edits!r}")
-    changes = response_payload(session.request("TakeParameterChanges"), "ParameterChanges").get("changes")
-    require(changes == [[0, bits(0.25)]], f"Native parameter-change feedback mismatch: {changes!r}")
+    # Keep stopped-transport DSP edits queued until SaveState's zero-sample flush.
+    # Draining the legacy display queue here would deliberately invalidate capture.
     notifications = response_payload(session.request("TakeHostNotifications"), "HostNotifications").get("notifications")
     require(notifications == [{"DirtyChanged": True}], f"Missing native DirtyChanged(true): {notifications!r}")
+    require(session.native_revision() > revision, "Native dirty revision did not survive feedback draining")
     require(desktop.painted_pixels(button) != before, "Native edited caption did not repaint")
     return [hwnd, panel, button]
+
+
+def assert_state_roundtrip(session, desktop, fixture, handles):
+    """Capture the stopped native edit, then restore into a fresh fixture instance."""
+    revision = session.native_revision()
+    captured = session.save_state()  # Must detach and flush the pending native DSP edit.
+    session.editor("Query", supported=True, has_editor=True, open=False)
+    desktop.gone(handles, session.deadline)
+    require(session.parameter(1000) == 0.0, "SaveState did not detach the native view")
+    changes = response_payload(session.request("TakeParameterChanges"), "ParameterChanges").get("changes")
+    require(changes == [[0, bits(0.25)]], f"Native parameter-change feedback mismatch: {changes!r}")
+    require(session.native_revision() == revision, "Native dirty revision changed during state capture")
+    response_payload(session.request("UnloadPlugin"), "Success")
+    session.load(fixture)
+    require(session.parameter(0) == 1.0, "Fresh fixture did not reset Cutoff before restore")
+    response_payload(session.request({"LoadState": {"data": captured, "context": "Project"}}), "Success")
+    require(session.parameter(0) == 0.25, "Native Cutoff edit did not survive opaque state restore")
+    require(session.parameter(1004) == 0.5, "Fixture did not observe project state context")
+    require(session.save_state() == captured, "Fixture component/controller state changed after round-trip")
 
 
 def exercise_lifecycle(command, fixture, no_editor, desktop, timeout=60.0, report=print):
@@ -599,6 +639,11 @@ def exercise_lifecycle(command, fixture, no_editor, desktop, timeout=60.0, repor
         error_response(session.request({"Editor": {"command": {"Open": {"owner": other}}}}))
         require(session.editor("Query") == state, "Rejected owner change modified editor state")
         desktop.destroy_owner(other)
+        assert_state_roundtrip(session, desktop, fixture, handles)
+        report("PASS state: stopped native edit captured after detach, restored into fresh instance, component/controller bytes preserved")
+        session.editor({"Open": {"owner": owner}}, open=True)
+        state, hwnd = assert_handshake(session, desktop)
+        handles = [hwnd] + desktop.windows(session.process.pid, hwnd)
         for _ in range(3):
             session.editor("Close", open=False, has_editor=True)
             desktop.gone(handles, session.deadline)

@@ -262,6 +262,29 @@ class SessionTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
+    def test_fixture_state_requires_nonempty_base64(self):
+        session = smoke.Session.__new__(smoke.Session)
+        session.request = mock.Mock(return_value={"State": {"data": "c3RhdGU="}})
+        self.assertEqual(session.save_state(), "c3RhdGU=")
+        session.request.assert_called_once_with("SaveState")
+        for payload in ({"data": ""}, {"data": "===="}, {"data": "bad!"},
+                        {"data": "\N{SNOWMAN}"}, {"data": []}, {"data": True},
+                        {"data": "A" * 65540}, {"data": "c3RhdGU=", "extra": 1}, {}):
+            with self.subTest(payload=payload), self.assertRaises(smoke.SmokeError):
+                session.request.return_value = {"State": payload}
+                session.save_state()
+
+    def test_native_revision_is_an_exact_nonnegative_integer(self):
+        session = smoke.Session.__new__(smoke.Session)
+        session.request = mock.Mock(return_value={"NativeDirtyRevision": {"revision": 3}})
+        self.assertEqual(session.native_revision(), 3)
+        session.request.assert_called_once_with("NativeDirtyRevision")
+        for payload in ({"revision": True}, {"revision": -1}, {"revision": 3.0},
+                        {"revision": "3"}, {"revision": 3, "extra": 1}, {}):
+            with self.subTest(payload=payload), self.assertRaises(smoke.SmokeError):
+                session.request.return_value = {"NativeDirtyRevision": payload}
+                session.native_revision()
+
     def test_stdout_evidence_survives_bounded_diagnostic_eviction(self):
         diagnostics = smoke.FixtureDiagnostics()
         for marker in smoke.STDOUT_MARKERS:
@@ -390,6 +413,81 @@ class ValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             with self.assertRaisesRegex(smoke.SmokeError, "Missing/invalid source-built fixture"):
                 smoke.verify_fixture(Path(temp), "editor")
+
+
+class StateRoundTripTests(unittest.TestCase):
+    """Check orchestration/failure gates only, without claiming native execution."""
+
+    def setUp(self):
+        self.session = mock.Mock(spec=smoke.Session)
+        self.session.deadline = 123.0
+        self.session.native_revision.side_effect = [2, 2]
+        self.session.save_state.side_effect = ["c3RhdGU=", "c3RhdGU="]
+        self.session.parameter.side_effect = [0.0, 1.0, 0.25, 0.5]
+        self.session.request.side_effect = [
+            {"ParameterChanges": {"changes": [[0, smoke.bits(0.25)]]}},
+            {"Success": {"message": "unloaded"}},
+            {"Success": {"message": "restored"}},
+        ]
+        self.desktop = mock.Mock(spec=smoke.WindowsDesktop)
+
+    def run_roundtrip(self):
+        smoke.assert_state_roundtrip(self.session, self.desktop, Path("owned-fixture"), [123, 456])
+
+    def test_capture_precedes_feedback_drain_and_fresh_instance_restore(self):
+        self.run_roundtrip()
+        self.assertEqual(self.session.method_calls, [
+            mock.call.native_revision(),
+            mock.call.save_state(),
+            mock.call.editor("Query", supported=True, has_editor=True, open=False),
+            mock.call.parameter(1000),
+            mock.call.request("TakeParameterChanges"),
+            mock.call.native_revision(),
+            mock.call.request("UnloadPlugin"),
+            mock.call.load(Path("owned-fixture")),
+            mock.call.parameter(0),
+            mock.call.request({"LoadState": {"data": "c3RhdGU=", "context": "Project"}}),
+            mock.call.parameter(0),
+            mock.call.parameter(1004),
+            mock.call.save_state(),
+        ])
+        self.desktop.gone.assert_called_once_with([123, 456], 123.0)
+
+    def test_capture_requires_native_detach(self):
+        self.session.parameter.side_effect = [1.0]
+        with self.assertRaisesRegex(smoke.SmokeError, "did not detach"):
+            self.run_roundtrip()
+        self.session.load.assert_not_called()
+
+    def test_missing_dsp_feedback_is_not_a_pass(self):
+        self.session.request.side_effect = [{"ParameterChanges": {"changes": []}}]
+        with self.assertRaisesRegex(smoke.SmokeError, "feedback mismatch"):
+            self.run_roundtrip()
+
+    def test_changed_native_revision_is_not_a_pass(self):
+        self.session.native_revision.side_effect = [2, 3]
+        with self.assertRaisesRegex(smoke.SmokeError, "revision changed"):
+            self.run_roundtrip()
+
+    def test_restore_requires_fresh_default_instance(self):
+        self.session.parameter.side_effect = [0.0, 0.25]
+        with self.assertRaisesRegex(smoke.SmokeError, "did not reset"):
+            self.run_roundtrip()
+
+    def test_stale_component_state_is_not_a_pass(self):
+        self.session.parameter.side_effect = [0.0, 1.0, 1.0]
+        with self.assertRaisesRegex(smoke.SmokeError, "did not survive"):
+            self.run_roundtrip()
+
+    def test_wrong_restore_context_is_not_a_pass(self):
+        self.session.parameter.side_effect = [0.0, 1.0, 0.25, 0.0]
+        with self.assertRaisesRegex(smoke.SmokeError, "project state context"):
+            self.run_roundtrip()
+
+    def test_changed_state_bytes_are_not_a_pass(self):
+        self.session.save_state.side_effect = ["c3RhdGU=", "Y2hhbmdlZA=="]
+        with self.assertRaisesRegex(smoke.SmokeError, "state changed"):
+            self.run_roundtrip()
 
 
 if __name__ == "__main__":
