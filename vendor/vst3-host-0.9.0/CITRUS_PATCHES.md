@@ -189,3 +189,26 @@ improvement. The production Linux/Windows helper uses an additive thread-bound e
 No upstream archive, license, package version, dependency manifest or registry checksum is
 changed. See repository `docs/PLUGIN_PROCESSOR_DOMAINS.md` for the remaining worker/broker,
 bounded lane and state-fence requirements, and `docs/WORK_LOG.md` for executed validation.
+
+## Narrow Surge XT 1.3.4 restore eligibility
+
+`src/internal/plugin_impl.rs` tracks positive Process invocation and explicit native-editor-opening-attempt history
+without resetting either on stop/reconfigure. The exact instantiated UID
+`ABCDEF019182FAEB566D624153675854` plus version `1.3.4` rejects state restore after either history,
+before lifecycle/queue/controller/component mutation. `src/plugin.rs` exposes additive local
+preflight through Plugin and MainThreadPlugin; remote helpers still enforce the authoritative
+check. Root helper native dispatchers preflight before detachment. No protocol change, internal
+settlement Process, wait loop or replacement-instance swap is added. Metadata is a compatibility
+selector, not authentication; official Linux x86-64 1.3.4 is the characterized binary/platform.
+
+The proposed settlement approach was rejected because a Surge background patch loader can leave
+halt_engine set while Process still returns success. Callers must restore a fresh candidate before
+first playback/native interaction and retain the old instance until candidate success. Current
+App fresh-candidate paths are distinct from the unchanged legacy public live-admin LoadState path,
+which still closes/faults its slot on backend rejection. See the ownership guide for that limit.
+
+An adjacent existing alias bug is corrected: an optional controller payload must not call
+IEditController::setState when controller and component are the same object. Both controller-state
+calls now share the alias guard. Added controlled fixtures cover exact policy selection,
+zero/positive/failed Process history, editor attempts, rejection without COM or queue mutation,
+continued processing, and a nonempty legacy controller payload on a single-component instance.

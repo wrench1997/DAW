@@ -129,3 +129,50 @@ original license/manifests remain unchanged. Fresh helper bytes match the genuin
 regression helper `cb1899fd…` exactly. New Windows runtime/package results remain
 separate candidate gates. No app UI source changed or new desktop/performance run
 was performed during integration.
+## Follow-on Surge state-restore compatibility guard
+
+The ownership-preparation checkpoint did not fix Surge XT 1.3.4 reused-instance restoration.
+Fresh-instance restoration before the first positive Process succeeds, but after prior processing
+Surge defers component state, the first note can be erased by `loadRaw`/`stopSound`, and JUCE's
+immediate controller synchronization can cache old values. A later component SaveState and native
+UI show the correct volume while the controller getter remains stale. This is not evidence of
+permanent processor-volume loss.
+
+A proposed internal 32-frame settlement transaction was rejected before commit: Surge's native
+preset loader can leave `halt_engine` true while a plugin-owned background task waits for its
+mutex. Process then reports success without reaching the queued state application. Fixed blocks,
+sleeps and arbitrary retries cannot establish completion, and no hidden settlement is enabled.
+
+The separate compatibility guard matches only instantiated factory UID
+`ABCDEF019182FAEB566D624153675854` and exact version `1.3.4`. Display names and bundle paths are not
+used. This metadata selects policy; it does not authenticate a binary. The characterization is
+from the installed official Linux x86-64 Surge 1.3.4 package and its official source tag, not a
+cross-platform/build completeness claim.
+
+- Any attempted positive Process, including one returning an error, makes this instance ineligible
+  for later state restore. Zero-sample parameter flushes do not mark it processed.
+- Entering an explicit native editor opening/attachment attempt also makes the history ineligible,
+  even if opening later fails. Existing temporary createView probes used during loading or metadata
+  inspection are unchanged; this flag is not proof that no plugin UI initialization ever occurred. Closing the editor, stopping, reconfiguring or changing process mode never resets
+  either history flag. Only a newly loaded instance is fresh.
+- Ineligible LoadState returns an actionable error before component/controller calls, lifecycle
+  changes, queue drains, state mutation or helper-native editor detachment. Linux and Windows
+  dispatchers share the local preflight; the in-process implementation repeats it authoritatively.
+- A caller must prepare a fresh candidate, restore its authoritative blob before playback/native
+  interaction, and retain the old instance until candidate success. There is no new helper-side
+  ownership swap or wire command.
+- The current App's normal configuration/reopen/restore path already uses fresh candidates. The
+  legacy public `PluginChainControl::load_state` path still closes its native editor and faults its
+  slot when the backend rejects a load; it is not called by the current App and is not changed here.
+  Direct helper/in-process preservation must not be presented as preservation through that legacy
+  full-chain API. Remote preflight remains the helper's responsibility; the additive local API does
+  not introduce an extra isolated-client protocol roundtrip.
+
+An adjacent existing alias-state bug is fixed separately in this slice: a nonempty controller
+payload in an envelope must not call `IEditController::setState` when that controller aliases the
+component. Both controller state calls now obey the same single-component guard.
+
+Source references: [Surge processor, release 1.3.4](https://github.com/surge-synthesizer/surge/blob/release_xt_1.3.4/src/surge-xt/SurgeSynthProcessor.cpp),
+[Surge synthesis and background loading](https://github.com/surge-synthesizer/surge/blob/release_xt_1.3.4/src/common/SurgeSynthesizer.cpp),
+[state queue/application](https://github.com/surge-synthesizer/surge/blob/release_xt_1.3.4/src/common/SurgeSynthesizerIO.cpp),
+[the release's pinned JUCE wrapper](https://github.com/surge-synthesizer/JUCE/blob/cf5754b19c87ea63758802e3f4239c05a77f1412/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp).

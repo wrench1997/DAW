@@ -186,6 +186,8 @@ struct ControlDomain {
     // plugin's own editor, get_parameter/format_parameter and saved state track the DSP.
     deferred_controller_sync: ArrayQueue<(u32, f64)>,
 
+    // Native interaction can enqueue a background patch load. This history never resets.
+    editor_has_been_opened: bool,
     // Plugin view
     plugin_view: Option<ComPtr<IPlugView>>,
     editor_scale_factor: f32,
@@ -223,6 +225,9 @@ struct ControlDomain {
 /// ParameterChanges/EventList and the legacy callback bridge still need bounded replacement.
 struct ProcessorRuntime {
     is_processing: bool,
+    // A positive processor call may activate deferred state even when it returns an error.
+    // Zero-sample parameter flushes do not enter the characterized Surge sample loop.
+    has_processed_audio: bool,
     sample_rate: f64,
     block_size: usize,
     /// Transport tempo (BPM) advertised in the host `ProcessContext`.
@@ -1646,6 +1651,7 @@ impl PluginImpl {
                 compatibility,
                 runtime: ProcessorRuntime {
                     is_processing: false,
+                    has_processed_audio: false,
                     sample_rate: 44100.0,
                     block_size: 512,
                     tempo: 120.0,
@@ -1688,6 +1694,7 @@ impl PluginImpl {
                         MAX_EDITOR_FEEDBACK,
                     ))),
                     deferred_controller_sync: ArrayQueue::new(MAX_DEFERRED_CONTROLLER_SYNC),
+                    editor_has_been_opened: false,
                     plugin_view: None,
                     editor_scale_factor: 1.0,
                     plug_frame,
@@ -2399,6 +2406,7 @@ impl ProcessorRuntime {
                 // A zero-sample flush carries events/parameter queues only. The VST3 process
                 // contract requires no audio buses or pointers for that call.
                 let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
+                self.has_processed_audio |= frames != 0;
                 bridge.enter_process();
                 let process_result = processor.process(&mut data.process_data);
                 bridge.leave_process();
@@ -3233,6 +3241,10 @@ impl PluginInternal for PluginImpl {
                 "editor parent window handle is null".to_string(),
             ));
         }
+
+        // Mark before any native view creation/attachment call: even a failed attempt may
+        // have entered plugin-side UI code. Null-parent rejection above remains nonmutating.
+        self.control.editor_has_been_opened = true;
 
         // Give each attachment a new frame/registry. Old retained frame pointers remain
         // closed forever, so release callbacks cannot resurrect a removed view's handlers.
@@ -4502,7 +4514,24 @@ impl PluginInternal for PluginImpl {
         }
     }
 
+    fn preflight_state_restore(&self) -> Result<()> {
+        // These are the actual instantiated factory class UID/version, not a display name or
+        // path. They select compatibility policy, not binary authenticity. Surge XT 1.3.4's
+        // deferred patch/native-worker completion has no VST acknowledgment; Process success
+        // cannot safely fence it. Do not attempt hidden warmup, fixed retries or opaque parsing.
+        if self.info.uid == "ABCDEF019182FAEB566D624153675854"
+            && self.info.version == "1.3.4"
+            && (self.runtime.has_processed_audio || self.control.editor_has_been_opened)
+        {
+            return Err(Error::Other(
+                "Surge XT 1.3.4 requires a fresh instance for state restore: load a new instance, restore its state before playback or opening the native editor, then replace the old instance only after success".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn load_state_with_context(&mut self, data: &[u8], context: &StateContext) -> Result<()> {
+        self.preflight_state_restore()?;
         let snapshot = decode_state_snapshot(data)?;
         let was_processing = self.runtime.is_processing;
         let was_active = self.control.is_active;
@@ -4565,7 +4594,10 @@ impl PluginInternal for PluginImpl {
                 }
 
                 if let (Some(controller), Some(controller_state)) = (
-                    self.control.controller.as_ref(),
+                    self.control
+                        .controller
+                        .as_ref()
+                        .filter(|_| !self.control.single_component),
                     snapshot.controller.as_ref(),
                 ) {
                     let stream = create_state_restore_stream(controller_state.clone(), context);

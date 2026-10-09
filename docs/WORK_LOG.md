@@ -572,3 +572,49 @@ Windows desktop acceptance. No publication was performed from this worktree.
 - The main-thread-only facade and exclusive processor borrow do not create a worker. Control lifetime/error unwind, state/topology storage rebuild and lifecycle failure reporting are hardened, but legacy locks/feedback remain synchronous. No latency, dropout or realtime-thread isolation gain is claimed. Fresh helper hash **`cb1899fd7b768e61ab3b5de747e4236e250a0387762058b1db12f4fe2bd5ca08`** is byte-identical to the independently tested native/headless regression helper.
 - Post-freeze genuine fixture and fresh-instance Surge/Stochas paint/input/state checks pass. **Full restore acceptance remains partial:** both previous/new helpers lose Surge's first immediate note after reused-instance restore, and the host getter stays stale even after the component volume correctly applies. Actual native menu and component XML correct the earlier interpretation of permanent DSP-volume loss. Reused-state content913×569 can remain inside host1178×735 until detach/reopen; historical resize346.9ms request stall remains. Details and exact source/state identities are in [state limits](PLUGIN_STATE_RESTORE_LIMITS.md), independently reviewed before this checkpoint.
 - Added ownership/state-limit guides to exact packaging and linked current native validation. All **129 packaged inputs** have closed links and strict provenance/QA inventories; original receipts are not rewritten. New Windows CI remains required. Callback timing, a real DSP worker and the separately proposed Surge compatibility transaction are excluded. Post-Rust-gate changes are documentation/packaging only; no main merge, Release or binary artifact publication.
+### 2026-10-09 12:25 UTC — Bound Surge state restore to fresh instances
+
+- Separate follow-on to ownership checkpoint `81fe8bf`; no DSP worker or latency improvement is
+  claimed. Old/new real-plugin comparison found the same existing Surge XT 1.3.4 behavior: a
+  used instance defers restored component state, can erase its first note, and leaves controller
+  readback stale. Component XML/native UI eventually hold the correct volume; the initial 1.0
+  getter was not proof of permanent DSP-volume loss.
+- Rejected and archived an uncommitted 32-frame-settlement experiment after independent review
+  found a real native preset-worker/halt_engine race. Successful Process is not a completion
+  acknowledgment. No hidden processing, sleeps, fixed retries or opaque state parsing was added.
+- Minimal guard matches only actual factory UID `ABCDEF019182FAEB566D624153675854` and version
+  `1.3.4`. Positive Process attempts (including failures) and explicit native opening/attachment
+  attempts are sticky history. Used instances receive an actionable fresh-instance error before
+  COM/lifecycle/queue mutation. Linux/Windows helper preflight precedes editor detachment. Zero
+  sample flushes remain eligible. Temporary createView metadata probes are not an assertion that
+  plugin-side UI initialization never occurred. Metadata selects policy, not binary authenticity.
+- Fixed the separately identified single-component alias case: an optional controller blob no
+  longer reapplies component state through the aliased controller interface. Focused fixture
+  verifies both controller-state calls are skipped while component state is applied once.
+- Available exact-feature vendor suite passes **276/276**, including six new history/no-mutation/
+  alias tests; the known missing upstream Dexed metadata fixture stays explicitly excluded.
+  **5** ownership doctests, **22** helper tests, **7** protocol tests, strict root helper/protocol
+  Clippy, build, **78** Python smoke-harness tests, **4** executed Unix descriptor tests, and
+  **92** packaging tests pass. Actual copied-helper smoke verifies three replies/recovery/shutdown
+  without loading a plugin. Source-linked harness constraints from the prior entry still apply.
+- Copied helper SHA256 `9dd18d74783e2ed13e947008d4dc4d5b2bdc0032948680c1cac678daed9aae60`
+  passes a **12-case** real Surge matrix at 17/47/128/256 frames: fresh authoritative restoration
+  immediately plays its first note and agrees at controller/component volume; used active and
+  stopped restoration is refused with byte-identical saved state before/after, preserved
+  lifecycle and subsequent nonzero PCM. No caller restore warmup is used. Stochas again produces
+  semantic pattern-preserving, balanced MIDI across reused/fresh state operations.
+- Independent native checks pass fresh Surge numeric agreement (−6.28 dB / normalized0.869186),
+  rejection of a different state with the SAME open XID/generation/1178×735 geometry/menu/value,
+  closed-but-previously-opened rejection and later reopen. Trusted fixture passes. Stochas reused
+  open-window state operations still save/reset/restore/re-export and repaint its UI-created cell.
+  Native helper shuts down with exit0. Independent read-only review found no remaining blocker
+  and verified exact source/diff/helper hashes.
+- The current App uses fresh candidate replacement. The unchanged legacy public live-admin
+  `PluginChainControl::load_state` still closes/faults its slot before backend rejection and is not
+  called by the current App. This guard's direct helper/in-process preservation is not a claim of
+  full-chain preservation through that legacy API. No Windows/macOS runtime, physical audio
+  device, full upstream fixture suite, merge or push acceptance is claimed.
+- Regenerated cumulative vendor patch replays byte-for-byte against the unchanged registry
+  archive; package patch/manifest pins are updated. Full source/provenance, raw positive and
+  retained negative traces, rejected-experiment receipt and native evidence are indexed by
+  `surge-guard-validation-receipt.json` in the development QA artifacts.

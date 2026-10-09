@@ -1085,6 +1085,10 @@ mod native {
                     command,
                     HostCommand::LoadPlugin { .. } | HostCommand::UnloadPlugin
                 );
+                if let Some(response) = crate::preflight_state_command(&command, &editor.plugin) {
+                    respond(protocol, &response);
+                    return true;
+                }
                 if requires_editor_detach(&command)
                     && let Err(error) = editor.close()
                 {

@@ -146,6 +146,7 @@ struct MockState {
     expand_on_state: AtomicBool,
     change_on_refusal: AtomicBool,
     fail_setup: AtomicBool,
+    fail_process: AtomicBool,
     fail_deactivate: AtomicBool,
     contexts: Mutex<Vec<usize>>,
     processed_layouts: Mutex<Vec<Vec<i32>>>,
@@ -159,6 +160,7 @@ impl Default for MockState {
             expand_on_state: AtomicBool::new(false),
             change_on_refusal: AtomicBool::new(false),
             fail_setup: AtomicBool::new(false),
+            fail_process: AtomicBool::new(false),
             fail_deactivate: AtomicBool::new(false),
             contexts: Mutex::new(Vec::new()),
             processed_layouts: Mutex::new(Vec::new()),
@@ -359,6 +361,9 @@ impl<const S: bool, const C: bool> IAudioProcessorTrait for MockPlugin<S, C> {
     }
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         self.probe.record("process");
+        if self.state.fail_process.load(Ordering::Acquire) {
+            return kResultFalse;
+        }
         let data = &mut *data;
         let mut layout = Vec::new();
         for index in 0..data.numOutputs.max(0) as usize {
@@ -702,6 +707,7 @@ fn plugin_fixture(trace: &Trace, state: &Arc<MockState>) -> PluginImpl {
         compatibility: Vec::new(),
         runtime: ProcessorRuntime {
             is_processing: false,
+            has_processed_audio: false,
             sample_rate: 48000.0,
             block_size: 16,
             tempo: 120.0,
@@ -742,6 +748,7 @@ fn plugin_fixture(trace: &Trace, state: &Arc<MockState>) -> PluginImpl {
             connection: None,
             gui_param_changes_for_host: Arc::new(Mutex::new(Vec::new())),
             deferred_controller_sync: ArrayQueue::new(8),
+            editor_has_been_opened: false,
             plugin_view: None,
             editor_scale_factor: 1.0,
             plug_frame,
@@ -1104,4 +1111,188 @@ fn io_restart_rebuilds_layout_and_failed_rebuild_stays_quiescent() {
     state.fail_setup.store(false, Ordering::Relaxed);
     plugin.start_processing().unwrap();
     assert_prepared_layout(&plugin, 2, 2);
+}
+
+fn identify_surge_fixture(plugin: &mut PluginImpl) {
+    plugin.info.uid = "ABCDEF019182FAEB566D624153675854".into();
+    plugin.info.version = "1.3.4".into();
+}
+
+#[test]
+fn surge_reused_restore_rejects_before_lifecycle_state_and_queue_mutations() {
+    for stopped in [false, true] {
+        let trace = Trace::default();
+        let state = Arc::new(MockState::default());
+        let mut plugin = plugin_fixture(&trace, &state);
+        identify_surge_fixture(&mut plugin);
+        plugin.start_processing().unwrap();
+        process_and_assert_samples(&mut plugin, 1, 1);
+        if stopped {
+            plugin.stop_processing().unwrap();
+        }
+        let prior_note = plugin.note_on(MidiChannel::Ch1, 60, 100, 0).unwrap();
+        plugin.set_parameter(7, 0.75).unwrap();
+        let process_data =
+            plugin.runtime.process_data.as_ref().unwrap().as_ref() as *const HostProcessData;
+        let next_note = plugin.runtime.next_note_id;
+        let prior_context = plugin
+            .runtime
+            .process_data
+            .as_ref()
+            .unwrap()
+            .process_context;
+        trace.clear();
+        let error = plugin
+            .load_state_with_context(&[1], &StateContext::Project)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("fresh instance"));
+        assert!(
+            trace.methods().is_empty(),
+            "rejection must not enter plugin COM code"
+        );
+        assert_eq!(plugin.runtime.is_processing, !stopped);
+        assert_eq!(plugin.control.is_active, !stopped);
+        assert_eq!(
+            plugin.runtime.process_data.as_ref().unwrap().as_ref() as *const HostProcessData,
+            process_data
+        );
+        assert_eq!(plugin.runtime.pending_param_changes.len(), 1);
+        assert_eq!(plugin.runtime.active_notes.len(), 1);
+        assert_eq!(plugin.runtime.next_note_id, next_note);
+        assert_eq!(
+            plugin
+                .runtime
+                .process_data
+                .as_ref()
+                .unwrap()
+                .process_context
+                .projectTimeSamples,
+            prior_context.projectTimeSamples
+        );
+        plugin.start_processing().unwrap();
+        let new_note = plugin.note_on(MidiChannel::Ch1, 64, 100, 0).unwrap();
+        assert_ne!(prior_note, new_note);
+        process_and_assert_samples(&mut plugin, 1, 1);
+    }
+}
+
+#[test]
+fn surge_history_counts_attempted_positive_process_even_on_failure() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    identify_surge_fixture(&mut plugin);
+    plugin.start_processing().unwrap();
+    plugin
+        .process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
+        .unwrap();
+    assert!(plugin.preflight_state_restore().is_ok());
+    state.fail_process.store(true, Ordering::Release);
+    assert!(plugin
+        .process(&mut AudioBuffers::new(0, 1, 16, 48000.0))
+        .is_err());
+    assert!(plugin.preflight_state_restore().is_err());
+    state.fail_process.store(false, Ordering::Release);
+    plugin.stop_processing().unwrap();
+    plugin.reconfigure(44100.0, 32).unwrap();
+    plugin.start_processing().unwrap();
+    assert!(plugin.preflight_state_restore().is_err());
+}
+
+#[test]
+fn surge_fresh_state_restore_remains_eligible_after_only_zero_sample_flushes() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    identify_surge_fixture(&mut plugin);
+    plugin.start_processing().unwrap();
+    plugin
+        .process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
+        .unwrap();
+    plugin.stop_processing().unwrap();
+    trace.clear();
+    plugin
+        .load_state_with_context(&[1], &StateContext::Project)
+        .unwrap();
+    assert!(plugin.preflight_state_restore().is_ok());
+    assert!(!trace
+        .methods()
+        .iter()
+        .any(|(_, method)| *method == "process"));
+    assert_eq!(
+        trace
+            .methods()
+            .iter()
+            .filter(|(_, method)| *method == "component.setState")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn surge_editor_history_survives_failed_open_close_and_processing_lifecycle() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    identify_surge_fixture(&mut plugin);
+    assert!(plugin.open_editor(ptr::null_mut()).is_err());
+    assert!(plugin.preflight_state_restore().is_ok());
+    // The mock returns no IPlugView: entering native creation is enough to make the history
+    // conservative, without needing a desktop or calling through a fake parent window.
+    assert!(plugin
+        .open_editor(std::ptr::dangling_mut::<c_void>())
+        .is_err());
+    assert!(plugin.preflight_state_restore().is_err());
+    plugin.close_editor().unwrap();
+    plugin.start_processing().unwrap();
+    plugin.stop_processing().unwrap();
+    assert!(plugin.preflight_state_restore().is_err());
+}
+
+#[test]
+fn surge_restore_restriction_uses_exact_factory_uid_and_version_not_names_or_paths() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    identify_surge_fixture(&mut plugin);
+    plugin.runtime.has_processed_audio = true;
+    plugin.info.name = "Unrelated name".into();
+    plugin.info.path = "different-path.vst3".into();
+    assert!(plugin.preflight_state_restore().is_err());
+    for version in ["", "1.3.40", "1.3.5", "v1.3.4"] {
+        plugin.info.version = version.into();
+        assert!(plugin.preflight_state_restore().is_ok());
+    }
+    plugin.info.version = "1.3.4".into();
+    plugin.info.uid = "ABCDEF019182FAEB70726F6A53746F63".into(); // Stochas
+    assert!(plugin.preflight_state_restore().is_ok());
+}
+
+#[test]
+fn aliased_controller_blob_is_not_applied_as_a_second_component_state() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    let snapshot = encode_state_snapshot(&StateSnapshot {
+        component: vec![1],
+        controller: Some(vec![2]),
+    })
+    .unwrap();
+    trace.clear();
+    plugin
+        .load_state_with_context(&snapshot, &StateContext::Project)
+        .unwrap();
+    let calls = trace.methods();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|(_, method)| *method == "component.setState")
+            .count(),
+        1
+    );
+    assert!(!calls
+        .iter()
+        .any(|(_, method)| *method == "controller.setState" || *method == "setComponentState"));
 }

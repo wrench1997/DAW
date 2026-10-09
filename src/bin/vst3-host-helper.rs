@@ -145,6 +145,24 @@ fn err<E: std::fmt::Display>(prefix: &str, e: E) -> HostResponse {
     }
 }
 
+/// Native-window dispatchers call this before detaching the current editor. In-process
+/// LoadState repeats the same authoritative check, so non-window callers cannot bypass it.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn preflight_state_command(command: &HostCommand, plugin: &SharedPlugin) -> Option<HostResponse> {
+    if !matches!(command, HostCommand::LoadState { .. }) {
+        return None;
+    }
+    let result = match plugin.lock() {
+        Ok(guard) => guard
+            .as_ref()
+            .map_or(Ok(()), |plugin| plugin.preflight_state_restore()),
+        Err(_) => Err(vst3_host::Error::Other(
+            "plugin lock poisoned before state preflight".into(),
+        )),
+    };
+    result.err().map(|error| err("LoadState", error))
+}
+
 fn state_capture_flush_buffers(sample_rate: f64) -> AudioBuffers {
     // At least one empty channel is intentional: upstream's flat-buffer path uses its full
     // configured block size when *both* channel lists are empty. This must render zero samples.
@@ -982,6 +1000,24 @@ mod macos {
 #[cfg(test)]
 mod native_state_tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn state_preflight_errors_are_available_before_native_detachment() {
+        let plugin = PluginOwner::new(Mutex::new(None));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = plugin.lock().unwrap();
+            panic!("controlled poison for preflight fixture");
+        }));
+        let command = HostCommand::LoadState {
+            data: vec![],
+            context: Default::default(),
+        };
+        assert!(
+            matches!(preflight_state_command(&command, &plugin), Some(HostResponse::Error { message }) if message.contains("before state preflight"))
+        );
+        assert!(preflight_state_command(&HostCommand::SaveState, &plugin).is_none());
+    }
 
     #[test]
     fn state_flush_has_an_explicit_zero_frame_channel() {

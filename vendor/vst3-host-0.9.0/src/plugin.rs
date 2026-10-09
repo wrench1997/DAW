@@ -1239,6 +1239,10 @@ impl MainThreadPlugin {
     pub fn save_state(&self) -> Result<Vec<u8>> {
         self.plugin.save_state()
     }
+    /// Main-thread equivalent of [`Plugin::preflight_state_restore`].
+    pub fn preflight_state_restore(&self) -> Result<()> {
+        self.plugin.preflight_state_restore()
+    }
     /// Main-thread equivalent of [`Plugin::load_state`].
     pub fn load_state(&mut self, data: &[u8]) -> Result<()> {
         self.plugin.load_state(data)
@@ -1652,6 +1656,11 @@ pub(crate) trait PluginInternal: Send {
             "state save/restore is not supported".to_string(),
         ))
     }
+    /// Local compatibility check before a caller detaches the native editor.
+    fn preflight_state_restore(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Restore the plugin's state from a blob previously returned by [`Self::save_state`],
     /// telling the plugin what kind of restore this is via the stream's attributes.
     ///
@@ -2925,6 +2934,15 @@ impl Plugin {
             .as_ref()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .save_state()
+    }
+
+    /// Check locally known compatibility restrictions without changing plugin/editor state.
+    /// Remote helpers remain authoritative and repeat the check when they receive LoadState.
+    pub fn preflight_state_restore(&self) -> Result<()> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .preflight_state_restore()
     }
 
     /// Restore plugin state from a blob produced by [`Self::save_state`] on the *same*
