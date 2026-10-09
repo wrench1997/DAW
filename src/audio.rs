@@ -16845,6 +16845,10 @@ mod tests {
         install_test_timeline(&mut controller, 1, timeline);
         controller.install_chase(chase).unwrap();
         assert_eq!(dsp.apply_pending_timeline_commands(), 2);
+        // No plugin history or nonzero PDC is present; master gain/tanh is
+        // memoryless. These short fixtures finish before the first metronome beat.
+        assert!(dsp.insert_endpoints.iter().all(Option::is_none));
+        assert!(dsp.generator_endpoints.iter().all(Option::is_none));
         let status = AudioStatus::default();
         status.playing.store(true, Ordering::Release);
         dsp.apply_transport_discontinuity(

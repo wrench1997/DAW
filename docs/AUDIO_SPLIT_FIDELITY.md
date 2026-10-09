@@ -69,6 +69,8 @@ lost. Invalid original native offsets still fail validation.
   callback partition results deterministic. It is not a claim of bit-identical
   resampled realtime PCM against the old cumulative-rounding implementation.
   Offline v10 compatibility is separately checked against the old formulas.
+  A standalone 60-second calculation measured the old incremental error as
+  0.0000362694 native frames at 44.1→48 kHz and 0.0001073941 at 48→44.1 kHz.
 
 ## Verification
 
@@ -94,8 +96,23 @@ Independent review also exercised 198,000 nonbinary seam/end cases and 268,200
 legacy fade-anchor combinations, including song crops. These review experiments
 are supplemental, not replacements for checked-in regressions.
 
-Full Windows app tests (including actual callback PCM/seek/partition tests), GUI
-interaction, physical-device/audio-driver behavior and real VST hosting remain
-separate validation requirements. The local full Linux build is blocked by the
-known ALSA development dependency. No package version or remote publication is
-part of this isolated implementation commit.
+Additional real-application validation on 2026-10-09:
+
+- `cargo check --offline --locked --no-default-features --all-targets` passed,
+  including the actual app and test modules, with existing platform dead-code
+  warnings only.
+- The real application test binary linked and all three new callback tests
+  passed: split/nested PCM, seek/partition equality and a 24-hour root-clock
+  test. The measured combined run took about 3.73 seconds and peaked at 74 MiB.
+- Four real app-level tests passed for preview/fallback, reference fingerprints,
+  per-side edit/crossfade/resize Undo/Redo and complete production split history.
+
+This local validation used the already-installed ALSA 1.2.14 runtime (version
+queried from the library itself), truthful task-local pkg-config/linker metadata
+and alsa-sys's bundled bindings. No package was installed, no system file was
+changed and no headers or API were fabricated. This is a real Linux
+no-default-feature check/test result, not a Windows or VST integration claim.
+
+Full Windows all-feature app tests, GUI interaction, physical-device/audio-driver
+behavior and real VST hosting remain separate validation requirements. No package
+version or remote publication is part of this isolated implementation milestone.
