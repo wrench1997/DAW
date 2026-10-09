@@ -1,20 +1,21 @@
 # 当前开发状态
 
-最后更新：2026-10-09 03:09 UTC。以当前源码、集成状态和实际执行结果为准。
+最后更新：2026-10-09 03:16 UTC。以当前源码、集成状态和实际执行结果为准。
 
 ## 当前目标与状态
 
 Citrus Studio 0.4.0 是 clean-room Rust DAW 开发版，尚未达到完整 FL-class 商用品质。开发不会停在 CI 通过：当前优先完成「做一首歌 → 无损编辑 → 保存 → 找回缺失媒体 → 导出 → 重新打开」这一条可复现工作流。
 
-- 当前集成源码：独立分支 `ci/windows-reliability-20261009` 的 `4174649`，已在 `598cd48` 基础上集成项目媒体诊断与重定位。其全应用 Windows 验证待执行；旧基线结果不能替代新源码验证。`main` 未合并本轮修改，未发布 Release。
-- 项目媒体恢复已集成：15 项精确生产模块回归与子集 Clippy 已通过，本地全仓 fmt 通过；2 项 App 新回归及完整 Windows 门禁待执行。Audio Clip 切分保真仍在独立工作树开发，尚未集成。
-- 另有独立 Windows preview 打包流程正在开发：MSVC/static CRT 优化构建、PE/import 校验、白名单 ZIP、哈希/构建信息及解压后 helper smoke。尚未产出或验证 Windows 包，不替代固定 gnullvm Release 契约。
+- 最近完整验证提交：`36d257749bddd31367395ff0205035556a6fbee5`，Windows **792 项 Rust 测试、14 项 Python helper harness、实际 helper smoke 及全部开发门禁通过**。项目媒体恢复已在此提交集成并通过代码测试，GUI/真实媒体验收仍待执行。
+- 新集成候选：在上述基线上加入可取消/显示进度的离线导出与 unsigned Windows preview 打包脚本；完整 Windows 和 preview 验证待执行。导出切片已有 44 项精确生产源码/egui 子集测试通过（含 13 项新增），但不能替代新集成候选的全应用门禁。
+- Preview 路径采用 MSVC/static CRT 优化构建、PE/import 校验、白名单 ZIP、哈希/构建信息及解压后 helper smoke；本地 Python 包装/harness 测试通过，尚无真实 Windows 包验证结果。默认不上传 artifact，不改变固定 gnullvm Release 契约。
+- Audio Clip 切分保真仍在独立工作树开发，尚未集成；本轮继续按可复现歌曲工作流完善。`main` 未合并本轮修改，未发布 Release。
 - 后续验收顺序：完成上述两个源码切片及新回归 → 串联导出/重开歌曲场景 → 固定 Release 包及真实 Windows 设备验收。详细完成条件见 [开发路线图](docs/DEVELOPMENT_ROADMAP.md)。
 
 ## 已执行的基线验证与边界
 
-- [Windows MSVC CI](https://github.com/wrench1997/DAW/actions/runs/37873807018) 在 `acdcf23` 全部通过：Windows Server 2025 / x86_64-pc-windows-msvc，Rust/Cargo 1.99.0，Python 3.12.10。
-- Rust **775 通过、0 失败、0 忽略**；helper Rust target 0 tests。另有 **14 项 Python harness 测试通过**，实际 Windows helper 协议 smoke 通过。fmt、all-feature/all-target Clippy `-D warnings`、application/helper debug build、no-default-features all-target check 全部通过。
+- [Windows MSVC CI](https://github.com/wrench1997/DAW/actions/runs/37877968003) 在 `36d2577` 全部通过：Windows Server 2025 / x86_64-pc-windows-msvc，Rust/Cargo 1.99.0。
+- Rust **792 通过、0 失败、0 忽略**；helper Rust target 0 tests。另有 **14 项 Python harness 测试通过**，实际 Windows helper 协议 smoke 通过。fmt、all-feature/all-target Clippy `-D warnings`、application/helper debug build、no-default-features all-target check 全部通过。此结果不覆盖后来集成的导出/preview 变更。
 - helper smoke 只证实三次 JSON 回复、无效命令恢复、stdin 打开时 Shutdown 以 0 退出及子进程回收；没有加载真实插件。Python 仅供开发验收，不是应用运行依赖。
 - 本地 fmt 曾通过。Linux Cargo check 在 `alsa-sys` 因缺少 `alsa.pc` 停止，尚未编译项目源码；不能视作 Linux 通过。
 - **尚未执行当前候选的 GUI、真实设备/插件、固定 gnullvm Release、干净系统安装/启动验收。**「源码已实现」「指定提交代码测试通过」「GUI/设备场景通过」「Release candidate 通过」「商用成熟度」是不同证据层级。
@@ -24,7 +25,7 @@ Citrus Studio 0.4.0 是 clean-room Rust DAW 开发版，尚未达到完整 FL-cl
 - 编辑：Pattern/Piano Roll、Playlist 分组、Slip、Fade/Crossfade、手势 Undo/Redo 已接线。`playlist::create_audio_crossfade` 支持同轨、非嵌套重叠的两条 Audio Clips；`clip_fade.rs` 的等功率 envelope 由实时与离线路径复用。
 - 保存/恢复：blank project、Save/Save As、New/Open/Quit 未保存变更保护、插件状态屏障、同步后原子替换、autosave 和恢复/丢弃对话框已存在。不能把本轮媒体恢复工作描述成首次加入自动保存。
 - 导出：`export.rs` 支持 plugin-free Pattern/WAV arrangement 的 stereo PCM24 WAV；会阻止可能漏掉启用插件或 sidechain 的离线导出。`master_capture.rs` / `audio.rs` / `app.rs` 已连接实时 Master Capture，包含有界队列、PCM24 后台写入、停止确认和无覆盖发布。
-- 导出已核实的后续缺口：静态离线路径未渲染非 Tempo automation，现有插件/sidechain 检查也未拒绝这些 lane；后台导出没有运行中进度/取消操作。Peak 超过 0.95 时还会整曲衰减，不能默认视为与 Master 完全等电平。
+- 新导出切片已加入运行进度/Cancel、单任务与跨 session 保护、取消与最终原子发布的竞争判定，以及对启用且在歌曲范围内生效的非 Tempo automation 显式拒绝。完整 Windows 验证待执行；[导出契约](docs/OFFLINE_EXPORT_WORKFLOW.md) 说明不可中断操作和提交边界。Peak 超过 0.95 时仍会整曲衰减，不能默认视为与 Master 等电平。
 - 实时捕获不等于 VST 离线 bounce、自动 tails、stems 或实时/离线完全等价。真实媒体、TempoMap、鼠标、硬件和长期运行仍需单独验收。
 
 ## 当前正在补齐的两个缺口
@@ -35,7 +36,7 @@ Citrus Studio 0.4.0 是 clean-room Rust DAW 开发版，尚未达到完整 FL-cl
 
 ### M2：项目媒体诊断和安全重定位
 
-已集成 File → Project media / relink：持续显示路径/加载错误、后台校验候选文件、显式 Apply/Cancel、稳定 asset ID 的单步 Undo/Redo。候选需匹配 sample rate、channels、frame count，防止改变已有 native-frame offsets；旧 session/path/generation 的结果会拒绝。状态为 **源码已集成，完整 Windows 验证与 GUI 验收待执行**，未改 schema。15 项精确生产模块回归与子集 Clippy 已通过；工作流与限制见 [Project media](docs/PROJECT_MEDIA.md)。
+已集成 File → Project media / relink：持续显示路径/加载错误、后台校验候选文件、显式 Apply/Cancel、稳定 asset ID 的单步 Undo/Redo。候选需匹配 sample rate、channels、frame count，防止改变已有 native-frame offsets；旧 session/path/generation 的结果会拒绝。状态为 **源码已集成，Windows 全部门禁通过，GUI 验收待执行**，未改 schema。15 项模块回归与2项 App 新回归均包含在 792 项通过结果中；工作流与限制见 [Project media](docs/PROJECT_MEDIA.md)。
 
 这不是整套 crash recovery 或便携项目打包完成。必须串联「保存 → 媒体丢失 → 定位 → 重开 → 导出」与恢复点 Restore/保存场景，保留实际结果。
 

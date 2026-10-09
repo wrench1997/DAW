@@ -97,9 +97,10 @@ Its required files are:
 - `docs/DEVELOPMENT_ROADMAP.md`, `docs/WORK_LOG.md`
 - `docs/HISTORICAL_DEV_STATE.md`, `docs/WINDOWS_PREVIEW.md`
 
-The explicitly reviewed optional `docs/PROJECT_MEDIA.md` is included when it
-exists in the source checkout. This supports its independent implementation
-branch without requiring an unrelated code merge to test the packager. Any new
+The explicitly reviewed optional `docs/PROJECT_MEDIA.md` and
+`docs/OFFLINE_EXPORT_WORKFLOW.md` are included when present in the source checkout.
+This supports their independent implementation branches without requiring an
+unrelated code merge to test the packager. Any new
 package document must be added explicitly to `SOURCE_FILES` or
 `OPTIONAL_SOURCE_FILES`; no directory is copied recursively. Relative Markdown
 links are checked against the packaged files and a missing target fails the build.

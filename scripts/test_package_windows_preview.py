@@ -182,6 +182,17 @@ class PackageTests(unittest.TestCase):
         info = pkg.verify_package(archive)
         self.assertIn("docs/PROJECT_MEDIA.md", info["source_documents"])
 
+    def test_optional_export_and_media_guides_are_packaged_together(self):
+        for path in ("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md"):
+            (self.repo / path).write_text("[README](../README.md)\n")
+        (self.repo / "README.md").write_text(
+            "[Media](docs/PROJECT_MEDIA.md) [Export](docs/OFFLINE_EXPORT_WORKFLOW.md)\n"
+        )
+        archive = self.create()
+        info = pkg.verify_package(archive)
+        self.assertIn("docs/PROJECT_MEDIA.md", info["source_documents"])
+        self.assertIn("docs/OFFLINE_EXPORT_WORKFLOW.md", info["source_documents"])
+
     def test_missing_link_target_fails_before_package_write(self):
         (self.repo / "README.md").write_text("[Missing](docs/MISSING.md)\n")
         with self.assertRaises(pkg.PackageError):

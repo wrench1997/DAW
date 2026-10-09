@@ -1,12 +1,12 @@
 # Development roadmap
 
-Updated: 2026-10-09 03:09 UTC. Development continues beyond the passing CI milestone. The near-term product outcome is: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-09 03:16 UTC. Development continues beyond the passing CI milestone. The near-term product outcome is: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
-- Development branch: `ci/windows-reliability-20261009`. Last fully validated executable/CI baseline: `acdcf236d49cd3e5cd4d09506856c935b79eb12a`. Project media recovery is newly integrated at `4174649` on top of documentation checkpoint `598cd48`; fresh full Windows validation is pending.
-- [Windows MSVC development CI](https://github.com/wrench1997/DAW/actions/runs/37873807018): fmt, **775 Rust tests**, Clippy with denied warnings, app/helper debug build, **14 Python harness tests**, actual plugin-free helper protocol smoke and no-default-features check **passed**. Earlier failure/correction history is retained in [WORK_LOG.md](WORK_LOG.md).
-- Project media recovery has 15 passing focused production-module regressions and passing subset Clippy, and is now integrated pending full Windows and manual GUI validation. Split preservation and the preview-packaging lane remain separate/unintegrated. None can inherit the older 775-test result.
+- Development branch: `ci/windows-reliability-20261009`. Last fully validated source: `36d257749bddd31367395ff0205035556a6fbee5`, including project media recovery.
+- [Windows MSVC development CI](https://github.com/wrench1997/DAW/actions/runs/37877968003): fmt, **792 Rust tests**, Clippy with denied warnings, app/helper debug build, **14 Python harness tests**, actual plugin-free helper protocol smoke and no-default-features check **passed**. Earlier failure/correction history is retained in [WORK_LOG.md](WORK_LOG.md).
+- New export progress/cancellation/preflight and preview-packaging source are integrated after that baseline, pending fresh Windows gates. Export has 44 passing focused production-source/egui tests (13 new); preview has passing local packaging/harness tests. Split preservation remains unintegrated. No new candidate inherits the older passing result.
 - Evidence levels stay distinct: **implemented/source-inspected**; **executed code tests** at an exact revision; **GUI/device scenario passed** with artifacts; **release candidate accepted** on the intended package; **commercial maturity** from broader workflow, compatibility and sustained-use coverage. None implies the next.
 - Local Linux compilation was blocked at the missing ALSA native dependency before project compilation. Windows passing results do not certify Linux.
 
@@ -32,7 +32,7 @@ Updated: 2026-10-09 03:09 UTC. Development continues beyond the passing CI miles
 
 **Baseline gap addressed in source:** failed/missing WAV loading previously had transient notifications and runtime diagnostics without a persistent project-media inventory or relink action.
 
-**Integrated slice:** a [Project media view](PROJECT_MEDIA.md) with persistent paths/load failures, background validation, explicit Apply/Cancel and undoable relinking by stable asset ID. Replacement must match sample rate, channels and frame count to preserve existing native-frame offsets; stale session/path/generation results are rejected. Status: **integrated at `4174649`; 15 focused production-module regressions and subset Clippy passed; 2 App regressions/full Windows gates/manual GUI validation pending**. No schema change.
+**Integrated slice:** a [Project media view](PROJECT_MEDIA.md) with persistent paths/load failures, background validation, explicit Apply/Cancel and undoable relinking by stable asset ID. Replacement must match sample rate, channels and frame count to preserve existing native-frame offsets; stale session/path/generation results are rejected. Status: **integrated and all Windows gates passed at `36d2577` with 792 Rust tests (including 15 media and 2 App additions); manual GUI validation pending**. No schema change.
 
 **Acceptance:**
 1. Create a song with imported WAVs and an offset/faded Clip, save, close and reopen; verify arrangement, routing and asset metadata.
@@ -47,14 +47,14 @@ Updated: 2026-10-09 03:09 UTC. Development continues beyond the passing CI miles
 
 **Existing:** background stereo PCM24 WAV arrangement export for Pattern and WAV Audio Clips through the plugin-free MainInput DAG; staged atomic replacement; explicit refusal when enabled plug-ins or active sidechains would be omitted (`export.rs`). Realtime Master Capture records the rendered Master through a bounded queue and background writer (`master_capture.rs`, `audio.rs`, `app.rs`). The final-frame drain fix and invalid export-rate/audio regressions passed in the baseline suite.
 
-**Verified export gaps:** non-Tempo automation is not rendered by the static offline mixer/event path and is not covered by the existing plug-in/sidechain refusal. The background export has start/result notifications but no running-job progress/cancel controls. The current exporter also applies whole-song gain reduction when the peak exceeds 0.95; this must be included in output expectations rather than assuming an unchanged Master level. Tempo-map support does not establish support for all automation families.
+**New integrated slice:** [export progress/cancellation and fidelity preflight](OFFLINE_EXPORT_WORKFLOW.md) now refuses active unsupported non-Tempo automation, surfaces persistent errors, limits work to one background job, rejects stale-session results and atomically arbitrates Cancel versus final file commit. Forty-four focused source/egui tests passed before integration; full Windows verification is pending. The current exporter still applies whole-song gain reduction when peak exceeds 0.95; output expectations must include it. Non-Tempo automation rendering remains unsupported.
 
-**Next acceptance work:** follow M1/M2 with a reproducible song fixture, explicit unsupported-automation handling and export/reopen evidence. No new full-mix offline plug-in renderer is claimed in this checkpoint.
+**Next acceptance work:** validate the integrated cancellation/preflight slice in Windows and follow M1/M2 with a reproducible song fixture and export/reopen evidence. No new full-mix offline plug-in renderer is claimed in this checkpoint.
 
 **Acceptance:**
 1. Export the supported arrangement at documented rates; inspect WAV header, frame count/duration, channel count, nonempty audible content and source offsets/fades. Reimport/play the result.
 2. Compare known reference sections before/after splits and media relinking. Record numeric tolerances and the render scope rather than claiming arbitrary realtime/offline equivalence.
-3. Test invalid rate/audio, missing source and write failure; errors must be visible, previous destinations preserved where atomic replacement promises apply, and partial output not reported as complete. Closing the file picker must not start a job. Add and test running-job cancellation before claiming that capability.
+3. Test invalid rate/audio, missing source and write failure; errors must be visible, previous destinations preserved where atomic replacement promises apply, and partial output not reported as complete. Closing the file picker must not start a job. Test the new running-job cancellation in real Windows UI, including the noninterruptible operation and final-commit boundaries.
 4. For Master Capture, verify start/stop receipts, final frames, no-clobber publication and gap/overflow diagnostics. Exercise live plug-in audio on real hardware and retain the output/evidence.
 5. Offline plug-in/sidechain refusal stays explicit; unsupported automation must either render with verified semantics or fail visibly before output publication. Unified plug-in-aware rendering, automated parameters, tails, PDC equivalence, stems and freeze/bounce are later renderer work, each needing its own fixtures.
 
@@ -64,7 +64,7 @@ Updated: 2026-10-09 03:09 UTC. Development continues beyond the passing CI miles
 
 **Status:** release-candidate acceptance **not run**. Windows MSVC debug CI/helper smoke passed; it is not a pinned gnullvm Release or a clean-machine launch.
 
-**Parallel development lane:** an opt-in Windows preview-package workflow is in progress: Windows 2025, Rust 1.99.0 MSVC/static CRT, optimized all-feature app/helper, PE/import checks, ZIP whitelist, checksums/provenance and extracted-helper smoke. It has not produced a verified Windows artifact yet. This preview lane does not replace or silently change the pinned gnullvm release contract.
+**Integrated validation lane:** an opt-in [Windows preview-package workflow](WINDOWS_PREVIEW.md) is prepared for first Windows execution: Windows 2025, Rust 1.99.0 MSVC/static CRT, optimized all-feature app/helper, PE/import checks, ZIP whitelist, checksums/provenance and extracted-helper smoke. It has not produced a verified Windows artifact yet. This preview lane does not replace or silently change the pinned gnullvm release contract.
 
 **Acceptance:**
 1. Build the exact candidate with the pinned toolchain and locked inputs in [BUILD_AND_RELEASE.md](BUILD_AND_RELEASE.md); run all required tests/lints and the helper smoke against that Release helper.
