@@ -4757,6 +4757,7 @@ pub struct CitrusApp {
     audio_preferences_error: Option<String>,
     audio_preferences_dirty: bool,
     audio: Option<AudioEngine>,
+    mixer_meters: crate::audio_meter::MeterReadings,
     /// Persistent root cause for an offline/failed audio transition.  A toast
     /// may announce it once, but Settings must keep the diagnostic until a
     /// later engine is actually running.
@@ -5053,6 +5054,7 @@ impl CitrusApp {
                 audio_preferences_error,
                 audio_preferences_dirty: false,
                 audio,
+                mixer_meters: crate::audio_meter::MeterReadings::default(),
                 audio_error,
                 audio_error_announced: false,
                 audio_transition_diagnostic,
@@ -11613,6 +11615,22 @@ impl CitrusApp {
         let delta = (now - self.last_frame).as_secs_f32().min(0.1);
         self.frame_time_ms = self.frame_time_ms * 0.88 + delta * 1000.0 * 0.12;
         self.last_frame = now;
+        let meter_graph = self
+            .timeline_audio_source
+            .as_ref()
+            .filter(|source| source.generation == self.timeline_desired_generation)
+            .map(|source| {
+                (
+                    source.generation,
+                    source.timeline.mixer_graph().fingerprint(),
+                )
+            });
+        self.mixer_meters = self
+            .audio
+            .as_mut()
+            .map_or_else(crate::audio_meter::MeterReadings::default, |audio| {
+                audio.poll_meters(now, meter_graph)
+            });
         self.refresh_tempo_map_device_rate();
         let song_length = self.transport_loop_end_beat();
         self.transport_delta_beats = 0.0;
@@ -21491,6 +21509,7 @@ impl CitrusApp {
             ((ui.available_width() - 210.0) / self.project.mixer_tracks.len().max(1) as f32 - 14.0)
                 .clamp(70.0, 106.0);
         let mut clicked_runtime_slot = None;
+        let mut reset_meter = None;
         let mut audio_commands = Vec::new();
         let mut rack_action = None;
         let insert_latency = self.mixer_insert_latency_label(active, true);
@@ -21709,18 +21728,16 @@ impl CitrusApp {
                                                 .size(8.0)
                                                 .color(theme::MUTED),
                                         );
-                                        let peak = if self.playing {
-                                            (track.peak
-                                                + (self.beat_position * 0.9
-                                                    + f32::from(track.runtime_slot))
-                                                .sin()
-                                                .abs()
-                                                    * 0.22)
-                                                .min(0.98)
-                                        } else {
-                                            track.peak * 0.25
-                                        };
-                                        draw_meter(ui, peak, 82.0);
+                                        let reading =
+                                            self.mixer_meters.track(track.runtime_slot, track.id);
+                                        if crate::mixer_meter_ui::draw_meter(
+                                            ui,
+                                            reading,
+                                            runtime_slot == 0,
+                                            82.0,
+                                        ) {
+                                            reset_meter = Some((track.runtime_slot, track.id));
+                                        }
                                         ui.add_space(4.0);
                                         let pan = knob(
                                             ui,
@@ -21811,6 +21828,11 @@ impl CitrusApp {
                     });
                 });
         });
+        if let Some((slot, id)) = reset_meter
+            && let Some(audio) = self.audio.as_mut()
+        {
+            audio.reset_meter(slot, id);
+        }
         if let Some(runtime_slot) = clicked_runtime_slot {
             self.selected_mixer = runtime_slot;
         }
@@ -26664,31 +26686,6 @@ fn vertical_fader(ui: &mut egui::Ui, value: &mut f32, height: f32) -> Response {
         Stroke::new(1.0, Color32::WHITE),
     );
     response
-}
-
-fn draw_meter(ui: &mut egui::Ui, peak: f32, height: f32) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(58.0, height), Sense::hover());
-    let bars = 18;
-    for bar in 0..bars {
-        let t = bar as f32 / (bars - 1) as f32;
-        let y = rect.bottom() - t * rect.height();
-        let color = if t > 0.82 {
-            theme::RED
-        } else if t > 0.62 {
-            theme::ORANGE
-        } else {
-            theme::GREEN
-        };
-        let active = t <= peak;
-        ui.painter().rect_filled(
-            Rect::from_min_size(
-                Pos2::new(rect.left(), y - 2.0),
-                Vec2::new(rect.width(), 2.0),
-            ),
-            0.0,
-            color.gamma_multiply(if active { 0.9 } else { 0.13 }),
-        );
-    }
 }
 
 #[cfg(test)]

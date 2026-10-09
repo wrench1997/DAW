@@ -21,6 +21,9 @@ use crate::audio_device::{
     AudioEffectiveStreamConfig, AudioStreamTelemetrySnapshot, CallbackTelemetry,
     resolve_audio_device,
 };
+use crate::audio_meter::{
+    MeterFrame, MeterIdentity, MeterPublisher, MeterReader, MeterReadings, TrackPeak, meter_channel,
+};
 use crate::clip_fade::CompiledClipFades;
 use crate::fixed_quantum::{
     FixedQuantumAdapter, FixedQuantumError, FixedQuantumProcessStatus, FixedQuantumStats,
@@ -1226,6 +1229,7 @@ impl DeviceStreamLifecycle {
 pub struct AudioEngine {
     stream: Option<Stream>,
     stream_lifecycle: DeviceStreamLifecycle,
+    meter_reader: MeterReader,
     timeline_runtime: Option<TimelineRuntimeController>,
     /// Control-thread optimization hint only. The callback validates every
     /// reuse request against its actual active/candidate ownership.
@@ -1316,6 +1320,7 @@ impl AudioEngine {
             RingBuffer::new(MASTER_CAPTURE_EVENT_CAPACITY);
         let (timeline_runtime, realtime_timeline_runtime) = create_timeline_runtime();
 
+        let (meter_publisher, meter_reader) = meter_channel();
         let stream = match sample_format {
             SampleFormat::F32 => build_stream::<f32>(
                 &device,
@@ -1336,6 +1341,7 @@ impl AudioEngine {
                 status.clone(),
                 Arc::clone(&transport_mailbox),
                 Arc::clone(&callback_telemetry),
+                meter_publisher,
             ),
             SampleFormat::I16 => build_stream::<i16>(
                 &device,
@@ -1356,6 +1362,7 @@ impl AudioEngine {
                 status.clone(),
                 Arc::clone(&transport_mailbox),
                 Arc::clone(&callback_telemetry),
+                meter_publisher,
             ),
             SampleFormat::U16 => build_stream::<u16>(
                 &device,
@@ -1376,6 +1383,7 @@ impl AudioEngine {
                 status.clone(),
                 Arc::clone(&transport_mailbox),
                 Arc::clone(&callback_telemetry),
+                meter_publisher,
             ),
             other => return Err(anyhow!("Unsupported output sample format: {other}")),
         }
@@ -1389,6 +1397,7 @@ impl AudioEngine {
         Ok(Self {
             stream: Some(stream),
             stream_lifecycle: DeviceStreamLifecycle::Prepared,
+            meter_reader,
             timeline_runtime: Some(timeline_runtime),
             timeline_mixer_graph_fingerprint: None,
             producer,
@@ -1453,6 +1462,39 @@ impl AudioEngine {
     /// stream faults.
     pub fn stream_telemetry(&self) -> AudioStreamTelemetrySnapshot {
         self.callback_telemetry.snapshot()
+    }
+
+    /// Measured post-fader, pre-output-protection stereo bus peaks. No transport
+    /// playing check: paused live MIDI monitoring can genuinely be audible.
+    pub fn poll_meters(
+        &mut self,
+        now: Instant,
+        expected_graph: Option<(u64, u64)>,
+    ) -> MeterReadings {
+        let identity = if self.stream_telemetry().last_error_kind.invalidates_stream() {
+            None
+        } else {
+            self.confirmed_timeline_identity()
+                .and_then(|(revision, epoch)| {
+                    expected_graph
+                        .filter(|(generation, _)| *generation == revision)
+                        .map(|(_, graph_fingerprint)| MeterIdentity {
+                            revision,
+                            epoch,
+                            graph_fingerprint,
+                        })
+                })
+        };
+        self.meter_reader.poll(
+            now,
+            identity,
+            self.status.device_frame.load(Ordering::Acquire),
+            self.status.sample_rate.load(Ordering::Relaxed),
+        )
+    }
+
+    pub fn reset_meter(&mut self, runtime_slot: u8, id: crate::mixer_graph::MixerTrackId) {
+        self.meter_reader.reset_track(runtime_slot, id);
     }
 
     /// Transfers one immutable control-thread compilation to the callback. The
@@ -2813,6 +2855,10 @@ fn render_transport_chunk(
                 transport.epoch,
             )
         };
+        dsp.meter_graph_rendered = false;
+        if let Some(publisher) = dsp.meter_publisher.as_mut() {
+            publisher.begin_block();
+        }
         if !transport.request.playing
             && let Some(monitor) = midi_monitor_endpoint
         {
@@ -2839,6 +2885,10 @@ fn render_transport_chunk(
         }
         dsp.publish_plugin_epoch_status(status);
         dsp.capture_rendered_master(capture_device_frame, segment_frames);
+        dsp.publish_meters(
+            capture_device_frame.saturating_add(segment_frames as u64),
+            segment_frames,
+        );
         consume(rendered, &dsp.master_block[..segment_frames]);
         transport.advance(status, dsp, segment_frames);
         rendered += segment_frames;
@@ -2884,6 +2934,7 @@ fn build_stream<T>(
     status: Arc<AudioStatus>,
     transport_mailbox: Arc<TransportMailbox>,
     callback_telemetry: Arc<CallbackTelemetry>,
+    meter_publisher: MeterPublisher,
 ) -> Result<Stream>
 where
     T: Sample + SizedSample + FromSample<f32>,
@@ -2901,6 +2952,7 @@ where
         PDC_DEFAULT_MAX_DELAY_SAMPLES,
         realtime_timeline_runtime,
     )?;
+    dsp.meter_publisher = Some(meter_publisher);
     dsp.retired_midi_inputs = Some(retired_midi_inputs);
     dsp.midi_input_route_events = Some(midi_input_route_events);
     dsp.midi_recording_endpoint_events = Some(midi_recording_endpoint_events);
@@ -5314,6 +5366,8 @@ struct DspState {
     /// `N * MAX_MIXER_BLOCK_FRAMES`; only the current callback prefix is cleared.
     track_block: Box<[[f32; 2]]>,
     master_block: Box<[[f32; 2]]>,
+    meter_publisher: Option<MeterPublisher>,
+    meter_graph_rendered: bool,
     pdc_raw_track_delays: Box<[StereoDelayLine]>,
     pdc_plan: PdcPlan,
     mixer_graph_plan: Box<FixedMixerGraphLayout>,
@@ -5518,6 +5572,8 @@ impl DspState {
             track_muted: [false; TRACK_COUNT],
             track_solo: [false; TRACK_COUNT],
             track_block: vec![[0.0; 2]; TRACK_COUNT * MAX_MIXER_BLOCK_FRAMES].into_boxed_slice(),
+            meter_publisher: None,
+            meter_graph_rendered: false,
             master_block: vec![[0.0; 2]; MAX_MIXER_BLOCK_FRAMES].into_boxed_slice(),
             pdc_raw_track_delays: pdc_raw_track_delays.into_boxed_slice(),
             pdc_plan,
@@ -10493,6 +10549,7 @@ impl DspState {
         frames: usize,
         monitor: PausedMidiMonitorRoute,
     ) -> PausedEndpointProgress {
+        self.meter_graph_rendered = false;
         let mut progress = PausedEndpointProgress::default();
         for track in 0..TRACK_COUNT {
             let start = track * MAX_MIXER_BLOCK_FRAMES;
@@ -10708,6 +10765,7 @@ impl DspState {
                 self.master_block[frame_index] = [left.tanh(), right.tanh()];
             }
         }
+        self.meter_graph_rendered = true;
         self.publish_plugin_epoch_status(status);
         progress
     }
@@ -11244,6 +11302,7 @@ impl DspState {
     }
 
     fn render_mixer_graph_block(&mut self, status: &AudioStatus, frames: usize) {
+        self.meter_graph_rendered = false;
         self.publish_plugin_epoch_status(status);
         if !self.mixer_graph_binding_is_exact() {
             self.fail_mixer_graph_render(frames);
@@ -11369,7 +11428,48 @@ impl DspState {
             let [left, right] = self.track_block[master_start + frame_index];
             self.master_block[frame_index] = [left.tanh(), right.tanh()];
         }
+        self.meter_graph_rendered = true;
         self.publish_plugin_epoch_status(status);
+    }
+
+    fn publish_meters(&mut self, end_device_frame: u64, frames: usize) {
+        if self.meter_publisher.is_none() || frames == 0 {
+            return;
+        }
+        let mut frame = MeterFrame {
+            end_device_frame,
+            ..MeterFrame::default()
+        };
+        if self.mixer_graph_binding_is_exact() {
+            let identity = self.mixer_graph_identity.expect("exact graph identity");
+            frame.identity = Some(MeterIdentity {
+                revision: identity.revision,
+                epoch: identity.epoch,
+                graph_fingerprint: identity.fingerprint,
+            });
+            for runtime_slot in self
+                .mixer_graph_plan
+                .topological_runtime_slots()
+                .iter()
+                .copied()
+            {
+                let node = self
+                    .mixer_graph_plan
+                    .node_at_runtime_slot(runtime_slot)
+                    .expect("validated graph slot");
+                let slot = usize::from(runtime_slot);
+                // Silent/unrendered segments must not sample an old track_block.
+                frame.tracks[slot] = if self.meter_graph_rendered {
+                    let start = slot * MAX_MIXER_BLOCK_FRAMES;
+                    TrackPeak::measure(node.id, &self.track_block[start..start + frames])
+                } else {
+                    TrackPeak::measure(node.id, &[])
+                };
+            }
+        }
+        if let Some(publisher) = self.meter_publisher.as_mut() {
+            publisher.publish(frame);
+        }
     }
 
     fn render_block(&mut self, status: &AudioStatus, frames: usize) {
@@ -13437,6 +13537,354 @@ mod tests {
         (controller, dsp, status)
     }
 
+    fn measured_callback_fixture(
+        samples: &[f32],
+        channels: u16,
+        observation: bool,
+    ) -> (
+        TimelineRuntimeController,
+        Box<DspState>,
+        AudioStatus,
+        RealtimeTransport,
+        MeterReader,
+        MeterIdentity,
+    ) {
+        let timeline = compile_timeline_test_project(&timeline_test_project(4.0));
+        let identity = MeterIdentity {
+            revision: 1,
+            epoch: 2,
+            graph_fingerprint: timeline.mixer_graph().fingerprint(),
+        };
+        let (controller, mut dsp, status) =
+            install_and_activate_mixer_graph_timeline(timeline, 1, 2);
+        let (publisher, mut reader) = meter_channel();
+        reader.poll(Instant::now(), Some(identity), 0, 48_000);
+        if observation {
+            dsp.meter_publisher = Some(publisher);
+        }
+        let (mut retired, _reclaimed) = test_reclaimer();
+        register_test_asset(&mut dsp, &mut retired, 9001, samples, 48_000, channels);
+        dsp.handle(
+            AudioCommand::PlayClip {
+                clip_id: 9001,
+                asset_id: 9001,
+                source_frame: 0.0,
+                gain: 1.0,
+                mixer_track: 1,
+            },
+            &mut retired,
+        );
+        dsp.master = 1.0;
+        dsp.track_gains[1] = 1.0;
+        let transport = RealtimeTransport {
+            epoch: 2,
+            request: TransportRequest {
+                playing: true,
+                ..TransportRequest::default()
+            },
+            ..RealtimeTransport::default()
+        };
+        (controller, dsp, status, transport, reader, identity)
+    }
+
+    #[test]
+    fn measured_meters_callback_stereo_levels_clipping_and_silent_bus_are_exact() {
+        let samples: Vec<f32> = (0..256)
+            .flat_map(|index| {
+                if index == 17 {
+                    [1.25, -0.5]
+                } else {
+                    [0.25, -0.125]
+                }
+            })
+            .collect();
+        let (_controller, mut dsp, status, mut transport, mut reader, identity) =
+            measured_callback_fixture(&samples, 2, true);
+        let mailbox = TransportMailbox::default();
+        let now = Instant::now();
+        let mut output = Vec::new();
+        render_transport_chunk(
+            &mut dsp,
+            &status,
+            &mailbox,
+            &mut transport,
+            128,
+            |_, block| output.extend_from_slice(block),
+        );
+        let readings = reader.poll(now, Some(identity), transport.device_frame, 48_000);
+        let track = readings.track(1, crate::model::mixer_track_id_for_runtime_slot(1));
+        let master = readings.track(0, crate::mixer_graph::MASTER_MIXER_TRACK_ID);
+        assert_eq!(track.peak, [1.25, 0.5]);
+        assert_eq!(master.peak, track.peak);
+        assert!(track.clipped && master.clipped);
+        assert_eq!(output[17], [1.25_f32.tanh(), (-0.5_f32).tanh()]);
+        assert!(
+            output[17][0] < 1.0,
+            "meter is deliberately before existing master protection"
+        );
+        let silent = readings.track(2, crate::model::mixer_track_id_for_runtime_slot(2));
+        assert!(silent.available);
+        assert_eq!(silent.peak, [0.0; 2]);
+        dsp.track_muted[1] = true;
+        render_transport_chunk(
+            &mut dsp,
+            &status,
+            &mailbox,
+            &mut transport,
+            128,
+            |_, block| assert!(block.iter().all(|frame| *frame == [0.0; 2])),
+        );
+        let readings = reader.poll(now, Some(identity), transport.device_frame, 48_000);
+        assert_eq!(
+            readings
+                .track(1, crate::model::mixer_track_id_for_runtime_slot(1))
+                .peak,
+            [0.0; 2]
+        );
+        assert_eq!(
+            readings
+                .track(0, crate::mixer_graph::MASTER_MIXER_TRACK_ID)
+                .peak,
+            [0.0; 2]
+        );
+        assert_eq!(dsp.timeline_missing_assets, 0);
+        assert_eq!(dsp.timeline_execution_failures, 0);
+    }
+
+    #[test]
+    fn measured_meters_callback_mono_source_fader_pan_and_stopped_silence() {
+        let samples = [0.5; 256];
+        let (_controller, mut dsp, status, mut transport, mut reader, identity) =
+            measured_callback_fixture(&samples, 1, true);
+        dsp.track_gains[1] = 0.5;
+        dsp.track_pans[1] = 0.5;
+        dsp.master = 0.5;
+        let mailbox = TransportMailbox::default();
+        let now = Instant::now();
+        render_transport_chunk(&mut dsp, &status, &mailbox, &mut transport, 128, |_, _| {});
+        let readings = reader.poll(now, Some(identity), transport.device_frame, 48_000);
+        assert_eq!(
+            readings
+                .track(1, crate::model::mixer_track_id_for_runtime_slot(1))
+                .peak,
+            [0.125, 0.25]
+        );
+        assert_eq!(
+            readings
+                .track(0, crate::mixer_graph::MASTER_MIXER_TRACK_ID)
+                .peak,
+            [0.0625, 0.125]
+        );
+        // The paused path leaves the previous track buffers untouched. It must
+        // report measured silence, never sample those stale post-fader buffers.
+        transport.request.playing = false;
+        status.playing.store(false, Ordering::Release);
+        render_transport_chunk(
+            &mut dsp,
+            &status,
+            &mailbox,
+            &mut transport,
+            128,
+            |_, block| assert!(block.iter().all(|frame| *frame == [0.0; 2])),
+        );
+        let readings = reader.poll(now, Some(identity), transport.device_frame, 48_000);
+        assert_eq!(
+            readings
+                .track(1, crate::model::mixer_track_id_for_runtime_slot(1))
+                .peak,
+            [0.0; 2]
+        );
+        assert_eq!(
+            readings
+                .track(0, crate::mixer_graph::MASTER_MIXER_TRACK_ID)
+                .peak,
+            [0.0; 2]
+        );
+        assert_eq!(transport.timeline_frame, 128);
+    }
+
+    #[test]
+    fn measured_meters_observation_preserves_callback_pcm_bits_for_generated_signals() {
+        for channels in [1, 2] {
+            let samples: Vec<f32> = (0..2048)
+                .flat_map(|index| {
+                    let left = if index % 127 == 0 {
+                        0.9
+                    } else {
+                        (index as f32 * 0.037).sin() * 0.4
+                    };
+                    [left, -left * 0.5].into_iter().take(channels as usize)
+                })
+                .collect();
+            let mut rendered = Vec::new();
+            for observation in [false, true] {
+                let (_controller, mut dsp, status, mut transport, mut reader, identity) =
+                    measured_callback_fixture(&samples, channels, observation);
+                let mailbox = TransportMailbox::default();
+                let now = Instant::now();
+                let mut pcm = Vec::new();
+                for frames in [1, 31, 96, 128, 257, 511, 1024] {
+                    render_transport_chunk(
+                        &mut dsp,
+                        &status,
+                        &mailbox,
+                        &mut transport,
+                        frames,
+                        |_, block| {
+                            pcm.extend(
+                                block
+                                    .iter()
+                                    .map(|frame| [frame[0].to_bits(), frame[1].to_bits()]),
+                            );
+                        },
+                    );
+                    if observation {
+                        let meter =
+                            reader.poll(now, Some(identity), transport.device_frame, 48_000);
+                        assert!(
+                            meter
+                                .track(1, crate::model::mixer_track_id_for_runtime_slot(1))
+                                .available
+                        );
+                    }
+                }
+                assert_eq!(transport.device_frame, 2048);
+                assert_eq!(dsp.timeline_execution_failures, 0);
+                assert_eq!(dsp.timeline_missing_assets, 0);
+                rendered.push(pcm);
+            }
+            assert_eq!(rendered[0], rendered[1]);
+        }
+    }
+
+    #[test]
+    fn measured_meters_callback_sanitized_invalid_asset_is_silent() {
+        let samples: Vec<f32> = (0..128).flat_map(|_| [f32::NAN, f32::INFINITY]).collect();
+        let (_controller, mut dsp, status, mut transport, mut reader, identity) =
+            measured_callback_fixture(&samples, 2, true);
+        render_transport_chunk(
+            &mut dsp,
+            &status,
+            &TransportMailbox::default(),
+            &mut transport,
+            128,
+            |_, block| {
+                assert!(block.iter().all(|frame| *frame == [0.0; 2]));
+            },
+        );
+        let reading = reader
+            .poll(
+                Instant::now(),
+                Some(identity),
+                transport.device_frame,
+                48_000,
+            )
+            .track(1, crate::model::mixer_track_id_for_runtime_slot(1));
+        assert!(reading.available);
+        assert_eq!(reading.peak, [0.0; 2]);
+        assert!(!reading.clipped);
+    }
+
+    #[test]
+    fn measured_meters_graph_uses_stable_ids_despite_display_and_runtime_remap() {
+        let mut project = timeline_test_project(4.0);
+        let id = crate::model::mixer_track_id_for_runtime_slot(1);
+        project.mixer_tracks[1].runtime_slot = 2;
+        project.mixer_tracks[2].runtime_slot = 1;
+        project.mixer_tracks.swap(1, 9);
+        let timeline = compile_timeline_test_project(&project);
+        let identity = MeterIdentity {
+            revision: 7,
+            epoch: 3,
+            graph_fingerprint: timeline.mixer_graph().fingerprint(),
+        };
+        let (_controller, mut dsp, status) =
+            install_and_activate_mixer_graph_timeline(timeline, 7, 3);
+        let (publisher, mut reader) = meter_channel();
+        let now = Instant::now();
+        reader.poll(now, Some(identity), 0, 48_000);
+        dsp.meter_publisher = Some(publisher);
+        dsp.voices[0] = Voice {
+            phase: 0.25,
+            phase_step: 0.0,
+            envelope: 0.25,
+            decay: 1.0,
+            active: true,
+            mixer_track: 2,
+            ..Voice::default()
+        };
+        let mut transport = RealtimeTransport {
+            epoch: 3,
+            request: TransportRequest {
+                playing: true,
+                ..TransportRequest::default()
+            },
+            ..RealtimeTransport::default()
+        };
+        render_transport_chunk(
+            &mut dsp,
+            &status,
+            &TransportMailbox::default(),
+            &mut transport,
+            8,
+            |_, _| {},
+        );
+        let readings = reader.poll(now, Some(identity), transport.device_frame, 48_000);
+        assert!(readings.track(2, id).available);
+        assert!(readings.track(2, id).peak[0] > 0.1);
+        assert!(!readings.track(1, id).available);
+        assert!(!readings.track(9, id).available);
+        assert_eq!(dsp.timeline_execution_failures, 0);
+    }
+
+    #[test]
+    fn measured_meters_engine_invalidating_device_fault_clears_live_readings() {
+        let samples = [0.5; 256];
+        let (controller, mut dsp, status, mut transport, reader, identity) =
+            measured_callback_fixture(&samples, 1, true);
+        let mut engine = timeline_test_engine(controller);
+        engine.status = Arc::new(status);
+        engine.meter_reader = reader;
+        let now = Instant::now();
+        let expected = Some((identity.revision, identity.graph_fingerprint));
+        render_transport_chunk(
+            &mut dsp,
+            &engine.status,
+            &TransportMailbox::default(),
+            &mut transport,
+            128,
+            |_, _| {},
+        );
+        let id = crate::model::mixer_track_id_for_runtime_slot(1);
+        assert!(engine.poll_meters(now, expected).track(1, id).available);
+        observe_backend_stream_error(&engine.status, &engine.callback_telemetry, ErrorKind::Xrun);
+        assert!(
+            engine.poll_meters(now, expected).track(1, id).available,
+            "xrun warning does not pretend the device vanished"
+        );
+        observe_backend_stream_error(
+            &engine.status,
+            &engine.callback_telemetry,
+            ErrorKind::DeviceNotAvailable,
+        );
+        assert!(!engine.poll_meters(now, expected).track(1, id).available);
+    }
+
+    #[test]
+    fn measured_meters_unbound_compatibility_graph_is_unavailable() {
+        let (publisher, mut reader) = meter_channel();
+        let mut dsp = DspState::new(48_000.0);
+        dsp.meter_publisher = Some(publisher);
+        dsp.track_block[0] = [1.0; 2];
+        dsp.publish_meters(1, 1);
+        assert!(
+            !reader
+                .poll(Instant::now(), None, 1, 48_000)
+                .track(0, crate::mixer_graph::MASTER_MIXER_TRACK_ID)
+                .available
+        );
+    }
+
     #[test]
     fn mixer_graph_submix_routes_all_taps_and_mute_solo_gate_every_send() {
         for (revision, tap) in [
@@ -13701,14 +14149,42 @@ mod tests {
         let mut first_peak = 0.0_f32;
         let mut second_peak = 0.0_f32;
         let mut master_peak = 0.0_f32;
+        let meter_identity = MeterIdentity {
+            revision,
+            epoch,
+            graph_fingerprint: dsp.mixer_graph_plan.fingerprint(),
+        };
+        let (publisher, mut meter_reader) = meter_channel();
+        meter_reader.poll(Instant::now(), Some(meter_identity), 0, 48_000);
+        dsp.meter_publisher = Some(publisher);
+        let mut meter_frame = 0;
+        let mut measured_monitor_peak = 0.0_f32;
+        assert!(!status.playing.load(Ordering::Acquire));
+
         for _ in 0..24 {
             let target_completed = target_control.stats().completed;
             let first_completed = first_downstream_control.stats().completed;
             let second_completed = second_downstream_control.stats().completed;
+            dsp.meter_publisher.as_mut().unwrap().begin_block();
             let progress = dsp.render_paused_midi_monitor_graph(
                 &status,
                 DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES,
                 monitor,
+            );
+            meter_frame += DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES as u64;
+            dsp.publish_meters(meter_frame, DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES);
+            let meters =
+                meter_reader.poll(Instant::now(), Some(meter_identity), meter_frame, 48_000);
+            let measured = meters.track(2, crate::model::mixer_track_id_for_runtime_slot(2));
+            assert!(measured.available);
+            measured_monitor_peak = measured_monitor_peak
+                .max(measured.peak[0])
+                .max(measured.peak[1]);
+            assert_eq!(
+                meters
+                    .track(4, crate::model::mixer_track_id_for_runtime_slot(4))
+                    .peak,
+                [0.0; 2]
             );
             generator_mask |= progress.generator_mask;
             insert_mask |= progress.insert_mask;
@@ -13741,6 +14217,10 @@ mod tests {
                 break;
             }
         }
+        assert_eq!(
+            measured_monitor_peak, first_peak,
+            "paused monitor telemetry must match the genuinely rendered downstream bus"
+        );
         assert!(first_peak > 0.01, "first downstream branch must be audible");
         assert!(second_peak > 0.01, "fanout branch must be audible");
         assert!(master_peak > 0.01, "fanout must converge at MASTER");
@@ -14205,6 +14685,7 @@ mod tests {
         AudioEngine {
             stream: None,
             stream_lifecycle: DeviceStreamLifecycle::Playing,
+            meter_reader: meter_channel().1,
             timeline_runtime: Some(controller),
             timeline_mixer_graph_fingerprint: None,
             producer,
@@ -21431,6 +21912,7 @@ mod tests {
         let mut engine = AudioEngine {
             stream: None,
             stream_lifecycle: DeviceStreamLifecycle::Playing,
+            meter_reader: meter_channel().1,
             timeline_runtime: Some(timeline_runtime),
             timeline_mixer_graph_fingerprint: None,
             producer,
