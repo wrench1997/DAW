@@ -7,7 +7,9 @@ application. The background scan does not load third-party code in the applicati
 on its audio callback. It loads the same **default audio class** that the current
 project runtime loads, then reads that class's real factory name, vendor, class UID,
 subcategory string and event-bus capabilities. It does not create an editor or start
-processing for a scan.
+processing for a scan. This does execute the candidate plugin's load/initialization
+code in the helper. Process separation is not an OS security sandbox; use trusted
+plugin sources and do not interpret successful metadata loading as a security audit.
 
 - The exact `Instrument` subcategory token identifies an instrument.
 - Otherwise, the exact `Fx` token identifies an effect.
@@ -97,3 +99,25 @@ app/helper build, Windows MSVC no-default/all-target **source cross-check**, and
 Final application suites were also run from exact copied test executables outside the
 shared build target; no plugin fixture or backend replacement was used for the actual
 Surge metadata result above.
+
+
+## Integrated checkpoint
+
+Exact merged source `e6bd216863f6180c2745de05c6701c6300d41cf2` independently passes
+**1,107 app +14 helper +5 protocol all-feature tests**, **1,103 no-default app
+tests**, formatting, both strict Clippy modes, build/helper smoke and Windows
+MSVC source cross-check. The full UI suite passes **106 entries** (105 input
+flows plus the timing-disabled benchmark entry), with **44 genuine Vulkan frames**.
+The new production UI flow checks rescan notice, failure hover and completed-empty
+scan behavior without loading a plugin. The final source-only receipt/packaging
+regressions pass **177 Python tests** and all **72 explicitly packaged inputs**
+have valid relative links and complete QA inventories.
+
+The portable metadata probe was then compiled from this exact merged source using
+its matching Cargo-resolved dependencies and freshly built helper. It loaded the
+same official Surge bundles, rechecked category/event capabilities and cache
+round-trip, then shut both helpers down cleanly. The helper hash still matches
+the prior approved helper. This is a fresh metadata-only rerun; prior controlled
+DSP and configured Stochas MIDI-generation evidence retain their original source
+attribution. See [real-plugin receipts](REAL_VST3_VALIDATION.md). New Windows
+execution and broader plugin/native/hardware acceptance remain separate.

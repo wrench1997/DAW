@@ -314,3 +314,11 @@ trusted native state/interaction/lifecycle checks. Both paint captures still FAI
 repaint comparison is SKIP. [Preview 37905510775](https://github.com/wrench1997/DAW/actions/runs/37905510775) fully passes 167 Python tests,
 optimized provenance/package checks and actual extracted-helper smoke; upload is
 disabled. This terminal receipt does not replace a fresh run for later range edits.
+
+
+At `d9016e5066a8a974fc4be71d6fbc5cf147529010`, [quality 37910289005](https://github.com/wrench1997/DAW/actions/runs/37910289005)
+again passed all source and independent native interaction/state/lifecycle/cleanup
+checks. Only before/after PrintWindow capture failed; repaint comparison was skipped.
+The overall quality result remains failure. [Preview 37910288992](https://github.com/wrench1997/DAW/actions/runs/37910288992)
+passed completely with artifact upload skipped. Neither the passing package nor
+offline genuine-plugin DSP receipts replace this native paint acceptance gate.

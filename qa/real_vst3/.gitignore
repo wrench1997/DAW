@@ -1,0 +1,12 @@
+# Historical receipts are intentionally tracked despite the repository-wide log rule.
+!receipts/*.log
+!scanner/*.log
+!scanner-integrated/*.log
+# Reproduce in a separate working copy; these are never publication inputs.
+/bin/
+/downloads/
+/home/
+/plugins/
+/production-src/
+/__pycache__/
+/receipts/*.wav

@@ -4,3 +4,6 @@
 /vendor/vst3-host-0.9.0/src/internal/module_loader/macos.rs -whitespace
 /vendor/vst3-host-0.9.0/src/internal/module_loader/mod.rs -whitespace
 /vendor/vst3-host-0.9.0/src/internal/module_loader/private_namespace.rs -whitespace
+# Source-only real-plugin receipts use raw-byte hashes on every platform.
+/qa/real_vst3/** text eol=lf
+/qa/real_vst3/receipts/*.state -text

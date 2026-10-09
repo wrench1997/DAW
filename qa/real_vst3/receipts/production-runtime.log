@@ -1,0 +1,106 @@
+Production scan: [PluginDescriptor { id: "VST3:${VALIDATION_ROOT}/plugins/Surge XT.vst3", name: "Surge XT", vendor: "Unknown vendor", path: "${VALIDATION_ROOT}/plugins/Surge XT.vst3", format: Vst3, category: "Instrument", is_instrument: true, verified: true }, PluginDescriptor { id: "VST3:${VALIDATION_ROOT}/plugins/Surge XT Effects.vst3", name: "Surge XT Effects", vendor: "Unknown vendor", path: "${VALIDATION_ROOT}/plugins/Surge XT Effects.vst3", format: Vst3, category: "Instrument", is_instrument: true, verified: true }]
+block: Processed { sequence: 1, frames: 256 }
+No-plugin production chain dry baseline: bit-exact
+instrument SlotReady { slot: 0, name: "Surge XT — Surge Synth Team", latency_samples: 0, tail_samples: 96000 }
+block: Processed { sequence: 1, frames: 256 }
+block: Processed { sequence: 2, frames: 256 }
+block: Processed { sequence: 3, frames: 256 }
+block: Processed { sequence: 4, frames: 256 }
+block: Processed { sequence: 5, frames: 256 }
+block: Processed { sequence: 6, frames: 256 }
+block: Processed { sequence: 7, frames: 256 }
+block: Processed { sequence: 8, frames: 256 }
+block: Processed { sequence: 9, frames: 256 }
+block: Processed { sequence: 10, frames: 256 }
+block: Processed { sequence: 11, frames: 256 }
+block: Processed { sequence: 12, frames: 256 }
+block: Processed { sequence: 13, frames: 256 }
+block: Processed { sequence: 14, frames: 256 }
+block: Processed { sequence: 15, frames: 256 }
+block: Processed { sequence: 16, frames: 256 }
+block: Processed { sequence: 17, frames: 256 }
+block: Processed { sequence: 18, frames: 256 }
+block: Processed { sequence: 19, frames: 256 }
+block: Processed { sequence: 20, frames: 256 }
+block: Processed { sequence: 21, frames: 256 }
+block: Processed { sequence: 22, frames: 256 }
+block: Processed { sequence: 23, frames: 256 }
+block: Processed { sequence: 24, frames: 256 }
+block: Processed { sequence: 25, frames: 256 }
+block: Processed { sequence: 26, frames: 256 }
+block: Processed { sequence: 27, frames: 256 }
+block: Processed { sequence: 28, frames: 256 }
+block: Processed { sequence: 29, frames: 256 }
+block: Processed { sequence: 30, frames: 256 }
+instrument PCM rms=0.10712563890937783 delta_rms=0.10712563890937783 samples=15360
+block: Processed { sequence: 31, frames: 256 }
+instrument bridge stats BridgeStats { current_epoch: 1, epoch_resets: 0, worker_epoch_resets: 0, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 31, submitted: 31, completed: 31, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 256, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }
+effects SlotReady { slot: 0, name: "Surge XT Effects — Surge Synth Team", latency_samples: 0, tail_samples: 96000 }
+block: Processed { sequence: 1, frames: 256 }
+block: Processed { sequence: 2, frames: 256 }
+block: Processed { sequence: 3, frames: 256 }
+block: Processed { sequence: 4, frames: 256 }
+block: Processed { sequence: 5, frames: 256 }
+block: Processed { sequence: 6, frames: 256 }
+block: Processed { sequence: 7, frames: 256 }
+block: Processed { sequence: 8, frames: 256 }
+block: Processed { sequence: 9, frames: 256 }
+block: Processed { sequence: 10, frames: 256 }
+block: Processed { sequence: 11, frames: 256 }
+block: Processed { sequence: 12, frames: 256 }
+block: Processed { sequence: 13, frames: 256 }
+block: Processed { sequence: 14, frames: 256 }
+block: Processed { sequence: 15, frames: 256 }
+block: Processed { sequence: 16, frames: 256 }
+block: Processed { sequence: 17, frames: 256 }
+block: Processed { sequence: 18, frames: 256 }
+block: Processed { sequence: 19, frames: 256 }
+block: Processed { sequence: 20, frames: 256 }
+block: Processed { sequence: 21, frames: 256 }
+block: Processed { sequence: 22, frames: 256 }
+block: Processed { sequence: 23, frames: 256 }
+block: Processed { sequence: 24, frames: 256 }
+block: Processed { sequence: 25, frames: 256 }
+block: Processed { sequence: 26, frames: 256 }
+block: Processed { sequence: 27, frames: 256 }
+block: Processed { sequence: 28, frames: 256 }
+block: Processed { sequence: 29, frames: 256 }
+block: Processed { sequence: 30, frames: 256 }
+effects PCM rms=0.03637577816919371 delta_rms=0.03539361600908074 samples=15360
+effects bridge stats BridgeStats { current_epoch: 1, epoch_resets: 0, worker_epoch_resets: 0, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 30, submitted: 30, completed: 30, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 256, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }
+instrument-fx-chain SlotReady { slot: 0, name: "Surge XT — Surge Synth Team", latency_samples: 0, tail_samples: 96000 }
+instrument-fx-chain SlotReady { slot: 1, name: "Surge XT Effects — Surge Synth Team", latency_samples: 0, tail_samples: 96000 }
+block: Processed { sequence: 1, frames: 256 }
+block: Processed { sequence: 2, frames: 256 }
+block: Processed { sequence: 3, frames: 256 }
+block: Processed { sequence: 4, frames: 256 }
+block: Processed { sequence: 5, frames: 256 }
+block: Processed { sequence: 6, frames: 256 }
+block: Processed { sequence: 7, frames: 256 }
+block: Processed { sequence: 8, frames: 256 }
+block: Processed { sequence: 9, frames: 256 }
+block: Processed { sequence: 10, frames: 256 }
+block: Processed { sequence: 11, frames: 256 }
+block: Processed { sequence: 12, frames: 256 }
+block: Processed { sequence: 13, frames: 256 }
+block: Processed { sequence: 14, frames: 256 }
+block: Processed { sequence: 15, frames: 256 }
+block: Processed { sequence: 16, frames: 256 }
+block: Processed { sequence: 17, frames: 256 }
+block: Processed { sequence: 18, frames: 256 }
+block: Processed { sequence: 19, frames: 256 }
+block: Processed { sequence: 20, frames: 256 }
+block: Processed { sequence: 21, frames: 256 }
+block: Processed { sequence: 22, frames: 256 }
+block: Processed { sequence: 23, frames: 256 }
+block: Processed { sequence: 24, frames: 256 }
+block: Processed { sequence: 25, frames: 256 }
+block: Processed { sequence: 26, frames: 256 }
+block: Processed { sequence: 27, frames: 256 }
+block: Processed { sequence: 28, frames: 256 }
+block: Processed { sequence: 29, frames: 256 }
+block: Processed { sequence: 30, frames: 256 }
+instrument-fx-chain PCM rms=0.052846904365767784 delta_rms=0.052846904365767784 samples=15360
+block: Processed { sequence: 31, frames: 256 }
+instrument-fx-chain bridge stats BridgeStats { current_epoch: 1, epoch_resets: 0, worker_epoch_resets: 0, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 31, submitted: 31, completed: 31, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 256, tail_samples: 192000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }
+PASS: real production scanner, no-plugin dry, instrument, FX, instrument-to-FX chain and clean shutdown

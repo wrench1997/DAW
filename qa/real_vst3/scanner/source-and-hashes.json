@@ -1,0 +1,12 @@
+{
+  "commit": "1c673eb47ace331b4b05d147dd8d29747670d99e",
+  "sha256": {
+    "src/plugins.rs": "697698db6eae187ff8634af1bc8ad89ec4b54f256315ad48af31002c0e6464f8",
+    "src/plugin_runtime.rs": "f589603f7c2aecd34a5d7247dfe4f8c7828371f173d016b6f6fd461ec25eb8f9",
+    "${SCANNER_ROOT}/scanner_probe.rs": "ec127640d00fe8fabc083946589ff0b2d3ccc299b962fcd7d9d569552a24f019",
+    "${SCANNER_ROOT}/bin/vst3-host-helper": "ca91f242e409ab632427d5191c33ecae94bbd5172a8e7f1a98928d60f4f365fd",
+    "${SCANNER_ROOT}/bin/scanner_probe": "f74942f897d60cb547cab630dbeff20ef095e3fa379804d515f2270f2d7d4db6",
+    "${SCANNER_ROOT}/receipts/actual-scan.log": "5bb70c4ec2373d57d742308374aa640880d8d86bcbdd7fac8beb793f0b5bdd23",
+    "${SCANNER_ROOT}/receipts/actual-scan.stderr.log": "b15310a8bbf1148efec06408b47f0c6745d3037af184019e4b9fb89f56fa4380"
+  }
+}

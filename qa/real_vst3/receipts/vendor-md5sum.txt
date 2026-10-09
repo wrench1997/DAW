@@ -1,0 +1,14 @@
+9be33043031739a694eff5ac2c1f8b6a  releases/ReleaseNotes.md
+b2eff6a09829756bcb48d193313e445e  releases/surge-src-1.3.4.tar.gz
+0180f06ec7a8445b1c749471e29c702b  releases/surge-xt-linux-1.3.4-pluginsonly.tar.gz
+209543b5dc9a614b3d47c5ec1bfbc13a  releases/surge-xt-linux-x64-1.3.4.deb
+7f8bfce8a6131ec2c1bcbcfef3ba2038  releases/surge-xt-linux-x86_64-1.3.4.tar.gz
+8d64166483e704f7b07fd1893b3c4dd9  releases/surge-xt-macOS-1.3.4.dmg
+8afca4159d9b417c5e07ebc1a5e96ed3  releases/surge-xt-macos-1.3.4-pluginsonly.zip
+089b26486e9680aa4fe5121a7fd4c8c4  releases/surge-xt-portable-content-1.3.4.tar.gz
+e8fd61c0abc35531a5174545739c1aa4  releases/surge-xt-win32-1.3.4-pluginsonly.zip
+6597d95afded09c8f0284caa27862274  releases/surge-xt-win32-1.3.4-setup.exe
+d318e95ca79a5ee70ddafec04313a00c  releases/surge-xt-win64-1.3.4-pluginsonly.zip
+30023479e71252e91a7b7a9a59cbaa7d  releases/surge-xt-win64-1.3.4-portable-install.zip
+657ea4d5ab796d64ae93a32e4bcf43fb  releases/surge-xt-win64-1.3.4-setup.exe
+9168f9f5a8d135a189c38f770d8f73a6  releases/surge-xt-x86_64-1.3.4.rpm

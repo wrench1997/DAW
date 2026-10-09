@@ -305,3 +305,15 @@ expression/clipboard/workspace flows run together. Wide triplet, populated actua
 480×420 floating editor and its NOTE EDIT popup were visually inspected. This is
 source/input/offscreen evidence; native desktop, physical-device and plug-in paint
 acceptance remain independently reported.
+
+
+## Integrated scanner status and previous-editor regression
+
+Exact scanner runtime `e6bd216863f6180c2745de05c6701c6300d41cf2` passes **106 full harness
+entries**: 105 input/flow checks plus the timing-disabled benchmark entry. It
+produces **44 genuine Vulkan frames**, all PNGs RGB-identical. The added actual-app
+flow validates the legacy-cache rescan notice, explicit Unknown failure hover and
+notice removal after an empty-folder scan. It uses no actual plugin, native dialog
+or device. All previous editor/modal/import/native Inspector flows remain included;
+the populated minimum Piano menu pixels were re-inspected. Separate genuine
+plugin metadata evidence is in [VST3 scanning](VST3_SCANNING.md).

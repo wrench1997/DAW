@@ -1,0 +1,50 @@
+{
+  "commit": "e6bd216863f6180c2745de05c6701c6300d41cf2",
+  "probe": "scanner",
+  "command": [
+    "${RUSTC}",
+    "--edition=2024",
+    "--cfg",
+    "feature=\"vst3\"",
+    "-A",
+    "dead_code",
+    "${INTEGRATED_SCANNER_ROOT}/scanner_probe.rs",
+    "-L",
+    "dependency=${TARGET}/debug/deps",
+    "-o",
+    "${INTEGRATED_SCANNER_ROOT}/bin/scanner_probe",
+    "--extern",
+    "object=${TARGET}/debug/deps/libobject-1f0c114fb9621d39.rlib",
+    "--extern",
+    "serde=${TARGET}/debug/deps/libserde-c738d4be82bf1150.rlib",
+    "--extern",
+    "walkdir=${TARGET}/debug/deps/libwalkdir-410b0846acf79ccf.rlib",
+    "--extern",
+    "rtrb=${TARGET}/debug/deps/librtrb-f7c13a5259807a77.rlib",
+    "--extern",
+    "vst3_host=${TARGET}/debug/deps/libvst3_host-47a4fc9c3a8fec69.rlib",
+    "--extern",
+    "serde_json=${TARGET}/debug/deps/libserde_json-2a3436e57c48af62.rlib",
+    "-L",
+    "native=${NATIVE_LIBRARY_PATH_1}",
+    "-L",
+    "native=${NATIVE_LIBRARY_PATH_2}"
+  ],
+  "source_sha256": {
+    "src/plugins.rs": "697698db6eae187ff8634af1bc8ad89ec4b54f256315ad48af31002c0e6464f8",
+    "src/plugin_runtime.rs": "f589603f7c2aecd34a5d7247dfe4f8c7828371f173d016b6f6fd461ec25eb8f9"
+  },
+  "probe_source_sha256": "45907d40467950c7ebf55b0b674b1724eafb3fc744b9144bae3ae89a3be165ee",
+  "helper_sha256": "ca91f242e409ab632427d5191c33ecae94bbd5172a8e7f1a98928d60f4f365fd",
+  "rlib_sha256": {
+    "object": "a420e9c1b0e9296e35e8c2d96c0f2e952ba99a76e68160c30d5f75c1a6adee82",
+    "rtrb": "17dd455526b492d7b8418d38e9ca94c814ba3fd0d1fa094e179be5df01404e4a",
+    "serde": "714aac9683acc18a3e635262c93a013252ba2c464f2243c7be6b7436994bef42",
+    "serde_json": "7bb4de86997eb6fedd060341400e22d546d263c38cee9799fb9ff8e1a068483a",
+    "vst3_host": "e63369b2c098771611b05424c3e78a0b7203f693a31509d5ffe14a065d980246",
+    "walkdir": "10b6a0dcf390fad98179d90d55077a815ec548ebfea1967c47ac7df895377816"
+  },
+  "compiler": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+  "compile_succeeded": true,
+  "executable_sha256": "a79df74ccec1ba4a4a5b942f74d90cf7a6a99707c8548ad489450e9557511ffb"
+}

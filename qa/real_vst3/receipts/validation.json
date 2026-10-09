@@ -1,0 +1,885 @@
+{
+  "time_utc": "2026-10-09T09:03:38.663188+00:00",
+  "sample_rate": 48000,
+  "block_frames": 256,
+  "platform": "Linux-6.18.44-x86_64-with-glibc2.41",
+  "scope": "Real third-party Linux VST3 DSP via production helper; not hardware, GUI, or MIDI-output routing validation",
+  "checks": {
+    "empty_helper_process": {
+      "Error": {
+        "message": "No plugin loaded"
+      }
+    },
+    "instrument": {
+      "info": {
+        "vendor": "Surge Synth Team",
+        "name": "Surge XT",
+        "version": "1.3.4",
+        "category": "Instrument|Synth",
+        "uid": "ABCDEF019182FAEB566D624153675854",
+        "has_gui": true,
+        "audio_inputs": 1,
+        "audio_outputs": 3,
+        "output_channels": 2,
+        "has_midi_input": true,
+        "has_midi_output": false,
+        "compatibility": []
+      },
+      "buses": {
+        "AudioBusLayout": {
+          "layout": {
+            "inputs": [
+              {
+                "channel_count": 2,
+                "active": true
+              }
+            ],
+            "outputs": [
+              {
+                "channel_count": 2,
+                "active": true
+              },
+              {
+                "channel_count": 2,
+                "active": false
+              },
+              {
+                "channel_count": 2,
+                "active": false
+              }
+            ]
+          }
+        }
+      },
+      "units": {
+        "Units": {
+          "units": [
+            {
+              "id": 0,
+              "parent_id": -1,
+              "name": "Root Unit",
+              "program_list_id": 1886548852,
+              "programs": [
+                ""
+              ]
+            },
+            {
+              "id": 2553090,
+              "parent_id": 0,
+              "name": "Root",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 1065737767,
+              "parent_id": 2553090,
+              "name": "Macros",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 710291969,
+              "parent_id": 2553090,
+              "name": "Global & FX",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 710291970,
+              "parent_id": 2553090,
+              "name": "A Common",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 710291971,
+              "parent_id": 2553090,
+              "name": "A Oscillators",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 710291972,
+              "parent_id": 2553090,
+              "name": "A Mixer",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 710291973,
+              "parent_id": 2553090,
+              "name": "A Filters",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 710291974,
+              "parent_id": 2553090,
+              "name": "A Envelopes",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 710291975,
+              "parent_id": 2553090,
+              "name": "A LFOs",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 710291976,
+              "parent_id": 2553090,
+              "name": "B Common",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 544214576,
+              "parent_id": 2553090,
+              "name": "B Oscillators",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 544214577,
+              "parent_id": 2553090,
+              "name": "B Mixer",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 544214578,
+              "parent_id": 2553090,
+              "name": "B Filters",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 544214579,
+              "parent_id": 2553090,
+              "name": "B Envelopes",
+              "program_list_id": null,
+              "programs": []
+            },
+            {
+              "id": 544214580,
+              "parent_id": 2553090,
+              "name": "B LFOs",
+              "program_list_id": null,
+              "programs": []
+            }
+          ]
+        }
+      },
+      "parameter_count": 2855,
+      "program_select": {
+        "Error": {
+          "message": "SelectProgram: Invalid parameter: unknown unit 0 or no program-change parameter"
+        }
+      },
+      "volume_parameter": {
+        "id": 1336600346,
+        "normalized": 0.75,
+        "readback": {
+          "ParameterValue": {
+            "value": 0.75
+          }
+        },
+        "display": {
+          "ParameterString": {
+            "value": "-12.00 dB"
+          }
+        }
+      },
+      "saved_state_bytes": 51929,
+      "state_restore": {
+        "Success": {
+          "message": "state restored"
+        }
+      },
+      "restored_volume": {
+        "ParameterValue": {
+          "value": 0.75
+        }
+      },
+      "pre_note": {
+        "samples": 10240,
+        "finite": true,
+        "peak": 0.0,
+        "rms": 0.0
+      },
+      "note_on": {
+        "samples": 96256,
+        "finite": true,
+        "peak": 0.06726480275392532,
+        "rms": 0.02540488008521301
+      },
+      "note_off": {
+        "samples": 192000,
+        "finite": true,
+        "peak": 0.04477345198392868,
+        "rms": 0.0011799870226520102
+      },
+      "late_release": {
+        "samples": 96000,
+        "finite": true,
+        "peak": 3.5456036842412483e-15,
+        "rms": 5.395871116002226e-16
+      }
+    },
+    "effects_dry": {
+      "info": {
+        "vendor": "Surge Synth Team",
+        "name": "Surge XT Effects",
+        "version": "1.3.4",
+        "category": "Fx",
+        "uid": "ABCDEF019182FAEB566D624153465854",
+        "has_gui": true,
+        "audio_inputs": 2,
+        "audio_outputs": 1,
+        "output_channels": 2,
+        "has_midi_input": false,
+        "has_midi_output": false,
+        "compatibility": []
+      },
+      "buses": {
+        "AudioBusLayout": {
+          "layout": {
+            "inputs": [
+              {
+                "channel_count": 2,
+                "active": true
+              },
+              {
+                "channel_count": 2,
+                "active": true
+              }
+            ],
+            "outputs": [
+              {
+                "channel_count": 2,
+                "active": true
+              }
+            ]
+          }
+        }
+      },
+      "program_select": {
+        "Error": {
+          "message": "SelectProgram: Invalid parameter: unknown unit 0 or no program-change parameter"
+        }
+      },
+      "parameters": [
+        {
+          "id": 887087884,
+          "normalized": 0.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "Delay"
+            }
+          }
+        },
+        {
+          "id": 720135338,
+          "normalized": 0.5,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.5
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "0.00 % (Stereo)"
+            }
+          }
+        },
+        {
+          "id": 720135339,
+          "normalized": 0.4,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.4
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "143.59 ms"
+            }
+          }
+        },
+        {
+          "id": 720135340,
+          "normalized": 0.4,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.4
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "143.59 ms"
+            }
+          }
+        },
+        {
+          "id": 720135341,
+          "normalized": 0.25,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.25
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "25.00 %"
+            }
+          }
+        },
+        {
+          "id": 720135342,
+          "normalized": 0.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "0.00 %"
+            }
+          }
+        },
+        {
+          "id": 720135343,
+          "normalized": 0.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "13.75 Hz"
+            }
+          }
+        },
+        {
+          "id": 720135344,
+          "normalized": 1.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 1.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "25087.71 Hz"
+            }
+          }
+        },
+        {
+          "id": 720135347,
+          "normalized": 0.5,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.5
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "0.00 dB"
+            }
+          }
+        },
+        {
+          "id": 849359077,
+          "normalized": 0.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "0.00 %"
+            }
+          }
+        },
+        {
+          "id": 1652125811,
+          "normalized": 0.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "Off"
+            }
+          }
+        }
+      ],
+      "output": {
+        "samples": 144384,
+        "finite": true,
+        "peak": 0.15000000596046448,
+        "rms": 0.061247324475476074
+      },
+      "delta_from_input": {
+        "samples": 144384,
+        "finite": true,
+        "peak": 7.449858979713397e-09,
+        "rms": 1.7386849704323026e-09
+      },
+      "tail_after_input_stops": {
+        "samples": 96256,
+        "finite": true,
+        "peak": 0.0,
+        "rms": 0.0
+      }
+    },
+    "effects_delay": {
+      "info": {
+        "vendor": "Surge Synth Team",
+        "name": "Surge XT Effects",
+        "version": "1.3.4",
+        "category": "Fx",
+        "uid": "ABCDEF019182FAEB566D624153465854",
+        "has_gui": true,
+        "audio_inputs": 2,
+        "audio_outputs": 1,
+        "output_channels": 2,
+        "has_midi_input": false,
+        "has_midi_output": false,
+        "compatibility": []
+      },
+      "buses": {
+        "AudioBusLayout": {
+          "layout": {
+            "inputs": [
+              {
+                "channel_count": 2,
+                "active": true
+              },
+              {
+                "channel_count": 2,
+                "active": true
+              }
+            ],
+            "outputs": [
+              {
+                "channel_count": 2,
+                "active": true
+              }
+            ]
+          }
+        }
+      },
+      "program_select": {
+        "Error": {
+          "message": "SelectProgram: Invalid parameter: unknown unit 0 or no program-change parameter"
+        }
+      },
+      "parameters": [
+        {
+          "id": 887087884,
+          "normalized": 0.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "Delay"
+            }
+          }
+        },
+        {
+          "id": 720135338,
+          "normalized": 0.5,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.5
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "0.00 % (Stereo)"
+            }
+          }
+        },
+        {
+          "id": 720135339,
+          "normalized": 0.4,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.4
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "143.59 ms"
+            }
+          }
+        },
+        {
+          "id": 720135340,
+          "normalized": 0.4,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.4
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "143.59 ms"
+            }
+          }
+        },
+        {
+          "id": 720135341,
+          "normalized": 0.25,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.25
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "25.00 %"
+            }
+          }
+        },
+        {
+          "id": 720135342,
+          "normalized": 0.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "0.00 %"
+            }
+          }
+        },
+        {
+          "id": 720135343,
+          "normalized": 0.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "13.75 Hz"
+            }
+          }
+        },
+        {
+          "id": 720135344,
+          "normalized": 1.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 1.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "25087.71 Hz"
+            }
+          }
+        },
+        {
+          "id": 720135347,
+          "normalized": 0.5,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.5
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "0.00 dB"
+            }
+          }
+        },
+        {
+          "id": 849359077,
+          "normalized": 1.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 1.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "100.00 %"
+            }
+          }
+        },
+        {
+          "id": 1652125811,
+          "normalized": 0.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "Off"
+            }
+          }
+        }
+      ],
+      "output": {
+        "samples": 144384,
+        "finite": true,
+        "peak": 0.16001921892166138,
+        "rms": 0.0606163790240917
+      },
+      "delta_from_input": {
+        "samples": 144384,
+        "finite": true,
+        "peak": 0.3020162401771566,
+        "rms": 0.10783715627432487
+      },
+      "tail_after_input_stops": {
+        "samples": 96256,
+        "finite": true,
+        "peak": 0.14786778390407562,
+        "rms": 0.039597926372981485
+      }
+    },
+    "effects_bypass": {
+      "info": {
+        "vendor": "Surge Synth Team",
+        "name": "Surge XT Effects",
+        "version": "1.3.4",
+        "category": "Fx",
+        "uid": "ABCDEF019182FAEB566D624153465854",
+        "has_gui": true,
+        "audio_inputs": 2,
+        "audio_outputs": 1,
+        "output_channels": 2,
+        "has_midi_input": false,
+        "has_midi_output": false,
+        "compatibility": []
+      },
+      "buses": {
+        "AudioBusLayout": {
+          "layout": {
+            "inputs": [
+              {
+                "channel_count": 2,
+                "active": true
+              },
+              {
+                "channel_count": 2,
+                "active": true
+              }
+            ],
+            "outputs": [
+              {
+                "channel_count": 2,
+                "active": true
+              }
+            ]
+          }
+        }
+      },
+      "program_select": {
+        "Error": {
+          "message": "SelectProgram: Invalid parameter: unknown unit 0 or no program-change parameter"
+        }
+      },
+      "parameters": [
+        {
+          "id": 887087884,
+          "normalized": 0.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "Delay"
+            }
+          }
+        },
+        {
+          "id": 720135338,
+          "normalized": 0.5,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.5
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "0.00 % (Stereo)"
+            }
+          }
+        },
+        {
+          "id": 720135339,
+          "normalized": 0.4,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.4
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "143.59 ms"
+            }
+          }
+        },
+        {
+          "id": 720135340,
+          "normalized": 0.4,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.4
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "143.59 ms"
+            }
+          }
+        },
+        {
+          "id": 720135341,
+          "normalized": 0.25,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.25
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "25.00 %"
+            }
+          }
+        },
+        {
+          "id": 720135342,
+          "normalized": 0.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "0.00 %"
+            }
+          }
+        },
+        {
+          "id": 720135343,
+          "normalized": 0.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "13.75 Hz"
+            }
+          }
+        },
+        {
+          "id": 720135344,
+          "normalized": 1.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 1.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "25087.71 Hz"
+            }
+          }
+        },
+        {
+          "id": 720135347,
+          "normalized": 0.5,
+          "readback": {
+            "ParameterValue": {
+              "value": 0.5
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "0.00 dB"
+            }
+          }
+        },
+        {
+          "id": 849359077,
+          "normalized": 1.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 1.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "100.00 %"
+            }
+          }
+        },
+        {
+          "id": 1652125811,
+          "normalized": 1.0,
+          "readback": {
+            "ParameterValue": {
+              "value": 1.0
+            }
+          },
+          "display": {
+            "ParameterString": {
+              "value": "On"
+            }
+          }
+        }
+      ],
+      "output": {
+        "samples": 144384,
+        "finite": true,
+        "peak": 0.15000000596046448,
+        "rms": 0.061247324475476074
+      },
+      "delta_from_input": {
+        "samples": 144384,
+        "finite": true,
+        "peak": 7.449858979713397e-09,
+        "rms": 1.7386849704323026e-09
+      },
+      "tail_after_input_stops": {
+        "samples": 96256,
+        "finite": true,
+        "peak": 0.0,
+        "rms": 0.0
+      }
+    }
+  },
+  "helper_sha256": "ca91f242e409ab632427d5191c33ecae94bbd5172a8e7f1a98928d60f4f365fd",
+  "plugin_package_sha256": "dd431b75f5fa197c4bffa6ca27ca46970f0a94c834119bb1db7decdeec4c28db",
+  "all_assertions_passed": true
+}

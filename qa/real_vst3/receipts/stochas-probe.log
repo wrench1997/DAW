@@ -1,0 +1,12 @@
+load {'PluginInfo': {'vendor': 'Surge Synth Team', 'name': 'Stochas', 'version': '1.3.13', 'category': 'Instrument|Effect', 'uid': 'ABCDEF019182FAEB70726F6A53746F63', 'has_gui': True, 'audio_inputs': 0, 'audio_outputs': 1, 'output_channels': 2, 'has_midi_input': True, 'has_midi_output': True, 'compatibility': []}}
+AudioBusLayout {'AudioBusLayout': {'layout': {'inputs': [], 'outputs': [{'channel_count': 2, 'active': True}]}}}
+GetUnits {'Units': {'units': [{'id': 0, 'parent_id': -1, 'name': 'Root Unit', 'program_list_id': 1886548852, 'programs': ['']}]}}
+GetAllParameters {'Parameters': {'params': [{'id': 48, 'name': 'L1 speed', 'value': 0.0, 'min': 0.0, 'max': 1.0, 'default': 0.0, 'unit': '', 'step_count': 0, 'can_automate': True, 'is_read_only': False, 'is_bypass': False, 'flags': 1}, {'id': 49, 'name': 'L1 steps', 'value': 0.0, 'min': 0.0, 'max': 1.0, 'default': 0.0, 'unit': '', 'step_count': 0, 'can_automate': True, 'is_read_only': False, 'is_bypass': False, 'flags': 1}, {'id': 50, 'name': 'L1 steps/measure', 'value': 0.0, 'min': 0.0, 'max': 1.0, 'default': 0.0, 'unit': '', 'step_count': 0, 'can_automate': True, 'is_read_only': False, 'is_bypass': False, 'flags': 1}, {'id': 51, 'name': 'L1 note length', 'value': 0.0, 'min': 0.0, 'max': 1.0, 'default': 0.0, 'unit': '', 'step_count': 0, 'can_automate': True, 'is_read_only': False, 'is_bypass': False, 'flags': 1}, {'id': 52, 'name': 'L1 pos variance', 'value': 0.0, 'min': 0.0, 'max': 1.0, 'default': 0.0, 'unit': '', 'step_count': 0, 'can_automate': True, 'is_read_only': False, 'is_bypass': False, 'flag
+LatencySamples {'LatencySamples': {'samples': 0}}
+TailSamples {'TailSamples': {'samples': 0}}
+{'Success': {'message': 'processing started'}}
+{'Success': {'message': 'playing state set'}}
+default pattern events 0
+{'NoteStarted': {'note_id': 1}}
+note on output []
+note off output []

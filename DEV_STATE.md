@@ -1,21 +1,21 @@
 # 当前开发状态
 
-最后更新：2026-10-09 09:16 UTC。以当前源码、集成状态和实际执行结果为准。
+最后更新：2026-10-09 09:53 UTC。以当前源码、集成状态和实际执行结果为准。
 
 ## 当前目标与状态
 
 Citrus Studio 0.5.0-alpha.1 是 clean-room Rust DAW 开发版，尚未达到完整 FL-class 商用品质。Linux 优先开发与验证，Windows 持续检查兼容性。当前产品目标仍是「做一首歌 → 无损编辑 → 保存 → 找回缺失媒体 → 导出 → 重新打开」。
 
-- **当前 Linux 已验证源码：`37b0d0f65e0d7fe52139289b410cfea2eb8a3087`。** Piano edit/repeat range、精确 local snap、viewport-based paste 与最小窗口紧凑菜单已接线；Project/transport/Playlist snap 保持独立。完整 all-feature/all-target 为 **1094 application +14 helper +5 protocol**，no-default 为 **1092 application**，零失败/忽略；fmt、两套严格 Clippy、app/helper build、实际 helper smoke、Windows MSVC source cross-check 和 **167 Python tests** 通过，默认栈。Runtime/Cargo/vendor/packaging 与审查后的 feature 一致；新 Windows 执行结果须单独取得。
+- **当前 Linux 已验证源码：`e6bd216863f6180c2745de05c6701c6300d41cf2`。** VST3 default-class metadata scanner、实际 MIDI capabilities、legacy-cache rescan 提示和失败 hover 已接线；主线程/audio callback 不执行插件探测。完整 all-feature/all-target 为 **1107 application +14 helper +5 protocol**，no-default 为 **1103 application**，零失败/忽略；fmt、两套严格 Clippy、app/helper build、实际 helper smoke、Windows MSVC source cross-check 和 **177 Python tests** 通过，默认栈。Runtime/Cargo/vendor 与审查后的 scanner feature 一致；新 Windows 执行结果须单独取得。
 - **真实 Mixer 电平表已集成：** `21989d0` + `ad565d7`，读取实际 post-fader stereo 图缓冲；Master 在 tanh 保护前测量，显示 dBFS、hold、CLIP/fault。稳定 track ID/graph/epoch 防错位，排队峰值、超时失效、点击 reset 和暂停时 live-MIDI 路径均有回归。已移除 UI 假 sine 动画。详见 [MIXER_METERING](docs/MIXER_METERING.md)。
-- **最新 Windows 源码/包 checkpoint：`b57076ad990869f4a421cc816d67409b5c69b694`。** [Quality 37905510854](https://github.com/wrench1997/DAW/actions/runs/37905510854) 通过 **1043 application +13 helper +5 protocol Rust tests**、14 helper /61 editor Python tests 和全部源码门禁。Trusted fixture 的 interaction、dirty/state round-trip、focus/owner/lifecycle 与进程清理通过。前后 native paint 捕获失败、repaint comparison 跳过，整个 quality 仍失败；物理输入、真实 DPI/广泛厂商 GUI/设备验收未完成。
-- **最新完整 Preview 已通过。** 同一 `b57076a` 的 [Run 37905510775](https://github.com/wrench1997/DAW/actions/runs/37905510775) 通过 167 Python tests、上述 Rust tests、optimized static-CRT 构建、严格 vendor/license/PE/ZIP/hash 与隔离 PATH 的实际解压 helper smoke。上传跳过、artifacts 为0。Range 新候选须独立执行 Windows 门禁；固定 gnullvm Release、原生桌面/设备和干净系统验收仍独立。
+- **最新 Windows 源码/包 checkpoint：`d9016e5066a8a974fc4be71d6fbc5cf147529010`。** [Quality 37910289005](https://github.com/wrench1997/DAW/actions/runs/37910289005) 通过 **1091 application +13 helper +5 protocol Rust tests**、14 helper /61 editor Python tests 和全部源码门禁。Trusted fixture 的 interaction、dirty/state round-trip、focus/owner/lifecycle 与进程清理通过。前后 native paint 捕获失败、repaint comparison 跳过，整个 quality 仍失败；物理输入、真实 DPI/广泛厂商 GUI/设备验收未完成。
+- **最新完整 Preview 已通过。** 同一 `d9016e5` 的 [Run 37910288992](https://github.com/wrench1997/DAW/actions/runs/37910288992) 通过 167 Python tests、上述 Rust tests、optimized static-CRT 构建、严格 vendor/license/PE/ZIP/hash 与隔离 PATH 的实际解压 helper smoke。上传跳过、artifacts 为0。Scanner 新候选须独立执行 Windows 门禁；固定 gnullvm Release、原生桌面/设备和干净系统验收仍独立。
 - 项目格式 **v11**，旧 v10 文件可加载；新保存需新版本重新打开。评估前保留原项目备份。`main` 未合并，未发布 Release 或二进制 artifact。
 
 ## 已执行的验证与边界
 
-- Linux `cargo test --offline --locked --all-features --all-targets`：**1094 application +14 helper +5 protocol passed**；`--no-default-features --all-targets`：**1092 application passed**，均零失败/忽略。fmt、两套严格 Clippy 与 all-feature app/helper build 通过。依赖内部已有一处 upstream deprecated warning，未放宽项目 Clippy。
-- 精确合并源码的完整真实 app UI rerun：**105 harness entries 通过**（104 个 production-input flows + opt-in benchmark entry），输出 **44 个真实 Vulkan 画面**，PNG 与 readback RGB 完全相同。Wide triplet、最小 480×420 floating Piano 与 NOTE EDIT popup 画面已检查，note/velocity canvas 和菜单可用；所有既有 expression/keyboard/mouse/clipboard/workspace 回归一起执行。此运行未启用 benchmark timing，未把 footer FPS 当作性能证据。
+- Linux `cargo test --offline --locked --all-features --all-targets`：**1107 application +14 helper +5 protocol passed**；`--no-default-features --all-targets`：**1103 application passed**，均零失败/忽略。fmt、两套严格 Clippy 与 all-feature app/helper build 通过。依赖内部已有一处 upstream deprecated warning，未放宽项目 Clippy。
+- 精确合并源码的完整真实 app UI rerun：**106 harness entries 通过**（105 个 production-input flows + opt-in benchmark entry），输出 **44 个真实 Vulkan 画面**，PNG 与 readback RGB 完全相同。新实际 UI 回归检查 rescan notice、Unknown hover 的失败原因和空目录 scan 完成后清除提示，未加载插件。既有 minimum Piano 像素已复查，前序 expression/keyboard/mouse/clipboard/workspace/import/native Inspector 流程均执行；未启用 benchmark timing。
 - 为实现严格 Linux 门禁，将仅 Windows backend 与测试使用的 MIDI helper 用 `cfg(any(windows, test))` 编译，并把 BTreeMap import 移到 Windows 模块。没有关闭 warning、删除测试或改动 Windows backend 行为；Linux 物理 MIDI backend 仍未实现。
 - Windows 历史完整门禁使用 Windows Server 2025 / MSVC / Rust 1.99，包含 all-features app/helper、严格 Clippy、helper smoke 和 no-default all-target check；测试数量按平台/feature 分别记录，不能互相代替。
 - 普通 helper smoke 只证实 JSON 协议、错误恢复、Shutdown/子进程回收；不加载真实插件。另有仅加载仓库 MIT 源构建 fixture 的 Windows native lifecycle/state/stdout harness，执行结果独立记录；Linux 返回 77（UNSUPPORTED / NOT VERIFIED）。Python 是开发验证工具，不是应用运行依赖。
@@ -34,7 +34,7 @@ Citrus Studio 0.5.0-alpha.1 是 clean-room Rust DAW 开发版，尚未达到完�
 - 保存/恢复：blank project、Save/Save As、New/Open/Quit 未保存变更保护、插件状态屏障、同步后原子替换、autosave 和恢复/丢弃对话框已存在。不能把本轮媒体恢复工作描述成首次加入自动保存。
 - 导出：`export.rs` 支持 plugin-free Pattern/WAV arrangement 的 stereo PCM24 WAV；会阻止可能漏掉启用插件或 sidechain 的离线导出。`master_capture.rs` / `audio.rs` / `app.rs` 已连接实时 Master Capture，包含有界队列、PCM24 后台写入、停止确认和无覆盖发布。
 - 导出进度/Cancel、单任务/session 保护、最终发布竞争判定及 active unsupported automation 拒绝已通过 805 项 Windows checkpoint。新 [WAV 选项](docs/WAV_EXPORT_OPTIONS.md) 已集成：PCM16/PCM24/float32、文件采样率、legacy peak attenuation 或 preserve-level 显式选择/复核。默认保持旧 PCM24/0.95 peak 策略；preserve-level PCM 超限会拒绝，float 保留有限超限样本。新选项与 v11 渲染已通过当前 Windows 全部门禁；真实 native Save/GUI/audio 场景仍待验收。
-- 独立真实插件 QA 在 `b57076a` 的 production scanner/runtime 以受控离线、每块等待方式验证 Surge XT / Effects 的 instrument、FX 与 audio chain；这不证明实时设备性能、GUI 或插件 MIDI-out 路由。发现 Effects 的 filename hint 分类错误；scanner 修复和 MIDI/event routing 另行开发，未包含于本 range checkpoint，完整 receipt 随其后 checkpoint 记录。
+- [VST3 metadata scanner](docs/VST3_SCANNING.md) 已集成：通过隔离 helper 读取实际 default class 的 name/vendor/category/MIDI capabilities，不再用文件名猜测 VST3 类型；旧 cache 请求 rescan，超时/失败保留 Unknown 与可见原因。Surge XT Effects 的错误 Instrument 分类已修正。精确 e6bd216 已重新执行官方 Surge instrument/Effects metadata 与 cache round-trip；fresh helper hash 与旧已验证 helper 相同。完整 [source-only receipts](docs/REAL_VST3_VALIDATION.md) 保留先前 b57076a controlled-offline instrument/FX/audio-chain 和配置后 Stochas MIDI 生成结果；它们不证明真实设备/GUI、实时 deadline、Harmony Blueprint 或 DAW downstream MIDI routing。路由功能仍独立开发，未包含本 scanner checkpoint。
 - 实时捕获不等于 VST 离线 bounce、自动 tails、stems 或实时/离线完全等价。真实媒体、TempoMap、鼠标、硬件和长期运行仍需单独验收。
 
 ## 当前正在补齐的两个缺口

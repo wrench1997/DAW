@@ -1,0 +1,3 @@
+60 {'note_on_count': 9, 'note_off_count': 9, 'stop_note_off_count': 0, 'steady_intervals_samples': [11999, 12001, 11999, 12000, 12000, 12001, 12000], 'expected_interval_samples': 12000.0, 'balanced_after_stop': {60: 0, 64: 0, 67: 0}, 'no_note_on_after_stop': True}
+120 {'note_on_count': 18, 'note_off_count': 18, 'stop_note_off_count': 0, 'steady_intervals_samples': [6000, 6000, 6000, 6000, 6001, 6000, 5999, 6001, 6000, 5999, 6000, 6001, 5999, 6000, 6001, 5999], 'expected_interval_samples': 6000.0, 'balanced_after_stop': {60: 0, 64: 0, 67: 0}, 'no_note_on_after_stop': True}
+PASS: real Stochas BPM timing, pitch sequence, start/stop and balanced note release

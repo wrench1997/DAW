@@ -1,13 +1,13 @@
 # Development roadmap
 
-Updated: 2026-10-09 09:11 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-09 09:53 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
 - Development branch: `ci/windows-reliability-20261009`. Last fully validated Windows checkpoint: **`53494d518bfc4bad7304f25c127491a0c67d7cd8`**, including Browser, measured meters, v11 split fidelity, WAV/media/export controls and responsive UI QA. [Quality 37886481852](https://github.com/wrench1997/DAW/actions/runs/37886481852) passed **909 Rust tests**, 14 helper-harness tests and actual helper smoke. [Preview 37886481857](https://github.com/wrench1997/DAW/actions/runs/37886481857) passed optimized static-CRT builds, 57 Python tests, PE/import audit, ZIP/hash checks and extracted-helper smoke; no artifact upload.
 - Application **0.5.0-alpha.1** uses Project **v11**. v10 inputs load, but new saves require a new build. Preserve original projects before evaluation.
-- Current range/snap-integrated source **`37b0d0f65e0d7fe52139289b410cfea2eb8a3087`** passes Linux **1,094 app +14 helper +5 protocol all-feature tests**, **1,092 no-default app tests**, fmt, both strict Clippy modes, app/helper build, ordinary helper smoke, Windows source cross-check and 167 Python tests on default stack. Runtime and packaging inputs exactly match the independently reviewed feature. New exact Windows execution remains required.
-- At **`b57076a`**, Windows source gates passed 1,043 app +13 helper +5 protocol tests and [preview 37905510775](https://github.com/wrench1997/DAW/actions/runs/37905510775) passed the full optimized/provenance/package/extracted-helper lane with 167 Python tests, upload disabled. [Quality 37905510854](https://github.com/wrench1997/DAW/actions/runs/37905510854) passes trusted native stopped-state restore, interaction/lifecycle/protocol checks, but native paint still FAILS and repaint comparison is SKIP. Overall quality remains failed; wider physical-input/vendor/hardware acceptance remains open.
+- Current scanner-integrated source **`e6bd216863f6180c2745de05c6701c6300d41cf2`** passes Linux **1,107 app +14 helper +5 protocol all-feature tests**, **1,103 no-default app tests**, fmt, both strict Clippy modes, app/helper build, ordinary helper smoke, Windows source cross-check and **177 Python tests** on default stack. Runtime/Cargo/vendor exactly match the independently reviewed scanner. The complete UI harness passes 106 entries (105 input flows plus the timing-disabled benchmark entry) with 44 genuine Vulkan frames. Exact integrated metadata-only probing of official Surge instrument/Effects also passes. New Windows execution remains required.
+- At **`d9016e5`**, Windows source gates passed 1,091 app +13 helper +5 protocol tests and [preview 37910288992](https://github.com/wrench1997/DAW/actions/runs/37910288992) passed the full optimized/provenance/package/extracted-helper lane with 167 Python tests, upload disabled. [Quality 37910289005](https://github.com/wrench1997/DAW/actions/runs/37910289005) passes trusted native stopped-state restore, interaction/lifecycle/protocol checks, but native paint still FAILS and repaint comparison is SKIP. Overall quality remains failed; wider physical-input/vendor/hardware acceptance remains open.
 - The integrated [simultaneous workspace](MULTIWINDOW_WORKSPACE.md) is a real shared-project, internal-window implementation. The latest requested [compact refinement](COMPACT_WORKSPACE.md) keeps useful task density, persistent migration, continuous held gestures and bounded release snapping; controlled unoptimized CPU comparisons do not establish a general speedup or displayed FPS. Focused Piano session-local note clipboard now has bounded data, semantic input/text isolation and explicit Undo. Offscreen frames validate app paint/layout rather than cloud X11 presentation, OS-detached editors, device audio or native VST3 editor paint.
 - Evidence levels stay distinct: **implemented/source-inspected**; **executed code tests** at an exact revision; **GUI/device scenario passed** with artifacts; **release candidate accepted** on the intended package; **commercial maturity** from broader workflow, compatibility and sustained-use coverage. None implies the next.
 
@@ -116,14 +116,20 @@ The [local WAV Browser](LOCAL_SAMPLE_BROWSER.md) is integrated from reviewed sou
 
 ## Independent real-plugin usability and routing work
 
-Controlled offline QA at `b57076a` exercised genuine Surge XT instrument, Effects
-and their ordered audio chain through exact production scanner/runtime source,
-waiting for each worker block. It does not certify real-time device performance,
-native GUI, Windows or onward VST3 MIDI/event routing. A filename-hint scanner
-misclassification is confirmed; the actual helper identifies the effect correctly.
-The full reproducible receipt and scanner correction belong to a separate checkpoint.
-Plugin MIDI-output routing also proceeds as an isolated, reviewed feature; it is not
-part of this range candidate and must not be inferred from the passing audio chain.
+[Isolated metadata scanning](VST3_SCANNING.md) is now integrated. The production
+helper reports the default audio class's real name/vendor/category and event-bus
+capabilities. Old filename-only VST3 cache entries request a rescan; timeout/load
+failures remain explicitly unverified and actionable. Official Surge XT Effects
+is correctly classified as Fx. No additional class selector or project migration
+is implied.
+
+[Source-only real-plugin receipts](REAL_VST3_VALIDATION.md) preserve controlled
+offline QA at `b57076a`: genuine Surge instrument, Effects and ordered audio chain,
+plus separately configured Stochas MIDI generation. The original wrong scanner
+classification remains in its historical log; the corrected metadata rerun is
+separate. These results do not establish real-time audio deadlines, native GUI,
+Harmony Blueprint, Windows or onward VST3 MIDI/event routing. The larger routing
+feature proceeds independently and is not included in this scanner checkpoint.
 
 ## After the first reliable song workflow
 

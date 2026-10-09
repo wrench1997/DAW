@@ -1,0 +1,41 @@
+PluginDescriptor { id: "VST3:${VALIDATION_ROOT}/plugins/Surge XT.vst3", name: "Surge XT", vendor: "Surge Synth Team", path: "${VALIDATION_ROOT}/plugins/Surge XT.vst3", format: Vst3, category: "Instrument", is_instrument: true, verified: true, vst3_metadata: Some(Vst3ScanMetadata { class_uid: "ABCDEF019182FAEB566D624153675854", category: "Instrument|Synth", has_midi_input: true, has_midi_output: false }), scan_error: None }
+PluginDescriptor { id: "VST3:${VALIDATION_ROOT}/plugins/Surge XT Effects.vst3", name: "Surge XT Effects", vendor: "Surge Synth Team", path: "${VALIDATION_ROOT}/plugins/Surge XT Effects.vst3", format: Vst3, category: "Effect", is_instrument: false, verified: true, vst3_metadata: Some(Vst3ScanMetadata { class_uid: "ABCDEF019182FAEB566D624153465854", category: "Fx", has_midi_input: false, has_midi_output: false }), scan_error: None }
+CACHE_JSON_START
+[
+  {
+    "id": "VST3:${VALIDATION_ROOT}/plugins/Surge XT.vst3",
+    "name": "Surge XT",
+    "vendor": "Surge Synth Team",
+    "path": "${VALIDATION_ROOT}/plugins/Surge XT.vst3",
+    "format": "Vst3",
+    "category": "Instrument",
+    "is_instrument": true,
+    "verified": true,
+    "vst3_metadata": {
+      "class_uid": "ABCDEF019182FAEB566D624153675854",
+      "category": "Instrument|Synth",
+      "has_midi_input": true,
+      "has_midi_output": false
+    },
+    "scan_error": null
+  },
+  {
+    "id": "VST3:${VALIDATION_ROOT}/plugins/Surge XT Effects.vst3",
+    "name": "Surge XT Effects",
+    "vendor": "Surge Synth Team",
+    "path": "${VALIDATION_ROOT}/plugins/Surge XT Effects.vst3",
+    "format": "Vst3",
+    "category": "Effect",
+    "is_instrument": false,
+    "verified": true,
+    "vst3_metadata": {
+      "class_uid": "ABCDEF019182FAEB566D624153465854",
+      "category": "Fx",
+      "has_midi_input": false,
+      "has_midi_output": false
+    },
+    "scan_error": null
+  }
+]
+CACHE_JSON_END
+PASS: actual official Surge instrument/effect classifications, event capabilities and cache round-trip

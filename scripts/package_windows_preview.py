@@ -30,6 +30,52 @@ SOURCE_FILES = (
     "docs/DEVELOPMENT_ROADMAP.md", "docs/WORK_LOG.md", "docs/WINDOWS_PREVIEW.md",
     "docs/HISTORICAL_DEV_STATE.md",
 )
+# Source-only, manually executed real-plugin QA; no plugin or compiled probe ships.
+# Exact filenames are reviewed together; any present bundle must be complete.
+REAL_VST3_QA_ROOT = "qa/real_vst3/"
+REAL_VST3_QA_FILES = frozenset((
+    "qa/real_vst3/.gitignore",
+    "qa/real_vst3/CONTENTS-SHA256.txt",
+    "qa/real_vst3/PROVENANCE.md",
+    "qa/real_vst3/REPRODUCE.md",
+    "qa/real_vst3/build_runtime_probe.py",
+    "qa/real_vst3/probe.py",
+    "qa/real_vst3/provenance.json",
+    "qa/real_vst3/receipts/README.md",
+    "qa/real_vst3/receipts/effects-probe.json",
+    "qa/real_vst3/receipts/instrument-probe.json",
+    "qa/real_vst3/receipts/production-runtime.log",
+    "qa/real_vst3/receipts/production-runtime.stderr.log",
+    "qa/real_vst3/receipts/runtime-build-command.json",
+    "qa/real_vst3/receipts/stochas-pattern-output.json",
+    "qa/real_vst3/receipts/stochas-pattern.log",
+    "qa/real_vst3/receipts/stochas-probe.json",
+    "qa/real_vst3/receipts/stochas-probe.log",
+    "qa/real_vst3/receipts/stochas-qa-pattern.state",
+    "qa/real_vst3/receipts/stochas-qa-pattern.xml",
+    "qa/real_vst3/receipts/stochas-summary.md",
+    "qa/real_vst3/receipts/stochas-tempo-check.json",
+    "qa/real_vst3/receipts/stochas-tempo-check.log",
+    "qa/real_vst3/receipts/stochas-vendor-md5sum.txt",
+    "qa/real_vst3/receipts/validation-summary.log",
+    "qa/real_vst3/receipts/validation.json",
+    "qa/real_vst3/receipts/vendor-md5sum.txt",
+    "qa/real_vst3/render_probe.py",
+    "qa/real_vst3/runtime_probe.rs",
+    "qa/real_vst3/scanner-integrated/actual-scan.log",
+    "qa/real_vst3/scanner-integrated/actual-scan.stderr.log",
+    "qa/real_vst3/scanner-integrated/scanner-reproduction-build.json",
+    "qa/real_vst3/scanner/actual-scan.log",
+    "qa/real_vst3/scanner/actual-scan.stderr.log",
+    "qa/real_vst3/scanner/compile-command.json",
+    "qa/real_vst3/scanner/source-and-hashes.json",
+    "qa/real_vst3/scanner_probe.rs",
+    "qa/real_vst3/stochas_pattern.py",
+    "qa/real_vst3/stochas_probe.py",
+    "qa/real_vst3/stochas_tempo.py",
+    "qa/real_vst3/validate.py",
+    "qa/real_vst3/verify_receipts.py",
+))
 # Explicitly reviewed documentation that may land on an independent branch.
 OPTIONAL_SOURCE_FILES = frozenset((
     "docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md",
@@ -38,7 +84,8 @@ OPTIONAL_SOURCE_FILES = frozenset((
     "docs/COMPACT_WORKSPACE.md",
     "docs/PIANO_KEYBOARD_EDITING.md", "docs/PIANO_MOUSE_WORKFLOW.md",
     "docs/PIANO_NOTE_EXPRESSION.md", "docs/PIANO_RANGES_AND_SNAP.md",
-))
+    "docs/VST3_SCANNING.md", "docs/REAL_VST3_VALIDATION.md",
+)) | REAL_VST3_QA_FILES
 GENERATED_FILES = ("START_HERE_PREVIEW.txt", "BUILD_PROVENANCE.json", "DEPENDENCIES.json")
 PAYLOAD_FILES = frozenset(BINARIES + SOURCE_FILES + GENERATED_FILES)
 PACKAGE_FILES = PAYLOAD_FILES | {"SHA256SUMS.txt"}
@@ -393,6 +440,20 @@ def check_document_links(payload):
             require(destination in payload, f"Broken package document link: {path} -> {link}")
 
 
+def validate_real_vst3_qa(payload):
+    """Verify the complete explicitly allowed source-only measurement bundle."""
+    present = set(payload) & REAL_VST3_QA_FILES
+    if not present:
+        return
+    require(present == REAL_VST3_QA_FILES, "Incomplete real VST3 QA source bundle")
+    inventory = REAL_VST3_QA_ROOT + "CONTENTS-SHA256.txt"
+    expected = "".join(
+        f"{digest(payload[path])}  {path.removeprefix(REAL_VST3_QA_ROOT)}\n"
+        for path in sorted(REAL_VST3_QA_FILES - {inventory})
+    ).encode("utf-8")
+    require(payload[inventory] == expected, "Real VST3 QA inventory/hash mismatch")
+
+
 def create_package(repo, binaries, metadata, build_info, output):
     validate_build_info(build_info)
     manifest = tomllib.loads(read_input(repo / "Cargo.toml").decode())
@@ -443,6 +504,7 @@ def create_package(repo, binaries, metadata, build_info, output):
     payload["BUILD_PROVENANCE.json"] = json_bytes(provenance)
     require(set(payload) == PAYLOAD_FILES | (sources & (OPTIONAL_SOURCE_FILES | VENDOR_FILES)), "Internal payload whitelist mismatch")
     check_document_links(payload)
+    validate_real_vst3_qa(payload)
     payload["SHA256SUMS.txt"] = "".join(f"{digest(payload[p])}  {p}\n" for p in sorted(payload)).encode("ascii")
     output.mkdir(parents=True, exist_ok=True)
     epoch = max(315532800, min(build_info["source_epoch"], 4354819198))
@@ -495,6 +557,7 @@ def verify_package(path, extract_to=None):
     require(info.get("source_documents") == sorted(set(payload) & (set(SOURCE_FILES) | OPTIONAL_SOURCE_FILES | VENDOR_FILES)),
             "Source document manifest mismatch")
     check_document_links(payload)
+    validate_real_vst3_qa(payload)
     for binary in BINARIES:
         require(inspect_pe(payload[binary]) == info["pe_audit"][binary], "PE audit/provenance mismatch")
     inventory = json.loads(payload["DEPENDENCIES.json"])

@@ -1,0 +1,268 @@
+{
+  "plugin": "Surge XT Effects.vst3",
+  "load": {
+    "PluginInfo": {
+      "vendor": "Surge Synth Team",
+      "name": "Surge XT Effects",
+      "version": "1.3.4",
+      "category": "Fx",
+      "uid": "ABCDEF019182FAEB566D624153465854",
+      "has_gui": true,
+      "audio_inputs": 2,
+      "audio_outputs": 1,
+      "output_channels": 2,
+      "has_midi_input": false,
+      "has_midi_output": false,
+      "compatibility": []
+    }
+  },
+  "AudioBusLayout": {
+    "AudioBusLayout": {
+      "layout": {
+        "inputs": [
+          {
+            "channel_count": 2,
+            "active": true
+          },
+          {
+            "channel_count": 2,
+            "active": true
+          }
+        ],
+        "outputs": [
+          {
+            "channel_count": 2,
+            "active": true
+          }
+        ]
+      }
+    }
+  },
+  "GetUnits": {
+    "Units": {
+      "units": [
+        {
+          "id": 0,
+          "parent_id": -1,
+          "name": "Root Unit",
+          "program_list_id": 1886548852,
+          "programs": [
+            "Default"
+          ]
+        }
+      ]
+    }
+  },
+  "GetAllParameters": {
+    "Parameters": {
+      "params": [
+        {
+          "id": 720135338,
+          "name": "Input Channel",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 0,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": false,
+          "flags": 1
+        },
+        {
+          "id": 720135339,
+          "name": "Delay Time Left",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 0,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": false,
+          "flags": 1
+        },
+        {
+          "id": 720135340,
+          "name": "Delay Time Right",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 0,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": false,
+          "flags": 1
+        },
+        {
+          "id": 720135341,
+          "name": "Feedback/EQ Feedback",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 0,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": false,
+          "flags": 1
+        },
+        {
+          "id": 720135342,
+          "name": "Feedback/EQ Crossfeed",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 0,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": false,
+          "flags": 1
+        },
+        {
+          "id": 720135343,
+          "name": "Feedback/EQ Low Cut",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 0,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": false,
+          "flags": 1
+        },
+        {
+          "id": 720135344,
+          "name": "Feedback/EQ High Cut",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 0,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": false,
+          "flags": 1
+        },
+        {
+          "id": 720135345,
+          "name": "Modulation Rate",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 0,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": false,
+          "flags": 1
+        },
+        {
+          "id": 720135346,
+          "name": "Modulation Depth",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 0,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": false,
+          "flags": 1
+        },
+        {
+          "id": 720135347,
+          "name": "Output Width",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 0,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": false,
+          "flags": 1
+        },
+        {
+          "id": 849359077,
+          "name": "Output Mix",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 0,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": false,
+          "flags": 1
+        },
+        {
+          "id": 849359078,
+          "name": "- -",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 0,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": false,
+          "flags": 1
+        },
+        {
+          "id": 887087884,
+          "name": "FX Type",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 0,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": false,
+          "flags": 1
+        },
+        {
+          "id": 1652125811,
+          "name": "Bypass",
+          "value": 0.0,
+          "min": 0.0,
+          "max": 1.0,
+          "default": 0.0,
+          "unit": "",
+          "step_count": 1,
+          "can_automate": true,
+          "is_read_only": false,
+          "is_bypass": true,
+          "flags": 65537
+        }
+      ]
+    }
+  },
+  "LatencySamples": {
+    "LatencySamples": {
+      "samples": 0
+    }
+  },
+  "TailSamples": {
+    "TailSamples": {
+      "samples": 88200
+    }
+  }
+}

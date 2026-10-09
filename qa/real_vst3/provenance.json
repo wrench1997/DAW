@@ -1,0 +1,425 @@
+{
+  "schema_version": 1,
+  "measurement_date": "2026-10-09",
+  "scope": "Source-pinned genuine Linux x86-64 plugin receipts: historical offline DSP/MIDI and original scanner, plus an integrated-source metadata-only rerun; integrity checks are not a DSP rerun.",
+  "original_archive": {
+    "name": "vst3-validation-scripts-receipts.tar.gz",
+    "bytes": 68188,
+    "sha256": "8a11f97588cfcf139aaebaf272d352aa79ce17a56b0ac3ec948262f39552e5a2",
+    "redistributed": false
+  },
+  "original_portable_inventory_sha256": "4aa880025fa0a9729067e7127ba76e3a77ef6c943c50e4aa64516fe65dbdfea1",
+  "historical_runtime": {
+    "commit": "b57076ad990869f4a421cc816d67409b5c69b694",
+    "production_source_sha256": {
+      "src/plugins.rs": "e9b16f89261b8540d4ef15d5a0f568e7975a32672e83d9deabdb88661718329f",
+      "src/plugin_runtime.rs": "0d818b698c4becabb6982e6c7942f48fff2dff08240e80213f81066abf01dbac"
+    },
+    "helper_sha256": "ca91f242e409ab632427d5191c33ecae94bbd5172a8e7f1a98928d60f4f365fd",
+    "probe_executable_sha256": "85d16ec93c47d55c4871de2c29b6ec15ebcfe5035597f8e18788f7cc783d87f6",
+    "measured_source_hashes_recorded_in_original_SHA256SUMS": {
+      "probe.py": "27810387c1f4937bbfa362bf66519ffb3f268abec9961771faf5784786c24b0c",
+      "runtime_probe.rs": "2168e341c8ef63ba09af349bccdc7019601b1a15cc83a5b6c6a15b9518019862"
+    },
+    "original_SHA256SUMS_file_sha256": "c9f75017b8f890d84d31d9124cbede3958554173c542fae40ac987b33a84ab27",
+    "measured_probe_sources_in_bundle": false,
+    "note": "The original recorded measured-source hashes differ from the later portable sources. Do not attribute the historical executable to the portable source bytes. Original production-module hashes were independently checked against git show."
+  },
+  "historical_scanner": {
+    "commit": "1c673eb47ace331b4b05d147dd8d29747670d99e",
+    "integrated_equivalent_commit": "e6bd216863f6180c2745de05c6701c6300d41cf2",
+    "equivalence_checked_paths": [
+      "src/plugins.rs",
+      "src/plugin_runtime.rs",
+      "src/bin/vst3-host-helper.rs",
+      "vendor",
+      "Cargo.toml",
+      "Cargo.lock",
+      "build.rs"
+    ],
+    "measured_probe_source_sha256": "ec127640d00fe8fabc083946589ff0b2d3ccc299b962fcd7d9d569552a24f019",
+    "portable_probe_source_sha256": "45907d40467950c7ebf55b0b674b1724eafb3fc744b9144bae3ae89a3be165ee",
+    "note": "Only production source include and plugin-root lookup changed in the portable probe. The original log used the original measured probe, not this adaptation."
+  },
+  "path_tokens": {
+    "${VALIDATION_ROOT}": "Original Surge/Stochas validation working directory; runtime/plugin/home paths.",
+    "${SCANNER_ROOT}": "Original scanner-only validation working directory.",
+    "${TARGET}": "Original shared Cargo target; historical hash-named rlibs are not shipped.",
+    "${RUSTC}": "Original rustc executable; compiler and toolchain are not shipped.",
+    "${INTEGRATED_SCANNER_ROOT}": "Separate integrated e6bd216 metadata-only rerun working directory.",
+    "${NATIVE_LIBRARY_PATH_1}": "Historical local linker-library directory; not shipped.",
+    "${NATIVE_LIBRARY_PATH_2}": "Historical local linker-library directory; not shipped."
+  },
+  "publication_copies": [
+    {
+      "path": "REPRODUCE.md",
+      "original_reference": "portable-receipts/REPRODUCE.md",
+      "original_sha256": "6820416181bcef47e032ba17da276d1ef625623e995d9cdc8c109a646254a9ab",
+      "publication_sha256": "98d0478d73ab2710c46d7dc8d6193e7240c989e51ca35a84805e5a6b644f1922",
+      "treatment": "edited documentation"
+    },
+    {
+      "path": "build_runtime_probe.py",
+      "original_reference": "portable-receipts/build_runtime_probe.py",
+      "original_sha256": "ca7e9afcdcba664c7125bff45b40a4997c0ac24bd9fb0928ee6cc2a9b2302869",
+      "publication_sha256": "407776e72ade4d419f331e8abb4b8126e4b86e575080e1b412892cb72e262eaa",
+      "treatment": "adapted reproduction source, not measured-source bytes"
+    },
+    {
+      "path": "probe.py",
+      "original_reference": "portable-receipts/probe.py",
+      "original_sha256": "c3207eb5dd5a652664befd086fdf5861dd8d34d22c5364c0458fa17987df25df",
+      "publication_sha256": "c3207eb5dd5a652664befd086fdf5861dd8d34d22c5364c0458fa17987df25df",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/README.md",
+      "original_reference": "portable-receipts/receipts/README.md",
+      "original_sha256": "eb964d03387c1c844aea780aac7118809917b084128dc1ec2f5f5df5ec450132",
+      "publication_sha256": "d73139b27d93195433b66343889f3f55913b21a3c8e8862ae9843b75b5d0542e",
+      "treatment": "edited documentation"
+    },
+    {
+      "path": "receipts/effects-probe.json",
+      "original_reference": "portable-receipts/receipts/effects-probe.json",
+      "original_sha256": "47c743468dc348f57949bcdb0a4890c2e6fee9f56d4f7ff64fbffcf51bc4d3ec",
+      "publication_sha256": "47c743468dc348f57949bcdb0a4890c2e6fee9f56d4f7ff64fbffcf51bc4d3ec",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/instrument-probe.json",
+      "original_reference": "portable-receipts/receipts/instrument-probe.json",
+      "original_sha256": "c070fa31f8e9a6e6cbadd2146453d8fc877fdbeb8b5abc5124b6c784905f5f77",
+      "publication_sha256": "c070fa31f8e9a6e6cbadd2146453d8fc877fdbeb8b5abc5124b6c784905f5f77",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/production-runtime.log",
+      "original_reference": "portable-receipts/receipts/production-runtime.log",
+      "original_sha256": "1df57c410029c85709731398f5280361dcda4dc38c8c6756a626de9e4741a860",
+      "publication_sha256": "edcd46e03d66e963fc984444645a19eb455ed99ae20c131e4261e8cdc660d740",
+      "treatment": "path-only normalization",
+      "path_normalization": [
+        {
+          "original_prefix_sha256": "0794fe8d2d25872ad6c4a7c62a9a8c4bacb02ffc88f1779272c90d82e3bc5ae1",
+          "publication_token": "${VALIDATION_ROOT}",
+          "replacement_count": 4
+        }
+      ],
+      "raw_equivalence_check": "Literal path-only reversal matched original SHA256 locally before publication; private reversible map is not shipped."
+    },
+    {
+      "path": "receipts/production-runtime.stderr.log",
+      "original_reference": "portable-receipts/receipts/production-runtime.stderr.log",
+      "original_sha256": "2603de38950257995bcb306cb4e1ae48b22a0ca06cf47bae22e2adc8fb36d9b1",
+      "publication_sha256": "2603de38950257995bcb306cb4e1ae48b22a0ca06cf47bae22e2adc8fb36d9b1",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/runtime-build-command.json",
+      "original_reference": "surge-vst3-validation/receipts/runtime-build-command.json",
+      "original_sha256": "7c786e3e9788c2cdb91a7a607df6e0ee58b9a41970bfd9ada937478f990009cc",
+      "publication_sha256": "3a6eba6014414a3aa875bda2951970b0448446dcfe23b263fc0c7e279489f091",
+      "treatment": "path-only normalization",
+      "path_normalization": [
+        {
+          "original_prefix_sha256": "4a8b9e0fc14d0f84d0b0861e4ae220da596efd0462be4408139d92bb69c5bd27",
+          "publication_token": "${RUSTC}",
+          "replacement_count": 1
+        },
+        {
+          "original_prefix_sha256": "9b1f7f9d84d039edd8a350c55cd87fd3f657b2bd568f736e0dbf76efd4e31889",
+          "publication_token": "${TARGET}",
+          "replacement_count": 6
+        }
+      ],
+      "raw_equivalence_check": "Literal path-only reversal matched original SHA256 locally before publication; private reversible map is not shipped."
+    },
+    {
+      "path": "receipts/stochas-pattern-output.json",
+      "original_reference": "portable-receipts/receipts/stochas-pattern-output.json",
+      "original_sha256": "9d02ecef346044447e179726b01f9ed773c941d0fd08df96fe91152559a9762f",
+      "publication_sha256": "9d02ecef346044447e179726b01f9ed773c941d0fd08df96fe91152559a9762f",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/stochas-pattern.log",
+      "original_reference": "portable-receipts/receipts/stochas-pattern.log",
+      "original_sha256": "f778fb51abb2aaab25a20181be34875f99484ab1aaf31459eafeb323203b2564",
+      "publication_sha256": "f778fb51abb2aaab25a20181be34875f99484ab1aaf31459eafeb323203b2564",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/stochas-probe.json",
+      "original_reference": "portable-receipts/receipts/stochas-probe.json",
+      "original_sha256": "10eb44089d16d0cd5bfea334c374105f8ae9b43ab49115df13a4aa2c56aafb0e",
+      "publication_sha256": "10eb44089d16d0cd5bfea334c374105f8ae9b43ab49115df13a4aa2c56aafb0e",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/stochas-probe.log",
+      "original_reference": "portable-receipts/receipts/stochas-probe.log",
+      "original_sha256": "b023ed73a75a87f709ff980d2322e6e43d096417ea16a362a51b6eb6c50d76b7",
+      "publication_sha256": "b023ed73a75a87f709ff980d2322e6e43d096417ea16a362a51b6eb6c50d76b7",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/stochas-qa-pattern.state",
+      "original_reference": "portable-receipts/receipts/stochas-qa-pattern.state",
+      "original_sha256": "7f9852d0e5a9e934fadceee82c54bac167354e7a9e77a07d394c3a7493ed4f8f",
+      "publication_sha256": "7f9852d0e5a9e934fadceee82c54bac167354e7a9e77a07d394c3a7493ed4f8f",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/stochas-qa-pattern.xml",
+      "original_reference": "portable-receipts/receipts/stochas-qa-pattern.xml",
+      "original_sha256": "e705f67f6f0731a671b7cd906b9ad3ef00f82d795c135fd0fa404e5087a667b8",
+      "publication_sha256": "e705f67f6f0731a671b7cd906b9ad3ef00f82d795c135fd0fa404e5087a667b8",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/stochas-summary.md",
+      "original_reference": "portable-receipts/receipts/stochas-summary.md",
+      "original_sha256": "b7efb1d136667d03d637793c35426bb1f1d1c33cb16ce99e2eeda720d3322ab7",
+      "publication_sha256": "b7efb1d136667d03d637793c35426bb1f1d1c33cb16ce99e2eeda720d3322ab7",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/stochas-tempo-check.json",
+      "original_reference": "portable-receipts/receipts/stochas-tempo-check.json",
+      "original_sha256": "69e6533dcb13851af41b300a0ffc66a8f9bb096e8e89cd2b6fe308f94024fcce",
+      "publication_sha256": "69e6533dcb13851af41b300a0ffc66a8f9bb096e8e89cd2b6fe308f94024fcce",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/stochas-tempo-check.log",
+      "original_reference": "portable-receipts/receipts/stochas-tempo-check.log",
+      "original_sha256": "acc3e873b2fb78e8d096430eeecbc36c5e5129afe75b41e619c4aa5911f795ba",
+      "publication_sha256": "acc3e873b2fb78e8d096430eeecbc36c5e5129afe75b41e619c4aa5911f795ba",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/stochas-vendor-md5sum.txt",
+      "original_reference": "portable-receipts/receipts/stochas-vendor-md5sum.txt",
+      "original_sha256": "28f9fcc298784191fcf87d72e9560cf57ba194894e4b5ad9cf64b0f623a58e09",
+      "publication_sha256": "28f9fcc298784191fcf87d72e9560cf57ba194894e4b5ad9cf64b0f623a58e09",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/validation-summary.log",
+      "original_reference": "portable-receipts/receipts/validation-summary.log",
+      "original_sha256": "c47085d47063923db2e8f7eed8fc409c7b898c5590a6284d89315526174acb1c",
+      "publication_sha256": "c47085d47063923db2e8f7eed8fc409c7b898c5590a6284d89315526174acb1c",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/validation.json",
+      "original_reference": "portable-receipts/receipts/validation.json",
+      "original_sha256": "ca5df15919e053622e0169cfb698b42982c85fe590043f241c70295244a87e3e",
+      "publication_sha256": "ca5df15919e053622e0169cfb698b42982c85fe590043f241c70295244a87e3e",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "receipts/vendor-md5sum.txt",
+      "original_reference": "portable-receipts/receipts/vendor-md5sum.txt",
+      "original_sha256": "887e35ce610fee0c6728dd7ca8f80e2ca343a90fe45500f9c96f2bc29fb1908a",
+      "publication_sha256": "887e35ce610fee0c6728dd7ca8f80e2ca343a90fe45500f9c96f2bc29fb1908a",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "render_probe.py",
+      "original_reference": "portable-receipts/render_probe.py",
+      "original_sha256": "02eb0c42c4425ba9f11830b6d0099082164ebfd9c0644ebd3ea31b751c07c574",
+      "publication_sha256": "02eb0c42c4425ba9f11830b6d0099082164ebfd9c0644ebd3ea31b751c07c574",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "runtime_probe.rs",
+      "original_reference": "portable-receipts/runtime_probe.rs",
+      "original_sha256": "14f93e6f0ad43813a001914559a4df7a489b4c04cff61f3df194f21b617d86ce",
+      "publication_sha256": "14f93e6f0ad43813a001914559a4df7a489b4c04cff61f3df194f21b617d86ce",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "scanner-integrated/actual-scan.log",
+      "original_reference": "scanner-main-qa-e6bd216/receipts/actual-scan.log",
+      "original_sha256": "5bb70c4ec2373d57d742308374aa640880d8d86bcbdd7fac8beb793f0b5bdd23",
+      "publication_sha256": "ad9ef44faa331dd4325784814a25c17c99a7058abd8407cb0189152c3b4417b7",
+      "treatment": "path-only normalization",
+      "path_normalization": [
+        {
+          "original_prefix_sha256": "0794fe8d2d25872ad6c4a7c62a9a8c4bacb02ffc88f1779272c90d82e3bc5ae1",
+          "publication_token": "${VALIDATION_ROOT}",
+          "replacement_count": 8
+        }
+      ],
+      "raw_equivalence_check": "Literal path-only reversal matched original SHA256 locally before publication; private reversible map is not shipped."
+    },
+    {
+      "path": "scanner-integrated/actual-scan.stderr.log",
+      "original_reference": "scanner-main-qa-e6bd216/receipts/actual-scan.stderr.log",
+      "original_sha256": "b15310a8bbf1148efec06408b47f0c6745d3037af184019e4b9fb89f56fa4380",
+      "publication_sha256": "b15310a8bbf1148efec06408b47f0c6745d3037af184019e4b9fb89f56fa4380",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "scanner-integrated/scanner-reproduction-build.json",
+      "original_reference": "scanner-main-qa-e6bd216/receipts/scanner-reproduction-build.json",
+      "original_sha256": "a2f995d21f0e7e7295ee688bb108e2df0b14331931ed19251624bf7ab9979145",
+      "publication_sha256": "ca7508f9d681fedc8b94752cea5385bce0bc96dee7f90dcbb91ecfea0a82cce2",
+      "treatment": "path-only normalization",
+      "path_normalization": [
+        {
+          "original_prefix_sha256": "4a8b9e0fc14d0f84d0b0861e4ae220da596efd0462be4408139d92bb69c5bd27",
+          "publication_token": "${RUSTC}",
+          "replacement_count": 1
+        },
+        {
+          "original_prefix_sha256": "43e5bb91d3c52c381ed229fc3aa27db7b005d9528a02ef3698f97ac9ad16993a",
+          "publication_token": "${INTEGRATED_SCANNER_ROOT}",
+          "replacement_count": 2
+        },
+        {
+          "original_prefix_sha256": "9b1f7f9d84d039edd8a350c55cd87fd3f657b2bd568f736e0dbf76efd4e31889",
+          "publication_token": "${TARGET}",
+          "replacement_count": 7
+        },
+        {
+          "original_prefix_sha256": "21de019449a2d2deee08fe23eeb503a1fc0a5837aa98d5863420240e1052e137",
+          "publication_token": "${NATIVE_LIBRARY_PATH_1}",
+          "replacement_count": 1
+        },
+        {
+          "original_prefix_sha256": "9d16d0743be445e315f4e4d184ae3dec82af035167df225237e53d260ae2354c",
+          "publication_token": "${NATIVE_LIBRARY_PATH_2}",
+          "replacement_count": 1
+        }
+      ],
+      "raw_equivalence_check": "Literal path-only reversal matched original SHA256 locally before publication; private reversible map is not shipped."
+    },
+    {
+      "path": "scanner/actual-scan.log",
+      "original_reference": "scanner-validation/receipts/actual-scan.log",
+      "original_sha256": "5bb70c4ec2373d57d742308374aa640880d8d86bcbdd7fac8beb793f0b5bdd23",
+      "publication_sha256": "ad9ef44faa331dd4325784814a25c17c99a7058abd8407cb0189152c3b4417b7",
+      "treatment": "path-only normalization",
+      "path_normalization": [
+        {
+          "original_prefix_sha256": "0794fe8d2d25872ad6c4a7c62a9a8c4bacb02ffc88f1779272c90d82e3bc5ae1",
+          "publication_token": "${VALIDATION_ROOT}",
+          "replacement_count": 8
+        }
+      ],
+      "raw_equivalence_check": "Literal path-only reversal matched original SHA256 locally before publication; private reversible map is not shipped."
+    },
+    {
+      "path": "scanner/actual-scan.stderr.log",
+      "original_reference": "scanner-validation/receipts/actual-scan.stderr.log",
+      "original_sha256": "b15310a8bbf1148efec06408b47f0c6745d3037af184019e4b9fb89f56fa4380",
+      "publication_sha256": "b15310a8bbf1148efec06408b47f0c6745d3037af184019e4b9fb89f56fa4380",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "scanner/compile-command.json",
+      "original_reference": "scanner-validation/receipts/compile-command.json",
+      "original_sha256": "3cd29dc3c7635679f91c6b14a64c2f333773908acdd777f45f07265e747f4df4",
+      "publication_sha256": "ebaf41c822108f83e10a2610f90232546c4d9d613628c2f4a91740edcf92b292",
+      "treatment": "path-only normalization",
+      "path_normalization": [
+        {
+          "original_prefix_sha256": "4a8b9e0fc14d0f84d0b0861e4ae220da596efd0462be4408139d92bb69c5bd27",
+          "publication_token": "${RUSTC}",
+          "replacement_count": 1
+        },
+        {
+          "original_prefix_sha256": "4ebf01d016551978cb8815d270b7c22cf766b6a79bb988b7d404415f06e63313",
+          "publication_token": "${SCANNER_ROOT}",
+          "replacement_count": 2
+        },
+        {
+          "original_prefix_sha256": "9b1f7f9d84d039edd8a350c55cd87fd3f657b2bd568f736e0dbf76efd4e31889",
+          "publication_token": "${TARGET}",
+          "replacement_count": 7
+        }
+      ],
+      "raw_equivalence_check": "Literal path-only reversal matched original SHA256 locally before publication; private reversible map is not shipped."
+    },
+    {
+      "path": "scanner/source-and-hashes.json",
+      "original_reference": "scanner-validation/receipts/source-and-hashes.json",
+      "original_sha256": "4947af79eeb64889737a1231fc36793a3e8ca747b232dc5daae12b8feb0155b5",
+      "publication_sha256": "d88590ae7971c94590e29156b14d46f8db78aea4899c73d6b34162041a3a32cf",
+      "treatment": "path-only normalization",
+      "path_normalization": [
+        {
+          "original_prefix_sha256": "4ebf01d016551978cb8815d270b7c22cf766b6a79bb988b7d404415f06e63313",
+          "publication_token": "${SCANNER_ROOT}",
+          "replacement_count": 5
+        }
+      ],
+      "raw_equivalence_check": "Literal path-only reversal matched original SHA256 locally before publication; private reversible map is not shipped."
+    },
+    {
+      "path": "scanner_probe.rs",
+      "original_reference": "scanner-validation/scanner_probe.rs",
+      "original_sha256": "ec127640d00fe8fabc083946589ff0b2d3ccc299b962fcd7d9d569552a24f019",
+      "publication_sha256": "45907d40467950c7ebf55b0b674b1724eafb3fc744b9144bae3ae89a3be165ee",
+      "treatment": "adapted reproduction source, not measured-source bytes"
+    },
+    {
+      "path": "stochas_pattern.py",
+      "original_reference": "portable-receipts/stochas_pattern.py",
+      "original_sha256": "bdfdcafb58ec0a3f63342a9e5277bd3638547ec305e06df39e6df97e5e3f4352",
+      "publication_sha256": "bdfdcafb58ec0a3f63342a9e5277bd3638547ec305e06df39e6df97e5e3f4352",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "stochas_probe.py",
+      "original_reference": "portable-receipts/stochas_probe.py",
+      "original_sha256": "543f2bdba898e3508762cc0ce21e70fefb73fb6aca67584b021dee4bc1be0551",
+      "publication_sha256": "543f2bdba898e3508762cc0ce21e70fefb73fb6aca67584b021dee4bc1be0551",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "stochas_tempo.py",
+      "original_reference": "portable-receipts/stochas_tempo.py",
+      "original_sha256": "2e7714578b69df0d6e2d0c1ebcf88ae3d955af28584d77595353be979b42a4ae",
+      "publication_sha256": "2e7714578b69df0d6e2d0c1ebcf88ae3d955af28584d77595353be979b42a4ae",
+      "treatment": "byte-for-byte"
+    },
+    {
+      "path": "validate.py",
+      "original_reference": "portable-receipts/validate.py",
+      "original_sha256": "ea590618c9c2c585ec223103882b29eee382dcdfc9f1c8bed790de8333b7194e",
+      "publication_sha256": "ea590618c9c2c585ec223103882b29eee382dcdfc9f1c8bed790de8333b7194e",
+      "treatment": "byte-for-byte"
+    }
+  ],
+  "not_shipped": [
+    "Third-party plugin binaries and archives",
+    "Factory assets",
+    "Production helper and compiled probes",
+    "Compiler/toolchain, cached rlibs and local linker shims",
+    "Generated WAV audio",
+    "Original raw measured probe.py/runtime_probe.rs source bytes referenced only by the historical checksum record"
+  ],
+  "inventory": "CONTENTS-SHA256.txt covers every regular file under this directory except itself, sorted by relative path. The outer repository/package covers that manifest and the separate docs guide.",
+  "integrated_scanner_rerun": {
+    "run_date_utc": "2026-10-09",
+    "commit": "e6bd216863f6180c2745de05c6701c6300d41cf2",
+    "receipt_directory": "scanner-integrated",
+    "probe_source_sha256": "45907d40467950c7ebf55b0b674b1724eafb3fc744b9144bae3ae89a3be165ee",
+    "build_script_sha256": "407776e72ade4d419f331e8abb4b8126e4b86e575080e1b412892cb72e262eaa",
+    "result": "Actual official Surge instrument/effect identity, categories, MIDI capabilities, cache round-trip and clean helper lifecycle passed. No audio processing was requested.",
+    "rlib_selection": "Integration owner selected rlibs using the exact Cargo compiler-artifact output; serde also verified against the app fingerprint. No newest-file selection.",
+    "source_evidence": "Exact source/compiler/rlib/helper/executable hashes and compiler command are recorded in scanner-integrated/scanner-reproduction-build.json."
+  },
+  "omitted_empty_receipts": [
+    {
+      "original_reference": "scanner-validation/receipts/compile.log",
+      "original_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0,
+      "reason": "Empty compiler stdout/stderr log carries no measurement content and is omitted because preview payloads must be nonempty; original remains untouched."
+    }
+  ]
+}

@@ -1,0 +1,85 @@
+{
+  "empty_helper_process": {},
+  "instrument": {
+    "parameter_count": 2855,
+    "saved_state_bytes": 51929,
+    "pre_note": {
+      "samples": 10240,
+      "finite": true,
+      "peak": 0.0,
+      "rms": 0.0
+    },
+    "note_on": {
+      "samples": 96256,
+      "finite": true,
+      "peak": 0.06726480275392532,
+      "rms": 0.02540488008521301
+    },
+    "late_release": {
+      "samples": 96000,
+      "finite": true,
+      "peak": 3.5456036842412483e-15,
+      "rms": 5.395871116002226e-16
+    }
+  },
+  "effects_dry": {
+    "output": {
+      "samples": 144384,
+      "finite": true,
+      "peak": 0.15000000596046448,
+      "rms": 0.061247324475476074
+    },
+    "delta_from_input": {
+      "samples": 144384,
+      "finite": true,
+      "peak": 7.449858979713397e-09,
+      "rms": 1.7386849704323026e-09
+    },
+    "tail_after_input_stops": {
+      "samples": 96256,
+      "finite": true,
+      "peak": 0.0,
+      "rms": 0.0
+    }
+  },
+  "effects_delay": {
+    "output": {
+      "samples": 144384,
+      "finite": true,
+      "peak": 0.16001921892166138,
+      "rms": 0.0606163790240917
+    },
+    "delta_from_input": {
+      "samples": 144384,
+      "finite": true,
+      "peak": 0.3020162401771566,
+      "rms": 0.10783715627432487
+    },
+    "tail_after_input_stops": {
+      "samples": 96256,
+      "finite": true,
+      "peak": 0.14786778390407562,
+      "rms": 0.039597926372981485
+    }
+  },
+  "effects_bypass": {
+    "output": {
+      "samples": 144384,
+      "finite": true,
+      "peak": 0.15000000596046448,
+      "rms": 0.061247324475476074
+    },
+    "delta_from_input": {
+      "samples": 144384,
+      "finite": true,
+      "peak": 7.449858979713397e-09,
+      "rms": 1.7386849704323026e-09
+    },
+    "tail_after_input_stops": {
+      "samples": 96256,
+      "finite": true,
+      "peak": 0.0,
+      "rms": 0.0
+    }
+  }
+}

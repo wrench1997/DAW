@@ -1,0 +1,733 @@
+{
+  "plugin": {
+    "PluginInfo": {
+      "vendor": "Surge Synth Team",
+      "name": "Stochas",
+      "version": "1.3.13",
+      "category": "Instrument|Effect",
+      "uid": "ABCDEF019182FAEB70726F6A53746F63",
+      "has_gui": true,
+      "audio_inputs": 0,
+      "audio_outputs": 1,
+      "output_channels": 2,
+      "has_midi_input": true,
+      "has_midi_output": true,
+      "compatibility": []
+    }
+  },
+  "source_schema_roundtrip_verified": true,
+  "pattern": {
+    "notes": {
+      "125": 60,
+      "126": 64,
+      "127": 67
+    },
+    "cells": [
+      [
+        125,
+        0,
+        100,
+        100,
+        0
+      ],
+      [
+        125,
+        3,
+        100,
+        100,
+        0
+      ],
+      [
+        126,
+        1,
+        100,
+        100,
+        0
+      ],
+      [
+        127,
+        2,
+        100,
+        100,
+        0
+      ]
+    ],
+    "steps": "4",
+    "autoplay": "0"
+  },
+  "playing_at_bpm": 120,
+  "sample_rate": 48000,
+  "block_size": 256,
+  "preplay_output": [],
+  "playing_output": [
+    {
+      "block": 0,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 0,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 60,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 11,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 184,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 60,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 15,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 111,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 64,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 27,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 39,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 64,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 38,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 223,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 67,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 50,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 151,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 67,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 62,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 79,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 60,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 74,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 7,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 60,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 85,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 191,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 60,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 97,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 119,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 60,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 109,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 47,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 64,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 120,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 231,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 64,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 132,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 160,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 67,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 144,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 88,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 67,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 156,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 16,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 60,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 167,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 200,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 60,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 179,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 127,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 60,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 191,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 55,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 60,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 202,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 240,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 64,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 214,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 168,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 64,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 226,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 96,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 67,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 238,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 24,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 67,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 249,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 207,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 60,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 261,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 135,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 60,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 273,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 63,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 60,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 284,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 247,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 60,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 296,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 176,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 64,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 308,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 104,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 64,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 320,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 31,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 67,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 331,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 215,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 67,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 343,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 143,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 60,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 355,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 71,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 60,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 367,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 0,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 60,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    },
+    {
+      "block": 378,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 184,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 60,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    },
+    {
+      "block": 390,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 111,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOn": {
+            "channel": 0,
+            "pitch": 64,
+            "tuning": 0.0,
+            "velocity": 0.78740156,
+            "length": 0,
+            "note_id": -1
+          }
+        }
+      }
+    }
+  ],
+  "stop_output": [
+    {
+      "block": 0,
+      "event": {
+        "bus_index": 0,
+        "sample_offset": 0,
+        "ppq_position": 0.0,
+        "flags": 0,
+        "data": {
+          "NoteOff": {
+            "channel": 0,
+            "pitch": 64,
+            "velocity": 0.0,
+            "note_id": -1,
+            "tuning": 0.0
+          }
+        }
+      }
+    }
+  ],
+  "state_sha256": "7f9852d0e5a9e934fadceee82c54bac167354e7a9e77a07d394c3a7493ed4f8f"
+}

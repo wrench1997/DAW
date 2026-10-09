@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import stat
 import struct
+import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
@@ -220,7 +222,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn("docs/PROJECT_MEDIA.md", info["source_documents"])
 
     def test_optional_feature_guides_are_packaged_together(self):
-        for path in ("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md", "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md", "docs/LOCAL_SAMPLE_BROWSER.md", "docs/HEADLESS_UI_QA.md", "docs/FL_INSPIRED_NATIVE_THEME.md", "docs/MULTIWINDOW_WORKSPACE.md", "docs/COMPACT_WORKSPACE.md", "docs/PIANO_KEYBOARD_EDITING.md", "docs/PIANO_MOUSE_WORKFLOW.md", "docs/PIANO_NOTE_EXPRESSION.md", "docs/PIANO_RANGES_AND_SNAP.md"):
+        for path in ("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md", "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md", "docs/LOCAL_SAMPLE_BROWSER.md", "docs/HEADLESS_UI_QA.md", "docs/FL_INSPIRED_NATIVE_THEME.md", "docs/MULTIWINDOW_WORKSPACE.md", "docs/COMPACT_WORKSPACE.md", "docs/PIANO_KEYBOARD_EDITING.md", "docs/PIANO_MOUSE_WORKFLOW.md", "docs/PIANO_NOTE_EXPRESSION.md", "docs/PIANO_RANGES_AND_SNAP.md", "docs/VST3_SCANNING.md", "docs/REAL_VST3_VALIDATION.md"):
             (self.repo / path).write_text("[README](../README.md)\n")
         (self.repo / "README.md").write_text(
             "[Media](docs/PROJECT_MEDIA.md) [Export](docs/OFFLINE_EXPORT_WORKFLOW.md) "
@@ -228,7 +230,7 @@ class PackageTests(unittest.TestCase):
             "[Meters](docs/MIXER_METERING.md) [Samples](docs/LOCAL_SAMPLE_BROWSER.md) "
             "[UI QA](docs/HEADLESS_UI_QA.md) [Native theme](docs/FL_INSPIRED_NATIVE_THEME.md) "
             "[Workspace](docs/MULTIWINDOW_WORKSPACE.md) [Compact](docs/COMPACT_WORKSPACE.md) "
-            "[Piano keys](docs/PIANO_KEYBOARD_EDITING.md) [Piano mouse](docs/PIANO_MOUSE_WORKFLOW.md) [Expression](docs/PIANO_NOTE_EXPRESSION.md) [Piano ranges](docs/PIANO_RANGES_AND_SNAP.md)\n"
+            "[Piano keys](docs/PIANO_KEYBOARD_EDITING.md) [Piano mouse](docs/PIANO_MOUSE_WORKFLOW.md) [Expression](docs/PIANO_NOTE_EXPRESSION.md) [Piano ranges](docs/PIANO_RANGES_AND_SNAP.md) [Scanner](docs/VST3_SCANNING.md) [Real VST3 QA](docs/REAL_VST3_VALIDATION.md)\n"
         )
         archive = self.create()
         info = pkg.verify_package(archive)
@@ -246,6 +248,62 @@ class PackageTests(unittest.TestCase):
         self.assertIn("docs/PIANO_MOUSE_WORKFLOW.md", info["source_documents"])
         self.assertIn("docs/PIANO_NOTE_EXPRESSION.md", info["source_documents"])
         self.assertIn("docs/PIANO_RANGES_AND_SNAP.md", info["source_documents"])
+        self.assertIn("docs/VST3_SCANNING.md", info["source_documents"])
+        self.assertIn("docs/REAL_VST3_VALIDATION.md", info["source_documents"])
+
+    def real_vst3_qa_payload(self):
+        source = Path(__file__).resolve().parents[1]
+        return {name: (source / name).read_bytes() for name in pkg.REAL_VST3_QA_FILES}
+
+    def test_real_vst3_receipt_consistency_verifier_is_plugin_free(self):
+        source = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            [sys.executable, "-B", str(source / "qa/real_vst3/verify_receipts.py")],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Read-only receipt validation", result.stdout)
+
+    def test_real_vst3_receipt_line_endings_and_opaque_state_are_preserved(self):
+        source = Path(__file__).resolve().parents[1]
+        attributes = (source / ".gitattributes").read_text()
+        self.assertIn("/qa/real_vst3/** text eol=lf", attributes)
+        self.assertIn("/qa/real_vst3/receipts/*.state -text", attributes)
+
+    def test_real_vst3_source_receipts_are_complete_and_packaged(self):
+        payload = self.real_vst3_qa_payload()
+        self.assertTrue(payload)
+        pkg.validate_real_vst3_qa(payload)
+        for name, data in payload.items():
+            destination = self.repo / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        archive = self.create()
+        info = pkg.verify_package(archive)
+        self.assertTrue(pkg.REAL_VST3_QA_FILES <= set(info["source_documents"]))
+
+    def test_real_vst3_receipts_reject_missing_or_changed_bytes(self):
+        payload = self.real_vst3_qa_payload()
+        name = pkg.REAL_VST3_QA_ROOT + "receipts/production-runtime.log"
+        original = payload.pop(name)
+        with self.assertRaisesRegex(pkg.PackageError, "Incomplete real VST3"):
+            pkg.validate_real_vst3_qa(payload)
+        payload[name] = original + b"changed measurement\n"
+        with self.assertRaisesRegex(pkg.PackageError, "inventory/hash mismatch"):
+            pkg.validate_real_vst3_qa(payload)
+
+    def test_real_vst3_receipts_reject_duplicate_extra_or_escaping_inventory(self):
+        payload = self.real_vst3_qa_payload()
+        name = pkg.REAL_VST3_QA_ROOT + "CONTENTS-SHA256.txt"
+        original = payload[name]
+        additions = (original.splitlines(keepends=True)[0],
+                     b"0" * 64 + b"  undeclared.py\n",
+                     b"0" * 64 + b"  ../../outside.py\n")
+        for addition in additions:
+            with self.subTest(addition=addition):
+                payload[name] = original + addition
+                with self.assertRaisesRegex(pkg.PackageError, "inventory/hash mismatch"):
+                    pkg.validate_real_vst3_qa(payload)
 
     def test_prerelease_package_version_is_preserved(self):
         for name in ("Cargo.toml", "Cargo.lock"):
