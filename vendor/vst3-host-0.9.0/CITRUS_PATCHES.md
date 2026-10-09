@@ -1,4 +1,4 @@
-# Citrus isolated native-editor extension
+# Citrus native-editor and transport extensions
 
 ## Exact upstream source and license
 
@@ -23,7 +23,8 @@
    flag. No forged `WindowHandle` is needed for a helper-owned editor.
 2. `src/process_isolation.rs`: additive `HostCommand::Editor` and
    `HostResponse::EditorState` wire variants, plus `NativeDirtyRevision` command/response.
-   Existing variants are unchanged. Windows protocol output is retained through a private,
+   Existing variant names remain compatible; additive process fields are detailed below.
+   Windows protocol output is retained through a private,
    non-inheritable handle; Win32 stdout and CRT descriptor 1 are redirected before plugin
    load, failing closed if isolation fails. Registry dependency manifests remain unchanged.
 3. `src/internal/isolated_plugin_impl.rs`: typed forwarding and snapshot validation,
@@ -78,3 +79,50 @@ The standalone source-only fixture under `tests/fixtures/vst3-editor` has separa
 It is a test input, not a runtime dependency or release payload. Protocol tests do not prove a
 real editor rendered. Windows lifecycle and interactive smoke must report their own results;
 Linux typechecks and unsupported-desktop outcomes do not establish Windows GUI acceptance.
+
+## Authoritative MIDI-routing transport extension
+
+The same seven reviewed source files also carry the additive per-block transport and output
+loss contract used by Citrus MIDI routing:
+
+- `ProcessTransport` exposes independent project sample/quarter-note positions, current tempo,
+  playing state, and time signature. `Plugin::set_process_transport` validates it and the direct
+  implementation applies it to the next process context. Sample/PPQ positions freeze while
+  stopped; playing PPQ advances by each block's duration at its tempo, never by multiplying an
+  absolute sample position by the latest tempo. Continuous processing time remains independent.
+- The isolated implementation caches context without sending an additional IPC command.
+  `Process` and `ProcessBuses` carry optional, serde-defaulted `transport` in the same audio
+  request; both helpers apply it immediately before processing. Each audio response explicitly
+  acknowledges applied transport with a serde-defaulted `transport_applied` flag; an explicit
+  context request fails closed if a mismatched/older helper omits or rejects that acknowledgement.
+  Legacy tempo/time-signature/
+  playing setters remain supported, and requests without context retain their legacy setup.
+  Existing callers should set context for every quantum, especially after seeks or loop wraps.
+- `Plugin::take_output_events_with_loss` returns events plus a loss latch. SDK event capture
+  rejection, bounded event-list/output-queue overflow, and isolated backlog loss are observable.
+  Legacy event drains remain available but do not clear the latch. Each audio response includes
+  a serde-defaulted `output_events_lost` boolean so a routing host can panic the destination
+  rather than silently lose note-offs. There should be one draining consumer per plugin.
+- The event wire codec rejects more than 4096 events or more than 8 MiB of aggregate event
+  payload, and isolated accumulated output uses the same limits. Helpers reject oversized
+  flat process frame counts before allocating output buffers. Unsupported MIDI event/bus
+  policy remains a responsibility of the application, which must treat dropped note data as
+  a destination-safety concern.
+
+Headless regressions exercise transport validation, independent PPQ/seek origins, tempo
+changes, stopped and zero-sample contexts, single-request context forwarding, output-loss
+propagation/clearing, bounded overflow, and backward-compatible JSON defaults. These tests
+make no native GUI or real-plugin interoperability claim.
+
+### Regenerating the reviewable patch
+
+Verify the original registry archive against the SHA-256 above and extract a fresh copy.
+For each changed upstream source file, produce a unified diff with paths `a/<relative path>`
+and `b/<relative path>` against that pristine copy. Concatenate those diffs in sorted path
+order into `CITRUS.patch`; exclude `CITRUS.patch` and this manifest themselves. Apply it with
+`patch -p1` to another pristine extraction, then byte-compare every upstream file with this
+vendor directory. Only this manifest and the patch are additional provenance files. Keep the
+original LICENSE, `.cargo_vcs_info.json`, package version, and registry checksum unchanged.
+Finally review the changes and update the explicitly pinned manifest/patch SHA-256 values in
+`scripts/package_windows_preview.py` and its packaging regression test. Those pins deliberately
+require a fresh source review when this extension changes.

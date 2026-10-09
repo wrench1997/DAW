@@ -1,6 +1,80 @@
 --- a/src/bin/vst3-host-helper.rs
 +++ b/src/bin/vst3-host-helper.rs
-@@ -603,6 +603,10 @@
+@@ -454,7 +454,16 @@
+                 id: p.midi_cc_to_parameter(bus, channel, cc),
+             })
+         }
+-        HostCommand::Process { inputs, frames } => {
++        HostCommand::Process {
++            inputs,
++            frames,
++            transport,
++        } => {
++            if frames as usize > (1 << 20) {
++                return HostResponse::Error {
++                    message: "Process: frame count exceeds wire limit".into(),
++                };
++            }
+             let sr = *sample_rate;
+             with(plugin, |p| {
+                 // Live channel count (sums getBusInfo across output buses), so a negotiated
+@@ -466,11 +475,19 @@
+                     sample_rate: sr,
+                     block_size: frames as usize,
+                 };
++                if let Err(e) = transport.map(|t| p.set_process_transport(t)).transpose() {
++                    return err("Process transport", e);
++                }
+                 match p.process_audio(&mut buffers) {
+-                    Ok(()) => HostResponse::AudioOutput {
+-                        outputs: buffers.outputs,
+-                        output_events: p.take_output_events(),
+-                    },
++                    Ok(()) => {
++                        let (output_events, output_events_lost) = p.take_output_events_with_loss();
++                        HostResponse::AudioOutput {
++                            outputs: buffers.outputs,
++                            output_events,
++                            output_events_lost,
++                            transport_applied: transport.is_some(),
++                        }
++                    }
+                     Err(e) => err("Process", e),
+                 }
+             })
+@@ -479,6 +496,7 @@
+             inputs,
+             outputs,
+             frames,
++            transport,
+         } => {
+             if inputs.len() > 256
+                 || outputs.len() > 256
+@@ -506,11 +524,19 @@
+                     sample_rate: sr,
+                     block_size: frames as usize,
+                 };
++                if let Err(e) = transport.map(|t| p.set_process_transport(t)).transpose() {
++                    return err("ProcessBuses transport", e);
++                }
+                 match p.process_bus_audio(&mut buffers) {
+-                    Ok(()) => HostResponse::BusAudioOutput {
+-                        outputs: buffers.outputs,
+-                        output_events: p.take_output_events(),
+-                    },
++                    Ok(()) => {
++                        let (output_events, output_events_lost) = p.take_output_events_with_loss();
++                        HostResponse::BusAudioOutput {
++                            outputs: buffers.outputs,
++                            output_events,
++                            output_events_lost,
++                            transport_applied: transport.is_some(),
++                        }
++                    }
+                     Err(e) => err("ProcessBuses", e),
+                 }
+             })
+@@ -603,6 +629,10 @@
          HostCommand::TakeHostNotifications => with(plugin, |p| HostResponse::HostNotifications {
              notifications: p.take_host_notifications(),
          }),
@@ -11,7 +85,7 @@
          HostCommand::TakeDataExchangeBlocks => with(plugin, |p| HostResponse::DataExchangeBlocks {
              blocks: p.take_data_exchange_blocks(),
          }),
-@@ -629,6 +633,10 @@
+@@ -629,6 +659,10 @@
              Ok(flags) => HostResponse::RestartFlags { bits: flags.bits() },
              Err(error) => err("ServiceHostRequests", error),
          }),
@@ -141,7 +215,155 @@
          log::debug!("Host: Plugin marked state as dirty (state: {})", state);
          if self.push_notification(crate::plugin::HostNotification::DirtyChanged(state != 0)) {
              kResultOk
-@@ -2753,6 +2820,99 @@
+@@ -1915,6 +1982,7 @@
+ pub struct HostEventList {
+     pub events: Mutex<Vec<PluginEvent>>,
+     payload_bytes: AtomicUsize,
++    lost: AtomicBool,
+ }
+ 
+ impl HostEventList {
+@@ -1922,7 +1990,13 @@
+         Self {
+             events: Mutex::new(Vec::with_capacity(MAX_QUEUED_EVENTS)),
+             payload_bytes: AtomicUsize::new(0),
+-        }
++            lost: AtomicBool::new(false),
++        }
++    }
++
++    /// Acknowledge any rejected/uncaptured event since the last loss-aware drain.
++    pub fn take_loss(&self) -> bool {
++        self.lost.swap(false, Ordering::AcqRel)
+     }
+ 
+     pub fn clear(&self) {
+@@ -1933,6 +2007,7 @@
+                 log::trace!("HostEventList: Cleared all events");
+             }
+             Err(_) => {
++                self.lost.store(true, Ordering::Release);
+                 log::error!("HostEventList: Failed to lock events for clear");
+             }
+         }
+@@ -1951,6 +2026,7 @@
+     /// every other path into the list; the excess is dropped with a warning.
+     pub fn reset_with(&self, events: impl IntoIterator<Item = PluginEvent>) {
+         let Ok(mut queued) = self.events.lock() else {
++            self.lost.store(true, Ordering::Release);
+             log::error!("HostEventList: Failed to lock events for reset_with");
+             return;
+         };
+@@ -1958,11 +2034,13 @@
+         let mut payload_bytes = 0usize;
+         for event in events {
+             if queued.len() >= MAX_QUEUED_EVENTS {
++                self.lost.store(true, Ordering::Release);
+                 log::warn!("HostEventList: dropping event, queue full at {MAX_QUEUED_EVENTS}");
+                 break;
+             }
+             let next_payload_bytes = payload_bytes.saturating_add(event.payload_bytes());
+             if next_payload_bytes > MAX_QUEUED_EVENT_PAYLOAD_BYTES {
++                self.lost.store(true, Ordering::Release);
+                 log::warn!(
+                     "HostEventList: dropping event, payload budget exceeds \
+                      {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
+@@ -1980,7 +2058,10 @@
+         self.events
+             .lock()
+             .map(|events| events.is_empty())
+-            .unwrap_or(true)
++            .unwrap_or_else(|_| {
++                self.lost.store(true, Ordering::Release);
++                true
++            })
+     }
+ 
+     /// Move each queued event into `f`, leaving the list empty while retaining its backing
+@@ -1992,6 +2073,8 @@
+                 f(event);
+             }
+             self.payload_bytes.store(0, Ordering::Relaxed);
++        } else {
++            self.lost.store(true, Ordering::Release);
+         }
+     }
+ 
+@@ -1999,6 +2082,7 @@
+         match self.events.lock() {
+             Ok(mut events) => {
+                 if events.len() >= MAX_QUEUED_EVENTS {
++                    self.lost.store(true, Ordering::Release);
+                     log::warn!(
+                         "HostEventList: dropping event, queue full at {MAX_QUEUED_EVENTS} \
+                          (is the plugin processing?)"
+@@ -2009,6 +2093,7 @@
+                 if queued_payload_bytes.saturating_add(event.payload_bytes())
+                     > MAX_QUEUED_EVENT_PAYLOAD_BYTES
+                 {
++                    self.lost.store(true, Ordering::Release);
+                     log::warn!(
+                         "HostEventList: dropping event, payload budget exceeds \
+                          {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
+@@ -2026,6 +2111,7 @@
+                 );
+             }
+             Err(_) => {
++                self.lost.store(true, Ordering::Release);
+                 log::error!("HostEventList: Failed to lock events for add_event");
+             }
+         }
+@@ -2034,6 +2120,7 @@
+     /// Deep-copy a raw SDK event into the owned list.
+     pub fn add_raw_event(&self, event: &Event) -> bool {
+         let Ok(event) = (unsafe { raw_event_to_plugin_event(event) }) else {
++            self.lost.store(true, Ordering::Release);
+             return false;
+         };
+         self.add_event(event);
+@@ -2104,6 +2191,7 @@
+ 
+     unsafe fn addEvent(&self, event: *mut Event) -> i32 {
+         if event.is_null() {
++            self.lost.store(true, Ordering::Release);
+             log::warn!("HostEventList: addEvent called with null event pointer");
+             return kResultFalse;
+         }
+@@ -2113,6 +2201,7 @@
+                 // Bound what a plugin can emit into the output list in a single block, so a
+                 // misbehaving plugin can't drive unbounded growth from inside `process()`.
+                 if events.len() >= MAX_QUEUED_EVENTS {
++                    self.lost.store(true, Ordering::Release);
+                     log::warn!(
+                         "HostEventList: dropping plugin event, queue full at {MAX_QUEUED_EVENTS}"
+                     );
+@@ -2120,12 +2209,16 @@
+                 }
+                 let owned = match raw_event_to_plugin_event(&*event) {
+                     Ok(event) => event,
+-                    Err(()) => return kResultFalse,
++                    Err(()) => {
++                        self.lost.store(true, Ordering::Release);
++                        return kResultFalse;
++                    }
+                 };
+                 let queued_payload_bytes = self.payload_bytes.load(Ordering::Relaxed);
+                 if queued_payload_bytes.saturating_add(owned.payload_bytes())
+                     > MAX_QUEUED_EVENT_PAYLOAD_BYTES
+                 {
++                    self.lost.store(true, Ordering::Release);
+                     log::warn!(
+                         "HostEventList: dropping plugin event, payload budget exceeds \
+                          {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
+@@ -2141,6 +2234,7 @@
+                 kResultOk
+             }
+             Err(_) => {
++                self.lost.store(true, Ordering::Release);
+                 log::error!("HostEventList: Failed to lock events for addEvent");
+                 kResultFalse
+             }
+@@ -2753,6 +2847,99 @@
  mod component_handler_tests {
      use super::*;
      use crate::plugin::{ContextMenuItem, HostNotification, ParameterEdit, ParameterEditKind};
@@ -241,9 +463,54 @@
  
      struct TestContextMenuTarget {
          calls: Arc<Mutex<Vec<i32>>>,
+@@ -3958,3 +4145,28 @@
+         assert_eq!(read_attribute(&project, c"FilePathString"), None);
+     }
+ }
++
++#[cfg(test)]
++mod output_event_loss_tests {
++    use super::*;
++
++    #[test]
++    fn sdk_output_rejection_is_latched_across_clear_until_taken() {
++        let list = HostEventList::new();
++        let event = PluginEvent::from(crate::midi::MidiEvent::NoteOff {
++            channel: crate::midi::MidiChannel::Ch1,
++            note: 60,
++            velocity: 0,
++        });
++        for _ in 0..MAX_QUEUED_EVENTS + 1 {
++            list.add_event(event.clone());
++        }
++        list.clear();
++        assert!(list.take_loss());
++        assert!(!list.take_loss());
++        unsafe {
++            assert_eq!(list.addEvent(std::ptr::null_mut()), kResultFalse);
++        }
++        assert!(list.take_loss());
++    }
++}
 --- a/src/internal/isolated_plugin_impl.rs
 +++ b/src/internal/isolated_plugin_impl.rs
-@@ -74,6 +74,101 @@
+@@ -39,6 +39,7 @@
+     /// loaded plugin starts out playing (the in-process default), so only a stopped transport
+     /// needs replaying after a crash.
+     is_playing: bool,
++    process_transport: Option<crate::plugin::ProcessTransport>,
+     /// Whether the plugin is currently processing
+     is_processing: bool,
+     /// Whether the plugin has an open editor
+@@ -50,6 +51,7 @@
+     /// MIDI the plugin has emitted across the boundary, buffered for the host to poll
+     /// (mirrors PluginImpl::output_midi). Capped to bound growth if never read.
+     output_events: Mutex<Vec<PluginEvent>>,
++    output_events_lost: std::sync::atomic::AtomicBool,
+     /// Explicit helper-binary path override (re-used when respawning after a crash).
+     helper_path: Option<PathBuf>,
+     /// Per-command IPC response timeout (re-used when respawning after a crash).
+@@ -74,6 +76,101 @@
  /// Pause between auto-recover attempts whose respawn+reload itself failed, so a helper that
  /// cannot start at all is not hammered for the whole retry budget.
  const RECOVERY_RETRY_BACKOFF: Duration = Duration::from_millis(250);
@@ -345,7 +612,183 @@
  
  impl IsolatedPluginImpl {
      /// Create a new isolated plugin implementation
-@@ -832,6 +927,26 @@
+@@ -102,17 +199,47 @@
+             time_sig_numerator,
+             time_sig_denominator,
+             is_playing: true,
++            process_transport: None,
+             is_processing: false,
+             has_open_editor: false,
+             editor_size: None,
+             output_channels,
+-            output_events: Mutex::new(Vec::new()),
++            output_events: Mutex::new(Vec::with_capacity(MAX_OUTPUT_MIDI)),
++            output_events_lost: std::sync::atomic::AtomicBool::new(false),
+             helper_path,
+             response_timeout,
+             auto_recover,
+             auto_recover_max_retries,
+             recovery_count: std::sync::atomic::AtomicU64::new(0),
+             poll_error_logged: std::sync::atomic::AtomicBool::new(false),
++        }
++    }
++
++    fn buffer_output_events(&self, events: Vec<PluginEvent>, mut lost: bool) {
++        if let Ok(mut queued) = self.output_events.lock() {
++            let mut bytes: usize = queued.iter().map(PluginEvent::payload_bytes).sum();
++            for event in events {
++                let incoming = event.payload_bytes();
++                while !queued.is_empty()
++                    && (queued.len() >= MAX_OUTPUT_MIDI
++                        || bytes.saturating_add(incoming) > 8 * 1024 * 1024)
++                {
++                    bytes = bytes.saturating_sub(queued.remove(0).payload_bytes());
++                    lost = true;
++                }
++                if incoming > 8 * 1024 * 1024 {
++                    lost = true;
++                    continue;
++                }
++                bytes += incoming;
++                queued.push(event);
++            }
++        } else {
++            lost = true;
++        }
++        if lost {
++            self.output_events_lost
++                .store(true, std::sync::atomic::Ordering::Release);
+         }
+     }
+ 
+@@ -277,11 +404,25 @@
+         )
+     }
+ 
++    fn set_process_transport(&mut self, transport: crate::plugin::ProcessTransport) -> Result<()> {
++        transport.validate()?;
++        // Intentionally no IPC: transport and audio must be one indivisible request.
++        self.tempo = transport.tempo;
++        self.time_sig_numerator = transport.time_sig_numerator;
++        self.time_sig_denominator = transport.time_sig_denominator;
++        self.is_playing = transport.playing;
++        self.process_transport = Some(transport);
++        Ok(())
++    }
++
+     fn set_tempo(&mut self, bpm: f64) -> Result<()> {
+         self.expect_success(HostCommand::SetTempo { bpm }, "SetTempo")?;
+         // Track the accepted transport state so a post-crash reload replays it instead of the
+         // load-time settings. Only on success, so a rejected change can't desync the copy.
+         self.tempo = bpm;
++        if let Some(transport) = &mut self.process_transport {
++            transport.tempo = bpm;
++        }
+         Ok(())
+     }
+ 
+@@ -293,6 +434,10 @@
+             },
+             "SetTimeSignature",
+         )?;
++        if let Some(transport) = &mut self.process_transport {
++            transport.time_sig_numerator = numerator;
++            transport.time_sig_denominator = denominator;
++        }
+         self.time_sig_numerator = numerator;
+         self.time_sig_denominator = denominator;
+         Ok(())
+@@ -301,6 +446,9 @@
+     fn set_playing(&mut self, playing: bool) -> Result<()> {
+         self.expect_success(HostCommand::SetPlaying { playing }, "SetPlaying")?;
+         self.is_playing = playing;
++        if let Some(transport) = &mut self.process_transport {
++            transport.playing = playing;
++        }
+         Ok(())
+     }
+ 
+@@ -351,13 +499,21 @@
+         let response = self.send_command_once(HostCommand::Process {
+             inputs: buffers.inputs.clone(),
+             frames: frames as u32,
++            transport: self.process_transport,
+         })?;
+ 
+         match response {
+             HostResponse::AudioOutput {
+                 outputs,
+                 output_events,
++                output_events_lost,
++                transport_applied,
+             } => {
++                if self.process_transport.is_some() && !transport_applied {
++                    return Err(Error::ProcessError(
++                        "helper did not acknowledge authoritative per-block transport".into(),
++                    ));
++                }
+                 for (ch_idx, output_channel) in buffers.outputs.iter_mut().enumerate() {
+                     if let Some(src) = outputs.get(ch_idx) {
+                         let n = output_channel.len().min(src.len());
+@@ -369,15 +525,9 @@
+                         output_channel.fill(0.0);
+                     }
+                 }
+-                // Buffer any MIDI the plugin emitted this block for the host to poll.
+-                if !output_events.is_empty() {
+-                    if let Ok(mut buf) = self.output_events.lock() {
+-                        buf.extend(output_events);
+-                        if buf.len() > MAX_OUTPUT_MIDI {
+-                            let drop = buf.len() - MAX_OUTPUT_MIDI;
+-                            buf.drain(0..drop);
+-                        }
+-                    }
++                self.buffer_output_events(output_events, output_events_lost);
++                if let Some(transport) = &mut self.process_transport {
++                    transport.advance(frames as i64, self.sample_rate);
+                 }
+                 Ok(())
+             }
+@@ -423,12 +573,20 @@
+             inputs: buffers.inputs.clone(),
+             outputs,
+             frames: frames as u32,
++            transport: self.process_transport,
+         })?;
+         match response {
+             HostResponse::BusAudioOutput {
+                 outputs,
+                 output_events,
++                output_events_lost,
++                transport_applied,
+             } => {
++                if self.process_transport.is_some() && !transport_applied {
++                    return Err(Error::ProcessError(
++                        "helper did not acknowledge authoritative per-block transport".into(),
++                    ));
++                }
+                 for (destination_bus, source_bus) in buffers.outputs.iter_mut().zip(&outputs) {
+                     for (destination, source) in destination_bus
+                         .channels
+@@ -445,14 +603,9 @@
+                         destination.fill(0.0);
+                     }
+                 }
+-                if !output_events.is_empty() {
+-                    if let Ok(mut queued) = self.output_events.lock() {
+-                        queued.extend(output_events);
+-                        if queued.len() > MAX_OUTPUT_MIDI {
+-                            let drop_count = queued.len() - MAX_OUTPUT_MIDI;
+-                            queued.drain(0..drop_count);
+-                        }
+-                    }
++                self.buffer_output_events(output_events, output_events_lost);
++                if let Some(transport) = &mut self.process_transport {
++                    transport.advance(frames as i64, self.sample_rate);
+                 }
+                 Ok(())
+             }
+@@ -832,6 +985,26 @@
          self.info.has_gui
      }
  
@@ -372,7 +815,7 @@
      fn open_editor(&mut self, _parent: *mut std::ffi::c_void) -> Result<()> {
          let response = self.send_command(HostCommand::CreateGui)?;
  
-@@ -920,6 +1035,30 @@
+@@ -920,6 +1093,30 @@
          .unwrap_or_default()
      }
  
@@ -403,7 +846,7 @@
      fn take_data_exchange_blocks(&mut self) -> Vec<crate::plugin::DataExchangeBlock> {
          self.poll(
              HostCommand::TakeDataExchangeBlocks,
-@@ -930,6 +1069,23 @@
+@@ -930,6 +1127,23 @@
              },
          )
          .unwrap_or_default()
@@ -427,7 +870,7 @@
      }
  
      fn execute_context_menu_item(&mut self, menu_id: u64, item_id: u32) -> Result<()> {
-@@ -971,7 +1127,7 @@
+@@ -971,7 +1185,7 @@
      }
  
      fn service_host_requests(&mut self) -> Result<crate::plugin::RestartFlags> {
@@ -436,7 +879,7 @@
              HostResponse::RestartFlags { bits } => Ok(crate::plugin::RestartFlags::from_bits(bits)),
              HostResponse::Error { message } => {
                  Err(Error::Other(format!("ServiceHostRequests: {message}")))
-@@ -983,7 +1139,7 @@
+@@ -983,7 +1197,7 @@
      }
  
      fn save_state(&self) -> Result<Vec<u8>> {
@@ -445,7 +888,25 @@
              HostResponse::State { data } => Ok(data),
              HostResponse::Error { message } => Err(Error::Other(format!("SaveState: {message}"))),
              _ => Err(Error::Other("SaveState: unexpected response".to_string())),
-@@ -1146,6 +1302,26 @@
+@@ -1005,6 +1219,17 @@
+             .lock()
+             .map(|mut o| std::mem::take(&mut *o))
+             .unwrap_or_default()
++    }
++
++    fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
++        let events = match self.output_events.lock() {
++            Ok(mut queued) => queued.drain(..).collect(),
++            Err(_) => return (Vec::new(), true),
++        };
++        let lost = self
++            .output_events_lost
++            .swap(false, std::sync::atomic::Ordering::AcqRel);
++        (events, lost)
+     }
+ 
+     fn output_channel_count(&self) -> usize {
+@@ -1146,6 +1371,26 @@
              Self { dir, script, log }
          }
  
@@ -472,7 +933,7 @@
          fn requests(&self) -> Vec<String> {
              std::fs::read_to_string(&self.log)
                  .unwrap_or_default()
-@@ -1194,6 +1370,69 @@
+@@ -1194,6 +1439,187 @@
      }
  
      #[test]
@@ -539,15 +1000,151 @@
 +    }
 +
 +    #[test]
++    fn process_carries_authoritative_transport_in_one_request_and_propagates_loss() {
++        let fake = FakeHelper::new("process_transport");
++        let script = std::fs::read_to_string(&fake.script).unwrap();
++        let reply = "    *Process*) printf '%s\\n' '{\"AudioOutput\":{\"outputs\":[],\"output_events\":[],\"output_events_lost\":true,\"transport_applied\":true}}' ;;\n";
++        std::fs::write(
++            &fake.script,
++            script.replace("    *)", &(reply.to_owned() + "    *)")),
++        )
++        .unwrap();
++        let mut plugin = isolated(&fake);
++        let transport = crate::ProcessTransport {
++            sample_position: 96000,
++            quarter_note_position: 23.125,
++            tempo: 85.0,
++            playing: false,
++            time_sig_numerator: 3,
++            time_sig_denominator: 4,
++        };
++        plugin.set_process_transport(transport).unwrap();
++        assert!(
++            fake.requests().is_empty(),
++            "setting context must not make a separate IPC request"
++        );
++        let mut buffers = AudioBuffers {
++            inputs: vec![],
++            outputs: vec![vec![0.0; 64]],
++            sample_rate: 44100.0,
++            block_size: 64,
++        };
++        plugin.process(&mut buffers).unwrap();
++        let requests = fake.requests();
++        assert_eq!(requests.len(), 1);
++        match serde_json::from_str::<HostCommand>(&requests[0]).unwrap() {
++            HostCommand::Process {
++                transport: actual,
++                frames,
++                ..
++            } => {
++                assert_eq!(actual, Some(transport));
++                assert_eq!(frames, 64);
++            }
++            other => panic!("unexpected command {other:?}"),
++        }
++        assert!(plugin.take_output_events_with_loss().1);
++        assert!(!plugin.take_output_events_with_loss().1);
++        assert_eq!(
++            plugin.process_transport,
++            Some(transport),
++            "stopped context remains fixed"
++        );
++    }
++
++    #[test]
++    fn explicit_transport_rejects_an_old_or_nonacknowledging_helper() {
++        for (name, ack) in [
++            ("legacy_transport", ""),
++            ("rejected_transport", ",\"transport_applied\":false"),
++        ] {
++            let fake = FakeHelper::new(name);
++            let script = std::fs::read_to_string(&fake.script).unwrap();
++            let reply = format!("    *Process*) printf '%s\\n' '{{\"AudioOutput\":{{\"outputs\":[],\"output_events\":[]{ack}}}}}' ;;\n");
++            std::fs::write(&fake.script, script.replace("    *)", &(reply + "    *)"))).unwrap();
++            let mut plugin = isolated(&fake);
++            plugin
++                .set_process_transport(crate::ProcessTransport {
++                    sample_position: 0,
++                    quarter_note_position: 0.0,
++                    tempo: 120.0,
++                    playing: true,
++                    time_sig_numerator: 4,
++                    time_sig_denominator: 4,
++                })
++                .unwrap();
++            let mut buffers = AudioBuffers {
++                inputs: vec![],
++                outputs: vec![vec![0.0; 64]],
++                sample_rate: 44100.0,
++                block_size: 64,
++            };
++            assert!(plugin
++                .process(&mut buffers)
++                .unwrap_err()
++                .to_string()
++                .contains("did not acknowledge"));
++        }
++    }
++
++    #[test]
++    fn isolated_buffer_overflow_is_bounded_and_remains_visible_after_legacy_drain() {
++        let fake = FakeHelper::new("output_overflow");
++        let plugin = isolated(&fake);
++        let event: PluginEvent = MidiEvent::NoteOff {
++            channel: crate::MidiChannel::Ch1,
++            note: 60,
++            velocity: 0,
++        }
++        .into();
++        plugin.buffer_output_events(vec![event; MAX_OUTPUT_MIDI + 1], false);
++        assert_eq!(plugin.take_output_events().len(), MAX_OUTPUT_MIDI);
++        assert!(plugin.take_output_events_with_loss().1);
++        assert!(!plugin.take_output_events_with_loss().1);
++    }
++
++    #[test]
++    fn isolated_output_payload_backlog_is_bounded() {
++        let fake = FakeHelper::new("output_payload_budget");
++        let plugin = isolated(&fake);
++        plugin.buffer_output_events(vec![PluginEvent::sysex(vec![0; 1024 * 1024]); 9], false);
++        let (events, lost) = plugin.take_output_events_with_loss();
++        assert!(lost);
++        assert_eq!(events.len(), 8);
++        assert_eq!(
++            events.iter().map(PluginEvent::payload_bytes).sum::<usize>(),
++            8 * 1024 * 1024
++        );
++    }
++
++    #[test]
      fn recovery_replays_the_current_transport_state_not_the_load_time_one() {
          let fake = FakeHelper::new("transport");
          let mut plugin = isolated(&fake);
 --- a/src/internal/plugin_impl.rs
 +++ b/src/internal/plugin_impl.rs
-@@ -286,6 +286,22 @@
-     Buses(&'a mut BusAudioBuffers),
- }
+@@ -167,6 +167,7 @@
+     time_sig_denominator: i32,
+     /// Whether the transport is playing (the `kPlaying` flag in `ProcessContext.state`).
+     playing: bool,
++    process_transport: Option<crate::plugin::ProcessTransport>,
+     /// Real-time vs offline processing, baked into `ProcessSetup`/`process_data` at setup.
+     process_mode: crate::plugin::ProcessMode,
+     /// Optional VST3 3.7 declaration of exactly which ProcessContext fields the processor reads.
+@@ -235,6 +236,7 @@
+     // audio thread can push without locking and a UI thread can drain concurrently; when full
+     // the oldest event is dropped (bounded memory if the host never polls).
+     output_events_owned: Arc<ArrayQueue<PluginEvent>>,
++    output_events_lost: std::sync::atomic::AtomicBool,
  
+     // Plugin view
+     plugin_view: Option<ComPtr<IPlugView>>,
+@@ -284,6 +286,22 @@
+ enum CallerAudioBuffers<'a> {
+     Flat(&'a mut AudioBuffers),
+     Buses(&'a mut BusAudioBuffers),
++}
++
 +fn finish_stop_transition(
 +    state: &mut bool,
 +    result: tresult,
@@ -562,12 +1159,46 @@
 +    }
 +    *state = false;
 +    Ok(())
-+}
-+
+ }
+ 
  impl CallerAudioBuffers<'_> {
-     fn frame_count(&self, fallback: usize) -> usize {
-         match self {
-@@ -1026,6 +1042,11 @@
+@@ -952,10 +970,13 @@
+ 
+     /// Update the transport tempo for the **next** processed block, even while processing is
+     /// active: the stored tempo (used to rebuild the context after a reconfigure) and the live
+-    /// `ProcessContext` both move, and the musical playhead derives from the new tempo.
++    /// `ProcessContext` both move. Existing musical position is preserved.
+     #[allow(clippy::unnecessary_cast)]
+     fn update_tempo(&mut self, bpm: f64) {
+         self.tempo = bpm;
++        if let Some(transport) = &mut self.process_transport {
++            transport.tempo = bpm;
++        }
+         if let Some(ref mut data) = self.process_data {
+             data.transport_tempo = bpm;
+             if process_context_needs(
+@@ -971,6 +992,10 @@
+     /// processing is active (stored fields plus the live `ProcessContext`).
+     #[allow(clippy::unnecessary_cast)]
+     fn update_time_signature(&mut self, numerator: i32, denominator: i32) {
++        if let Some(transport) = &mut self.process_transport {
++            transport.time_sig_numerator = numerator;
++            transport.time_sig_denominator = denominator;
++        }
+         self.time_sig_numerator = numerator;
+         self.time_sig_denominator = denominator;
+         if let Some(ref mut data) = self.process_data {
+@@ -988,6 +1013,9 @@
+     /// while processing is active (stored field plus the live `ProcessContext.state`).
+     fn update_playing(&mut self, playing: bool) {
+         self.playing = playing;
++        if let Some(transport) = &mut self.process_transport {
++            transport.playing = playing;
++        }
+         if let Some(ref mut data) = self.process_data {
+             data.process_context.state =
+                 process_context_state(data.process_context_requirements, playing);
+@@ -1026,6 +1054,11 @@
          if !self.is_processing {
              if let Some(ref handler) = self.component_handler {
                  if let Ok(mut raw_changes) = handler.parameter_changes.lock() {
@@ -579,7 +1210,38 @@
                      changes.extend(raw_changes.drain(..));
                  }
              }
-@@ -2116,9 +2137,11 @@
+@@ -1493,6 +1526,7 @@
+                 time_sig_numerator: 4,
+                 time_sig_denominator: 4,
+                 playing: true,
++                process_transport: None,
+                 process_mode: crate::plugin::ProcessMode::Realtime,
+                 process_context_requirements,
+                 prefetchable_support,
+@@ -1519,6 +1553,7 @@
+                 output_events,
+                 chunk_events: Vec::with_capacity(MAX_QUEUED_EVENTS),
+                 output_events_owned: Arc::new(ArrayQueue::new(MAX_OUTPUT_MIDI)),
++                output_events_lost: std::sync::atomic::AtomicBool::new(false),
+                 plugin_view: None,
+                 editor_scale_factor: 1.0,
+                 plug_frame,
+@@ -1891,6 +1926,14 @@
+             data.process_context.state =
+                 process_context_state(self.process_context_requirements, self.playing);
+ 
++            if let Some(transport) = self.process_transport {
++                apply_process_transport(
++                    &mut data.process_context,
++                    self.process_context_requirements,
++                    transport,
++                );
++            }
++
+             // Set up process data
+             data.process_data.processMode = self.vst_process_mode();
+             data.process_data.numSamples = self.block_size as i32;
+@@ -2116,9 +2159,11 @@
                  // it unconditionally; a plugin that also self-relays just gets the same value
                  // twice in the same block, which is idempotent.) Drained here at offset 0 and
                  // stashed for the host's display poll (get_parameter_changes).
@@ -591,9 +1253,34 @@
                              for &(id, value) in gui_changes.iter() {
                                  data.input_param_changes.enqueue(id, 0, value);
                              }
-@@ -2226,6 +2249,11 @@
+@@ -2194,8 +2239,13 @@
+                     &mut data.process_context,
+                     data.process_context_requirements,
+                     data.transport_tempo,
++                    self.playing,
+                     frames as i64,
+                 );
++
++                if let Some(transport) = &mut self.process_transport {
++                    transport.advance(frames as i64, self.sample_rate);
++                }
+ 
+                 // Clear the staged input events AFTER processing, so the plugin got to see them
+                 // and the next chunk starts from an empty list.
+@@ -2221,11 +2271,21 @@
+                 if !self.output_events.is_empty() {
+                     let out = &self.output_events_owned;
+                     self.output_events.drain_each(|event| {
+-                        out.force_push(event);
++                        push_output_event(out, &self.output_events_lost, event);
+                     });
                  }
  
++                if self.output_events.take_loss() {
++                    self.output_events_lost
++                        .store(true, std::sync::atomic::Ordering::Release);
++                }
++
                  if process_result != kResultOk {
 +                    if native_edits_staged {
 +                        if let Some(handler) = self.component_handler.as_ref() {
@@ -603,7 +1290,30 @@
                      // Leave the caller's buffers as they were (the playback bridges pre-fill them
                      // with silence) rather than copying out whatever the failed call left behind.
                      Err(Error::ProcessFailed(process_result))
-@@ -2939,13 +2967,13 @@
+@@ -2430,6 +2490,22 @@
+         Ok(())
+     }
+ 
++    fn set_process_transport(&mut self, transport: crate::plugin::ProcessTransport) -> Result<()> {
++        transport.validate()?;
++        self.update_tempo(transport.tempo);
++        self.update_time_signature(transport.time_sig_numerator, transport.time_sig_denominator);
++        self.update_playing(transport.playing);
++        self.process_transport = Some(transport);
++        if let Some(data) = &mut self.process_data {
++            apply_process_transport(
++                &mut data.process_context,
++                data.process_context_requirements,
++                transport,
++            );
++        }
++        Ok(())
++    }
++
+     fn set_tempo(&mut self, bpm: f64) -> Result<()> {
+         self.update_tempo(bpm);
+         Ok(())
+@@ -2939,13 +3015,13 @@
      fn stop_processing(&mut self) -> Result<()> {
          unsafe {
              if self.is_processing {
@@ -621,7 +1331,7 @@
              }
  
              // Nothing can still be sounding, so no note-on is outstanding.
-@@ -2953,6 +2981,10 @@
+@@ -2953,6 +3029,10 @@
  
              Ok(())
          }
@@ -632,21 +1342,36 @@
      }
  
      fn has_editor(&self) -> bool {
-@@ -3332,6 +3364,13 @@
-             .as_ref()
-             .map(|h| h.take_parameter_edits())
+@@ -3334,6 +3414,13 @@
              .unwrap_or_default()
-+    }
-+
+     }
+ 
 +    fn native_dirty_revision(&mut self) -> Result<u64> {
 +        self.component_handler
 +            .as_ref()
 +            .ok_or_else(|| Error::Other("component handler is unavailable".into()))?
 +            .native_dirty_revision()
++    }
++
+     fn take_host_notifications(&mut self) -> Vec<crate::plugin::HostNotification> {
+         let mut notifications = self
+             .component_handler
+@@ -3481,6 +3568,14 @@
+             out.push(event);
+         }
+         out
++    }
++
++    fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
++        let events = self.take_output_events();
++        let lost = self
++            .output_events_lost
++            .swap(false, std::sync::atomic::Ordering::AcqRel);
++        (events, lost)
      }
  
-     fn take_host_notifications(&mut self) -> Vec<crate::plugin::HostNotification> {
-@@ -4163,6 +4202,11 @@
+     fn output_midi_handle(&self) -> Option<crate::plugin::OutputMidiConsumer> {
+@@ -4163,6 +4258,11 @@
  
      fn save_state(&self) -> Result<Vec<u8>> {
          self.drain_deferred_controller_sync();
@@ -658,7 +1383,7 @@
          unsafe {
              let component_stream =
                  create_memory_stream_with_metadata(None, StreamStateType::Project);
-@@ -4201,10 +4245,14 @@
+@@ -4201,10 +4301,14 @@
                  None
              };
  
@@ -675,7 +1400,7 @@
          }
      }
  
-@@ -4284,6 +4332,15 @@
+@@ -4284,6 +4388,15 @@
                  }
  
                  self.pending_param_changes.clear();
@@ -691,7 +1416,80 @@
                  if let Some(process_data) = self.process_data.as_ref() {
                      process_data.input_param_changes.clear_all();
                  }
-@@ -4809,6 +4866,20 @@
+@@ -4776,18 +4889,53 @@
+         .unwrap_or_default()
+ }
+ 
++fn push_output_event(
++    queue: &ArrayQueue<PluginEvent>,
++    lost: &std::sync::atomic::AtomicBool,
++    event: PluginEvent,
++) {
++    if queue.force_push(event).is_some() {
++        lost.store(true, std::sync::atomic::Ordering::Release);
++    }
++}
++
++/// Apply independent project sample/PPQ positions without modifying continuous time.
++#[allow(clippy::unnecessary_cast)]
++fn apply_process_transport(
++    ctx: &mut ProcessContext,
++    requirements: Option<u32>,
++    transport: crate::plugin::ProcessTransport,
++) {
++    use IProcessContextRequirements_::Flags_ as R;
++    ctx.projectTimeSamples = transport.sample_position;
++    if process_context_needs(requirements, R::kNeedProjectTimeMusic as u32) {
++        ctx.projectTimeMusic = transport.quarter_note_position;
++    }
++    if process_context_needs(requirements, R::kNeedTempo as u32) {
++        ctx.tempo = transport.tempo;
++    }
++    if process_context_needs(requirements, R::kNeedTimeSignature as u32) {
++        ctx.timeSigNumerator = transport.time_sig_numerator;
++        ctx.timeSigDenominator = transport.time_sig_denominator;
++    }
++    ctx.state = process_context_state(requirements, transport.playing);
++}
++
+ /// Advance the transport in a `ProcessContext` by `frames` samples after a processed block.
+-/// Keeps `continousTimeSamples`/`projectTimeSamples` (and the musical playhead derived from
+-/// the current tempo) moving so tempo-synced plugins don't see a frozen time-0.
++/// Continuous processing time always advances; project sample/quarter-note positions advance
++/// only while playing, integrating the current tempo without changing the musical origin.
+ #[allow(clippy::unnecessary_cast)]
+ fn advance_process_context(
+     ctx: &mut ProcessContext,
+     requirements: Option<u32>,
+     transport_tempo: f64,
++    playing: bool,
+     frames: i64,
+ ) {
+     use IProcessContextRequirements_::Flags_ as R;
+-    ctx.projectTimeSamples = ctx.projectTimeSamples.wrapping_add(frames);
++    if playing {
++        ctx.projectTimeSamples = ctx.projectTimeSamples.saturating_add(frames);
++    }
+     if process_context_needs(requirements, R::kNeedContinousTimeSamples as u32) {
+         ctx.continousTimeSamples = ctx.continousTimeSamples.wrapping_add(frames);
+     }
+@@ -4798,17 +4946,32 @@
+         let nanos = (frames as f64 * 1_000_000_000.0 / ctx.sampleRate).round() as i64;
+         ctx.systemTime = ctx.systemTime.saturating_add(nanos);
+     }
+-    if process_context_needs(requirements, R::kNeedProjectTimeMusic as u32) && ctx.sampleRate > 0.0
++    if playing
++        && process_context_needs(requirements, R::kNeedProjectTimeMusic as u32)
++        && ctx.sampleRate > 0.0
+     {
+-        // Quarter notes elapsed = seconds * (BPM / 60).
+-        let secs = ctx.projectTimeSamples as f64 / ctx.sampleRate;
+-        ctx.projectTimeMusic = secs * (transport_tempo / 60.0);
++        // Integrate only this block, preserving the explicit PPQ origin across tempo changes.
++        ctx.projectTimeMusic += frames as f64 / ctx.sampleRate * (transport_tempo / 60.0);
+     }
+ }
+ 
  #[cfg(test)]
  mod process_buffer_tests {
      use super::*;
@@ -712,6 +1510,82 @@
  
      fn buses(channels: &[i32]) -> Vec<AudioBusBuffers> {
          channels
+@@ -5053,7 +5216,7 @@
+         // One second of audio at 48 kHz in 512-sample blocks.
+         let blocks = 48_000 / 512;
+         for _ in 0..blocks {
+-            advance_process_context(&mut ctx, None, 120.0, 512);
++            advance_process_context(&mut ctx, None, 120.0, true, 512);
+         }
+         let advanced = (blocks * 512) as i64;
+         assert_eq!(ctx.projectTimeSamples, advanced);
+@@ -5448,3 +5611,66 @@
+         assert_eq!(calls.load(Ordering::SeqCst), 0);
+     }
+ }
++
++#[cfg(test)]
++mod authoritative_transport_tests {
++    use super::*;
++    use crate::plugin::ProcessTransport;
++    use std::sync::atomic::{AtomicBool, Ordering};
++
++    #[test]
++    fn context_seek_tempo_change_pause_and_zero_frames() {
++        let mut ctx: ProcessContext = unsafe { std::mem::zeroed() };
++        ctx.sampleRate = 48000.0;
++        let mut t = ProcessTransport {
++            sample_position: 480000,
++            quarter_note_position: 37.5,
++            tempo: 90.0,
++            playing: true,
++            time_sig_numerator: 7,
++            time_sig_denominator: 8,
++        };
++        apply_process_transport(&mut ctx, None, t);
++        assert_eq!(ctx.projectTimeSamples, 480000);
++        assert_eq!(ctx.projectTimeMusic, 37.5);
++        assert_eq!((ctx.timeSigNumerator, ctx.timeSigDenominator), (7, 8));
++        advance_process_context(&mut ctx, None, t.tempo, true, 48000);
++        assert_eq!(ctx.projectTimeSamples, 528000);
++        assert_eq!(ctx.projectTimeMusic, 39.0);
++        advance_process_context(&mut ctx, None, 60.0, true, 48000);
++        assert_eq!(ctx.projectTimeMusic, 40.0);
++        t.sample_position = 12000;
++        t.quarter_note_position = 3.125;
++        t.playing = false;
++        apply_process_transport(&mut ctx, None, t);
++        advance_process_context(&mut ctx, None, t.tempo, false, 48000);
++        assert_eq!(ctx.projectTimeSamples, 12000);
++        assert_eq!(ctx.projectTimeMusic, 3.125);
++        assert_eq!(ctx.continousTimeSamples, 144000);
++        assert_eq!(ctx.state & PROCESS_CONTEXT_PLAYING, 0);
++        advance_process_context(&mut ctx, None, t.tempo, true, 0);
++        assert_eq!(ctx.projectTimeSamples, 12000);
++        assert_eq!(ctx.projectTimeMusic, 3.125);
++    }
++
++    #[test]
++    fn queue_overflow_latches_loss_instead_of_silently_dropping_note_offs() {
++        let queue = ArrayQueue::new(2);
++        let lost = AtomicBool::new(false);
++        for note in [60, 61, 62] {
++            push_output_event(
++                &queue,
++                &lost,
++                MidiEvent::NoteOff {
++                    channel: MidiChannel::Ch1,
++                    note,
++                    velocity: 0,
++                }
++                .into(),
++            );
++        }
++        assert_eq!(queue.len(), 2);
++        assert!(lost.swap(false, Ordering::AcqRel));
++        assert!(!lost.load(Ordering::Acquire));
++    }
++}
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -111,9 +111,10 @@
@@ -723,14 +1597,96 @@
 -    ProgramPitchName, ProgressKind, ProgressValue, RestartFlags, StateContext, WindowHandle,
 +    AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification, IsolatedEditorCommand,
 +    IsolatedEditorOwner, IsolatedEditorState, OutputMidiConsumer, ParameterEdit, ParameterEditKind,
-+    Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode, ProgramPitchName, ProgressKind,
-+    ProgressValue, RestartFlags, StateContext, WindowHandle,
++    Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode, ProcessTransport, ProgramPitchName,
++    ProgressKind, ProgressValue, RestartFlags, StateContext, WindowHandle,
  };
  pub use realtime::{RealtimePluginRunner, RtControl};
  pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
+@@ -142,8 +143,8 @@
+         plugin::{
+             AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification,
+             OutputEventConsumer, OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin,
+-            PluginInfo, ProcessMode, ProgramPitchName, ProgressKind, ProgressValue, StateContext,
+-            WindowHandle,
++            PluginInfo, ProcessMode, ProcessTransport, ProgramPitchName, ProgressKind,
++            ProgressValue, StateContext, WindowHandle,
+         },
+         transport::{AutomationLane, MidiClip, Timeline},
+         window::PluginWindow,
 --- a/src/plugin.rs
 +++ b/src/plugin.rs
-@@ -898,10 +898,21 @@
+@@ -704,6 +704,53 @@
+     Offline,
+ }
+ 
++/// Authoritative transport at the start of the next audio block.
++///
++/// Supply this before every DAW processing quantum, including stopped blocks and seeks.
++/// Sample and musical positions are independent: a tempo change must not recompute PPQ
++/// from the current sample position. Without a subsequent update, playing positions advance
++/// by the processed frame count; stopped project positions stay fixed.
++#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
++pub struct ProcessTransport {
++    /// Project sample position at the start of the block (negative preroll is supported).
++    pub sample_position: i64,
++    /// Project position in quarter notes at the start of the block.
++    pub quarter_note_position: f64,
++    /// Tempo in beats per minute; finite and greater than zero.
++    pub tempo: f64,
++    /// Whether project time advances during this block.
++    pub playing: bool,
++    /// Positive time-signature numerator.
++    pub time_sig_numerator: i32,
++    /// Time-signature denominator: one of 1, 2, 4, 8, or 16.
++    pub time_sig_denominator: i32,
++}
++
++impl ProcessTransport {
++    pub(crate) fn validate(self) -> Result<()> {
++        if !self.quarter_note_position.is_finite()
++            || !self.tempo.is_finite()
++            || self.tempo <= 0.0
++            || self.time_sig_numerator <= 0
++            || !matches!(self.time_sig_denominator, 1 | 2 | 4 | 8 | 16)
++        {
++            return Err(Error::InvalidParameter(
++                "invalid per-block process transport".into(),
++            ));
++        }
++        Ok(())
++    }
++
++    pub(crate) fn advance(&mut self, frames: i64, sample_rate: f64) {
++        if self.playing {
++            self.sample_position = self.sample_position.saturating_add(frames);
++            if sample_rate > 0.0 {
++                self.quarter_note_position += frames as f64 / sample_rate * (self.tempo / 60.0);
++            }
++        }
++    }
++}
++
+ /// VST3 plugin instance
+ #[allow(clippy::type_complexity)] // callback fields are Box<dyn Fn...>; intrinsic to the API
+ pub struct Plugin {
+@@ -805,9 +852,13 @@
+             "bus activation is not supported for this plugin".to_string(),
+         ))
+     }
+-    /// Update the transport tempo (BPM) advertised in the host `ProcessContext`, taking effect
+-    /// on the next processed block. The caller validates `bpm > 0`. Defaults to unsupported
+-    /// (overridden by the in-process and isolated implementations).
++    /// Apply independent authoritative sample and quarter-note positions for the next block.
++    fn set_process_transport(&mut self, _transport: ProcessTransport) -> Result<()> {
++        Err(Error::Other(
++            "per-block transport is not supported for this plugin".into(),
++        ))
++    }
++    /// Change the next block's tempo without changing its musical origin.
+     fn set_tempo(&mut self, _bpm: f64) -> Result<()> {
+         Err(Error::Other(
+             "runtime transport mutation is not supported for this plugin".to_string(),
+@@ -898,10 +949,21 @@
      }
      fn start_processing(&mut self) -> Result<()>;
      fn stop_processing(&mut self) -> Result<()>;
@@ -752,11 +1708,10 @@
      /// Whether the editor accepts host-driven size changes.
      fn editor_can_resize(&self) -> bool {
          false
-@@ -930,6 +941,19 @@
-     /// Drain ordered requests reported through `IComponentHandler2`.
+@@ -931,6 +993,19 @@
      fn take_host_notifications(&mut self) -> Vec<HostNotification> {
          Vec::new()
-+    }
+     }
 +    /// Checked editor drain for hosts whose dirty-state accounting must not treat IPC failure
 +    /// as an empty edit batch. In-process implementations have no transport failure.
 +    fn try_take_parameter_edits(&mut self) -> Result<Vec<ParameterEdit>> {
@@ -769,10 +1724,58 @@
 +    /// Non-draining native-state change revision; unsupported backends fail explicitly.
 +    fn native_dirty_revision(&mut self) -> Result<u64> {
 +        Err(Error::Other("native dirty revision is unavailable".into()))
-     }
++    }
      /// Dispatch any main-thread data-exchange blocks to the controller and drain owned host
      /// snapshots. Background-dispatched queues are copied into the same bounded snapshot sink.
-@@ -1846,10 +1870,15 @@
+     fn take_data_exchange_blocks(&mut self) -> Vec<DataExchangeBlock> {
+@@ -962,8 +1037,11 @@
+     fn take_output_events(&self) -> Vec<PluginEvent> {
+         Vec::new()
+     }
+-    /// A lock-free handle for draining emitted MIDI from another thread. Defaults to `None`
+-    /// for implementations without a shared in-process queue (e.g. process isolation).
++    /// Drain emitted events and acknowledge a latched capture/queue loss indication.
++    fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
++        (self.take_output_events(), false)
++    }
++    /// Lock-free output consumer, when an in-process shared queue is available.
+     fn output_midi_handle(&self) -> Option<OutputMidiConsumer> {
+         None
+     }
+@@ -1341,6 +1419,19 @@
+             .queue_processor_parameter_at(id, value, sample_offset)
+     }
+ 
++    /// Set the authoritative starting transport for the next processed block.
++    ///
++    /// Works in-process and in isolation. The isolated implementation includes the context
++    /// in the audio request itself, without another per-block IPC exchange. Rejects non-finite
++    /// musical position/tempo, non-positive tempo/numerator, and unsupported denominators.
++    pub fn set_process_transport(&mut self, transport: ProcessTransport) -> Result<()> {
++        transport.validate()?;
++        self.internal
++            .as_mut()
++            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
++            .set_process_transport(transport)
++    }
++
+     /// Change the transport tempo (beats per minute) advertised to the plugin in the host
+     /// `ProcessContext`, taking effect on the **next** processed block — even while the plugin
+     /// is actively processing. Drives tempo-synced DSP (LFOs, synced delays, arpeggiators).
+@@ -1387,10 +1478,8 @@
+     /// `ProcessContext` (the `kPlaying` flag), taking effect on the **next** processed block —
+     /// even while the plugin is actively processing.
+     ///
+-    /// While playing, the host advances the continuous and musical playhead each block; while
+-    /// stopped, the playhead still advances but the plugin sees the transport as not playing
+-    /// (so tempo-synced effects can react to a paused transport). Works both in-process and
+-    /// across process isolation.
++    /// While stopped, project sample/quarter-note positions stay fixed. Continuous processing
++    /// time still advances. Works both in-process and across process isolation.
+     pub fn set_playing(&mut self, playing: bool) -> Result<()> {
+         self.internal
+             .as_mut()
+@@ -1846,10 +1935,15 @@
              return Ok(());
          }
  
@@ -792,7 +1795,7 @@
  
          self.is_processing = false;
          Ok(())
-@@ -1986,6 +2015,29 @@
+@@ -1986,6 +2080,29 @@
              .as_ref()
              .map(|i| i.has_editor())
              .unwrap_or(false)
@@ -822,12 +1825,10 @@
      }
  
      /// Open the plugin editor window
-@@ -2113,6 +2165,39 @@
-             .as_mut()
-             .map(|i| i.take_parameter_edits())
+@@ -2115,6 +2232,39 @@
              .unwrap_or_default()
-+    }
-+
+     }
+ 
 +    /// Drain editor gestures while surfacing transport/protocol failure. Unlike the legacy
 +    /// infallible drain, an empty successful batch is never substituted for a failed exchange.
 +    /// Polling is control-plane work and must not run on a realtime audio callback.
@@ -859,10 +1860,42 @@
 +            .as_mut()
 +            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
 +            .native_dirty_revision()
++    }
++
+     /// Drain ordered requests the plugin reported through `IComponentHandler2`.
+     pub fn take_host_notifications(&mut self) -> Vec<HostNotification> {
+         self.internal
+@@ -2191,7 +2341,8 @@
+     /// marshalled back alongside each processed block.
+     ///
+     /// The buffer is capped at 4096 events: if you never poll while a chatty plugin keeps
+-    /// emitting, the oldest events are dropped (silently) to bound memory.
++    /// emitting, the oldest events are dropped to bound memory. Use
++    /// [`Self::take_output_events_with_loss`] to observe loss before forwarding notes.
+     pub fn take_output_midi(&self) -> Vec<MidiEvent> {
+         self.internal
+             .as_ref()
+@@ -2209,6 +2360,19 @@
+         self.internal
+             .as_ref()
+             .map(|i| i.take_output_events())
++            .unwrap_or_default()
++    }
++
++    /// Drain emitted events and atomically acknowledge any observed output-event loss.
++    ///
++    /// The boolean latches queue overflow, rejected event capture, and isolated buffering
++    /// loss since the previous loss-aware drain. A routing host should release notes at its
++    /// destination when true, because a note-off may have been lost. Legacy drains do not
++    /// clear this loss indication. Use a single draining consumer per plugin.
++    pub fn take_output_events_with_loss(&self) -> (Vec<crate::midi::OutputEvent>, bool) {
++        self.internal
++            .as_ref()
++            .map(|i| i.take_output_events_with_loss())
+             .unwrap_or_default()
      }
  
-     /// Drain ordered requests the plugin reported through `IComponentHandler2`.
-@@ -2669,6 +2754,59 @@
+@@ -2669,6 +2833,59 @@
              "Legacy MIDI CC events are plugin output only".to_string(),
          )),
      }
@@ -922,7 +1955,7 @@
  }
  
  /// Platform-specific window handle
-@@ -2950,6 +3088,14 @@
+@@ -2950,6 +3167,14 @@
  #[cfg(test)]
  mod public_surface_tests {
      use super::*;
@@ -937,9 +1970,135 @@
  
      /// A `Plugin` with no backing implementation. Enough to exercise the checks the public
      /// surface performs *before* it reaches into `internal`.
+@@ -3327,3 +3552,68 @@
+         assert!(decode_state_snapshot(&bytes).is_err());
+     }
+ }
++
++#[cfg(test)]
++mod process_transport_tests {
++    use super::ProcessTransport;
++
++    fn transport() -> ProcessTransport {
++        ProcessTransport {
++            sample_position: 96000,
++            quarter_note_position: 7.25,
++            tempo: 90.0,
++            playing: true,
++            time_sig_numerator: 7,
++            time_sig_denominator: 8,
++        }
++    }
++
++    #[test]
++    fn transport_validation_and_increment_preserve_independent_ppq() {
++        let mut t = transport();
++        assert!(t.validate().is_ok());
++        t.advance(48000, 48000.0);
++        assert_eq!(t.sample_position, 144000);
++        assert_eq!(t.quarter_note_position, 8.75);
++        t.tempo = 120.0;
++        t.advance(48000, 48000.0);
++        assert_eq!(t.quarter_note_position, 10.75);
++        t.playing = false;
++        let stopped = t;
++        t.advance(48000, 48000.0);
++        assert_eq!(t, stopped);
++        for tempo in [0.0, -1.0, f64::INFINITY, f64::NAN] {
++            assert!(ProcessTransport {
++                tempo,
++                ..transport()
++            }
++            .validate()
++            .is_err());
++        }
++        assert!(ProcessTransport {
++            quarter_note_position: f64::NAN,
++            ..transport()
++        }
++        .validate()
++        .is_err());
++        assert!(ProcessTransport {
++            time_sig_numerator: 0,
++            ..transport()
++        }
++        .validate()
++        .is_err());
++        assert!(ProcessTransport {
++            time_sig_denominator: 3,
++            ..transport()
++        }
++        .validate()
++        .is_err());
++        assert!(ProcessTransport {
++            sample_position: -48000,
++            quarter_note_position: -2.0,
++            ..transport()
++        }
++        .validate()
++        .is_ok());
++    }
++}
 --- a/src/process_isolation.rs
 +++ b/src/process_isolation.rs
-@@ -455,7 +455,12 @@
+@@ -46,6 +46,56 @@
+ /// parameters and controller/editor changes. One response drains both, so its wire cap is the
+ /// sum of their 4096-entry limits.
+ const MAX_WIRE_PARAMETER_CHANGES: usize = 8192;
++
++/// MIDI/event count and aggregate payload limits apply in both wire directions.
++mod output_events_codec {
++    use super::{Deserializer, Serialize, Serializer};
++    use crate::midi::PluginEvent;
++    use serde::de::{Error as _, SeqAccess, Visitor};
++    use serde::ser::Error as _;
++    const MAX_EVENTS: usize = 4096;
++    const MAX_BYTES: usize = 8 * 1024 * 1024;
++
++    pub fn serialize<S: Serializer>(
++        events: &[PluginEvent],
++        serializer: S,
++    ) -> Result<S::Ok, S::Error> {
++        if events.len() > MAX_EVENTS
++            || events
++                .iter()
++                .try_fold(0usize, |sum, event| sum.checked_add(event.payload_bytes()))
++                .is_none_or(|bytes| bytes > MAX_BYTES)
++        {
++            return Err(S::Error::custom("output event budget exceeded"));
++        }
++        events.serialize(serializer)
++    }
++
++    pub fn deserialize<'de, D: Deserializer<'de>>(
++        deserializer: D,
++    ) -> Result<Vec<PluginEvent>, D::Error> {
++        struct Events;
++        impl<'de> Visitor<'de> for Events {
++            type Value = Vec<PluginEvent>;
++            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
++                f.write_str("at most 4096 output events within an 8 MiB payload budget")
++            }
++            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
++                let mut events = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(MAX_EVENTS));
++                let mut bytes = 0usize;
++                while let Some(event) = seq.next_element::<PluginEvent>()? {
++                    bytes = bytes.saturating_add(event.payload_bytes());
++                    if events.len() >= MAX_EVENTS || bytes > MAX_BYTES {
++                        return Err(A::Error::custom("output event budget exceeded"));
++                    }
++                    events.push(event);
++                }
++                Ok(events)
++            }
++        }
++        deserializer.deserialize_seq(Events)
++    }
++}
+ 
+ /// Whether a command belongs to the slow class — module load and state I/O — which gets
+ /// [`DEFAULT_SLOW_COMMAND_TIMEOUT`] instead of the per-block response deadline.
+@@ -455,7 +505,12 @@
      },
      /// Unload the current plugin
      UnloadPlugin,
@@ -953,7 +2112,27 @@
      CreateGui,
      /// Close plugin GUI
      CloseGui,
-@@ -748,6 +753,8 @@
+@@ -556,6 +611,9 @@
+         inputs: Vec<Vec<f32>>,
+         /// Number of frames in this block.
+         frames: u32,
++        /// Authoritative starting transport; absent retains legacy host transport behavior.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        transport: Option<crate::plugin::ProcessTransport>,
+     },
+     /// Process one block while preserving every VST3 audio bus.
+     ProcessBuses {
+@@ -565,6 +623,9 @@
+         outputs: Vec<crate::audio::AudioBusConfig>,
+         /// Number of frames in this block.
+         frames: u32,
++        /// Authoritative starting transport; absent retains legacy host transport behavior.
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        transport: Option<crate::plugin::ProcessTransport>,
+     },
+     /// Query per-bus channel counts and activation state.
+     AudioBusLayout,
+@@ -748,6 +809,8 @@
      TakeParameterChanges,
      /// Drain ordered `IComponentHandler2` requests from the helper.
      TakeHostNotifications,
@@ -962,7 +2141,38 @@
      /// Dispatch and drain owned VST3 data-exchange blocks from the helper.
      TakeDataExchangeBlocks,
      /// Execute an item from a pending plugin-provided context menu.
-@@ -838,6 +845,11 @@
+@@ -795,14 +858,30 @@
+         #[serde(with = "audio_codec")]
+         outputs: Vec<Vec<f32>>,
+         /// Owned VST3 events the plugin emitted this block, in order.
++        #[serde(with = "output_events_codec")]
+         output_events: Vec<crate::midi::PluginEvent>,
++        /// At least one emitted event was lost before this response.
++        #[serde(default)]
++        output_events_lost: bool,
++        /// True only when this request's explicit transport was applied before processing.
++        /// Defaults to false so a new host detects a helper that ignores the new contract.
++        #[serde(default)]
++        transport_applied: bool,
+     },
+     /// Bus-preserving audio output from a `ProcessBuses` request.
+     BusAudioOutput {
+         /// Output buses in VST3 bus-index order.
+         outputs: Vec<crate::audio::AudioBusBuffer>,
+         /// Owned VST3 events emitted during the block.
++        #[serde(with = "output_events_codec")]
+         output_events: Vec<crate::midi::PluginEvent>,
++        /// At least one emitted event was lost before this response.
++        #[serde(default)]
++        output_events_lost: bool,
++        /// True only when this request's explicit transport was applied before processing.
++        /// Defaults to false so a new host detects a helper that ignores the new contract.
++        #[serde(default)]
++        transport_applied: bool,
+     },
+     /// Current audio-bus layout and activation state.
+     AudioBusLayout {
+@@ -838,6 +917,11 @@
          width: i32,
          /// Editor height in pixels.
          height: i32,
@@ -974,7 +2184,7 @@
      },
      /// Plugin information
      PluginInfo {
-@@ -898,6 +910,11 @@
+@@ -898,6 +982,11 @@
          /// The queued host requests.
          notifications: Vec<crate::plugin::HostNotification>,
      },
@@ -986,7 +2196,7 @@
      /// Owned VST3 data-exchange blocks drained from the helper.
      DataExchangeBlocks {
          /// Block snapshots, in delivery order.
-@@ -969,16 +986,17 @@
+@@ -969,16 +1058,17 @@
  /// descriptor 1 at stderr, so plugin output is merged into the helper's stderr instead. Call
  /// it once, before any plugin code can run.
  ///
@@ -1009,7 +2219,7 @@
  type ProtocolChannelInner = std::io::Stdout;
  
  impl ProtocolChannel {
-@@ -1020,7 +1038,129 @@
+@@ -1020,7 +1110,129 @@
      }
  
      /// Claim the protocol channel for this process. See the type documentation.
@@ -1140,10 +2350,40 @@
      pub fn claim() -> Self {
          Self {
              inner: std::io::stdout(),
-@@ -2112,6 +2252,32 @@
-     }
+@@ -1660,6 +1872,8 @@
+         // The Process response carries emitted MIDI alongside audio; check the variant
+         // round-trips through the JSON transport host and helper share.
+         let resp = HostResponse::AudioOutput {
++            transport_applied: false,
++            output_events_lost: false,
+             outputs: vec![vec![0.0, 0.5], vec![-0.5, 0.0]],
+             output_events: vec![
+                 MidiEvent::NoteOn {
+@@ -1682,6 +1896,7 @@
+             HostResponse::AudioOutput {
+                 outputs,
+                 output_events,
++                ..
+             } => {
+                 assert_eq!(outputs, vec![vec![0.0, 0.5], vec![-0.5, 0.0]]);
+                 assert_eq!(output_events.len(), 2);
+@@ -1809,6 +2024,8 @@
+         }
  
-     #[test]
+         let response = HostResponse::AudioOutput {
++            transport_applied: false,
++            output_events_lost: false,
+             outputs: Vec::new(),
+             output_events: vec![event.clone()],
+         };
+@@ -2108,6 +2325,32 @@
+         {
+             HostResponse::ParameterEdits { edits: back } => assert_eq!(back, edits),
+             other => panic!("ParameterEdits round-trip changed the variant: {other:?}"),
++        }
++    }
++
++    #[test]
 +    fn native_dirty_revision_wire_is_nondraining_and_lossless() {
 +        let command = serde_json::to_string(&HostCommand::NativeDirtyRevision).unwrap();
 +        assert_eq!(command, r#""NativeDirtyRevision""#);
@@ -1166,10 +2406,162 @@
 +            r#"{"NativeDirtyRevision":{"revision":-1}}"#,
 +        ] {
 +            assert!(serde_json::from_str::<HostResponse>(wire).is_err());
+         }
+     }
+ 
+@@ -2339,6 +2582,8 @@
+             f32::MIN_POSITIVE,
+         ];
+         let resp = HostResponse::AudioOutput {
++            transport_applied: false,
++            output_events_lost: false,
+             outputs: vec![channel.clone(), vec![]],
+             output_events: Vec::new(),
+         };
+@@ -2360,12 +2605,13 @@
+ 
+         // The same for the host -> helper direction.
+         let cmd = HostCommand::Process {
++            transport: None,
+             inputs: vec![vec![f32::NAN, 1.0]],
+             frames: 2,
+         };
+         let json = serde_json::to_string(&cmd).expect("serialize Process");
+         match serde_json::from_str::<HostCommand>(&json).expect("deserialize Process") {
+-            HostCommand::Process { inputs, frames } => {
++            HostCommand::Process { inputs, frames, .. } => {
+                 assert_eq!(frames, 2);
+                 assert!(inputs[0][0].is_nan());
+                 assert_eq!(inputs[0][1], 1.0);
+@@ -2377,6 +2623,7 @@
+     #[test]
+     fn bus_audio_wire_preserves_bus_boundaries_activation_and_sample_bits() {
+         let command = HostCommand::ProcessBuses {
++            transport: None,
+             inputs: vec![
+                 crate::audio::AudioBusBuffer {
+                     active: true,
+@@ -2405,6 +2652,7 @@
+                 inputs,
+                 outputs,
+                 frames,
++                ..
+             } => {
+                 assert_eq!(frames, 2);
+                 assert_eq!(inputs.len(), 2);
+@@ -2484,6 +2732,8 @@
+             .collect();
+         let plain = serde_json::to_string(&block).expect("plain json").len();
+         let encoded = serde_json::to_string(&HostResponse::AudioOutput {
++            transport_applied: false,
++            output_events_lost: false,
+             outputs: block,
+             output_events: Vec::new(),
+         })
+@@ -2568,6 +2818,7 @@
+             class_id: None,
+         }));
+         assert!(!is_slow_command(&HostCommand::Process {
++            transport: None,
+             inputs: vec![],
+             frames: 64
+         }));
+@@ -2803,3 +3054,98 @@
+         })
+     }
+ }
++
++#[cfg(test)]
++mod process_transport_wire_tests {
++    use super::*;
++    use crate::{MidiChannel, MidiEvent, ProcessTransport};
++
++    #[test]
++    fn process_transport_round_trip_and_legacy_defaults() {
++        let t = ProcessTransport {
++            sample_position: -96000,
++            quarter_note_position: 19.125,
++            tempo: 135.5,
++            playing: false,
++            time_sig_numerator: 5,
++            time_sig_denominator: 8,
++        };
++        let cmd = HostCommand::Process {
++            inputs: vec![],
++            frames: 64,
++            transport: Some(t),
++        };
++        let value = serde_json::to_value(cmd).unwrap();
++        match serde_json::from_value::<HostCommand>(value).unwrap() {
++            HostCommand::Process {
++                transport, frames, ..
++            } => {
++                assert_eq!(transport, Some(t));
++                assert_eq!(frames, 64);
++            }
++            other => panic!("wrong command: {other:?}"),
 +        }
++        let old = r#"{"Process":{"inputs":[],"frames":64}}"#;
++        assert!(matches!(
++            serde_json::from_str::<HostCommand>(old).unwrap(),
++            HostCommand::Process {
++                transport: None,
++                ..
++            }
++        ));
++        let old = r#"{"AudioOutput":{"outputs":[],"output_events":[]}}"#;
++        assert!(matches!(
++            serde_json::from_str::<HostResponse>(old).unwrap(),
++            HostResponse::AudioOutput {
++                output_events_lost: false,
++                ..
++            }
++        ));
++        let response = HostResponse::AudioOutput {
++            transport_applied: false,
++            outputs: vec![],
++            output_events: vec![],
++            output_events_lost: true,
++        };
++        let value = serde_json::to_value(response).unwrap();
++        assert!(matches!(
++            serde_json::from_value::<HostResponse>(value).unwrap(),
++            HostResponse::AudioOutput {
++                output_events_lost: true,
++                ..
++            }
++        ));
 +    }
 +
 +    #[test]
-     fn parameter_feedback_round_trips_losslessly_and_is_bounded() {
-         let command = serde_json::to_string(&HostCommand::TakeParameterChanges)
-             .expect("serialize TakeParameterChanges");
++    fn output_event_wire_payload_budget_is_bounded_before_serializing() {
++        let event = crate::PluginEvent::sysex(vec![0; 1024 * 1024]);
++        let response = HostResponse::AudioOutput {
++            transport_applied: false,
++            outputs: vec![],
++            output_events: vec![event; 9],
++            output_events_lost: false,
++        };
++        assert!(serde_json::to_writer(std::io::sink(), &response).is_err());
++    }
++
++    #[test]
++    fn output_event_wire_count_is_bounded_on_send_and_receive() {
++        let note: crate::PluginEvent = MidiEvent::NoteOff {
++            channel: MidiChannel::Ch1,
++            note: 60,
++            velocity: 0,
++        }
++        .into();
++        let response = HostResponse::AudioOutput {
++            transport_applied: false,
++            outputs: vec![],
++            output_events: vec![note.clone(); 4097],
++            output_events_lost: false,
++        };
++        assert!(serde_json::to_string(&response).is_err());
++        let value =
++            serde_json::json!({"AudioOutput": {"outputs": [], "output_events": vec![note; 4097]}});
++        assert!(serde_json::from_value::<HostResponse>(value).is_err());
++    }
++}

@@ -454,7 +454,16 @@ fn handle(
                 id: p.midi_cc_to_parameter(bus, channel, cc),
             })
         }
-        HostCommand::Process { inputs, frames } => {
+        HostCommand::Process {
+            inputs,
+            frames,
+            transport,
+        } => {
+            if frames as usize > (1 << 20) {
+                return HostResponse::Error {
+                    message: "Process: frame count exceeds wire limit".into(),
+                };
+            }
             let sr = *sample_rate;
             with(plugin, |p| {
                 // Live channel count (sums getBusInfo across output buses), so a negotiated
@@ -466,11 +475,19 @@ fn handle(
                     sample_rate: sr,
                     block_size: frames as usize,
                 };
+                if let Err(e) = transport.map(|t| p.set_process_transport(t)).transpose() {
+                    return err("Process transport", e);
+                }
                 match p.process_audio(&mut buffers) {
-                    Ok(()) => HostResponse::AudioOutput {
-                        outputs: buffers.outputs,
-                        output_events: p.take_output_events(),
-                    },
+                    Ok(()) => {
+                        let (output_events, output_events_lost) = p.take_output_events_with_loss();
+                        HostResponse::AudioOutput {
+                            outputs: buffers.outputs,
+                            output_events,
+                            output_events_lost,
+                            transport_applied: transport.is_some(),
+                        }
+                    }
                     Err(e) => err("Process", e),
                 }
             })
@@ -479,6 +496,7 @@ fn handle(
             inputs,
             outputs,
             frames,
+            transport,
         } => {
             if inputs.len() > 256
                 || outputs.len() > 256
@@ -506,11 +524,19 @@ fn handle(
                     sample_rate: sr,
                     block_size: frames as usize,
                 };
+                if let Err(e) = transport.map(|t| p.set_process_transport(t)).transpose() {
+                    return err("ProcessBuses transport", e);
+                }
                 match p.process_bus_audio(&mut buffers) {
-                    Ok(()) => HostResponse::BusAudioOutput {
-                        outputs: buffers.outputs,
-                        output_events: p.take_output_events(),
-                    },
+                    Ok(()) => {
+                        let (output_events, output_events_lost) = p.take_output_events_with_loss();
+                        HostResponse::BusAudioOutput {
+                            outputs: buffers.outputs,
+                            output_events,
+                            output_events_lost,
+                            transport_applied: transport.is_some(),
+                        }
+                    }
                     Err(e) => err("ProcessBuses", e),
                 }
             })

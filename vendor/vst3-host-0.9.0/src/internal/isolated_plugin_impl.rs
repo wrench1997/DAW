@@ -39,6 +39,7 @@ pub struct IsolatedPluginImpl {
     /// loaded plugin starts out playing (the in-process default), so only a stopped transport
     /// needs replaying after a crash.
     is_playing: bool,
+    process_transport: Option<crate::plugin::ProcessTransport>,
     /// Whether the plugin is currently processing
     is_processing: bool,
     /// Whether the plugin has an open editor
@@ -50,6 +51,7 @@ pub struct IsolatedPluginImpl {
     /// MIDI the plugin has emitted across the boundary, buffered for the host to poll
     /// (mirrors PluginImpl::output_midi). Capped to bound growth if never read.
     output_events: Mutex<Vec<PluginEvent>>,
+    output_events_lost: std::sync::atomic::AtomicBool,
     /// Explicit helper-binary path override (re-used when respawning after a crash).
     helper_path: Option<PathBuf>,
     /// Per-command IPC response timeout (re-used when respawning after a crash).
@@ -197,17 +199,47 @@ impl IsolatedPluginImpl {
             time_sig_numerator,
             time_sig_denominator,
             is_playing: true,
+            process_transport: None,
             is_processing: false,
             has_open_editor: false,
             editor_size: None,
             output_channels,
-            output_events: Mutex::new(Vec::new()),
+            output_events: Mutex::new(Vec::with_capacity(MAX_OUTPUT_MIDI)),
+            output_events_lost: std::sync::atomic::AtomicBool::new(false),
             helper_path,
             response_timeout,
             auto_recover,
             auto_recover_max_retries,
             recovery_count: std::sync::atomic::AtomicU64::new(0),
             poll_error_logged: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn buffer_output_events(&self, events: Vec<PluginEvent>, mut lost: bool) {
+        if let Ok(mut queued) = self.output_events.lock() {
+            let mut bytes: usize = queued.iter().map(PluginEvent::payload_bytes).sum();
+            for event in events {
+                let incoming = event.payload_bytes();
+                while !queued.is_empty()
+                    && (queued.len() >= MAX_OUTPUT_MIDI
+                        || bytes.saturating_add(incoming) > 8 * 1024 * 1024)
+                {
+                    bytes = bytes.saturating_sub(queued.remove(0).payload_bytes());
+                    lost = true;
+                }
+                if incoming > 8 * 1024 * 1024 {
+                    lost = true;
+                    continue;
+                }
+                bytes += incoming;
+                queued.push(event);
+            }
+        } else {
+            lost = true;
+        }
+        if lost {
+            self.output_events_lost
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 
@@ -372,11 +404,25 @@ impl PluginInternal for IsolatedPluginImpl {
         )
     }
 
+    fn set_process_transport(&mut self, transport: crate::plugin::ProcessTransport) -> Result<()> {
+        transport.validate()?;
+        // Intentionally no IPC: transport and audio must be one indivisible request.
+        self.tempo = transport.tempo;
+        self.time_sig_numerator = transport.time_sig_numerator;
+        self.time_sig_denominator = transport.time_sig_denominator;
+        self.is_playing = transport.playing;
+        self.process_transport = Some(transport);
+        Ok(())
+    }
+
     fn set_tempo(&mut self, bpm: f64) -> Result<()> {
         self.expect_success(HostCommand::SetTempo { bpm }, "SetTempo")?;
         // Track the accepted transport state so a post-crash reload replays it instead of the
         // load-time settings. Only on success, so a rejected change can't desync the copy.
         self.tempo = bpm;
+        if let Some(transport) = &mut self.process_transport {
+            transport.tempo = bpm;
+        }
         Ok(())
     }
 
@@ -388,6 +434,10 @@ impl PluginInternal for IsolatedPluginImpl {
             },
             "SetTimeSignature",
         )?;
+        if let Some(transport) = &mut self.process_transport {
+            transport.time_sig_numerator = numerator;
+            transport.time_sig_denominator = denominator;
+        }
         self.time_sig_numerator = numerator;
         self.time_sig_denominator = denominator;
         Ok(())
@@ -396,6 +446,9 @@ impl PluginInternal for IsolatedPluginImpl {
     fn set_playing(&mut self, playing: bool) -> Result<()> {
         self.expect_success(HostCommand::SetPlaying { playing }, "SetPlaying")?;
         self.is_playing = playing;
+        if let Some(transport) = &mut self.process_transport {
+            transport.playing = playing;
+        }
         Ok(())
     }
 
@@ -446,13 +499,21 @@ impl PluginInternal for IsolatedPluginImpl {
         let response = self.send_command_once(HostCommand::Process {
             inputs: buffers.inputs.clone(),
             frames: frames as u32,
+            transport: self.process_transport,
         })?;
 
         match response {
             HostResponse::AudioOutput {
                 outputs,
                 output_events,
+                output_events_lost,
+                transport_applied,
             } => {
+                if self.process_transport.is_some() && !transport_applied {
+                    return Err(Error::ProcessError(
+                        "helper did not acknowledge authoritative per-block transport".into(),
+                    ));
+                }
                 for (ch_idx, output_channel) in buffers.outputs.iter_mut().enumerate() {
                     if let Some(src) = outputs.get(ch_idx) {
                         let n = output_channel.len().min(src.len());
@@ -464,15 +525,9 @@ impl PluginInternal for IsolatedPluginImpl {
                         output_channel.fill(0.0);
                     }
                 }
-                // Buffer any MIDI the plugin emitted this block for the host to poll.
-                if !output_events.is_empty() {
-                    if let Ok(mut buf) = self.output_events.lock() {
-                        buf.extend(output_events);
-                        if buf.len() > MAX_OUTPUT_MIDI {
-                            let drop = buf.len() - MAX_OUTPUT_MIDI;
-                            buf.drain(0..drop);
-                        }
-                    }
+                self.buffer_output_events(output_events, output_events_lost);
+                if let Some(transport) = &mut self.process_transport {
+                    transport.advance(frames as i64, self.sample_rate);
                 }
                 Ok(())
             }
@@ -518,12 +573,20 @@ impl PluginInternal for IsolatedPluginImpl {
             inputs: buffers.inputs.clone(),
             outputs,
             frames: frames as u32,
+            transport: self.process_transport,
         })?;
         match response {
             HostResponse::BusAudioOutput {
                 outputs,
                 output_events,
+                output_events_lost,
+                transport_applied,
             } => {
+                if self.process_transport.is_some() && !transport_applied {
+                    return Err(Error::ProcessError(
+                        "helper did not acknowledge authoritative per-block transport".into(),
+                    ));
+                }
                 for (destination_bus, source_bus) in buffers.outputs.iter_mut().zip(&outputs) {
                     for (destination, source) in destination_bus
                         .channels
@@ -540,14 +603,9 @@ impl PluginInternal for IsolatedPluginImpl {
                         destination.fill(0.0);
                     }
                 }
-                if !output_events.is_empty() {
-                    if let Ok(mut queued) = self.output_events.lock() {
-                        queued.extend(output_events);
-                        if queued.len() > MAX_OUTPUT_MIDI {
-                            let drop_count = queued.len() - MAX_OUTPUT_MIDI;
-                            queued.drain(0..drop_count);
-                        }
-                    }
+                self.buffer_output_events(output_events, output_events_lost);
+                if let Some(transport) = &mut self.process_transport {
+                    transport.advance(frames as i64, self.sample_rate);
                 }
                 Ok(())
             }
@@ -1163,6 +1221,17 @@ impl PluginInternal for IsolatedPluginImpl {
             .unwrap_or_default()
     }
 
+    fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
+        let events = match self.output_events.lock() {
+            Ok(mut queued) => queued.drain(..).collect(),
+            Err(_) => return (Vec::new(), true),
+        };
+        let lost = self
+            .output_events_lost
+            .swap(false, std::sync::atomic::Ordering::AcqRel);
+        (events, lost)
+    }
+
     fn output_channel_count(&self) -> usize {
         self.output_channels
     }
@@ -1430,6 +1499,124 @@ mod tests {
                 "{command} must not reload or retry"
             );
         }
+    }
+
+    #[test]
+    fn process_carries_authoritative_transport_in_one_request_and_propagates_loss() {
+        let fake = FakeHelper::new("process_transport");
+        let script = std::fs::read_to_string(&fake.script).unwrap();
+        let reply = "    *Process*) printf '%s\\n' '{\"AudioOutput\":{\"outputs\":[],\"output_events\":[],\"output_events_lost\":true,\"transport_applied\":true}}' ;;\n";
+        std::fs::write(
+            &fake.script,
+            script.replace("    *)", &(reply.to_owned() + "    *)")),
+        )
+        .unwrap();
+        let mut plugin = isolated(&fake);
+        let transport = crate::ProcessTransport {
+            sample_position: 96000,
+            quarter_note_position: 23.125,
+            tempo: 85.0,
+            playing: false,
+            time_sig_numerator: 3,
+            time_sig_denominator: 4,
+        };
+        plugin.set_process_transport(transport).unwrap();
+        assert!(
+            fake.requests().is_empty(),
+            "setting context must not make a separate IPC request"
+        );
+        let mut buffers = AudioBuffers {
+            inputs: vec![],
+            outputs: vec![vec![0.0; 64]],
+            sample_rate: 44100.0,
+            block_size: 64,
+        };
+        plugin.process(&mut buffers).unwrap();
+        let requests = fake.requests();
+        assert_eq!(requests.len(), 1);
+        match serde_json::from_str::<HostCommand>(&requests[0]).unwrap() {
+            HostCommand::Process {
+                transport: actual,
+                frames,
+                ..
+            } => {
+                assert_eq!(actual, Some(transport));
+                assert_eq!(frames, 64);
+            }
+            other => panic!("unexpected command {other:?}"),
+        }
+        assert!(plugin.take_output_events_with_loss().1);
+        assert!(!plugin.take_output_events_with_loss().1);
+        assert_eq!(
+            plugin.process_transport,
+            Some(transport),
+            "stopped context remains fixed"
+        );
+    }
+
+    #[test]
+    fn explicit_transport_rejects_an_old_or_nonacknowledging_helper() {
+        for (name, ack) in [
+            ("legacy_transport", ""),
+            ("rejected_transport", ",\"transport_applied\":false"),
+        ] {
+            let fake = FakeHelper::new(name);
+            let script = std::fs::read_to_string(&fake.script).unwrap();
+            let reply = format!("    *Process*) printf '%s\\n' '{{\"AudioOutput\":{{\"outputs\":[],\"output_events\":[]{ack}}}}}' ;;\n");
+            std::fs::write(&fake.script, script.replace("    *)", &(reply + "    *)"))).unwrap();
+            let mut plugin = isolated(&fake);
+            plugin
+                .set_process_transport(crate::ProcessTransport {
+                    sample_position: 0,
+                    quarter_note_position: 0.0,
+                    tempo: 120.0,
+                    playing: true,
+                    time_sig_numerator: 4,
+                    time_sig_denominator: 4,
+                })
+                .unwrap();
+            let mut buffers = AudioBuffers {
+                inputs: vec![],
+                outputs: vec![vec![0.0; 64]],
+                sample_rate: 44100.0,
+                block_size: 64,
+            };
+            assert!(plugin
+                .process(&mut buffers)
+                .unwrap_err()
+                .to_string()
+                .contains("did not acknowledge"));
+        }
+    }
+
+    #[test]
+    fn isolated_buffer_overflow_is_bounded_and_remains_visible_after_legacy_drain() {
+        let fake = FakeHelper::new("output_overflow");
+        let plugin = isolated(&fake);
+        let event: PluginEvent = MidiEvent::NoteOff {
+            channel: crate::MidiChannel::Ch1,
+            note: 60,
+            velocity: 0,
+        }
+        .into();
+        plugin.buffer_output_events(vec![event; MAX_OUTPUT_MIDI + 1], false);
+        assert_eq!(plugin.take_output_events().len(), MAX_OUTPUT_MIDI);
+        assert!(plugin.take_output_events_with_loss().1);
+        assert!(!plugin.take_output_events_with_loss().1);
+    }
+
+    #[test]
+    fn isolated_output_payload_backlog_is_bounded() {
+        let fake = FakeHelper::new("output_payload_budget");
+        let plugin = isolated(&fake);
+        plugin.buffer_output_events(vec![PluginEvent::sysex(vec![0; 1024 * 1024]); 9], false);
+        let (events, lost) = plugin.take_output_events_with_loss();
+        assert!(lost);
+        assert_eq!(events.len(), 8);
+        assert_eq!(
+            events.iter().map(PluginEvent::payload_bytes).sum::<usize>(),
+            8 * 1024 * 1024
+        );
     }
 
     #[test]

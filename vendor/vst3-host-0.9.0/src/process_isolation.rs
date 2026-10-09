@@ -47,6 +47,56 @@ const MAX_WIRE_BUSES: i32 = 256;
 /// sum of their 4096-entry limits.
 const MAX_WIRE_PARAMETER_CHANGES: usize = 8192;
 
+/// MIDI/event count and aggregate payload limits apply in both wire directions.
+mod output_events_codec {
+    use super::{Deserializer, Serialize, Serializer};
+    use crate::midi::PluginEvent;
+    use serde::de::{Error as _, SeqAccess, Visitor};
+    use serde::ser::Error as _;
+    const MAX_EVENTS: usize = 4096;
+    const MAX_BYTES: usize = 8 * 1024 * 1024;
+
+    pub fn serialize<S: Serializer>(
+        events: &[PluginEvent],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        if events.len() > MAX_EVENTS
+            || events
+                .iter()
+                .try_fold(0usize, |sum, event| sum.checked_add(event.payload_bytes()))
+                .is_none_or(|bytes| bytes > MAX_BYTES)
+        {
+            return Err(S::Error::custom("output event budget exceeded"));
+        }
+        events.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<PluginEvent>, D::Error> {
+        struct Events;
+        impl<'de> Visitor<'de> for Events {
+            type Value = Vec<PluginEvent>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("at most 4096 output events within an 8 MiB payload budget")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut events = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(MAX_EVENTS));
+                let mut bytes = 0usize;
+                while let Some(event) = seq.next_element::<PluginEvent>()? {
+                    bytes = bytes.saturating_add(event.payload_bytes());
+                    if events.len() >= MAX_EVENTS || bytes > MAX_BYTES {
+                        return Err(A::Error::custom("output event budget exceeded"));
+                    }
+                    events.push(event);
+                }
+                Ok(events)
+            }
+        }
+        deserializer.deserialize_seq(Events)
+    }
+}
+
 /// Whether a command belongs to the slow class — module load and state I/O — which gets
 /// [`DEFAULT_SLOW_COMMAND_TIMEOUT`] instead of the per-block response deadline.
 pub(crate) fn is_slow_command(command: &HostCommand) -> bool {
@@ -561,6 +611,9 @@ pub enum HostCommand {
         inputs: Vec<Vec<f32>>,
         /// Number of frames in this block.
         frames: u32,
+        /// Authoritative starting transport; absent retains legacy host transport behavior.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport: Option<crate::plugin::ProcessTransport>,
     },
     /// Process one block while preserving every VST3 audio bus.
     ProcessBuses {
@@ -570,6 +623,9 @@ pub enum HostCommand {
         outputs: Vec<crate::audio::AudioBusConfig>,
         /// Number of frames in this block.
         frames: u32,
+        /// Authoritative starting transport; absent retains legacy host transport behavior.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transport: Option<crate::plugin::ProcessTransport>,
     },
     /// Query per-bus channel counts and activation state.
     AudioBusLayout,
@@ -802,14 +858,30 @@ pub enum HostResponse {
         #[serde(with = "audio_codec")]
         outputs: Vec<Vec<f32>>,
         /// Owned VST3 events the plugin emitted this block, in order.
+        #[serde(with = "output_events_codec")]
         output_events: Vec<crate::midi::PluginEvent>,
+        /// At least one emitted event was lost before this response.
+        #[serde(default)]
+        output_events_lost: bool,
+        /// True only when this request's explicit transport was applied before processing.
+        /// Defaults to false so a new host detects a helper that ignores the new contract.
+        #[serde(default)]
+        transport_applied: bool,
     },
     /// Bus-preserving audio output from a `ProcessBuses` request.
     BusAudioOutput {
         /// Output buses in VST3 bus-index order.
         outputs: Vec<crate::audio::AudioBusBuffer>,
         /// Owned VST3 events emitted during the block.
+        #[serde(with = "output_events_codec")]
         output_events: Vec<crate::midi::PluginEvent>,
+        /// At least one emitted event was lost before this response.
+        #[serde(default)]
+        output_events_lost: bool,
+        /// True only when this request's explicit transport was applied before processing.
+        /// Defaults to false so a new host detects a helper that ignores the new contract.
+        #[serde(default)]
+        transport_applied: bool,
     },
     /// Current audio-bus layout and activation state.
     AudioBusLayout {
@@ -1800,6 +1872,8 @@ mod wire_tests {
         // The Process response carries emitted MIDI alongside audio; check the variant
         // round-trips through the JSON transport host and helper share.
         let resp = HostResponse::AudioOutput {
+            transport_applied: false,
+            output_events_lost: false,
             outputs: vec![vec![0.0, 0.5], vec![-0.5, 0.0]],
             output_events: vec![
                 MidiEvent::NoteOn {
@@ -1822,6 +1896,7 @@ mod wire_tests {
             HostResponse::AudioOutput {
                 outputs,
                 output_events,
+                ..
             } => {
                 assert_eq!(outputs, vec![vec![0.0, 0.5], vec![-0.5, 0.0]]);
                 assert_eq!(output_events.len(), 2);
@@ -1949,6 +2024,8 @@ mod wire_tests {
         }
 
         let response = HostResponse::AudioOutput {
+            transport_applied: false,
+            output_events_lost: false,
             outputs: Vec::new(),
             output_events: vec![event.clone()],
         };
@@ -2505,6 +2582,8 @@ mod wire_tests {
             f32::MIN_POSITIVE,
         ];
         let resp = HostResponse::AudioOutput {
+            transport_applied: false,
+            output_events_lost: false,
             outputs: vec![channel.clone(), vec![]],
             output_events: Vec::new(),
         };
@@ -2526,12 +2605,13 @@ mod wire_tests {
 
         // The same for the host -> helper direction.
         let cmd = HostCommand::Process {
+            transport: None,
             inputs: vec![vec![f32::NAN, 1.0]],
             frames: 2,
         };
         let json = serde_json::to_string(&cmd).expect("serialize Process");
         match serde_json::from_str::<HostCommand>(&json).expect("deserialize Process") {
-            HostCommand::Process { inputs, frames } => {
+            HostCommand::Process { inputs, frames, .. } => {
                 assert_eq!(frames, 2);
                 assert!(inputs[0][0].is_nan());
                 assert_eq!(inputs[0][1], 1.0);
@@ -2543,6 +2623,7 @@ mod wire_tests {
     #[test]
     fn bus_audio_wire_preserves_bus_boundaries_activation_and_sample_bits() {
         let command = HostCommand::ProcessBuses {
+            transport: None,
             inputs: vec![
                 crate::audio::AudioBusBuffer {
                     active: true,
@@ -2571,6 +2652,7 @@ mod wire_tests {
                 inputs,
                 outputs,
                 frames,
+                ..
             } => {
                 assert_eq!(frames, 2);
                 assert_eq!(inputs.len(), 2);
@@ -2650,6 +2732,8 @@ mod wire_tests {
             .collect();
         let plain = serde_json::to_string(&block).expect("plain json").len();
         let encoded = serde_json::to_string(&HostResponse::AudioOutput {
+            transport_applied: false,
+            output_events_lost: false,
             outputs: block,
             output_events: Vec::new(),
         })
@@ -2734,6 +2818,7 @@ mod wire_tests {
             class_id: None,
         }));
         assert!(!is_slow_command(&HostCommand::Process {
+            transport: None,
             inputs: vec![],
             frames: 64
         }));
@@ -2967,5 +3052,100 @@ pub mod crash_protection {
                 "Plugin panicked with unknown error".to_string()
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod process_transport_wire_tests {
+    use super::*;
+    use crate::{MidiChannel, MidiEvent, ProcessTransport};
+
+    #[test]
+    fn process_transport_round_trip_and_legacy_defaults() {
+        let t = ProcessTransport {
+            sample_position: -96000,
+            quarter_note_position: 19.125,
+            tempo: 135.5,
+            playing: false,
+            time_sig_numerator: 5,
+            time_sig_denominator: 8,
+        };
+        let cmd = HostCommand::Process {
+            inputs: vec![],
+            frames: 64,
+            transport: Some(t),
+        };
+        let value = serde_json::to_value(cmd).unwrap();
+        match serde_json::from_value::<HostCommand>(value).unwrap() {
+            HostCommand::Process {
+                transport, frames, ..
+            } => {
+                assert_eq!(transport, Some(t));
+                assert_eq!(frames, 64);
+            }
+            other => panic!("wrong command: {other:?}"),
+        }
+        let old = r#"{"Process":{"inputs":[],"frames":64}}"#;
+        assert!(matches!(
+            serde_json::from_str::<HostCommand>(old).unwrap(),
+            HostCommand::Process {
+                transport: None,
+                ..
+            }
+        ));
+        let old = r#"{"AudioOutput":{"outputs":[],"output_events":[]}}"#;
+        assert!(matches!(
+            serde_json::from_str::<HostResponse>(old).unwrap(),
+            HostResponse::AudioOutput {
+                output_events_lost: false,
+                ..
+            }
+        ));
+        let response = HostResponse::AudioOutput {
+            transport_applied: false,
+            outputs: vec![],
+            output_events: vec![],
+            output_events_lost: true,
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert!(matches!(
+            serde_json::from_value::<HostResponse>(value).unwrap(),
+            HostResponse::AudioOutput {
+                output_events_lost: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn output_event_wire_payload_budget_is_bounded_before_serializing() {
+        let event = crate::PluginEvent::sysex(vec![0; 1024 * 1024]);
+        let response = HostResponse::AudioOutput {
+            transport_applied: false,
+            outputs: vec![],
+            output_events: vec![event; 9],
+            output_events_lost: false,
+        };
+        assert!(serde_json::to_writer(std::io::sink(), &response).is_err());
+    }
+
+    #[test]
+    fn output_event_wire_count_is_bounded_on_send_and_receive() {
+        let note: crate::PluginEvent = MidiEvent::NoteOff {
+            channel: MidiChannel::Ch1,
+            note: 60,
+            velocity: 0,
+        }
+        .into();
+        let response = HostResponse::AudioOutput {
+            transport_applied: false,
+            outputs: vec![],
+            output_events: vec![note.clone(); 4097],
+            output_events_lost: false,
+        };
+        assert!(serde_json::to_string(&response).is_err());
+        let value =
+            serde_json::json!({"AudioOutput": {"outputs": [], "output_events": vec![note; 4097]}});
+        assert!(serde_json::from_value::<HostResponse>(value).is_err());
     }
 }

@@ -27,6 +27,7 @@ mod piano_roll;
 mod piano_snap;
 mod playlist;
 pub mod plugin_graph;
+mod plugin_midi_routing;
 pub mod plugin_parameter_edit;
 pub mod plugin_parameter_editor;
 mod plugins;

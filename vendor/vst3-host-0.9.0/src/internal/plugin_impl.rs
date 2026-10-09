@@ -167,6 +167,7 @@ pub struct PluginImpl {
     time_sig_denominator: i32,
     /// Whether the transport is playing (the `kPlaying` flag in `ProcessContext.state`).
     playing: bool,
+    process_transport: Option<crate::plugin::ProcessTransport>,
     /// Real-time vs offline processing, baked into `ProcessSetup`/`process_data` at setup.
     process_mode: crate::plugin::ProcessMode,
     /// Optional VST3 3.7 declaration of exactly which ProcessContext fields the processor reads.
@@ -235,6 +236,7 @@ pub struct PluginImpl {
     // audio thread can push without locking and a UI thread can drain concurrently; when full
     // the oldest event is dropped (bounded memory if the host never polls).
     output_events_owned: Arc<ArrayQueue<PluginEvent>>,
+    output_events_lost: std::sync::atomic::AtomicBool,
 
     // Plugin view
     plugin_view: Option<ComPtr<IPlugView>>,
@@ -968,10 +970,13 @@ impl PluginImpl {
 
     /// Update the transport tempo for the **next** processed block, even while processing is
     /// active: the stored tempo (used to rebuild the context after a reconfigure) and the live
-    /// `ProcessContext` both move, and the musical playhead derives from the new tempo.
+    /// `ProcessContext` both move. Existing musical position is preserved.
     #[allow(clippy::unnecessary_cast)]
     fn update_tempo(&mut self, bpm: f64) {
         self.tempo = bpm;
+        if let Some(transport) = &mut self.process_transport {
+            transport.tempo = bpm;
+        }
         if let Some(ref mut data) = self.process_data {
             data.transport_tempo = bpm;
             if process_context_needs(
@@ -987,6 +992,10 @@ impl PluginImpl {
     /// processing is active (stored fields plus the live `ProcessContext`).
     #[allow(clippy::unnecessary_cast)]
     fn update_time_signature(&mut self, numerator: i32, denominator: i32) {
+        if let Some(transport) = &mut self.process_transport {
+            transport.time_sig_numerator = numerator;
+            transport.time_sig_denominator = denominator;
+        }
         self.time_sig_numerator = numerator;
         self.time_sig_denominator = denominator;
         if let Some(ref mut data) = self.process_data {
@@ -1004,6 +1013,9 @@ impl PluginImpl {
     /// while processing is active (stored field plus the live `ProcessContext.state`).
     fn update_playing(&mut self, playing: bool) {
         self.playing = playing;
+        if let Some(transport) = &mut self.process_transport {
+            transport.playing = playing;
+        }
         if let Some(ref mut data) = self.process_data {
             data.process_context.state =
                 process_context_state(data.process_context_requirements, playing);
@@ -1514,6 +1526,7 @@ impl PluginImpl {
                 time_sig_numerator: 4,
                 time_sig_denominator: 4,
                 playing: true,
+                process_transport: None,
                 process_mode: crate::plugin::ProcessMode::Realtime,
                 process_context_requirements,
                 prefetchable_support,
@@ -1540,6 +1553,7 @@ impl PluginImpl {
                 output_events,
                 chunk_events: Vec::with_capacity(MAX_QUEUED_EVENTS),
                 output_events_owned: Arc::new(ArrayQueue::new(MAX_OUTPUT_MIDI)),
+                output_events_lost: std::sync::atomic::AtomicBool::new(false),
                 plugin_view: None,
                 editor_scale_factor: 1.0,
                 plug_frame,
@@ -1912,6 +1926,14 @@ impl PluginImpl {
             data.process_context.state =
                 process_context_state(self.process_context_requirements, self.playing);
 
+            if let Some(transport) = self.process_transport {
+                apply_process_transport(
+                    &mut data.process_context,
+                    self.process_context_requirements,
+                    transport,
+                );
+            }
+
             // Set up process data
             data.process_data.processMode = self.vst_process_mode();
             data.process_data.numSamples = self.block_size as i32;
@@ -2217,8 +2239,13 @@ impl PluginImpl {
                     &mut data.process_context,
                     data.process_context_requirements,
                     data.transport_tempo,
+                    self.playing,
                     frames as i64,
                 );
+
+                if let Some(transport) = &mut self.process_transport {
+                    transport.advance(frames as i64, self.sample_rate);
+                }
 
                 // Clear the staged input events AFTER processing, so the plugin got to see them
                 // and the next chunk starts from an empty list.
@@ -2244,8 +2271,13 @@ impl PluginImpl {
                 if !self.output_events.is_empty() {
                     let out = &self.output_events_owned;
                     self.output_events.drain_each(|event| {
-                        out.force_push(event);
+                        push_output_event(out, &self.output_events_lost, event);
                     });
+                }
+
+                if self.output_events.take_loss() {
+                    self.output_events_lost
+                        .store(true, std::sync::atomic::Ordering::Release);
                 }
 
                 if process_result != kResultOk {
@@ -2455,6 +2487,22 @@ impl PluginInternal for PluginImpl {
             value,
             sample_offset,
         });
+        Ok(())
+    }
+
+    fn set_process_transport(&mut self, transport: crate::plugin::ProcessTransport) -> Result<()> {
+        transport.validate()?;
+        self.update_tempo(transport.tempo);
+        self.update_time_signature(transport.time_sig_numerator, transport.time_sig_denominator);
+        self.update_playing(transport.playing);
+        self.process_transport = Some(transport);
+        if let Some(data) = &mut self.process_data {
+            apply_process_transport(
+                &mut data.process_context,
+                data.process_context_requirements,
+                transport,
+            );
+        }
         Ok(())
     }
 
@@ -3520,6 +3568,14 @@ impl PluginInternal for PluginImpl {
             out.push(event);
         }
         out
+    }
+
+    fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
+        let events = self.take_output_events();
+        let lost = self
+            .output_events_lost
+            .swap(false, std::sync::atomic::Ordering::AcqRel);
+        (events, lost)
     }
 
     fn output_midi_handle(&self) -> Option<crate::plugin::OutputMidiConsumer> {
@@ -4833,18 +4889,53 @@ fn current_system_time_nanos() -> i64 {
         .unwrap_or_default()
 }
 
+fn push_output_event(
+    queue: &ArrayQueue<PluginEvent>,
+    lost: &std::sync::atomic::AtomicBool,
+    event: PluginEvent,
+) {
+    if queue.force_push(event).is_some() {
+        lost.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Apply independent project sample/PPQ positions without modifying continuous time.
+#[allow(clippy::unnecessary_cast)]
+fn apply_process_transport(
+    ctx: &mut ProcessContext,
+    requirements: Option<u32>,
+    transport: crate::plugin::ProcessTransport,
+) {
+    use IProcessContextRequirements_::Flags_ as R;
+    ctx.projectTimeSamples = transport.sample_position;
+    if process_context_needs(requirements, R::kNeedProjectTimeMusic as u32) {
+        ctx.projectTimeMusic = transport.quarter_note_position;
+    }
+    if process_context_needs(requirements, R::kNeedTempo as u32) {
+        ctx.tempo = transport.tempo;
+    }
+    if process_context_needs(requirements, R::kNeedTimeSignature as u32) {
+        ctx.timeSigNumerator = transport.time_sig_numerator;
+        ctx.timeSigDenominator = transport.time_sig_denominator;
+    }
+    ctx.state = process_context_state(requirements, transport.playing);
+}
+
 /// Advance the transport in a `ProcessContext` by `frames` samples after a processed block.
-/// Keeps `continousTimeSamples`/`projectTimeSamples` (and the musical playhead derived from
-/// the current tempo) moving so tempo-synced plugins don't see a frozen time-0.
+/// Continuous processing time always advances; project sample/quarter-note positions advance
+/// only while playing, integrating the current tempo without changing the musical origin.
 #[allow(clippy::unnecessary_cast)]
 fn advance_process_context(
     ctx: &mut ProcessContext,
     requirements: Option<u32>,
     transport_tempo: f64,
+    playing: bool,
     frames: i64,
 ) {
     use IProcessContextRequirements_::Flags_ as R;
-    ctx.projectTimeSamples = ctx.projectTimeSamples.wrapping_add(frames);
+    if playing {
+        ctx.projectTimeSamples = ctx.projectTimeSamples.saturating_add(frames);
+    }
     if process_context_needs(requirements, R::kNeedContinousTimeSamples as u32) {
         ctx.continousTimeSamples = ctx.continousTimeSamples.wrapping_add(frames);
     }
@@ -4855,11 +4946,12 @@ fn advance_process_context(
         let nanos = (frames as f64 * 1_000_000_000.0 / ctx.sampleRate).round() as i64;
         ctx.systemTime = ctx.systemTime.saturating_add(nanos);
     }
-    if process_context_needs(requirements, R::kNeedProjectTimeMusic as u32) && ctx.sampleRate > 0.0
+    if playing
+        && process_context_needs(requirements, R::kNeedProjectTimeMusic as u32)
+        && ctx.sampleRate > 0.0
     {
-        // Quarter notes elapsed = seconds * (BPM / 60).
-        let secs = ctx.projectTimeSamples as f64 / ctx.sampleRate;
-        ctx.projectTimeMusic = secs * (transport_tempo / 60.0);
+        // Integrate only this block, preserving the explicit PPQ origin across tempo changes.
+        ctx.projectTimeMusic += frames as f64 / ctx.sampleRate * (transport_tempo / 60.0);
     }
 }
 
@@ -5124,7 +5216,7 @@ mod transport_tests {
         // One second of audio at 48 kHz in 512-sample blocks.
         let blocks = 48_000 / 512;
         for _ in 0..blocks {
-            advance_process_context(&mut ctx, None, 120.0, 512);
+            advance_process_context(&mut ctx, None, 120.0, true, 512);
         }
         let advanced = (blocks * 512) as i64;
         assert_eq!(ctx.projectTimeSamples, advanced);
@@ -5517,5 +5609,68 @@ mod editor_scale_tests {
             );
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod authoritative_transport_tests {
+    use super::*;
+    use crate::plugin::ProcessTransport;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn context_seek_tempo_change_pause_and_zero_frames() {
+        let mut ctx: ProcessContext = unsafe { std::mem::zeroed() };
+        ctx.sampleRate = 48000.0;
+        let mut t = ProcessTransport {
+            sample_position: 480000,
+            quarter_note_position: 37.5,
+            tempo: 90.0,
+            playing: true,
+            time_sig_numerator: 7,
+            time_sig_denominator: 8,
+        };
+        apply_process_transport(&mut ctx, None, t);
+        assert_eq!(ctx.projectTimeSamples, 480000);
+        assert_eq!(ctx.projectTimeMusic, 37.5);
+        assert_eq!((ctx.timeSigNumerator, ctx.timeSigDenominator), (7, 8));
+        advance_process_context(&mut ctx, None, t.tempo, true, 48000);
+        assert_eq!(ctx.projectTimeSamples, 528000);
+        assert_eq!(ctx.projectTimeMusic, 39.0);
+        advance_process_context(&mut ctx, None, 60.0, true, 48000);
+        assert_eq!(ctx.projectTimeMusic, 40.0);
+        t.sample_position = 12000;
+        t.quarter_note_position = 3.125;
+        t.playing = false;
+        apply_process_transport(&mut ctx, None, t);
+        advance_process_context(&mut ctx, None, t.tempo, false, 48000);
+        assert_eq!(ctx.projectTimeSamples, 12000);
+        assert_eq!(ctx.projectTimeMusic, 3.125);
+        assert_eq!(ctx.continousTimeSamples, 144000);
+        assert_eq!(ctx.state & PROCESS_CONTEXT_PLAYING, 0);
+        advance_process_context(&mut ctx, None, t.tempo, true, 0);
+        assert_eq!(ctx.projectTimeSamples, 12000);
+        assert_eq!(ctx.projectTimeMusic, 3.125);
+    }
+
+    #[test]
+    fn queue_overflow_latches_loss_instead_of_silently_dropping_note_offs() {
+        let queue = ArrayQueue::new(2);
+        let lost = AtomicBool::new(false);
+        for note in [60, 61, 62] {
+            push_output_event(
+                &queue,
+                &lost,
+                MidiEvent::NoteOff {
+                    channel: MidiChannel::Ch1,
+                    note,
+                    velocity: 0,
+                }
+                .into(),
+            );
+        }
+        assert_eq!(queue.len(), 2);
+        assert!(lost.swap(false, Ordering::AcqRel));
+        assert!(!lost.load(Ordering::Acquire));
     }
 }

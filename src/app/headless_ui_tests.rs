@@ -2599,3 +2599,144 @@ fn plugin_scan_rescan_notice_and_failure_details_use_production_ui() {
     assert!(!ui.app.plugin_cache_needs_rescan);
     assert!(ui.app.plugins.is_empty());
 }
+
+#[test]
+fn plugin_midi_port_controls_change_real_model_and_keep_monitor_separate() {
+    let mut ui = UiHarness::new();
+    ui.size = egui::vec2(1440.0, 1200.0);
+    ui.app.project = Project::blank();
+    let plugin: PluginInstance = serde_json::from_value(serde_json::json!({
+        "id":501,"format":"vst3","path":"/not-a-real-plugin/midi-ui.vst3",
+        "uid":"midi-ui-fixture","name":"MIDI processor fixture",
+        "midi_ports":{"output":0}
+    }))
+    .unwrap();
+    ui.app.project.channels[0].instrument_plugin_instance_id = Some(501);
+    ui.app.project.plugin_instances.push(plugin);
+    ui.app.selected_channel = 0;
+    ui.app.focus_editor(StudioView::ChannelRack);
+    ui.app.sync_history_observer();
+    ui.settle();
+    assert!(
+        ui.nodes
+            .iter()
+            .any(|node| node.value().or_else(|| node.label()) == Some("PLUGIN MIDI PORTS"))
+    );
+    let output_label_y = ui
+        .nodes
+        .iter()
+        .find(|node| node.value().or_else(|| node.label()) == Some("Output"))
+        .map(|node| node_rect(node).center().y)
+        .unwrap();
+    let port = ui
+        .nodes
+        .iter()
+        .filter(|node| node.value().or_else(|| node.label()) == Some("0") && !node.is_disabled())
+        .min_by(|left, right| {
+            (node_rect(left).center().y - output_label_y)
+                .abs()
+                .total_cmp(&(node_rect(right).center().y - output_label_y).abs())
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "saved output port zero must be an actual enabled ComboBox: {:?}",
+                ui.nodes
+                    .iter()
+                    .map(|node| (node.role(), node.value(), node.label(), node.is_disabled()))
+                    .collect::<Vec<_>>()
+            )
+        });
+    ui.click_pos(node_rect(port).center());
+    // The real popup scrolls its 257 choices. Choose a currently visible row,
+    // rather than an accessibility node below the popup's clipped viewport.
+    ui.click("1");
+    assert_eq!(
+        ui.app.project.plugin_instances[0].midi_ports.output,
+        Some(1),
+        "toast={:?}",
+        ui.app.toast
+    );
+    assert_eq!(ui.app.project.plugin_instances[0].midi_ports.input, None);
+    let port_position = |ui: &UiHarness, value: &str| {
+        ui.nodes
+            .iter()
+            .find(|node| {
+                node.role() == Role::ComboBox && node.value() == Some(value) && !node.is_disabled()
+            })
+            .map(|node| node_rect(node).center())
+            .expect("actual port ComboBox")
+    };
+    let pointer = port_position(&ui, "1");
+    ui.click_pos(pointer);
+    // Hover the popup itself, then scroll its bounded viewport to the far end.
+    // Wheel must not leak into Piano/Playlist zoom or mutate musical content.
+    for _ in 0..8 {
+        ui.run(vec![
+            egui::Event::PointerMoved(pointer + egui::vec2(0.0, 60.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                phase: egui::TouchPhase::Move,
+                delta: egui::vec2(0.0, -2_000.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        ui.settle();
+    }
+    ui.click("255");
+    assert_eq!(
+        ui.app.project.plugin_instances[0].midi_ports.output,
+        Some(255)
+    );
+    ui.click_pos(port_position(&ui, "255"));
+    for _ in 0..8 {
+        ui.run(vec![
+            egui::Event::PointerMoved(pointer + egui::vec2(0.0, 60.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                phase: egui::TouchPhase::Move,
+                delta: egui::vec2(0.0, 2_000.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        ui.settle();
+    }
+    ui.click("0");
+    assert_eq!(
+        ui.app.project.plugin_instances[0].midi_ports.output,
+        Some(0)
+    );
+    let mute = ui
+        .nodes
+        .iter()
+        .find(|node| node.label() == Some("Mute device audio monitor"))
+        .expect("independent audio-monitor checkbox");
+    ui.click_pos(node_rect(mute).center());
+    let ports = ui.app.project.plugin_instances[0].midi_ports;
+    assert!(ports.audio_monitor_muted);
+    assert_eq!(ports.output, Some(0));
+    assert!(!ui.app.project.plugin_instances[0].bypass);
+    assert!(!ui.app.project.channels[0].muted);
+    assert!(
+        ui.app
+            .undo_stack
+            .last()
+            .is_some_and(|before| !before.plugin_instances[0].midi_ports.audio_monitor_muted)
+    );
+    ui.capture("plugin-midi-ports");
+    ui.click_pos(port_position(&ui, "0"));
+    ui.click("Off");
+    assert_eq!(ui.app.project.plugin_instances[0].midi_ports.output, None);
+    assert!(
+        ui.app.project.plugin_instances[0]
+            .midi_ports
+            .audio_monitor_muted
+    );
+    // A reopened unavailable input remains editable to Off without trusting stale
+    // scan capabilities. Exercise the actual Input control independently.
+    ui.app.project.plugin_instances[0].midi_ports.input = Some(0);
+    ui.app.sync_history_observer();
+    ui.settle();
+    ui.click_pos(port_position(&ui, "0"));
+    ui.click("Off");
+    assert_eq!(ui.app.project.plugin_instances[0].midi_ports.input, None);
+}

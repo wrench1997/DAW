@@ -704,6 +704,53 @@ pub enum ProcessMode {
     Offline,
 }
 
+/// Authoritative transport at the start of the next audio block.
+///
+/// Supply this before every DAW processing quantum, including stopped blocks and seeks.
+/// Sample and musical positions are independent: a tempo change must not recompute PPQ
+/// from the current sample position. Without a subsequent update, playing positions advance
+/// by the processed frame count; stopped project positions stay fixed.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessTransport {
+    /// Project sample position at the start of the block (negative preroll is supported).
+    pub sample_position: i64,
+    /// Project position in quarter notes at the start of the block.
+    pub quarter_note_position: f64,
+    /// Tempo in beats per minute; finite and greater than zero.
+    pub tempo: f64,
+    /// Whether project time advances during this block.
+    pub playing: bool,
+    /// Positive time-signature numerator.
+    pub time_sig_numerator: i32,
+    /// Time-signature denominator: one of 1, 2, 4, 8, or 16.
+    pub time_sig_denominator: i32,
+}
+
+impl ProcessTransport {
+    pub(crate) fn validate(self) -> Result<()> {
+        if !self.quarter_note_position.is_finite()
+            || !self.tempo.is_finite()
+            || self.tempo <= 0.0
+            || self.time_sig_numerator <= 0
+            || !matches!(self.time_sig_denominator, 1 | 2 | 4 | 8 | 16)
+        {
+            return Err(Error::InvalidParameter(
+                "invalid per-block process transport".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn advance(&mut self, frames: i64, sample_rate: f64) {
+        if self.playing {
+            self.sample_position = self.sample_position.saturating_add(frames);
+            if sample_rate > 0.0 {
+                self.quarter_note_position += frames as f64 / sample_rate * (self.tempo / 60.0);
+            }
+        }
+    }
+}
+
 /// VST3 plugin instance
 #[allow(clippy::type_complexity)] // callback fields are Box<dyn Fn...>; intrinsic to the API
 pub struct Plugin {
@@ -805,9 +852,13 @@ pub(crate) trait PluginInternal: Send {
             "bus activation is not supported for this plugin".to_string(),
         ))
     }
-    /// Update the transport tempo (BPM) advertised in the host `ProcessContext`, taking effect
-    /// on the next processed block. The caller validates `bpm > 0`. Defaults to unsupported
-    /// (overridden by the in-process and isolated implementations).
+    /// Apply independent authoritative sample and quarter-note positions for the next block.
+    fn set_process_transport(&mut self, _transport: ProcessTransport) -> Result<()> {
+        Err(Error::Other(
+            "per-block transport is not supported for this plugin".into(),
+        ))
+    }
+    /// Change the next block's tempo without changing its musical origin.
     fn set_tempo(&mut self, _bpm: f64) -> Result<()> {
         Err(Error::Other(
             "runtime transport mutation is not supported for this plugin".to_string(),
@@ -986,8 +1037,11 @@ pub(crate) trait PluginInternal: Send {
     fn take_output_events(&self) -> Vec<PluginEvent> {
         Vec::new()
     }
-    /// A lock-free handle for draining emitted MIDI from another thread. Defaults to `None`
-    /// for implementations without a shared in-process queue (e.g. process isolation).
+    /// Drain emitted events and acknowledge a latched capture/queue loss indication.
+    fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
+        (self.take_output_events(), false)
+    }
+    /// Lock-free output consumer, when an in-process shared queue is available.
     fn output_midi_handle(&self) -> Option<OutputMidiConsumer> {
         None
     }
@@ -1365,6 +1419,19 @@ impl Plugin {
             .queue_processor_parameter_at(id, value, sample_offset)
     }
 
+    /// Set the authoritative starting transport for the next processed block.
+    ///
+    /// Works in-process and in isolation. The isolated implementation includes the context
+    /// in the audio request itself, without another per-block IPC exchange. Rejects non-finite
+    /// musical position/tempo, non-positive tempo/numerator, and unsupported denominators.
+    pub fn set_process_transport(&mut self, transport: ProcessTransport) -> Result<()> {
+        transport.validate()?;
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .set_process_transport(transport)
+    }
+
     /// Change the transport tempo (beats per minute) advertised to the plugin in the host
     /// `ProcessContext`, taking effect on the **next** processed block — even while the plugin
     /// is actively processing. Drives tempo-synced DSP (LFOs, synced delays, arpeggiators).
@@ -1411,10 +1478,8 @@ impl Plugin {
     /// `ProcessContext` (the `kPlaying` flag), taking effect on the **next** processed block —
     /// even while the plugin is actively processing.
     ///
-    /// While playing, the host advances the continuous and musical playhead each block; while
-    /// stopped, the playhead still advances but the plugin sees the transport as not playing
-    /// (so tempo-synced effects can react to a paused transport). Works both in-process and
-    /// across process isolation.
+    /// While stopped, project sample/quarter-note positions stay fixed. Continuous processing
+    /// time still advances. Works both in-process and across process isolation.
     pub fn set_playing(&mut self, playing: bool) -> Result<()> {
         self.internal
             .as_mut()
@@ -2276,7 +2341,8 @@ impl Plugin {
     /// marshalled back alongside each processed block.
     ///
     /// The buffer is capped at 4096 events: if you never poll while a chatty plugin keeps
-    /// emitting, the oldest events are dropped (silently) to bound memory.
+    /// emitting, the oldest events are dropped to bound memory. Use
+    /// [`Self::take_output_events_with_loss`] to observe loss before forwarding notes.
     pub fn take_output_midi(&self) -> Vec<MidiEvent> {
         self.internal
             .as_ref()
@@ -2294,6 +2360,19 @@ impl Plugin {
         self.internal
             .as_ref()
             .map(|i| i.take_output_events())
+            .unwrap_or_default()
+    }
+
+    /// Drain emitted events and atomically acknowledge any observed output-event loss.
+    ///
+    /// The boolean latches queue overflow, rejected event capture, and isolated buffering
+    /// loss since the previous loss-aware drain. A routing host should release notes at its
+    /// destination when true, because a note-off may have been lost. Legacy drains do not
+    /// clear this loss indication. Use a single draining consumer per plugin.
+    pub fn take_output_events_with_loss(&self) -> (Vec<crate::midi::OutputEvent>, bool) {
+        self.internal
+            .as_ref()
+            .map(|i| i.take_output_events_with_loss())
             .unwrap_or_default()
     }
 
@@ -3471,5 +3550,70 @@ mod vstpreset_tests {
         let mut bytes = encode_state_snapshot(&snapshot).expect("encode");
         bytes[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(decode_state_snapshot(&bytes).is_err());
+    }
+}
+
+#[cfg(test)]
+mod process_transport_tests {
+    use super::ProcessTransport;
+
+    fn transport() -> ProcessTransport {
+        ProcessTransport {
+            sample_position: 96000,
+            quarter_note_position: 7.25,
+            tempo: 90.0,
+            playing: true,
+            time_sig_numerator: 7,
+            time_sig_denominator: 8,
+        }
+    }
+
+    #[test]
+    fn transport_validation_and_increment_preserve_independent_ppq() {
+        let mut t = transport();
+        assert!(t.validate().is_ok());
+        t.advance(48000, 48000.0);
+        assert_eq!(t.sample_position, 144000);
+        assert_eq!(t.quarter_note_position, 8.75);
+        t.tempo = 120.0;
+        t.advance(48000, 48000.0);
+        assert_eq!(t.quarter_note_position, 10.75);
+        t.playing = false;
+        let stopped = t;
+        t.advance(48000, 48000.0);
+        assert_eq!(t, stopped);
+        for tempo in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+            assert!(ProcessTransport {
+                tempo,
+                ..transport()
+            }
+            .validate()
+            .is_err());
+        }
+        assert!(ProcessTransport {
+            quarter_note_position: f64::NAN,
+            ..transport()
+        }
+        .validate()
+        .is_err());
+        assert!(ProcessTransport {
+            time_sig_numerator: 0,
+            ..transport()
+        }
+        .validate()
+        .is_err());
+        assert!(ProcessTransport {
+            time_sig_denominator: 3,
+            ..transport()
+        }
+        .validate()
+        .is_err());
+        assert!(ProcessTransport {
+            sample_position: -48000,
+            quarter_note_position: -2.0,
+            ..transport()
+        }
+        .validate()
+        .is_ok());
     }
 }

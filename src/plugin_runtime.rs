@@ -29,7 +29,11 @@ use super::{PluginDescriptor, PluginFormat};
 
 /// Maximum block accepted by the plug-in bridge. This matches the Mixer's preallocated blocks.
 pub const MAX_PLUGIN_BLOCK_FRAMES: usize = 2_048;
-const DEFAULT_QUEUE_CAPACITY: usize = 4;
+// Two maximum 2048-frame callback bursts plus margin at Q128. Queue allocation
+// happens off the audio thread; default sequence latency remains one quantum.
+const DEFAULT_QUEUE_CAPACITY: usize = 36;
+const LEGACY_QUEUE_ADMISSION: usize = 4;
+pub const MAX_MIDI_BRIDGE_LOOKAHEAD_QUANTA: usize = 16;
 pub const MAX_PLUGIN_CHAIN_SLOTS: usize = 10;
 /// Maximum number of parameters exposed by one plug-in instance to the generic control surface.
 pub const MAX_PLUGIN_PARAMETER_CATALOG_ITEMS: usize = 4_096;
@@ -144,6 +148,77 @@ pub struct MidiMessage {
     pub sample_offset: u16,
 }
 
+/// Maximum MIDI1 messages emitted by one worker quantum. Loss invalidates the whole batch.
+pub const MAX_PLUGIN_OUTPUT_EVENTS: usize = 128;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PluginMidiOutput {
+    pub slot: u8,
+    pub message: MidiMessage,
+}
+
+/// Output travels inside the same epoch/sequence/latency-attested block as its audio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PluginMidiBatch {
+    pub events: [PluginMidiOutput; MAX_PLUGIN_OUTPUT_EVENTS],
+    pub len: usize,
+    pub lost: bool,
+    /// Processing failed independently of whether generated MIDI is representable.
+    pub audio_lost: bool,
+}
+
+impl Default for PluginMidiBatch {
+    fn default() -> Self {
+        Self {
+            events: [PluginMidiOutput {
+                slot: 0,
+                message: MidiMessage {
+                    data: [0; 3],
+                    sample_offset: 0,
+                },
+            }; MAX_PLUGIN_OUTPUT_EVENTS],
+            len: 0,
+            lost: false,
+            audio_lost: false,
+        }
+    }
+}
+
+impl PluginMidiBatch {
+    pub fn push(&mut self, slot: u8, message: MidiMessage) {
+        if self.len == self.events.len() {
+            self.lost = true;
+        } else {
+            self.events[self.len] = PluginMidiOutput { slot, message };
+            self.len += 1;
+        }
+    }
+}
+
+/// The authoritative musical context of the first input sample in a worker block.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PluginTransport {
+    pub sample_position: i64,
+    pub quarter_note_position: f64,
+    pub tempo: f64,
+    pub playing: bool,
+    pub time_sig_numerator: i32,
+    pub time_sig_denominator: i32,
+}
+
+impl Default for PluginTransport {
+    fn default() -> Self {
+        Self {
+            sample_position: 0,
+            quarter_note_position: 0.0,
+            tempo: 128.0,
+            playing: false,
+            time_sig_numerator: 4,
+            time_sig_denominator: 4,
+        }
+    }
+}
+
 /// One bounded generic-control description of a plug-in parameter.
 ///
 /// Catalog producers clamp normalized values and truncate `name`/`unit` at a UTF-8 boundary to
@@ -246,6 +321,15 @@ pub trait PluginBackend: 'static {
     fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize)
     -> Result<(), String>;
     fn send_midi(&mut self, message: MidiMessage) -> Result<(), String>;
+    fn midi_capabilities(&self) -> (bool, bool) {
+        (false, false)
+    }
+    fn set_transport(&mut self, _transport: PluginTransport) -> Result<(), String> {
+        Ok(())
+    }
+    /// Drain exactly the just-processed block. Defaults preserve non-MIDI-output backends.
+    fn drain_midi_output(&mut self, _batch: &mut PluginMidiBatch, _slot: u8, _frames: usize) {}
+
     fn set_parameter(&mut self, id: u32, normalized: f32) -> Result<(), String>;
     fn get_parameter(&mut self, id: u32) -> Result<f32, String>;
     /// Return one bounded parameter-catalog page. Backends without a generic parameter surface
@@ -745,6 +829,8 @@ enum LatencyAttestation {
 
 /// Fixed-size value moved through the two audio SPSC rings.
 pub struct StereoBlock {
+    transport: PluginTransport,
+    midi_output: PluginMidiBatch,
     epoch: u64,
     sequence: u64,
     frames: u16,
@@ -759,6 +845,8 @@ pub struct StereoBlock {
 impl StereoBlock {
     fn silence() -> Self {
         Self {
+            transport: PluginTransport::default(),
+            midi_output: PluginMidiBatch::default(),
             epoch: INITIAL_TRANSPORT_EPOCH,
             sequence: 0,
             frames: 0,
@@ -820,20 +908,29 @@ impl DryBlock {
 /// Keeping it behind one pointer prevents the bounded `AudioCommand` ring from inheriting the
 /// inline audio/event storage size.
 struct EndpointScratch {
+    transport: PluginTransport,
+    midi_output: PluginMidiBatch,
     pending_rt_event_count: u16,
     pending_rt_events: [RtCommand; MAX_RT_EVENTS_PER_BLOCK],
     delayed_dry: DryBlock,
-    future_outputs: [StereoBlock; DEFAULT_QUEUE_CAPACITY],
+    bridge_lookahead_quanta: usize,
+    future_outputs: Box<[StereoBlock]>,
     future_output_valid: [bool; DEFAULT_QUEUE_CAPACITY],
 }
 
 impl EndpointScratch {
     fn new() -> Self {
         Self {
+            transport: PluginTransport::default(),
+            midi_output: PluginMidiBatch::default(),
             pending_rt_event_count: 0,
             pending_rt_events: [RtCommand::EMPTY; MAX_RT_EVENTS_PER_BLOCK],
             delayed_dry: DryBlock::silence(),
-            future_outputs: std::array::from_fn(|_| StereoBlock::silence()),
+            bridge_lookahead_quanta: 1,
+            future_outputs: (0..DEFAULT_QUEUE_CAPACITY)
+                .map(|_| StereoBlock::silence())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
             future_output_valid: [false; DEFAULT_QUEUE_CAPACITY],
         }
     }
@@ -973,6 +1070,7 @@ impl AudioThreadEndpoint {
 
         self.epoch = epoch;
         self.next_sequence = 1;
+        self.metrics.midi_blocked.store(false, Ordering::Release);
         self.requested_epoch.store(epoch, Ordering::Release);
         self.metrics.current_epoch.store(epoch, Ordering::Release);
         self.metrics.epoch_resets.fetch_add(1, Ordering::Relaxed);
@@ -984,6 +1082,7 @@ impl AudioThreadEndpoint {
             .dropped_rt_events
             .fetch_add(staged, Ordering::Relaxed);
         self.scratch.delayed_dry = DryBlock::silence();
+        self.scratch.midi_output = PluginMidiBatch::default();
 
         let held = self
             .scratch
@@ -1054,12 +1153,19 @@ impl AudioThreadEndpoint {
         self.metrics
             .callback_sequences
             .fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .current_bridge_frames
-            .store(left.len() as u32, Ordering::Relaxed);
+        self.metrics.current_bridge_frames.store(
+            (left.len() * self.scratch.bridge_lookahead_quanta) as u32,
+            Ordering::Relaxed,
+        );
         let event_count = usize::from(self.scratch.pending_rt_event_count);
 
-        if self.input.slots() == 0 {
+        let capacity = self.input.buffer().capacity();
+        let admitted_capacity = if self.scratch.bridge_lookahead_quanta == 1 {
+            capacity.min(LEGACY_QUEUE_ADMISSION)
+        } else {
+            capacity
+        };
+        if capacity.saturating_sub(self.input.slots()) >= admitted_capacity {
             self.fail_pending_parameter_edits(ParameterEditFailureReason::InputGap);
             self.scratch.pending_rt_event_count = 0;
             self.scratch
@@ -1077,6 +1183,7 @@ impl AudioThreadEndpoint {
         block.epoch = self.epoch;
         block.sequence = sequence;
         block.frames = left.len() as u16;
+        block.transport = self.scratch.transport;
         block.rt_event_count = self.scratch.pending_rt_event_count;
         block.expected_latency_revision = expected_latency_revision;
         // Callback Q128 admission may reserve a tagged Live edit before the fixed-quantum
@@ -1132,6 +1239,7 @@ impl AudioThreadEndpoint {
                 left,
                 right,
                 &self.metrics,
+                &mut self.scratch.midi_output,
             );
         }
 
@@ -1145,7 +1253,13 @@ impl AudioThreadEndpoint {
                     .fetch_add(1, Ordering::Relaxed);
                 continue;
             }
-            return copy_received_block(&block, left, right, &self.metrics);
+            return copy_received_block(
+                &block,
+                left,
+                right,
+                &self.metrics,
+                &mut self.scratch.midi_output,
+            );
         }
         ReceiveStatus::Empty
     }
@@ -1189,12 +1303,20 @@ impl AudioThreadEndpoint {
         {
             return RealtimeProcessStatus::InvalidFrameCount;
         }
+        self.scratch.midi_output = PluginMidiBatch::default();
         let sequence = self.next_sequence;
-        let expected_sequence = sequence.wrapping_sub(1);
+        let expected_sequence = if self.scratch.bridge_lookahead_quanta == 1 {
+            sequence.wrapping_sub(1)
+        } else {
+            sequence.saturating_sub(self.scratch.bridge_lookahead_quanta as u64)
+        };
         // Consume before submitting. This makes the bridge latency deterministic: even an
         // exceptionally fast worker can never return the block from this same callback.
-        let received =
-            self.try_receive_expected(self.epoch, expected_sequence, output_left, output_right);
+        let received = if expected_sequence == 0 {
+            ReceiveStatus::Empty
+        } else {
+            self.try_receive_expected(self.epoch, expected_sequence, output_left, output_right)
+        };
         let source = match received {
             ReceiveStatus::Processed {
                 frames: received_frames,
@@ -1232,10 +1354,12 @@ impl AudioThreadEndpoint {
                 RealtimeOutputSource::DelayedDry
             }
             ReceiveStatus::Empty => {
-                if self.scratch.delayed_dry.valid
-                    && self.scratch.delayed_dry.epoch == self.epoch
-                    && self.scratch.delayed_dry.sequence == expected_sequence
-                    && self.scratch.delayed_dry.submitted
+                if expected_sequence != 0
+                    && (self.scratch.bridge_lookahead_quanta > 1
+                        || (self.scratch.delayed_dry.valid
+                            && self.scratch.delayed_dry.epoch == self.epoch
+                            && self.scratch.delayed_dry.sequence == expected_sequence
+                            && self.scratch.delayed_dry.submitted))
                 {
                     self.metrics.deadline_misses.fetch_add(1, Ordering::Relaxed);
                 }
@@ -1305,6 +1429,7 @@ impl AudioThreadEndpoint {
                         left,
                         right,
                         &self.metrics,
+                        &mut self.scratch.midi_output,
                     );
                 }
                 std::cmp::Ordering::Greater => {}
@@ -1326,7 +1451,13 @@ impl AudioThreadEndpoint {
                     self.metrics.stale_outputs.fetch_add(1, Ordering::Relaxed);
                 }
                 std::cmp::Ordering::Equal => {
-                    return copy_received_block(&block, left, right, &self.metrics);
+                    return copy_received_block(
+                        &block,
+                        left,
+                        right,
+                        &self.metrics,
+                        &mut self.scratch.midi_output,
+                    );
                 }
                 std::cmp::Ordering::Greater => {
                     if let Some(index) = self
@@ -1349,6 +1480,35 @@ impl AudioThreadEndpoint {
             }
         }
         ReceiveStatus::Empty
+    }
+
+    pub fn bridge_lookahead_quanta(&self) -> usize {
+        self.scratch.bridge_lookahead_quanta
+    }
+    /// Only change at an epoch boundary before any input has been submitted.
+    pub fn set_bridge_lookahead_quanta(&mut self, quanta: usize) -> bool {
+        if self.next_sequence != 1 || !(1..=MAX_MIDI_BRIDGE_LOOKAHEAD_QUANTA).contains(&quanta) {
+            return false;
+        }
+        self.scratch.bridge_lookahead_quanta = quanta;
+        true
+    }
+
+    /// Reliable safety latch. The worker resets once and rejects all MIDI until a new epoch.
+    pub fn block_midi_until_epoch(&self) {
+        self.metrics.midi_blocked.store(true, Ordering::Release);
+    }
+    pub fn midi_capabilities(&self) -> (bool, bool) {
+        let mask = self.metrics.midi_capabilities.load(Ordering::Acquire);
+        (mask & 1 != 0, mask & (1 << 16) != 0)
+    }
+
+    pub fn set_transport(&mut self, transport: PluginTransport) {
+        self.scratch.transport = transport;
+    }
+
+    pub fn take_midi_output(&mut self) -> PluginMidiBatch {
+        std::mem::take(&mut self.scratch.midi_output)
     }
 
     pub fn try_send_midi(&mut self, slot: Option<usize>, message: MidiMessage) -> bool {
@@ -1552,6 +1712,7 @@ fn copy_received_block(
     left: &mut [f32],
     right: &mut [f32],
     metrics: &BridgeMetrics,
+    midi_output: &mut PluginMidiBatch,
 ) -> ReceiveStatus {
     let frames = block.frames();
     if left.len() < frames || right.len() < frames {
@@ -1571,6 +1732,7 @@ fn copy_received_block(
     }
     left[..frames].copy_from_slice(&block.left[..frames]);
     right[..frames].copy_from_slice(&block.right[..frames]);
+    *midi_output = block.midi_output;
     ReceiveStatus::Processed {
         sequence: block.sequence,
         frames,
@@ -1723,6 +1885,11 @@ pub struct PluginChainControl {
 }
 
 impl PluginChainControl {
+    pub fn midi_capabilities(&self) -> (bool, bool) {
+        let mask = self.metrics.midi_capabilities.load(Ordering::Acquire);
+        (mask & 1 != 0, mask & (1 << 16) != 0)
+    }
+
     #[must_use]
     pub const fn plugin_endpoint_manifest(&self) -> PluginEndpointManifest {
         self.manifest
@@ -1918,6 +2085,8 @@ fn manifest_accepts_slot(manifest: PluginEndpointManifest, slot: usize) -> bool 
 
 #[derive(Default)]
 struct BridgeMetrics {
+    midi_capabilities: AtomicU32,
+    midi_blocked: AtomicBool,
     native_editors: Mutex<[NativeEditorSnapshot; MAX_PLUGIN_CHAIN_SLOTS]>,
     max_block_frames: AtomicU32,
     current_epoch: AtomicU64,
@@ -2467,8 +2636,22 @@ fn run_worker(
     let mut dry = StereoBlock::silence();
     let mut active_epoch = INITIAL_TRANSPORT_EPOCH;
     let mut shutdown = false;
+    let mut midi_panic_applied = false;
     let mut next_native_poll = Instant::now();
     while !shutdown {
+        let requested = requested_epoch.load(Ordering::Acquire);
+        if requested != 0 && requested != active_epoch {
+            active_epoch = requested;
+            dry = StereoBlock::silence();
+            reset_worker_epoch(active_epoch, &mut slots, &mut events, &metrics);
+            metrics.worker_epoch_resets.fetch_add(1, Ordering::Relaxed);
+            update_latency_and_tail(&mut slots, &mut events, &metrics);
+        }
+        let blocked = metrics.midi_blocked.load(Ordering::Acquire);
+        if blocked && !midi_panic_applied {
+            reset_worker_epoch(active_epoch, &mut slots, &mut events, &metrics);
+        }
+        midi_panic_applied = blocked;
         if Instant::now() >= next_native_poll {
             poll_native_editors(&mut slots, &mut events, &metrics);
             update_latency_and_tail(&mut slots, &mut events, &metrics);
@@ -2528,6 +2711,11 @@ fn run_worker(
                 let frames = block.frames();
                 let had_rt_events = block.rt_event_count != 0;
                 for command in block.rt_events().iter().copied() {
+                    if matches!(command, RtCommand::Midi { .. })
+                        && metrics.midi_blocked.load(Ordering::Acquire)
+                    {
+                        continue;
+                    }
                     let command = clamp_rt_event_to_block(command, frames);
                     rt_metadata_changed |= handle_rt(
                         command,
@@ -2547,7 +2735,20 @@ fn run_worker(
                 {
                     latency_attestation_valid = false;
                 }
-                process_chain(&mut slots, &mut block, &mut dry, &mut events, &metrics);
+                process_chain(
+                    &mut slots,
+                    &mut block,
+                    &mut dry,
+                    &mut events,
+                    &metrics,
+                    config.sample_rate,
+                );
+                if metrics.midi_blocked.load(Ordering::Acquire) {
+                    block.midi_output.lost = true;
+                    block.midi_output.audio_lost = true;
+                    block.left[..frames].fill(0.0);
+                    block.right[..frames].fill(0.0);
+                }
                 // A plug-in may change its reported latency or tail while processing without a
                 // host parameter/configuration command. Polling on the worker after each block
                 // keeps the callback's fixed snapshot current without calling plug-in code there.
@@ -2684,10 +2885,12 @@ fn reset_worker_epoch(
 
         let mut first_error = None;
         for channel in 0_u8..16 {
-            let message = MidiMessage::new([0xb0 | channel, 123, 0], 0);
-            if let Err(message) = catch_backend(|| backend.send_midi(message)) {
-                first_error = Some(format!("All Notes Off failed: {message}"));
-                break;
+            for controller in [64, 123, 120] {
+                let message = MidiMessage::new([0xb0 | channel, controller, 0], 0);
+                if let Err(message) = catch_backend(|| backend.send_midi(message)) {
+                    first_error = Some(format!("MIDI safety reset failed: {message}"));
+                    break;
+                }
             }
         }
         if let Err(message) = catch_backend(|| backend.reset_processing())
@@ -2733,10 +2936,14 @@ fn process_chain(
     dry: &mut StereoBlock,
     events: &mut Producer<RuntimeEvent>,
     metrics: &BridgeMetrics,
+    sample_rate: f64,
 ) {
     let frames = block.frames();
+    let mut latency_prefix = 0_u32;
     for (slot_index, slot) in slots.iter_mut().enumerate() {
         if !slot.config.enabled || slot.config.bypassed || slot.fault.is_some() {
+            block.midi_output.lost = true;
+            block.midi_output.audio_lost |= slot.fault.is_some();
             continue;
         }
         let Some(backend) = slot.backend.as_mut() else {
@@ -2744,18 +2951,29 @@ fn process_chain(
         };
         dry.left[..frames].copy_from_slice(&block.left[..frames]);
         dry.right[..frames].copy_from_slice(&block.right[..frames]);
+        let mut transport = block.transport;
+        transport.sample_position = transport
+            .sample_position
+            .saturating_sub(i64::from(latency_prefix));
+        transport.quarter_note_position -=
+            f64::from(latency_prefix) * transport.tempo / (60.0 * sample_rate);
         let result = catch_backend(|| {
+            backend.set_transport(transport)?;
             backend.process(
                 &mut block.left[..frames],
                 &mut block.right[..frames],
                 frames,
-            )
+            )?;
+            backend.drain_midi_output(&mut block.midi_output, slot_index as u8, frames);
+            Ok(())
         });
         let finite = block.left[..frames]
             .iter()
             .chain(&block.right[..frames])
             .all(|sample| sample.is_finite());
         if let Err(message) = result {
+            block.midi_output.lost = true;
+            block.midi_output.audio_lost = true;
             block.left[..frames].copy_from_slice(&dry.left[..frames]);
             block.right[..frames].copy_from_slice(&dry.right[..frames]);
             slot.fault = Some(message.clone());
@@ -2763,6 +2981,8 @@ fn process_chain(
             continue;
         }
         if !finite {
+            block.midi_output.lost = true;
+            block.midi_output.audio_lost = true;
             block.left[..frames].copy_from_slice(&dry.left[..frames]);
             block.right[..frames].copy_from_slice(&dry.right[..frames]);
             let message = "plug-in produced non-finite audio".to_owned();
@@ -2770,6 +2990,11 @@ fn process_chain(
             register_fault(slot_index, message, events, metrics);
             continue;
         }
+        // Snapshot is worker-owned and coherent for this block; any process-time latency
+        // change invalidates the existing block attestation before callback consumption.
+        latency_prefix = latency_prefix.saturating_add(
+            metrics.plugin_slot_latency_samples[slot_index].load(Ordering::Relaxed),
+        );
         let wet = slot.config.wet;
         if wet < 1.0 {
             let dry_gain = 1.0 - wet;
@@ -3812,6 +4037,7 @@ fn update_latency_and_tail(
     let mut latency = 0u64;
     let mut tail = 0u32;
     let mut active_mask = 0_u16;
+    let mut midi_capabilities = 0_u32;
     let mut slot_latencies = [0_u32; MAX_PLUGIN_CHAIN_SLOTS];
     for (slot_index, slot) in slots.iter_mut().enumerate() {
         if !slot.config.enabled || slot.config.bypassed || slot.fault.is_some() {
@@ -3822,6 +4048,9 @@ fn update_latency_and_tail(
                 Ok((plugin_latency, plugin_tail)) => {
                     debug_assert!(slot_index < MAX_PLUGIN_CHAIN_SLOTS);
                     active_mask |= 1_u16 << slot_index;
+                    let (input, output) = backend.midi_capabilities();
+                    midi_capabilities |= u32::from(input) << slot_index;
+                    midi_capabilities |= u32::from(output) << (slot_index + 16);
                     slot_latencies[slot_index] = plugin_latency;
                     latency = latency.saturating_add(u64::from(plugin_latency));
                     // Serial tails can accumulate: an upstream reverb tail still has to traverse
@@ -3835,6 +4064,9 @@ fn update_latency_and_tail(
             }
         }
     }
+    metrics
+        .midi_capabilities
+        .store(midi_capabilities, Ordering::Release);
     publish_plugin_latency_snapshot(
         metrics,
         active_mask,
@@ -4299,6 +4531,7 @@ impl Drop for Vst2Backend {
 
 #[cfg(feature = "vst3")]
 struct Vst3Backend {
+    last_transport: PluginTransport,
     native_revision_base: u64,
     plugin: vst3_host::Plugin,
     buffers: vst3_host::AudioBuffers,
@@ -4373,6 +4606,7 @@ impl Vst3Backend {
             format!("{} — {}", plugin.info().name, plugin.info().vendor)
         };
         Ok(Self {
+            last_transport: PluginTransport::default(),
             native_revision_base: 0,
             plugin,
             buffers: vst3_host::AudioBuffers::new(
@@ -4523,6 +4757,101 @@ impl PluginBackend for Vst3Backend {
         self.plugin
             .send_midi_event_at(event, i32::from(message.sample_offset))
             .map_err(|error| error.to_string())
+    }
+
+    fn midi_capabilities(&self) -> (bool, bool) {
+        (
+            self.plugin.info().has_midi_input,
+            self.plugin.info().has_midi_output,
+        )
+    }
+
+    fn set_transport(&mut self, transport: PluginTransport) -> Result<(), String> {
+        self.last_transport = transport;
+        self.plugin
+            .set_process_transport(vst3_host::ProcessTransport {
+                sample_position: transport.sample_position,
+                quarter_note_position: transport.quarter_note_position,
+                tempo: transport.tempo,
+                playing: transport.playing,
+                time_sig_numerator: transport.time_sig_numerator,
+                time_sig_denominator: transport.time_sig_denominator,
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    fn drain_midi_output(&mut self, batch: &mut PluginMidiBatch, slot: u8, frames: usize) {
+        let (events, lost) = self.plugin.take_output_events_with_loss();
+        batch.lost |= lost;
+        for event in events {
+            if event.bus_index != 0
+                || event.sample_offset < 0
+                || event.sample_offset as usize >= frames
+            {
+                batch.lost = true;
+                continue;
+            }
+            // The first slice intentionally narrows to MIDI1. Rich per-note IDs, tuning,
+            // SysEx and expression are not silently presented as lossless MPE/MIDI2.
+            let compatible = match &event.data {
+                vst3_host::PluginEventData::NoteOn {
+                    velocity, tuning, ..
+                }
+                | vst3_host::PluginEventData::NoteOff {
+                    velocity, tuning, ..
+                } => velocity.is_finite() && *tuning == 0.0,
+                vst3_host::PluginEventData::PolyPressure { pressure, .. } => pressure.is_finite(),
+                vst3_host::PluginEventData::LegacyMidiCcOut { .. } => true,
+                _ => false,
+            };
+            let Some(midi) = event.to_midi().filter(|_| compatible) else {
+                batch.lost = true;
+                continue;
+            };
+            use vst3_host::MidiEvent;
+            let data = match midi {
+                MidiEvent::NoteOn {
+                    channel,
+                    note,
+                    velocity,
+                } => [
+                    if velocity == 0 { 0x80 } else { 0x90 } | channel.as_index(),
+                    note,
+                    velocity,
+                ],
+                MidiEvent::NoteOff {
+                    channel,
+                    note,
+                    velocity,
+                } => [0x80 | channel.as_index(), note, velocity],
+                MidiEvent::PolyAftertouch {
+                    channel,
+                    note,
+                    pressure,
+                } => [0xa0 | channel.as_index(), note, pressure],
+                MidiEvent::ControlChange {
+                    channel,
+                    controller,
+                    value,
+                } => [0xb0 | channel.as_index(), controller, value],
+                MidiEvent::ProgramChange { channel, program } => {
+                    [0xc0 | channel.as_index(), program, 0]
+                }
+                MidiEvent::ChannelAftertouch { channel, pressure } => {
+                    [0xd0 | channel.as_index(), pressure, 0]
+                }
+                MidiEvent::PitchBend { channel, value } => [
+                    0xe0 | channel.as_index(),
+                    (value & 127) as u8,
+                    ((value >> 7) & 127) as u8,
+                ],
+                _ => {
+                    batch.lost = true;
+                    continue;
+                }
+            };
+            batch.push(slot, MidiMessage::new(data, event.sample_offset as usize));
+        }
     }
 
     fn set_parameter(&mut self, id: u32, normalized: f32) -> Result<(), String> {
@@ -4687,6 +5016,18 @@ impl PluginBackend for Vst3Backend {
         if !self.prepared {
             return Ok(());
         }
+        // CC mapping is optional in VST3. Queue native NoteOff for tracked ordinary notes
+        // and consume it on this worker even when no more callback blocks will arrive.
+        let stopped = PluginTransport {
+            playing: false,
+            ..self.last_transport
+        };
+        self.set_transport(stopped)?;
+        self.plugin
+            .midi_panic()
+            .map_err(|error| error.to_string())?;
+        self.process(&mut [0.0], &mut [0.0], 1)?;
+        let _ = self.plugin.take_output_events_with_loss();
         self.plugin
             .stop_processing()
             .map_err(|error| error.to_string())?;
@@ -5251,6 +5592,7 @@ mod tests {
         parameter_catalog: Vec<PluginParameterDescriptor>,
         parameter_catalog_revision: u64,
         parameter_snapshot_getters: Option<Arc<AtomicU64>>,
+        transports: Option<Arc<std::sync::Mutex<Vec<PluginTransport>>>>,
     }
 
     impl MockBackend {
@@ -5272,6 +5614,7 @@ mod tests {
                 parameter_catalog: Vec::new(),
                 parameter_catalog_revision: 1,
                 parameter_snapshot_getters: None,
+                transports: None,
             }
         }
     }
@@ -5282,6 +5625,13 @@ mod tests {
         }
 
         fn prepare(&mut self, _config: PluginPrepareConfig) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn set_transport(&mut self, transport: PluginTransport) -> Result<(), String> {
+            if let Some(transports) = &self.transports {
+                transports.lock().unwrap().push(transport);
+            }
             Ok(())
         }
 
@@ -5440,6 +5790,72 @@ mod tests {
         fn tail_samples(&self) -> u32 {
             self.tail
         }
+    }
+
+    #[test]
+    fn midi_lookahead_counts_real_deadline_misses_but_not_sixteen_startup_quanta() {
+        let (mut audio, _input, _output) = manual_endpoint(DEFAULT_QUEUE_CAPACITY, 64);
+        assert!(audio.set_bridge_lookahead_quanta(16));
+        let mut left = [0.0; 64];
+        let mut right = [0.0; 64];
+        for _ in 0..16 {
+            audio.process_realtime(&[0.0; 64], &[0.0; 64], &mut left, &mut right);
+        }
+        assert_eq!(audio.stats().deadline_misses, 0);
+        audio.process_realtime(&[0.0; 64], &[0.0; 64], &mut left, &mut right);
+        assert_eq!(audio.stats().deadline_misses, 1);
+    }
+
+    #[test]
+    fn chain_transport_subtracts_active_preceding_plugin_latency() {
+        let first_context = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let second_context = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut chain = PluginChain::spawn_with_backend_factory(
+            {
+                let first_context = Arc::clone(&first_context);
+                let second_context = Arc::clone(&second_context);
+                move || {
+                    let mut first = MockBackend::new("first", MockProcess::Gain(1.0));
+                    first.latency = 37;
+                    first.transports = Some(first_context);
+                    let mut second = MockBackend::new("second", MockProcess::Gain(1.0));
+                    second.latency = 19;
+                    second.transports = Some(second_context);
+                    vec![
+                        BackendSlot::new(Box::new(first)),
+                        BackendSlot::new(Box::new(second)),
+                    ]
+                }
+            },
+            config(),
+        )
+        .unwrap();
+        wait_until(|| {
+            chain
+                .control
+                .plugin_latency_snapshot()
+                .is_some_and(|snapshot| snapshot.total_plugin_latency_samples == 56)
+        });
+        let transport = PluginTransport {
+            sample_position: 12,
+            quarter_note_position: 0.0005,
+            tempo: 120.0,
+            playing: true,
+            ..PluginTransport::default()
+        };
+        chain.audio.set_transport(transport);
+        chain.audio.try_submit(&[0.0; 64], &[0.0; 64]);
+        receive(&mut chain.audio, 64);
+        assert_eq!(first_context.lock().unwrap()[0], transport);
+        let second = second_context.lock().unwrap()[0];
+        assert_eq!(second.sample_position, -25);
+        assert!(
+            (second.quarter_note_position - (transport.quarter_note_position - 37.0 / 24_000.0))
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(second.tempo, 120.0);
+        assert!(second.playing);
     }
 
     fn config() -> PluginPrepareConfig {
@@ -7025,7 +7441,7 @@ mod tests {
             SubmitStatus::Submitted { .. }
         ));
         wait_until(|| entered.load(Ordering::Acquire));
-        for _ in 0..DEFAULT_QUEUE_CAPACITY {
+        for _ in 0..LEGACY_QUEUE_ADMISSION {
             assert!(matches!(
                 chain.audio.try_submit(&samples, &samples),
                 SubmitStatus::Submitted { .. }

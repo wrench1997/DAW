@@ -3804,6 +3804,7 @@ mod tests {
 
     fn plugin(instance_id: u64) -> PluginInstance {
         PluginInstance {
+            midi_ports: crate::plugin_midi_routing::PluginMidiPorts::default(),
             id: instance_id,
             format: PluginFormat::Vst3,
             role: PluginRole::Instrument,

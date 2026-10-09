@@ -1982,6 +1982,7 @@ const MAX_QUEUED_EVENT_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 pub struct HostEventList {
     pub events: Mutex<Vec<PluginEvent>>,
     payload_bytes: AtomicUsize,
+    lost: AtomicBool,
 }
 
 impl HostEventList {
@@ -1989,7 +1990,13 @@ impl HostEventList {
         Self {
             events: Mutex::new(Vec::with_capacity(MAX_QUEUED_EVENTS)),
             payload_bytes: AtomicUsize::new(0),
+            lost: AtomicBool::new(false),
         }
+    }
+
+    /// Acknowledge any rejected/uncaptured event since the last loss-aware drain.
+    pub fn take_loss(&self) -> bool {
+        self.lost.swap(false, Ordering::AcqRel)
     }
 
     pub fn clear(&self) {
@@ -2000,6 +2007,7 @@ impl HostEventList {
                 log::trace!("HostEventList: Cleared all events");
             }
             Err(_) => {
+                self.lost.store(true, Ordering::Release);
                 log::error!("HostEventList: Failed to lock events for clear");
             }
         }
@@ -2018,6 +2026,7 @@ impl HostEventList {
     /// every other path into the list; the excess is dropped with a warning.
     pub fn reset_with(&self, events: impl IntoIterator<Item = PluginEvent>) {
         let Ok(mut queued) = self.events.lock() else {
+            self.lost.store(true, Ordering::Release);
             log::error!("HostEventList: Failed to lock events for reset_with");
             return;
         };
@@ -2025,11 +2034,13 @@ impl HostEventList {
         let mut payload_bytes = 0usize;
         for event in events {
             if queued.len() >= MAX_QUEUED_EVENTS {
+                self.lost.store(true, Ordering::Release);
                 log::warn!("HostEventList: dropping event, queue full at {MAX_QUEUED_EVENTS}");
                 break;
             }
             let next_payload_bytes = payload_bytes.saturating_add(event.payload_bytes());
             if next_payload_bytes > MAX_QUEUED_EVENT_PAYLOAD_BYTES {
+                self.lost.store(true, Ordering::Release);
                 log::warn!(
                     "HostEventList: dropping event, payload budget exceeds \
                      {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
@@ -2047,7 +2058,10 @@ impl HostEventList {
         self.events
             .lock()
             .map(|events| events.is_empty())
-            .unwrap_or(true)
+            .unwrap_or_else(|_| {
+                self.lost.store(true, Ordering::Release);
+                true
+            })
     }
 
     /// Move each queued event into `f`, leaving the list empty while retaining its backing
@@ -2059,6 +2073,8 @@ impl HostEventList {
                 f(event);
             }
             self.payload_bytes.store(0, Ordering::Relaxed);
+        } else {
+            self.lost.store(true, Ordering::Release);
         }
     }
 
@@ -2066,6 +2082,7 @@ impl HostEventList {
         match self.events.lock() {
             Ok(mut events) => {
                 if events.len() >= MAX_QUEUED_EVENTS {
+                    self.lost.store(true, Ordering::Release);
                     log::warn!(
                         "HostEventList: dropping event, queue full at {MAX_QUEUED_EVENTS} \
                          (is the plugin processing?)"
@@ -2076,6 +2093,7 @@ impl HostEventList {
                 if queued_payload_bytes.saturating_add(event.payload_bytes())
                     > MAX_QUEUED_EVENT_PAYLOAD_BYTES
                 {
+                    self.lost.store(true, Ordering::Release);
                     log::warn!(
                         "HostEventList: dropping event, payload budget exceeds \
                          {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
@@ -2093,6 +2111,7 @@ impl HostEventList {
                 );
             }
             Err(_) => {
+                self.lost.store(true, Ordering::Release);
                 log::error!("HostEventList: Failed to lock events for add_event");
             }
         }
@@ -2101,6 +2120,7 @@ impl HostEventList {
     /// Deep-copy a raw SDK event into the owned list.
     pub fn add_raw_event(&self, event: &Event) -> bool {
         let Ok(event) = (unsafe { raw_event_to_plugin_event(event) }) else {
+            self.lost.store(true, Ordering::Release);
             return false;
         };
         self.add_event(event);
@@ -2171,6 +2191,7 @@ impl IEventListTrait for HostEventList {
 
     unsafe fn addEvent(&self, event: *mut Event) -> i32 {
         if event.is_null() {
+            self.lost.store(true, Ordering::Release);
             log::warn!("HostEventList: addEvent called with null event pointer");
             return kResultFalse;
         }
@@ -2180,6 +2201,7 @@ impl IEventListTrait for HostEventList {
                 // Bound what a plugin can emit into the output list in a single block, so a
                 // misbehaving plugin can't drive unbounded growth from inside `process()`.
                 if events.len() >= MAX_QUEUED_EVENTS {
+                    self.lost.store(true, Ordering::Release);
                     log::warn!(
                         "HostEventList: dropping plugin event, queue full at {MAX_QUEUED_EVENTS}"
                     );
@@ -2187,12 +2209,16 @@ impl IEventListTrait for HostEventList {
                 }
                 let owned = match raw_event_to_plugin_event(&*event) {
                     Ok(event) => event,
-                    Err(()) => return kResultFalse,
+                    Err(()) => {
+                        self.lost.store(true, Ordering::Release);
+                        return kResultFalse;
+                    }
                 };
                 let queued_payload_bytes = self.payload_bytes.load(Ordering::Relaxed);
                 if queued_payload_bytes.saturating_add(owned.payload_bytes())
                     > MAX_QUEUED_EVENT_PAYLOAD_BYTES
                 {
+                    self.lost.store(true, Ordering::Release);
                     log::warn!(
                         "HostEventList: dropping plugin event, payload budget exceeds \
                          {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
@@ -2208,6 +2234,7 @@ impl IEventListTrait for HostEventList {
                 kResultOk
             }
             Err(_) => {
+                self.lost.store(true, Ordering::Release);
                 log::error!("HostEventList: Failed to lock events for addEvent");
                 kResultFalse
             }
@@ -4116,5 +4143,30 @@ mod memory_stream_tests {
             Some("Project")
         );
         assert_eq!(read_attribute(&project, c"FilePathString"), None);
+    }
+}
+
+#[cfg(test)]
+mod output_event_loss_tests {
+    use super::*;
+
+    #[test]
+    fn sdk_output_rejection_is_latched_across_clear_until_taken() {
+        let list = HostEventList::new();
+        let event = PluginEvent::from(crate::midi::MidiEvent::NoteOff {
+            channel: crate::midi::MidiChannel::Ch1,
+            note: 60,
+            velocity: 0,
+        });
+        for _ in 0..MAX_QUEUED_EVENTS + 1 {
+            list.add_event(event.clone());
+        }
+        list.clear();
+        assert!(list.take_loss());
+        assert!(!list.take_loss());
+        unsafe {
+            assert_eq!(list.addEvent(std::ptr::null_mut()), kResultFalse);
+        }
+        assert!(list.take_loss());
     }
 }

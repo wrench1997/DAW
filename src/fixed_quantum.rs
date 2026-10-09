@@ -12,8 +12,8 @@
 
 use crate::plugins::plugin_runtime::{
     AudioThreadEndpoint, BridgeStats, MAX_PLUGIN_BLOCK_FRAMES, MidiMessage, ParameterEditId,
-    PluginEndpointManifest, PluginEndpointSnapshot, PluginLatencySnapshot, RealtimeOutputSource,
-    RealtimeProcessStatus, SubmitStatus,
+    PluginEndpointManifest, PluginEndpointSnapshot, PluginLatencySnapshot, PluginMidiBatch,
+    PluginMidiOutput, PluginTransport, RealtimeOutputSource, RealtimeProcessStatus, SubmitStatus,
 };
 use crate::timeline::{
     TIMELINE_ENDPOINT_MAX_EVENTS_PER_CALLBACK, TIMELINE_ENDPOINT_MAX_EVENTS_PER_QUANTUM,
@@ -163,6 +163,13 @@ pub struct FixedQuantumStats {
 
 /// Narrow callback surface used by the production endpoint and deterministic tests.
 pub trait FixedQuantumEndpoint {
+    fn fixed_bridge_lookahead_quanta(&self) -> usize {
+        1
+    }
+    fn fixed_set_transport(&mut self, _transport: PluginTransport) {}
+    fn fixed_take_midi_output(&mut self) -> PluginMidiBatch {
+        PluginMidiBatch::default()
+    }
     fn fixed_max_block_frames(&self) -> usize;
     fn fixed_epoch(&self) -> u64;
     /// Stable creation-time physical-slot identity for this exact endpoint.
@@ -211,6 +218,16 @@ pub trait FixedQuantumEndpoint {
 }
 
 impl FixedQuantumEndpoint for AudioThreadEndpoint {
+    fn fixed_bridge_lookahead_quanta(&self) -> usize {
+        self.bridge_lookahead_quanta()
+    }
+    fn fixed_set_transport(&mut self, transport: PluginTransport) {
+        self.set_transport(transport);
+    }
+    fn fixed_take_midi_output(&mut self) -> PluginMidiBatch {
+        self.take_midi_output()
+    }
+
     fn fixed_max_block_frames(&self) -> usize {
         self.max_block_frames()
     }
@@ -281,7 +298,55 @@ impl FixedQuantumEndpoint for AudioThreadEndpoint {
     }
 }
 
+const OUTPUT_MIDI_RING_CAPACITY: usize = 4096;
+const EMPTY_MIDI_OUTPUT: PluginMidiOutput = PluginMidiOutput {
+    slot: 0,
+    message: MidiMessage {
+        data: [0; 3],
+        sample_offset: 0,
+    },
+};
+
+#[derive(Clone, Copy)]
+struct ScheduledMidiOutput {
+    frame: u64,
+    event: PluginMidiOutput,
+}
+const EMPTY_SCHEDULED_OUTPUT: ScheduledMidiOutput = ScheduledMidiOutput {
+    frame: 0,
+    event: EMPTY_MIDI_OUTPUT,
+};
+
+/// Sample-aligned MIDI output of the last device callback. Loss requires downstream panic.
+pub struct CallbackMidiOutput {
+    pub events: [PluginMidiOutput; OUTPUT_MIDI_RING_CAPACITY],
+    pub len: usize,
+    pub lost: bool,
+    pub audio_lost: bool,
+}
+impl CallbackMidiOutput {
+    fn new() -> Self {
+        Self {
+            events: [EMPTY_MIDI_OUTPUT; OUTPUT_MIDI_RING_CAPACITY],
+            len: 0,
+            lost: false,
+            audio_lost: false,
+        }
+    }
+}
+
 struct AdapterScratch {
+    transport: PluginTransport,
+    pending_transport: PluginTransport,
+    sample_rate: f64,
+    output_position: u64,
+    output_written: u64,
+    midi_ring: [ScheduledMidiOutput; OUTPUT_MIDI_RING_CAPACITY],
+    midi_head: usize,
+    midi_len: usize,
+    midi_fault_positions: [(u64, bool); 64],
+    midi_fault_count: usize,
+    midi_callback: CallbackMidiOutput,
     input_left: [f32; MAX_PLUGIN_BLOCK_FRAMES],
     input_right: [f32; MAX_PLUGIN_BLOCK_FRAMES],
     quantum_left: [f32; MAX_PLUGIN_BLOCK_FRAMES],
@@ -300,6 +365,17 @@ struct AdapterScratch {
 impl AdapterScratch {
     fn new() -> Self {
         Self {
+            transport: PluginTransport::default(),
+            pending_transport: PluginTransport::default(),
+            sample_rate: 48000.0,
+            output_position: 0,
+            output_written: 0,
+            midi_ring: [EMPTY_SCHEDULED_OUTPUT; OUTPUT_MIDI_RING_CAPACITY],
+            midi_head: 0,
+            midi_len: 0,
+            midi_fault_positions: [(0, false); 64],
+            midi_fault_count: 0,
+            midi_callback: CallbackMidiOutput::new(),
             input_left: [0.0; MAX_PLUGIN_BLOCK_FRAMES],
             input_right: [0.0; MAX_PLUGIN_BLOCK_FRAMES],
             quantum_left: [0.0; MAX_PLUGIN_BLOCK_FRAMES],
@@ -317,6 +393,14 @@ impl AdapterScratch {
     }
 
     fn clear_stream(&mut self) {
+        self.output_position = 0;
+        self.output_written = 0;
+        self.midi_head = 0;
+        self.midi_len = 0;
+        self.midi_fault_count = 0;
+        self.midi_callback.len = 0;
+        self.midi_callback.lost = true;
+        self.midi_callback.audio_lost = true;
         self.input_fill = 0;
         self.output_head = 0;
         self.output_len = 0;
@@ -332,6 +416,7 @@ impl AdapterScratch {
         self.output_left[index] = left;
         self.output_right[index] = right;
         self.output_len += 1;
+        self.output_written += 1;
         true
     }
 
@@ -357,6 +442,28 @@ pub struct FixedQuantumAdapter<E = AudioThreadEndpoint> {
 }
 
 impl FixedQuantumAdapter<AudioThreadEndpoint> {
+    pub fn bridge_lookahead_quanta(&self) -> usize {
+        self.endpoint.bridge_lookahead_quanta()
+    }
+
+    pub fn set_midi_bridge_lookahead(&mut self, enabled: bool) -> bool {
+        if self.scratch.input_fill != 0 {
+            return false;
+        }
+        self.endpoint.set_bridge_lookahead_quanta(if enabled {
+            crate::plugins::plugin_runtime::MAX_MIDI_BRIDGE_LOOKAHEAD_QUANTA
+        } else {
+            1
+        })
+    }
+
+    pub fn block_midi_until_epoch(&self) {
+        self.endpoint.block_midi_until_epoch();
+    }
+    pub fn midi_capabilities(&self) -> (bool, bool) {
+        self.endpoint.midi_capabilities()
+    }
+
     pub fn new(
         endpoint: AudioThreadEndpoint,
         quantum_frames: usize,
@@ -394,8 +501,8 @@ impl<E: FixedQuantumEndpoint> FixedQuantumAdapter<E> {
     pub fn latency(&self) -> FixedQuantumLatency {
         FixedQuantumLatency {
             input_accumulation_frames: self.quantum_frames,
-            bridge_frames: self.quantum_frames,
-            total_frames: self.quantum_frames * 2,
+            bridge_frames: self.quantum_frames * self.endpoint.fixed_bridge_lookahead_quanta(),
+            total_frames: self.quantum_frames * (1 + self.endpoint.fixed_bridge_lookahead_quanta()),
         }
     }
 
@@ -547,6 +654,17 @@ impl<E: FixedQuantumEndpoint> FixedQuantumAdapter<E> {
         self.endpoint
     }
 
+    /// Context is stamped when the first sample of a partial quantum enters; later callbacks
+    /// cannot overwrite it. The caller supplies the first input sample's content position.
+    pub fn set_transport(&mut self, transport: PluginTransport, sample_rate: f64) {
+        self.scratch.transport = transport;
+        self.scratch.sample_rate = sample_rate;
+    }
+
+    pub fn midi_output(&self) -> &CallbackMidiOutput {
+        &self.scratch.midi_callback
+    }
+
     fn process_inner(
         &mut self,
         epoch: u64,
@@ -564,6 +682,9 @@ impl<E: FixedQuantumEndpoint> FixedQuantumAdapter<E> {
         }
 
         let epoch_changed = self.set_epoch(epoch);
+        self.scratch.midi_callback.len = 0;
+        self.scratch.midi_callback.lost = epoch_changed;
+        self.scratch.midi_callback.audio_lost = epoch_changed;
         let latency_drift_quanta_before = self.stats.latency_drift_quanta;
         self.stats.callbacks += 1;
         self.stats.callback_frames += frames as u64;
@@ -574,6 +695,16 @@ impl<E: FixedQuantumEndpoint> FixedQuantumAdapter<E> {
         let mut event_cursor = 0;
         while consumed < frames {
             let old_fill = self.scratch.input_fill;
+            if old_fill == 0 {
+                let mut transport = self.scratch.transport;
+                if transport.playing {
+                    transport.sample_position =
+                        transport.sample_position.saturating_add(consumed as i64);
+                    transport.quarter_note_position +=
+                        consumed as f64 * transport.tempo / (60.0 * self.scratch.sample_rate);
+                }
+                self.scratch.pending_transport = transport;
+            }
             let chunk = (self.quantum_frames - old_fill).min(frames - consumed);
             let chunk_end = consumed + chunk;
 
@@ -615,6 +746,38 @@ impl<E: FixedQuantumEndpoint> FixedQuantumAdapter<E> {
             }
         }
 
+        let callback_start = self.scratch.output_position;
+        let callback_end = callback_start.saturating_add(frames as u64);
+        while self.scratch.midi_len != 0 {
+            let scheduled = self.scratch.midi_ring[self.scratch.midi_head];
+            if scheduled.frame >= callback_end {
+                break;
+            }
+            self.scratch.midi_head = (self.scratch.midi_head + 1) % OUTPUT_MIDI_RING_CAPACITY;
+            self.scratch.midi_len -= 1;
+            if scheduled.frame < callback_start {
+                self.scratch.midi_callback.lost = true;
+                continue;
+            }
+            let mut event = scheduled.event;
+            event.message.sample_offset = (scheduled.frame - callback_start) as u16;
+            let index = self.scratch.midi_callback.len;
+            self.scratch.midi_callback.events[index] = event;
+            self.scratch.midi_callback.len += 1;
+        }
+        let mut retained_faults = 0;
+        for index in 0..self.scratch.midi_fault_count {
+            let position = self.scratch.midi_fault_positions[index];
+            if position.0 < callback_end {
+                self.scratch.midi_callback.lost = true;
+                self.scratch.midi_callback.audio_lost |= position.1;
+            } else {
+                self.scratch.midi_fault_positions[retained_faults] = position;
+                retained_faults += 1;
+            }
+        }
+        self.scratch.midi_fault_count = retained_faults;
+        self.scratch.output_position = callback_end;
         for index in 0..frames {
             let (left, right) = match self.scratch.pop_output() {
                 Some(samples) => samples,
@@ -713,6 +876,8 @@ impl<E: FixedQuantumEndpoint> FixedQuantumAdapter<E> {
         self.scratch.pending_event_count = 0;
 
         let quantum = self.quantum_frames;
+        self.endpoint
+            .fixed_set_transport(self.scratch.pending_transport);
         let status = self.endpoint.fixed_process_with_expected_latency_revision(
             &self.scratch.input_left[..quantum],
             &self.scratch.input_right[..quantum],
@@ -769,6 +934,67 @@ impl<E: FixedQuantumEndpoint> FixedQuantumAdapter<E> {
                 self.scratch.quantum_right[..quantum].fill(0.0);
                 self.stats.bridge_gaps += 1;
                 self.stats.events_dropped_on_gap += staged_count;
+            }
+        }
+
+        let batch = self.endpoint.fixed_take_midi_output();
+        let valid = matches!(
+            status,
+            RealtimeProcessStatus::Processed {
+                source: RealtimeOutputSource::Plugin,
+                ..
+            }
+        );
+        let startup = matches!(status, RealtimeProcessStatus::Processed { sequence: 0, .. });
+        let audio_lost = batch.audio_lost || (!valid && !startup);
+        let lost = batch.lost || audio_lost;
+        let start = self.scratch.output_written;
+        if lost {
+            if self.scratch.midi_fault_count < self.scratch.midi_fault_positions.len() {
+                self.scratch.midi_fault_positions[self.scratch.midi_fault_count] =
+                    (start, audio_lost);
+                self.scratch.midi_fault_count += 1;
+            } else {
+                self.scratch.midi_callback.lost = true;
+                self.scratch.midi_callback.audio_lost |= audio_lost;
+            }
+        } else if valid {
+            // Stable offset sort; at equal time note-off precedes note-on to avoid hanging
+            // retriggers. The batch lives on bounded worker/callback scratch, never a Vec.
+            let mut batch = batch;
+            let key = |event: PluginMidiOutput| {
+                (
+                    event.message.sample_offset,
+                    u8::from(
+                        event.message.data[0] & 0xf0 != 0x80
+                            && !(event.message.data[0] & 0xf0 == 0x90
+                                && event.message.data[2] == 0),
+                    ),
+                )
+            };
+            for index in 1..batch.len {
+                let event = batch.events[index];
+                let mut cursor = index;
+                while cursor > 0 && key(batch.events[cursor - 1]) > key(event) {
+                    batch.events[cursor] = batch.events[cursor - 1];
+                    cursor -= 1;
+                }
+                batch.events[cursor] = event;
+            }
+            for event in batch.events[..batch.len].iter().copied() {
+                if usize::from(event.message.sample_offset) >= quantum
+                    || self.scratch.midi_len == OUTPUT_MIDI_RING_CAPACITY
+                {
+                    self.scratch.midi_callback.lost = true;
+                    continue;
+                }
+                let index =
+                    (self.scratch.midi_head + self.scratch.midi_len) % OUTPUT_MIDI_RING_CAPACITY;
+                self.scratch.midi_ring[index] = ScheduledMidiOutput {
+                    frame: start + u64::from(event.message.sample_offset),
+                    event,
+                };
+                self.scratch.midi_len += 1;
             }
         }
 
@@ -1572,5 +1798,215 @@ mod tests {
         );
         assert_eq!(left, [0.0; 64]);
         assert!(adapter.endpoint.submitted.is_empty());
+    }
+    /// Deterministic worker that makes no progress during a device callback. Only the
+    /// test driver's callback boundary promotes submitted work to completed work.
+    struct BurstWorker {
+        epoch: u64,
+        sequence: u64,
+        ready: VecDeque<(u64, PluginTransport)>,
+        submitted: Vec<(u64, PluginTransport)>,
+        transport: PluginTransport,
+        contexts: Vec<PluginTransport>,
+        output: PluginMidiBatch,
+        misses: usize,
+    }
+    impl BurstWorker {
+        fn new() -> Self {
+            Self {
+                epoch: 1,
+                sequence: 1,
+                ready: VecDeque::new(),
+                submitted: Vec::new(),
+                transport: PluginTransport::default(),
+                contexts: Vec::new(),
+                output: PluginMidiBatch::default(),
+                misses: 0,
+            }
+        }
+        fn work_between_callbacks(&mut self) {
+            self.ready.extend(self.submitted.drain(..));
+        }
+    }
+    impl FixedQuantumEndpoint for BurstWorker {
+        fn fixed_bridge_lookahead_quanta(&self) -> usize {
+            16
+        }
+        fn fixed_max_block_frames(&self) -> usize {
+            128
+        }
+        fn fixed_epoch(&self) -> u64 {
+            self.epoch
+        }
+        fn fixed_plugin_endpoint_manifest(&self) -> PluginEndpointManifest {
+            PluginEndpointManifest::unknown_for_slots(1).unwrap()
+        }
+        fn fixed_plugin_latency_snapshot(&self) -> Option<PluginLatencySnapshot> {
+            None
+        }
+        fn fixed_reported_latency_samples(&self) -> u32 {
+            2048
+        }
+        fn fixed_set_epoch(&mut self, epoch: u64) -> bool {
+            if epoch == self.epoch {
+                return false;
+            }
+            self.epoch = epoch;
+            self.sequence = 1;
+            self.ready.clear();
+            self.submitted.clear();
+            self.output = PluginMidiBatch::default();
+            true
+        }
+        fn fixed_send_midi(&mut self, _: Option<usize>, _: MidiMessage) -> bool {
+            true
+        }
+        fn fixed_set_parameter(&mut self, _: usize, _: u32, _: f32) -> bool {
+            true
+        }
+        fn fixed_set_transport(&mut self, transport: PluginTransport) {
+            self.transport = transport;
+        }
+        fn fixed_take_midi_output(&mut self) -> PluginMidiBatch {
+            std::mem::take(&mut self.output)
+        }
+        fn fixed_process(
+            &mut self,
+            input_left: &[f32],
+            _: &[f32],
+            left: &mut [f32],
+            right: &mut [f32],
+        ) -> RealtimeProcessStatus {
+            let sequence = self.sequence;
+            self.sequence += 1;
+            let expected = sequence.saturating_sub(16);
+            left.fill(0.0);
+            right.fill(0.0);
+            let mut source = RealtimeOutputSource::DelayedDry;
+            if expected != 0 {
+                if self
+                    .ready
+                    .front()
+                    .is_some_and(|(sequence, _)| *sequence == expected)
+                {
+                    self.ready.pop_front();
+                    source = RealtimeOutputSource::Plugin;
+                    for (offset, data) in [
+                        (0, [0x90, 60, 100]),
+                        (1, [0x80, 60, 0]),
+                        (127, [0x90, 64, 90]),
+                    ] {
+                        self.output.push(0, MidiMessage::new(data, offset));
+                        left[offset] = data[0] as f32;
+                        right[offset] = data[1] as f32;
+                    }
+                } else {
+                    self.misses += 1;
+                }
+            }
+            self.submitted.push((sequence, self.transport));
+            self.contexts.push(self.transport);
+            RealtimeProcessStatus::Processed {
+                sequence: expected,
+                frames: input_left.len(),
+                submit: SubmitStatus::Submitted { sequence },
+                source,
+            }
+        }
+    }
+
+    type GeneratedMidiRender = (
+        Vec<(usize, [u8; 3])>,
+        Vec<f32>,
+        FixedQuantumAdapter<BurstWorker>,
+    );
+
+    fn render_generated_midi(split: &[usize]) -> GeneratedMidiRender {
+        let mut adapter = FixedQuantumAdapter::with_endpoint(BurstWorker::new(), 128).unwrap();
+        let mut absolute = 0;
+        let mut midi = Vec::new();
+        let mut audio = Vec::new();
+        while absolute < 8192 {
+            let frames = split[(audio.len() / 8192 + absolute) % split.len()].min(8192 - absolute);
+            let mut left = vec![0.0; frames];
+            let mut right = vec![0.0; frames];
+            adapter.set_transport(
+                PluginTransport {
+                    sample_position: absolute as i64,
+                    quarter_note_position: absolute as f64 / 24000.0,
+                    tempo: 120.0,
+                    playing: true,
+                    ..PluginTransport::default()
+                },
+                48000.0,
+            );
+            adapter.process_generator(1, frames, &mut left, &mut right, &[]);
+            assert!(
+                !adapter.midi_output().lost,
+                "false output loss at {absolute}, frames {frames}"
+            );
+            for event in &adapter.midi_output().events[..adapter.midi_output().len] {
+                let offset = usize::from(event.message.sample_offset);
+                assert_eq!(left[offset], event.message.data[0] as f32);
+                assert_eq!(right[offset], event.message.data[1] as f32);
+                midi.push((absolute + offset, event.message.data));
+            }
+            audio.extend(left);
+            absolute += frames;
+            adapter.endpoint.work_between_callbacks();
+        }
+        (midi, audio, adapter)
+    }
+
+    #[test]
+    fn generated_midi_follows_audio_with_callback_independent_worker_lookahead() {
+        let (expected, audio, adapter) = render_generated_midi(&[128]);
+        assert_eq!(adapter.latency().total_frames, 2176);
+        assert_eq!(
+            &expected[..3],
+            &[
+                (2176, [0x90, 60, 100]),
+                (2177, [0x80, 60, 0]),
+                (2303, [0x90, 64, 90])
+            ]
+        );
+        for split in [
+            &[1][..],
+            &[31][..],
+            &[64][..],
+            &[127][..],
+            &[255][..],
+            &[256][..],
+            &[512][..],
+            &[2048][..],
+            &[1, 31, 64, 127, 128, 255, 512, 2048][..],
+        ] {
+            let (actual, rendered, adapter) = render_generated_midi(split);
+            assert_eq!(actual, expected, "split {split:?}");
+            assert_eq!(rendered, audio, "audio split {split:?}");
+            assert_eq!(adapter.endpoint.misses, 0);
+            for (index, context) in adapter.endpoint.contexts.iter().enumerate() {
+                assert_eq!(context.sample_position, (index * 128) as i64);
+                assert!(
+                    (context.quarter_note_position - (index * 128) as f64 / 24000.0).abs() < 1e-10
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generated_midi_epoch_reset_drops_audio_ring_events_and_restarts_preroll() {
+        let mut adapter = FixedQuantumAdapter::with_endpoint(BurstWorker::new(), 128).unwrap();
+        let mut left = [0.0; 128];
+        let mut right = [0.0; 128];
+        for _ in 0..20 {
+            adapter.process_generator(1, 128, &mut left, &mut right, &[]);
+            adapter.endpoint.work_between_callbacks();
+        }
+        assert!(adapter.midi_output().len > 0);
+        adapter.process_generator(2, 128, &mut left, &mut right, &[]);
+        assert_eq!(adapter.midi_output().len, 0);
+        assert!(adapter.midi_output().lost);
+        assert!(left.iter().all(|sample| *sample == 0.0));
     }
 }

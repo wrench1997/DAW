@@ -1489,6 +1489,7 @@ mod tests {
 
     fn test_plugin(id: u64) -> PluginInstance {
         PluginInstance {
+            midi_ports: crate::plugin_midi_routing::PluginMidiPorts::default(),
             id,
             format: PluginFormat::Vst3,
             role: PluginRole::Unknown,
@@ -2946,7 +2947,10 @@ mod tests {
             let path = files.path("v11", "citrus");
             project.save(&path).unwrap();
             let restored = Project::load(&path).unwrap();
-            assert_eq!(restored.format_version, 11);
+            assert_eq!(
+                restored.format_version,
+                crate::model::CURRENT_PROJECT_FORMAT_VERSION
+            );
             assert_eq!(restored.clips.len(), 4);
             for (before, after) in project.clips.iter().zip(&restored.clips) {
                 assert_eq!(before.audio_source_reference, after.audio_source_reference);

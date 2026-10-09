@@ -339,6 +339,8 @@ pub enum TimelineResource {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum TimelineCompileError {
+    #[error("MIDI port routing: {0}")]
+    MidiPortRouting(String),
     #[error("step gate must be finite and greater than zero")]
     InvalidStepGate,
     #[error("legacy Piano Roll period must be finite and greater than zero")]
@@ -624,11 +626,24 @@ pub struct CompiledTimeline {
     channel_bases: Vec<ChannelBaseDescriptor>,
     plugin_routes: Vec<CompiledPluginRoute>,
     mixer_graph: CompiledMixerGraph,
+    midi_port_routes: Vec<crate::plugin_midi_routing::CompiledMidiPortRoute>,
+    midi_monitor_mutes: Vec<u64>,
+    plugin_transport_tempo: f64,
     diagnostics: Vec<TimelineDiagnostic>,
     stats: TimelineCompileStats,
 }
 
 impl CompiledTimeline {
+    pub fn midi_port_routes(&self) -> &[crate::plugin_midi_routing::CompiledMidiPortRoute] {
+        &self.midi_port_routes
+    }
+    pub fn midi_monitor_muted(&self, instance: u64) -> bool {
+        self.midi_monitor_mutes.contains(&instance)
+    }
+    pub fn plugin_transport_tempo(&self) -> f64 {
+        self.plugin_transport_tempo
+    }
+
     pub fn from_project(
         project: &Project,
         tempo_map: &TempoMap,
@@ -1251,12 +1266,30 @@ impl<'a> Compiler<'a> {
         self.compile_automation()?;
         self.pending.sort_by_key(|pending| pending.key);
         self.stats.max_events_at_frame = maximum_same_frame_burst(&self.pending);
+        let midi_port_routes = crate::plugin_midi_routing::compile_midi_port_routes(self.project)
+            .map_err(TimelineCompileError::MidiPortRouting)?;
         let events = self
             .pending
             .into_iter()
             .map(|pending| pending.event)
+            .filter(|event| match event.kind {
+                TimelineEventKind::NoteOn { channel_id, .. }
+                | TimelineEventKind::NoteOff { channel_id, .. } => !midi_port_routes
+                    .iter()
+                    .any(|route| route.destination_channel == channel_id),
+                _ => true,
+            })
             .collect();
         Ok(CompiledTimeline {
+            midi_port_routes,
+            midi_monitor_mutes: self
+                .project
+                .plugin_instances
+                .iter()
+                .filter(|plugin| plugin.midi_ports.audio_monitor_muted)
+                .map(|plugin| plugin.id)
+                .collect(),
+            plugin_transport_tempo: f64::from(self.project.tempo),
             sample_rate: self.tempo_map.sample_rate(),
             duration_frames: self.tempo_map.duration_frames(),
             events,
@@ -3167,6 +3200,7 @@ mod tests {
 
     fn plugin(instance_id: u64) -> PluginInstance {
         PluginInstance {
+            midi_ports: crate::plugin_midi_routing::PluginMidiPorts::default(),
             id: instance_id,
             format: PluginFormat::Vst3,
             role: PluginRole::Unknown,
@@ -4026,6 +4060,9 @@ mod tests {
             },
         };
         let timeline = CompiledTimeline {
+            midi_port_routes: Vec::new(),
+            midi_monitor_mutes: Vec::new(),
+            plugin_transport_tempo: 120.0,
             sample_rate: 48_000,
             duration_frames: 65_536,
             events: vec![event, event],

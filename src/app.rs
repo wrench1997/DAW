@@ -5541,6 +5541,7 @@ impl CitrusApp {
         mut candidate: Project,
         previous_state: Option<ChannelGeneratorState>,
     ) -> Result<(), String> {
+        crate::plugin_midi_routing::compile_midi_port_routes(&candidate)?;
         if !self.audio_restart_state.allows_realtime_session_actions()
             && !self.audio_restart_state.is_restoring()
         {
@@ -6041,7 +6042,9 @@ impl CitrusApp {
                     .plugin_instances
                     .iter()
                     .find(|instance| instance.id == instance_id)?;
-                if instance.runtime_status != PluginRuntimeStatus::Loaded {
+                if instance.runtime_status != PluginRuntimeStatus::Loaded
+                    || instance.midi_ports.input.is_some()
+                {
                     return None;
                 }
                 let chain = self.running_generator_chains.get(&channel.id)?;
@@ -9801,6 +9804,46 @@ impl CitrusApp {
         length_beats: f32,
         mixer_track: usize,
     ) {
+        let output_port = self
+            .project
+            .channels
+            .iter()
+            .find(|channel| channel.id == channel_id)
+            .and_then(|channel| channel.instrument_plugin_instance_id)
+            .and_then(|id| {
+                self.project
+                    .plugin_instances
+                    .iter()
+                    .find(|plugin| plugin.id == id)
+            })
+            .and_then(|plugin| plugin.midi_ports.output);
+        if !self.playing
+            && output_port.is_some_and(|port| {
+                self.project
+                    .plugin_instances
+                    .iter()
+                    .any(|plugin| plugin.midi_ports.input == Some(port))
+            })
+        {
+            self.notify("Start playback to audition a plugin MIDI route; stopped live chaining is not supported yet.".into());
+            return;
+        }
+        if self
+            .project
+            .channels
+            .iter()
+            .find(|channel| channel.id == channel_id)
+            .and_then(|channel| channel.instrument_plugin_instance_id)
+            .and_then(|id| {
+                self.project
+                    .plugin_instances
+                    .iter()
+                    .find(|plugin| plugin.id == id)
+            })
+            .is_some_and(|plugin| plugin.midi_ports.input.is_some())
+        {
+            return;
+        }
         let Some(midi_velocity) = generator_midi_velocity(velocity) else {
             return;
         };
@@ -10203,6 +10246,14 @@ impl CitrusApp {
         {
             return;
         }
+        if self.playing
+            && self.undo_stack.last().is_some_and(|candidate| {
+                plugin_midi_configuration_changed(&self.project, candidate)
+            })
+        {
+            self.notify("Stop playback before Undo/Redo changes MIDI routing.".into());
+            return;
+        }
         self.poll_native_editor_snapshots();
         if let Err(error) = self.native_editor_topology_guard() {
             self.notify(error);
@@ -10244,6 +10295,14 @@ impl CitrusApp {
             || self.piano_roll_gesture_before.is_some()
             || self.playlist_gesture_before.is_some()
         {
+            return;
+        }
+        if self.playing
+            && self.redo_stack.last().is_some_and(|candidate| {
+                plugin_midi_configuration_changed(&self.project, candidate)
+            })
+        {
+            self.notify("Stop playback before Undo/Redo changes MIDI routing.".into());
             return;
         }
         self.poll_native_editor_snapshots();
@@ -14083,7 +14142,26 @@ impl CitrusApp {
                 let diagnostic_count = project.migration_diagnostics.len();
                 self.install_project(project, Some(path.clone()), false);
                 self.project_lifecycle = ProjectLifecycle::Idle;
-                if diagnostic_count == 0 {
+                let midi_warning =
+                    self.project
+                        .migration_diagnostics
+                        .iter()
+                        .find_map(|diagnostic| {
+                            if let crate::model::ProjectMigrationDiagnostic::MidiRoutingDisabled {
+                                reason,
+                            } = diagnostic
+                            {
+                                Some(reason.clone())
+                            } else {
+                                None
+                            }
+                        });
+                if let Some(reason) = midi_warning {
+                    self.notify(format!(
+                        "Opened {}. MIDI routing disabled safely: {reason}",
+                        path.display()
+                    ));
+                } else if diagnostic_count == 0 {
                     self.notify(format!("Opened {}", path.display()));
                 } else {
                     self.notify(format!(
@@ -15619,7 +15697,7 @@ impl CitrusApp {
         }
         if let Some(index) = load_index {
             let descriptor = self.plugins[index].clone();
-            if descriptor.is_instrument {
+            if descriptor.is_instrument || descriptor.has_midi_output() {
                 let channel = self
                     .selected_channel
                     .min(self.project.channels.len().saturating_sub(1));
@@ -15880,6 +15958,18 @@ impl CitrusApp {
             .filter(|instance| self.native_editor_instance_pending(instance.id))
             .map(|instance| instance.id)
             .collect();
+        let midi_routes_active = self
+            .project
+            .plugin_instances
+            .iter()
+            .any(|plugin| plugin.midi_ports.input.is_some());
+        let midi_sink_instances = self
+            .project
+            .plugin_instances
+            .iter()
+            .filter(|plugin| plugin.midi_ports.input.is_some())
+            .map(|plugin| plugin.id)
+            .collect::<HashSet<_>>();
         let Some(automation) = self
             .project
             .automation_lanes
@@ -15984,12 +16074,33 @@ impl CitrusApp {
                 );
                 selected_target = original_target.clone();
             }
+            if midi_routes_active
+                && matches!(selected_target, AutomationTarget::Tempo)
+                && selected_target != original_target
+            {
+                ui.colored_label(
+                    theme::AMBER,
+                    "Turn MIDI ports Off before enabling Tempo automation.",
+                );
+                selected_target = original_target.clone();
+            }
             if selected_target != original_target {
                 automation.lane.set_target(selected_target.clone());
             }
             let mut enabled = automation.lane.is_enabled();
             if ui.toggle_value(&mut enabled, "ENABLED").changed() {
-                automation.lane.set_enabled(enabled);
+                if enabled
+                    && (midi_routes_active
+                        && matches!(automation.lane.target(), AutomationTarget::Tempo)
+                        || matches!(automation.lane.target(), AutomationTarget::PluginParameter { instance, .. } if midi_sink_instances.contains(instance)))
+                {
+                    ui.colored_label(
+                        theme::AMBER,
+                        "Turn MIDI ports Off before enabling Tempo or routed-instrument parameter automation.",
+                    );
+                } else {
+                    automation.lane.set_enabled(enabled);
+                }
             }
             let mut curve = automation.lane.curve();
             egui::ComboBox::from_id_salt(("automation-curve", automation.id))
@@ -16142,6 +16253,79 @@ impl CitrusApp {
                     }),
             );
         });
+    }
+
+    fn apply_plugin_midi_ports(
+        &mut self,
+        instance_id: u64,
+        ports: crate::plugin_midi_routing::PluginMidiPorts,
+    ) -> Result<(), String> {
+        if self.playing {
+            return Err("Stop playback before changing MIDI ports.".into());
+        }
+        if self.project_snapshot_transition_pending()
+            || self.project_lifecycle_barriers_active()
+            || !self.pending_generator_chains.is_empty()
+            || !self.pending_generator_removals.is_empty()
+        {
+            return Err("Wait for the pending project, recording or device change before editing MIDI ports.".into());
+        }
+        self.native_editor_topology_guard()?;
+        if !self.midi_input.state.is_disconnected() {
+            return Err("Disconnect hardware MIDI before changing plugin ports.".into());
+        }
+        let mut candidate = self.project.clone();
+        let instance = candidate
+            .plugin_instances
+            .iter_mut()
+            .find(|plugin| plugin.id == instance_id)
+            .ok_or("The plugin instance changed; reopen its Inspector.")?;
+        instance.midi_ports = ports;
+        let routes = crate::plugin_midi_routing::compile_midi_port_routes(&candidate)?;
+        for route in &routes {
+            let source = self
+                .running_generator_chains
+                .get(&route.source_channel)
+                .filter(|chain| {
+                    chain.project_session == self.project_session
+                        && chain.instance_id == route.source_instance
+                })
+                .ok_or("Wait for the MIDI producer's Running endpoint.")?;
+            let destination = self
+                .running_generator_chains
+                .get(&route.destination_channel)
+                .filter(|chain| {
+                    chain.project_session == self.project_session
+                        && chain.instance_id == route.destination_instance
+                })
+                .ok_or("Wait for the MIDI destination's Running endpoint.")?;
+            if !source.control.midi_capabilities().1 || !destination.control.midi_capabilities().0 {
+                return Err(
+                    "The running devices do not expose the required MIDI output/input buses."
+                        .into(),
+                );
+            }
+            if source
+                .control
+                .plugin_latency_snapshot()
+                .is_none_or(|snapshot| snapshot.total_plugin_latency_samples != 0)
+            {
+                return Err(
+                    "MIDI producers reporting nonzero audio latency are not supported yet.".into(),
+                );
+            }
+        }
+        commit_explicit_project_history_transaction(
+            &mut self.project,
+            &mut self.history_snapshot,
+            &mut self.history_fingerprint,
+            &mut self.undo_stack,
+            &mut self.redo_stack,
+            &mut self.dirty,
+            candidate,
+        );
+        self.automation_evaluator.reset();
+        Ok(())
     }
 
     fn channel_inspector(&mut self, ui: &mut egui::Ui) {
@@ -16339,6 +16523,97 @@ impl CitrusApp {
                     });
                 });
         });
+        if let Some(instance_id) = self
+            .project
+            .channels
+            .get(channel_index)
+            .and_then(|channel| channel.instrument_plugin_instance_id)
+            && let Some(instance) = self
+                .project
+                .plugin_instances
+                .iter()
+                .find(|plugin| plugin.id == instance_id)
+        {
+            let original = instance.midi_ports;
+            let mut ports = original;
+            let capabilities = self
+                .running_generator_chains
+                .get(&channel_id)
+                .filter(|chain| {
+                    chain.project_session == self.project_session
+                        && chain.instance_id == instance_id
+                })
+                .map_or((false, false), |chain| chain.control.midi_capabilities());
+            inspector_section(ui, "PLUGIN MIDI PORTS", |ui| {
+                ui.label(
+                    RichText::new("Match output and input numbers. Off is separate from port 0.")
+                        .size(9.0),
+                );
+                for diagnostic in &self.project.migration_diagnostics {
+                    if let crate::model::ProjectMigrationDiagnostic::MidiRoutingDisabled {
+                        reason,
+                    } = diagnostic
+                    {
+                        ui.colored_label(
+                            theme::RED,
+                            format!("Saved MIDI routing was disabled: {reason}"),
+                        );
+                    }
+                }
+                ui.add_enabled_ui(capabilities.1 || ports.output.is_some(), |ui| {
+                    plugin_midi_port_combo(ui, instance_id, "Output", &mut ports.output);
+                });
+                ui.add_enabled_ui(capabilities.0 || ports.input.is_some(), |ui| {
+                    plugin_midi_port_combo(ui, instance_id, "Input", &mut ports.input);
+                });
+                ui.checkbox(&mut ports.audio_monitor_muted, "Mute device audio monitor");
+                if ports.input.is_some() {
+                    ui.colored_label(theme::AMBER, "Exclusive plugin MIDI input: this channel's Piano/step/live notes are inactive. Adds 2176 frames before the instrument's 2176-frame bridge (about 91 ms to the synth at 48 kHz; insert/master FX add more).");
+                }
+                ui.label(RichText::new("Playback required. One producer; one or more instruments. MIDI1 bus 0, constant tempo. Stop playback to edit.").size(8.5).color(theme::MUTED));
+                property_line(
+                    ui,
+                    "Activation",
+                    match self.timeline_audio_sync.phase {
+                        TimelineAudioSyncPhase::Active { .. } => "Callback-confirmed",
+                        TimelineAudioSyncPhase::Faulted => "Blocked; inspect Timeline status",
+                        _ => "Waiting for callback confirmation",
+                    },
+                );
+                if let Some(audio) = &self.audio {
+                    let snapshot = audio.snapshot();
+                    if ports.input.is_some() {
+                        property_line(
+                            ui,
+                            "Final output latency",
+                            &format!(
+                                "{} frames · {:.1} ms",
+                                snapshot.pdc_output_latency_samples,
+                                snapshot.pdc_output_latency_samples as f64 * 1000.0
+                                    / f64::from(snapshot.sample_rate)
+                            ),
+                        );
+                    }
+                }
+                ui.label(
+                    RichText::new("Callbacks above 2048 frames stop routed MIDI safely.")
+                        .size(8.5)
+                        .color(theme::MUTED),
+                );
+                if self
+                    .audio
+                    .as_ref()
+                    .is_some_and(|audio| audio.snapshot().plugin_midi_faulted_destinations != 0)
+                {
+                    ui.colored_label(theme::RED, "MIDI routing stopped safely after a lost/late event or device fault. Stop/restart transport after fixing the cause.");
+                }
+            });
+            if ports != original
+                && let Err(error) = self.apply_plugin_midi_ports(instance_id, ports)
+            {
+                self.notify(error);
+            }
+        }
         if let Some(action) = slot_action {
             self.apply_plugin_slot_action(action);
         }
@@ -25472,10 +25747,39 @@ fn plugin_target_has_instance(project: &Project, target: PluginPickerTarget) -> 
     }
 }
 
+fn plugin_midi_configuration_changed(before: &Project, after: &Project) -> bool {
+    let configured = |project: &Project| {
+        project
+            .plugin_instances
+            .iter()
+            .filter(|plugin| {
+                plugin.midi_ports != crate::plugin_midi_routing::PluginMidiPorts::default()
+            })
+            .map(|plugin| (plugin.id, plugin.midi_ports))
+            .collect::<Vec<_>>()
+    };
+    configured(before) != configured(after)
+}
+
+fn plugin_midi_port_combo(ui: &mut egui::Ui, instance: u64, label: &str, port: &mut Option<u8>) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        egui::ComboBox::from_id_salt(("plugin-midi-port", instance, label))
+            .selected_text(port.map_or_else(|| "Off".to_owned(), |port| port.to_string()))
+            .width(90.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(port, None, "Off");
+                for number in 0..=255_u8 {
+                    ui.selectable_value(port, Some(number), number.to_string());
+                }
+            });
+    });
+}
+
 fn plugin_target_expected_label(target: PluginPickerTarget) -> &'static str {
     match target {
         PluginPickerTarget::MixerSlot { .. } => "effect",
-        PluginPickerTarget::ChannelDevice { .. } => "instrument",
+        PluginPickerTarget::ChannelDevice { .. } => "instrument or MIDI processor",
     }
 }
 
@@ -25484,8 +25788,16 @@ fn plugin_descriptor_matches_target(
     target: PluginPickerTarget,
 ) -> bool {
     match target {
-        PluginPickerTarget::MixerSlot { .. } => !descriptor.is_instrument,
-        PluginPickerTarget::ChannelDevice { .. } => descriptor.is_instrument,
+        PluginPickerTarget::MixerSlot { .. } => {
+            if descriptor.format == crate::plugins::PluginFormat::Vst3 {
+                descriptor.category == "Effect"
+            } else {
+                !descriptor.is_instrument
+            }
+        }
+        PluginPickerTarget::ChannelDevice { .. } => {
+            descriptor.is_instrument || descriptor.has_midi_output()
+        }
     }
 }
 
@@ -25754,6 +26066,16 @@ fn ensure_plugin_parameter_automation(
     else {
         return Err("the plug-in instance no longer exists".into());
     };
+    if project
+        .plugin_instances
+        .iter()
+        .any(|plugin| plugin.id == instance_id && plugin.midi_ports.input.is_some())
+    {
+        return Err(
+            "Turn this instrument's MIDI input port Off before creating parameter automation."
+                .into(),
+        );
+    }
     let target = AutomationTarget::PluginParameter {
         instance: instance_id,
         parameter: parameter_id,
@@ -26503,6 +26825,7 @@ fn commit_loaded_plugin(
         descriptor_name.to_owned()
     };
     project.plugin_instances.push(PluginInstance {
+        midi_ports: crate::plugin_midi_routing::PluginMidiPorts::default(),
         id: instance_id,
         format: match descriptor.format {
             ScannedPluginFormat::Vst2 => ProjectPluginFormat::Vst2,
@@ -26865,6 +27188,9 @@ fn timeline_compile_fingerprint(project: &Project, sample_rate: u32) -> u64 {
     project.plugin_instances.len().hash(&mut hasher);
     for plugin in &project.plugin_instances {
         plugin.id.hash(&mut hasher);
+        plugin.midi_ports.input.hash(&mut hasher);
+        plugin.midi_ports.output.hash(&mut hasher);
+        plugin.midi_ports.audio_monitor_muted.hash(&mut hasher);
         (plugin.format as u8).hash(&mut hasher);
         (plugin.role as u8).hash(&mut hasher);
         plugin.enabled.hash(&mut hasher);
@@ -32290,9 +32616,12 @@ mod playback_tests {
         let channel_target = PluginPickerTarget::ChannelDevice { channel: 0 };
         let mixer_target = PluginPickerTarget::MixerSlot { track: 0, slot: 0 };
         assert!(!plugin_descriptor_matches_target(&effect, channel_target));
+        assert!(!plugin_descriptor_matches_target(&effect, mixer_target));
+        effect.category = "Effect".into();
         assert!(plugin_descriptor_matches_target(&effect, mixer_target));
 
         effect.is_instrument = true;
+        effect.category = "Instrument".into();
         assert!(plugin_descriptor_matches_target(&effect, channel_target));
         assert!(!plugin_descriptor_matches_target(&effect, mixer_target));
     }

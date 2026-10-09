@@ -21,7 +21,7 @@ const PROJECT_SAVE_TEMP_ATTEMPTS: usize = 128;
 static PROJECT_SAVE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Current on-disk project schema written by Citrus Studio.
-pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 11;
+pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 12;
 
 const LEGACY_PROJECT_FORMAT_VERSION: u32 = 1;
 
@@ -387,6 +387,9 @@ pub enum AudioOffsetMigrationIssue {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProjectMigrationDiagnostic {
+    MidiRoutingDisabled {
+        reason: String,
+    },
     LegacyPianoMirrorIgnored {
         note_count: usize,
     },
@@ -459,6 +462,8 @@ pub enum PluginRuntimeStatus {
 /// A persisted plug-in instance, independent from its mixer placement.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PluginInstance {
+    #[serde(default)]
+    pub midi_ports: crate::plugin_midi_routing::PluginMidiPorts,
     pub id: u64,
     pub format: PluginFormat,
     #[serde(default)]
@@ -1027,6 +1032,14 @@ impl Project {
             .validate_audio_references()
             .context("The project audio split metadata is invalid")?;
         project.normalize();
+        if let Err(reason) = crate::plugin_midi_routing::compile_midi_port_routes(&project) {
+            for plugin in &mut project.plugin_instances {
+                plugin.midi_ports.input = None;
+            }
+            project
+                .migration_diagnostics
+                .push(ProjectMigrationDiagnostic::MidiRoutingDisabled { reason });
+        }
         project
             .validate_mixer_graph()
             .context("The project mixer graph is invalid")?;
@@ -1284,6 +1297,7 @@ impl Project {
     }
 
     pub fn validate_mixer_graph(&self) -> Result<()> {
+        crate::plugin_midi_routing::compile_midi_port_routes(self).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(
             self.mixer_tracks.len() == MIXER_GRAPH_MAX_NODES,
             "v8 requires exactly {MIXER_GRAPH_MAX_NODES} mixer tracks, found {}",
@@ -2374,7 +2388,7 @@ mod tests {
             .iter()
             .find(|clip| clip.id == original.id)
             .unwrap();
-        assert_eq!(restored.format_version, 11);
+        assert_eq!(restored.format_version, CURRENT_PROJECT_FORMAT_VERSION);
         assert_eq!(
             restored_clip.audio_source_offset_frame,
             original.audio_source_offset_frame
@@ -3749,6 +3763,7 @@ mod tests {
 
     fn test_plugin(id: u64, format: PluginFormat, path: impl Into<PathBuf>) -> PluginInstance {
         PluginInstance {
+            midi_ports: crate::plugin_midi_routing::PluginMidiPorts::default(),
             id,
             format,
             role: PluginRole::Unknown,
@@ -3806,5 +3821,41 @@ mod tests {
         invalid["clips"][0]["fade_in_reference"]["end_limit_beats"] = serde_json::json!(-2.0);
         std::fs::write(&target, serde_json::to_vec(&invalid).unwrap()).unwrap();
         assert!(Project::load(&target).is_err());
+    }
+    #[test]
+    fn v12_midi_ports_save_load_and_incompatible_load_is_explicitly_disabled() {
+        let directory = TestDirectory::new("midi-port-save-load");
+        let path = directory.path().join("ports.citrus");
+        let mut project = Project {
+            plugin_instances: vec![
+                test_plugin(1001, PluginFormat::Vst3, "source.vst3"),
+                test_plugin(1002, PluginFormat::Vst3, "sink.vst3"),
+            ],
+            ..Project::default()
+        };
+        project.channels[0].instrument_plugin_instance_id = Some(1001);
+        project.channels[1].instrument_plugin_instance_id = Some(1002);
+        project.plugin_instances[0].midi_ports.output = Some(0);
+        project.plugin_instances[0].midi_ports.audio_monitor_muted = true;
+        project.plugin_instances[1].midi_ports.input = Some(0);
+        project.save(&path).unwrap();
+        let restored = Project::load(&path).unwrap();
+        assert_eq!(restored.format_version, 12);
+        assert_eq!(
+            restored.plugin_instances[0].midi_ports,
+            project.plugin_instances[0].midi_ports
+        );
+        assert_eq!(restored.plugin_instances[1].midi_ports.input, Some(0));
+        let mut invalid = serde_json::to_value(&restored).unwrap();
+        invalid["plugin_instances"][1]["midi_ports"]["input"] = 9.into();
+        std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let reopened = Project::load(&path).unwrap();
+        assert_eq!(reopened.plugin_instances[1].midi_ports.input, None);
+        assert_eq!(reopened.channels.len(), restored.channels.len());
+        assert_eq!(
+            serde_json::to_value(&reopened.patterns).unwrap(),
+            serde_json::to_value(&restored.patterns).unwrap()
+        );
+        assert!(reopened.migration_diagnostics.iter().any(|diagnostic| matches!(diagnostic, ProjectMigrationDiagnostic::MidiRoutingDisabled { reason } if reason.contains("no Generator"))));
     }
 }

@@ -1017,6 +1017,7 @@ pub struct AudioStatus {
     pub plugin_epoch_reset_failures: AtomicU64,
     pub last_plugin_endpoint_epoch: AtomicU64,
     pub plugin_fixed_quantum_frames: AtomicU32,
+    pub plugin_midi_faulted_destinations: AtomicU64,
     pub plugin_fixed_quantum_event_overflows: AtomicU64,
     pub plugin_fixed_quantum_invalid_events: AtomicU64,
     pub plugin_fixed_quantum_event_rejections: AtomicU64,
@@ -1056,6 +1057,7 @@ impl Default for AudioStatus {
             plugin_epoch_reset_failures: AtomicU64::new(0),
             last_plugin_endpoint_epoch: AtomicU64::new(0),
             plugin_fixed_quantum_frames: AtomicU32::new(DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES as u32),
+            plugin_midi_faulted_destinations: AtomicU64::new(0),
             plugin_fixed_quantum_event_overflows: AtomicU64::new(0),
             plugin_fixed_quantum_invalid_events: AtomicU64::new(0),
             plugin_fixed_quantum_event_rejections: AtomicU64::new(0),
@@ -1177,6 +1179,7 @@ pub struct AudioSnapshot {
     pub plugin_epoch_reset_failures: u64,
     pub last_plugin_endpoint_epoch: u64,
     pub plugin_fixed_quantum_frames: u32,
+    pub plugin_midi_faulted_destinations: u64,
     pub plugin_fixed_quantum_event_overflows: u64,
     pub plugin_fixed_quantum_invalid_events: u64,
     pub plugin_fixed_quantum_event_rejections: u64,
@@ -2339,6 +2342,10 @@ impl AudioEngine {
                 .status
                 .plugin_fixed_quantum_frames
                 .load(Ordering::Relaxed),
+            plugin_midi_faulted_destinations: self
+                .status
+                .plugin_midi_faulted_destinations
+                .load(Ordering::Relaxed),
             plugin_fixed_quantum_event_overflows: self
                 .status
                 .plugin_fixed_quantum_event_overflows
@@ -2835,6 +2842,12 @@ fn render_transport_chunk(
             segment_frames,
             transport.request.playing,
         );
+        dsp.configure_plugin_transport(
+            transport.timeline_frame,
+            transport.beat_q32,
+            transport.request.playing,
+            status,
+        );
         dsp.service_midi_recording_boundary(
             MidiRecordClockAnchor {
                 device_frame: capture_device_frame,
@@ -2981,6 +2994,7 @@ where
                 &mut asset_events,
             );
 
+            let device_callback_frames = output.len() / channels;
             for output_block in output.chunks_mut(channels * MAX_MIXER_BLOCK_FRAMES) {
                 let frames = output_block.len() / channels;
                 dsp.apply_pending_timeline_commands();
@@ -2989,6 +3003,7 @@ where
                 // a third read later to fail closed on worker drift.
                 dsp.refresh_pdc_plan(&status, frames);
                 transport.apply_pending_timeline_activation(&status, &mut dsp);
+                dsp.reject_oversized_midi_callback(device_callback_frames);
                 render_transport_chunk(
                     &mut dsp,
                     &status,
@@ -4662,6 +4677,7 @@ impl EndpointFrameEvents {
 /// together through the command and retire rings; construction never occurs on
 /// the device callback.
 pub struct PreparedFixedEndpoint {
+    midi_port_input: bool,
     adapter: FixedQuantumAdapter<AudioThreadEndpoint>,
     events: EndpointFrameEvents,
     project_session: u64,
@@ -4686,6 +4702,7 @@ impl PreparedFixedEndpoint {
             .filter(|snapshot| snapshot.revision != 0);
         Ok(Self {
             adapter,
+            midi_port_input: false,
             events: EndpointFrameEvents::new(),
             project_session: 0,
             manifest,
@@ -4819,6 +4836,14 @@ impl PreparedFixedEndpoint {
     }
 
     fn stage(&mut self, event: FrameEvent) -> bool {
+        if self.midi_port_input
+            && matches!(
+                event.kind,
+                crate::fixed_quantum::FrameEventKind::Midi { .. }
+            )
+        {
+            return false;
+        }
         self.stage_class(EndpointEventClass::Live, event)
     }
 
@@ -5225,12 +5250,17 @@ impl MixerGraphEndpointIdentityTable {
         &self,
         graph: &CompiledMixerGraph,
         maximum_delay_samples: u32,
+        midi_routes: &[crate::plugin_midi_routing::CompiledMidiPortRoute],
     ) -> Option<GraphPdcPlan> {
         let bridge_latency = (DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES as u64).checked_mul(2)?;
         let mut stage_latencies = [0_u64; MIXER_GRAPH_MAX_NODES];
         for identity in self.inserts[..self.insert_count].iter().flatten() {
-            stage_latencies[usize::from(identity.runtime_slot)] = bridge_latency
-                .checked_add(u64::from(identity.snapshot.total_plugin_latency_samples()))?;
+            stage_latencies[usize::from(identity.runtime_slot)] = (if midi_routes.is_empty() {
+                bridge_latency
+            } else {
+                u64::from(crate::plugin_midi_routing::MIDI_ROUTE_BRIDGE_FRAMES)
+            })
+            .checked_add(u64::from(identity.snapshot.total_plugin_latency_samples()))?;
         }
         let empty_generator = GraphPdcGenerator {
             endpoint_id: 0,
@@ -5253,8 +5283,25 @@ impl MixerGraphEndpointIdentityTable {
                 endpoint_id: identity.endpoint_id,
                 channel_id: identity.channel_id,
                 destination_id,
-                latency_samples: bridge_latency
-                    .checked_add(u64::from(identity.snapshot.total_plugin_latency_samples()))?,
+                latency_samples: (if midi_routes.iter().any(|route| {
+                    route.source_instance == identity.plugin_instance_id
+                        || route.destination_instance == identity.plugin_instance_id
+                }) {
+                    u64::from(crate::plugin_midi_routing::MIDI_ROUTE_BRIDGE_FRAMES)
+                } else {
+                    bridge_latency
+                })
+                .checked_add(
+                    if midi_routes
+                        .iter()
+                        .any(|route| route.destination_instance == identity.plugin_instance_id)
+                    {
+                        u64::from(crate::plugin_midi_routing::MIDI_ROUTE_BRIDGE_FRAMES)
+                    } else {
+                        0
+                    },
+                )?
+                .checked_add(u64::from(identity.snapshot.total_plugin_latency_samples()))?,
             };
         }
         GraphPdcPlan::build_for_mixer_graph(
@@ -5406,6 +5453,7 @@ struct DspState {
     midi_recording_event_reservations: usize,
     callback_transport_anchor: MidiRecordClockAnchor,
     callback_transport_playing: bool,
+    midi_route_faulted: u64,
     paused_midi_safety: [Option<PausedMidiSafetyService>; MAX_GENERATOR_ENDPOINTS],
     retired_midi_inputs: Option<Producer<RetiredMidiInputResource>>,
     midi_input_route_events: Option<Producer<MidiInputRouteEvent>>,
@@ -5620,6 +5668,7 @@ impl DspState {
                 loop_count: 0,
             },
             callback_transport_playing: false,
+            midi_route_faulted: 0,
             paused_midi_safety: [None; MAX_GENERATOR_ENDPOINTS],
             retired_midi_inputs: None,
             midi_input_route_events: None,
@@ -5686,6 +5735,12 @@ impl DspState {
     }
 
     fn clear_timeline_render_binding(&mut self) {
+        for slot in self.generator_endpoints.iter_mut().flatten() {
+            if slot.endpoint.midi_port_input {
+                slot.endpoint.adapter.block_midi_until_epoch();
+                slot.endpoint.midi_port_input = false;
+            }
+        }
         self.clear_timeline_expected_latency_revisions();
         *self.mixer_graph_plan = FixedMixerGraphLayout::default();
         *self.mixer_graph_activation_plan = FixedMixerGraphLayout::default();
@@ -5741,6 +5796,22 @@ impl DspState {
             .is_none()
         {
             return;
+        }
+        if let Some(timeline) = self
+            .timeline_runtime
+            .as_ref()
+            .and_then(RealtimeTimelineRuntime::active_timeline)
+        {
+            for slot in self.generator_endpoints.iter().flatten() {
+                if timeline.midi_port_routes().iter().any(|route| {
+                    route.source_instance == slot.plugin_instance_id
+                        || route.destination_instance == slot.plugin_instance_id
+                }) {
+                    // Internally generated notes never enter the Timeline note ledger.
+                    // Stop must still reset both endpoints even if no new block arrives.
+                    slot.endpoint.adapter.block_midi_until_epoch();
+                }
+            }
         }
         self.timeline_plan.clear();
         self.timeline_plan_has_chase = false;
@@ -7218,10 +7289,13 @@ impl DspState {
         insert_endpoints: &mut [Option<InsertEndpointSlot>; TRACK_COUNT],
         generator_endpoints: &mut [Option<GeneratorEndpointSlot>; MAX_GENERATOR_ENDPOINTS],
         maximum_delay_samples: u32,
+        midi_routes: &[crate::plugin_midi_routing::CompiledMidiPortRoute],
     ) -> Option<GraphPdcPlan> {
         endpoint_identities
             .capture(graph, insert_endpoints, generator_endpoints)
-            .then(|| endpoint_identities.build_pdc_plan(graph, maximum_delay_samples))?
+            .then(|| {
+                endpoint_identities.build_pdc_plan(graph, maximum_delay_samples, midi_routes)
+            })?
     }
 
     /// Writes only preallocated scratch members. Every active runtime, voice,
@@ -7275,6 +7349,36 @@ impl DspState {
                 },
             ))?;
 
+        for route in timeline.midi_port_routes() {
+            let source = generator_endpoints.iter().flatten().find(|slot| {
+                slot.plugin_instance_id == route.source_instance
+                    && slot.channel_id == route.source_channel
+            });
+            let destination = generator_endpoints.iter().flatten().find(|slot| {
+                slot.plugin_instance_id == route.destination_instance
+                    && slot.channel_id == route.destination_channel
+            });
+            let valid = source
+                .zip(destination)
+                .is_some_and(|(source, destination)| {
+                    source.endpoint.adapter.midi_capabilities().1
+                        && destination.endpoint.adapter.midi_capabilities().0
+                        && source
+                            .endpoint
+                            .coherent_latency_snapshot()
+                            .is_some_and(|snapshot| {
+                                snapshot.slot_is_active(0)
+                                    && snapshot.total_plugin_latency_samples == 0
+                            })
+                        && destination
+                            .endpoint
+                            .coherent_latency_snapshot()
+                            .is_some_and(|snapshot| snapshot.slot_is_active(0))
+                });
+            if !valid {
+                return Err(TimelineTransportActivationRejectReason::GeneratorRouteBinding);
+            }
+        }
         if !mixer_graph_activation_plan.reset_from(timeline.mixer_graph()) {
             return Err(TimelineTransportActivationRejectReason::MixerGraphPlan);
         }
@@ -7289,6 +7393,7 @@ impl DspState {
             insert_endpoints,
             generator_endpoints,
             *pdc_maximum_delay_samples,
+            timeline.midi_port_routes(),
         )
         .ok_or(TimelineTransportActivationRejectReason::GraphPdcPlan)?;
         runtime
@@ -7540,6 +7645,40 @@ impl DspState {
             .as_mut()
             .expect("preflighted activation retains its runtime")
             .commit_preflighted_transport_activation(ticket, actual_epoch);
+        if let Some(timeline) = self
+            .timeline_runtime
+            .as_ref()
+            .and_then(RealtimeTimelineRuntime::active_timeline)
+        {
+            for slot in self.insert_endpoints.iter_mut().flatten() {
+                let configured = slot
+                    .endpoint
+                    .adapter
+                    .set_midi_bridge_lookahead(!timeline.midi_port_routes().is_empty());
+                debug_assert!(
+                    configured,
+                    "committed epoch resets inserts before lookahead selection"
+                );
+            }
+            for slot in self.generator_endpoints.iter_mut().flatten() {
+                slot.endpoint.midi_port_input = timeline
+                    .midi_port_routes()
+                    .iter()
+                    .any(|route| route.destination_instance == slot.plugin_instance_id);
+                let participates = timeline.midi_port_routes().iter().any(|route| {
+                    route.source_instance == slot.plugin_instance_id
+                        || route.destination_instance == slot.plugin_instance_id
+                });
+                let configured = slot
+                    .endpoint
+                    .adapter
+                    .set_midi_bridge_lookahead(participates);
+                debug_assert!(
+                    configured,
+                    "committed epoch resets every Generator before lookahead selection"
+                );
+            }
+        }
         let graph_pdc_plan = self
             .graph_pdc_plan
             .as_ref()
@@ -7889,6 +8028,14 @@ impl DspState {
     }
 
     fn fail_timeline_block(&mut self) {
+        for (index, slot) in self.generator_endpoints.iter().enumerate() {
+            if let Some(slot) = slot
+                && slot.endpoint.midi_port_input
+            {
+                self.midi_route_faulted |= 1_u64 << index;
+                slot.endpoint.adapter.block_midi_until_epoch();
+            }
+        }
         self.timeline_execution_failures = self.timeline_execution_failures.saturating_add(1);
         self.clear_timeline_expected_latency_revisions();
         self.timeline_automation.abort_block();
@@ -7918,6 +8065,9 @@ impl DspState {
             match synchronize_endpoint_epoch(&mut slot.endpoint, epoch) {
                 EndpointEpochSync::AlreadyCurrent => synchronized = true,
                 EndpointEpochSync::Reset => {
+                    // Suppression belongs to the discarded epoch. Keeping it would make
+                    // strict graph rendering fail again before the new preroll can run.
+                    slot.suppress_output_frames = 0;
                     resets += 1;
                     synchronized = true;
                 }
@@ -7925,10 +8075,18 @@ impl DspState {
             }
             let _ = slot.endpoint.clear_and_stage_all_notes_off();
         }
-        for slot in self.generator_endpoints.iter_mut().flatten() {
+        for (index, slot) in self.generator_endpoints.iter_mut().enumerate() {
+            let Some(slot) = slot else {
+                self.midi_route_faulted &= !(1_u64 << index);
+                continue;
+            };
             match synchronize_endpoint_epoch(&mut slot.endpoint, epoch) {
                 EndpointEpochSync::AlreadyCurrent => synchronized = true,
                 EndpointEpochSync::Reset => {
+                    // Suppression belongs to the discarded epoch. Keeping it would make
+                    // strict graph rendering fail again before the new preroll can run.
+                    slot.suppress_output_frames = 0;
+                    self.midi_route_faulted &= !(1_u64 << index);
                     resets += 1;
                     synchronized = true;
                 }
@@ -8000,6 +8158,10 @@ impl DspState {
     }
 
     fn publish_plugin_epoch_status(&self, status: &AudioStatus) {
+        status.plugin_midi_faulted_destinations.store(
+            u64::from(self.midi_route_faulted.count_ones()),
+            Ordering::Relaxed,
+        );
         status
             .plugin_epoch_resets
             .store(self.plugin_epoch_resets, Ordering::Relaxed);
@@ -8207,6 +8369,10 @@ impl DspState {
                 insert_endpoints,
                 generator_endpoints,
                 *pdc_maximum_delay_samples,
+                runtime
+                    .active_timeline()
+                    .expect("active graph owns timeline")
+                    .midi_port_routes(),
             ) else {
                 mixer_graph_activation_endpoint_identities.clear();
                 return false;
@@ -8894,7 +9060,17 @@ impl DspState {
         }
         let invalidates_active = self
             .timeline_plugin_automation_bindings
-            .references_generator_endpoint(endpoint_id, plugin_instance_id);
+            .references_generator_endpoint(endpoint_id, plugin_instance_id)
+            || self
+                .timeline_runtime
+                .as_ref()
+                .and_then(RealtimeTimelineRuntime::active_timeline)
+                .is_some_and(|timeline| {
+                    timeline.midi_port_routes().iter().any(|route| {
+                        route.source_instance == plugin_instance_id
+                            || route.destination_instance == plugin_instance_id
+                    })
+                });
         if self
             .timeline_activation_plugin_automation_bindings
             .references_generator_endpoint(endpoint_id, plugin_instance_id)
@@ -10230,6 +10406,79 @@ impl DspState {
         }
     }
 
+    fn reject_oversized_midi_callback(&mut self, frames: usize) {
+        if frames <= crate::fixed_quantum::MAX_DEVICE_CALLBACK_FRAMES {
+            return;
+        }
+        for (index, slot) in self.generator_endpoints.iter().enumerate() {
+            if let Some(slot) = slot
+                && slot.endpoint.midi_port_input
+            {
+                self.midi_route_faulted |= 1_u64 << index;
+                slot.endpoint.adapter.block_midi_until_epoch();
+            }
+        }
+    }
+
+    fn configure_plugin_transport(
+        &mut self,
+        frame: u64,
+        beat_q32: u64,
+        playing: bool,
+        status: &AudioStatus,
+    ) {
+        let tempo = self
+            .timeline_runtime
+            .as_ref()
+            .and_then(RealtimeTimelineRuntime::active_timeline)
+            .map_or(
+                f64::from(status.tempo_milli.load(Ordering::Relaxed)) / 1000.0,
+                CompiledTimeline::plugin_transport_tempo,
+            );
+        for slot in self.generator_endpoints.iter_mut().flatten() {
+            let delay = if slot.endpoint.midi_port_input {
+                i64::from(crate::plugin_midi_routing::MIDI_ROUTE_BRIDGE_FRAMES)
+            } else {
+                0
+            };
+            slot.endpoint.adapter.set_transport(
+                crate::plugins::plugin_runtime::PluginTransport {
+                    sample_position: frame as i64 - delay,
+                    quarter_note_position: q32_to_beat(beat_q32)
+                        - delay as f64 * tempo / (60.0 * f64::from(self.sample_rate)),
+                    tempo,
+                    playing,
+                    time_sig_numerator: 4,
+                    time_sig_denominator: 4,
+                },
+                f64::from(self.sample_rate),
+            );
+        }
+        for (index, slot) in self.insert_endpoints.iter_mut().enumerate() {
+            let Some(slot) = slot else {
+                continue;
+            };
+            let delay = self
+                .graph_pdc_plan
+                .as_ref()
+                .as_ref()
+                .and_then(|plan| plan.node_for_runtime_slot(index))
+                .map_or(0, |node| node.join_latency_samples) as i64;
+            slot.endpoint.adapter.set_transport(
+                crate::plugins::plugin_runtime::PluginTransport {
+                    sample_position: frame as i64 - delay,
+                    quarter_note_position: q32_to_beat(beat_q32)
+                        - delay as f64 * tempo / (60.0 * f64::from(self.sample_rate)),
+                    tempo,
+                    playing,
+                    time_sig_numerator: 4,
+                    time_sig_denominator: 4,
+                },
+                f64::from(self.sample_rate),
+            );
+        }
+    }
+
     fn process_generator_endpoints(&mut self, frames: usize) -> bool {
         self.process_generator_endpoints_impl(frames, None, false)
     }
@@ -10253,10 +10502,66 @@ impl DspState {
         }
 
         let transport_epoch = self.transport_epoch;
+        let timeline = self
+            .timeline_runtime
+            .as_ref()
+            .and_then(RealtimeTimelineRuntime::active_timeline);
+        let mut edges = [None; crate::plugin_midi_routing::MAX_MIDI_PORT_ROUTES];
+        let mut input_mask = 0_u64;
+        let mut monitor_mute_mask = 0_u64;
+        if let Some(timeline) = timeline {
+            for (edge, route) in edges.iter_mut().zip(timeline.midi_port_routes()) {
+                let source = self.generator_endpoints.iter().position(|slot| {
+                    slot.as_ref().is_some_and(|slot| {
+                        slot.plugin_instance_id == route.source_instance
+                            && slot.channel_id == route.source_channel
+                    })
+                });
+                let destination = self.generator_endpoints.iter().position(|slot| {
+                    slot.as_ref().is_some_and(|slot| {
+                        slot.plugin_instance_id == route.destination_instance
+                            && slot.channel_id == route.destination_channel
+                    })
+                });
+                if let Some(destination) = destination {
+                    input_mask |= 1_u64 << destination;
+                    if let Some(source) = source {
+                        *edge = Some((source, destination));
+                    } else {
+                        self.midi_route_faulted |= 1_u64 << destination;
+                    }
+                }
+            }
+            for (index, slot) in self.generator_endpoints.iter().enumerate() {
+                if slot
+                    .as_ref()
+                    .is_some_and(|slot| timeline.midi_monitor_muted(slot.plugin_instance_id))
+                {
+                    monitor_mute_mask |= 1_u64 << index;
+                }
+            }
+        }
+        let tempo = timeline.map_or(128.0, CompiledTimeline::plugin_transport_tempo);
+        let playing = self.callback_transport_playing;
+        let content_frame = if playing {
+            self.timeline_render_start_frame
+        } else {
+            self.callback_transport_anchor.timeline_frame
+        };
         let channel_bases = &self.timeline_channel_bases;
+        let mut order = [0_usize; MAX_GENERATOR_ENDPOINTS];
+        let mut cursor = 0;
+        for inputs in [false, true] {
+            for index in 0..MAX_GENERATOR_ENDPOINTS {
+                if (input_mask & (1_u64 << index) != 0) == inputs {
+                    order[cursor] = index;
+                    cursor += 1;
+                }
+            }
+        }
         let mut latency_drifted = false;
         let mut completed_marker_endpoints = 0_usize;
-        for index in 0..MAX_GENERATOR_ENDPOINTS {
+        for index in order {
             let Some(slot) = self.generator_endpoints[index].as_mut() else {
                 continue;
             };
@@ -10275,6 +10580,28 @@ impl DspState {
                         channel_bases.is_audible(base),
                     )
                 });
+            let routed_input = input_mask & (1_u64 << index) != 0;
+            if self.midi_route_faulted & (1_u64 << index) != 0 {
+                slot.endpoint.adapter.block_midi_until_epoch();
+            }
+            let delay = if routed_input {
+                u64::from(crate::plugin_midi_routing::MIDI_ROUTE_BRIDGE_FRAMES)
+            } else {
+                0
+            };
+            let sample_position = content_frame as i64 - delay as i64;
+            slot.endpoint.adapter.set_transport(
+                crate::plugins::plugin_runtime::PluginTransport {
+                    sample_position,
+                    quarter_note_position: sample_position as f64 * tempo
+                        / (60.0 * f64::from(self.sample_rate)),
+                    tempo,
+                    playing,
+                    time_sig_numerator: 4,
+                    time_sig_denominator: 4,
+                },
+                f64::from(self.sample_rate),
+            );
             let had_admitted_marker = slot.endpoint.has_admitted_live_edit_marker();
             let before = slot.endpoint.stats();
             let status = slot.endpoint.process_generator(
@@ -10320,6 +10647,14 @@ impl DspState {
                     ..
                 } if processed_frames == frames
             );
+            if routed_input
+                && (slot.endpoint.adapter.midi_output().audio_lost
+                    || !slot.endpoint.adapter.midi_capabilities().0)
+            {
+                self.midi_route_faulted |= 1_u64 << index;
+                slot.endpoint.adapter.block_midi_until_epoch();
+                slot.endpoint.clear_and_stage_all_notes_off();
+            }
             let suppressed = slot.suppress_output_frames != 0;
             slot.suppress_output_frames = slot.suppress_output_frames.saturating_sub(frames);
 
@@ -10336,7 +10671,12 @@ impl DspState {
 
             let start = mixer_track * MAX_MIXER_BLOCK_FRAMES;
             for frame_index in 0..frames {
-                let source = if has_exact_output && !suppressed && channel_audible {
+                let source = if has_exact_output
+                    && !suppressed
+                    && channel_audible
+                    && monitor_mute_mask & (1_u64 << index) == 0
+                    && self.midi_route_faulted & (1_u64 << index) == 0
+                {
                     let left = safe_plugin_sample(self.plugin_output_left[frame_index])
                         * channel_volume
                         * if channel_pan > 0.0 {
@@ -10360,6 +10700,66 @@ impl DspState {
                     let bus = &mut self.track_block[start + frame_index];
                     bus[0] += delayed[0];
                     bus[1] += delayed[1];
+                }
+            }
+            // Source callback events already share its exact delayed audio stream. Sinks have
+            // not run yet; preserve those offsets when assigning their next input quantum.
+            for (source_index, destination_index) in edges
+                .iter()
+                .flatten()
+                .copied()
+                .filter(|(source, _)| *source == index)
+            {
+                let (source, destination) = if source_index < destination_index {
+                    let (before, after) = self.generator_endpoints.split_at_mut(destination_index);
+                    (
+                        before[source_index].as_ref().expect("bound source"),
+                        after[0].as_mut().expect("bound destination"),
+                    )
+                } else {
+                    let (before, after) = self.generator_endpoints.split_at_mut(source_index);
+                    (
+                        after[0].as_ref().expect("bound source"),
+                        before[destination_index]
+                            .as_mut()
+                            .expect("bound destination"),
+                    )
+                };
+                let output = source.endpoint.adapter.midi_output();
+                let mut failed = output.lost
+                    || suppressed
+                    || !has_exact_output
+                    || !channel_audible
+                    || !source.endpoint.adapter.midi_capabilities().1
+                    || !destination.endpoint.adapter.midi_capabilities().0
+                    || source
+                        .endpoint
+                        .coherent_latency_snapshot()
+                        .is_none_or(|snapshot| {
+                            snapshot.total_plugin_latency_samples != 0
+                                || !snapshot.slot_is_active(0)
+                        });
+                if self.midi_route_faulted & (1_u64 << destination_index) == 0 && !failed {
+                    for output in &output.events[..output.len] {
+                        if output.slot != 0
+                            || !destination.endpoint.stage_class(
+                                EndpointEventClass::Timeline,
+                                FrameEvent::midi(
+                                    output.message.sample_offset,
+                                    Some(0),
+                                    output.message.data,
+                                ),
+                            )
+                        {
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+                if failed {
+                    self.midi_route_faulted |= 1_u64 << destination_index;
+                    destination.endpoint.adapter.block_midi_until_epoch();
+                    destination.endpoint.clear_and_stage_all_notes_off();
                 }
             }
         }
@@ -11024,6 +11424,14 @@ impl DspState {
         self.fixed_quantum_output_underflow_frames = self
             .fixed_quantum_output_underflow_frames
             .saturating_add(diagnostics.output_underflow_frames);
+        // Routed projects cannot silently recover a lost FX block with old dry audio.
+        // The adapter's fault follows the same output stream position as that block.
+        if strict
+            && slot.endpoint.adapter.bridge_lookahead_quanta() > 1
+            && slot.endpoint.adapter.midi_output().audio_lost
+        {
+            return false;
+        }
         let latency_drifted = diagnostics.latency_drift_quanta != 0;
         if diagnostics.event_overflows != 0
             || diagnostics.endpoint_event_rejections != 0
@@ -11473,6 +11881,7 @@ impl DspState {
     }
 
     fn render_block(&mut self, status: &AudioStatus, frames: usize) {
+        self.callback_transport_playing = status.playing.load(Ordering::Acquire);
         debug_assert!(frames <= MAX_MIXER_BLOCK_FRAMES);
         if self.mixer_graph_was_activated {
             self.render_mixer_graph_block(status, frames);
@@ -11707,7 +12116,7 @@ fn safe_plugin_sample(sample: f32) -> f32 {
 }
 
 fn fixed_quantum_endpoint_latency(endpoint: &PreparedFixedEndpoint) -> u32 {
-    let adapter_and_bridge = (DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES as u32).saturating_mul(2);
+    let adapter_and_bridge = endpoint.adapter.latency().total_frames as u32;
     adapter_and_bridge.saturating_add(
         endpoint
             .coherent_latency_snapshot()
@@ -13321,6 +13730,7 @@ mod tests {
 
     fn timeline_test_plugin(id: u64) -> PluginInstance {
         PluginInstance {
+            midi_ports: crate::plugin_midi_routing::PluginMidiPorts::default(),
             id,
             format: PluginFormat::Vst3,
             role: PluginRole::Instrument,
@@ -21987,5 +22397,8 @@ mod tests {
         drop((insert_control, generator_control));
         drop(capture_control);
         assert!(!capture_target.exists());
+    }
+    mod midi_routing_tests {
+        include!("audio_midi_routing_tests.rs");
     }
 }

@@ -2,7 +2,7 @@
 
 > Status: 0.5.0-alpha.1 development prerelease. This is a usable Rust DAW foundation, not a completed FL Studio replica or a production-complete commercial DAW.
 
-Project compatibility: this prerelease loads existing v10 projects and saves project format v11. Older v10-only builds cannot reopen those new saves. Keep a backup of existing projects before evaluating the prerelease.
+Project compatibility: this prerelease loads existing v10/v11 projects and saves project format v12. Older builds cannot reopen those new saves. Keep a backup of existing projects before evaluating the prerelease.
 
 Citrus Studio is a clean-room, native music-production application written in Rust. It follows a pattern-first workflow while using its own product identity, vector iconography, layout, project format, DSP, and implementation.
 
@@ -16,6 +16,8 @@ filenames. Legacy caches request a rescan and failures stay explicitly unverifie
 [Real free-plugin validation](docs/REAL_VST3_VALIDATION.md) records official Surge
 instrument/FX offline audio and configured Stochas event generation; downstream
 MIDI routing, native GUI and hardware remain separate acceptance work.
+
+[Plugin MIDI ports](docs/PLUGIN_MIDI_ROUTING.md) connect one channel MIDI producer to one or more instruments during playback. The first slice has exclusive sink inputs, constant tempo, conservative high-latency buffering and explicit safety limits. Harmony Blueprint itself and platform-specific plugin UI/device acceptance remain unverified.
 
 ## Architecture
 
@@ -99,7 +101,7 @@ The callback compiler and kernel cover every compiled target, but rendering a va
 
 ### VST instruments and effects
 
-- Versioned Project v11 files, including inherited Audio Clip fade/source/exact-length references plus v10 Playlist Clip-group and v9 Piano Roll note-group identities plus the v8 Mixer track/route and plug-in stable-ID schema; Mixer realtime slots stay independent of display order, with one instrument assignment per Channel, ten ordered effect slots per Mixer track, normalized parameters, and opaque vendor-state persistence
+- Versioned Project v12 files with persisted plugin MIDI ports (legacy projects default Off), including inherited Audio Clip fade/source/exact-length references plus v10 Playlist Clip-group and v9 Piano Roll note-group identities plus the v8 Mixer track/route and plug-in stable-ID schema; Mixer realtime slots stay independent of display order, with one instrument assignment per Channel, ten ordered effect slots per Mixer track, normalized parameters, and opaque vendor-state persistence
 - Tagged plug-in-state save barriers for manual save/autosave: admitted live parameter edits drain before graph/state probes, pending graph changes must be callback-confirmed, transient control-queue pressure is retried, and unresolved state is reported before synchronized same-directory atomic project replacement; a manual save with stale state remains marked unsaved
 - Full-chain load, replace, remove, enable, bypass, wet, missing/crashed state, and reported latency in the Channel/Mixer UI
 - VST2 and VST3 backends on dedicated workers; a fixed 128-frame quantum adapter isolates plug-in scheduling from variable device callback sizes, and the audio callback never calls third-party plug-in code
