@@ -156,17 +156,23 @@ otherwise healthy plugin. Best-effort close remains available for a faulted inst
 
 - Linux `cargo test --offline --locked --all-features --all-targets`: 883 tests passed
   (864 application, 14 helper, 5 editor protocol), using the default thread stack.
-- Linux strict all-feature/all-target Clippy and Windows MSVC all-feature/all-target typecheck:
-  passed. The preceding safety candidate also passed Windows strict Clippy. One unchanged
-  upstream dependency deprecation warning remains in `internal/data_exchange.rs`.
+- Linux `cargo test --offline --locked --no-default-features --all-targets`: 862 tests
+  passed on the default thread stack; strict no-default Clippy also passed.
+- Linux strict all-feature/all-target Clippy and Windows MSVC all-feature/all-target typecheck
+  and strict Clippy: passed. One unchanged upstream dependency deprecation warning remains
+  in `internal/data_exchange.rs`.
 - Windows source fixture all-feature/all-target strict Clippy: passed, including all three
   deliberate stdout-pollution paths. This is cross-target compilation, not Windows execution.
 - Python protocol/build-receipt/package regressions: 89 tests passed on Linux.
 - Real Linux helper no-plugin smoke: three valid replies, invalid-command recovery, explicit
   shutdown/exit zero and child reaping passed.
-- Focused exact-source vendored-library audit: 9 native/revision tests passed using a temporary
-  production-dependency manifest (upstream's unused example dev dependencies were not fetched).
-  Stage-1 closed-state validators additionally passed 3 source-based standalone tests.
+- Focused exact-source vendored-library audit: 13 targeted tests passed (native/revision,
+  closed-state validation and failed-stop transitions) using a temporary production-dependency
+  manifest. Upstream's unused example dev dependencies were not fetched; this is not a claim
+  of passing the entire upstream suite or its absent external plugin fixtures.
+- The original registry archive checksum and exact patch reconstruction passed. Applying
+  `CITRUS.patch` reproduces every upstream file in the vendored directory, with only the seven
+  documented code files modified and the upstream license/manifests unchanged.
 - Linux native GUI gate: exit 77, **UNSUPPORTED / NOT VERIFIED**.
 - Windows GUI rendering, keyboard/mouse interaction, DPI, audio load and real-plugin compatibility:
   **NOT VERIFIED** in this Linux environment. Windows MSVC cross-target checks verify types only.
