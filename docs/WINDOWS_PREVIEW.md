@@ -77,9 +77,15 @@ The runner performs:
 
 The source tree must be clean. Source commit/time and Cargo.lock hash are captured
 before building and checked again during packaging. Cargo metadata is filtered
-for the MSVC target. Only sanitized package name/version/source, locked checksum,
-manifest license expression and selected features enter `DEPENDENCIES.json`.
+for the MSVC target. Sanitized package name/version/source, locked checksum,
+manifest license expression and selected features enter `DEPENDENCIES.json`, plus
+the bounded reviewed vendor provenance when selected.
 Raw metadata with local paths stays in ignored build output and is not uploaded.
+The local root must match the repository manifest identity, version, exact manifest
+location and Cargo graph root/workspace. Registry packages retain the fixed
+crates.io source and locked checksum requirement. The only approved additional
+local dependency is the MIT `vst3-host 0.9.0` extension described below; arbitrary
+path/git/registry overrides and spoofed root packages fail closed.
 
 To run locally on an authorized Windows development machine with PowerShell 7+:
 
@@ -111,13 +117,69 @@ Its required files are:
 The explicitly reviewed optional `docs/PROJECT_MEDIA.md` and
 `docs/OFFLINE_EXPORT_WORKFLOW.md`, `docs/AUDIO_SPLIT_FIDELITY.md` and
 `docs/WAV_EXPORT_OPTIONS.md`, `docs/MIXER_METERING.md` and
-`docs/LOCAL_SAMPLE_BROWSER.md` and `docs/HEADLESS_UI_QA.md` are included
+`docs/LOCAL_SAMPLE_BROWSER.md`, `docs/HEADLESS_UI_QA.md` and
+`docs/NATIVE_VST3_EDITORS.md` are included
 when present in the source checkout.
 This supports their independent implementation branches without requiring an
 unrelated code merge to test the packager. Any new
 package document must be added explicitly to `SOURCE_FILES` or
 `OPTIONAL_SOURCE_FILES`; no directory is copied recursively. Relative Markdown
 links are checked against the packaged files and a missing target fails the build.
+
+### Reviewed native-editor vendor provenance
+
+When the resolved graph includes the local `vst3-host 0.9.0` extension, these four
+files are required together, preserved exactly, and listed in `source_documents`:
+
+- `vendor/vst3-host-0.9.0/LICENSE`
+- `vendor/vst3-host-0.9.0/CITRUS_PATCHES.md`
+- `vendor/vst3-host-0.9.0/CITRUS.patch`
+- `vendor/vst3-host-0.9.0/.cargo_vcs_info.json`
+
+The root manifest must use exactly:
+
+```toml
+[patch.crates-io]
+vst3-host = { path = "vendor/vst3-host-0.9.0" }
+```
+
+The resolved manifest must be the actual
+`vendor/vst3-host-0.9.0/Cargo.toml`, with name `vst3-host`, version `0.9.0` and
+license `MIT`. Its matching local lock entry must have neither source nor checksum.
+Absolute/traversing/alternative overrides, extra overrides, wrong identities,
+duplicate graph/lock records, symlink components and Windows junction/reparse
+points are rejected. No directory is copied recursively.
+
+`DEPENDENCIES.json` keeps this modified path package's `source` and `checksum`
+**null**. A distinct, bounded `vendor_provenance` object records only the fixed
+relative vendor directory, original archive URL/SHA-256, upstream commit and the
+four explicitly shipped file hashes. Cargo IDs, local manifest paths, workspace
+paths and private package metadata are excluded. The pinned source facts are:
+
+- Original archive: `https://static.crates.io/crates/vst3-host/vst3-host-0.9.0.crate`
+- Original archive SHA-256: `6ec579d54bd13b83c60c1fd8bb756cf234e36ccbfb4833ff756b417e64db7fea`
+- Upstream commit: `ed054908cfe057694d8cf037d0c39dfb5eb4c2ca`
+- Original MIT license SHA-256: `a65a537295910b776a8b2edb2e7410c3b0e975ca6388994e032c4d1842b4952d`
+- Reviewed seven-file patch SHA-256: `dd74099ae07fcb4d0f2668bebf3b85714f992247c65714b72d12d1fc245b4c5d`
+
+All four bundle hashes are pinned in the packager. Updating any bundle bytes
+requires reviewing/updating those pins. For integration into a Windows checkout,
+add `/vendor/vst3-host-0.9.0/** text eol=lf` to `.gitattributes` before checkout.
+The reviewed 43-file vendor tree is UTF-8 text without CRLF or NUL bytes; this
+explicit LF rule preserves its current hashes under `core.autocrlf=true`.
+The feature branch's `-whitespace` rules alone do not preserve newline bytes.
+
+The archive hash identifies the **unmodified upstream crate**, not the modified
+local code. The provenance bundle hashes identify those four files only. This
+packager does not download/reconstruct upstream, apply the patch or attest that
+the entire modified source matches it. The build source commit separately
+identifies the checkout used for the application/helper build.
+
+The native-editor guide is optional so the packager remains testable without
+merging the feature. When included, its relative vendor-provenance link must close
+through the complete bundle. Its source-only fixture link must point to a verified,
+published source permalink. Do not copy the fixture README/provenance, fixture
+binaries, vendor source tree, vendor manifests or sample helper into the preview.
 
 `BUILD_PROVENANCE.json` records the full source SHA, exact Cargo.lock hash, Rust,
 Cargo, MSVC/SDK/runner inputs, target, features, profile, package-document manifest
@@ -133,7 +195,10 @@ SDK, Python/zlib or runner installations reproduce identical application bytes.
 
 The verifier rejects missing, extra, duplicate, traversing, absolute-path,
 second-root, symbolic-link, encrypted and oversized entries, as well as corrupted
-checksums or mismatched provenance. It validates all entries before extraction:
+checksums or mismatched provenance. It also validates the exact sanitized
+inventory schema, root identity, vendor/bundle pairing, upstream facts and all four
+pinned hashes, even if an altered archive has a freshly recomputed checksum list.
+All entries and these semantic checks complete before extraction:
 
     python -B scripts/package_windows_preview.py verify <preview.zip> --extract-to <new-directory>
 
@@ -148,8 +213,13 @@ ignored rather than copied.
 notice file describes a historical gnullvm distribution: its libunwind/MinGW
 component statements are **not claims about this MSVC preview**. The generated
 start-here notice makes this distinction visible before launch. `DEPENDENCIES.json`
-provides the current resolved Cargo graph and license expressions; a manifest
-inventory alone does not establish full license compliance or identify every
+provides the current resolved Cargo graph and license expressions. For the reviewed
+native-editor extension, the original Helge Sverre MIT text remains unchanged in
+`THIRD_PARTY_NOTICES.md`; the complete original license also ships in the explicit
+vendor bundle. `CITRUS_PATCHES.md` and `CITRUS.patch` describe the current extension
+and production-helper distinction; the historical helper description in the notices
+is not rewritten. The start-here notice points out the bundle and upstream-hash
+scope. A manifest inventory alone does not establish full license compliance or identify every
 piece of native linked object code. Before external commercial distribution,
 review the actual Rust, embedded crate/font/native code and Microsoft static CRT
 redistribution terms and all required notices. This pipeline does not certify
@@ -168,7 +238,13 @@ Windows security controls to run an unsigned build.
 The packager has synthetic PE and ZIP regression coverage, including malicious
 entry names, duplicate/symlink entries, payload tampering, runtime imports,
 metadata sanitization, source-lock changes, documentation links and deterministic
-archives. These tests run on Linux without executing any Windows binary.
+archives. Vendor regressions cover every missing/tampered bundle member, fully
+rehashed inconsistent archives, exact path/manifest/lock/override identities,
+symlink escapes, Windows reparse-point handling, excluded source/fixture files and
+document closure. Small synthetic vendor fixtures exercise these checks without
+merging/copying the runtime feature; they override only the four file-digest pins,
+not the upstream identities or validation rules. These tests run on Linux without
+executing any Windows binary.
 PowerShell orchestration, actual optimized MSVC binaries and their import tables
 must be verified by a Windows workflow run at the integrated source SHA. Do not
 turn synthetic/local test success into a claim that a downloadable preview has

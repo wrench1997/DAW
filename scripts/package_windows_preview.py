@@ -34,11 +34,27 @@ SOURCE_FILES = (
 OPTIONAL_SOURCE_FILES = frozenset((
     "docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md",
     "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md", "docs/LOCAL_SAMPLE_BROWSER.md",
-    "docs/HEADLESS_UI_QA.md",
+    "docs/HEADLESS_UI_QA.md", "docs/NATIVE_VST3_EDITORS.md",
 ))
 GENERATED_FILES = ("START_HERE_PREVIEW.txt", "BUILD_PROVENANCE.json", "DEPENDENCIES.json")
 PAYLOAD_FILES = frozenset(BINARIES + SOURCE_FILES + GENERATED_FILES)
 PACKAGE_FILES = PAYLOAD_FILES | {"SHA256SUMS.txt"}
+REGISTRY_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
+VENDOR_PATH = "vendor/vst3-host-0.9.0"
+VENDOR_ARCHIVE_URL = "https://static.crates.io/crates/vst3-host/vst3-host-0.9.0.crate"
+VENDOR_ARCHIVE_SHA256 = "6ec579d54bd13b83c60c1fd8bb756cf234e36ccbfb4833ff756b417e64db7fea"
+VENDOR_COMMIT = "ed054908cfe057694d8cf037d0c39dfb5eb4c2ca"
+# These reviewed provenance bytes are deliberately pinned, not a hash of the
+# modified dependency's entire source tree. A changed bundle needs fresh review.
+VENDOR_FILE_HASHES = {
+    f"{VENDOR_PATH}/LICENSE": "a65a537295910b776a8b2edb2e7410c3b0e975ca6388994e032c4d1842b4952d",
+    f"{VENDOR_PATH}/CITRUS_PATCHES.md": "cb09da9879db50a0f52171647507ff2190ae5c988e7c22eb570fbe39fa214f91",
+    f"{VENDOR_PATH}/CITRUS.patch": "dd74099ae07fcb4d0f2668bebf3b85714f992247c65714b72d12d1fc245b4c5d",
+    f"{VENDOR_PATH}/.cargo_vcs_info.json": "737b52ce29e201e3cc14bab20bc449c6e4a3238c78320391a14d8bc1cf8a9657",
+}
+VENDOR_FILES = frozenset(VENDOR_FILE_HASHES)
+INVENTORY_SCOPE = "Cargo target-resolved graph; may include build/proc-macro dependencies"
+LICENSE_REVIEW = "Manifest expressions only; not a legal compliance attestation"
 MAX_FILE_BYTES = 256 * 1024 * 1024
 # These are Windows 10/11 OS components, never copied from a developer PATH.
 # Unknown imports must be investigated; do not 'fix' a failure by collecting DLLs.
@@ -166,35 +182,173 @@ def inspect_pe(data):
             "delay_imports": delayed}
 
 
-def dependency_inventory(metadata, lock):
+def repository_file(repo, relative):
+    """Anchor approved inputs before resolving; reject symlink/reparse components.
+
+    FILE_ATTRIBUTE_REPARSE_POINT also catches Windows junctions on Python 3.11,
+    where pathlib has no is_junction(). Resolving the expected path first would
+    accidentally bless a vendor directory redirected outside the checkout.
+    """
+    root = repo.resolve(strict=True)
+    path = root
+    for part in PurePosixPath(relative).parts:
+        require(part not in ("", ".", "..") and "/" not in part and "\\" not in part,
+                "Invalid repository-relative input")
+        path = path / part
+        try:
+            status = path.lstat()
+        except OSError as error:
+            raise PackageError("Missing/unreadable repository input: " + relative) from error
+        require(not stat.S_ISLNK(status.st_mode) and
+                not getattr(status, "st_file_attributes", 0) & 0x400,
+                "Symlink/junction repository input")
+    require(path.resolve(strict=True) == path and path.is_relative_to(root),
+            "Repository input escapes approved root")
+    return path
+
+
+def vendor_provenance():
+    return {"path": VENDOR_PATH, "upstream_archive_url": VENDOR_ARCHIVE_URL,
+            "upstream_archive_sha256": VENDOR_ARCHIVE_SHA256,
+            "upstream_commit": VENDOR_COMMIT, "files": dict(VENDOR_FILE_HASHES)}
+
+
+def validate_vendor_bundle(payload):
+    require(VENDOR_FILES <= set(payload), "Incomplete vendor provenance bundle")
+    for path, checksum in VENDOR_FILE_HASHES.items():
+        require(digest(payload[path]) == checksum, "Unreviewed vendor provenance bytes: " + path)
+    require(json.loads(payload[f"{VENDOR_PATH}/.cargo_vcs_info.json"]) ==
+            {"git": {"sha1": VENDOR_COMMIT}, "path_in_vcs": "vst3-host"},
+            "Wrong upstream VCS identity")
+
+
+def validate_inventory(inventory, root_version, payload=None):
+    """Check the same bounded public schema at creation and before extraction."""
+    require(isinstance(inventory, dict) and set(inventory) ==
+            {"target", "scope", "license_review", "packages"}, "Unreviewed inventory fields")
+    require(inventory["target"] == TARGET and inventory["scope"] == INVENTORY_SCOPE and
+            inventory["license_review"] == LICENSE_REVIEW, "Wrong inventory identity")
+    packages = inventory["packages"]
+    require(isinstance(packages, list) and 0 < len(packages) <= 10000, "Missing/oversized dependency inventory")
+    seen = set()
+    roots = 0
+    vendors = 0
+    fields = {"name", "version", "source", "checksum", "license", "features"}
+    for package in packages:
+        require(isinstance(package, dict) and fields <= set(package) <= fields | {"vendor_provenance"},
+                "Unreviewed dependency fields")
+        name, version = package["name"], package["version"]
+        require(isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name), "Invalid dependency name")
+        require(isinstance(version, str) and len(version) <= 128 and re.fullmatch(
+                r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?(?:\+[A-Za-z0-9.-]+)?", version),
+                "Invalid dependency version")
+        source, checksum = package["source"], package["checksum"]
+        require(source is None or source == REGISTRY_SOURCE, "Unreviewed dependency source")
+        identity = (name, version, source)
+        require(identity not in seen, "Duplicate dependency identity")
+        seen.add(identity)
+        license_expression = package["license"]
+        require(license_expression is None or (isinstance(license_expression, str) and
+                len(license_expression) <= 512 and ":/" not in license_expression and
+                re.fullmatch(r"[A-Za-z0-9(][A-Za-z0-9_.+(): /-]*", license_expression)), "Invalid manifest license expression")
+        features = package["features"]
+        require(isinstance(features, list) and len(features) <= 10000 and
+                all(isinstance(f, str) and re.fullmatch(r"[A-Za-z0-9_+.-]{1,128}", f) for f in features),
+                "Invalid dependency features")
+        require(features == sorted(set(features)), "Noncanonical dependency features")
+        if source is not None:
+            require(isinstance(checksum, str) and re.fullmatch(r"[0-9a-f]{64}", checksum),
+                    "Missing locked registry checksum")
+            require("vendor_provenance" not in package, "Registry package has vendor provenance")
+        else:
+            require(checksum is None, "Local package must not have a registry checksum")
+            if name == "citrus-studio" and version == root_version:
+                roots += 1
+                require("vendor_provenance" not in package, "Root has vendor provenance")
+            else:
+                require((name, version, license_expression) == ("vst3-host", "0.9.0", "MIT"),
+                        "Unexpected local/path dependency")
+                require(package.get("vendor_provenance") == vendor_provenance(),
+                        "Unreviewed vendor provenance")
+                vendors += 1
+    require(roots == 1 and vendors <= 1, "Missing/duplicate root or vendor dependency")
+    require(packages == sorted(packages, key=lambda p: (p["name"], p["version"])),
+            "Noncanonical dependency order")
+    if payload is not None:
+        present = set(payload) & VENDOR_FILES
+        require(present == (VENDOR_FILES if vendors else set()), "Vendor dependency/bundle mismatch")
+        if vendors:
+            validate_vendor_bundle(payload)
+    return bool(vendors)
+
+
+def dependency_inventory(metadata, lock, repo):
+    root_manifest = repository_file(repo, "Cargo.toml")
+    manifest = tomllib.loads(read_input(root_manifest).decode())
+    require(metadata.get("workspace_root") == str(root_manifest.parent), "Cargo workspace root mismatch")
+    root_identity = (manifest["package"]["name"], manifest["package"]["version"])
+    require(root_identity[0] == "citrus-studio", "Unexpected root manifest identity")
+    patch = manifest.get("patch", {})
+    require(not patch or patch == {"crates-io": {"vst3-host": {"path": VENDOR_PATH}}},
+            "Unreviewed root patch override")
+    require(not manifest.get("replace"), "Unreviewed root replacement override")
     nodes = metadata.get("resolve", {}).get("nodes", [])
-    wanted = {node["id"] for node in nodes}
-    require(wanted, "Cargo metadata has no resolved graph")
-    checksums = {(p["name"], p["version"], p.get("source")): p.get("checksum")
-                 for p in lock["package"]}
+    wanted = {node["id"]: node["features"] for node in nodes}
+    require(wanted and len(wanted) == len(nodes), "Missing/duplicate Cargo graph nodes")
+    checksums = {}
+    for entry in lock["package"]:
+        key = (entry["name"], entry["version"], entry.get("source"))
+        require(key not in checksums, "Duplicate Cargo.lock package")
+        checksums[key] = entry
     result = []
+    found_ids = set()
+    root_id = None
+    vendors = 0
     for package in metadata["packages"]:
         if package["id"] not in wanted:
             continue
+        require(package["id"] not in found_ids, "Duplicate Cargo metadata package")
+        found_ids.add(package["id"])
         source = package.get("source")
-        # Reject new unreviewed dependency source types rather than leaking paths,
-        # credentials, or accidentally attesting an arbitrary registry or git URL.
-        require(source in (None, "registry+https://github.com/rust-lang/crates.io-index"),
-                f"Unreviewed Cargo source for {package['name']}")
-        require(source is not None or package["name"] == "citrus-studio",
-                "Unexpected local/path dependency")
+        require(source is None or source == REGISTRY_SOURCE, "Unreviewed Cargo source")
         key = (package["name"], package["version"], source)
-        require(key in checksums, f"Dependency absent from Cargo.lock: {key[:2]}")
-        checksum = checksums[key]
-        require(source is None or re.fullmatch(r"[0-9a-f]{64}", checksum or ""),
-                "Missing locked registry checksum")
-        result.append({"name": package["name"], "version": package["version"],
-                       "source": source, "checksum": checksum, "license": package.get("license"),
-                       "features": sorted(next(n["features"] for n in nodes if n["id"] == package["id"]))})
-    require(len(result) == len(wanted), "Incomplete Cargo metadata package set")
-    return {"target": TARGET, "scope": "Cargo target-resolved graph; may include build/proc-macro dependencies",
-            "license_review": "Manifest expressions only; not a legal compliance attestation",
-            "packages": sorted(result, key=lambda p: (p["name"], p["version"]))}
+        require(key in checksums, "Dependency absent from Cargo.lock")
+        entry = checksums[key]
+        record = {"name": package["name"], "version": package["version"],
+                  "source": source, "checksum": entry.get("checksum"), "license": package.get("license"),
+                  "features": sorted(wanted[package["id"]])}
+        if source is None:
+            require("source" not in entry and "checksum" not in entry,
+                    "Local lock entry contains source/checksum")
+            manifest_path = package.get("manifest_path")
+            require(isinstance(manifest_path, str) and Path(manifest_path).is_absolute(),
+                    "Missing local manifest location")
+            if key[:2] == root_identity:
+                require(Path(manifest_path) == root_manifest, "Root manifest location mismatch")
+                require(root_id is None, "Duplicate root package")
+                root_id = package["id"]
+            else:
+                require(key[:2] == ("vst3-host", "0.9.0") and package.get("license") == "MIT",
+                        "Unexpected local/path dependency")
+                require(bool(patch), "Missing reviewed root patch override")
+                approved_manifest = repository_file(repo, f"{VENDOR_PATH}/Cargo.toml")
+                require(Path(manifest_path) == approved_manifest, "Vendor manifest location mismatch")
+                vendored = tomllib.loads(read_input(approved_manifest).decode())["package"]
+                require((vendored.get("name"), vendored.get("version"), vendored.get("license")) ==
+                        ("vst3-host", "0.9.0", "MIT"), "Wrong vendor manifest identity/license")
+                bundle = {path: read_input(repository_file(repo, path)) for path in VENDOR_FILES}
+                validate_vendor_bundle(bundle)
+                record["vendor_provenance"] = vendor_provenance()
+                vendors += 1
+        result.append(record)
+    require(found_ids == set(wanted), "Incomplete Cargo metadata package set")
+    require(root_id is not None and metadata.get("resolve", {}).get("root") == root_id,
+            "Cargo graph root does not match root manifest")
+    require(bool(patch) == bool(vendors), "Root patch/resolved dependency mismatch")
+    inventory = {"target": TARGET, "scope": INVENTORY_SCOPE, "license_review": LICENSE_REVIEW,
+                 "packages": sorted(result, key=lambda p: (p["name"], p["version"]))}
+    validate_inventory(inventory, root_identity[1])
+    return inventory
 
 
 def validate_build_info(info):
@@ -246,8 +400,12 @@ def create_package(repo, binaries, metadata, build_info, output):
     archive_path = output / (name + ".zip")
     checksum_path = output / (name + ".zip.sha256")
     require(not archive_path.exists() and not checksum_path.exists(), "Output already exists")
+    inventory = dependency_inventory(metadata, tomllib.loads(lock_bytes.decode()), repo)
     sources = set(SOURCE_FILES) | {p for p in OPTIONAL_SOURCE_FILES if (repo / p).exists()}
-    payload = {path: read_input(repo / path) for path in sources}
+    if any("vendor_provenance" in p for p in inventory["packages"]):
+        sources |= VENDOR_FILES
+    payload = {path: read_input(repository_file(repo, path)) for path in sources}
+    validate_inventory(inventory, version, payload)
     audits = {}
     audit_errors = []
     for binary in BINARIES:
@@ -257,7 +415,7 @@ def create_package(repo, binaries, metadata, build_info, output):
         except PackageError as error:
             audit_errors.append(f"{binary}: {error}")
     require(not audit_errors, "Binary audit failed: " + "; ".join(audit_errors))
-    payload["DEPENDENCIES.json"] = json_bytes(dependency_inventory(metadata, tomllib.loads(lock_bytes.decode())))
+    payload["DEPENDENCIES.json"] = json_bytes(inventory)
     payload["START_HERE_PREVIEW.txt"] = (
         f"Citrus Studio {version} — UNSIGNED MSVC DEVELOPER PREVIEW\n\n"
         "Extract the entire ZIP, then launch citrus-studio.exe. Keep vst3-host-helper.exe beside it.\n"
@@ -272,12 +430,15 @@ def create_package(repo, binaries, metadata, build_info, output):
         "The import audit cannot establish dynamically loaded plugin/graphics dependencies.\n"
         "THIRD_PARTY_NOTICES.md preserves the historical gnullvm notices; its libunwind/MinGW\n"
         "distribution claims do not describe this MSVC preview. See docs/WINDOWS_PREVIEW.md.\n"
+        "When DEPENDENCIES.json records the reviewed local vst3-host 0.9.0 extension, its\n"
+        "original MIT license and four-file provenance bundle ship under vendor/vst3-host-0.9.0/.\n"
+        "The upstream archive hash identifies the original crate, not the modified code.\n"
     ).encode("utf-8")
     provenance = {**build_info, "schema": 1, "channel": "unsigned-msvc-developer-preview",
                   "version": version, "pe_audit": audits, "source_documents": sorted(sources),
                   "acceptance": "Package integrity only; no commercial or official-release attestation"}
     payload["BUILD_PROVENANCE.json"] = json_bytes(provenance)
-    require(set(payload) == PAYLOAD_FILES | (sources & OPTIONAL_SOURCE_FILES), "Internal payload whitelist mismatch")
+    require(set(payload) == PAYLOAD_FILES | (sources & (OPTIONAL_SOURCE_FILES | VENDOR_FILES)), "Internal payload whitelist mismatch")
     check_document_links(payload)
     payload["SHA256SUMS.txt"] = "".join(f"{digest(payload[p])}  {p}\n" for p in sorted(payload)).encode("ascii")
     output.mkdir(parents=True, exist_ok=True)
@@ -310,7 +471,7 @@ def verify_package(path, extract_to=None):
     with zipfile.ZipFile(path) as archive:
         entries = archive.infolist()
         expected = {f"{root}/{p}" for p in PACKAGE_FILES}
-        allowed = expected | {f"{root}/{p}" for p in OPTIONAL_SOURCE_FILES}
+        allowed = expected | {f"{root}/{p}" for p in OPTIONAL_SOURCE_FILES | VENDOR_FILES}
         actual = {e.filename for e in entries}
         require(len(entries) == len(actual) and expected <= actual <= allowed,
                 "ZIP entries do not match exact whitelist (extra/missing/duplicate/path traversal)")
@@ -328,13 +489,14 @@ def verify_package(path, extract_to=None):
     require(package_name(info["version"], info["source_commit"]) == root, "ZIP identity does not match provenance")
     expected_hashes = "".join(f"{digest(payload[p])}  {p}\n" for p in sorted(set(payload) - {"SHA256SUMS.txt"})).encode("ascii")
     require(payload["SHA256SUMS.txt"] == expected_hashes, "Package checksum mismatch")
-    require(info.get("source_documents") == sorted(set(payload) & (set(SOURCE_FILES) | OPTIONAL_SOURCE_FILES)),
+    require(info.get("source_documents") == sorted(set(payload) & (set(SOURCE_FILES) | OPTIONAL_SOURCE_FILES | VENDOR_FILES)),
             "Source document manifest mismatch")
     check_document_links(payload)
     for binary in BINARIES:
         require(inspect_pe(payload[binary]) == info["pe_audit"][binary], "PE audit/provenance mismatch")
     inventory = json.loads(payload["DEPENDENCIES.json"])
-    require(inventory.get("target") == TARGET and bool(inventory.get("packages")), "Missing dependency inventory")
+    require(payload["DEPENDENCIES.json"] == json_bytes(inventory), "Noncanonical dependency inventory")
+    validate_inventory(inventory, info["version"], payload)
     if extract_to is not None:
         require(not extract_to.exists(), "Extraction destination already exists")
         extract_to.mkdir(parents=True)
