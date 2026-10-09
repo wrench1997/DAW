@@ -20,6 +20,7 @@ cargo test --locked --no-default-features --bin citrus-studio app::headless_ui_t
 
 Coverage:
 
+- Metronome CLICK ON/OFF pointer toggles while stopped/playing, preference save/reopen, unchanged project/Undo, and silent offline-export independence; see [metronome scope](METRONOME.md)
 - Playlist, Channel Rack, Piano Roll and Mixer keyboard navigation
 - All six Settings pages via actual buttons; F10/Escape dismissal, reopening,
   and preventing workspace shortcuts behind Settings

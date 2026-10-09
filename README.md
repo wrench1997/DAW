@@ -50,6 +50,7 @@ Useful shortcuts:
 - `Space`: play or pause
 - `L`: switch PAT (current Pattern loop) and SONG (Playlist arrangement) playback
 - `Escape`: stop
+- [Playback metronome](docs/METRONOME.md): `CLICK OFF` / `CLICK ON` beside Record; defaults Off and persists as an app preference. Offline WAV export excludes it; Realtime Master Capture includes it when enabled.
 - Playlist `P`, `B`, `D`, `T`, `C`, `S`, `E`: Draw, Paint, Delete, Mute, Slice, Slip Edit, and Select; `1` to `4` remain aliases for Select, Draw, Slice, and Mute
 - `F5`, `F6`, `F7`, `F9`: show and focus Playlist, Channel Rack, Piano Roll, and Mixer
 - `Ctrl+O`, `Ctrl+S`: open and save

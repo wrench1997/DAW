@@ -2610,6 +2610,8 @@ struct AppAudioPreferences {
     last_known_good_output: Option<AudioDeviceProfile>,
     #[serde(default = "default_allow_audio_fallback")]
     allow_default_fallback: bool,
+    #[serde(default)]
+    metronome_enabled: bool,
 }
 
 impl Default for AppAudioPreferences {
@@ -2620,6 +2622,7 @@ impl Default for AppAudioPreferences {
             requested_input: AudioDeviceProfile::system_default_input(),
             last_known_good_output: None,
             allow_default_fallback: true,
+            metronome_enabled: false,
         }
     }
 }
@@ -5051,6 +5054,7 @@ impl CitrusApp {
         {
             match AudioEngine::start_with_profile(&attempt.profile) {
                 Ok(engine) => {
+                    engine.set_metronome_enabled(audio_preferences.metronome_enabled);
                     startup_source = Some(attempt.source);
                     audio = Some(engine);
                     break;
@@ -7715,6 +7719,7 @@ impl CitrusApp {
         } = candidate;
         engine.set_playing(false);
         engine.set_recording(false);
+        engine.set_metronome_enabled(self.audio_preferences.metronome_enabled);
         let effective_profile = engine.effective_device_profile().clone();
         let stream_telemetry = engine.stream_telemetry();
 
@@ -14902,6 +14907,17 @@ impl CitrusApp {
             });
     }
 
+    fn set_metronome_enabled(&mut self, enabled: bool) {
+        if self.audio_preferences.metronome_enabled == enabled {
+            return;
+        }
+        self.audio_preferences.metronome_enabled = enabled;
+        self.audio_preferences_dirty = true;
+        if let Some(audio) = &self.audio {
+            audio.set_metronome_enabled(enabled);
+        }
+    }
+
     fn toolbar(&mut self, root: &mut egui::Ui) {
         // Keep every transport and navigation action visible at the supported minimum size.
         // A second explicit row is preferable to right-aligned controls painting over siblings.
@@ -15031,6 +15047,21 @@ impl CitrusApp {
                         .clicked()
                     {
                         self.toggle_record();
+                    }
+                    let metronome_enabled = self.audio_preferences.metronome_enabled;
+                    if ui
+                        .add_sized(
+                            [60.0, 30.0],
+                            egui::Button::new(
+                                RichText::new(if metronome_enabled { "CLICK ON" } else { "CLICK OFF" })
+                                    .size(9.0),
+                            )
+                            .selected(metronome_enabled),
+                        )
+                        .on_hover_text("Metronome: click during playback. Saved as an app preference.\nRealtime Master Capture includes the click; offline WAV export does not.")
+                        .clicked()
+                    {
+                        self.set_metronome_enabled(!metronome_enabled);
                     }
                     ui.separator();
 
@@ -28471,6 +28502,32 @@ mod playback_tests {
             decode_audio_preferences(Some(&encoded)).0,
             AppAudioPreferences::default()
         );
+    }
+
+    #[test]
+    fn metronome_preference_defaults_off_migrates_and_survives_device_preference_commit() {
+        assert!(!decode_audio_preferences(None).0.metronome_enabled);
+        let mut legacy = serde_json::to_value(AppAudioPreferences::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("metronome_enabled");
+        let (decoded, error) = decode_audio_preferences(Some(&legacy.to_string()));
+        assert!(!decoded.metronome_enabled);
+        assert!(error.is_none());
+        for enabled in [true, false] {
+            let mut preferences = AppAudioPreferences {
+                metronome_enabled: enabled,
+                ..Default::default()
+            };
+            commit_audio_preferences_after_restart(
+                &mut preferences,
+                exact_test_output_profile(),
+                AudioDeviceProfile::system_default_input(),
+                exact_test_output_profile(),
+            );
+            let encoded = serde_json::to_string(&preferences).unwrap();
+            let (restored, error) = decode_audio_preferences(Some(&encoded));
+            assert_eq!(restored.metronome_enabled, enabled);
+            assert!(error.is_none());
+        }
     }
 
     #[test]

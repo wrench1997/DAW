@@ -181,10 +181,12 @@ The same copied binary passed the quiet comparison. The separately instrumented
 unpaced overload above verifies deadline cleanup/recovery, but cannot retroactively
 prove the original loss's cause. There is no unlimited CPU-overload guarantee.
 
-Native no-note checks isolate the instrument bus: this build's existing Master
-metronome produces playback clicks even when the instrument is silent. Its peak
-must not be misreported as an unreleased plugin voice. A metronome control and a
-callback-safe general bridge are separate follow-ups.
+Native no-note checks at the reviewed `e54a6e4` routing checkpoint isolated the
+instrument bus because that checkpoint's Master metronome clicked automatically.
+Its peak must not be misreported as an unreleased plugin voice. The subsequent
+[metronome control](METRONOME.md) defaults Off; this does not change the historical
+acceptance source or qualify the old Off-mode bridge. A callback-safe general
+bridge remains separate work.
 
 Harmony Blueprint, Windows/macOS execution, physical speakers/devices, native
 plugin UI, seamless loops and stopped live multi-plugin audition remain unverified

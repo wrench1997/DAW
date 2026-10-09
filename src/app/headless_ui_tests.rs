@@ -531,10 +531,17 @@ fn full_app_responsive_toolbars_keep_navigation_plugins_group_and_snap_separate(
         let mut ui = UiHarness::new();
         ui.size = egui::vec2(width, 680.0);
         ui.settle();
-        let navigation: Vec<_> = ["PLAYLIST", "RACK", "PIANO", "MIXER", "PLUGINS manager"]
-            .into_iter()
-            .map(|name| node_rect(ui.button(name)))
-            .collect();
+        let navigation: Vec<_> = [
+            "CLICK OFF",
+            "PLAYLIST",
+            "RACK",
+            "PIANO",
+            "MIXER",
+            "PLUGINS manager",
+        ]
+        .into_iter()
+        .map(|name| node_rect(ui.button(name)))
+        .collect();
         for (index, rect) in navigation.iter().enumerate() {
             assert!(
                 ui.ctx.content_rect().contains_rect(*rect),
@@ -945,6 +952,62 @@ fn full_app_native_inspector_actions_fit_narrow_and_wide_panels() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn full_app_metronome_pointer_toggle_persists_without_project_history_or_export_click() {
+    let mut ui = UiHarness::new();
+    let original = project_fingerprint(&ui.app.project);
+    assert!(!ui.app.audio_preferences.metronome_enabled);
+    assert!(!ui.app.dirty);
+    ui.click("CLICK OFF");
+    assert!(ui.app.audio_preferences.metronome_enabled);
+    assert!(ui.app.audio_preferences_dirty);
+    ui.key(egui::Key::Space, egui::Modifiers::NONE);
+    assert!(ui.app.playing);
+    ui.click("CLICK ON");
+    assert!(!ui.app.audio_preferences.metronome_enabled);
+    assert!(ui.app.playing, "click toggle must not pause playback");
+    ui.click("CLICK OFF");
+    assert!(ui.app.playing);
+    ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+    assert!(!ui.app.playing);
+    assert!(ui.app.audio_preferences.metronome_enabled);
+    assert_eq!(project_fingerprint(&ui.app.project), original);
+    assert!(!ui.app.dirty);
+    assert!(ui.app.undo_stack.is_empty());
+    assert!(ui.app.redo_stack.is_empty());
+    ui.capture("metronome-enabled");
+
+    let mut storage = WorkspaceTestStorage::default();
+    ui.app.save(&mut storage);
+    let mut restored = UiHarness::with_storage(Some(&storage), true);
+    assert!(restored.app.audio_preferences.metronome_enabled);
+    restored.button("CLICK ON");
+    restored.click("CLICK ON");
+    restored.app.save(&mut storage);
+    let restored_off = UiHarness::with_storage(Some(&storage), true);
+    assert!(!restored_off.app.audio_preferences.metronome_enabled);
+    restored_off.button("CLICK OFF");
+
+    // Offline rendering takes only Project music, regardless of the app click preference.
+    let fixture = Fixture::new();
+    let mut blank = Project::blank();
+    blank.tempo = 120.0;
+    blank.song_length_beats = 2.0;
+    let off_path = fixture.0.join("metronome-off.wav");
+    let on_path = fixture.0.join("metronome-on.wav");
+    restored.app.set_metronome_enabled(false);
+    export::render_project_wav(&blank, &off_path, 8_000).unwrap();
+    restored.app.set_metronome_enabled(true);
+    export::render_project_wav(&blank, &on_path, 8_000).unwrap();
+    assert_eq!(
+        std::fs::read(&off_path).unwrap(),
+        std::fs::read(&on_path).unwrap()
+    );
+    let decoded = crate::wav::read_wav(&on_path).unwrap();
+    assert_eq!(decoded.metadata.frames, 8_000);
+    assert!(decoded.samples.iter().all(|sample| *sample == 0.0));
 }
 
 #[derive(Default)]

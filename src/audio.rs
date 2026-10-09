@@ -1004,6 +1004,8 @@ impl fmt::Debug for AudioCommand {
 pub struct AudioStatus {
     pub playing: AtomicBool,
     pub recording: AtomicBool,
+    /// App preference, independent of project/transport activation and command queue capacity.
+    pub metronome_enabled: AtomicBool,
     pub tempo_milli: AtomicU32,
     pub sample_rate: AtomicU32,
     pub rendered_frames: AtomicU64,
@@ -1044,6 +1046,7 @@ impl Default for AudioStatus {
         Self {
             playing: AtomicBool::new(false),
             recording: AtomicBool::new(false),
+            metronome_enabled: AtomicBool::new(false),
             tempo_milli: AtomicU32::new(128_000),
             sample_rate: AtomicU32::new(48_000),
             rendered_frames: AtomicU64::new(0),
@@ -2212,6 +2215,14 @@ impl AudioEngine {
         self.master_capture_events.pop().ok()
     }
 
+    /// Changes only click generation. The callback clears the active click envelope when off;
+    /// audio already submitted to device/plugin/PDC buffers drains normally.
+    pub fn set_metronome_enabled(&self, enabled: bool) {
+        self.status
+            .metronome_enabled
+            .store(enabled, Ordering::Release);
+    }
+
     pub fn set_playing(&self, playing: bool) {
         self.transport_mailbox
             .publish(TransportMutation::SetPlaying(playing));
@@ -2828,6 +2839,9 @@ fn render_transport_chunk(
     let mut rendered = 0;
     while rendered < frames {
         transport.apply_latest_request(mailbox, status, dsp);
+        // Also clear while paused, awaiting Timeline activation, or monitoring live MIDI,
+        // when the normal source renderer may not run at all.
+        dsp.clear_disabled_metronome(status);
         let segment_frames = transport.frames_before_loop(frames - rendered);
         if segment_frames == 0 {
             transport.wrap_loop(status, dsp);
@@ -10383,15 +10397,29 @@ impl DspState {
         }
     }
 
+    fn clear_disabled_metronome(&mut self, status: &AudioStatus) -> bool {
+        let enabled = status.metronome_enabled.load(Ordering::Acquire);
+        if !enabled {
+            self.click_envelope = 0.0;
+            self.click_phase = 0.0;
+        }
+        enabled
+    }
+
     fn render_metronome_frame(&mut self, status: &AudioStatus, frame_index: usize) {
+        let enabled = self.clear_disabled_metronome(status);
         let transport_playing = status.playing.load(Ordering::Acquire);
         if transport_playing {
             let tempo = status.tempo_milli.load(Ordering::Relaxed) as f32 / 1000.0;
             self.beat_phase += tempo / 60.0 / self.sample_rate;
             if self.beat_phase >= 1.0 {
                 self.beat_phase -= 1.0;
-                self.click_envelope = 0.1;
-                self.click_phase = 0.0;
+                // Keep the existing beat phase advancing while off so enabling during
+                // playback waits for the next beat rather than restarting its clock.
+                if enabled {
+                    self.click_envelope = 0.1;
+                    self.click_phase = 0.0;
+                }
             }
         }
         if self.click_envelope > 0.0001 {
@@ -15683,6 +15711,8 @@ mod tests {
     #[test]
     fn dsp_stays_finite_and_bounded() {
         let status = AudioStatus::default();
+        // Preserve explicit click safety coverage now that new engines default Off.
+        status.metronome_enabled.store(true, Ordering::Release);
         let mut dsp = DspState::new(48_000.0);
         let (mut retired, _reclaimed) = test_reclaimer();
         register_test_asset(
@@ -19998,6 +20028,177 @@ mod tests {
             assert!(frames <= MAX_MIXER_BLOCK_FRAMES);
             render_transport_chunk(dsp, status, mailbox, transport, frames, |_, _| {});
         }
+    }
+
+    #[test]
+    fn metronome_defaults_off_and_toggle_clears_envelope_in_both_renderers() {
+        for graph in [false, true] {
+            let (_controller, mut dsp, status) = if graph {
+                install_and_activate_mixer_graph_timeline(
+                    compile_timeline_test_project(&Project::blank()),
+                    1,
+                    2,
+                )
+            } else {
+                let (controller, _) = create_timeline_runtime();
+                (
+                    controller,
+                    Box::write(Box::new_uninit(), DspState::new(48_000.0)),
+                    AudioStatus::default(),
+                )
+            };
+            status.playing.store(true, Ordering::Release);
+            assert!(!status.metronome_enabled.load(Ordering::Acquire));
+            // Cross a complete beat with a truly empty source, not a short pre-click fixture.
+            for _ in 0..64 {
+                dsp.render_block(&status, 512);
+                assert!(
+                    dsp.master_block[..512]
+                        .iter()
+                        .all(|frame| *frame == [0.0; 2])
+                );
+            }
+            assert_eq!(dsp.click_envelope, 0.0);
+            assert!(dsp.beat_phase > 0.0);
+
+            status.metronome_enabled.store(true, Ordering::Release);
+            dsp.beat_phase = 0.9999;
+            dsp.render_block(&status, 256);
+            assert!(
+                dsp.master_block[..256]
+                    .iter()
+                    .any(|frame| frame[0].abs() > 0.001)
+            );
+            assert!(dsp.click_envelope > 0.0);
+            let running_phase = dsp.beat_phase;
+
+            status.metronome_enabled.store(false, Ordering::Release);
+            dsp.render_block(&status, 1);
+            assert_eq!(dsp.click_envelope, 0.0);
+            assert_eq!(dsp.click_phase, 0.0);
+            assert_eq!(dsp.master_block[0], [0.0; 2]);
+            assert!(
+                dsp.beat_phase > running_phase,
+                "toggle must not reset the beat clock"
+            );
+
+            status.metronome_enabled.store(true, Ordering::Release);
+            dsp.render_block(&status, 128);
+            assert!(
+                dsp.master_block[..128]
+                    .iter()
+                    .all(|frame| *frame == [0.0; 2]),
+                "reenabling between beats must not resurrect the cleared click"
+            );
+            status.playing.store(false, Ordering::Release);
+            dsp.beat_phase = 0.9999;
+            dsp.render_block(&status, 128);
+            assert_eq!(dsp.beat_phase, 0.9999);
+            assert_eq!(dsp.click_envelope, 0.0);
+            assert!(
+                dsp.master_block[..128]
+                    .iter()
+                    .all(|frame| *frame == [0.0; 2]),
+                "enabled click must not start stopped transport"
+            );
+        }
+    }
+
+    #[test]
+    fn metronome_disable_clears_residual_even_when_paused_renderer_is_not_running() {
+        let (_controller, mut dsp, status) = install_and_activate_mixer_graph_timeline(
+            compile_timeline_test_project(&Project::blank()),
+            1,
+            2,
+        );
+        status.playing.store(false, Ordering::Release);
+        let mailbox = TransportMailbox::default();
+        let mut transport = RealtimeTransport {
+            epoch: 2,
+            ..RealtimeTransport::default()
+        };
+        assert!(!dsp.prepare_timeline_render(2, 0, 0, 128, false));
+        dsp.click_envelope = 0.08;
+        dsp.click_phase = 0.3;
+        dsp.track_block[0] = [0.37; 2];
+        // A paused, activated Timeline skips render_block entirely.
+        render_test_transport(&mut dsp, &status, &mailbox, &mut transport, &[128]);
+        assert_eq!(dsp.click_envelope, 0.0);
+        assert_eq!(dsp.click_phase, 0.0);
+        assert_eq!(
+            dsp.track_block[0], [0.37; 2],
+            "normal source renderer must not run"
+        );
+        assert_eq!(transport.timeline_frame, 0);
+        assert!(
+            dsp.master_block[..128]
+                .iter()
+                .all(|frame| *frame == [0.0; 2])
+        );
+    }
+
+    #[test]
+    fn metronome_engine_switch_does_not_mutate_transport_or_use_command_queue() {
+        let (controller, _realtime) = create_timeline_runtime();
+        let mut engine = timeline_test_engine(controller);
+        let before = engine.transport_mailbox.try_load().unwrap();
+        let queue_slots = engine.producer.slots();
+        for enabled in [true, false, true, false] {
+            engine.set_metronome_enabled(enabled);
+            assert_eq!(
+                engine.status.metronome_enabled.load(Ordering::Acquire),
+                enabled
+            );
+            assert_eq!(engine.transport_mailbox.try_load().unwrap(), before);
+            assert_eq!(engine.producer.slots(), queue_slots);
+        }
+        engine.timeline_runtime_shutdown_confirmed = true;
+    }
+
+    #[test]
+    fn metronome_toggle_audio_and_transport_are_callback_partition_invariant() {
+        fn render(partition: usize) -> (Vec<[f32; 2]>, RealtimeTransport) {
+            let status = transport_status(8_000, 120.0);
+            let mailbox = TransportMailbox::default();
+            let mut transport = RealtimeTransport::default();
+            let mut dsp = DspState::new(8_000.0);
+            let mut output = Vec::new();
+            mailbox.publish(TransportMutation::SetPlaying(true));
+            for (enabled, length) in [(false, 4_100), (true, 4_100), (false, 37), (true, 4_100)] {
+                status.metronome_enabled.store(enabled, Ordering::Release);
+                let mut remaining = length;
+                while remaining != 0 {
+                    let frames = remaining.min(partition);
+                    render_transport_chunk(
+                        &mut dsp,
+                        &status,
+                        &mailbox,
+                        &mut transport,
+                        frames,
+                        |_, block| output.extend_from_slice(block),
+                    );
+                    remaining -= frames;
+                }
+                if !enabled {
+                    assert_eq!(dsp.click_envelope, 0.0);
+                }
+            }
+            (output, transport)
+        }
+        let (uniform, transport) = render(512);
+        let (single, single_transport) = render(1);
+        let (irregular, irregular_transport) = render(137);
+        assert_eq!(uniform, single);
+        assert_eq!(uniform, irregular);
+        assert_eq!(transport, single_transport);
+        assert_eq!(transport, irregular_transport);
+        assert!(uniform[..4_100].iter().all(|frame| *frame == [0.0; 2]));
+        assert!(
+            uniform[4_100..8_200]
+                .iter()
+                .any(|frame| frame[0].abs() > 0.001)
+        );
+        assert!(uniform[8_200..8_237].iter().all(|frame| *frame == [0.0; 2]));
     }
 
     #[test]
