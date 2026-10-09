@@ -1,13 +1,15 @@
 # 当前开发状态
 
-最后更新：2026-10-09 16:38 UTC。以当前源码、集成状态和实际执行结果为准。
+最后更新：2026-10-09 17:32 UTC。以当前源码、集成状态和实际执行结果为准。
 
 ## 当前目标与状态
 
 
-- **新 scoped-session + reset-origin 合并源码：`1f021b154c436d2910c15a4a9ddfea5617f8c792`。** 审查通过的96410ec与fd6f5b1已合并，独立语义审查确认普通/reset SDK调用共用restricted AtomicBool RAII gate；两种私有facade仍!Send/!Sync，reset只可在session rejoin后由owner执行。新增三路径gate回归与六项reset编译期权限检查；53项compiler contracts及组合源码门禁已通过；精确Surge instrument1.3.4 reset256兼容修正待合入和重新验证。
-- **Reset边界：** DAW专用Q128 reset将待处理event/host parameter归零偏移并保留FIFO，单独丢弃旧epoch和reset生成的processor输出，保留native UI feedback与真实SDK确认，拒绝unsupported/不确定helper回复。DAW准备max要求128..=2048，standalone17/47等仍支持。它不改变strict latency/identity fence，不加入DSP线程或通用tail-clear。详见[reset-origin](docs/PLUGIN_RESET_ORIGIN.md)。
-- **最新合并helper验证仍待完成：** 强制当前vendor编译/链接得到421a8d7d…73c41，source hashes稳定。切片helper的source/native结果不直接代替此新helper的真实图与UI/state复验。独立reset测试新发现：stop/start后的立即held NoteOn，在旧Process1和新reset128均只产生transient；fresh无reset可持续、正常图first/replay通过。保留该已有限制，不宣称通用立即retrigger成功或实时性能提升。
+- **新 scoped-session + reset-origin 合并源码：`f08617092f74903862a9e7bf04698c2db49b523c`。** 审查通过的96410ec与fd6f5b1已合并，独立语义审查确认普通/reset SDK调用共用restricted AtomicBool RAII gate；两种私有facade仍!Send/!Sync，reset只可在session rejoin后由owner执行。新增三路径gate回归与六项reset编译期权限检查；精确Surge instrument1.3.4 reset256兼容修正236f784已合入，136源码hash一致。最终组合源码门禁及新的真实图/UI/state验收通过；新Windows CI须发布后独立执行。
+- **Reset边界：** DAW专用Q128 reset将待处理event/host parameter归零偏移并保留FIFO，单独丢弃旧epoch和reset生成的processor输出，保留native UI feedback与真实SDK确认，拒绝unsupported/不确定helper回复。DAW准备max一般要求128..=2048；实际加载的精确Surge instrument UID/version1.3.4使用单次reset256并要求max至少256，其他插件/版本/SurgeFX仍128。Standalone17/47等仍支持。它不改变strict latency/identity fence，不加入DSP线程或通用tail-clear。详见[reset-origin](docs/PLUGIN_RESET_ORIGIN.md)。
+- **最终组合门禁通过：** Linux 1,179 app +25 helper +6 reset +5 editor +2 transport protocol、1,167 core，零失败/忽略；395 available vendor cases（同一缺失fixture明确排除）、26 doctests、53/53 private compiler contracts、239 Python（含四项真实Unix descriptor、无skip）、fmt/两套严格rootClippy/build/helper smoke/两种MSVCsource checks通过。Direct vendor Clippy仅保留既有deprecated/drain_collect例外。中断的首次contract日志保留；仅完整重跑的53项计为通过。官方archive+patch重建46文件。
+- **新真实插件验收通过：** source236f784与f086170逐字节对应，helper421a8d7d…73c41实际重新绑定。五次genuine调用全部exit0：自动reset后的G4 offsets0/1/127持续发声，held/future+sustain清理和max128拒绝、八个图phase、故意FX32 drift/actualRetry、blank-tail和fresh-state通过。原始旧1/128 immediate-note失败保留；修正仅针对精确instrument1.3.4。Changing debug callback仍有12/14 ordinary和15/17 routed overruns，不代表实时性能认证。
+- **新native UI/state smoke通过：** 新Surge停止编辑/20轮poll/save/fresh数值、same-window/closed-used guard、Stochas used-state重开及关闭通过；同一新GUI blob的17/47/128/256首音通过，无positive warmup。未重复fixture/EOF/crash/mixed-Wayland/hardware验收，历史346.9ms resize stall仍在。Reset256在48k只额外推进内部DSP/连续时钟5.333ms，不推进timeline位置或改变PDC。
 
 - **历史 checked-event admission 合并源码：`7d7294b36df8f877c30a16a14afb98cf0f1ac047`。** 只集成审查通过的7d8a416，41 source hashes及native receipt一致。先检查event容量/元数据再copy，明确回传拒绝；普通音符计数、tracked ID和panic release obligation仅在接受后提交，拒绝保留重试责任。App/helper wire/timing/reset保持b92c394不变；完整组合源码门禁及20a9dfc Windows source/preview已通过；native paint仍失败。
 - **历史event完整门禁：** Linux1170app+22helper+5+2protocol、1166core，默认stack/零失败忽略；362available vendor（一个明确缺失fixture排除）、26doctests、239Python、fmt/两套严格rootClippy/build/实际helper smoke/两种MSVCsource checks全部通过。Fresh copied helper59b6bcbd…0d086与独立native/default2048验收一致，124production hashes匹配已测event源码；未重复宣称新性能测量。

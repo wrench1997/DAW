@@ -8,7 +8,7 @@ Citrus Studio is a clean-room, native music-production application written in Ru
 
 Development is continuing toward a complete song workflow: create and edit an arrangement, save it, recover missing media, export the supported mix, and reopen it without losing work. Passing CI is a development baseline, not completion of that workflow or commercial release acceptance. Current implementation status is in [DEV_STATE.md](DEV_STATE.md); prioritized acceptance and dated evidence are in the [development roadmap](docs/DEVELOPMENT_ROADMAP.md) and [work log](docs/WORK_LOG.md).
 
-The development branch is `ci/windows-reliability-20261009`; Linux remains primary. The [compact workspace](docs/COMPACT_WORKSPACE.md), [Piano melody shortcuts](docs/PIANO_KEYBOARD_EDITING.md), [mouse composition](docs/PIANO_MOUSE_WORKFLOW.md), typed clipboard and [note expression](docs/PIANO_NOTE_EXPRESSION.md) now include [independent edit/repeat ranges, precise local snap and compact minimum-window controls](docs/PIANO_RANGES_AND_SNAP.md). Range metadata is session UI state, not an audio playback loop; paste uses the containing left-visible four-beat bar. Citrus boundary/precision policies and remaining FL/OS/device gaps are explicit. At **`20a9dfc`**, [Windows preview](https://github.com/wrench1997/DAW/actions/runs/37955606487) passed 239 Python cases (235 passed, four Unix-only skips), 1,165 app +15 helper +5 editor protocol +2 transport protocol Rust tests, optimized static-CRT/provenance/PE/ZIP/hash checks and extracted-helper smoke; upload was disabled. [Quality](https://github.com/wrench1997/DAW/actions/runs/37955606457) passed source and trusted native state/interaction/lifecycle checks, while before/after paint failed and repaint comparison was skipped. The follow-on scoped-session/reset-origin combination has semantic source review; its exact combined tests, new-helper native checks and Windows run are recorded separately in DEV_STATE/WORK_LOG.
+The development branch is `ci/windows-reliability-20261009`; Linux remains primary. The [compact workspace](docs/COMPACT_WORKSPACE.md), [Piano melody shortcuts](docs/PIANO_KEYBOARD_EDITING.md), [mouse composition](docs/PIANO_MOUSE_WORKFLOW.md), typed clipboard and [note expression](docs/PIANO_NOTE_EXPRESSION.md) now include [independent edit/repeat ranges, precise local snap and compact minimum-window controls](docs/PIANO_RANGES_AND_SNAP.md). Range metadata is session UI state, not an audio playback loop; paste uses the containing left-visible four-beat bar. Citrus boundary/precision policies and remaining FL/OS/device gaps are explicit. At **`20a9dfc`**, [Windows preview](https://github.com/wrench1997/DAW/actions/runs/37955606487) passed 239 Python cases (235 passed, four Unix-only skips), 1,165 app +15 helper +5 editor protocol +2 transport protocol Rust tests, optimized static-CRT/provenance/PE/ZIP/hash checks and extracted-helper smoke; upload was disabled. [Quality](https://github.com/wrench1997/DAW/actions/runs/37955606457) passed source and trusted native state/interaction/lifecycle checks, while before/after paint failed and repaint comparison was skipped. The follow-on scoped-session/reset-origin combination has passed semantic review, exact combined source gates and new real-plugin graph/UI/state checks; its next Windows run is tracked independently in DEV_STATE/WORK_LOG.
 
 [VST3 scanning](docs/VST3_SCANNING.md) now reads real default-class metadata and
 MIDI capabilities through the isolated production helper rather than guessing from
@@ -21,11 +21,13 @@ original historical sources. New downstream routing evidence is recorded separat
 
 [Private scoped plugin sessions](docs/PLUGIN_PROCESSOR_DOMAINS.md#private-scoped-domain-sessions-checkpoint-1)
 keep control and processor capabilities borrowed on one thread. The combined
-[reset-origin transaction](docs/PLUGIN_RESET_ORIGIN.md) uses one aligned Q128 block
+[reset-origin transaction](docs/PLUGIN_RESET_ORIGIN.md) uses one aligned block
 for DAW reset input ordering and explicit output discard, with owner-only authority.
+Most plugins use128 frames; exact loaded Surge XT instrument1.3.4 uses256 to finish
+its known CC120 cleanup, with a matching prepared-capacity requirement.
 It preserves strict latency faults and does not add an audio thread. Isolated tests
-retain the old/new immediate post-stop/start held-note transient limitation; exact
-merged-helper functional acceptance is separate.
+retain the old/new immediate post-stop/start held-note transient limitation; corrected-source acceptance is separately bound and passes the scoped immediate-note,
+state and scheduled-graph checks. Raw callback overruns and hardware limits remain.
 
 [Checked event admission](docs/PLUGIN_PROCESSOR_DOMAINS.md#checked-event-admission-and-note-release-obligations)
 now rejects invalid/full input explicitly and commits note counts/voice IDs only

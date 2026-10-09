@@ -11,11 +11,13 @@ Status terms:
 
 ## Current implementation and historical evidence
 
-Current combined source1f021b1 has independently reviewed private same-thread
+Current combined sourcef086170 has independently reviewed private same-thread
 scoped domains and an [owner-only reset-origin transaction](PLUGIN_RESET_ORIGIN.md).
-Ordinary/reset SDK calls share the restricted RAII gate. New combined source and
-actual-helper acceptance are pending; no worker, GUI stall or realtime improvement
-is claimed. Old/new immediate held-note retrigger limitations remain explicit.
+Ordinary/reset SDK calls share the restricted RAII gate. New combined source gates and
+actual graph/UI/state acceptance pass; no worker, GUI stall or realtime improvement
+is claimed. Historical old1/new128 immediate held-note failures remain explicit; the exact
+Surge instrument1.3.4 reset256 correction has separate immediate-note and graph
+acceptance, with raw callback overruns and scope limits retained.
 
 Historical follow-on source87ceb06 adds bounded acknowledged native-edit transport,
 not a DSP thread. Display polling no longer steals pending processor edits;

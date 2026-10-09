@@ -54,7 +54,8 @@ Neither scoped control nor processor facade exposes it. It processes one positiv
 - Project sample/PPQ position is stationary with `playing=false`. Requested continuous/system
   clocks and free-running internal DSP can advance by the frame count. The default128 is
   2.667ms at48k; the exact instrument256 exception is 5.333ms at48k (255 samples beyond the
-  legacy one-frame flush). These durations scale with sample rate. This is explicit reset cleanup,
+  legacy one-frame flush). These durations scale with sample rate; timeline position and
+  bridge/PDC budgeting do not advance or change. This is explicit reset cleanup,
   not a general state-settling contract.
 - Audio is discarded inside the owner. Prior undrained processor MIDI/parameter feedback is
   invalidated as old-epoch data with separate counts. Reset-generated processor output goes to
@@ -116,17 +117,52 @@ MIDI discard, and ordinary/routed playback. Historical timing failures and one-f
 not be overwritten or reclassified as passes. This change does not qualify native editor DSP
 thread isolation, hardware callback bounds, or universal real-time/plugin compatibility.
 
-## Retained real-plugin counterexamples
+## Retained pre-correction real-plugin counterexamples
 
 The reset-only validation retains initial failed assertions that treated every
 replay as a fresh silent onset or assumed stop/start clears all plugin tails.
 An actually advancing blank-source control distinguishes retained audio from new
 source delivery. A further direct comparison finds immediate held NoteOn after
 stop/start produces only a transient with BOTH legacy one-frame cleanup and the
-new128-frame reset; a fresh no-reset instance sustains. Component state hash and
+then-new128-frame reset; a fresh no-reset instance sustains. Component state hash and
 controller/component volume remain unchanged. Normal graph first/replay can pass
-without proving this separate immediate retrigger contract. This existing limit
-is not silently fixed or waived. In the reset-only four-arm after-decay control,
+without proving this separate immediate retrigger contract. This historical limit
+is not silently reclassified as passing by the later exact-identity256 correction. In the reset-only four-arm after-decay control,
 a distinct G4 sustains after four seconds of genuinely advancing silent DSP;
 this does not establish immediate-note success or a general required wait time.
 Combined-source acceptance is separately bound.
+
+## Corrected-source genuine acceptance
+
+Reviewed correction `236f7846ff869f38815ec66ca138d7387adc4c1b` and integrated
+`f08617092f74903862a9e7bf04698c2db49b523c` match all 136 frozen owner-source hashes;
+127 runtime snapshot files and the two external harness appendices are separately
+bound. The real tests use the ordinary production factory and automatic identity
+selection, with helper `421a8d7d…73c41`, rather than manually injecting256.
+
+All five invocations pass. Immediate distinct G4 notes at offsets0/1/127 sustain
+for one second after acknowledged automatic reset, with no additional submitted
+Process between the reset acknowledgment and NoteOn. State/controller values and
+native latency0 remain correct. Held C4 plus future offset64 G4/sustain cleanup
+leaves all192000 genuinely processed blank samples zero, with unchanged serialized
+state and stopped host sample12345/PPQ9.25. Actual preparedmax128 loading is rejected
+before ready for this exact instrument.
+
+Four ordinary/routed fixed/changing configurations pass both first play and replay
+at fresh FX native0 without initial Retry, with PDC4864/7296. Replay first PCM2432
+is retained FX tail, not a new-note onset. A genuinely advancing blank-source
+control checks1500 native quanta per endpoint and no source MIDI. Deliberate ordinary
+Process1 still changes FX to32, triggers strict LatencyDrift, and requires actual
+stopped Retry/new revision/epoch; honest post-replan PDC is7328. No metadata or fault
+counter is fabricated. A separate fresh-state-before-first-Process case passes.
+
+Changing debug callbacks retain12/14 ordinary and15/17 routed raw-core interval
+overruns. Correct delivery is not wall-deadline, hardware or optimized-performance
+certification. The source-only corrected archive has SHA256
+`fe46a506eb1a936fcf0fc13f8f3ed571f31ff5c1e3339e5563c29a77578b70f5`
+(339092 bytes,129 source/text files), including one preserved harness compilation
+failure. Its original source/helper attribution remains separate from the335-file
+historical diagnosis archive SHA256
+`3ff69eaba1a11b8640e6b83534768d13f395430be92be6ec9085818b97e4320d`
+(814776 bytes). Both are supplied as separate source-bundle validation appendices;
+none substitutes for native UI/state or Windows acceptance.

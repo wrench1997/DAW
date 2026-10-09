@@ -224,3 +224,38 @@ match the final event source;12/14 changing debug core overruns remain. GUI sess
 has no positive Process/device audio, and no wire submitted/applied telemetry was
 added. Payload allocation, helper serialization,346.9ms native-resize stall and
 hardware/Wayland/DPI/sanitizer limitations remain. Reset policy is unchanged.
+
+## Combined scoped-session/reset native smoke (2026-10-09)
+
+A new run binds reviewed corrected source236f7846 and integratedf086170, all136
+frozen source hashes before/after, and copied helper
+`421a8d7dc8c793cc5e8ecd81e0c74392b24383eed08ed21a4d64fee8f9473c41`.
+It started after the corrected-source freeze; the earlier1f021b1 preparation did
+not execute native acceptance.
+
+Surge stopped native volume editing,20 poll rounds,zero-sample SaveState and fresh
+native/controller/component agreement pass. The newly created GUI blob has SHA256
+`011ded9e14952b8a631e9e9b443fad6f0997daf641919862e95f5e860f414272`;
+deterministic bytes matching an older blob do not replace this run's new creation.
+Fresh-instance first-note PCM at17/47/128/256 passes without positive warmup, with
+first nonzero frames11/44/64/40 and unchanged normalized0.8691863417625427/component
+−6.27905654907227dB. These onsets are functional traces, not latency qualification.
+
+Open-window and closed-used Surge guard rejections preserve window identity,
+generation and value; normal reopen succeeds. Stochas used-instance native state
+restores/reexports/repaints the newly edited layer0,row115,step7 cell. Its blob hash
+is `671e314184b48ffa868b339a2d0c364c3092092c4537787760581e09328e7fe6`.
+Shutdown exits0, with zero remaining plugin windows. There are113 recorded wire
+exchanges; this run did not repeat the trusted fixture, EOF/forced exit, sanitizer
+or Stochas MIDI matrix, and does not borrow those older receipts as current passes.
+
+Raw native receipt SHA256:
+`bd6365eb84026aa96050a0089663a736e1b2f3534d74f6e225c3fc6b7cb2a138`.
+The path-normalized source-bundle receipt has SHA256
+`de96e3194ea881bcc0589fb68be3c213aba35efc7d53634c34dfae742fa9456c`;
+all measurements and identities remain unchanged. State payloads, screenshots,
+executables and private HOME data are excluded from the portable receipt.
+Automatic reset256 and immediate post-reset-note evidence belongs to the separate
+production-graph receipt in the reset-origin guide. This UI run establishes no
+DSP thread, hardware, mixed-Wayland or processing-continuity improvement; the
+historical346.9ms resize-processing stall remains unresolved.

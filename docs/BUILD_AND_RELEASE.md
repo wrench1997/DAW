@@ -14,7 +14,7 @@
 
 下文 `$Version` 和目录名的 0.4.0 是历史示例；构建当前候选时必须使用 `Cargo.toml` 的实际版本 `0.5.0-alpha.1`，不得把新 v12 构建标成旧 0.4.0。Rust/LLVM-MinGW 固定工具链及三文件发布契约不变。
 
-当前session/reset源码1f021b1已完成语义合并审查，完整组合门禁和新helper真实图/UI/state验收另行执行。私有capability仍同线程，reset在session rejoin后由owner调用；DAW要求prepared maximum128..=2048，standalone小block不受该DAW限制。旧/新reset均出现的立即held-note transient限制保留，不以正常图重放通过替代。新候选Windows CI不得借用20a9dfc结论。
+当前session/reset源码f086170已完成语义合并审查，完整组合门禁（1179app+25helper+13protocol、1167core、395vendor、26docs、53contracts、239Python）和新helper真实图/UI/state验收通过。私有capability仍同线程，reset在session rejoin后由owner调用；DAW一般要求prepared maximum128..=2048，精确SurgeXT instrument1.3.4单次reset256且max至少256；standalone小block不受该DAW限制。旧1/128 reset的立即held-note失败保留，精确256修正另以offsets0/1/127持续新音符验证，不从重放tail推断成功。新候选Windows CI不得借用20a9dfc结论。
 
 ## 开发 CI（独立分支验证）
 

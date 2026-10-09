@@ -1,6 +1,6 @@
 # Development roadmap
 
-Updated: 2026-10-09 16:38 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-09 17:32 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
@@ -15,17 +15,21 @@ Updated: 2026-10-09 16:38 UTC. Current priorities are detailed Piano composition
 
 ## Current scoped-session and reset-origin integration
 
-Reviewed source1f021b1 combines private borrowed control/processor sessions with
+Reviewed sourcef086170 combines private borrowed control/processor sessions with
 owner-only reset-origin processing. Independent semantic review confirms SDK-only
 RAII in both normal and reset paths, checked FIFO origin staging, output discard,
 actual native acknowledgment and reset exclusion from both facades. A combined COM
 test covers success, SDK error and pre-SDK staging failure; compiler contracts add
-six reset exclusions to the original47 cases. Full merged gates and new-helper
-native graph/UI/state checks are separate pending acceptance at this entry.
+six reset exclusions to the original47 cases. Full merged gates pass 1,179 app +25 helper +13 protocol, 1,167 core,395 available
+vendor cases,26 doctests,53 private contracts and239 Python cases. New source-bound
+native graph/UI/state checks also pass; exact new Windows CI remains separate.
 
 The correction targets host-induced one-frame Surge FX mode changes, preserving
 strict metadata and faults. Standalone small blocks remain valid; only the DAW
-requires prepared maximum128..=2048 for Q128 reset. Fresh graph playback/replay
+requires prepared maximum128..=2048 normally. Exact loaded Surge XT instrument1.3.4
+selects one reset256 and requires maximum256 or higher; no safety CC is omitted.
+Corrected-source immediate notes at offsets0/1/127 sustain in the production path.
+Fresh graph playback/replay
 slice evidence does not establish universal tail clearing: immediate held NoteOn
 after stop/start is transient in both old and new reset traces. Keep that negative,
 old performance matrices and historical resize stall. See [reset contract](PLUGIN_RESET_ORIGIN.md).
