@@ -1,3 +1,5 @@
+mod project_media_ui;
+
 use std::{
     collections::{HashMap, HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
@@ -97,6 +99,7 @@ use crate::{
             PluginLoadSpec, PluginWorkerGuard, RuntimeEvent, SlotConfig,
         },
     },
+    project_media::{ProjectMediaManager, media_references_changed},
     recording::{InputRecorder, PendingRecording, RecordingMetadata},
     settings_ui::{
         AudioSettingsInput, AudioSettingsPresentation, SettingsPage, SettingsSeverity,
@@ -1699,6 +1702,7 @@ struct PianoRollTransformSession {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShortcutModal {
+    ProjectMedia,
     ProjectLifecycle,
     PianoTransform,
     PluginManager,
@@ -4696,6 +4700,7 @@ pub struct CitrusApp {
     scan_receiver: Option<Receiver<Vec<PluginDescriptor>>>,
     export_receiver: Option<Receiver<Result<PathBuf, String>>>,
     audio_import_receiver: Option<Receiver<AudioImportResult>>,
+    project_media: ProjectMediaManager,
     audio_asset_sender: Sender<AudioAssetLoadResult>,
     audio_asset_receiver: Receiver<AudioAssetLoadResult>,
     loaded_audio_assets: HashMap<u64, u64>,
@@ -4989,6 +4994,7 @@ impl CitrusApp {
                 scan_receiver: None,
                 export_receiver: None,
                 audio_import_receiver: None,
+                project_media: ProjectMediaManager::default(),
                 audio_asset_sender,
                 audio_asset_receiver,
                 loaded_audio_assets: HashMap::new(),
@@ -9665,8 +9671,13 @@ impl CitrusApp {
             self.notify("Nothing to undo".into());
             return;
         };
+        let media_changed =
+            media_references_changed(&self.project.audio_assets, &previous.audio_assets);
         self.redo_stack
             .push(std::mem::replace(&mut self.project, previous));
+        if media_changed {
+            self.reload_project_media_runtime();
+        }
         self.stop_all_plugin_notes();
         self.automation_evaluator.reset();
         self.sync_mixer_to_audio();
@@ -9687,8 +9698,13 @@ impl CitrusApp {
             self.notify("Nothing to redo".into());
             return;
         };
+        let media_changed =
+            media_references_changed(&self.project.audio_assets, &next.audio_assets);
         self.undo_stack
             .push(std::mem::replace(&mut self.project, next));
+        if media_changed {
+            self.reload_project_media_runtime();
+        }
         self.stop_all_plugin_notes();
         self.automation_evaluator.reset();
         self.sync_mixer_to_audio();
@@ -11407,6 +11423,7 @@ impl CitrusApp {
 
     fn shortcut_blocking_layer_active(&self) -> bool {
         !self.project_lifecycle.is_idle()
+            || self.project_media.open
             || self.audio_restart_state.locks_session_actions()
             || self.recovery_available
             || self.save_barrier.is_some()
@@ -11420,6 +11437,8 @@ impl CitrusApp {
             Some(ShortcutModal::ProjectLifecycle)
         } else if self.recovery_available {
             Some(ShortcutModal::Recovery)
+        } else if self.project_media.open {
+            Some(ShortcutModal::ProjectMedia)
         } else if self.piano_roll_transform.is_some() {
             Some(ShortcutModal::PianoTransform)
         } else if self.pending_midi_export.is_some() {
@@ -11506,6 +11525,7 @@ impl CitrusApp {
     fn dismiss_shortcut_modal(&mut self, modal: ShortcutModal) {
         match modal {
             ShortcutModal::ProjectLifecycle => self.cancel_project_lifecycle(),
+            ShortcutModal::ProjectMedia => self.project_media.close(),
             ShortcutModal::PianoTransform => self.cancel_piano_roll_transform(),
             ShortcutModal::PluginManager => {
                 self.show_plugins = false;
@@ -11526,7 +11546,9 @@ impl CitrusApp {
             ShortcutModal::Settings => self.show_settings = false,
             ShortcutModal::MidiImport => self.confirm_midi_import(),
             ShortcutModal::MidiExport => self.confirm_midi_export(),
-            ShortcutModal::PluginManager | ShortcutModal::Recovery => {}
+            ShortcutModal::ProjectMedia
+            | ShortcutModal::PluginManager
+            | ShortcutModal::Recovery => {}
         }
     }
 
@@ -13193,6 +13215,7 @@ impl CitrusApp {
             return false;
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        self.project_media.close();
         if self.piano_roll_transform.is_some() {
             // Preview candidates are never eligible for save, recovery, or quit handling.
             self.cancel_piano_roll_transform();
@@ -13418,6 +13441,7 @@ impl CitrusApp {
         self.clear_pending_midi_routing();
         self.plugin_parameter_edits.fail_all();
         self.plugin_parameter_edit_draft_desired.clear();
+        self.project_media.close();
         self.project_session = next_project_session(self.project_session);
         self.cached_audio_assets.clear();
         self.pending_generator_routes.clear();
@@ -13921,6 +13945,10 @@ impl CitrusApp {
                         {
                             ui.close();
                             self.import_audio();
+                        }
+                        if ui.button("Project media / relink…").clicked() {
+                            ui.close();
+                            self.open_project_media();
                         }
                         if ui.button("Import MIDI…").clicked() {
                             ui.close();
@@ -16888,7 +16916,9 @@ impl CitrusApp {
                 message: message.clone(),
             },
         );
-        self.notify(message);
+        self.notify(format!(
+            "{message}. Open File > Project media / relink to locate the audio."
+        ));
     }
 
     fn import_midi(&mut self) {
@@ -17294,6 +17324,7 @@ impl eframe::App for CitrusApp {
         self.poll_export();
         self.poll_audio_import();
         self.poll_audio_asset_loads();
+        self.poll_project_media(&ctx);
         self.drive_audio_asset_clear();
         self.drive_prepared_audio_asset_registrations();
         self.poll_recording();
@@ -17312,6 +17343,7 @@ impl eframe::App for CitrusApp {
             || self.recovery_available
             || self.audio_restart_state.locks_session_actions()
             || self.piano_roll_transform.is_some()
+            || self.project_media.open
         {
             // egui publishes a newly-created modal layer at end-of-pass. Disable the root surface
             // as well so the first modal frame cannot pass the same pointer event through.
@@ -17321,6 +17353,10 @@ impl eframe::App for CitrusApp {
         if self.project_lifecycle.exit_is_armed() {
             self.dispatch_armed_window_close(&ctx, close_canceled_this_frame);
             return;
+        }
+        if self.project_media.open {
+            // A File-menu click can open the modal in this very pass.
+            ui.disable();
         }
         self.toolbar(ui);
         self.bottom_status(ui);
@@ -17340,7 +17376,12 @@ impl eframe::App for CitrusApp {
                 StudioView::Mixer => self.mixer(ui),
             });
 
-        let exclusive_project_modal = self.project_lifecycle.is_modal() || self.recovery_available;
+        let exclusive_project_modal =
+            self.project_lifecycle.is_modal() || self.recovery_available || self.project_media.open;
+        if self.project_media.open && !self.project_lifecycle.is_modal() && !self.recovery_available
+        {
+            self.project_media_dialog(&ctx);
+        }
         if !exclusive_project_modal {
             if self.piano_roll_transform.is_some() {
                 self.piano_roll_transform_dialog(&ctx);
@@ -28144,6 +28185,7 @@ mod playback_tests {
     #[test]
     fn every_modal_disables_globals_and_owns_plain_escape() {
         for modal in [
+            ShortcutModal::ProjectMedia,
             ShortcutModal::ProjectLifecycle,
             ShortcutModal::PianoTransform,
             ShortcutModal::PluginManager,

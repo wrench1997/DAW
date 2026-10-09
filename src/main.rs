@@ -24,6 +24,7 @@ pub mod plugin_graph;
 pub mod plugin_parameter_edit;
 pub mod plugin_parameter_editor;
 mod plugins;
+mod project_media;
 pub mod recording;
 mod settings_ui;
 pub mod tempo_map;
