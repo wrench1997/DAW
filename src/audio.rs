@@ -16196,7 +16196,7 @@ mod tests {
         parameter: Arc<AtomicU32>,
         max_block_frames: usize,
     ) -> PluginChain {
-        PluginChain::spawn_with_backend_factory(
+        let chain = PluginChain::spawn_with_backend_factory(
             move || {
                 vec![BackendSlot::new(Box::new(MockInsertBackend {
                     add,
@@ -16215,7 +16215,17 @@ mod tests {
                 max_block_frames: max_block_frames.max(DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES),
             },
         )
-        .expect("mock insert worker should start")
+        .expect("mock insert worker should start");
+        // These fixtures install/render directly rather than polling production lifecycle
+        // commands. Wait for the same coherent-ready publication that those commands require;
+        // worker scheduling during a large parallel suite must not decide fixture ownership.
+        wait_until(|| {
+            chain
+                .control
+                .plugin_latency_snapshot()
+                .is_some_and(|snapshot| snapshot.revision != 0 && snapshot.slot_is_active(0))
+        });
+        chain
     }
 
     fn spawn_mock_latency_transform(
@@ -16351,7 +16361,7 @@ mod tests {
         last_midi: Arc<AtomicU32>,
         parameter: Arc<AtomicU32>,
     ) -> PluginChain {
-        PluginChain::spawn_identified_with_backend_factory(
+        let chain = PluginChain::spawn_identified_with_backend_factory(
             &[instance_id],
             move || {
                 vec![BackendSlot::new(Box::new(MockInstrumentBackend {
@@ -16367,7 +16377,17 @@ mod tests {
                 max_block_frames: DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES,
             },
         )
-        .expect("identified mock instrument should start")
+        .expect("identified mock instrument should start");
+        // These fixtures install/render directly rather than polling production lifecycle
+        // commands. Wait for the same coherent-ready publication that those commands require;
+        // worker scheduling during a large parallel suite must not decide fixture ownership.
+        wait_until(|| {
+            chain
+                .control
+                .plugin_latency_snapshot()
+                .is_some_and(|snapshot| snapshot.revision != 0 && snapshot.slot_is_active(0))
+        });
+        chain
     }
 
     fn spawn_mock_instrument_with_delay(
@@ -16377,7 +16397,7 @@ mod tests {
         max_block_frames: usize,
         process_delay: Duration,
     ) -> PluginChain {
-        PluginChain::spawn_with_backend_factory(
+        let chain = PluginChain::spawn_with_backend_factory(
             move || {
                 vec![BackendSlot::new(Box::new(MockInstrumentBackend {
                     active: false,
@@ -16392,7 +16412,17 @@ mod tests {
                 max_block_frames: max_block_frames.max(DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES),
             },
         )
-        .expect("mock instrument worker should start")
+        .expect("mock instrument worker should start");
+        // These fixtures install/render directly rather than polling production lifecycle
+        // commands. Wait for the same coherent-ready publication that those commands require;
+        // worker scheduling during a large parallel suite must not decide fixture ownership.
+        wait_until(|| {
+            chain
+                .control
+                .plugin_latency_snapshot()
+                .is_some_and(|snapshot| snapshot.revision != 0 && snapshot.slot_is_active(0))
+        });
+        chain
     }
 
     fn spawn_empty_chain(max_block_frames: usize) -> PluginChain {
@@ -16418,6 +16448,7 @@ mod tests {
         .expect("identified empty endpoint worker should start")
     }
 
+    #[track_caller]
     fn wait_until(mut predicate: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(2);
         while !predicate() {

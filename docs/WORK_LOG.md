@@ -649,3 +649,16 @@ full paused-monitor continuation with an unrelated admitted edit and armed safet
 These paths run inside callback allocation/deallocation guards. Prior genuine deadline
 failures at B128/B256 remain evidence; this correction does not tune the guard or certify
 any profile, hardware device, or native editor.
+
+The first unrestricted-parallel aggregate invocation additionally exposed three older fixture
+assumptions: `deferred_partial_q_midi_safety_runs_through_the_following_quantum`,
+`midi_recording_start_rejects_an_input_route_still_in_panic_recovery`, and
+`replacement_monitor_never_clears_another_generators_safety_service` directly installed
+project-stamped mock endpoints before coherent worker readiness, then unwrapped missing
+endpoint/route state. Their common factory now waits off-callback for an active coherent
+publication. The ordinary mock instrument/effect factories also establish readiness before
+immediate render. The same invocation recorded a two-second `wait_until` timeout in
+`mock_instrument_routes_through_insert_and_fader_then_stops_on_midi`; the old log does not
+identify which of its several predicates timed out, so it is retained without assigning an
+unproven cause. `wait_until` now tracks the caller for any future failure. No processing block,
+longer timeout, weakened assertion, or runtime-path wait was added.
