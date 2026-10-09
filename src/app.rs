@@ -8259,10 +8259,8 @@ impl CitrusApp {
             && native_open_snapshot_barrier(
                 self.piano_roll_transform.is_some(),
                 self.piano_roll_gesture_before.is_some() || self.playlist_gesture_before.is_some(),
-                self.deferred_generator_candidate_after_midi.is_some()
-                    || self.deferred_project_intent_after_midi.is_some()
-                    || self.deferred_recovery_project_after_midi.is_some(),
-                !self.project_lifecycle.is_idle() || self.queued_save_request.is_some(),
+                self.project_snapshot_transition_pending(),
+                self.queued_save_request.is_some(),
             )
         {
             self.notify("Finish or cancel the current project edit/transition before opening a native editor".into());
@@ -13470,6 +13468,15 @@ impl CitrusApp {
         self.dirty
     }
 
+    /// These operations retain a whole Project that can replace the current one later.
+    /// Keep import completion and native editor opening on the same snapshot boundary.
+    fn project_snapshot_transition_pending(&self) -> bool {
+        !self.project_lifecycle.is_idle()
+            || self.deferred_project_intent_after_midi.is_some()
+            || self.deferred_recovery_project_after_midi.is_some()
+            || self.deferred_generator_candidate_after_midi.is_some()
+    }
+
     fn project_lifecycle_barriers_active(&self) -> bool {
         self.audio_restart_state.locks_session_actions()
             || self.save_barrier.is_some()
@@ -16838,9 +16845,7 @@ impl CitrusApp {
         // Leave the single completed result queued while a preview/gesture owns a Project
         // snapshot. Applying it then would let Cancel restore an older Project over the import.
         let barriers = audio_import::AudioImportCommitBarriers {
-            project_transition: !self.project_lifecycle.is_idle()
-                || self.deferred_project_intent_after_midi.is_some()
-                || self.deferred_recovery_project_after_midi.is_some(),
+            project_transition: self.project_snapshot_transition_pending(),
             save_or_recording: self.project_lifecycle_barriers_active(),
             piano_transform: self.piano_roll_transform.is_some(),
             playlist_gesture: self.playlist_gesture_before.is_some(),

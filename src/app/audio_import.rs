@@ -461,6 +461,95 @@ mod tests {
     }
 
     #[test]
+    fn wav_completion_waits_for_deferred_generator_replacement_and_keeps_own_undo() {
+        for replacement_succeeds in [false, true] {
+            let cc = eframe::CreationContext::_new_kittest(egui::Context::default());
+            let mut app = CitrusApp::new_boxed_with_services(&cc, false);
+            app.audio_restart_state = AudioRestartState::Idle;
+            let original = project_fingerprint(&app.project);
+            let original_assets = app.project.audio_assets.len();
+            let original_clips = app.project.clips.len();
+            let channel_id = app.project.channels[0].id;
+            let mut candidate = app.project.clone();
+            candidate.channels[0].name = "Replacement after MIDI teardown".into();
+            let replacement = project_fingerprint(&candidate);
+            let owner = MidiInputRouteOwner {
+                route_id: 1,
+                connection_id: MidiInputConnectionId(1),
+                stable_port_id: "test-only-midi-owner".into(),
+                stamp: MidiGeneratorRouteStamp {
+                    project_session: app.project_session,
+                    channel_id,
+                    endpoint_id: 1,
+                    plugin_instance_id: 1,
+                    slot: Some(0),
+                },
+                connection_epoch: 1,
+            };
+            app.midi_input.state = MidiInputControlState::Active {
+                owner: owner.clone(),
+            };
+            app.queue_channel_generator_candidate(channel_id, candidate, None)
+                .unwrap();
+            assert!(matches!(
+                app.midi_input.state,
+                MidiInputControlState::Removing { .. }
+            ));
+            assert!(app.project_snapshot_transition_pending());
+            let (sender, receiver) = mpsc::channel();
+            sender
+                .send(Ok((
+                    app.audio_asset_generation,
+                    PathBuf::from("deferred-import.wav"),
+                    decoded_fixture(),
+                    0.0,
+                    4,
+                )))
+                .unwrap();
+            app.audio_import_receiver = Some(receiver);
+
+            app.poll_audio_import();
+            app.drive_actions_after_midi_disconnect();
+            assert!(app.audio_import_receiver.is_some());
+            assert!(app.deferred_generator_candidate_after_midi.is_some());
+            assert_eq!(project_fingerprint(&app.project), original);
+            assert!(app.undo_stack.is_empty());
+
+            // Model the exact teardown receipt, then let the production deferred action run.
+            app.finish_midi_input_disconnect(owner, "Test teardown completed".into());
+            if !replacement_succeeds {
+                app.audio_restart_state = AudioRestartState::Degraded {
+                    message: "Test replacement failure".into(),
+                };
+            }
+            app.drive_actions_after_midi_disconnect();
+            assert!(app.deferred_generator_candidate_after_midi.is_none());
+            let before_import = if replacement_succeeds {
+                replacement
+            } else {
+                original
+            };
+            assert_eq!(project_fingerprint(&app.project), before_import);
+            app.audio_restart_state = AudioRestartState::Idle;
+            app.poll_audio_import();
+            assert!(app.audio_import_receiver.is_none());
+            assert_eq!(app.project.audio_assets.len(), original_assets + 1);
+            assert_eq!(app.project.clips.len(), original_clips + 1);
+            assert_eq!(
+                app.undo_stack.len(),
+                if replacement_succeeds { 2 } else { 1 }
+            );
+            app.undo();
+            assert_eq!(project_fingerprint(&app.project), before_import);
+            assert_eq!(app.project.audio_assets.len(), original_assets);
+            if replacement_succeeds {
+                app.undo();
+                assert_eq!(project_fingerprint(&app.project), original);
+            }
+        }
+    }
+
+    #[test]
     fn deferred_result_is_still_checked_against_latest_project_generation() {
         let (sender, receiver) = mpsc::sync_channel(1);
         sender
