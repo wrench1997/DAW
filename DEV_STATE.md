@@ -1,26 +1,24 @@
 # 当前开发状态
 
-最后更新：2026-10-09 03:59 UTC。以当前源码、集成状态和实际执行结果为准。
+最后更新：2026-10-09 04:18 UTC。以当前源码、集成状态和实际执行结果为准。
 
 ## 当前目标与状态
 
-Citrus Studio 0.5.0-alpha.1 是 clean-room Rust DAW 开发版，尚未达到完整 FL-class 商用品质。开发不会停在 CI 通过：当前优先完成「做一首歌 → 无损编辑 → 保存 → 找回缺失媒体 → 导出 → 重新打开」这一条可复现工作流。
+Citrus Studio 0.5.0-alpha.1 是 clean-room Rust DAW 开发版，尚未达到完整 FL-class 商用品质。Linux 优先开发与验证，Windows 持续检查兼容性。当前产品目标仍是「做一首歌 → 无损编辑 → 保存 → 找回缺失媒体 → 导出 → 重新打开」。
 
-- 当前 Windows 完整验证提交：`a760313d599f458976ad6f9fd8e31acd688d2906`，**862 项 Rust 测试、14 项 Python helper harness、实际 helper smoke 及全部开发门禁通过**，覆盖媒体恢复、v11 split、WAV 选项与堆构造修复。
-- 新集成源码候选：`bb5817118b16fde04689d21131fdf1510a177713`，包含 Audio Clip 切分保真/v11、WAV 选项和直接堆初始化修复，应用版本明确为 **0.5.0-alpha.1**。旧 v10 文件可加载；保存将写 v11，旧构建不能重新打开。评估前保留原项目备份。完整候选 Windows 验证已通过；具体目标/feature 的测试数与 Linux 分开记录。
-- 合并源码的真实 Linux no-default all-target typecheck 和完整 **860 项 Rust 测试全部通过，0 失败/忽略**，保持默认测试栈。已通过直接堆初始化修复 packet 构造栈溢出；仅将旧 Windows 路径 fixture 在非 Windows 改为本地路径，Windows 原覆盖保留。未调大栈或删测试。使用已安装 ALSA 运行库，不代表 Windows/all-feature VST/GUI/物理设备验收。
-- Preview 的第一次 Windows 运行在 Python synthetic Cargo.lock 的 CRLF 哈希 fixture 上失败，尚未构建实际 package；fixture 已修正，52 项 packaging/helper Python 测试已在 Linux 和 Windows 通过；随后 VS shell 初始化出现路径引用错误，包装脚本已修正，实际静态 CRT 构建/包校验待重跑。默认不上传 artifact，不改变固定 gnullvm Release 契约。
-- 本轮继续按可复现歌曲工作流完善；`main` 未合并修改，未发布 Release。
-- 后续验收顺序：完成上述两个源码切片及新回归 → 串联导出/重开歌曲场景 → 固定 Release 包及真实 Windows 设备验收。详细完成条件见 [开发路线图](docs/DEVELOPMENT_ROADMAP.md)。
+- **当前 Linux 已验证源码：`4045cb24da846057461dd6e464b1c90058a0835f`。** 集成真实电平表、空闲 transport 的 live-MIDI 重绘及精确平台编译条件。完整 no-default/all-target Rust **878 项通过、0 失败/忽略**，fmt、Clippy `-D warnings` 与应用 debug build 全部通过；保持默认测试栈，使用真实已安装 ALSA 运行库。该模式不含 VST2/VST3。
+- **真实 Mixer 电平表已集成：** `21989d0` + `ad565d7`，读取实际 post-fader stereo 图缓冲；Master 在 tanh 保护前测量，显示 dBFS、hold、CLIP/fault。稳定 track ID/graph/epoch 防错位，排队峰值、超时失效、点击 reset 和暂停时 live-MIDI 路径均有回归。已移除 UI 假 sine 动画。详见 [MIXER_METERING](docs/MIXER_METERING.md)。
+- **最近已完成 Windows 验证：`2c9d81174e676272c70666ac56519084d7d55d20`。** [Quality 37881848416](https://github.com/wrench1997/DAW/actions/runs/37881848416) 成功，862 项 Rust 测试、14 项 Python helper tests、实际 helper smoke 及全部开发门禁通过。它是电平表集成前的 checkpoint；新源码需独立 Windows 结果。
+- **Preview 尚未通过包验收。** [Run 37881848475](https://github.com/wrench1997/DAW/actions/runs/37881848475) 已通过 52 项 Python 测试、Rust 门禁和实际 optimized static-CRT 构建；包检查因漏列 Windows 系统 `ComBase.dll` 而拒绝。已根据 Microsoft 文档精确补充该名称及 normal/delay import 回归，未知 DLL/动态 VC runtime 仍拒绝。当前本地 packaging/helper **53 项通过**；新 Windows 包/ZIP helper smoke 待运行。默认不上传 artifact，不改变固定 gnullvm Release 契约。
+- 项目格式 **v11**，旧 v10 文件可加载；新保存需新版本重新打开。评估前保留原项目备份。`main` 未合并，未发布 Release 或二进制 artifact。
 
-## 已执行的基线验证与边界
+## 已执行的验证与边界
 
-- [Windows MSVC CI](https://github.com/wrench1997/DAW/actions/runs/37881375638) 在 `a760313d` 全部通过：Windows Server 2025 / x86_64-pc-windows-msvc，Rust/Cargo 1.99.0。
-- Windows all-feature Rust **862 通过、0 失败、0 忽略**；helper Rust target 0 tests。另有 **14 项 Python harness 测试通过**，实际 helper 协议 smoke、fmt、Clippy `-D warnings`、application/helper debug build、no-default all-target check 全部通过。
-- Linux 优先用于开发和本地验证；当前 no-default 完整 suite **860 通过**。Windows 继续覆盖兼容性、Windows-only 功能及独立 preview。GUI/真实设备验收单独记录，不能与无设备单元测试混同。
-- helper smoke 只证实三次 JSON 回复、无效命令恢复、stdin 打开时 Shutdown 以 0 退出及子进程回收；没有加载真实插件。Python 仅供开发验收，不是应用运行依赖。
-- 本地 fmt 通过；早期 ALSA metadata 缺失阻碍已通过识别现有真实运行库解决，当前合并源码的 Linux no-default all-target typecheck 已通过。
-- **尚未执行当前候选的 GUI、真实设备/插件、固定 gnullvm Release、干净系统安装/启动验收。**「源码已实现」「指定提交代码测试通过」「GUI/设备场景通过」「Release candidate 通过」「商用成熟度」是不同证据层级。
+- Linux `cargo test --offline --locked --no-default-features --all-targets`：**878 passed / 0 failed / 0 ignored**。`cargo fmt --all -- --check`、`cargo clippy --offline --locked --no-default-features --all-targets -- -D warnings` 与 `cargo build --offline --locked --no-default-features --bins` 全部成功。
+- 为实现严格 Linux 门禁，将仅 Windows backend 与测试使用的 MIDI helper 用 `cfg(any(windows, test))` 编译，并把 BTreeMap import 移到 Windows 模块。没有关闭 warning、删除测试或改动 Windows backend 行为；Linux 物理 MIDI backend 仍未实现。
+- Windows 历史完整门禁使用 Windows Server 2025 / MSVC / Rust 1.99，包含 all-features app/helper、严格 Clippy、helper smoke 和 no-default all-target check；测试数量按平台/feature 分别记录，不能互相代替。
+- helper smoke 只证实 JSON 协议、错误恢复、Shutdown/子进程回收；不加载真实插件。Python 是开发验证工具，不是应用运行依赖。
+- Linux 应用二进制已经编译并尝试启动，但云端图形栈尚未获得可靠可见 UI；**没有把启动进程或单元测试当作 GUI 验收**。真实设备/插件、固定 gnullvm Release、干净系统安装/启动及完整歌曲场景仍待验收。
 
 ## 当前源码已经具备什么
 

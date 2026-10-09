@@ -1,12 +1,13 @@
 # Development roadmap
 
-Updated: 2026-10-09 03:59 UTC. Development continues beyond the passing CI milestone. The near-term product outcome is: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-09 04:17 UTC. Development continues beyond the passing CI milestone. The near-term product outcome is: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
-- Development branch: `ci/windows-reliability-20261009`. Last fully validated Windows source: `a760313d599f458976ad6f9fd8e31acd688d2906`, including v11 split fidelity, WAV options, media and export controls. [Run 37881375638](https://github.com/wrench1997/DAW/actions/runs/37881375638) passed all gates with **862 Rust tests**, **14 helper-harness tests** and actual helper smoke.
+- Development branch: `ci/windows-reliability-20261009`. Last fully validated Windows source: `2c9d81174e676272c70666ac56519084d7d55d20`, including v11 split fidelity, WAV options, media and export controls. [Run 37881848416](https://github.com/wrench1997/DAW/actions/runs/37881848416) passed all gates with **862 Rust tests**, **14 helper-harness tests** and actual helper smoke.
 - Audio split fidelity is now integrated as `ba6a27f` + `21b716b`, with explicit application version **0.5.0-alpha.1** and project format **v11**. v10 inputs still load; new v11 saves require a new build. Preserve original projects before evaluating this prerelease.
-- Merged source `bb5817118b16fde04689d21131fdf1510a177713` passes real Linux no-default all-target typecheck and **860/860 Rust tests** on default stack, including the packet-construction regression and combined media/split/export/options tests. All-feature Windows gates passed separately with862 tests. Preview's fixture failure is fixed and52 Python tests pass on Windows; a VS shell-initialization quoting error is corrected for rerun. Actual static-CRT package validation remains pending. Linux is the primary ongoing development/test path; platform/GUI/hardware acceptance remains distinct.
+- Merged source `bb5817118b16fde04689d21131fdf1510a177713` passes real Linux no-default all-target typecheck and **860/860 Rust tests** on default stack, including the packet-construction regression and combined media/split/export/options tests. All-feature Windows gates passed separately with862 tests. Preview's fixture and VS initialization repairs now pass on Windows. Run 37881848475 completed all gates and the optimized static-CRT build, then rejected the OS ComBase.dll import during packaging. Its narrowly documented allowlist repair and new regression need fresh Windows execution; archive/helper-from-ZIP validation remains pending. Linux is the primary ongoing development/test path; platform/GUI/hardware acceptance remains distinct.
+- New metering source `4045cb24` passes **878 Linux no-default/all-target tests**, formatting, strict Clippy and application build. This is the current native checkpoint; its Windows all-feature validation is pending. The app has been compiled and launched, but cloud rendering has not established a reliable visible GUI. No GUI/device acceptance is inferred.
 - Evidence levels stay distinct: **implemented/source-inspected**; **executed code tests** at an exact revision; **GUI/device scenario passed** with artifacts; **release candidate accepted** on the intended package; **commercial maturity** from broader workflow, compatibility and sustained-use coverage. None implies the next.
 - Local Linux typechecking now uses the verified already-installed ALSA runtime through truthful linker metadata. It does not certify Windows, all-feature VST hosting, GUI or physical hardware.
 
@@ -14,7 +15,7 @@ Updated: 2026-10-09 03:59 UTC. Development continues beyond the passing CI miles
 
 **Existing:** Pattern/Piano Roll editing, audio import, grouped Playlist gestures, Slip, equal-power fades and two-Clip Crossfade are connected. Arithmetic hardening and dependent-state undo/redo regressions passed in the baseline suite (`playlist.rs`, `app.rs`).
 
-**Verified gap:** splitting an Audio Clip inside an existing fade copies normalized fades to both pieces instead of retaining one continuous original envelope. Splitting also rounds the native-source offset to an integer, which can alter resampled PCM at a non-native-rate boundary. These defects are addressed by the new integrated source; fresh complete candidate verification is still required.
+**Verified gap:** splitting an Audio Clip inside an existing fade copies normalized fades to both pieces instead of retaining one continuous original envelope. Splitting also rounds the native-source offset to an integer, which can alter resampled PCM at a non-native-rate boundary. These defects are addressed by the integrated source and have passed the complete Linux and Windows candidate code gates. Real-media GUI/device acceptance is still required.
 
 **Active slice:** preserve Audio Clip split-envelope origin/range and source phase across model persistence, migration, realtime Timeline/audio, offline export and visual editing. Pattern splitting is outside this implementation slice. Status: **integrated in the v11 prerelease candidate; 200 focused source tests and seven real callback/App tests passed before integration, merged native typecheck and complete860-test suite passed; Windows gates passed; GUI acceptance pending**.
 
@@ -49,7 +50,7 @@ Updated: 2026-10-09 03:59 UTC. Development continues beyond the passing CI miles
 
 **New integrated slice:** [export progress/cancellation and fidelity preflight](OFFLINE_EXPORT_WORKFLOW.md) now refuses active unsupported non-Tempo automation, surfaces persistent errors, limits work to one background job, rejects stale-session results and atomically arbitrates Cancel versus final file commit. The progress/cancellation slice passed all Windows gates at `43e7e41`. Newly integrated [WAV export options](WAV_EXPORT_OPTIONS.md) add PCM16/PCM24/float32, file sample rate and explicit legacy peak attenuation versus preserve-level review. Defaults preserve legacy PCM24/0.95 behavior; the combined options/v11 candidate passed full Windows verification at `a760313d`. Non-Tempo automation rendering remains unsupported.
 
-**Next acceptance work:** validate the integrated cancellation/preflight slice in Windows and follow M1/M2 with a reproducible song fixture and export/reopen evidence. No new full-mix offline plug-in renderer is claimed in this checkpoint.
+**Next acceptance work:** the integrated cancellation/preflight/options source has passed complete Windows and Linux code gates. Exercise its real GUI flow and follow M1/M2 with a reproducible song fixture and export/reopen evidence. No new full-mix offline plug-in renderer is claimed in this checkpoint.
 
 **Acceptance:**
 1. Export the supported arrangement at documented rates; inspect WAV header, frame count/duration, channel count, nonempty audible content and source offsets/fades. Reimport/play the result.
@@ -60,11 +61,15 @@ Updated: 2026-10-09 03:59 UTC. Development continues beyond the passing CI miles
 
 **Exit:** the supported export and live-capture workflows are reproducible with playable outputs and clear failure handling. This does not claim complete commercial bounce facilities.
 
+## P1 — Truthful mixer feedback
+
+[Measured mixer meters](MIXER_METERING.md) replace synthetic animation with actual post-fader stereo peaks, a pre-protection Master tap, dBFS labels, one-second hold and resettable CLIP/fault status. The callback uses bounded snapshots; graph/epoch/stable track identity, queue saturation, stale measurement and paused live-MIDI cases are covered. Meter activity does not alter Project or history. Integration commits `21989d0` and `ad565d7` retain the reviewed DSP/PCM behavior. Native GUI/device acceptance is pending; RMS/LUFS/true-peak analysis is outside this slice.
+
 ## P1 / M4 — Install and complete the workflow on Windows
 
 **Status:** release-candidate acceptance **not run**. Windows MSVC debug CI/helper smoke passed; it is not a pinned gnullvm Release or a clean-machine launch.
 
-**Integrated validation lane:** an opt-in [Windows preview-package workflow](WINDOWS_PREVIEW.md) is prepared for first Windows execution: Windows 2025, Rust 1.99.0 MSVC/static CRT, optimized all-feature app/helper, PE/import checks, ZIP whitelist, checksums/provenance and extracted-helper smoke. It has not produced a verified Windows artifact yet. This preview lane does not replace or silently change the pinned gnullvm release contract.
+**Integrated validation lane:** an opt-in [Windows preview-package workflow](WINDOWS_PREVIEW.md) has executed through optimized build but is still resolving package-validation findings: Windows 2025, Rust 1.99.0 MSVC/static CRT, optimized all-feature app/helper, PE/import checks, ZIP whitelist, checksums/provenance and extracted-helper smoke. The latest run rejected the known OS ComBase.dll import; a narrow allowlist repair is ready. It has not produced a verified Windows archive yet. This preview lane does not replace or silently change the pinned gnullvm release contract.
 
 **Acceptance:**
 1. Build the exact candidate with the pinned toolchain and locked inputs in [BUILD_AND_RELEASE.md](BUILD_AND_RELEASE.md); run all required tests/lints and the helper smoke against that Release helper.

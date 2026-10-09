@@ -33,6 +33,11 @@ unreviewed DLLs. Investigate a rejected DLL; do not copy DLLs from System32, a
 random download or another toolchain to make the test pass. The parser follows
 Microsoft's [PE format reference](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format).
 
+The allowlist includes `ComBase.dll`, the Windows Runtime/COM OS component
+identified in Microsoft's [WindowsPreallocateStringBuffer requirements](https://learn.microsoft.com/en-us/windows/win32/api/winstring/nf-winstring-windowspreallocatestringbuffer).
+A normal/delay-import regression covers this exact name. Dynamic VC runtimes and
+unknown DLLs remain rejected; no system DLL is copied into the archive.
+
 The preview includes **no `libunwind.dll`**. Do not mix these two MSVC executables
 into the gnullvm release package, which still requires the matching LLVM-MinGW
 20260616 runtime. PE import auditing does not discover every `LoadLibrary` call,
@@ -100,7 +105,7 @@ Its required files are:
 
 The explicitly reviewed optional `docs/PROJECT_MEDIA.md` and
 `docs/OFFLINE_EXPORT_WORKFLOW.md`, `docs/AUDIO_SPLIT_FIDELITY.md` and
-`docs/WAV_EXPORT_OPTIONS.md` are included
+`docs/WAV_EXPORT_OPTIONS.md` and `docs/MIXER_METERING.md` are included
 when present in the source checkout.
 This supports their independent implementation branches without requiring an
 unrelated code merge to test the packager. Any new
