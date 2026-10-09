@@ -38,6 +38,7 @@ use crate::{
     clip_fade::equal_power_normalized_gain,
     editor_viewport::{AxisViewport, Viewport2D},
     export,
+    export_job::{ExportCancelled, ExportJob, ExportOutcome},
     icons::{self, StudioIcon},
     master_capture::{
         MasterCaptureControl, MasterCaptureEndpoint, MasterCaptureMetadata, MasterCaptureSession,
@@ -120,6 +121,8 @@ use crate::{
     },
     wav,
 };
+
+mod export_ui;
 
 const LOOP_LENGTH: f32 = 16.0;
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -4698,7 +4701,8 @@ pub struct CitrusApp {
     plugins: Vec<PluginDescriptor>,
     scan_paths: Vec<PathBuf>,
     scan_receiver: Option<Receiver<Vec<PluginDescriptor>>>,
-    export_receiver: Option<Receiver<Result<PathBuf, String>>>,
+    export_job: ExportJob,
+    export_error: Option<String>,
     audio_import_receiver: Option<Receiver<AudioImportResult>>,
     project_media: ProjectMediaManager,
     audio_asset_sender: Sender<AudioAssetLoadResult>,
@@ -4992,7 +4996,8 @@ impl CitrusApp {
                 plugins,
                 scan_paths: plugins::default_scan_paths(),
                 scan_receiver: None,
-                export_receiver: None,
+                export_job: ExportJob::default(),
+                export_error: None,
                 audio_import_receiver: None,
                 project_media: ProjectMediaManager::default(),
                 audio_asset_sender,
@@ -13439,6 +13444,8 @@ impl CitrusApp {
         self.stop();
         self.stop_all_plugin_notes();
         self.clear_pending_midi_routing();
+        self.export_job.cancel();
+        self.export_error = None;
         self.plugin_parameter_edits.fail_all();
         self.plugin_parameter_edit_draft_desired.clear();
         self.project_media.close();
@@ -13961,8 +13968,8 @@ impl CitrusApp {
                         ui.separator();
                         if ui
                             .add_enabled(
-                                self.export_receiver.is_none(),
-                                egui::Button::new(if self.export_receiver.is_some() {
+                                !self.export_job.is_running(),
+                                egui::Button::new(if self.export_job.is_running() {
                                     "Rendering WAV…"
                                 } else {
                                     "Export 24-bit WAV…"
@@ -17105,15 +17112,20 @@ impl CitrusApp {
     }
 
     fn export_wav(&mut self) {
-        if self.export_receiver.is_some() {
+        if self.export_job.is_running() {
             return;
         }
         if project_has_active_vst_placements(&self.project) {
-            self.notify(
-                "0.4 offline export 不含 VST，请先 bypass/remove 或使用 realtime capture".into(),
+            self.export_error = Some(
+                "Offline WAV export cannot render active VST plug-ins. Bypass/remove them, or use Realtime Master Capture to preserve the live result.".into(),
             );
             return;
         }
+        if let Err(error) = export::ensure_supported_automation(&self.project) {
+            self.export_error = Some(error.to_string());
+            return;
+        }
+        self.export_error = None;
         let Some(path) = rfd::FileDialog::new()
             .add_filter("24-bit WAV audio", &["wav"])
             .set_file_name(format!("{}.wav", self.project.name))
@@ -17127,35 +17139,39 @@ impl CitrusApp {
             .as_ref()
             .map(|audio| audio.snapshot().sample_rate)
             .unwrap_or(48_000);
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let result = export::render_project_wav(&project, &path, sample_rate)
-                .map(|()| path)
-                .map_err(|error| error.to_string());
-            let _ = sender.send(result);
-        });
-        self.export_receiver = Some(receiver);
-        self.notify("Rendering 24-bit WAV in the background…".into());
+        let worker_path = path.clone();
+        match self
+            .export_job
+            .start(self.project_session, path, move |control| {
+                match export::render_project_wav_controlled(
+                    &project,
+                    &worker_path,
+                    sample_rate,
+                    &control,
+                ) {
+                    Ok(()) => ExportOutcome::Complete(worker_path),
+                    Err(error) if error.downcast_ref::<ExportCancelled>().is_some() => {
+                        ExportOutcome::Cancelled
+                    }
+                    Err(error) => ExportOutcome::Failed(format!("{error:#}")),
+                }
+            }) {
+            Ok(true) => self.notify("Rendering a 24-bit WAV snapshot in the background…".into()),
+            Ok(false) => {}
+            Err(error) => self.export_error = Some(format!("Unable to start WAV export: {error}")),
+        }
     }
 
     fn poll_export(&mut self) {
-        let Some(receiver) = &self.export_receiver else {
-            return;
-        };
-        match receiver.try_recv() {
-            Ok(Ok(path)) => {
-                self.export_receiver = None;
-                self.notify(format!("Exported {}", path.display()));
+        match self.export_job.poll(self.project_session) {
+            Some(ExportOutcome::Complete(path)) => {
+                self.notify(format!("Exported {}", path.display()))
             }
-            Ok(Err(error)) => {
-                self.export_receiver = None;
-                self.notify(format!("Export failed: {error}"));
+            Some(ExportOutcome::Cancelled) => {
+                self.notify("WAV export cancelled; the destination was not changed".into())
             }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.export_receiver = None;
-                self.notify("Export worker stopped unexpectedly".into());
-            }
-            Err(mpsc::TryRecvError::Empty) => {}
+            Some(ExportOutcome::Failed(error)) => self.export_error = Some(error),
+            None => {}
         }
     }
 
@@ -17360,6 +17376,7 @@ impl eframe::App for CitrusApp {
         }
         self.toolbar(ui);
         self.bottom_status(ui);
+        export_ui::progress_panel(ui, &self.export_job);
         if self.show_browser {
             self.browser(ui);
         }
@@ -17383,6 +17400,7 @@ impl eframe::App for CitrusApp {
             self.project_media_dialog(&ctx);
         }
         if !exclusive_project_modal {
+            export_ui::error_window(&ctx, &mut self.export_error);
             if self.piano_roll_transform.is_some() {
                 self.piano_roll_transform_dialog(&ctx);
             }
@@ -17469,6 +17487,7 @@ impl eframe::App for CitrusApp {
 
 impl Drop for CitrusApp {
     fn drop(&mut self) {
+        self.export_job.cancel();
         // A prepared/warming candidate owns a second device stream. Destroy it
         // before running shutdown barriers against the committed engine.
         let restart = std::mem::replace(&mut self.audio_restart_state, AudioRestartState::Idle);

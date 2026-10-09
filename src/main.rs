@@ -8,6 +8,7 @@ pub mod automation_runtime;
 mod clip_fade;
 pub mod editor_viewport;
 mod export;
+mod export_job;
 pub mod fixed_quantum;
 mod icons;
 pub mod master_capture;

@@ -10,7 +10,9 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::{
+    automation::AutomationTarget,
     clip_fade::equal_power_frame_gain,
+    export_job::ExportControl,
     mixer_graph::{
         CompiledMixerGraph, MIXER_GRAPH_MAX_NODES, MixerRouteTap, MixerTrackId, compile_mixer_graph,
     },
@@ -19,6 +21,7 @@ use crate::{
     wav,
 };
 
+const PROGRESS_FRAME_INTERVAL: usize = 4096;
 const WAV_WRITE_BUFFER_BYTES: usize = 64 * 1024;
 // Keep offline rendering aligned with the callback timeline's legacy Piano Roll period
 // (`TimelineCompileOptions::default().legacy_piano_period_beats`). Channel Rack steps retain
@@ -234,6 +237,73 @@ fn ensure_no_active_plugins(project: &Project) -> Result<()> {
     Ok(())
 }
 
+/// Pure preflight shared by the UI and renderer. Legacy lanes without any
+/// Playlist placement are globally active, matching live automation/TempoMap.
+/// Once a lane has placements, only their unmuted half-open windows enable it.
+pub fn ensure_supported_automation(project: &Project) -> Result<()> {
+    for automation in &project.automation_lanes {
+        let lane = &automation.lane;
+        if !lane.is_enabled()
+            || lane.points().is_empty()
+            || *lane.target() == AutomationTarget::Tempo
+        {
+            continue;
+        }
+        let mut placements = project
+            .clips
+            .iter()
+            .filter(|clip| {
+                clip.kind == ClipKind::Automation && clip.automation_id == Some(automation.id)
+            })
+            .peekable();
+        let active = if placements.peek().is_none() {
+            project.song_length_beats > 0.0
+        } else {
+            placements.any(|clip| {
+                let start = f64::from(clip.start);
+                let end = start + f64::from(clip.length);
+                let overlap_start = start.max(0.0);
+                let overlap_end = end.min(f64::from(project.song_length_beats));
+                !clip.muted
+                    && start.is_finite()
+                    && end.is_finite()
+                    && overlap_start < overlap_end
+                    && lane
+                        .evaluate(f64::from(clip.source_offset) + overlap_start - start)
+                        .is_some()
+            })
+        };
+        if active {
+            bail!(
+                "Offline WAV export cannot render automation '{}' (lane {}, target {}). Only Tempo automation is supported. Disable this lane or use Realtime Master Capture to preserve the live result.",
+                automation.name,
+                automation.id,
+                automation_target_description(lane.target())
+            );
+        }
+    }
+    Ok(())
+}
+
+fn automation_target_description(target: &AutomationTarget) -> String {
+    match target {
+        AutomationTarget::MasterVolume => "Master volume".into(),
+        AutomationTarget::MasterPan => "Master pan".into(),
+        AutomationTarget::Tempo => "Tempo".into(),
+        AutomationTarget::Swing => "Swing".into(),
+        AutomationTarget::MixerVolume { track } => format!("Mixer {track} volume"),
+        AutomationTarget::MixerPan { track } => format!("Mixer {track} pan"),
+        AutomationTarget::MixerMute { track } => format!("Mixer {track} mute"),
+        AutomationTarget::ChannelVolume { channel } => format!("Channel {channel} volume"),
+        AutomationTarget::ChannelPan { channel } => format!("Channel {channel} pan"),
+        AutomationTarget::ChannelMute { channel } => format!("Channel {channel} mute"),
+        AutomationTarget::PluginParameter {
+            instance,
+            parameter,
+        } => format!("Plug-in {instance} parameter {parameter}"),
+    }
+}
+
 #[derive(Debug)]
 struct PreparedAudioAsset {
     samples: Vec<f32>,
@@ -261,8 +331,21 @@ struct PreparedAudioClip {
     route: MixerRoute,
 }
 
+// Kept for callers that do not need background progress/cancellation.
+#[allow(dead_code)]
 pub fn render_project_wav(project: &Project, path: &Path, sample_rate: u32) -> Result<()> {
+    render_project_wav_controlled(project, path, sample_rate, &ExportControl::default())
+}
+
+pub fn render_project_wav_controlled(
+    project: &Project,
+    path: &Path,
+    sample_rate: u32,
+    control: &ExportControl,
+) -> Result<()> {
+    control.checkpoint(0)?;
     validate_export_sample_rate(sample_rate)?;
+    ensure_supported_automation(project)?;
     let mixer_plan = OfflineMixerPlan::build(project)?;
     let tempo_map = TempoMap::from_project(project, sample_rate)
         .context("Unable to build the project tempo map for WAV export")?;
@@ -273,15 +356,27 @@ pub fn render_project_wav(project: &Project, path: &Path, sample_rate: u32) -> R
         frame_count <= max_wav_frames,
         "Project is too long for a standard PCM WAV file"
     );
-    let (audio_assets, audio_clips) =
-        prepare_audio_clips(project, &mixer_plan, sample_rate, &tempo_map, frame_count)?;
-    let mut events = collect_events(project, &mixer_plan, &tempo_map)?;
+    let (audio_assets, audio_clips) = prepare_audio_clips(
+        project,
+        &mixer_plan,
+        sample_rate,
+        &tempo_map,
+        frame_count,
+        control,
+    )?;
+    control.checkpoint(1000)?;
+    let mut events = collect_events_controlled(project, &mixer_plan, &tempo_map, control)?;
     events.sort_by_key(|event| event.sample);
 
+    control.checkpoint(1200)?;
     let mut stereo = allocate_render_buffer(frame_count, sample_rate)?;
+    control.checkpoint(1500)?;
     let mut voices = Vec::<Voice>::with_capacity(96);
     let mut next_event = 0;
     for (frame, output) in stereo.iter_mut().enumerate() {
+        if frame % PROGRESS_FRAME_INTERVAL == 0 {
+            control.work_progress(frame, frame_count, 1500, 5000)?;
+        }
         while next_event < events.len() && events[next_event].sample <= frame {
             let event = events[next_event];
             let duration_samples = (event.duration * sample_rate as f32).max(1.0);
@@ -332,28 +427,45 @@ pub fn render_project_wav(project: &Project, path: &Path, sample_rate: u32) -> R
         output.right += right * 0.24;
     }
 
-    mix_prepared_audio(&audio_assets, &audio_clips, &mut stereo);
+    control.checkpoint(5000)?;
+    mix_prepared_audio(&audio_assets, &audio_clips, &mut stereo, control)?;
+    control.checkpoint(6500)?;
     // Decoded source assets can be much larger than the final render. Release
     // them before the output pass so source media and destination encoding do
     // not contribute to the same peak.
     drop(audio_clips);
     drop(audio_assets);
 
-    let peak = stereo.iter().fold(0.0_f32, |peak, frame| {
-        peak.max(frame.left.abs()).max(frame.right.abs())
-    });
+    let mut peak = 0.0_f32;
+    for (index, frame) in stereo.iter().enumerate() {
+        if index % PROGRESS_FRAME_INTERVAL == 0 {
+            control.work_progress(index, stereo.len(), 6500, 7000)?;
+        }
+        peak = peak.max(frame.left.abs()).max(frame.right.abs());
+    }
     let gain = if peak > 0.95 { 0.95 / peak } else { 1.0 };
-    write_stereo_pcm24(path, sample_rate, &stereo, gain)
+    write_stereo_pcm24_controlled(path, sample_rate, &stereo, gain, control)
         .with_context(|| format!("Unable to export WAV to {}", path.display()))
 }
 
+#[cfg(test)]
 fn collect_events(
     project: &Project,
     mixer_plan: &OfflineMixerPlan,
     tempo_map: &TempoMap,
 ) -> Result<Vec<Event>> {
+    collect_events_controlled(project, mixer_plan, tempo_map, &ExportControl::default())
+}
+
+fn collect_events_controlled(
+    project: &Project,
+    mixer_plan: &OfflineMixerPlan,
+    tempo_map: &TempoMap,
+    control: &ExportControl,
+) -> Result<Vec<Event>> {
     let mut events = Vec::new();
     for clip in &project.clips {
+        control.check_cancelled()?;
         if clip.kind != ClipKind::Pattern || clip.muted {
             continue;
         }
@@ -374,6 +486,7 @@ fn collect_events(
             mixer_plan,
             tempo_map,
             &mut events,
+            control,
         )?;
     }
     Ok(events)
@@ -390,6 +503,7 @@ fn collect_pattern_events(
     mixer_plan: &OfflineMixerPlan,
     tempo_map: &TempoMap,
     events: &mut Vec<Event>,
+    control: &ExportControl,
 ) -> Result<()> {
     if !clip_start.is_finite()
         || !clip_length.is_finite()
@@ -429,6 +543,7 @@ fn collect_pattern_events(
         let cycle_beats = step_count as f32 * 0.25;
         let mut cycle = -source_offset.rem_euclid(cycle_beats);
         while clip_start + cycle < clip_end {
+            control.check_cancelled()?;
             for (step, enabled) in steps.iter().copied().take(step_count).enumerate() {
                 if !enabled {
                     continue;
@@ -461,6 +576,7 @@ fn collect_pattern_events(
 
     let mut cycle = -source_offset.rem_euclid(LEGACY_PIANO_REPEAT_BEATS);
     while clip_start + cycle < clip_end {
+        control.check_cancelled()?;
         for note in &pattern.notes {
             if note.muted {
                 continue;
@@ -529,6 +645,7 @@ fn prepare_audio_clips(
     output_sample_rate: u32,
     tempo_map: &TempoMap,
     output_frames: usize,
+    control: &ExportControl,
 ) -> Result<(HashMap<u64, PreparedAudioAsset>, Vec<PreparedAudioClip>)> {
     let mut catalog = HashMap::with_capacity(project.audio_assets.len());
     for asset in &project.audio_assets {
@@ -544,11 +661,11 @@ fn prepare_audio_clips(
 
     let mut assets = HashMap::new();
     let mut clips = Vec::new();
-    for clip in project
-        .clips
-        .iter()
-        .filter(|clip| clip.kind == ClipKind::Audio && !clip.muted)
-    {
+    for (index, clip) in project.clips.iter().enumerate() {
+        control.work_progress(index, project.clips.len(), 0, 1000)?;
+        if clip.kind != ClipKind::Audio || clip.muted {
+            continue;
+        }
         // Playlist lane 0 feeds mixer insert 1. Resolve gating before touching
         // the asset catalog or filesystem: muted inserts and non-solo routes
         // must be cheap even when their media is offline or corrupt.
@@ -745,14 +862,28 @@ fn mix_prepared_audio(
     assets: &HashMap<u64, PreparedAudioAsset>,
     clips: &[PreparedAudioClip],
     output: &mut [StereoFrame],
-) {
+    control: &ExportControl,
+) -> Result<()> {
+    let total_frames = clips
+        .iter()
+        .fold(0_usize, |sum, clip| sum.saturating_add(clip.frame_count));
+    let mut completed_frames = 0_usize;
     for clip in clips {
+        control.check_cancelled()?;
         let Some(asset) = assets.get(&clip.asset_id) else {
             debug_assert!(false, "prepared clip refers to an unavailable asset");
             continue;
         };
         let destination = &mut output[clip.output_start..clip.output_start + clip.frame_count];
         for (index, destination) in destination.iter_mut().enumerate() {
+            if index % PROGRESS_FRAME_INTERVAL == 0 {
+                control.work_progress(
+                    completed_frames.saturating_add(index),
+                    total_frames,
+                    5000,
+                    6500,
+                )?;
+            }
             let envelope = equal_power_frame_gain(
                 index as u64,
                 clip.timeline_frames as u64,
@@ -771,7 +902,9 @@ fn mix_prepared_audio(
             destination.left += left * gain * clip.route.left_gain;
             destination.right += right * gain * clip.route.right_gain;
         }
+        completed_frames = completed_frames.saturating_add(clip.frame_count);
     }
+    Ok(())
 }
 
 fn midi_frequency(note: u8) -> f32 {
@@ -786,15 +919,30 @@ fn validate_export_sample_rate(sample_rate: u32) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn write_stereo_pcm24(
     path: &Path,
     sample_rate: u32,
     stereo: &[StereoFrame],
     gain: f32,
 ) -> Result<()> {
+    write_stereo_pcm24_controlled(path, sample_rate, stereo, gain, &ExportControl::default())
+}
+
+fn write_stereo_pcm24_controlled(
+    path: &Path,
+    sample_rate: u32,
+    stereo: &[StereoFrame],
+    gain: f32,
+    control: &ExportControl,
+) -> Result<()> {
+    control.checkpoint(7000)?;
     validate_export_sample_rate(sample_rate)?;
     ensure!(gain.is_finite(), "WAV export gain must be finite");
     for (index, frame) in stereo.iter().enumerate() {
+        if index % PROGRESS_FRAME_INTERVAL == 0 {
+            control.work_progress(index, stereo.len(), 7000, 7500)?;
+        }
         ensure!(
             frame.left.is_finite()
                 && frame.right.is_finite()
@@ -816,6 +964,7 @@ fn write_stereo_pcm24(
         "Rendered audio is too large for a standard PCM WAV file"
     );
 
+    control.checkpoint(7500)?;
     let (mut staged, file) = create_staged_output(path)?;
     let mut writer = BufWriter::with_capacity(WAV_WRITE_BUFFER_BYTES, file);
     writer.write_all(b"RIFF")?;
@@ -832,7 +981,10 @@ fn write_stereo_pcm24(
     writer.write_all(&bits_per_sample.to_le_bytes())?;
     writer.write_all(b"data")?;
     writer.write_all(&data_size.to_le_bytes())?;
-    for frame in stereo {
+    for (index, frame) in stereo.iter().enumerate() {
+        if index % PROGRESS_FRAME_INTERVAL == 0 {
+            control.work_progress(index, stereo.len(), 7500, 9800)?;
+        }
         let mut encoded_frame = [0_u8; 6];
         for (channel, sample) in [frame.left, frame.right].into_iter().enumerate() {
             let value = (sample * gain).clamp(-1.0, 1.0);
@@ -843,15 +995,22 @@ fn write_stereo_pcm24(
         }
         writer.write_all(&encoded_frame)?;
     }
+    control.checkpoint(9800)?;
     writer
         .flush()
         .with_context(|| format!("Unable to flush staged WAV for {}", path.display()))?;
+    control.check_cancelled()?;
     writer
         .get_ref()
         .sync_all()
         .with_context(|| format!("Unable to sync staged WAV for {}", path.display()))?;
     drop(writer);
-    staged.commit(path)
+    // The cancellation/commit CAS makes the final boundary unambiguous even
+    // if the UI requests Cancel concurrently with the worker's rename.
+    control.begin_commit()?;
+    staged.commit(path)?;
+    control.complete();
+    Ok(())
 }
 
 struct StagedOutput {
@@ -1143,6 +1302,7 @@ mod tests {
             track.muted = false;
             track.solo = false;
         }
+        project.automation_lanes.clear();
         project.clips = vec![audio_clip(0.0, 0.001, 0)];
         project.audio_clip_mixer_destinations = vec![AudioClipMixerDestination {
             clip_id: 70,
@@ -1479,6 +1639,202 @@ mod tests {
         });
         let error = OfflineMixerPlan::build(&project).unwrap_err();
         assert!(format!("{error:#}").contains("sidechain"));
+    }
+
+    fn unsupported_lane(target: AutomationTarget) -> ProjectAutomation {
+        let mut lane = AutomationLane::new(target);
+        // Endpoint holding makes this active even before its first point.
+        lane.replace_points([AutomationPoint::new(128.0, 0.5)]);
+        ProjectAutomation {
+            id: 900,
+            name: "Audible movement".into(),
+            lane,
+        }
+    }
+
+    fn automation_placement(start: f32, length: f32, muted: bool) -> Clip {
+        let mut clip = pattern_clip(start, length, 1.0, muted);
+        clip.kind = ClipKind::Automation;
+        clip.automation_id = Some(900);
+        clip
+    }
+
+    fn workflow_test_directory(name: &str) -> PathBuf {
+        let sequence = STAGED_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "citrus-export-{name}-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn all_non_tempo_targets_fail_preflight_without_replacing_destination() {
+        let directory = workflow_test_directory("automation");
+        let path = directory.join("existing.wav");
+        let original = b"original destination bytes";
+        std::fs::write(&path, original).unwrap();
+        let targets = [
+            AutomationTarget::MasterVolume,
+            AutomationTarget::MasterPan,
+            AutomationTarget::Swing,
+            AutomationTarget::MixerVolume { track: 1 },
+            AutomationTarget::MixerPan { track: 1 },
+            AutomationTarget::MixerMute { track: 1 },
+            AutomationTarget::ChannelVolume { channel: 1 },
+            AutomationTarget::ChannelPan { channel: 1 },
+            AutomationTarget::ChannelMute { channel: 1 },
+            AutomationTarget::PluginParameter {
+                instance: 12,
+                parameter: 3,
+            },
+        ];
+        for target in targets {
+            let mut project = arrangement_project();
+            project
+                .automation_lanes
+                .push(unsupported_lane(target.clone()));
+            let error = render_project_wav(&project, &path, 8000)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Audible movement"));
+            assert!(error.contains("lane 900"));
+            assert!(error.contains(&automation_target_description(&target)));
+            assert!(error.contains("Realtime Master Capture"));
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn preflight_respects_disabled_empty_and_half_open_placement_gates() {
+        let mut project = arrangement_project();
+        project
+            .automation_lanes
+            .push(unsupported_lane(AutomationTarget::MasterVolume));
+        project.automation_lanes[0].lane.set_enabled(false);
+        ensure_supported_automation(&project).unwrap();
+        project.automation_lanes[0].lane.set_enabled(true);
+        project.automation_lanes[0].lane.replace_points([]);
+        ensure_supported_automation(&project).unwrap();
+        project.automation_lanes[0] = unsupported_lane(AutomationTarget::MasterVolume);
+        for (start, length, muted) in [
+            (0.0, 8.0, true),
+            (8.0, 1.0, false),
+            (10.0, 1.0, false),
+            (-2.0, 2.0, false),
+            (2.0, 0.0, false),
+        ] {
+            project.clips = vec![automation_placement(start, length, muted)];
+            ensure_supported_automation(&project).unwrap();
+        }
+        for (start, length) in [(0.0, 1.0), (7.999, 1.0), (-1.0, 2.0)] {
+            project.clips = vec![automation_placement(start, length, false)];
+            assert!(ensure_supported_automation(&project).is_err());
+        }
+        project.clips = vec![
+            automation_placement(0.0, 1.0, true),
+            automation_placement(7.0, 1.0, false),
+        ];
+        assert!(ensure_supported_automation(&project).is_err());
+    }
+
+    #[test]
+    fn unplaced_legacy_lanes_remain_global_and_unrelated_clips_do_not_gate_them() {
+        let mut project = arrangement_project();
+        project
+            .automation_lanes
+            .push(unsupported_lane(AutomationTarget::MasterPan));
+        assert!(ensure_supported_automation(&project).is_err());
+        let mut unrelated = automation_placement(0.0, 1.0, true);
+        unrelated.automation_id = Some(901);
+        project.clips.push(unrelated);
+        assert!(ensure_supported_automation(&project).is_err());
+        project.automation_lanes[0]
+            .lane
+            .set_target(AutomationTarget::Tempo);
+        ensure_supported_automation(&project).unwrap();
+    }
+
+    #[test]
+    fn cancellation_before_preflight_does_not_create_or_replace_a_file() {
+        let directory = workflow_test_directory("early-cancel");
+        let path = directory.join("not-created.wav");
+        let control = ExportControl::default();
+        assert!(control.cancel());
+        let error = render_project_wav_controlled(&arrangement_project(), &path, 8000, &control)
+            .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::export_job::ExportCancelled>()
+                .is_some()
+        );
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        std::fs::write(&path, b"original").unwrap();
+        assert!(
+            render_project_wav_controlled(&arrangement_project(), &path, 8000, &control).is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn cancellation_during_render_mix_encode_and_finalization_preserves_original_and_cleans_stage()
+    {
+        let directory = workflow_test_directory("phase-cancel");
+        let source = directory.join("source.wav");
+        let destination = directory.join("existing.wav");
+        write_pcm16_wav(&source, 8000, 1, &vec![8192; 16000]);
+        let mut project = audio_project(&source, 8000, 1, 16000);
+        project.song_length_beats = 2.0;
+        project.clips[0].length = 2.0;
+        for threshold in [1000, 1500, 2000, 5000, 6000, 6800, 7200, 8000, 9800, 9900] {
+            std::fs::write(&destination, b"original bytes").unwrap();
+            let control = ExportControl::default();
+            control.cancel_at(threshold);
+            let error =
+                render_project_wav_controlled(&project, &destination, 8000, &control).unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<crate::export_job::ExportCancelled>()
+                    .is_some(),
+                "threshold {threshold}: {error:#}"
+            );
+            assert!(control.progress().cancelling);
+            assert!(control.progress().basis_points < 10000);
+            assert_eq!(
+                std::fs::read(&destination).unwrap(),
+                b"original bytes",
+                "threshold {threshold}"
+            );
+            assert_eq!(
+                std::fs::read_dir(&directory).unwrap().count(),
+                2,
+                "staging leaked at {threshold}"
+            );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn controlled_export_matches_compatible_wrapper_byte_for_byte() {
+        let directory = workflow_test_directory("normal");
+        let old_api = directory.join("wrapper.wav");
+        let controlled = directory.join("controlled.wav");
+        let project = arrangement_project();
+        render_project_wav(&project, &old_api, 8000).unwrap();
+        let control = ExportControl::default();
+        render_project_wav_controlled(&project, &controlled, 8000, &control).unwrap();
+        assert_eq!(
+            std::fs::read(&old_api).unwrap(),
+            std::fs::read(&controlled).unwrap()
+        );
+        assert_eq!(control.progress().basis_points, 10000);
+        assert!(!control.cancel());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 2);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -2122,7 +2478,8 @@ mod tests {
         let marker = destination.join("existing-export-marker");
         std::fs::write(&marker, b"keep me").unwrap();
 
-        let result = write_stereo_pcm24(
+        let control = ExportControl::default();
+        let result = write_stereo_pcm24_controlled(
             &destination,
             48_000,
             &[StereoFrame {
@@ -2130,8 +2487,19 @@ mod tests {
                 right: -0.1,
             }],
             1.0,
+            &control,
         );
-        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::export_job::ExportCancelled>()
+                .is_none()
+        );
+        assert_eq!(control.progress().basis_points, 9900);
+        assert!(
+            !control.cancel(),
+            "commit failure is not a cancelled result"
+        );
         assert_eq!(std::fs::read(&marker).unwrap(), b"keep me");
 
         let file_name = destination.file_name().unwrap().to_string_lossy();
