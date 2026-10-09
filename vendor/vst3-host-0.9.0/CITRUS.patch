@@ -1,179 +1,246 @@
---- a/src/plugin.rs
-+++ b/src/plugin.rs
-@@ -902,6 +902,13 @@
-     fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()>;
-     fn close_editor(&mut self) -> Result<()>;
-     fn get_editor_size(&self) -> Result<(i32, i32)>;
-+    /// Control a native editor owned by an isolated helper. In-process implementations cannot
-+    /// satisfy this contract and keep returning an explicit error.
-+    fn isolated_editor(&mut self, _command: IsolatedEditorCommand) -> Result<IsolatedEditorState> {
-+        Err(Error::Other(
-+            "plugin is not hosted by an editor-capable isolated helper".to_string(),
-+        ))
+--- a/src/bin/vst3-host-helper.rs
++++ b/src/bin/vst3-host-helper.rs
+@@ -603,6 +603,10 @@
+         HostCommand::TakeHostNotifications => with(plugin, |p| HostResponse::HostNotifications {
+             notifications: p.take_host_notifications(),
+         }),
++        HostCommand::NativeDirtyRevision => with(plugin, |p| match p.native_dirty_revision() {
++            Ok(revision) => HostResponse::NativeDirtyRevision { revision },
++            Err(error) => err("NativeDirtyRevision", error),
++        }),
+         HostCommand::TakeDataExchangeBlocks => with(plugin, |p| HostResponse::DataExchangeBlocks {
+             blocks: p.take_data_exchange_blocks(),
+         }),
+@@ -629,6 +633,10 @@
+             Ok(flags) => HostResponse::RestartFlags { bits: flags.bits() },
+             Err(error) => err("ServiceHostRequests", error),
+         }),
++        HostCommand::Editor { .. } => HostResponse::Error {
++            message: "This upstream helper does not implement the Citrus native editor protocol"
++                .to_string(),
++        },
+         HostCommand::CreateGui => gui_request(gui, true),
+         HostCommand::CloseGui => gui_request(gui, false),
+         HostCommand::Shutdown => HostResponse::Success {
+--- a/src/internal/com_implementations.rs
++++ b/src/internal/com_implementations.rs
+@@ -1646,6 +1646,12 @@
+     // "re-read my parameters"), so accumulating them is both complete and inherently bounded —
+     // a plugin that spams restartComponent while nothing polls costs one word, not a queue.
+     restart_flags: AtomicI32,
++    // Durable, per-instance evidence independent of the bounded feedback queues. Never drained
++    // or reset; saturation makes checked reads fail rather than wrapping to a clean baseline.
++    native_dirty_revision: AtomicU64,
++    // Once a native value failed to reach the processor, a later empty queue cannot prove that
++    // its state is current. Only a new plugin instance clears this conservative capture guard.
++    native_parameter_feedback_lost: AtomicBool,
+     // Ordered IComponentHandler2 / IUnitHandler / IProgress / context-menu requests. These are
+     // control-plane work items, never executed from inside the plugin callback. Ordered against
+     // themselves only — not against `edits`. Capped at MAX_HOST_NOTIFICATIONS, and a push past
+@@ -1661,9 +1667,61 @@
+             parameter_changes,
+             edits: Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK))),
+             restart_flags: AtomicI32::new(0),
++            native_dirty_revision: AtomicU64::new(0),
++            native_parameter_feedback_lost: AtomicBool::new(false),
+             notifications: Arc::new(Mutex::new(Vec::with_capacity(MAX_HOST_NOTIFICATIONS))),
+             context_menus: Arc::new(ContextMenuRegistry::new()),
+         }
 +    }
-     /// Whether the editor accepts host-driven size changes.
-     fn editor_can_resize(&self) -> bool {
-         false
-@@ -930,6 +937,15 @@
-     /// Drain ordered requests reported through `IComponentHandler2`.
-     fn take_host_notifications(&mut self) -> Vec<HostNotification> {
-         Vec::new()
-+    }
-+    /// Checked editor drain for hosts whose dirty-state accounting must not treat IPC failure
-+    /// as an empty edit batch. In-process implementations have no transport failure.
-+    fn try_take_parameter_edits(&mut self) -> Result<Vec<ParameterEdit>> {
-+        Ok(self.take_parameter_edits())
-+    }
-+    /// Checked host-notification drain; preserves errors across the isolation boundary.
-+    fn try_take_host_notifications(&mut self) -> Result<Vec<HostNotification>> {
-+        Ok(self.take_host_notifications())
-     }
-     /// Dispatch any main-thread data-exchange blocks to the controller and drain owned host
-     /// snapshots. Background-dispatched queues are copied into the same bounded snapshot sink.
-@@ -1988,6 +2004,29 @@
-             .unwrap_or(false)
-     }
- 
-+    /// Query, open/focus or close a native editor owned by the isolated helper.
-+    ///
-+    /// This safe API carries only a logical owner's integer identity across IPC. The helper
-+    /// validates it and constructs a real local native parent before calling the plugin.
-+    /// Calling this on an in-process plugin returns an error. All work is control-plane work;
-+    /// do not invoke it from a realtime audio callback.
-+    pub fn isolated_editor(
-+        &mut self,
-+        command: IsolatedEditorCommand,
-+    ) -> Result<IsolatedEditorState> {
-+        if let IsolatedEditorCommand::Open { owner: Some(owner) } = command {
-+            if owner.window == 0 || owner.process_id == 0 {
-+                return Err(Error::Other(
-+                    "isolated editor owner must have a nonzero window and process id".to_string(),
-+                ));
++
++    fn mark_native_dirty(&self) {
++        let mut revision = self.native_dirty_revision.load(Ordering::Acquire);
++        loop {
++            match self.native_dirty_revision.compare_exchange_weak(
++                revision,
++                revision.saturating_add(1),
++                Ordering::AcqRel,
++                Ordering::Acquire,
++            ) {
++                Ok(_) => break,
++                Err(current) => revision = current,
 +            }
 +        }
-+        self.internal
-+            .as_mut()
-+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-+            .isolated_editor(command)
 +    }
 +
-     /// Open the plugin editor window
-     pub fn open_editor(&mut self, parent: WindowHandle) -> Result<()> {
-         self.internal
-@@ -2113,6 +2152,25 @@
-             .as_mut()
-             .map(|i| i.take_parameter_edits())
-             .unwrap_or_default()
++    pub fn native_dirty_revision(&self) -> crate::Result<u64> {
++        let revision = self.native_dirty_revision.load(Ordering::Acquire);
++        if revision == u64::MAX {
++            return Err(crate::Error::Other(
++                "native dirty revision exhausted".into(),
++            ));
++        }
++        Ok(revision)
 +    }
 +
-+    /// Drain editor gestures while surfacing transport/protocol failure. Unlike the legacy
-+    /// infallible drain, an empty successful batch is never substituted for a failed exchange.
-+    /// Polling is control-plane work and must not run on a realtime audio callback.
-+    pub fn try_take_parameter_edits(&mut self) -> Result<Vec<ParameterEdit>> {
-+        self.internal
-+            .as_mut()
-+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-+            .try_take_parameter_edits()
++    pub fn mark_native_parameter_feedback_lost(&self) {
++        self.native_parameter_feedback_lost
++            .store(true, Ordering::Release);
 +    }
 +
-+    /// Drain host notifications while surfacing transport/protocol failure. Hosts should retain
-+    /// conservative unsaved-state evidence if this fails after native editing was possible.
-+    pub fn try_take_host_notifications(&mut self) -> Result<Vec<HostNotification>> {
-+        self.internal
-+            .as_mut()
-+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-+            .try_take_host_notifications()
++    /// State is authoritative only after every native value reached a successful processor
++    /// call. This does not drain evidence, and bounded gesture/notification loss cannot reset it.
++    pub fn native_state_capture_revision(&self) -> crate::Result<u64> {
++        if self.native_parameter_feedback_lost.load(Ordering::Acquire) {
++            return Err(crate::Error::Other(
++                "native parameter feedback was lost; reload the plugin before capturing state"
++                    .into(),
++            ));
++        }
++        let pending = self.parameter_changes.lock().map_err(|_| {
++            crate::Error::Other("native parameter feedback lock is poisoned".into())
++        })?;
++        if !pending.is_empty() {
++            return Err(crate::Error::Other(
++                "native parameter values must be flushed before capturing state".into(),
++            ));
++        }
++        self.native_dirty_revision()
      }
  
-     /// Drain ordered requests the plugin reported through `IComponentHandler2`.
-@@ -2669,6 +2727,59 @@
-             "Legacy MIDI CC events are plugin output only".to_string(),
-         )),
+     /// Take the accumulated `restartComponent` flags, clearing them.
+@@ -1761,16 +1819,19 @@
      }
-+}
-+
-+/// Logical owner of an isolated Windows editor, transported as data rather than a pointer.
-+///
-+/// The helper validates both the live HWND and its process id. It owns its editor container
-+/// independently: Windows must not destroy that container before the plugin can detach when
-+/// the owner disappears. This is a standalone associated window, not cross-process embedding.
-+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-+#[serde(deny_unknown_fields)]
-+pub struct IsolatedEditorOwner {
-+    /// The owner's HWND value. Zero is invalid; the helper also rejects width truncation.
-+    pub window: u64,
-+    /// Process which owns that HWND. Zero is invalid.
-+    pub process_id: u32,
-+}
-+
-+/// Control-plane request to a helper-owned native editor. No fabricated `WindowHandle` is needed.
-+///
-+/// New helpers implement this additive protocol; an older helper returns an ordinary error.
-+/// These requests may perform synchronous IPC and must never run on a realtime audio callback.
-+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-+#[serde(deny_unknown_fields)]
-+pub enum IsolatedEditorCommand {
-+    /// Query actual helper-side capability and state, including a user-closed editor.
-+    Query,
-+    /// Open once, or focus the existing editor. A different live owner is rejected while open.
-+    Open {
-+        /// Optional logical owning application window; `None` is a standalone editor.
-+        owner: Option<IsolatedEditorOwner>,
-+    },
-+    /// Focus an already open editor. Fails if it has been closed.
-+    Focus,
-+    /// Detach the plugin view before destroying its container. Closing twice is harmless.
-+    Close,
-+}
-+
-+/// Authoritative snapshot from the isolated helper, not a cached "open was requested" flag.
-+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-+#[serde(deny_unknown_fields)]
-+pub struct IsolatedEditorState {
-+    /// Whether this helper platform implements the native lifecycle protocol.
-+    pub supported: bool,
-+    /// Whether the loaded plugin advertises a native editor; false if no plugin is loaded.
-+    pub has_editor: bool,
-+    /// Whether a real plugin view is currently attached to a live helper-owned container.
-+    pub open: bool,
-+    /// Current accepted client width, or zero when closed.
-+    pub width: i32,
-+    /// Current accepted client height, or zero when closed.
-+    pub height: i32,
-+    /// Increases on each successful new attachment in this helper process; zero before first open.
-+    /// Combine with the host's instance/helper identity: a restarted process begins at zero.
-+    pub generation: u64,
- }
  
- /// Platform-specific window handle
---- a/src/process_isolation.rs
-+++ b/src/process_isolation.rs
-@@ -455,7 +455,12 @@
-     },
-     /// Unload the current plugin
-     UnloadPlugin,
--    /// Create plugin GUI
-+    /// Control a helper-owned native editor using the additive Citrus lifecycle protocol.
-+    Editor {
-+        /// Typed query/open/focus/close request. Native handles are never dereferenced in the host.
-+        command: crate::plugin::IsolatedEditorCommand,
-+    },
-+    /// Create plugin GUI (legacy protocol; unchanged for existing clients).
-     CreateGui,
-     /// Close plugin GUI
-     CloseGui,
-@@ -838,6 +843,11 @@
-         width: i32,
-         /// Editor height in pixels.
-         height: i32,
-+    },
-+    /// Actual native editor capability and state, in reply to `Editor`.
-+    EditorState {
-+        /// Snapshot from the helper which owns the native window.
-+        state: crate::plugin::IsolatedEditorState,
-     },
-     /// Plugin information
-     PluginInfo {
+     unsafe fn performEdit(&self, id: u32, value_normalized: f64) -> i32 {
++        // Record before either bounded queue can reject the value.
++        self.mark_native_dirty();
+         log::debug!(
+             "Host: Perform edit for parameter {} = {}",
+             id,
+             value_normalized
+         );
+         // Store the parameter change for the DSP-feeding drain...
+-        if let Ok(mut changes) = self.parameter_changes.lock() {
+-            if changes.len() < MAX_EDITOR_FEEDBACK {
++        match self.parameter_changes.lock() {
++            Ok(mut changes) if changes.len() < MAX_EDITOR_FEEDBACK => {
+                 changes.push((id, value_normalized));
+             }
++            _ => self.mark_native_parameter_feedback_lost(),
+         }
+         // ...and as an ordered gesture event for the richer `take_parameter_edits` drain.
+         self.push_edit(crate::plugin::ParameterEdit {
+@@ -1792,6 +1853,9 @@
+     }
+ 
+     unsafe fn restartComponent(&self, flags: i32) -> i32 {
++        if flags & (RestartFlags_::kParamValuesChanged | RestartFlags_::kReloadComponent) != 0 {
++            self.mark_native_dirty();
++        }
+         log::debug!("Host: Restart component requested with flags: {flags:#x}");
+         // Recorded for the host to poll (`Plugin::take_restart_flags`), not acted on here: the
+         // host decides what a restart means for it. See `RestartFlags` for which flags this
+@@ -1827,6 +1891,9 @@
+ 
+ impl IComponentHandler2Trait for ComponentHandler {
+     unsafe fn setDirty(&self, state: u8) -> i32 {
++        if state != 0 {
++            self.mark_native_dirty();
++        }
+         log::debug!("Host: Plugin marked state as dirty (state: {})", state);
+         if self.push_notification(crate::plugin::HostNotification::DirtyChanged(state != 0)) {
+             kResultOk
+@@ -2753,6 +2820,99 @@
+ mod component_handler_tests {
+     use super::*;
+     use crate::plugin::{ContextMenuItem, HostNotification, ParameterEdit, ParameterEditKind};
++
++    #[test]
++    fn native_dirty_revision_survives_all_feedback_drains() {
++        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
++        assert_eq!(handler.native_dirty_revision().unwrap(), 0);
++        unsafe {
++            handler.beginEdit(7);
++            handler.endEdit(7);
++            handler.setDirty(0);
++            handler.restartComponent(RestartFlags_::kLatencyChanged);
++        }
++        assert_eq!(handler.native_dirty_revision().unwrap(), 0);
++        unsafe {
++            handler.performEdit(7, 0.75);
++            handler.setDirty(1);
++            handler.restartComponent(
++                RestartFlags_::kParamValuesChanged | RestartFlags_::kReloadComponent,
++            );
++            handler.restartComponent(RestartFlags_::kReloadComponent);
++        }
++        assert_eq!(handler.native_dirty_revision().unwrap(), 4);
++        assert!(handler.native_state_capture_revision().is_err());
++        handler.take_parameter_edits();
++        handler.take_host_notifications();
++        handler.take_restart_flags();
++        assert_eq!(handler.native_dirty_revision().unwrap(), 4);
++        // Model a successful processor delivery: only the raw DSP queue is consumed.
++        handler.parameter_changes.lock().unwrap().clear();
++        assert_eq!(handler.native_state_capture_revision().unwrap(), 4);
++    }
++
++    #[test]
++    fn native_dirty_revision_survives_bounded_feedback_overflow() {
++        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
++        unsafe {
++            for _ in 0..(MAX_EDITOR_FEEDBACK + 3) {
++                handler.performEdit(7, 0.5);
++            }
++            for _ in 0..MAX_HOST_NOTIFICATIONS {
++                assert_eq!(handler.setDirty(0), kResultOk);
++            }
++            assert_eq!(handler.setDirty(1), kResultFalse);
++        }
++        assert_eq!(
++            handler.native_dirty_revision().unwrap(),
++            MAX_EDITOR_FEEDBACK as u64 + 4
++        );
++        assert_eq!(handler.take_parameter_edits().len(), MAX_EDITOR_FEEDBACK);
++        assert_eq!(
++            handler.take_host_notifications().len(),
++            MAX_HOST_NOTIFICATIONS
++        );
++        handler.parameter_changes.lock().unwrap().clear();
++        assert!(handler.native_state_capture_revision().is_err());
++        assert_eq!(
++            handler.native_dirty_revision().unwrap(),
++            MAX_EDITOR_FEEDBACK as u64 + 4
++        );
++    }
++
++    #[test]
++    fn native_dirty_revision_exhaustion_never_wraps_to_clean() {
++        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
++        handler
++            .native_dirty_revision
++            .store(u64::MAX - 1, Ordering::Release);
++        assert_eq!(handler.native_dirty_revision().unwrap(), u64::MAX - 1);
++        unsafe {
++            handler.setDirty(1);
++            handler.setDirty(1);
++        }
++        assert_eq!(
++            handler.native_dirty_revision.load(Ordering::Acquire),
++            u64::MAX
++        );
++        assert!(handler.native_dirty_revision().is_err());
++        assert!(handler.native_state_capture_revision().is_err());
++    }
++
++    #[test]
++    fn native_feedback_poison_is_visible_after_the_edit() {
++        let changes = Arc::new(Mutex::new(Vec::new()));
++        let handler = ComponentHandler::new(changes.clone());
++        let _ = std::panic::catch_unwind(|| {
++            let _guard = changes.lock().unwrap();
++            panic!("simulate a poisoned native feedback queue");
++        });
++        unsafe {
++            handler.performEdit(7, 0.5);
++        }
++        assert_eq!(handler.native_dirty_revision().unwrap(), 1);
++        assert!(handler.native_state_capture_revision().is_err());
++    }
+ 
+     struct TestContextMenuTarget {
+         calls: Arc<Mutex<Vec<i32>>>,
 --- a/src/internal/isolated_plugin_impl.rs
 +++ b/src/internal/isolated_plugin_impl.rs
 @@ -74,6 +74,101 @@
@@ -286,7 +353,7 @@
 +        &mut self,
 +        command: crate::plugin::IsolatedEditorCommand,
 +    ) -> Result<crate::plugin::IsolatedEditorState> {
-+        match self.send_command(HostCommand::Editor { command })? {
++        match self.send_command_once(HostCommand::Editor { command })? {
 +            HostResponse::EditorState { state } => {
 +                validate_editor_state(&state)?;
 +                self.has_open_editor = state.open;
@@ -305,14 +372,12 @@
      fn open_editor(&mut self, _parent: *mut std::ffi::c_void) -> Result<()> {
          let response = self.send_command(HostCommand::CreateGui)?;
  
-@@ -918,6 +1033,30 @@
-             },
-         )
+@@ -920,6 +1035,30 @@
          .unwrap_or_default()
-+    }
-+
+     }
+ 
 +    fn try_take_parameter_edits(&mut self) -> Result<Vec<crate::plugin::ParameterEdit>> {
-+        match self.send_command(HostCommand::TakeParameterEdits)? {
++        match self.send_command_once(HostCommand::TakeParameterEdits)? {
 +            HostResponse::ParameterEdits { edits } => Ok(edits),
 +            HostResponse::Error { message } => {
 +                Err(Error::Other(format!("TakeParameterEdits: {message}")))
@@ -324,7 +389,7 @@
 +    }
 +
 +    fn try_take_host_notifications(&mut self) -> Result<Vec<crate::plugin::HostNotification>> {
-+        match self.send_command(HostCommand::TakeHostNotifications)? {
++        match self.send_command_once(HostCommand::TakeHostNotifications)? {
 +            HostResponse::HostNotifications { notifications } => Ok(notifications),
 +            HostResponse::Error { message } => {
 +                Err(Error::Other(format!("TakeHostNotifications: {message}")))
@@ -333,9 +398,320 @@
 +                "TakeHostNotifications: unexpected response".to_string(),
 +            )),
 +        }
++    }
++
+     fn take_data_exchange_blocks(&mut self) -> Vec<crate::plugin::DataExchangeBlock> {
+         self.poll(
+             HostCommand::TakeDataExchangeBlocks,
+@@ -930,6 +1069,23 @@
+             },
+         )
+         .unwrap_or_default()
++    }
++
++    fn native_dirty_revision(&mut self) -> Result<u64> {
++        // Never respawn here: recovery would substitute a new instance's clean revision for
++        // unsaved edits in the dead helper. The caller must explicitly handle that loss.
++        match self.send_command_once(HostCommand::NativeDirtyRevision)? {
++            HostResponse::NativeDirtyRevision { revision } if revision < u64::MAX => Ok(revision),
++            HostResponse::NativeDirtyRevision { .. } => {
++                Err(Error::Other("native dirty revision exhausted".into()))
++            }
++            HostResponse::Error { message } => {
++                Err(Error::Other(format!("NativeDirtyRevision: {message}")))
++            }
++            _ => Err(Error::Other(
++                "NativeDirtyRevision: unexpected response".into(),
++            )),
++        }
      }
  
-     fn take_data_exchange_blocks(&mut self) -> Vec<crate::plugin::DataExchangeBlock> {
+     fn execute_context_menu_item(&mut self, menu_id: u64, item_id: u32) -> Result<()> {
+@@ -971,7 +1127,7 @@
+     }
+ 
+     fn service_host_requests(&mut self) -> Result<crate::plugin::RestartFlags> {
+-        match self.send_command(HostCommand::ServiceHostRequests)? {
++        match self.send_command_once(HostCommand::ServiceHostRequests)? {
+             HostResponse::RestartFlags { bits } => Ok(crate::plugin::RestartFlags::from_bits(bits)),
+             HostResponse::Error { message } => {
+                 Err(Error::Other(format!("ServiceHostRequests: {message}")))
+@@ -983,7 +1139,7 @@
+     }
+ 
+     fn save_state(&self) -> Result<Vec<u8>> {
+-        match self.send_command(HostCommand::SaveState)? {
++        match self.send_command_once(HostCommand::SaveState)? {
+             HostResponse::State { data } => Ok(data),
+             HostResponse::Error { message } => Err(Error::Other(format!("SaveState: {message}"))),
+             _ => Err(Error::Other("SaveState: unexpected response".to_string())),
+@@ -1146,6 +1302,26 @@
+             Self { dir, script, log }
+         }
+ 
++        fn native_reply(name: &str, response: &str) -> Self {
++            let helper = Self::new(name);
++            let script = std::fs::read_to_string(&helper.script).unwrap();
++            let reply = format!("    *NativeDirtyRevision*) printf '%s\\n' '{response}' ;;\n");
++            std::fs::write(
++                &helper.script,
++                script.replace("    *)", &(reply + "    *)")),
++            )
++            .unwrap();
++            helper
++        }
++
++        fn exit_on(name: &str, command: &str) -> Self {
++            let helper = Self::new(name);
++            let script = std::fs::read_to_string(&helper.script).unwrap();
++            let exit = format!("    *{command}*) exit 0 ;;\n");
++            std::fs::write(&helper.script, script.replace("    *)", &(exit + "    *)"))).unwrap();
++            helper
++        }
++
+         fn requests(&self) -> Vec<String> {
+             std::fs::read_to_string(&self.log)
+                 .unwrap_or_default()
+@@ -1194,6 +1370,69 @@
+     }
+ 
+     #[test]
++    fn checked_native_revision_retains_the_full_integer_and_rejects_bad_replies() {
++        let fake = FakeHelper::native_reply(
++            "native_revision",
++            r#"{"NativeDirtyRevision":{"revision":9007199254740993}}"#,
++        );
++        let mut plugin = isolated(&fake);
++        assert_eq!(
++            plugin.native_dirty_revision().unwrap(),
++            9_007_199_254_740_993
++        );
++        assert_eq!(
++            plugin.native_dirty_revision().unwrap(),
++            9_007_199_254_740_993
++        );
++        for (name, reply) in [
++            ("native_error", r#"{"Error":{"message":"lost"}}"#),
++            ("native_wrong", r#"{"Success":{"message":"ok"}}"#),
++            (
++                "native_exhausted",
++                r#"{"NativeDirtyRevision":{"revision":18446744073709551615}}"#,
++            ),
++        ] {
++            let fake = FakeHelper::native_reply(name, reply);
++            assert!(isolated(&fake).native_dirty_revision().is_err());
++        }
++    }
++
++    #[test]
++    fn checked_native_operations_never_respawn_a_dead_instance() {
++        for command in [
++            "NativeDirtyRevision",
++            "TakeParameterEdits",
++            "TakeHostNotifications",
++            "ServiceHostRequests",
++            "SaveState",
++            "Editor",
++        ] {
++            let fake = FakeHelper::exit_on(command, command);
++            let mut plugin = isolated(&fake);
++            plugin.auto_recover = true;
++            plugin.auto_recover_max_retries = 1;
++            let failed = match command {
++                "NativeDirtyRevision" => plugin.native_dirty_revision().is_err(),
++                "TakeParameterEdits" => plugin.try_take_parameter_edits().is_err(),
++                "TakeHostNotifications" => plugin.try_take_host_notifications().is_err(),
++                "ServiceHostRequests" => plugin.service_host_requests().is_err(),
++                "SaveState" => plugin.save_state().is_err(),
++                "Editor" => plugin
++                    .isolated_editor(crate::plugin::IsolatedEditorCommand::Query)
++                    .is_err(),
++                _ => unreachable!(),
++            };
++            assert!(failed, "{command} must surface helper loss");
++            assert_eq!(plugin.recovery_count(), 0, "{command} must not recover");
++            assert_eq!(
++                fake.requests().len(),
++                1,
++                "{command} must not reload or retry"
++            );
++        }
++    }
++
++    #[test]
+     fn recovery_replays_the_current_transport_state_not_the_load_time_one() {
+         let fake = FakeHelper::new("transport");
+         let mut plugin = isolated(&fake);
+--- a/src/internal/plugin_impl.rs
++++ b/src/internal/plugin_impl.rs
+@@ -286,6 +286,22 @@
+     Buses(&'a mut BusAudioBuffers),
+ }
+ 
++fn finish_stop_transition(
++    state: &mut bool,
++    result: tresult,
++    allow_not_implemented: bool,
++    operation: &str,
++) -> Result<()> {
++    if result != kResultOk
++        && result != kResultTrue
++        && !(allow_not_implemented && result == kNotImplemented)
++    {
++        return Err(Error::Other(format!("Failed to {operation}: {result:#x}")));
++    }
++    *state = false;
++    Ok(())
++}
++
+ impl CallerAudioBuffers<'_> {
+     fn frame_count(&self, fallback: usize) -> usize {
+         match self {
+@@ -1026,6 +1042,11 @@
+         if !self.is_processing {
+             if let Some(ref handler) = self.component_handler {
+                 if let Ok(mut raw_changes) = handler.parameter_changes.lock() {
++                    if !raw_changes.is_empty() {
++                        // This legacy display drain bypasses DSP while stopped. Do not later
++                        // claim a component snapshot contains values removed by this route.
++                        handler.mark_native_parameter_feedback_lost();
++                    }
+                     changes.extend(raw_changes.drain(..));
+                 }
+             }
+@@ -2116,9 +2137,11 @@
+                 // it unconditionally; a plugin that also self-relays just gets the same value
+                 // twice in the same block, which is idempotent.) Drained here at offset 0 and
+                 // stashed for the host's display poll (get_parameter_changes).
++                let mut native_edits_staged = false;
+                 if let Some(ref handler) = self.component_handler {
+                     if let Ok(mut gui_changes) = handler.parameter_changes.lock() {
+                         if !gui_changes.is_empty() {
++                            native_edits_staged = true;
+                             for &(id, value) in gui_changes.iter() {
+                                 data.input_param_changes.enqueue(id, 0, value);
+                             }
+@@ -2226,6 +2249,11 @@
+                 }
+ 
+                 if process_result != kResultOk {
++                    if native_edits_staged {
++                        if let Some(handler) = self.component_handler.as_ref() {
++                            handler.mark_native_parameter_feedback_lost();
++                        }
++                    }
+                     // Leave the caller's buffers as they were (the playback bridges pre-fill them
+                     // with silence) rather than copying out whatever the failed call left behind.
+                     Err(Error::ProcessFailed(process_result))
+@@ -2939,13 +2967,13 @@
+     fn stop_processing(&mut self) -> Result<()> {
+         unsafe {
+             if self.is_processing {
+-                self.processor.setProcessing(0);
+-                self.is_processing = false;
++                let result = self.processor.setProcessing(0);
++                finish_stop_transition(&mut self.is_processing, result, true, "stop processing")?;
+             }
+ 
+             if self.is_active {
+-                self.set_component_active(false);
+-                self.is_active = false;
++                let result = self.set_component_active(false);
++                finish_stop_transition(&mut self.is_active, result, false, "deactivate component")?;
+             }
+ 
+             // Nothing can still be sounding, so no note-on is outstanding.
+@@ -2953,6 +2981,10 @@
+ 
+             Ok(())
+         }
++    }
++
++    fn processing_state(&self) -> Option<bool> {
++        Some(self.is_processing)
+     }
+ 
+     fn has_editor(&self) -> bool {
+@@ -3332,6 +3364,13 @@
+             .as_ref()
+             .map(|h| h.take_parameter_edits())
+             .unwrap_or_default()
++    }
++
++    fn native_dirty_revision(&mut self) -> Result<u64> {
++        self.component_handler
++            .as_ref()
++            .ok_or_else(|| Error::Other("component handler is unavailable".into()))?
++            .native_dirty_revision()
+     }
+ 
+     fn take_host_notifications(&mut self) -> Vec<crate::plugin::HostNotification> {
+@@ -4163,6 +4202,11 @@
+ 
+     fn save_state(&self) -> Result<Vec<u8>> {
+         self.drain_deferred_controller_sync();
++        let handler = self
++            .component_handler
++            .as_ref()
++            .ok_or_else(|| Error::Other("component handler is unavailable".into()))?;
++        let native_revision = handler.native_state_capture_revision()?;
+         unsafe {
+             let component_stream =
+                 create_memory_stream_with_metadata(None, StreamStateType::Project);
+@@ -4201,10 +4245,14 @@
+                 None
+             };
+ 
+-            encode_state_snapshot(&StateSnapshot {
++            let snapshot = encode_state_snapshot(&StateSnapshot {
+                 component: component_stream.to_vec(),
+                 controller,
+-            })
++            })?;
++            if handler.native_state_capture_revision()? != native_revision {
++                return Err(Error::Other("native state changed during capture".into()));
++            }
++            Ok(snapshot)
+         }
+     }
+ 
+@@ -4284,6 +4332,15 @@
+                 }
+ 
+                 self.pending_param_changes.clear();
++                if let Some(handler) = self.component_handler.as_ref() {
++                    handler
++                        .parameter_changes
++                        .lock()
++                        .map_err(|_| {
++                            Error::Other("native parameter feedback lock is poisoned".into())
++                        })?
++                        .clear();
++                }
+                 if let Some(process_data) = self.process_data.as_ref() {
+                     process_data.input_param_changes.clear_all();
+                 }
+@@ -4809,6 +4866,20 @@
+ #[cfg(test)]
+ mod process_buffer_tests {
+     use super::*;
++
++    #[test]
++    fn failed_stop_transitions_preserve_the_last_confirmed_state() {
++        let mut processing = true;
++        assert!(finish_stop_transition(&mut processing, kResultFalse, true, "stop").is_err());
++        assert!(processing);
++        assert!(finish_stop_transition(&mut processing, kNotImplemented, true, "stop").is_ok());
++        assert!(!processing);
++        let mut active = true;
++        assert!(finish_stop_transition(&mut active, kNotImplemented, false, "deactivate").is_err());
++        assert!(active);
++        assert!(finish_stop_transition(&mut active, kResultOk, false, "deactivate").is_ok());
++        assert!(!active);
++    }
+ 
+     fn buses(channels: &[i32]) -> Vec<AudioBusBuffers> {
+         channels
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -111,9 +111,10 @@
@@ -352,16 +728,448 @@
  };
  pub use realtime::{RealtimePluginRunner, RtControl};
  pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
---- a/src/bin/vst3-host-helper.rs
-+++ b/src/bin/vst3-host-helper.rs
-@@ -629,6 +629,10 @@
-             Ok(flags) => HostResponse::RestartFlags { bits: flags.bits() },
-             Err(error) => err("ServiceHostRequests", error),
-         }),
-+        HostCommand::Editor { .. } => HostResponse::Error {
-+            message: "This upstream helper does not implement the Citrus native editor protocol"
-+                .to_string(),
-+        },
-         HostCommand::CreateGui => gui_request(gui, true),
-         HostCommand::CloseGui => gui_request(gui, false),
-         HostCommand::Shutdown => HostResponse::Success {
+--- a/src/plugin.rs
++++ b/src/plugin.rs
+@@ -898,10 +898,21 @@
+     }
+     fn start_processing(&mut self) -> Result<()>;
+     fn stop_processing(&mut self) -> Result<()>;
++    /// Authoritative processing flag where available, including a partially failed stop.
++    fn processing_state(&self) -> Option<bool> {
++        None
++    }
+     fn has_editor(&self) -> bool;
+     fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()>;
+     fn close_editor(&mut self) -> Result<()>;
+     fn get_editor_size(&self) -> Result<(i32, i32)>;
++    /// Control a native editor owned by an isolated helper. In-process implementations cannot
++    /// satisfy this contract and keep returning an explicit error.
++    fn isolated_editor(&mut self, _command: IsolatedEditorCommand) -> Result<IsolatedEditorState> {
++        Err(Error::Other(
++            "plugin is not hosted by an editor-capable isolated helper".to_string(),
++        ))
++    }
+     /// Whether the editor accepts host-driven size changes.
+     fn editor_can_resize(&self) -> bool {
+         false
+@@ -930,6 +941,19 @@
+     /// Drain ordered requests reported through `IComponentHandler2`.
+     fn take_host_notifications(&mut self) -> Vec<HostNotification> {
+         Vec::new()
++    }
++    /// Checked editor drain for hosts whose dirty-state accounting must not treat IPC failure
++    /// as an empty edit batch. In-process implementations have no transport failure.
++    fn try_take_parameter_edits(&mut self) -> Result<Vec<ParameterEdit>> {
++        Ok(self.take_parameter_edits())
++    }
++    /// Checked host-notification drain; preserves errors across the isolation boundary.
++    fn try_take_host_notifications(&mut self) -> Result<Vec<HostNotification>> {
++        Ok(self.take_host_notifications())
++    }
++    /// Non-draining native-state change revision; unsupported backends fail explicitly.
++    fn native_dirty_revision(&mut self) -> Result<u64> {
++        Err(Error::Other("native dirty revision is unavailable".into()))
+     }
+     /// Dispatch any main-thread data-exchange blocks to the controller and drain owned host
+     /// snapshots. Background-dispatched queues are copied into the same bounded snapshot sink.
+@@ -1846,10 +1870,15 @@
+             return Ok(());
+         }
+ 
+-        self.internal
+-            .as_mut()
+-            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+-            .stop_processing()?;
++        let internal = self
++            .internal
++            .as_mut()
++            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?;
++        let result = internal.stop_processing();
++        if let Some(processing) = internal.processing_state() {
++            self.is_processing = processing;
++        }
++        result?;
+ 
+         self.is_processing = false;
+         Ok(())
+@@ -1986,6 +2015,29 @@
+             .as_ref()
+             .map(|i| i.has_editor())
+             .unwrap_or(false)
++    }
++
++    /// Query, open/focus or close a native editor owned by the isolated helper.
++    ///
++    /// This safe API carries only a logical owner's integer identity across IPC. The helper
++    /// validates it and constructs a real local native parent before calling the plugin.
++    /// Calling this on an in-process plugin returns an error. All work is control-plane work;
++    /// do not invoke it from a realtime audio callback.
++    pub fn isolated_editor(
++        &mut self,
++        command: IsolatedEditorCommand,
++    ) -> Result<IsolatedEditorState> {
++        if let IsolatedEditorCommand::Open { owner: Some(owner) } = command {
++            if owner.window == 0 || owner.process_id == 0 {
++                return Err(Error::Other(
++                    "isolated editor owner must have a nonzero window and process id".to_string(),
++                ));
++            }
++        }
++        self.internal
++            .as_mut()
++            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
++            .isolated_editor(command)
+     }
+ 
+     /// Open the plugin editor window
+@@ -2113,6 +2165,39 @@
+             .as_mut()
+             .map(|i| i.take_parameter_edits())
+             .unwrap_or_default()
++    }
++
++    /// Drain editor gestures while surfacing transport/protocol failure. Unlike the legacy
++    /// infallible drain, an empty successful batch is never substituted for a failed exchange.
++    /// Polling is control-plane work and must not run on a realtime audio callback.
++    pub fn try_take_parameter_edits(&mut self) -> Result<Vec<ParameterEdit>> {
++        self.internal
++            .as_mut()
++            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
++            .try_take_parameter_edits()
++    }
++
++    /// Drain host notifications while surfacing transport/protocol failure. Hosts should retain
++    /// conservative unsaved-state evidence if this fails after native editing was possible.
++    pub fn try_take_host_notifications(&mut self) -> Result<Vec<HostNotification>> {
++        self.internal
++            .as_mut()
++            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
++            .try_take_host_notifications()
++    }
++
++    /// Read durable evidence of native edits for this loaded plugin instance.
++    ///
++    /// Increases for `performEdit`, `setDirty(true)`, and parameter-value/reload restart
++    /// requests, even when the bounded feedback queues are full. Reading or draining feedback
++    /// never clears it. Compare only within the same loaded instance; a reload creates a new
++    /// baseline. Transport failure and counter exhaustion are errors, never a clean revision.
++    /// No transparent helper recovery occurs. This is control-plane work, not realtime work.
++    pub fn native_dirty_revision(&mut self) -> Result<u64> {
++        self.internal
++            .as_mut()
++            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
++            .native_dirty_revision()
+     }
+ 
+     /// Drain ordered requests the plugin reported through `IComponentHandler2`.
+@@ -2669,6 +2754,59 @@
+             "Legacy MIDI CC events are plugin output only".to_string(),
+         )),
+     }
++}
++
++/// Logical owner of an isolated Windows editor, transported as data rather than a pointer.
++///
++/// The helper validates both the live HWND and its process id. It owns its editor container
++/// independently: Windows must not destroy that container before the plugin can detach when
++/// the owner disappears. This is a standalone associated window, not cross-process embedding.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct IsolatedEditorOwner {
++    /// The owner's HWND value. Zero is invalid; the helper also rejects width truncation.
++    pub window: u64,
++    /// Process which owns that HWND. Zero is invalid.
++    pub process_id: u32,
++}
++
++/// Control-plane request to a helper-owned native editor. No fabricated `WindowHandle` is needed.
++///
++/// New helpers implement this additive protocol; an older helper returns an ordinary error.
++/// These requests may perform synchronous IPC and must never run on a realtime audio callback.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++pub enum IsolatedEditorCommand {
++    /// Query actual helper-side capability and state, including a user-closed editor.
++    Query,
++    /// Open once, or focus the existing editor. A different live owner is rejected while open.
++    Open {
++        /// Optional logical owning application window; `None` is a standalone editor.
++        owner: Option<IsolatedEditorOwner>,
++    },
++    /// Focus an already open editor. Fails if it has been closed.
++    Focus,
++    /// Detach the plugin view before destroying its container. Closing twice is harmless.
++    Close,
++}
++
++/// Authoritative snapshot from the isolated helper, not a cached "open was requested" flag.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct IsolatedEditorState {
++    /// Whether this helper platform implements the native lifecycle protocol.
++    pub supported: bool,
++    /// Whether the loaded plugin advertises a native editor; false if no plugin is loaded.
++    pub has_editor: bool,
++    /// Whether a real plugin view is currently attached to a live helper-owned container.
++    pub open: bool,
++    /// Current accepted client width, or zero when closed.
++    pub width: i32,
++    /// Current accepted client height, or zero when closed.
++    pub height: i32,
++    /// Increases on each successful new attachment in this helper process; zero before first open.
++    /// Combine with the host's instance/helper identity: a restarted process begins at zero.
++    pub generation: u64,
+ }
+ 
+ /// Platform-specific window handle
+@@ -2950,6 +3088,14 @@
+ #[cfg(test)]
+ mod public_surface_tests {
+     use super::*;
++
++    #[test]
++    fn unloaded_native_feedback_checks_never_report_a_clean_result() {
++        let mut plugin = unloaded_plugin();
++        assert!(plugin.native_dirty_revision().is_err());
++        assert!(plugin.try_take_parameter_edits().is_err());
++        assert!(plugin.try_take_host_notifications().is_err());
++    }
+ 
+     /// A `Plugin` with no backing implementation. Enough to exercise the checks the public
+     /// surface performs *before* it reaches into `internal`.
+--- a/src/process_isolation.rs
++++ b/src/process_isolation.rs
+@@ -455,7 +455,12 @@
+     },
+     /// Unload the current plugin
+     UnloadPlugin,
+-    /// Create plugin GUI
++    /// Control a helper-owned native editor using the additive Citrus lifecycle protocol.
++    Editor {
++        /// Typed query/open/focus/close request. Native handles are never dereferenced in the host.
++        command: crate::plugin::IsolatedEditorCommand,
++    },
++    /// Create plugin GUI (legacy protocol; unchanged for existing clients).
+     CreateGui,
+     /// Close plugin GUI
+     CloseGui,
+@@ -748,6 +753,8 @@
+     TakeParameterChanges,
+     /// Drain ordered `IComponentHandler2` requests from the helper.
+     TakeHostNotifications,
++    /// Read the loaded instance's non-draining native edit revision.
++    NativeDirtyRevision,
+     /// Dispatch and drain owned VST3 data-exchange blocks from the helper.
+     TakeDataExchangeBlocks,
+     /// Execute an item from a pending plugin-provided context menu.
+@@ -838,6 +845,11 @@
+         width: i32,
+         /// Editor height in pixels.
+         height: i32,
++    },
++    /// Actual native editor capability and state, in reply to `Editor`.
++    EditorState {
++        /// Snapshot from the helper which owns the native window.
++        state: crate::plugin::IsolatedEditorState,
+     },
+     /// Plugin information
+     PluginInfo {
+@@ -898,6 +910,11 @@
+         /// The queued host requests.
+         notifications: Vec<crate::plugin::HostNotification>,
+     },
++    /// Durable native edit evidence, independent of bounded feedback queues.
++    NativeDirtyRevision {
++        /// Monotonic revision within this loaded plugin instance.
++        revision: u64,
++    },
+     /// Owned VST3 data-exchange blocks drained from the helper.
+     DataExchangeBlocks {
+         /// Block snapshots, in delivery order.
+@@ -969,16 +986,17 @@
+ /// descriptor 1 at stderr, so plugin output is merged into the helper's stderr instead. Call
+ /// it once, before any plugin code can run.
+ ///
+-/// On non-Unix platforms the protocol still runs over the process stdout; a plugin writing
+-/// there corrupts the stream (the host drops lines it cannot parse, which limits the damage
+-/// to noise, but a well-formed line would still be taken for a response).
++/// On Windows it retains a non-inheritable duplicate of the inherited output handle and
++/// redirects both Win32 stdout and the host CRT's descriptor 1 to stderr (or NUL). Failure to
++/// isolate either route terminates the helper before any plugin is loaded. This prevents
++/// ordinary plugin logging, including valid JSON, from becoming a protocol response.
+ pub struct ProtocolChannel {
+     inner: ProtocolChannelInner,
+ }
+ 
+-#[cfg(unix)]
++#[cfg(any(unix, windows))]
+ type ProtocolChannelInner = std::fs::File;
+-#[cfg(not(unix))]
++#[cfg(not(any(unix, windows)))]
+ type ProtocolChannelInner = std::io::Stdout;
+ 
+ impl ProtocolChannel {
+@@ -1020,7 +1038,129 @@
+     }
+ 
+     /// Claim the protocol channel for this process. See the type documentation.
+-    #[cfg(not(unix))]
++    #[cfg(windows)]
++    pub fn claim() -> Self {
++        match Self::claim_windows() {
++            Ok(channel) => channel,
++            Err(error) => {
++                eprintln!("helper: could not isolate the protocol channel: {error}");
++                std::process::exit(1);
++            }
++        }
++    }
++
++    #[cfg(windows)]
++    fn claim_windows() -> std::io::Result<Self> {
++        use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, RawHandle};
++        use std::ptr::null_mut;
++
++        // Raw Kernel32 imports keep the pinned upstream dependency manifest unchanged.
++        #[link(name = "kernel32")]
++        unsafe extern "system" {
++            fn GetCurrentProcess() -> RawHandle;
++            fn GetStdHandle(kind: u32) -> RawHandle;
++            fn SetStdHandle(kind: u32, handle: RawHandle) -> i32;
++            fn DuplicateHandle(
++                source_process: RawHandle,
++                source: RawHandle,
++                target_process: RawHandle,
++                target: *mut RawHandle,
++                access: u32,
++                inherit: i32,
++                options: u32,
++            ) -> i32;
++            fn CloseHandle(handle: RawHandle) -> i32;
++        }
++        const STD_OUTPUT_HANDLE: u32 = -11_i32 as u32;
++        const STD_ERROR_HANDLE: u32 = -12_i32 as u32;
++        const DUPLICATE_SAME_ACCESS: u32 = 2;
++        let valid = |handle: RawHandle| !handle.is_null() && handle as isize != -1;
++        let duplicate = |handle: RawHandle| -> std::io::Result<std::fs::File> {
++            let mut owned = null_mut();
++            // SAFETY: handles come from this process; the output is a new, non-inheritable
++            // handle with unchanged access. The File takes sole ownership of that duplicate.
++            unsafe {
++                let process = GetCurrentProcess();
++                if DuplicateHandle(
++                    process,
++                    handle,
++                    process,
++                    &mut owned,
++                    0,
++                    0,
++                    DUPLICATE_SAME_ACCESS,
++                ) == 0
++                {
++                    return Err(std::io::Error::last_os_error());
++                }
++                Ok(std::fs::File::from_raw_handle(owned))
++            }
++        };
++
++        // SAFETY: std-handle queries do not transfer ownership.
++        let stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
++        if !valid(stdout) {
++            return Err(std::io::Error::other(
++                "inherited stdout handle is unavailable",
++            ));
++        }
++        let private = duplicate(stdout)?;
++        let stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
++        if stderr == stdout {
++            return Err(std::io::Error::other(
++                "stderr aliases the protocol output handle",
++            ));
++        }
++        let redirect = if valid(stderr) {
++            duplicate(stderr)?
++        } else {
++            std::fs::OpenOptions::new().write(true).open("NUL")?
++        };
++        // The CRT takes ownership only when _open_osfhandle succeeds. A fresh handle avoids
++        // accidentally closing stderr when _dup2 closes/replaces the old stdout descriptor.
++        let redirected_handle = redirect.into_raw_handle();
++        let old_crt_stdout = unsafe { libc::get_osfhandle(1) } as RawHandle;
++        let fd = unsafe {
++            libc::open_osfhandle(
++                redirected_handle as libc::intptr_t,
++                libc::O_WRONLY | libc::O_BINARY,
++            )
++        };
++        if fd < 0 {
++            unsafe {
++                drop(std::fs::File::from_raw_handle(redirected_handle));
++            }
++            return Err(std::io::Error::last_os_error());
++        }
++        if fd != 1 {
++            let result = unsafe { libc::dup2(fd, 1) };
++            unsafe {
++                libc::close(fd);
++            }
++            if result != 0 {
++                return Err(std::io::Error::other("could not redirect CRT stdout"));
++            }
++        }
++        let redirected_stdout = unsafe { libc::get_osfhandle(1) } as RawHandle;
++        if !valid(redirected_stdout)
++            || unsafe { SetStdHandle(STD_OUTPUT_HANDLE, redirected_stdout) } == 0
++        {
++            return Err(std::io::Error::other("could not redirect Win32 stdout"));
++        }
++        // _dup2 already closed the original when it belonged to descriptor 1. Otherwise
++        // remove that inherited alias explicitly, so pre-existing CRTs cannot keep writing
++        // through a cached old standard handle. No plugin has been loaded at this point.
++        if stdout != old_crt_stdout && stdout != stderr {
++            if unsafe { CloseHandle(stdout) } == 0 {
++                return Err(std::io::Error::last_os_error());
++            }
++        }
++        debug_assert_ne!(private.as_raw_handle(), redirected_stdout);
++        Ok(Self { inner: private })
++    }
++
++    /// Claim the protocol channel on other, currently unsupported helper platforms.
++    #[cfg(not(any(unix, windows)))]
+     pub fn claim() -> Self {
+         Self {
+             inner: std::io::stdout(),
+@@ -2112,6 +2252,32 @@
+     }
+ 
+     #[test]
++    fn native_dirty_revision_wire_is_nondraining_and_lossless() {
++        let command = serde_json::to_string(&HostCommand::NativeDirtyRevision).unwrap();
++        assert_eq!(command, r#""NativeDirtyRevision""#);
++        assert!(matches!(
++            serde_json::from_str::<HostCommand>(&command).unwrap(),
++            HostCommand::NativeDirtyRevision
++        ));
++        for revision in [0, 1, (1_u64 << 53) + 1, u64::MAX] {
++            let wire =
++                serde_json::to_string(&HostResponse::NativeDirtyRevision { revision }).unwrap();
++            match serde_json::from_str::<HostResponse>(&wire).unwrap() {
++                HostResponse::NativeDirtyRevision { revision: decoded } => {
++                    assert_eq!(decoded, revision)
++                }
++                other => panic!("wrong native revision response: {other:?}"),
++            }
++        }
++        for wire in [
++            r#"{"NativeDirtyRevision":{}}"#,
++            r#"{"NativeDirtyRevision":{"revision":-1}}"#,
++        ] {
++            assert!(serde_json::from_str::<HostResponse>(wire).is_err());
++        }
++    }
++
++    #[test]
+     fn parameter_feedback_round_trips_losslessly_and_is_bounded() {
+         let command = serde_json::to_string(&HostCommand::TakeParameterChanges)
+             .expect("serialize TakeParameterChanges");

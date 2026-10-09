@@ -1646,6 +1646,12 @@ pub struct ComponentHandler {
     // "re-read my parameters"), so accumulating them is both complete and inherently bounded —
     // a plugin that spams restartComponent while nothing polls costs one word, not a queue.
     restart_flags: AtomicI32,
+    // Durable, per-instance evidence independent of the bounded feedback queues. Never drained
+    // or reset; saturation makes checked reads fail rather than wrapping to a clean baseline.
+    native_dirty_revision: AtomicU64,
+    // Once a native value failed to reach the processor, a later empty queue cannot prove that
+    // its state is current. Only a new plugin instance clears this conservative capture guard.
+    native_parameter_feedback_lost: AtomicBool,
     // Ordered IComponentHandler2 / IUnitHandler / IProgress / context-menu requests. These are
     // control-plane work items, never executed from inside the plugin callback. Ordered against
     // themselves only — not against `edits`. Capped at MAX_HOST_NOTIFICATIONS, and a push past
@@ -1661,9 +1667,61 @@ impl ComponentHandler {
             parameter_changes,
             edits: Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK))),
             restart_flags: AtomicI32::new(0),
+            native_dirty_revision: AtomicU64::new(0),
+            native_parameter_feedback_lost: AtomicBool::new(false),
             notifications: Arc::new(Mutex::new(Vec::with_capacity(MAX_HOST_NOTIFICATIONS))),
             context_menus: Arc::new(ContextMenuRegistry::new()),
         }
+    }
+
+    fn mark_native_dirty(&self) {
+        let mut revision = self.native_dirty_revision.load(Ordering::Acquire);
+        loop {
+            match self.native_dirty_revision.compare_exchange_weak(
+                revision,
+                revision.saturating_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => revision = current,
+            }
+        }
+    }
+
+    pub fn native_dirty_revision(&self) -> crate::Result<u64> {
+        let revision = self.native_dirty_revision.load(Ordering::Acquire);
+        if revision == u64::MAX {
+            return Err(crate::Error::Other(
+                "native dirty revision exhausted".into(),
+            ));
+        }
+        Ok(revision)
+    }
+
+    pub fn mark_native_parameter_feedback_lost(&self) {
+        self.native_parameter_feedback_lost
+            .store(true, Ordering::Release);
+    }
+
+    /// State is authoritative only after every native value reached a successful processor
+    /// call. This does not drain evidence, and bounded gesture/notification loss cannot reset it.
+    pub fn native_state_capture_revision(&self) -> crate::Result<u64> {
+        if self.native_parameter_feedback_lost.load(Ordering::Acquire) {
+            return Err(crate::Error::Other(
+                "native parameter feedback was lost; reload the plugin before capturing state"
+                    .into(),
+            ));
+        }
+        let pending = self.parameter_changes.lock().map_err(|_| {
+            crate::Error::Other("native parameter feedback lock is poisoned".into())
+        })?;
+        if !pending.is_empty() {
+            return Err(crate::Error::Other(
+                "native parameter values must be flushed before capturing state".into(),
+            ));
+        }
+        self.native_dirty_revision()
     }
 
     /// Take the accumulated `restartComponent` flags, clearing them.
@@ -1761,16 +1819,19 @@ impl IComponentHandlerTrait for ComponentHandler {
     }
 
     unsafe fn performEdit(&self, id: u32, value_normalized: f64) -> i32 {
+        // Record before either bounded queue can reject the value.
+        self.mark_native_dirty();
         log::debug!(
             "Host: Perform edit for parameter {} = {}",
             id,
             value_normalized
         );
         // Store the parameter change for the DSP-feeding drain...
-        if let Ok(mut changes) = self.parameter_changes.lock() {
-            if changes.len() < MAX_EDITOR_FEEDBACK {
+        match self.parameter_changes.lock() {
+            Ok(mut changes) if changes.len() < MAX_EDITOR_FEEDBACK => {
                 changes.push((id, value_normalized));
             }
+            _ => self.mark_native_parameter_feedback_lost(),
         }
         // ...and as an ordered gesture event for the richer `take_parameter_edits` drain.
         self.push_edit(crate::plugin::ParameterEdit {
@@ -1792,6 +1853,9 @@ impl IComponentHandlerTrait for ComponentHandler {
     }
 
     unsafe fn restartComponent(&self, flags: i32) -> i32 {
+        if flags & (RestartFlags_::kParamValuesChanged | RestartFlags_::kReloadComponent) != 0 {
+            self.mark_native_dirty();
+        }
         log::debug!("Host: Restart component requested with flags: {flags:#x}");
         // Recorded for the host to poll (`Plugin::take_restart_flags`), not acted on here: the
         // host decides what a restart means for it. See `RestartFlags` for which flags this
@@ -1827,6 +1891,9 @@ impl IComponentHandler3Trait for ComponentHandler {
 
 impl IComponentHandler2Trait for ComponentHandler {
     unsafe fn setDirty(&self, state: u8) -> i32 {
+        if state != 0 {
+            self.mark_native_dirty();
+        }
         log::debug!("Host: Plugin marked state as dirty (state: {})", state);
         if self.push_notification(crate::plugin::HostNotification::DirtyChanged(state != 0)) {
             kResultOk
@@ -2753,6 +2820,99 @@ mod host_attr_tests {
 mod component_handler_tests {
     use super::*;
     use crate::plugin::{ContextMenuItem, HostNotification, ParameterEdit, ParameterEditKind};
+
+    #[test]
+    fn native_dirty_revision_survives_all_feedback_drains() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        assert_eq!(handler.native_dirty_revision().unwrap(), 0);
+        unsafe {
+            handler.beginEdit(7);
+            handler.endEdit(7);
+            handler.setDirty(0);
+            handler.restartComponent(RestartFlags_::kLatencyChanged);
+        }
+        assert_eq!(handler.native_dirty_revision().unwrap(), 0);
+        unsafe {
+            handler.performEdit(7, 0.75);
+            handler.setDirty(1);
+            handler.restartComponent(
+                RestartFlags_::kParamValuesChanged | RestartFlags_::kReloadComponent,
+            );
+            handler.restartComponent(RestartFlags_::kReloadComponent);
+        }
+        assert_eq!(handler.native_dirty_revision().unwrap(), 4);
+        assert!(handler.native_state_capture_revision().is_err());
+        handler.take_parameter_edits();
+        handler.take_host_notifications();
+        handler.take_restart_flags();
+        assert_eq!(handler.native_dirty_revision().unwrap(), 4);
+        // Model a successful processor delivery: only the raw DSP queue is consumed.
+        handler.parameter_changes.lock().unwrap().clear();
+        assert_eq!(handler.native_state_capture_revision().unwrap(), 4);
+    }
+
+    #[test]
+    fn native_dirty_revision_survives_bounded_feedback_overflow() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        unsafe {
+            for _ in 0..(MAX_EDITOR_FEEDBACK + 3) {
+                handler.performEdit(7, 0.5);
+            }
+            for _ in 0..MAX_HOST_NOTIFICATIONS {
+                assert_eq!(handler.setDirty(0), kResultOk);
+            }
+            assert_eq!(handler.setDirty(1), kResultFalse);
+        }
+        assert_eq!(
+            handler.native_dirty_revision().unwrap(),
+            MAX_EDITOR_FEEDBACK as u64 + 4
+        );
+        assert_eq!(handler.take_parameter_edits().len(), MAX_EDITOR_FEEDBACK);
+        assert_eq!(
+            handler.take_host_notifications().len(),
+            MAX_HOST_NOTIFICATIONS
+        );
+        handler.parameter_changes.lock().unwrap().clear();
+        assert!(handler.native_state_capture_revision().is_err());
+        assert_eq!(
+            handler.native_dirty_revision().unwrap(),
+            MAX_EDITOR_FEEDBACK as u64 + 4
+        );
+    }
+
+    #[test]
+    fn native_dirty_revision_exhaustion_never_wraps_to_clean() {
+        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        handler
+            .native_dirty_revision
+            .store(u64::MAX - 1, Ordering::Release);
+        assert_eq!(handler.native_dirty_revision().unwrap(), u64::MAX - 1);
+        unsafe {
+            handler.setDirty(1);
+            handler.setDirty(1);
+        }
+        assert_eq!(
+            handler.native_dirty_revision.load(Ordering::Acquire),
+            u64::MAX
+        );
+        assert!(handler.native_dirty_revision().is_err());
+        assert!(handler.native_state_capture_revision().is_err());
+    }
+
+    #[test]
+    fn native_feedback_poison_is_visible_after_the_edit() {
+        let changes = Arc::new(Mutex::new(Vec::new()));
+        let handler = ComponentHandler::new(changes.clone());
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = changes.lock().unwrap();
+            panic!("simulate a poisoned native feedback queue");
+        });
+        unsafe {
+            handler.performEdit(7, 0.5);
+        }
+        assert_eq!(handler.native_dirty_revision().unwrap(), 1);
+        assert!(handler.native_state_capture_revision().is_err());
+    }
 
     struct TestContextMenuTarget {
         calls: Arc<Mutex<Vec<i32>>>,

@@ -931,7 +931,7 @@ impl PluginInternal for IsolatedPluginImpl {
         &mut self,
         command: crate::plugin::IsolatedEditorCommand,
     ) -> Result<crate::plugin::IsolatedEditorState> {
-        match self.send_command(HostCommand::Editor { command })? {
+        match self.send_command_once(HostCommand::Editor { command })? {
             HostResponse::EditorState { state } => {
                 validate_editor_state(&state)?;
                 self.has_open_editor = state.open;
@@ -1036,7 +1036,7 @@ impl PluginInternal for IsolatedPluginImpl {
     }
 
     fn try_take_parameter_edits(&mut self) -> Result<Vec<crate::plugin::ParameterEdit>> {
-        match self.send_command(HostCommand::TakeParameterEdits)? {
+        match self.send_command_once(HostCommand::TakeParameterEdits)? {
             HostResponse::ParameterEdits { edits } => Ok(edits),
             HostResponse::Error { message } => {
                 Err(Error::Other(format!("TakeParameterEdits: {message}")))
@@ -1048,7 +1048,7 @@ impl PluginInternal for IsolatedPluginImpl {
     }
 
     fn try_take_host_notifications(&mut self) -> Result<Vec<crate::plugin::HostNotification>> {
-        match self.send_command(HostCommand::TakeHostNotifications)? {
+        match self.send_command_once(HostCommand::TakeHostNotifications)? {
             HostResponse::HostNotifications { notifications } => Ok(notifications),
             HostResponse::Error { message } => {
                 Err(Error::Other(format!("TakeHostNotifications: {message}")))
@@ -1069,6 +1069,23 @@ impl PluginInternal for IsolatedPluginImpl {
             },
         )
         .unwrap_or_default()
+    }
+
+    fn native_dirty_revision(&mut self) -> Result<u64> {
+        // Never respawn here: recovery would substitute a new instance's clean revision for
+        // unsaved edits in the dead helper. The caller must explicitly handle that loss.
+        match self.send_command_once(HostCommand::NativeDirtyRevision)? {
+            HostResponse::NativeDirtyRevision { revision } if revision < u64::MAX => Ok(revision),
+            HostResponse::NativeDirtyRevision { .. } => {
+                Err(Error::Other("native dirty revision exhausted".into()))
+            }
+            HostResponse::Error { message } => {
+                Err(Error::Other(format!("NativeDirtyRevision: {message}")))
+            }
+            _ => Err(Error::Other(
+                "NativeDirtyRevision: unexpected response".into(),
+            )),
+        }
     }
 
     fn execute_context_menu_item(&mut self, menu_id: u64, item_id: u32) -> Result<()> {
@@ -1110,7 +1127,7 @@ impl PluginInternal for IsolatedPluginImpl {
     }
 
     fn service_host_requests(&mut self) -> Result<crate::plugin::RestartFlags> {
-        match self.send_command(HostCommand::ServiceHostRequests)? {
+        match self.send_command_once(HostCommand::ServiceHostRequests)? {
             HostResponse::RestartFlags { bits } => Ok(crate::plugin::RestartFlags::from_bits(bits)),
             HostResponse::Error { message } => {
                 Err(Error::Other(format!("ServiceHostRequests: {message}")))
@@ -1122,7 +1139,7 @@ impl PluginInternal for IsolatedPluginImpl {
     }
 
     fn save_state(&self) -> Result<Vec<u8>> {
-        match self.send_command(HostCommand::SaveState)? {
+        match self.send_command_once(HostCommand::SaveState)? {
             HostResponse::State { data } => Ok(data),
             HostResponse::Error { message } => Err(Error::Other(format!("SaveState: {message}"))),
             _ => Err(Error::Other("SaveState: unexpected response".to_string())),
@@ -1285,6 +1302,26 @@ mod tests {
             Self { dir, script, log }
         }
 
+        fn native_reply(name: &str, response: &str) -> Self {
+            let helper = Self::new(name);
+            let script = std::fs::read_to_string(&helper.script).unwrap();
+            let reply = format!("    *NativeDirtyRevision*) printf '%s\\n' '{response}' ;;\n");
+            std::fs::write(
+                &helper.script,
+                script.replace("    *)", &(reply + "    *)")),
+            )
+            .unwrap();
+            helper
+        }
+
+        fn exit_on(name: &str, command: &str) -> Self {
+            let helper = Self::new(name);
+            let script = std::fs::read_to_string(&helper.script).unwrap();
+            let exit = format!("    *{command}*) exit 0 ;;\n");
+            std::fs::write(&helper.script, script.replace("    *)", &(exit + "    *)"))).unwrap();
+            helper
+        }
+
         fn requests(&self) -> Vec<String> {
             std::fs::read_to_string(&self.log)
                 .unwrap_or_default()
@@ -1330,6 +1367,69 @@ mod tests {
             false,
             0,
         )
+    }
+
+    #[test]
+    fn checked_native_revision_retains_the_full_integer_and_rejects_bad_replies() {
+        let fake = FakeHelper::native_reply(
+            "native_revision",
+            r#"{"NativeDirtyRevision":{"revision":9007199254740993}}"#,
+        );
+        let mut plugin = isolated(&fake);
+        assert_eq!(
+            plugin.native_dirty_revision().unwrap(),
+            9_007_199_254_740_993
+        );
+        assert_eq!(
+            plugin.native_dirty_revision().unwrap(),
+            9_007_199_254_740_993
+        );
+        for (name, reply) in [
+            ("native_error", r#"{"Error":{"message":"lost"}}"#),
+            ("native_wrong", r#"{"Success":{"message":"ok"}}"#),
+            (
+                "native_exhausted",
+                r#"{"NativeDirtyRevision":{"revision":18446744073709551615}}"#,
+            ),
+        ] {
+            let fake = FakeHelper::native_reply(name, reply);
+            assert!(isolated(&fake).native_dirty_revision().is_err());
+        }
+    }
+
+    #[test]
+    fn checked_native_operations_never_respawn_a_dead_instance() {
+        for command in [
+            "NativeDirtyRevision",
+            "TakeParameterEdits",
+            "TakeHostNotifications",
+            "ServiceHostRequests",
+            "SaveState",
+            "Editor",
+        ] {
+            let fake = FakeHelper::exit_on(command, command);
+            let mut plugin = isolated(&fake);
+            plugin.auto_recover = true;
+            plugin.auto_recover_max_retries = 1;
+            let failed = match command {
+                "NativeDirtyRevision" => plugin.native_dirty_revision().is_err(),
+                "TakeParameterEdits" => plugin.try_take_parameter_edits().is_err(),
+                "TakeHostNotifications" => plugin.try_take_host_notifications().is_err(),
+                "ServiceHostRequests" => plugin.service_host_requests().is_err(),
+                "SaveState" => plugin.save_state().is_err(),
+                "Editor" => plugin
+                    .isolated_editor(crate::plugin::IsolatedEditorCommand::Query)
+                    .is_err(),
+                _ => unreachable!(),
+            };
+            assert!(failed, "{command} must surface helper loss");
+            assert_eq!(plugin.recovery_count(), 0, "{command} must not recover");
+            assert_eq!(
+                fake.requests().len(),
+                1,
+                "{command} must not reload or retry"
+            );
+        }
     }
 
     #[test]

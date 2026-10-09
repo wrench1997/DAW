@@ -31,6 +31,10 @@ Citrus modifications:
    detect stale/wrong artifacts; they are not cryptographic builder attestation.
 6. A narrow newer-Clippy style-lint allowance preserves upstream state parsing
    unchanged; non-Windows native-editor shared fields allow dead-code warnings.
+7. Windows attach deliberately writes valid fake protocol replies to stdout through
+   Rust, direct Win32 standard-handle writes, and the target C runtime. The harness
+   requires all three markers on stderr and unaffected real protocol replies. This
+   checks accidental stdout routing, not isolation against a hostile native plugin.
 
 The original fixture is lifecycle-complete but draws nothing. The lifecycle
 assertions and the Citrus-added native drawing/interaction assertions are separate

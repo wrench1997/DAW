@@ -286,6 +286,22 @@ enum CallerAudioBuffers<'a> {
     Buses(&'a mut BusAudioBuffers),
 }
 
+fn finish_stop_transition(
+    state: &mut bool,
+    result: tresult,
+    allow_not_implemented: bool,
+    operation: &str,
+) -> Result<()> {
+    if result != kResultOk
+        && result != kResultTrue
+        && !(allow_not_implemented && result == kNotImplemented)
+    {
+        return Err(Error::Other(format!("Failed to {operation}: {result:#x}")));
+    }
+    *state = false;
+    Ok(())
+}
+
 impl CallerAudioBuffers<'_> {
     fn frame_count(&self, fallback: usize) -> usize {
         match self {
@@ -1026,6 +1042,11 @@ impl PluginImpl {
         if !self.is_processing {
             if let Some(ref handler) = self.component_handler {
                 if let Ok(mut raw_changes) = handler.parameter_changes.lock() {
+                    if !raw_changes.is_empty() {
+                        // This legacy display drain bypasses DSP while stopped. Do not later
+                        // claim a component snapshot contains values removed by this route.
+                        handler.mark_native_parameter_feedback_lost();
+                    }
                     changes.extend(raw_changes.drain(..));
                 }
             }
@@ -2116,9 +2137,11 @@ impl PluginImpl {
                 // it unconditionally; a plugin that also self-relays just gets the same value
                 // twice in the same block, which is idempotent.) Drained here at offset 0 and
                 // stashed for the host's display poll (get_parameter_changes).
+                let mut native_edits_staged = false;
                 if let Some(ref handler) = self.component_handler {
                     if let Ok(mut gui_changes) = handler.parameter_changes.lock() {
                         if !gui_changes.is_empty() {
+                            native_edits_staged = true;
                             for &(id, value) in gui_changes.iter() {
                                 data.input_param_changes.enqueue(id, 0, value);
                             }
@@ -2226,6 +2249,11 @@ impl PluginImpl {
                 }
 
                 if process_result != kResultOk {
+                    if native_edits_staged {
+                        if let Some(handler) = self.component_handler.as_ref() {
+                            handler.mark_native_parameter_feedback_lost();
+                        }
+                    }
                     // Leave the caller's buffers as they were (the playback bridges pre-fill them
                     // with silence) rather than copying out whatever the failed call left behind.
                     Err(Error::ProcessFailed(process_result))
@@ -2939,13 +2967,13 @@ impl PluginInternal for PluginImpl {
     fn stop_processing(&mut self) -> Result<()> {
         unsafe {
             if self.is_processing {
-                self.processor.setProcessing(0);
-                self.is_processing = false;
+                let result = self.processor.setProcessing(0);
+                finish_stop_transition(&mut self.is_processing, result, true, "stop processing")?;
             }
 
             if self.is_active {
-                self.set_component_active(false);
-                self.is_active = false;
+                let result = self.set_component_active(false);
+                finish_stop_transition(&mut self.is_active, result, false, "deactivate component")?;
             }
 
             // Nothing can still be sounding, so no note-on is outstanding.
@@ -2953,6 +2981,10 @@ impl PluginInternal for PluginImpl {
 
             Ok(())
         }
+    }
+
+    fn processing_state(&self) -> Option<bool> {
+        Some(self.is_processing)
     }
 
     fn has_editor(&self) -> bool {
@@ -3332,6 +3364,13 @@ impl PluginInternal for PluginImpl {
             .as_ref()
             .map(|h| h.take_parameter_edits())
             .unwrap_or_default()
+    }
+
+    fn native_dirty_revision(&mut self) -> Result<u64> {
+        self.component_handler
+            .as_ref()
+            .ok_or_else(|| Error::Other("component handler is unavailable".into()))?
+            .native_dirty_revision()
     }
 
     fn take_host_notifications(&mut self) -> Vec<crate::plugin::HostNotification> {
@@ -4163,6 +4202,11 @@ impl PluginInternal for PluginImpl {
 
     fn save_state(&self) -> Result<Vec<u8>> {
         self.drain_deferred_controller_sync();
+        let handler = self
+            .component_handler
+            .as_ref()
+            .ok_or_else(|| Error::Other("component handler is unavailable".into()))?;
+        let native_revision = handler.native_state_capture_revision()?;
         unsafe {
             let component_stream =
                 create_memory_stream_with_metadata(None, StreamStateType::Project);
@@ -4201,10 +4245,14 @@ impl PluginInternal for PluginImpl {
                 None
             };
 
-            encode_state_snapshot(&StateSnapshot {
+            let snapshot = encode_state_snapshot(&StateSnapshot {
                 component: component_stream.to_vec(),
                 controller,
-            })
+            })?;
+            if handler.native_state_capture_revision()? != native_revision {
+                return Err(Error::Other("native state changed during capture".into()));
+            }
+            Ok(snapshot)
         }
     }
 
@@ -4284,6 +4332,15 @@ impl PluginInternal for PluginImpl {
                 }
 
                 self.pending_param_changes.clear();
+                if let Some(handler) = self.component_handler.as_ref() {
+                    handler
+                        .parameter_changes
+                        .lock()
+                        .map_err(|_| {
+                            Error::Other("native parameter feedback lock is poisoned".into())
+                        })?
+                        .clear();
+                }
                 if let Some(process_data) = self.process_data.as_ref() {
                     process_data.input_param_changes.clear_all();
                 }
@@ -4809,6 +4866,20 @@ fn advance_process_context(
 #[cfg(test)]
 mod process_buffer_tests {
     use super::*;
+
+    #[test]
+    fn failed_stop_transitions_preserve_the_last_confirmed_state() {
+        let mut processing = true;
+        assert!(finish_stop_transition(&mut processing, kResultFalse, true, "stop").is_err());
+        assert!(processing);
+        assert!(finish_stop_transition(&mut processing, kNotImplemented, true, "stop").is_ok());
+        assert!(!processing);
+        let mut active = true;
+        assert!(finish_stop_transition(&mut active, kNotImplemented, false, "deactivate").is_err());
+        assert!(active);
+        assert!(finish_stop_transition(&mut active, kResultOk, false, "deactivate").is_ok());
+        assert!(!active);
+    }
 
     fn buses(channels: &[i32]) -> Vec<AudioBusBuffers> {
         channels

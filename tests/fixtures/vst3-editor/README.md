@@ -22,12 +22,16 @@ acceptance. Skipping this gate is not successful release acceptance.
 
 Evidence is printed in separate stages:
 
-1. Exact VST3 attach, self-resize to 560×400, content-scale and state/generation
+1. Deliberate valid fake protocol replies written by the fixture through Rust,
+   Win32 and CRT stdout must appear on stderr, without corrupting real replies.
+   This checks all three routes for the fixture's selected toolchain/runtime;
+   it does not establish compatibility with every third-party static CRT.
+2. Exact VST3 attach, self-resize to 560×400, content-scale and state/generation
    assertions against probes 1000–1003.
-2. Real helper-owned HWND, native child/button visibility, nonuniform painted
+3. Real helper-owned HWND, native child/button visibility, nonuniform painted
    pixels, actual button event, parameter 0 = 0.25, begin/value/end callbacks,
    DirtyChanged(true), and a changed rendered caption.
-3. Repeated open/focus/close, native title-bar close, rejected invalid/different
+4. Repeated open/focus/close, native title-bar close, rejected invalid/different
    owners, logical owner loss, unload/reload, no-editor capability, stdin EOF,
    Shutdown with stdin open, and forced helper termination with HWND cleanup.
 

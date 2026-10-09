@@ -13,7 +13,7 @@ use std::{
     panic::{self, AssertUnwindSafe},
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{self, AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     },
@@ -179,6 +179,60 @@ impl MidiMessage {
     }
 }
 
+/// Native editor commands run only on the insert worker; the HWND is logical owner data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeEditorCommand {
+    Open {
+        owner_window: u64,
+        owner_process: u32,
+    },
+    Focus,
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NativeEditorState {
+    pub supported: bool,
+    pub has_editor: bool,
+    pub open: bool,
+    pub width: i32,
+    pub height: i32,
+    pub generation: u64,
+}
+
+/// One reliable control-plane publication per slot, independent of RuntimeEvent overflow.
+/// This mutex is never read, locked, or modified by the device callback.
+#[derive(Clone, Debug, Default)]
+pub struct NativeEditorSnapshot {
+    pub state: NativeEditorState,
+    pub native_used: bool,
+    pub dirty_revision: u64,
+    pub captured_dirty_revision: u64,
+    pub capture_serial: u64,
+    pub captured_state: Option<Arc<Vec<u8>>>,
+    pub pending_request: Option<u64>,
+    pub capture_in_progress: bool,
+    pub completed_request: u64,
+    pub error: Option<String>,
+}
+
+impl NativeEditorSnapshot {
+    pub fn has_uncaptured_changes(&self) -> bool {
+        self.state.open
+            || self.capture_in_progress
+            || self.pending_request.is_some()
+            || self.dirty_revision != self.captured_dirty_revision
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct NativeEditorFeedback {
+    pub state: NativeEditorState,
+    /// Monotonic, non-droppable revision scoped to this backend instance.
+    pub dirty_revision: u64,
+    pub catalog_invalidated: bool,
+}
+
 /// Common processing surface implemented by VST2, VST3 and deterministic test doubles.
 ///
 /// Every method runs on the insert worker. Implementations may allocate, lock or perform IPC;
@@ -242,6 +296,16 @@ pub trait PluginBackend: 'static {
             total_items,
             items,
         })
+    }
+    fn native_editor(&mut self, command: NativeEditorCommand) -> Result<NativeEditorState, String> {
+        if command == NativeEditorCommand::Close {
+            Ok(NativeEditorState::default())
+        } else {
+            Err("Native editor is not supported by this backend".into())
+        }
+    }
+    fn native_editor_feedback(&mut self) -> Result<NativeEditorFeedback, String> {
+        Ok(NativeEditorFeedback::default())
     }
     fn save_state(&mut self) -> Result<Vec<u8>, String>;
     fn load_state(&mut self, state: &[u8]) -> Result<(), String>;
@@ -1550,6 +1614,11 @@ pub enum RealtimeOutputSource {
 }
 
 enum AdminCommand {
+    NativeEditor {
+        slot: usize,
+        request_id: u64,
+        command: NativeEditorCommand,
+    },
     SetSlotConfig {
         slot: usize,
         config: SlotConfig,
@@ -1736,6 +1805,42 @@ impl PluginChainControl {
         })
     }
 
+    pub fn native_editor_snapshot(&self, slot: usize) -> Option<NativeEditorSnapshot> {
+        if !manifest_accepts_slot(self.manifest, slot) {
+            return None;
+        }
+        self.metrics.native_editors.lock().ok()?.get(slot).cloned()
+    }
+
+    pub fn request_native_editor(
+        &self,
+        slot: usize,
+        request_id: u64,
+        command: NativeEditorCommand,
+    ) -> bool {
+        if request_id == 0 || !manifest_accepts_slot(self.manifest, slot) {
+            return false;
+        }
+        let Ok(mut snapshots) = self.metrics.native_editors.lock() else {
+            return false;
+        };
+        let snapshot = &mut snapshots[slot];
+        if snapshot.pending_request.is_some() {
+            return false;
+        }
+        if self.try_admin(AdminCommand::NativeEditor {
+            slot,
+            request_id,
+            command,
+        }) {
+            snapshot.pending_request = Some(request_id);
+            snapshot.error = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn request_state(&self, slot: usize) -> bool {
         self.request_state_tagged(slot, 0)
     }
@@ -1804,6 +1909,7 @@ fn manifest_accepts_slot(manifest: PluginEndpointManifest, slot: usize) -> bool 
 
 #[derive(Default)]
 struct BridgeMetrics {
+    native_editors: Mutex<[NativeEditorSnapshot; MAX_PLUGIN_CHAIN_SLOTS]>,
     max_block_frames: AtomicU32,
     current_epoch: AtomicU64,
     epoch_resets: AtomicU64,
@@ -2347,7 +2453,13 @@ fn run_worker(
     let mut dry = StereoBlock::silence();
     let mut active_epoch = INITIAL_TRANSPORT_EPOCH;
     let mut shutdown = false;
+    let mut next_native_poll = Instant::now();
     while !shutdown {
+        if Instant::now() >= next_native_poll {
+            poll_native_editors(&mut slots, &mut events, &metrics);
+            update_latency_and_tail(&mut slots, &mut events, &metrics);
+            next_native_poll = Instant::now() + Duration::from_millis(100);
+        }
         drain_parameter_edit_failures(&mut parameter_edit_failures, &mut parameter_edit_receipts);
         let mut admin_metadata_changed = false;
         for _ in 0..MAX_ADMIN_COMMANDS_PER_WORKER_TURN {
@@ -2470,6 +2582,16 @@ fn run_worker(
         );
     }
 
+    for (slot, runtime) in slots.iter_mut().enumerate() {
+        if let Some(backend) = runtime.backend.as_mut() {
+            let _ = catch_backend(|| backend.native_editor(NativeEditorCommand::Close));
+        }
+        if let Ok(mut snapshots) = metrics.native_editors.lock() {
+            snapshots[slot].state.open = false;
+            snapshots[slot].state.width = 0;
+            snapshots[slot].state.height = 0;
+        }
+    }
     metrics.stopped.store(true, Ordering::Release);
     push_event(&mut events, RuntimeEvent::ShutdownComplete, &metrics);
 }
@@ -2814,6 +2936,62 @@ fn handle_admin(
     metrics: &BridgeMetrics,
 ) -> bool {
     match command {
+        AdminCommand::NativeEditor {
+            slot,
+            request_id,
+            command,
+        } => {
+            if slot >= MAX_PLUGIN_CHAIN_SLOTS {
+                return false;
+            }
+            let was_faulted = slots
+                .get(slot)
+                .is_some_and(|runtime| runtime.fault.is_some());
+            let result = slots
+                .get_mut(slot)
+                .filter(|runtime| runtime.fault.is_none() || command == NativeEditorCommand::Close)
+                .and_then(|runtime| runtime.backend.as_mut())
+                .ok_or_else(|| "plug-in runtime is not available".to_owned())
+                .and_then(|backend| catch_backend(|| backend.native_editor(command)));
+            if let Ok(mut snapshots) = metrics.native_editors.lock() {
+                let snapshot = &mut snapshots[slot];
+                snapshot.capture_in_progress =
+                    command == NativeEditorCommand::Close && result.is_ok();
+                if was_faulted && command == NativeEditorCommand::Close {
+                    // DSP failure can precede the next native feedback poll. A detached view
+                    // is not evidence that its last changes were captured successfully.
+                    snapshot.dirty_revision = snapshot
+                        .dirty_revision
+                        .max(snapshot.captured_dirty_revision.saturating_add(1));
+                    snapshot.error = slots.get(slot).and_then(|runtime| runtime.fault.clone());
+                }
+                match result {
+                    Ok(state) => {
+                        snapshot.state = state;
+                        snapshot.native_used |= state.open;
+                        if !was_faulted {
+                            snapshot.error = None;
+                        }
+                    }
+                    Err(error) => snapshot.error = Some(error),
+                }
+            }
+            // Closing captures final changes reliably, even when the event ring is full.
+            let capture = !was_faulted
+                && command == NativeEditorCommand::Close
+                && metrics.native_editors.lock().ok().is_some_and(|snapshots| {
+                    snapshots[slot].state.supported && snapshots[slot].error.is_none()
+                });
+            if capture {
+                capture_native_slot(slot, slots, events, metrics);
+            }
+            if let Ok(mut snapshots) = metrics.native_editors.lock() {
+                snapshots[slot].capture_in_progress = false;
+                snapshots[slot].pending_request = None;
+                snapshots[slot].completed_request = request_id;
+            }
+            false
+        }
         AdminCommand::SetSlotConfig { slot, config } => {
             if let Some(runtime) = slots.get_mut(slot) {
                 runtime.config = config.normalized();
@@ -2907,7 +3085,19 @@ fn handle_admin(
                 && runtime.fault.is_none()
                 && let Some(backend) = runtime.backend.as_mut()
             {
-                match catch_backend(|| backend.save_state()) {
+                runtime.parameter_catalog_cache = None;
+                let result = catch_backend(|| {
+                    close_native_before_state(backend.as_mut())?;
+                    let before = backend.native_editor_feedback()?.dirty_revision;
+                    let bytes = backend.save_state()?;
+                    let feedback = backend.native_editor_feedback()?;
+                    if feedback.dirty_revision != before {
+                        return Err("Native state changed across the capture barrier".into());
+                    }
+                    publish_native_capture(slot, feedback, &bytes, metrics);
+                    Ok(bytes)
+                });
+                match result {
                     Ok(bytes) => {
                         push_event(
                             events,
@@ -2930,11 +3120,142 @@ fn handle_admin(
         }
         AdminCommand::LoadState { slot, state } => {
             let faulted = with_backend(slot, slots, events, metrics, |backend| {
+                close_native_before_state(backend)?;
                 backend.load_state(&state)
             });
+            if !faulted
+                && metrics.native_editors.lock().ok().is_some_and(|snapshots| {
+                    snapshots[slot].native_used || snapshots[slot].dirty_revision != 0
+                })
+            {
+                capture_native_slot(slot, slots, events, metrics);
+            }
             faulted || slots.get(slot).is_some_and(|slot| slot.fault.is_none())
         }
         AdminCommand::Shutdown => false,
+    }
+}
+
+fn close_native_before_state(backend: &mut dyn PluginBackend) -> Result<(), String> {
+    if backend.native_editor(NativeEditorCommand::Close)?.open {
+        return Err("Native editor remained open; state capture/restore was cancelled".into());
+    }
+    Ok(())
+}
+
+fn publish_native_feedback(slot: usize, feedback: &NativeEditorFeedback, metrics: &BridgeMetrics) {
+    if let Ok(mut snapshots) = metrics.native_editors.lock() {
+        let snapshot = &mut snapshots[slot];
+        if snapshot.state.open && !feedback.state.open {
+            snapshot.capture_in_progress = true;
+        }
+        snapshot.native_used |= feedback.state.open;
+        snapshot.state = feedback.state;
+        snapshot.dirty_revision = snapshot.dirty_revision.max(feedback.dirty_revision);
+    }
+}
+
+fn publish_native_capture(
+    slot: usize,
+    feedback: NativeEditorFeedback,
+    bytes: &[u8],
+    metrics: &BridgeMetrics,
+) {
+    if let Ok(mut snapshots) = metrics.native_editors.lock() {
+        let snapshot = &mut snapshots[slot];
+        snapshot.state = feedback.state;
+        snapshot.dirty_revision = snapshot.dirty_revision.max(feedback.dirty_revision);
+        // Once a native editor has opened, snapshots remain authoritative even if a plugin
+        // omits dirty callbacks. Retain them independently of best-effort event delivery.
+        if snapshot.native_used || snapshot.dirty_revision != 0 {
+            snapshot.captured_dirty_revision = snapshot.dirty_revision;
+            snapshot.capture_serial = snapshot.capture_serial.saturating_add(1);
+            snapshot.captured_state = Some(Arc::new(bytes.to_vec()));
+        }
+        snapshot.capture_in_progress = false;
+    }
+}
+
+fn capture_native_slot(
+    slot: usize,
+    slots: &mut [WorkerSlot],
+    events: &mut Producer<RuntimeEvent>,
+    metrics: &BridgeMetrics,
+) {
+    let Some(runtime) = slots
+        .get_mut(slot)
+        .filter(|runtime| runtime.fault.is_none())
+    else {
+        return;
+    };
+    runtime.parameter_catalog_cache = None;
+    let Some(backend) = runtime.backend.as_mut() else {
+        return;
+    };
+    let result = catch_backend(|| {
+        close_native_before_state(backend.as_mut())?;
+        let before = backend.native_editor_feedback()?.dirty_revision;
+        let bytes = backend.save_state()?;
+        let feedback = backend.native_editor_feedback()?;
+        if feedback.dirty_revision != before {
+            return Err("Native state changed across the capture barrier".into());
+        }
+        publish_native_capture(slot, feedback, &bytes, metrics);
+        Ok(())
+    });
+    if let Err(error) = result {
+        if let Ok(mut snapshots) = metrics.native_editors.lock() {
+            snapshots[slot].error = Some(error.clone());
+            snapshots[slot].capture_in_progress = false;
+            // Failure cannot turn potentially unsaved changes into a clean slot.
+            snapshots[slot].dirty_revision = snapshots[slot].dirty_revision.saturating_add(1);
+        }
+        runtime.fault = Some(error.clone());
+        register_fault(slot, error, events, metrics);
+    }
+}
+
+fn poll_native_editors(
+    slots: &mut [WorkerSlot],
+    events: &mut Producer<RuntimeEvent>,
+    metrics: &BridgeMetrics,
+) {
+    for slot in 0..slots.len() {
+        let was_open = metrics
+            .native_editors
+            .lock()
+            .ok()
+            .is_some_and(|snapshots| snapshots[slot].state.open);
+        let Some(runtime) = slots
+            .get_mut(slot)
+            .filter(|runtime| runtime.fault.is_none())
+        else {
+            continue;
+        };
+        let Some(backend) = runtime.backend.as_mut() else {
+            continue;
+        };
+        match catch_backend(|| backend.native_editor_feedback()) {
+            Ok(feedback) => {
+                let closed = was_open && !feedback.state.open;
+                if feedback.catalog_invalidated {
+                    runtime.parameter_catalog_cache = None;
+                }
+                publish_native_feedback(slot, &feedback, metrics);
+                if closed {
+                    capture_native_slot(slot, slots, events, metrics);
+                }
+            }
+            Err(error) => {
+                if let Ok(mut snapshots) = metrics.native_editors.lock() {
+                    snapshots[slot].error = Some(error.clone());
+                    snapshots[slot].dirty_revision =
+                        snapshots[slot].dirty_revision.saturating_add(1);
+                }
+                runtime.fault = Some(error.clone());
+                register_fault(slot, error, events, metrics);
+            }
+        }
     }
 }
 
@@ -3901,6 +4222,7 @@ impl Drop for Vst2Backend {
 
 #[cfg(feature = "vst3")]
 struct Vst3Backend {
+    native_revision_base: u64,
     plugin: vst3_host::Plugin,
     buffers: vst3_host::AudioBuffers,
     name: String,
@@ -3928,6 +4250,7 @@ impl Vst3Backend {
             .sample_rate(config.sample_rate)
             .block_size(config.max_block_frames)
             .with_process_isolation(true)
+            .auto_recover_plugins(false)
             .helper_path(&helper_path)
             .build()
             .map_err(|error| {
@@ -3973,6 +4296,7 @@ impl Vst3Backend {
             format!("{} — {}", plugin.info().name, plugin.info().vendor)
         };
         Ok(Self {
+            native_revision_base: 0,
             plugin,
             buffers: vst3_host::AudioBuffers::new(
                 2,
@@ -4017,6 +4341,10 @@ impl PluginBackend for Vst3Backend {
         }
         self.plugin
             .start_processing()
+            .map_err(|error| error.to_string())?;
+        self.native_revision_base = self
+            .plugin
+            .native_dirty_revision()
             .map_err(|error| error.to_string())?;
         self.prepared = true;
         Ok(())
@@ -4181,6 +4509,93 @@ impl PluginBackend for Vst3Backend {
         ))
     }
 
+    fn native_editor(&mut self, command: NativeEditorCommand) -> Result<NativeEditorState, String> {
+        use vst3_host::{IsolatedEditorCommand as Command, IsolatedEditorOwner};
+        let command = match command {
+            NativeEditorCommand::Open {
+                owner_window,
+                owner_process,
+            } => Command::Open {
+                owner: Some(IsolatedEditorOwner {
+                    window: owner_window,
+                    process_id: owner_process,
+                }),
+            },
+            NativeEditorCommand::Focus => Command::Focus,
+            NativeEditorCommand::Close => Command::Close,
+        };
+        self.plugin
+            .isolated_editor(command)
+            .map(native_editor_state)
+            .map_err(|error| error.to_string())
+    }
+
+    fn native_editor_feedback(&mut self) -> Result<NativeEditorFeedback, String> {
+        let state = self
+            .plugin
+            .isolated_editor(vst3_host::IsolatedEditorCommand::Query)
+            .map(native_editor_state)
+            .map_err(|error| error.to_string())?;
+        let edits = self
+            .plugin
+            .try_take_parameter_edits()
+            .map_err(|error| error.to_string())?;
+        let notifications = self
+            .plugin
+            .try_take_host_notifications()
+            .map_err(|error| error.to_string())?;
+        // Service lifecycle-sensitive restart requests on the helper's main thread. Returned
+        // flags refresh host-side caches; failures never masquerade as an empty feedback batch.
+        let flags = self
+            .plugin
+            .service_host_requests()
+            .map_err(|error| error.to_string())?;
+        let revision = self
+            .plugin
+            .native_dirty_revision()
+            .map_err(|error| error.to_string())?;
+        let dirty_revision = revision
+            .checked_sub(self.native_revision_base)
+            .ok_or_else(|| {
+                "VST3 native revision reset; helper state may have been lost".to_owned()
+            })?;
+        if flags.reload_component() {
+            return Err(
+                "VST3 requested component reload; native state must be recovered before reloading"
+                    .into(),
+            );
+        }
+        if flags.io_changed() {
+            let layout = self
+                .plugin
+                .audio_bus_layout()
+                .map_err(|error| error.to_string())?;
+            self.input_channels = layout
+                .inputs
+                .iter()
+                .filter(|bus| bus.active)
+                .map(|bus| bus.channel_count)
+                .sum();
+            self.output_channels = layout
+                .outputs
+                .iter()
+                .filter(|bus| bus.active)
+                .map(|bus| bus.channel_count)
+                .sum();
+        }
+        let catalog_invalidated = !edits.is_empty()
+            || flags.param_values_changed()
+            || flags.param_titles_changed()
+            || notifications
+                .iter()
+                .any(|item| matches!(item, vst3_host::HostNotification::DirtyChanged(true)));
+        Ok(NativeEditorFeedback {
+            state,
+            dirty_revision,
+            catalog_invalidated,
+        })
+    }
+
     fn save_state(&mut self) -> Result<Vec<u8>, String> {
         self.plugin.save_state().map_err(|error| error.to_string())
     }
@@ -4213,8 +4628,23 @@ impl PluginBackend for Vst3Backend {
 }
 
 #[cfg(feature = "vst3")]
+fn native_editor_state(state: vst3_host::IsolatedEditorState) -> NativeEditorState {
+    NativeEditorState {
+        supported: state.supported,
+        has_editor: state.has_editor,
+        open: state.open,
+        width: state.width,
+        height: state.height,
+        generation: state.generation,
+    }
+}
+
+#[cfg(feature = "vst3")]
 impl Drop for Vst3Backend {
     fn drop(&mut self) {
+        let _ = self
+            .plugin
+            .isolated_editor(vst3_host::IsolatedEditorCommand::Close);
         if self.prepared {
             let _ = self.plugin.stop_processing();
         }
@@ -4224,6 +4654,284 @@ impl Drop for Vst3Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct NativeMock {
+        open: bool,
+        revision: u64,
+        bytes: Vec<u8>,
+        calls: Vec<&'static str>,
+        fail_feedback: bool,
+        reject_open: bool,
+    }
+
+    struct NativeMockBackend(Arc<Mutex<NativeMock>>);
+    impl PluginBackend for NativeMockBackend {
+        fn name(&self) -> &str {
+            "native fixture"
+        }
+        fn prepare(&mut self, _: PluginPrepareConfig) -> Result<(), String> {
+            Ok(())
+        }
+        fn process(&mut self, _: &mut [f32], _: &mut [f32], _: usize) -> Result<(), String> {
+            Ok(())
+        }
+        fn send_midi(&mut self, _: MidiMessage) -> Result<(), String> {
+            Ok(())
+        }
+        fn set_parameter(&mut self, _: u32, _: f32) -> Result<(), String> {
+            Ok(())
+        }
+        fn get_parameter(&mut self, _: u32) -> Result<f32, String> {
+            Ok(0.5)
+        }
+        fn save_state(&mut self) -> Result<Vec<u8>, String> {
+            let mut mock = self.0.lock().unwrap();
+            assert!(!mock.open, "snapshot must detach editor first");
+            mock.calls.push("save");
+            Ok(mock.bytes.clone())
+        }
+        fn load_state(&mut self, bytes: &[u8]) -> Result<(), String> {
+            let mut mock = self.0.lock().unwrap();
+            assert!(!mock.open, "restore must detach editor first");
+            mock.calls.push("load");
+            mock.bytes = bytes.to_vec();
+            Ok(())
+        }
+        fn native_editor(
+            &mut self,
+            command: NativeEditorCommand,
+        ) -> Result<NativeEditorState, String> {
+            let mut mock = self.0.lock().unwrap();
+            match command {
+                NativeEditorCommand::Close => {
+                    mock.calls.push("close");
+                    mock.open = false;
+                }
+                NativeEditorCommand::Open { .. } => {
+                    if mock.reject_open {
+                        return Err("no editor".into());
+                    }
+                    mock.calls.push("open");
+                    mock.open = true;
+                }
+                NativeEditorCommand::Focus => {
+                    mock.calls.push("focus");
+                }
+            }
+            Ok(NativeEditorState {
+                supported: true,
+                has_editor: true,
+                open: mock.open,
+                width: if mock.open { 400 } else { 0 },
+                height: if mock.open { 300 } else { 0 },
+                generation: 1,
+            })
+        }
+        fn native_editor_feedback(&mut self) -> Result<NativeEditorFeedback, String> {
+            let mock = self.0.lock().unwrap();
+            if mock.fail_feedback {
+                return Err("helper disconnected".into());
+            }
+            Ok(NativeEditorFeedback {
+                state: NativeEditorState {
+                    supported: true,
+                    has_editor: true,
+                    open: mock.open,
+                    width: if mock.open { 400 } else { 0 },
+                    height: if mock.open { 300 } else { 0 },
+                    generation: 1,
+                },
+                dirty_revision: mock.revision,
+                catalog_invalidated: false,
+            })
+        }
+        fn latency_samples(&self) -> u32 {
+            0
+        }
+        fn tail_samples(&self) -> u32 {
+            0
+        }
+    }
+
+    fn native_slots(mock: Arc<Mutex<NativeMock>>) -> Vec<WorkerSlot> {
+        vec![WorkerSlot {
+            backend: Some(Box::new(NativeMockBackend(mock))),
+            config: SlotConfig::default(),
+            fault: None,
+            parameter_catalog_cache: None,
+        }]
+    }
+
+    #[test]
+    fn native_dirty_and_capture_survive_full_best_effort_event_ring() {
+        let mock = Arc::new(Mutex::new(NativeMock {
+            open: true,
+            revision: 8193,
+            bytes: vec![9, 8, 7],
+            ..Default::default()
+        }));
+        let mut slots = native_slots(mock.clone());
+        let metrics = BridgeMetrics::default();
+        let (mut events, _rx) = RingBuffer::new(1);
+        events.push(RuntimeEvent::ShutdownComplete).unwrap();
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        assert_eq!(
+            metrics.native_editors.lock().unwrap()[0].dirty_revision,
+            8193
+        );
+        handle_admin(
+            AdminCommand::SaveState {
+                slot: 0,
+                request_id: 42,
+            },
+            &mut slots,
+            &mut events,
+            &metrics,
+        );
+        let snapshot = metrics.native_editors.lock().unwrap()[0].clone();
+        assert_eq!(snapshot.captured_state.as_deref(), Some(&vec![9, 8, 7]));
+        assert_eq!(snapshot.captured_dirty_revision, 8193);
+        assert!(!snapshot.has_uncaptured_changes());
+        assert!(metrics.event_overflows.load(Ordering::Relaxed) > 0);
+        assert_eq!(mock.lock().unwrap().calls, ["close", "save"]);
+    }
+
+    #[test]
+    fn native_titlebar_close_captures_once_and_preserves_revision() {
+        let mock = Arc::new(Mutex::new(NativeMock {
+            open: true,
+            revision: 3,
+            bytes: vec![4],
+            ..Default::default()
+        }));
+        let mut slots = native_slots(mock.clone());
+        let metrics = BridgeMetrics::default();
+        let (mut events, _rx) = RingBuffer::new(1);
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        mock.lock().unwrap().open = false;
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        let snapshot = metrics.native_editors.lock().unwrap()[0].clone();
+        assert_eq!(snapshot.capture_serial, 1);
+        assert_eq!(snapshot.captured_dirty_revision, 3);
+        assert_eq!(mock.lock().unwrap().calls, ["close", "save"]);
+    }
+
+    #[test]
+    fn rejected_native_open_does_not_fault_healthy_plugin() {
+        let mock = Arc::new(Mutex::new(NativeMock {
+            reject_open: true,
+            ..Default::default()
+        }));
+        let mut slots = native_slots(mock);
+        let metrics = BridgeMetrics::default();
+        let (mut events, _rx) = RingBuffer::new(1);
+        handle_admin(
+            AdminCommand::NativeEditor {
+                slot: 0,
+                request_id: 7,
+                command: NativeEditorCommand::Open {
+                    owner_window: 123,
+                    owner_process: 456,
+                },
+            },
+            &mut slots,
+            &mut events,
+            &metrics,
+        );
+        assert!(slots[0].fault.is_none());
+        let snapshot = metrics.native_editors.lock().unwrap()[0].clone();
+        assert_eq!(snapshot.completed_request, 7);
+        assert_eq!(snapshot.error.as_deref(), Some("no editor"));
+        assert_eq!(metrics.faults.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn lost_native_feedback_stays_unsaved_even_if_fault_event_overflows() {
+        let mock = Arc::new(Mutex::new(NativeMock {
+            fail_feedback: true,
+            ..Default::default()
+        }));
+        let mut slots = native_slots(mock);
+        let metrics = BridgeMetrics::default();
+        let (mut events, _rx) = RingBuffer::new(1);
+        events.push(RuntimeEvent::ShutdownComplete).unwrap();
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        let snapshot = metrics.native_editors.lock().unwrap()[0].clone();
+        assert!(snapshot.has_uncaptured_changes());
+        assert!(snapshot.error.as_ref().unwrap().contains("disconnected"));
+        assert!(slots[0].fault.is_some());
+    }
+
+    #[test]
+    fn faulted_native_close_cannot_make_unpolled_edits_clean() {
+        let mock = Arc::new(Mutex::new(NativeMock {
+            open: true,
+            ..Default::default()
+        }));
+        let mut slots = native_slots(mock.clone());
+        slots[0].fault = Some("DSP failed before native poll".into());
+        let metrics = BridgeMetrics::default();
+        metrics.native_editors.lock().unwrap()[0].state.open = true;
+        let (mut events, _rx) = RingBuffer::new(1);
+        handle_admin(
+            AdminCommand::NativeEditor {
+                slot: 0,
+                request_id: 8,
+                command: NativeEditorCommand::Close,
+            },
+            &mut slots,
+            &mut events,
+            &metrics,
+        );
+        let snapshot = metrics.native_editors.lock().unwrap()[0].clone();
+        assert!(!snapshot.state.open);
+        assert!(snapshot.has_uncaptured_changes());
+        assert!(snapshot.error.unwrap().contains("DSP failed"));
+        assert_eq!(mock.lock().unwrap().calls, ["close"]);
+    }
+
+    #[test]
+    fn native_close_retains_state_even_when_plugin_omits_dirty_callbacks() {
+        let mock = Arc::new(Mutex::new(NativeMock {
+            open: true,
+            bytes: vec![77],
+            ..Default::default()
+        }));
+        let mut slots = native_slots(mock.clone());
+        let metrics = BridgeMetrics::default();
+        let (mut events, _rx) = RingBuffer::new(1);
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        mock.lock().unwrap().open = false;
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        let snapshot = metrics.native_editors.lock().unwrap()[0].clone();
+        assert_eq!(snapshot.dirty_revision, 0);
+        assert_eq!(snapshot.capture_serial, 1);
+        assert_eq!(snapshot.captured_state.as_deref(), Some(&vec![77]));
+    }
+
+    #[test]
+    fn authoritative_restore_closes_native_editor_before_loading() {
+        let mock = Arc::new(Mutex::new(NativeMock {
+            open: true,
+            ..Default::default()
+        }));
+        let mut slots = native_slots(mock.clone());
+        let metrics = BridgeMetrics::default();
+        let (mut events, _rx) = RingBuffer::new(1);
+        handle_admin(
+            AdminCommand::LoadState {
+                slot: 0,
+                state: vec![1, 2],
+            },
+            &mut slots,
+            &mut events,
+            &metrics,
+        );
+        assert_eq!(mock.lock().unwrap().calls, ["close", "load"]);
+        assert_eq!(mock.lock().unwrap().bytes, [1, 2]);
+    }
 
     #[test]
     fn worker_block_stably_orders_untagged_timeline_before_tagged_live_edits() {

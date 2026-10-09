@@ -2,17 +2,60 @@
 //! This code is developer-only and is never linked into the DAW or its helper.
 
 use super::*;
+use std::io::Write;
 use std::mem;
 use winapi::shared::minwindef::{HINSTANCE, LPARAM, LRESULT, UINT, WPARAM};
 use winapi::shared::windef::{HBRUSH, HWND};
+use winapi::um::fileapi::WriteFile;
 use winapi::um::libloaderapi::{
     GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 };
+use winapi::um::processenv::GetStdHandle;
+use winapi::um::winbase::STD_OUTPUT_HANDLE;
 use winapi::um::winuser::*;
 
 const BUTTON_ID: usize = 4101;
 const CLASS_NAME: &str = "CitrusVst3FixturePanelV1";
+
+// Each line is a valid HostResponse, so a host cannot pass this check merely by
+// dropping unparseable logging. All three routes must be redirected to stderr
+// before loading the fixture. These calls intentionally do not use eprintln!.
+fn exercise_stdout_routes() -> bool {
+    let rust = b"{\"Error\":{\"message\":\"CITRUS_FIXTURE_STDOUT_RUST\"}}\n";
+    let win32 = b"{\"Error\":{\"message\":\"CITRUS_FIXTURE_STDOUT_WIN32\"}}\n";
+    {
+        let mut stdout = std::io::stdout().lock();
+        if stdout.write_all(rust).is_err() || stdout.flush().is_err() {
+            return false;
+        }
+    }
+    unsafe {
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        let mut written = 0;
+        if handle.is_null()
+            || handle as isize == -1
+            || WriteFile(
+                handle,
+                win32.as_ptr().cast(),
+                win32.len() as u32,
+                &mut written,
+                ptr::null_mut(),
+            ) == 0
+            || written != win32.len() as u32
+        {
+            return false;
+        }
+        // Exercise the fixture's C runtime as well as Rust and the Win32 standard
+        // handle. No new runtime dependency is introduced: this is the target CRT.
+        unsafe extern "C" {
+            fn puts(text: *const c_char) -> i32;
+            fn fflush(stream: *mut c_void) -> i32;
+        }
+        puts(c"{\"Error\":{\"message\":\"CITRUS_FIXTURE_STDOUT_CRT\"}}".as_ptr()) >= 0
+            && fflush(ptr::null_mut()) == 0
+    }
+}
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
@@ -33,6 +76,10 @@ impl NativeWindow {
         size: (i32, i32),
         edit: NativeEditState,
     ) -> Option<Self> {
+        if !exercise_stdout_routes() {
+            eprintln!("Fixture stdout-routing probe could not write all three routes");
+            return None;
+        }
         let mut module: HINSTANCE = ptr::null_mut();
         if GetModuleHandleExW(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,

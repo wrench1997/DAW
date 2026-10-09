@@ -603,6 +603,10 @@ fn handle(
         HostCommand::TakeHostNotifications => with(plugin, |p| HostResponse::HostNotifications {
             notifications: p.take_host_notifications(),
         }),
+        HostCommand::NativeDirtyRevision => with(plugin, |p| match p.native_dirty_revision() {
+            Ok(revision) => HostResponse::NativeDirtyRevision { revision },
+            Err(error) => err("NativeDirtyRevision", error),
+        }),
         HostCommand::TakeDataExchangeBlocks => with(plugin, |p| HostResponse::DataExchangeBlocks {
             blocks: p.take_data_exchange_blocks(),
         }),

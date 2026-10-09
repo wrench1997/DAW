@@ -898,6 +898,10 @@ pub(crate) trait PluginInternal: Send {
     }
     fn start_processing(&mut self) -> Result<()>;
     fn stop_processing(&mut self) -> Result<()>;
+    /// Authoritative processing flag where available, including a partially failed stop.
+    fn processing_state(&self) -> Option<bool> {
+        None
+    }
     fn has_editor(&self) -> bool;
     fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()>;
     fn close_editor(&mut self) -> Result<()>;
@@ -946,6 +950,10 @@ pub(crate) trait PluginInternal: Send {
     /// Checked host-notification drain; preserves errors across the isolation boundary.
     fn try_take_host_notifications(&mut self) -> Result<Vec<HostNotification>> {
         Ok(self.take_host_notifications())
+    }
+    /// Non-draining native-state change revision; unsupported backends fail explicitly.
+    fn native_dirty_revision(&mut self) -> Result<u64> {
+        Err(Error::Other("native dirty revision is unavailable".into()))
     }
     /// Dispatch any main-thread data-exchange blocks to the controller and drain owned host
     /// snapshots. Background-dispatched queues are copied into the same bounded snapshot sink.
@@ -1862,10 +1870,15 @@ impl Plugin {
             return Ok(());
         }
 
-        self.internal
+        let internal = self
+            .internal
             .as_mut()
-            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-            .stop_processing()?;
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?;
+        let result = internal.stop_processing();
+        if let Some(processing) = internal.processing_state() {
+            self.is_processing = processing;
+        }
+        result?;
 
         self.is_processing = false;
         Ok(())
@@ -2171,6 +2184,20 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .try_take_host_notifications()
+    }
+
+    /// Read durable evidence of native edits for this loaded plugin instance.
+    ///
+    /// Increases for `performEdit`, `setDirty(true)`, and parameter-value/reload restart
+    /// requests, even when the bounded feedback queues are full. Reading or draining feedback
+    /// never clears it. Compare only within the same loaded instance; a reload creates a new
+    /// baseline. Transport failure and counter exhaustion are errors, never a clean revision.
+    /// No transparent helper recovery occurs. This is control-plane work, not realtime work.
+    pub fn native_dirty_revision(&mut self) -> Result<u64> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .native_dirty_revision()
     }
 
     /// Drain ordered requests the plugin reported through `IComponentHandler2`.
@@ -3061,6 +3088,14 @@ mod vstpreset {
 #[cfg(test)]
 mod public_surface_tests {
     use super::*;
+
+    #[test]
+    fn unloaded_native_feedback_checks_never_report_a_clean_result() {
+        let mut plugin = unloaded_plugin();
+        assert!(plugin.native_dirty_revision().is_err());
+        assert!(plugin.try_take_parameter_edits().is_err());
+        assert!(plugin.try_take_host_notifications().is_err());
+    }
 
     /// A `Plugin` with no backing implementation. Enough to exercise the checks the public
     /// surface performs *before* it reaches into `internal`.

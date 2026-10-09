@@ -99,6 +99,12 @@ for line in sys.stdin:
                 opened = True
                 owner = candidate
                 generation += 1
+                if mode in ("pollution_stderr", "pollution_stdout", "missing_pollution"):
+                    stream = sys.stdout if mode == "pollution_stdout" else sys.stderr
+                    routes = ("RUST", "WIN32") if mode == "missing_pollution" else ("RUST", "WIN32", "CRT")
+                    for route in routes:
+                        print(json.dumps({"Error": {"message": "CITRUS_FIXTURE_STDOUT_" + route}}),
+                              file=stream, flush=True)
             elif mode == "unstable_generation":
                 generation += 1
         elif editor == "Close":
@@ -174,6 +180,24 @@ class SessionTests(unittest.TestCase):
     def test_stderr_flood_is_drained(self):
         self.run_session(self.protocol, "stderr_flood")
 
+    @staticmethod
+    def pollution_probe(session):
+        session.load("source-built-editor")
+        session.editor({"Open": {"owner": None}}, open=True)
+        session.assert_stdout_rerouted()
+        session.editor("Query", open=True)  # Reject any delayed fake response, too.
+        session.finish()
+
+    def test_fixture_stdout_markers_must_be_observed_on_stderr(self):
+        self.run_session(self.pollution_probe, "pollution_stderr")
+
+    def test_valid_json_plugin_stdout_is_not_accepted_as_editor_reply(self):
+        self.run_session(self.pollution_probe, "pollution_stdout", "Expected EditorState")
+
+    def test_missing_stdout_route_cannot_silently_pass(self):
+        self.run_session(self.pollution_probe, "missing_pollution",
+                         "did not reach stderr: CITRUS_FIXTURE_STDOUT_CRT", timeout=0.3)
+
     def test_wrong_size_fails(self):
         self.run_session(self.protocol, "bad_width", "Closed editor has stale dimensions")
 
@@ -238,6 +262,25 @@ class SessionTests(unittest.TestCase):
 
 
 class ValidationTests(unittest.TestCase):
+    def test_stdout_evidence_survives_bounded_diagnostic_eviction(self):
+        diagnostics = smoke.FixtureDiagnostics()
+        for marker in smoke.STDOUT_MARKERS:
+            # Simulate a bounded reader splitting a marker between chunks.
+            midpoint = len(marker) // 2
+            diagnostics.append(marker[:midpoint])
+            diagnostics.append(marker[midpoint:] + "\n")
+        for _ in range(40):
+            diagnostics.append("later unrelated diagnostic\n")
+        self.assertEqual(len(diagnostics), 8)
+        self.assertTrue(diagnostics.stdout_rerouted.is_set())
+        self.assertEqual(diagnostics.missing_stdout_markers(), [])
+
+    def test_unrelated_stderr_is_not_stdout_routing_evidence(self):
+        diagnostics = smoke.FixtureDiagnostics()
+        diagnostics.append("plugin loaded successfully\n")
+        self.assertFalse(diagnostics.stdout_rerouted.is_set())
+        self.assertEqual(diagnostics.missing_stdout_markers(), sorted(smoke.STDOUT_MARKERS))
+
     def test_state_must_be_internally_consistent(self):
         valid = dict(supported=True, has_editor=True, open=True, width=560, height=400, generation=2)
         for change in ({"supported": False}, {"has_editor": False}, {"width": 0}, {"height": -1},

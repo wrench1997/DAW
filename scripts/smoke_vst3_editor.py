@@ -26,6 +26,7 @@ UPSTREAM_COMMIT = "ed054908cfe057694d8cf037d0c39dfb5eb4c2ca"
 CONTAINER_CLASS = "CitrusVst3EditorContainerV1"
 PANEL_CLASS = "CitrusVst3FixturePanelV1"
 STATE_KEYS = {"supported", "has_editor", "open", "width", "height", "generation"}
+STDOUT_MARKERS = frozenset(f"CITRUS_FIXTURE_STDOUT_{route}" for route in ("RUST", "WIN32", "CRT"))
 
 
 class UnsupportedDesktop(SmokeError):
@@ -114,6 +115,31 @@ def verify_fixture(root, variant):
     return bundle.resolve()
 
 
+class FixtureDiagnostics(deque):
+    """Bound diagnostics while retaining evidence that every stdout route reached stderr."""
+
+    def __init__(self):
+        super().__init__(maxlen=8)
+        self._markers = set()
+        self._carry = ""
+        self._lock = threading.Lock()
+        self.stdout_rerouted = threading.Event()
+
+    def append(self, chunk):
+        with self._lock:
+            # readline is capped, so a marker can straddle two bounded chunks.
+            scan = self._carry + chunk
+            self._markers.update(marker for marker in STDOUT_MARKERS if marker in scan)
+            self._carry = scan[-(max(map(len, STDOUT_MARKERS)) - 1):]
+            if self._markers == STDOUT_MARKERS:
+                self.stdout_rerouted.set()
+            super().append(chunk)
+
+    def missing_stdout_markers(self):
+        with self._lock:
+            return sorted(STDOUT_MARKERS - self._markers)
+
+
 class Session:
     """One bounded helper process. Fake-process tests exercise this layer without claiming GUI QA."""
 
@@ -122,7 +148,7 @@ class Session:
             raise ValueError("timeout must be finite and greater than zero")
         self.deadline = time.monotonic() + timeout
         self.events = queue.Queue(maxsize=16)
-        self.diagnostics = deque(maxlen=8)
+        self.diagnostics = FixtureDiagnostics()
         self.stopped = threading.Event()
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, text=True, encoding="utf-8",
@@ -151,6 +177,11 @@ class Session:
 
     def editor(self, command, **expected):
         return state_response(self.request({"Editor": {"command": command}}), **expected)
+
+    def assert_stdout_rerouted(self):
+        require(self.diagnostics.stdout_rerouted.wait(_remaining(self.deadline, "fixture stdout routing")),
+                "Fixture stdout routes did not reach stderr: "
+                + ", ".join(self.diagnostics.missing_stdout_markers()))
 
     def load(self, path, has_editor=True):
         info = response_payload(self.request({"LoadPlugin": {
@@ -552,6 +583,8 @@ def exercise_lifecycle(command, fixture, no_editor, desktop, timeout=60.0, repor
                         {"window": owner["window"], "process_id": 0}):
             error_response(session.request({"Editor": {"command": {"Open": {"owner": invalid}}}}))
         session.editor({"Open": {"owner": owner}}, supported=True, has_editor=True, open=True)
+        session.assert_stdout_rerouted()
+        report("PASS protocol isolation: fixture Rust, Win32 and CRT stdout reached stderr; valid fake replies did not pollute IPC")
         state, hwnd = assert_handshake(session, desktop)
         report("PASS lifecycle: attached, exact 560x400 resize, DPI scale, real helper container")
         handles = assert_interaction(session, desktop, hwnd)

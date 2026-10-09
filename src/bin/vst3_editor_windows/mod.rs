@@ -19,6 +19,17 @@ const COMMAND_BATCH: usize = 4;
 // input before JSON parsing. The queue is also bounded; the reader backpressures stdin.
 const MAX_COMMAND_BYTES: usize = 96 * 1024 * 1024;
 
+fn requires_editor_detach(command: &vst3_host::process_isolation::HostCommand) -> bool {
+    use vst3_host::process_isolation::HostCommand;
+    matches!(
+        command,
+        HostCommand::LoadPlugin { .. }
+            | HostCommand::UnloadPlugin
+            | HostCommand::SaveState
+            | HostCommand::LoadState { .. }
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Size {
     width: i32,
@@ -252,6 +263,39 @@ mod native {
 
     const WAKE_MESSAGE: UINT = WM_APP + 31;
     const MAINTENANCE_MS: u32 = 16;
+
+    #[link(name = "ole32")]
+    unsafe extern "system" {
+        fn OleInitialize(reserved: *mut std::ffi::c_void) -> i32;
+        fn OleUninitialize();
+    }
+
+    struct OleApartment;
+
+    impl OleApartment {
+        fn initialize() -> Result<Self, String> {
+            // SAFETY: called once on this helper's UI thread before loading any plugin.
+            // Both S_OK and S_FALSE require a matching OleUninitialize on the same thread.
+            let status = unsafe { OleInitialize(null_mut()) };
+            if matches!(status, 0 | 1) {
+                Ok(Self)
+            } else {
+                Err(format!(
+                    "Failed to initialize the editor OLE apartment: {status:#x}"
+                ))
+            }
+        }
+    }
+
+    impl Drop for OleApartment {
+        fn drop(&mut self) {
+            // SAFETY: the guard never leaves the UI thread, and successful initialization
+            // owns one balance. Plugin/view teardown runs before this guard is dropped.
+            unsafe {
+                OleUninitialize();
+            }
+        }
+    }
     const CLASS_NAME: &str = "CitrusVst3EditorContainerV1";
 
     enum Input {
@@ -1041,10 +1085,15 @@ mod native {
                     command,
                     HostCommand::LoadPlugin { .. } | HostCommand::UnloadPlugin
                 );
-                if changes_plugin && let Err(error) = editor.close() {
+                if requires_editor_detach(&command)
+                    && let Err(error) = editor.close()
+                {
                     respond(
                         protocol,
-                        &err("Failed to close editor before plugin replacement", error),
+                        &err(
+                            "Failed to close editor before plugin state operation",
+                            error,
+                        ),
                     );
                     return true;
                 }
@@ -1064,6 +1113,13 @@ mod native {
         // builds physical pixels and WM_DPICHANGED provide the editor's content scale.
         // If a manifest already chose DPI awareness, Windows leaves it unchanged.
         unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        let _ole = match OleApartment::initialize() {
+            Ok(apartment) => apartment,
+            Err(message) => {
+                respond(&mut protocol, &HostResponse::Error { message });
+                return;
+            }
+        };
         let mut editor = Editor::new(plugin.clone());
         // Create the queue before the reader can PostThreadMessage. There is no dummy
         // HWND: the only editor handle is a real window created when Open succeeds.
@@ -1152,6 +1208,19 @@ mod native {
 mod tests {
     use super::*;
     use std::io::{BufReader, Cursor};
+
+    #[test]
+    fn state_capture_and_restore_require_editor_detachment() {
+        use vst3_host::process_isolation::HostCommand;
+        assert!(requires_editor_detach(&HostCommand::SaveState));
+        assert!(requires_editor_detach(&HostCommand::LoadState {
+            data: Vec::new(),
+            context: vst3_host::StateContext::Project,
+        }));
+        assert!(requires_editor_detach(&HostCommand::UnloadPlugin));
+        assert!(!requires_editor_detach(&HostCommand::NativeDirtyRevision));
+        assert!(!requires_editor_detach(&HostCommand::TakeParameterEdits));
+    }
 
     #[test]
     fn lifecycle_repeated_close_and_queries_do_not_advance_generation() {

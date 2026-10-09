@@ -50,7 +50,8 @@ fn main() {
     // code -- take the protocol channel away from stdout. A hosted plugin shares this
     // process's descriptors and third-party plugins do print; on the shared stdout a single
     // `printf` line would be read by the host as a response and desynchronise every later
-    // command from its reply.
+    // command from its reply. On Windows the channel owns a private handle and redirects
+    // both the Win32 stdout handle and CRT descriptor 1; failed isolation exits before load.
     let protocol = ProtocolChannel::claim();
 
     eprintln!("VST3 Host Helper Process Started");
@@ -122,6 +123,34 @@ fn respond(protocol: &mut ProtocolChannel, response: &HostResponse) {
 fn err<E: std::fmt::Display>(prefix: &str, e: E) -> HostResponse {
     HostResponse::Error {
         message: format!("{prefix}: {e}"),
+    }
+}
+
+fn state_capture_flush_buffers(sample_rate: f64) -> AudioBuffers {
+    // At least one empty channel is intentional: upstream's flat-buffer path uses its full
+    // configured block size when *both* channel lists are empty. This must render zero samples.
+    AudioBuffers::new(0, 1, 0, sample_rate)
+}
+
+fn save_state_after_native_flush(plugin: &mut Plugin) -> vst3_host::Result<Vec<u8>> {
+    let was_processing = plugin.is_processing();
+    if !was_processing {
+        plugin.start_processing()?;
+    }
+    let flush = plugin.process_audio(&mut state_capture_flush_buffers(plugin.sample_rate()));
+    // Attempt lifecycle restoration even when the flush failed. No failed step may be
+    // replaced with a successful, potentially stale opaque-state capture.
+    let restore = if was_processing {
+        Ok(())
+    } else {
+        plugin.stop_processing()
+    };
+    match (flush, restore) {
+        (Ok(()), Ok(())) => plugin.save_state(),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(flush), Err(restore)) => Err(vst3_host::Error::Other(format!(
+            "state flush failed: {flush}; restoring processing state also failed: {restore}"
+        ))),
     }
 }
 
@@ -537,7 +566,7 @@ fn handle(
             Ok(layout) => HostResponse::AudioBusLayout { layout },
             Err(e) => err("AudioBusLayout", e),
         }),
-        HostCommand::SaveState => with(plugin, |p| match p.save_state() {
+        HostCommand::SaveState => with(plugin, |p| match save_state_after_native_flush(p) {
             Ok(data) => HostResponse::State { data },
             Err(e) => err("SaveState", e),
         }),
@@ -620,6 +649,10 @@ fn handle(
         }),
         HostCommand::TakeHostNotifications => with(plugin, |p| HostResponse::HostNotifications {
             notifications: p.take_host_notifications(),
+        }),
+        HostCommand::NativeDirtyRevision => with(plugin, |p| match p.native_dirty_revision() {
+            Ok(revision) => HostResponse::NativeDirtyRevision { revision },
+            Err(error) => err("NativeDirtyRevision", error),
         }),
         HostCommand::TakeDataExchangeBlocks => with(plugin, |p| HostResponse::DataExchangeBlocks {
             blocks: p.take_data_exchange_blocks(),
@@ -892,6 +925,35 @@ mod macos {
         if let Some(w) = window {
             w.close();
         }
+    }
+}
+
+#[cfg(test)]
+mod native_state_tests {
+    use super::*;
+
+    #[test]
+    fn state_flush_has_an_explicit_zero_frame_channel() {
+        let buffers = state_capture_flush_buffers(48_000.0);
+        assert_eq!(buffers.block_size, 0);
+        assert_eq!(buffers.sample_rate, 48_000.0);
+        assert!(buffers.inputs.is_empty());
+        assert_eq!(buffers.outputs, vec![Vec::<f32>::new()]);
+    }
+
+    #[test]
+    fn native_revision_without_a_loaded_plugin_is_an_error() {
+        let plugin = Arc::new(Mutex::new(None));
+        let mut sample_rate = 44_100.0;
+        assert!(matches!(
+            handle(
+                HostCommand::NativeDirtyRevision,
+                &plugin,
+                &mut sample_rate,
+                None
+            ),
+            HostResponse::Error { .. }
+        ));
     }
 }
 

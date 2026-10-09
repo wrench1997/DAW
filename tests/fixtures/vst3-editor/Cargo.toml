@@ -20,4 +20,4 @@ no-editor = []
 vst3 = "=0.3.0"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "=0.3.9", features = ["winuser", "libloaderapi"] }
+winapi = { version = "=0.3.9", features = ["winuser", "libloaderapi", "fileapi", "processenv", "winbase"] }

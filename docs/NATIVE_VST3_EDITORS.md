@@ -10,8 +10,8 @@ FL Studio parity, VST2 editor support, arbitrary vendor compatibility, or realti
 2. Connect Citrus worker/UI commands, authoritative status, native edit/dirty notifications,
    and save/topology/session teardown protections.
 
-Until stage 2 and its acceptance pass, the presence of a helper `Editor` protocol is not a
-user-facing native-editor feature. The generic parameter catalog remains a separate interface.
+The stage-2 application controls are implemented, but native Windows acceptance remains required
+before calling the feature verified. The generic parameter catalog remains a separate interface.
 
 Actual GUI/lifecycle/interaction results must be recorded for the exact build under test.
 A Linux check, JSON protocol test, fake-helper harness, or unsupported Windows desktop is not
@@ -22,7 +22,7 @@ contracts; it does not record a completed Windows GUI acceptance run.
 
 The local `[patch.crates-io]` override is explicit in `Cargo.toml` and `Cargo.lock`.
 [Vendor provenance and exact patch scope](../vendor/vst3-host-0.9.0/CITRUS_PATCHES.md) identify
-its registry archive/checksum, upstream commit, original MIT license, and the five modified
+its registry archive/checksum, upstream commit, original MIT license, and the bounded modified
 upstream code files. Existing upstream API and legacy `CreateGui`/`CloseGui` values are kept.
 The new isolated API does not manufacture a native handle to satisfy an ignored argument.
 
@@ -40,9 +40,10 @@ plugin can detach when the DAW owner disappears. Logical owner loss causes order
 Repeated open focuses the existing generation rather than attaching a duplicate view. A new
 owner cannot silently take over an already open generation.
 
-The Windows helper's main thread owns plugin loading/unloading, controller/control calls,
-processing requests, and native window operations. A separate stdin reader only parses and
-queues requests. Bounded alternation of commands and native messages prevents an input/resize
+The Windows helper's main thread initializes STA/OLE before any plugin is loaded, and fails
+explicitly if initialization fails. OLE is released only after plugin/view teardown. That thread
+owns plugin loading/unloading, controller/control calls, processing requests, and native window
+operations. This is a required lifecycle condition, not broad plugin-compatibility evidence. A separate stdin reader only parses and queues requests. Bounded alternation of commands and native messages prevents an input/resize
 flood from monopolizing the event pump. Native callbacks record intent; plugin calls happen
 outside those callbacks to avoid reentrant host locking. Teardown detaches the view before
 native destruction, including explicit close, titlebar close, unload, replacement, owner loss,
@@ -98,3 +99,54 @@ Windows test seam.
 A runner without a usable interactive desktop must report **NOT VERIFIED / UNSUPPORTED**, with
 its exact reason. It must not convert absent GUI coverage into a pass. No global hooks, arbitrary
 plugin downloads, commercial SDK agreements, or user computer access are required by this test.
+
+## Stage 2: application controls and state safety
+
+The channel device inspector and mixer insert rows expose **EDITOR** (open/focus) and a close
+control. Capability comes from the actual worker/helper snapshot. On Linux the button is disabled,
+`open` and `supported` remain false, and `has_editor` still reflects plugin metadata. Generic
+parameters remain available. Native VST2 editors are not implemented.
+
+Editor commands carry exact running endpoint/instance/slot identity and use the existing bounded
+worker admin queue. Per-slot control-only snapshots retain pending/completed commands, actual
+window state, errors, a monotonic native dirty revision, and the latest captured opaque state.
+They do not depend on the lossy diagnostic/event ring, and the audio callback never locks or
+reads this publication. Each worker polls native feedback at most once per 100 ms, draining
+`TakeParameterEdits`, host notifications and accumulated restart flags. The helper's separate
+atomic dirty revision survives bounded feedback queue overflow. Transport failure is an error;
+editor queries, feedback, restart servicing and state capture must not silently respawn a fresh
+plugin and substitute its clean/default state.
+
+Opening an editor conservatively marks the project unsaved, covering an edit followed immediately
+by closing the DAW before its next feedback poll. Explicit native close, detected titlebar close,
+and project state requests detach before capturing. The final native parameter queue is flushed
+with a zero-sample process call, so a stopped transport cannot leave a just-edited controller value
+absent from component state. The snapshot is retained even if a plugin omits dirty callbacks.
+Feedback loss, capture failure or required component reload remains a visible unsaved/faulted state;
+there is no automatic default-state recovery.
+
+A native preset can change unreported parameters. Its captured opaque state therefore supersedes
+persisted generic base overrides; those stale overrides are cleared, and an open generic catalog
+is refreshed after capture. Native gestures are not currently written into Citrus automation or
+individual undo steps. Generic live edits are disabled while native editing or capture is pending.
+Topology changes and Undo/Redo are blocked until the editor is closed and the app has consumed
+its exact retained capture. Save/restore and unload all detach first; normal project save barriers
+still require their exact tagged state receipts. Unsupported editor actions do not fault an
+otherwise healthy plugin. Best-effort close remains available for a faulted instance.
+
+## Verification record (2026-10-09)
+
+- Stage-1 Python protocol/build-receipt/package regressions: 83 tests passed on Linux.
+- Stage-1 pure closed-state validation tests: 3 passed in a source-based standalone harness.
+- Linux native GUI gate: exit 77, **UNSUPPORTED / NOT VERIFIED**.
+- Windows GUI rendering, keyboard/mouse interaction, DPI, audio load and real-plugin compatibility:
+  **NOT VERIFIED** in this Linux environment. Windows MSVC cross-target checks verify types only.
+- Stage-2 final Cargo, fixture and Python results are recorded with the final review commit/report;
+  they must not be interpreted as interactive Windows acceptance.
+
+The production helper privately owns a duplicate protocol output handle before loading any plugin.
+Windows public Win32 stdout and CRT descriptor 1 are redirected to stderr (or NUL if no diagnostic
+handle exists), with initialization failure terminating the helper. The trusted fixture deliberately
+writes valid fake protocol responses through Rust stdout, direct Win32 output and CRT stdio. Its
+real Windows smoke requires all three to appear on stderr while protocol replies remain correct.
+Pure Python routing tests do not establish that the Windows handle routing executed.

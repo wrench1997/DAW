@@ -753,6 +753,8 @@ pub enum HostCommand {
     TakeParameterChanges,
     /// Drain ordered `IComponentHandler2` requests from the helper.
     TakeHostNotifications,
+    /// Read the loaded instance's non-draining native edit revision.
+    NativeDirtyRevision,
     /// Dispatch and drain owned VST3 data-exchange blocks from the helper.
     TakeDataExchangeBlocks,
     /// Execute an item from a pending plugin-provided context menu.
@@ -908,6 +910,11 @@ pub enum HostResponse {
         /// The queued host requests.
         notifications: Vec<crate::plugin::HostNotification>,
     },
+    /// Durable native edit evidence, independent of bounded feedback queues.
+    NativeDirtyRevision {
+        /// Monotonic revision within this loaded plugin instance.
+        revision: u64,
+    },
     /// Owned VST3 data-exchange blocks drained from the helper.
     DataExchangeBlocks {
         /// Block snapshots, in delivery order.
@@ -979,16 +986,17 @@ pub enum HostResponse {
 /// descriptor 1 at stderr, so plugin output is merged into the helper's stderr instead. Call
 /// it once, before any plugin code can run.
 ///
-/// On non-Unix platforms the protocol still runs over the process stdout; a plugin writing
-/// there corrupts the stream (the host drops lines it cannot parse, which limits the damage
-/// to noise, but a well-formed line would still be taken for a response).
+/// On Windows it retains a non-inheritable duplicate of the inherited output handle and
+/// redirects both Win32 stdout and the host CRT's descriptor 1 to stderr (or NUL). Failure to
+/// isolate either route terminates the helper before any plugin is loaded. This prevents
+/// ordinary plugin logging, including valid JSON, from becoming a protocol response.
 pub struct ProtocolChannel {
     inner: ProtocolChannelInner,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 type ProtocolChannelInner = std::fs::File;
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 type ProtocolChannelInner = std::io::Stdout;
 
 impl ProtocolChannel {
@@ -1030,7 +1038,129 @@ impl ProtocolChannel {
     }
 
     /// Claim the protocol channel for this process. See the type documentation.
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    pub fn claim() -> Self {
+        match Self::claim_windows() {
+            Ok(channel) => channel,
+            Err(error) => {
+                eprintln!("helper: could not isolate the protocol channel: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    fn claim_windows() -> std::io::Result<Self> {
+        use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, RawHandle};
+        use std::ptr::null_mut;
+
+        // Raw Kernel32 imports keep the pinned upstream dependency manifest unchanged.
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> RawHandle;
+            fn GetStdHandle(kind: u32) -> RawHandle;
+            fn SetStdHandle(kind: u32, handle: RawHandle) -> i32;
+            fn DuplicateHandle(
+                source_process: RawHandle,
+                source: RawHandle,
+                target_process: RawHandle,
+                target: *mut RawHandle,
+                access: u32,
+                inherit: i32,
+                options: u32,
+            ) -> i32;
+            fn CloseHandle(handle: RawHandle) -> i32;
+        }
+        const STD_OUTPUT_HANDLE: u32 = -11_i32 as u32;
+        const STD_ERROR_HANDLE: u32 = -12_i32 as u32;
+        const DUPLICATE_SAME_ACCESS: u32 = 2;
+        let valid = |handle: RawHandle| !handle.is_null() && handle as isize != -1;
+        let duplicate = |handle: RawHandle| -> std::io::Result<std::fs::File> {
+            let mut owned = null_mut();
+            // SAFETY: handles come from this process; the output is a new, non-inheritable
+            // handle with unchanged access. The File takes sole ownership of that duplicate.
+            unsafe {
+                let process = GetCurrentProcess();
+                if DuplicateHandle(
+                    process,
+                    handle,
+                    process,
+                    &mut owned,
+                    0,
+                    0,
+                    DUPLICATE_SAME_ACCESS,
+                ) == 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(std::fs::File::from_raw_handle(owned))
+            }
+        };
+
+        // SAFETY: std-handle queries do not transfer ownership.
+        let stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+        if !valid(stdout) {
+            return Err(std::io::Error::other(
+                "inherited stdout handle is unavailable",
+            ));
+        }
+        let private = duplicate(stdout)?;
+        let stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+        if stderr == stdout {
+            return Err(std::io::Error::other(
+                "stderr aliases the protocol output handle",
+            ));
+        }
+        let redirect = if valid(stderr) {
+            duplicate(stderr)?
+        } else {
+            std::fs::OpenOptions::new().write(true).open("NUL")?
+        };
+        // The CRT takes ownership only when _open_osfhandle succeeds. A fresh handle avoids
+        // accidentally closing stderr when _dup2 closes/replaces the old stdout descriptor.
+        let redirected_handle = redirect.into_raw_handle();
+        let old_crt_stdout = unsafe { libc::get_osfhandle(1) } as RawHandle;
+        let fd = unsafe {
+            libc::open_osfhandle(
+                redirected_handle as libc::intptr_t,
+                libc::O_WRONLY | libc::O_BINARY,
+            )
+        };
+        if fd < 0 {
+            unsafe {
+                drop(std::fs::File::from_raw_handle(redirected_handle));
+            }
+            return Err(std::io::Error::last_os_error());
+        }
+        if fd != 1 {
+            let result = unsafe { libc::dup2(fd, 1) };
+            unsafe {
+                libc::close(fd);
+            }
+            if result != 0 {
+                return Err(std::io::Error::other("could not redirect CRT stdout"));
+            }
+        }
+        let redirected_stdout = unsafe { libc::get_osfhandle(1) } as RawHandle;
+        if !valid(redirected_stdout)
+            || unsafe { SetStdHandle(STD_OUTPUT_HANDLE, redirected_stdout) } == 0
+        {
+            return Err(std::io::Error::other("could not redirect Win32 stdout"));
+        }
+        // _dup2 already closed the original when it belonged to descriptor 1. Otherwise
+        // remove that inherited alias explicitly, so pre-existing CRTs cannot keep writing
+        // through a cached old standard handle. No plugin has been loaded at this point.
+        if stdout != old_crt_stdout && stdout != stderr {
+            if unsafe { CloseHandle(stdout) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        debug_assert_ne!(private.as_raw_handle(), redirected_stdout);
+        Ok(Self { inner: private })
+    }
+
+    /// Claim the protocol channel on other, currently unsupported helper platforms.
+    #[cfg(not(any(unix, windows)))]
     pub fn claim() -> Self {
         Self {
             inner: std::io::stdout(),
@@ -2118,6 +2248,32 @@ mod wire_tests {
         {
             HostResponse::ParameterEdits { edits: back } => assert_eq!(back, edits),
             other => panic!("ParameterEdits round-trip changed the variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn native_dirty_revision_wire_is_nondraining_and_lossless() {
+        let command = serde_json::to_string(&HostCommand::NativeDirtyRevision).unwrap();
+        assert_eq!(command, r#""NativeDirtyRevision""#);
+        assert!(matches!(
+            serde_json::from_str::<HostCommand>(&command).unwrap(),
+            HostCommand::NativeDirtyRevision
+        ));
+        for revision in [0, 1, (1_u64 << 53) + 1, u64::MAX] {
+            let wire =
+                serde_json::to_string(&HostResponse::NativeDirtyRevision { revision }).unwrap();
+            match serde_json::from_str::<HostResponse>(&wire).unwrap() {
+                HostResponse::NativeDirtyRevision { revision: decoded } => {
+                    assert_eq!(decoded, revision)
+                }
+                other => panic!("wrong native revision response: {other:?}"),
+            }
+        }
+        for wire in [
+            r#"{"NativeDirtyRevision":{}}"#,
+            r#"{"NativeDirtyRevision":{"revision":-1}}"#,
+        ] {
+            assert!(serde_json::from_str::<HostResponse>(wire).is_err());
         }
     }
 

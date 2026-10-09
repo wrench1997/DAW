@@ -8,3 +8,5 @@ target/
 *.citrus
 rustup-init.exe
 
+
+/scripts/__pycache__/
