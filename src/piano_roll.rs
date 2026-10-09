@@ -1966,6 +1966,185 @@ pub fn clamp_group_velocity_delta(
     Ok(requested_delta.clamp(-minimum, 1.0 - maximum))
 }
 
+/// Immediate, channel-scoped melody edits. Time and pitch moves use one common
+/// bounded delta, preserving intervals even at the edges of the editor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PianoKeyboardEdit {
+    MoveSteps(i8),
+    Transpose(i16),
+    RepeatRight,
+    DiscardLengths,
+    QuickQuantize { starts_only: bool },
+}
+
+pub const MAX_PIANO_BEAT: f64 = 4096.0;
+
+/// Group expansion is channel-qualified and linear, including large selections.
+/// No selection in the active channel means all notes in that channel.
+pub fn piano_keyboard_targets(
+    notes: &[PianoNote],
+    selection: &HashSet<u64>,
+    channel_id: u32,
+    grouping: bool,
+) -> HashSet<u64> {
+    let selected = notes
+        .iter()
+        .filter(|n| n.channel_id == Some(channel_id) && selection.contains(&n.id));
+    let groups: HashSet<_> = if grouping {
+        selected.clone().filter_map(|n| n.group_id).collect()
+    } else {
+        HashSet::new()
+    };
+    let has_selection = selected.count() != 0;
+    notes
+        .iter()
+        .filter(|n| {
+            n.channel_id == Some(channel_id)
+                && (!has_selection
+                    || selection.contains(&n.id)
+                    || n.group_id.is_some_and(|g| groups.contains(&g)))
+        })
+        .map(|n| n.id)
+        .collect()
+}
+
+fn validate_keyboard_notes(
+    notes: &[PianoNote],
+    targets: &HashSet<u64>,
+) -> Result<(), PianoRollEditError> {
+    if notes.len() > MAX_TRANSFORM_NOTES {
+        return Err(PianoRollEditError::TransformTooLarge);
+    }
+    validate_group_edit_target(notes, targets)?;
+    for n in notes.iter().filter(|n| targets.contains(&n.id)) {
+        let end = f64::from(n.start) + f64::from(n.length);
+        if !n.start.is_finite()
+            || n.start < 0.0
+            || !n.length.is_finite()
+            || n.length < 0.01
+            || end > MAX_PIANO_BEAT
+            || n.note > 127
+            || !n.velocity.is_finite()
+            || !(0.0..=1.0).contains(&n.velocity)
+            || n.group_id == Some(0)
+        {
+            return Err(PianoRollEditError::InvalidNumber);
+        }
+    }
+    Ok(())
+}
+
+/// The caller supplies the maximum note ID across the entire project, so phrase
+/// copies cannot collide with another pattern. Inputs remain untouched on error.
+/// Repeat spacing is Citrus's explicit selected extent, not an undocumented FL
+/// bar-rounding approximation. A separate repeat time-range is not implemented.
+pub fn edit_piano_notes_from_keyboard(
+    notes: &[PianoNote],
+    targets: &HashSet<u64>,
+    edit: PianoKeyboardEdit,
+    snap: f32,
+    project_note_id_floor: u64,
+) -> Result<DuplicateNotesResult, PianoRollEditError> {
+    validate_keyboard_notes(notes, targets)?;
+    if targets.is_empty() {
+        return Ok(DuplicateNotesResult {
+            notes: notes.to_vec(),
+            selection_ids: targets.clone(),
+        });
+    }
+    if !matches!(edit, PianoKeyboardEdit::Transpose(_))
+        && (!snap.is_finite() || snap <= 0.0 || f64::from(snap) > MAX_PIANO_BEAT)
+    {
+        return Err(PianoRollEditError::InvalidSnap);
+    }
+    let origins: Vec<_> = notes
+        .iter()
+        .filter(|n| targets.contains(&n.id))
+        .cloned()
+        .collect();
+    let minimum_start = origins
+        .iter()
+        .map(|n| f64::from(n.start))
+        .reduce(f64::min)
+        .unwrap();
+    let maximum_end = origins
+        .iter()
+        .map(|n| f64::from(n.start) + f64::from(n.length))
+        .reduce(f64::max)
+        .unwrap();
+    let mut result = DuplicateNotesResult {
+        notes: notes.to_vec(),
+        selection_ids: targets.clone(),
+    };
+    match edit {
+        PianoKeyboardEdit::MoveSteps(steps) => {
+            // Round each endpoint constraint inward before choosing the shared
+            // delta. A direct f64 clamp followed by f32 rounding could otherwise
+            // turn e.g. a 0.15-beat note into a tiny 4096-beat overshoot.
+            let maximum_delta = origins
+                .iter()
+                .map(|n| {
+                    let limit = MAX_PIANO_BEAT - f64::from(n.length);
+                    let rounded = limit as f32;
+                    let safe_start = if f64::from(rounded) > limit {
+                        rounded.next_down()
+                    } else {
+                        rounded
+                    };
+                    f64::from(safe_start) - f64::from(n.start)
+                })
+                .reduce(f64::min)
+                .unwrap();
+            let delta = (f64::from(snap) * f64::from(steps)).clamp(-minimum_start, maximum_delta);
+            for n in result.notes.iter_mut().filter(|n| targets.contains(&n.id)) {
+                n.start = (f64::from(n.start) + delta) as f32;
+            }
+        }
+        PianoKeyboardEdit::Transpose(semitones) => {
+            let (_, delta) = clamp_group_move_delta(&origins, 0.0, semitones)?;
+            for n in result.notes.iter_mut().filter(|n| targets.contains(&n.id)) {
+                n.note = (i16::from(n.note) + delta) as u8;
+            }
+        }
+        PianoKeyboardEdit::RepeatRight => {
+            let delta = (maximum_end - minimum_start).max(f64::from(snap));
+            if maximum_end + delta > MAX_PIANO_BEAT {
+                return Err(PianoRollEditError::InvalidNumber);
+            }
+            if notes.len().saturating_add(targets.len()) > MAX_TRANSFORM_NOTES {
+                return Err(PianoRollEditError::TransformTooLarge);
+            }
+            result = if project_note_id_floor == 0 {
+                duplicate_selected_notes(notes, targets, delta as f32)?
+            } else {
+                duplicate_selected_notes_with_floor(
+                    notes,
+                    targets,
+                    delta as f32,
+                    project_note_id_floor,
+                )?
+            };
+            for (original, candidate) in notes.iter().zip(&mut result.notes) {
+                candidate.selected = original.selected;
+            }
+        }
+        PianoKeyboardEdit::DiscardLengths => {
+            for n in result.notes.iter_mut().filter(|n| targets.contains(&n.id)) {
+                n.length = snap.max(MIN_NOTE_LENGTH_BEATS);
+            }
+        }
+        PianoKeyboardEdit::QuickQuantize { starts_only } => {
+            let mut settings = QuantizeSettings::new(snap);
+            if starts_only {
+                settings.duration_mode = QuantizeDurationMode::LeaveDuration;
+            }
+            result.notes = quantize_notes(notes, targets, settings)?.notes;
+        }
+    }
+    validate_keyboard_notes(&result.notes, &result.selection_ids)?;
+    Ok(result)
+}
+
 /// Returns an all-or-none duplicated note set.
 ///
 /// Every selected note moves by the same positive delta. There is deliberately
@@ -1974,6 +2153,15 @@ pub fn duplicate_selected_notes(
     notes: &[PianoNote],
     selection_ids: &HashSet<u64>,
     delta: f32,
+) -> Result<DuplicateNotesResult, PianoRollEditError> {
+    duplicate_selected_notes_with_floor(notes, selection_ids, delta, 0)
+}
+
+fn duplicate_selected_notes_with_floor(
+    notes: &[PianoNote],
+    selection_ids: &HashSet<u64>,
+    delta: f32,
+    id_floor: u64,
 ) -> Result<DuplicateNotesResult, PianoRollEditError> {
     if !delta.is_finite() || delta <= 0.0 {
         return Err(PianoRollEditError::InvalidNumber);
@@ -1990,7 +2178,7 @@ pub fn duplicate_selected_notes(
     }
 
     let mut used = notes.iter().map(|note| note.id).collect::<HashSet<_>>();
-    let mut next_id = used.iter().copied().max().unwrap_or(0);
+    let mut next_id = used.iter().copied().max().unwrap_or(0).max(id_floor);
     let selected_group_counts = selected.iter().fold(BTreeMap::new(), |mut counts, note| {
         if let Some(group_id) = note.group_id {
             *counts.entry((note.channel_id, group_id)).or_insert(0_usize) += 1;
@@ -2885,6 +3073,267 @@ mod tests {
         assert_eq!(
             PianoRollState::from_preferences(invalid).preferences(),
             PianoRollPreferences::default()
+        );
+    }
+}
+
+#[cfg(test)]
+mod keyboard_edit_tests {
+    use super::*;
+
+    fn notes() -> Vec<PianoNote> {
+        [
+            (1, 1, 0.125, 0.625, 60),
+            (2, 1, 0.5, 0.25, 64),
+            (3, 2, 0.0, 0.25, 127),
+        ]
+        .into_iter()
+        .map(|(id, channel, start, length, pitch)| PianoNote {
+            id,
+            channel_id: Some(channel),
+            group_id: Some(7),
+            note: pitch,
+            start,
+            length,
+            velocity: 0.6,
+            selected: false,
+            muted: id == 2,
+        })
+        .collect()
+    }
+    fn run(
+        notes: &[PianoNote],
+        edit: PianoKeyboardEdit,
+    ) -> Result<DuplicateNotesResult, PianoRollEditError> {
+        edit_piano_notes_from_keyboard(notes, &HashSet::from([1, 2]), edit, 0.25, 100)
+    }
+    #[test]
+    fn keyboard_targets_are_active_channel_selected_or_all_and_group_qualified() {
+        let notes = notes();
+        for selection in [
+            HashSet::new(),
+            HashSet::from([1]),
+            HashSet::from([3]),
+            HashSet::from([99]),
+        ] {
+            assert_eq!(
+                piano_keyboard_targets(&notes, &selection, 1, true),
+                HashSet::from([1, 2])
+            );
+        }
+        assert_eq!(
+            piano_keyboard_targets(&notes, &HashSet::from([1, 3]), 1, false),
+            HashSet::from([1])
+        );
+        assert!(piano_keyboard_targets(&notes, &HashSet::new(), 999, true).is_empty());
+    }
+    #[test]
+    fn keyboard_moves_preserve_offsets_and_clamp_the_whole_phrase() {
+        let mut source = notes();
+        let result = run(&source, PianoKeyboardEdit::MoveSteps(-1)).unwrap();
+        assert_eq!((result.notes[0].start, result.notes[1].start), (0.0, 0.375));
+        assert_eq!(result.notes[2].start, source[2].start);
+        source[0].start = 4095.25;
+        source[1].start = 4095.625;
+        let result = run(&source, PianoKeyboardEdit::MoveSteps(1)).unwrap();
+        assert_eq!(
+            (result.notes[0].start, result.notes[1].start),
+            (4095.375, 4095.75)
+        );
+        assert_eq!(
+            serde_json::to_string(
+                &run(&result.notes, PianoKeyboardEdit::MoveSteps(1))
+                    .unwrap()
+                    .notes
+            )
+            .unwrap(),
+            serde_json::to_string(&result.notes).unwrap()
+        );
+    }
+    #[test]
+    fn keyboard_fractional_lengths_reach_representable_right_boundary() {
+        for length in [0.15, 0.2, 0.1, 0.01] {
+            let mut source = notes();
+            source[0].start = 4095.75;
+            source[0].length = length;
+            source[1].start = 4095.25;
+            source[1].length = length;
+            let moved = run(&source, PianoKeyboardEdit::MoveSteps(1)).unwrap();
+            assert!(moved.notes[0].start > source[0].start);
+            assert!(f64::from(moved.notes[0].start) + f64::from(length) <= MAX_PIANO_BEAT);
+            assert_eq!(
+                moved.notes[0].start - source[0].start,
+                moved.notes[1].start - source[1].start
+            );
+            let again = run(&moved.notes, PianoKeyboardEdit::MoveSteps(1)).unwrap();
+            assert_eq!(again.notes[0].start, moved.notes[0].start);
+            assert_eq!(again.notes[1].start, moved.notes[1].start);
+        }
+    }
+
+    #[test]
+    fn keyboard_transpose_is_chromatic_and_preserves_interval_at_both_pitch_edges() {
+        let mut source = notes();
+        source[0].note = 120;
+        source[1].note = 124;
+        let result = run(&source, PianoKeyboardEdit::Transpose(12)).unwrap();
+        assert_eq!((result.notes[0].note, result.notes[1].note), (123, 127));
+        source[0].note = 1;
+        source[1].note = 5;
+        let result = run(&source, PianoKeyboardEdit::Transpose(-12)).unwrap();
+        assert_eq!((result.notes[0].note, result.notes[1].note), (0, 4));
+        assert_eq!(result.notes[2].note, 127);
+        assert_eq!(result.notes[0].group_id, Some(7));
+    }
+    #[test]
+    fn keyboard_repeat_uses_extent_fresh_project_ids_and_is_chainable() {
+        let source = notes();
+        let first = run(&source, PianoKeyboardEdit::RepeatRight).unwrap();
+        assert_eq!(first.selection_ids, HashSet::from([101, 102]));
+        assert_eq!((first.notes[3].start, first.notes[4].start), (0.75, 1.125));
+        assert_ne!(first.notes[3].group_id, source[0].group_id);
+        assert_eq!(first.notes[3].group_id, first.notes[4].group_id);
+        assert!(first.notes[4].muted);
+        let second = edit_piano_notes_from_keyboard(
+            &first.notes,
+            &first.selection_ids,
+            PianoKeyboardEdit::RepeatRight,
+            0.25,
+            102,
+        )
+        .unwrap();
+        assert_eq!(
+            (second.notes[5].start, second.notes[6].start),
+            (1.375, 1.75)
+        );
+        assert_eq!(second.selection_ids, HashSet::from([103, 104]));
+    }
+    #[test]
+    fn keyboard_quantize_variants_and_discard_have_distinct_lengths() {
+        let source = notes();
+        let starts = run(
+            &source,
+            PianoKeyboardEdit::QuickQuantize { starts_only: true },
+        )
+        .unwrap();
+        let full = run(
+            &source,
+            PianoKeyboardEdit::QuickQuantize { starts_only: false },
+        )
+        .unwrap();
+        let discard = run(&source, PianoKeyboardEdit::DiscardLengths).unwrap();
+        assert_eq!(
+            (starts.notes[0].start, starts.notes[0].length),
+            (0.25, 0.625)
+        );
+        assert_eq!((full.notes[0].start, full.notes[0].length), (0.25, 0.75));
+        assert_eq!(
+            (discard.notes[0].start, discard.notes[0].length),
+            (0.125, 0.25)
+        );
+        assert_eq!(
+            serde_json::to_string(&discard.notes[2]).unwrap(),
+            serde_json::to_string(&source[2]).unwrap()
+        );
+    }
+    #[test]
+    fn keyboard_operations_reject_invalid_source_or_target_atomically() {
+        for damage in 0..9 {
+            let mut source = notes();
+            match damage {
+                0 => source[0].start = f32::NAN,
+                1 => source[0].start = -1.0,
+                2 => source[0].length = f32::INFINITY,
+                3 => source[0].length = 0.0,
+                4 => source[0].note = 128,
+                5 => source[0].velocity = f32::NAN,
+                6 => source[0].start = 4096.0,
+                7 => source[0].id = 2,
+                _ => source[0].group_id = Some(0),
+            }
+            assert!(
+                run(&source, PianoKeyboardEdit::Transpose(1)).is_err(),
+                "damage {damage}"
+            );
+        }
+        assert!(
+            edit_piano_notes_from_keyboard(
+                &notes(),
+                &HashSet::from([999]),
+                PianoKeyboardEdit::Transpose(1),
+                0.25,
+                100
+            )
+            .is_err()
+        );
+        for snap in [0.0, -1.0, f32::NAN, f32::INFINITY, 8192.0] {
+            assert!(
+                edit_piano_notes_from_keyboard(
+                    &notes(),
+                    &HashSet::from([1]),
+                    PianoKeyboardEdit::RepeatRight,
+                    snap,
+                    100
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn keyboard_repeat_and_length_edits_fail_closed_at_time_and_allocation_limits() {
+        let mut source = notes();
+        source[0].start = 4095.375;
+        assert!(run(&source, PianoKeyboardEdit::RepeatRight).is_err());
+        source[0].start = 4095.9;
+        source[0].length = 0.02;
+        assert!(run(&source, PianoKeyboardEdit::DiscardLengths).is_err());
+        assert!(
+            edit_piano_notes_from_keyboard(
+                &notes(),
+                &HashSet::from([1, 2]),
+                PianoKeyboardEdit::RepeatRight,
+                0.25,
+                u64::MAX
+            )
+            .is_err()
+        );
+        let mut source = notes();
+        source[0].group_id = Some(u64::MAX);
+        source[1].group_id = Some(u64::MAX);
+        assert!(run(&source, PianoKeyboardEdit::RepeatRight).is_err());
+    }
+    #[test]
+    fn keyboard_repeat_count_is_bounded_before_generating_notes() {
+        let mut source = Vec::new();
+        for id in 1..=MAX_TRANSFORM_NOTES {
+            source.push(PianoNote {
+                id: id as u64,
+                ..notes()[0].clone()
+            });
+        }
+        assert!(
+            edit_piano_notes_from_keyboard(
+                &source,
+                &HashSet::from([1]),
+                PianoKeyboardEdit::RepeatRight,
+                0.25,
+                MAX_TRANSFORM_NOTES as u64
+            )
+            .is_err()
+        );
+        let targets: HashSet<_> = source.iter().map(|n| n.id).collect();
+        assert_eq!(
+            edit_piano_notes_from_keyboard(
+                &source,
+                &targets,
+                PianoKeyboardEdit::Transpose(1),
+                0.25,
+                0
+            )
+            .unwrap()
+            .notes
+            .len(),
+            MAX_TRANSFORM_NOTES
         );
     }
 }

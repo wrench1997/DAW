@@ -4,6 +4,7 @@ mod headless_ui_capture;
 #[cfg(test)]
 mod headless_ui_tests;
 mod piano_clipboard;
+mod piano_shortcuts;
 mod project_media_ui;
 mod sample_browser_ui;
 mod workspace;
@@ -75,10 +76,10 @@ use crate::{
     },
     piano_roll::{
         ArpeggioDirection, ArpeggioSync, ArticulateSettings, ArticulationPreset, PianoChordStamp,
-        PianoRollPreferences, PianoRollState, PianoRollTool, PianoRollTransformKind,
-        PianoRollTransformSettings, PianoScale, QuantizeDurationMode, chord_stamp_pitches,
-        clamp_group_move_delta, clamp_group_resize_delta, clamp_group_velocity_delta,
-        duplicate_selected_notes, ensure_note_group_selected, expand_note_group_selection,
+        PianoKeyboardEdit, PianoRollPreferences, PianoRollState, PianoRollTool,
+        PianoRollTransformKind, PianoRollTransformSettings, PianoScale, QuantizeDurationMode,
+        chord_stamp_pitches, clamp_group_move_delta, clamp_group_resize_delta,
+        clamp_group_velocity_delta, ensure_note_group_selected, expand_note_group_selection,
         group_selected_notes, moved_note_start, note_group_members, pitch_class_in_scale,
         pitch_class_label, resized_note_length, select_note_group_members, snap_pitch_to_scale,
         stamp_chord_notes, toggle_note_group_selection, transform_piano_notes,
@@ -1728,6 +1729,8 @@ enum ShortcutModal {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ShortcutContext {
+    piano_active: bool,
+    macos: bool,
     text_editor_active: bool,
     popup_open: bool,
     blocking_layer: bool,
@@ -1807,10 +1810,14 @@ enum ShortcutKey {
     Num2,
     Num3,
     Num4,
+    ArrowLeft,
+    ArrowRight,
+    ArrowUp,
+    ArrowDown,
 }
 
 impl ShortcutKey {
-    const PRIORITY: [Self; 32] = [
+    const PRIORITY: [Self; 36] = [
         Self::S,
         Self::O,
         Self::N,
@@ -1843,6 +1850,10 @@ impl ShortcutKey {
         Self::Num3,
         Self::Num4,
         Self::Enter,
+        Self::ArrowLeft,
+        Self::ArrowRight,
+        Self::ArrowUp,
+        Self::ArrowDown,
     ];
 
     const fn index(self) -> usize {
@@ -1879,6 +1890,10 @@ impl ShortcutKey {
             Self::G => 29,
             Self::X => 30,
             Self::V => 31,
+            Self::ArrowLeft => 32,
+            Self::ArrowRight => 33,
+            Self::ArrowUp => 34,
+            Self::ArrowDown => 35,
         }
     }
 
@@ -1916,6 +1931,10 @@ impl ShortcutKey {
             egui::Key::Num2 => Some(Self::Num2),
             egui::Key::Num3 => Some(Self::Num3),
             egui::Key::Num4 => Some(Self::Num4),
+            egui::Key::ArrowLeft => Some(Self::ArrowLeft),
+            egui::Key::ArrowRight => Some(Self::ArrowRight),
+            egui::Key::ArrowUp => Some(Self::ArrowUp),
+            egui::Key::ArrowDown => Some(Self::ArrowDown),
             _ => None,
         }
     }
@@ -1927,9 +1946,15 @@ struct ShortcutChord {
     modifiers: ShortcutModifiers,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ShortcutPresses {
-    chords: [Option<ShortcutChord>; 32],
+    chords: [Option<ShortcutChord>; 36],
+}
+
+impl Default for ShortcutPresses {
+    fn default() -> Self {
+        Self { chords: [None; 36] }
+    }
 }
 
 impl ShortcutPresses {
@@ -1957,7 +1982,7 @@ impl ShortcutPresses {
             let egui::Event::Key {
                 key,
                 pressed: true,
-                repeat: false,
+                repeat,
                 modifiers,
                 ..
             } = event
@@ -1967,6 +1992,19 @@ impl ShortcutPresses {
             let Some(key) = ShortcutKey::from_egui(*key) else {
                 continue;
             };
+            // Only movement keys autorepeat. Each accepted frame is a complete
+            // undoable step; no held-key transaction can survive focus loss.
+            if *repeat
+                && !matches!(
+                    key,
+                    ShortcutKey::ArrowLeft
+                        | ShortcutKey::ArrowRight
+                        | ShortcutKey::ArrowUp
+                        | ShortcutKey::ArrowDown
+                )
+            {
+                continue;
+            }
             presses.insert(ShortcutChord {
                 key,
                 modifiers: ShortcutModifiers::from_egui(*modifiers),
@@ -2001,6 +2039,9 @@ enum ShortcutAction {
     Duplicate,
     Delete,
     SelectAllNotes,
+    DeselectNotes,
+    ToggleGhostNotes,
+    PianoEdit(PianoKeyboardEdit),
     CopyNotes,
     CutNotes,
     PasteNotes,
@@ -2057,6 +2098,50 @@ impl ShortcutPolicy {
         if self.context.text_editor_active || self.context.popup_open || self.context.blocking_layer
         {
             return None;
+        }
+        if self.context.piano_active {
+            let m = chord.modifiers;
+            let edit = match chord.key {
+                ShortcutKey::D if m.is_command_only() => {
+                    return Some(ShortcutAction::DeselectNotes);
+                }
+                ShortcutKey::V if m.is_alt_only() => return Some(ShortcutAction::ToggleGhostNotes),
+                ShortcutKey::B if m.is_command_only() => Some(PianoKeyboardEdit::RepeatRight),
+                ShortcutKey::D if m.is_shift_only() => Some(PianoKeyboardEdit::DiscardLengths),
+                ShortcutKey::ArrowLeft if m.is_shift_only() => {
+                    Some(PianoKeyboardEdit::MoveSteps(-1))
+                }
+                ShortcutKey::ArrowRight if m.is_shift_only() => {
+                    Some(PianoKeyboardEdit::MoveSteps(1))
+                }
+                ShortcutKey::ArrowUp if m.is_shift_only() => Some(PianoKeyboardEdit::Transpose(1)),
+                ShortcutKey::ArrowDown if m.is_shift_only() => {
+                    Some(PianoKeyboardEdit::Transpose(-1))
+                }
+                ShortcutKey::ArrowUp if m.is_command_only() => {
+                    Some(PianoKeyboardEdit::Transpose(12))
+                }
+                ShortcutKey::ArrowDown if m.is_command_only() => {
+                    Some(PianoKeyboardEdit::Transpose(-12))
+                }
+                ShortcutKey::Q if m.is_shift_only() => {
+                    Some(PianoKeyboardEdit::QuickQuantize { starts_only: true })
+                }
+                ShortcutKey::Q
+                    if (!self.context.macos && m.is_command_only())
+                        || (self.context.macos
+                            && m.command
+                            && m.alt
+                            && !m.shift
+                            && !m.non_command_control) =>
+                {
+                    Some(PianoKeyboardEdit::QuickQuantize { starts_only: false })
+                }
+                _ => None,
+            };
+            if let Some(edit) = edit {
+                return Some(ShortcutAction::PianoEdit(edit));
+            }
         }
         resolve_global_shortcut(chord)
     }
@@ -10664,24 +10749,7 @@ impl CitrusApp {
                     self.refresh_timeline_fingerprint(now, true);
                 }
             }
-            StudioView::PianoRoll => {
-                let notes = &self.project.active_pattern().notes;
-                let selection_ids = expand_note_group_selection(
-                    notes,
-                    &self.piano_roll_state.selection_ids,
-                    self.piano_roll_state.grouping_enabled,
-                );
-                if let Ok(candidate) = duplicate_selected_notes(
-                    notes,
-                    &selection_ids,
-                    self.piano_roll_state.local_snap.max(0.05),
-                ) {
-                    let mut project = self.project.clone();
-                    project.active_pattern_mut().notes = candidate.notes;
-                    self.commit_editor_project(project);
-                    self.piano_roll_state.selection_ids = candidate.selection_ids;
-                }
-            }
+            StudioView::PianoRoll => {} // Piano duplication uses the guarded Ctrl/Cmd+B path.
             StudioView::ChannelRack | StudioView::Mixer => {}
         }
     }
@@ -11862,6 +11930,9 @@ impl CitrusApp {
         blocker_at_frame_start: bool,
     ) -> ShortcutContext {
         ShortcutContext {
+            piano_active: self.workspace.focused == StudioView::PianoRoll
+                && self.workspace.windows[workspace::index(StudioView::PianoRoll)].visible,
+            macos: cfg!(target_os = "macos"),
             // A focused non-text widget must not permanently swallow Space.
             // Actual text/numeric editors and open popups still own keyboard
             // input so typing or choosing a menu item never starts transport.
@@ -11929,7 +12000,19 @@ impl CitrusApp {
         {
             return;
         }
+        if self.workspace.focused == StudioView::PianoRoll
+            && matches!(
+                action,
+                ShortcutAction::Duplicate | ShortcutAction::Delete | ShortcutAction::QuickLegato
+            )
+            && (!self.piano_clipboard_ready(ctx) || ctx.input(|i| i.pointer.any_down()))
+        {
+            return;
+        }
         match action {
+            ShortcutAction::DeselectNotes
+            | ShortcutAction::ToggleGhostNotes
+            | ShortcutAction::PianoEdit(_) => self.piano_immediate_action(ctx, action),
             ShortcutAction::TogglePlay => self.toggle_play(),
             ShortcutAction::ToggleTransportMode => self.toggle_transport_mode(),
             ShortcutAction::TogglePlaylistFades => {
@@ -14554,13 +14637,20 @@ impl CitrusApp {
                             self.redo();
                         }
                         ui.separator();
-                        if ui.button("Duplicate          Ctrl+D").clicked() {
+                        let piano = self.workspace.focused == StudioView::PianoRoll;
+                        if ui.button(if piano { "Duplicate right     Ctrl/Cmd+B" } else { "Duplicate          Ctrl+D" }).clicked() {
                             ui.close();
-                            self.duplicate_selection();
+                            if piano { self.piano_menu_action(ui.ctx(), ShortcutAction::PianoEdit(PianoKeyboardEdit::RepeatRight)); }
+                            else { self.duplicate_selection(); }
+                        }
+                        if piano && ui.button("Deselect notes      Ctrl/Cmd+D").clicked() {
+                            ui.close();
+                            self.piano_menu_action(ui.ctx(), ShortcutAction::DeselectNotes);
                         }
                         if ui.button("Delete             Del").clicked() {
                             ui.close();
-                            self.delete_selection();
+                            if piano { self.piano_menu_action(ui.ctx(), ShortcutAction::Delete); }
+                            else { self.apply_shortcut_action(ui.ctx(), ShortcutAction::Delete); }
                         }
                         ui.separator();
                         let piano = self.workspace.focused == StudioView::PianoRoll;
@@ -18315,6 +18405,7 @@ impl CitrusApp {
         let mut playlist_group_request = None;
         let mut playlist_crossfade_request = false;
         let mut piano_quick_legato_request = false;
+        let mut piano_immediate_request = None;
         egui::Frame::NONE
             .fill(theme::PANEL_ALT)
             .inner_margin(egui::Margin::symmetric(4, 1))
@@ -18388,6 +18479,21 @@ impl CitrusApp {
                                     piano_quick_legato_request = true;
                                     ui.close();
                                 }
+                                ui.separator();
+                                for (label, edit) in [
+                                    ("Duplicate right     Ctrl/Cmd+B", PianoKeyboardEdit::RepeatRight),
+                                    ("Discard lengths    Shift+D", PianoKeyboardEdit::DiscardLengths),
+                                    (if cfg!(target_os = "macos") { "Quick quantize     Opt+Cmd+Q" } else { "Quick quantize     Ctrl+Q" }, PianoKeyboardEdit::QuickQuantize { starts_only: false }),
+                                    ("Quantize starts     Shift+Q", PianoKeyboardEdit::QuickQuantize { starts_only: true }),
+                                ] {
+                                    if ui.button(label).clicked() {
+                                        piano_immediate_request = Some(ShortcutAction::PianoEdit(edit));
+                                        ui.close();
+                                    }
+                                }
+                                ui.label(RichText::new("Shift+arrows: snap step / semitone").size(10.0).color(theme::MUTED));
+                                ui.label(RichText::new("Ctrl/Cmd+Up/Down: octave").size(10.0).color(theme::MUTED));
+                                ui.label(RichText::new("Ctrl/Cmd+D: deselect · Alt+V: ghosts").size(10.0).color(theme::MUTED));
                                 ui.separator();
                                 for kind in PianoRollTransformKind::ALL {
                                     if ui
@@ -18543,7 +18649,10 @@ impl CitrusApp {
             self.begin_piano_roll_transform(kind);
         }
         if piano_quick_legato_request {
-            self.quick_legato_piano_roll();
+            self.piano_menu_action(ui.ctx(), ShortcutAction::QuickLegato);
+        }
+        if let Some(action) = piano_immediate_request {
+            self.piano_menu_action(ui.ctx(), action);
         }
         if let Some(group) = piano_group_request {
             if group {
@@ -20357,7 +20466,8 @@ impl CitrusApp {
                     });
             });
             ui.separator();
-            ui.toggle_value(&mut self.piano_roll_state.ghosts_visible, "GHOST NOTES");
+            ui.toggle_value(&mut self.piano_roll_state.ghosts_visible, "GHOST NOTES")
+                .on_hover_text("Show notes from other Channels — Alt+V");
         });
         if target_channel_changed {
             self.selected_channel = target_channel_index;

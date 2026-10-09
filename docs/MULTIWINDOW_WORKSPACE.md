@@ -33,7 +33,7 @@ workspace after viewport or side-panel changes. Layout changes don't dirty the
 musical project or add undo entries.
 
 There is one shortcut dispatch after all windows render. Supported editor-specific
-commands such as Delete, Ctrl+D, tool selection and grouping target only the active,
+commands such as Delete, Playlist Ctrl+D, Piano Ctrl/Cmd+B, tool selection and grouping target only the active,
 visible editor. Undo/Redo operate on the shared project. Switching, hiding or
 arranging editors commits the preceding edit boundary so quick cross-editor edits
 remain separate. Piano Delete/Duplicate are explicit undo transactions.
@@ -60,7 +60,7 @@ pointer and key events. Added regressions cover:
 - first-press resizing and pan-knob dragging in an unfocused Mixer;
 - saved geometry/focus/stacking round-trip, default migration and offscreen recovery;
 - actual z-order after maximize → editor switch → restore and after Arrange;
-- correctly routed Delete/Ctrl+D, shared Undo, independent Rack/Mixer edit boundaries;
+- correctly routed Delete/duplicate commands (Playlist Ctrl+D, Piano Ctrl/Cmd+B), shared Undo, independent Rack/Mixer edit boundaries;
 - real Rack step edits and simultaneous Piano target-channel presentation;
 - text-field isolation and unchanged unsupported non-Piano canvas clipboard chords;
 - Playlist/Piano body and note-edge drags interrupted by editor switches or dialogs;

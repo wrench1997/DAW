@@ -45,7 +45,11 @@ Useful shortcuts:
 - `F5`, `F6`, `F7`, `F9`: show and focus Playlist, Channel Rack, Piano Roll, and Mixer
 - `Ctrl+O`, `Ctrl+S`: open and save
 - `Ctrl+Z`, `Ctrl+Y`: undo and redo
-- `Ctrl+D`, `Delete`: duplicate and delete the current Playlist or Piano Roll selection
+- Playlist `Ctrl+D`: duplicate the selection; `Delete`: delete selected Playlist Clips or Piano notes
+- Piano `Ctrl/Cmd+D`: deselect; `Ctrl/Cmd+B`: repeat the selected phrase to its right (all active-Channel notes when none selected)
+- Piano `Shift+Left/Right`: move one Piano snap step; `Shift+Up/Down`: transpose one semitone; `Ctrl/Cmd+Up/Down`: transpose one octave
+- Piano `Shift+D`: discard lengths to Piano snap; `Ctrl+Q` (macOS `Opt+Cmd+Q`): quantize starts and durations; `Shift+Q`: quantize starts only; `Alt+V`: toggle ghost notes
+- These Piano melody operations use the selected notes/groups in the active Channel, or all notes in that Channel when none are selected. See [Piano keyboard editing](docs/PIANO_KEYBOARD_EDITING.md) for bounds and parity details.
 - `Ctrl+L`: apply Piano Roll Quick legato immediately
 - `Alt+Q`, `Alt+S`, `Alt+U`, `Alt+F`, `Alt+L`, `Alt+A`: Piano Roll Quantize, Strum, Chop, Flam, Articulate, and Arpeggiate
 - `Shift+G`, `Alt+G`: group and ungroup the selected Playlist Clips or Piano Roll notes

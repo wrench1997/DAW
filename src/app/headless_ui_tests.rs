@@ -1137,7 +1137,7 @@ fn floating_workspace_focus_routes_supported_edits_and_shared_undo_once() {
     assert!(ui.app.piano_roll_state.selection_ids.contains(&note_id));
 
     ui.key(egui::Key::F7, egui::Modifiers::NONE);
-    ui.key(egui::Key::D, command);
+    ui.key(egui::Key::B, command);
     assert_eq!(ui.app.project.active_pattern().notes.len(), notes + 1);
     assert_eq!(ui.app.project.clips.len(), clips);
     ui.key(egui::Key::Z, command);
@@ -2523,3 +2523,5 @@ fn compact_rack_retains_accessible_controls_and_scrolls_at_minimum_width() {
     );
     ui.capture("compact-rack-minimum");
 }
+
+include!("piano_keyboard_tests.rs");

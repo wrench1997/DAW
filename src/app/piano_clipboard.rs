@@ -253,11 +253,21 @@ fn paste_candidate(
 }
 
 impl CitrusApp {
-    fn piano_clipboard_ready(&self, ctx: &egui::Context) -> bool {
+    pub(super) fn piano_clipboard_ready(&self, ctx: &egui::Context) -> bool {
+        self.piano_editor_command_ready(ctx, false)
+    }
+
+    // Explicitly clicked menu commands own their popup. Raw keys and clipboard
+    // actions cannot bypass it; every other ownership/snapshot barrier is shared.
+    pub(super) fn piano_editor_command_ready(
+        &self,
+        ctx: &egui::Context,
+        menu_command: bool,
+    ) -> bool {
         self.workspace.focused == StudioView::PianoRoll
             && self.workspace.windows[workspace::index(StudioView::PianoRoll)].visible
             && !ctx.text_edit_focused()
-            && !ctx.any_popup_open()
+            && (menu_command || !ctx.any_popup_open())
             && !self.editor_pointer_gesture_active()
             && self.playlist_gesture_before.is_none()
             && self.piano_roll_gesture_before.is_none()
