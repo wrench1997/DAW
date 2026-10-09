@@ -8454,14 +8454,18 @@ impl CitrusApp {
         let command = if close {
             NativeEditorCommand::Close
         } else {
-            let Some((owner_window, owner_process)) = self.native_editor_owner else {
-                self.notify("Native VST3 editors require a Windows desktop; generic parameters remain available".into());
-                return;
+            let owner = if cfg!(target_os = "linux") {
+                // A Wayland DAW surface is not an X11 window ID. The helper owns a
+                // standalone plugin window on the desktop's X11/XWayland DISPLAY.
+                None
+            } else {
+                let Some(owner) = self.native_editor_owner else {
+                    self.notify("Native VST3 editors require a supported desktop; generic parameters remain available".into());
+                    return;
+                };
+                Some(owner)
             };
-            NativeEditorCommand::Open {
-                owner_window,
-                owner_process,
-            }
+            NativeEditorCommand::Open { owner }
         };
         let request_id = self.next_plugin_parameter_request_id.max(1);
         self.next_plugin_parameter_request_id = request_id.wrapping_add(1).max(1);

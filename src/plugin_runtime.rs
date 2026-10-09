@@ -258,8 +258,8 @@ impl MidiMessage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NativeEditorCommand {
     Open {
-        owner_window: u64,
-        owner_process: u32,
+        /// Windows logical HWND/PID; Linux uses a standalone helper window with no owner.
+        owner: Option<(u64, u32)>,
     },
     Focus,
     Close,
@@ -4918,14 +4918,8 @@ impl PluginBackend for Vst3Backend {
     fn native_editor(&mut self, command: NativeEditorCommand) -> Result<NativeEditorState, String> {
         use vst3_host::{IsolatedEditorCommand as Command, IsolatedEditorOwner};
         let command = match command {
-            NativeEditorCommand::Open {
-                owner_window,
-                owner_process,
-            } => Command::Open {
-                owner: Some(IsolatedEditorOwner {
-                    window: owner_window,
-                    process_id: owner_process,
-                }),
+            NativeEditorCommand::Open { owner } => Command::Open {
+                owner: owner.map(|(window, process_id)| IsolatedEditorOwner { window, process_id }),
             },
             NativeEditorCommand::Focus => Command::Focus,
             NativeEditorCommand::Close => Command::Close,
@@ -5279,8 +5273,7 @@ mod tests {
                 request_id: 7,
                 base_parameter_ids: vec![],
                 command: NativeEditorCommand::Open {
-                    owner_window: 123,
-                    owner_process: 456,
+                    owner: Some((123, 456)),
                 },
             },
             &mut slots,

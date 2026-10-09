@@ -253,6 +253,8 @@ pub struct PluginImpl {
 
     // VST3 module handle (kept alive). Declared after every plugin-side COM reference above so
     // those are released while the module's vtables still exist, and before `_host_app` below.
+    #[cfg(target_os = "linux")]
+    _factory: ComPtr<IPluginFactory>,
     _module: Box<dyn VstModule>,
 
     // Host application context passed to initialize() — kept alive for the plugin's lifetime
@@ -1260,6 +1262,8 @@ impl PluginImpl {
             // (whether via `InitializedComponent` or `Drop for PluginImpl`) must complete before
             // the module unmaps.
             log::debug!("Step 1: Loading VST3 module...");
+            #[cfg(target_os = "linux")]
+            let host_app = create_host_application();
             let module = load_module(path)?;
             log::debug!("VST3 module loaded successfully");
 
@@ -1281,7 +1285,10 @@ impl PluginImpl {
 
             // Factory3 must receive the host context before any class is instantiated. Keep the
             // same context alive for the complete component/controller lifetime.
+            #[cfg(not(target_os = "linux"))]
             let host_app = create_host_application();
+            #[cfg(target_os = "linux")]
+            let mut run_loop_cleanup = host_app.run_loop_cleanup();
             let host_ctx = host_app.to_com_ptr::<IHostApplication>();
             let context = host_ctx
                 .as_ref()
@@ -1560,6 +1567,8 @@ impl PluginImpl {
                 editor_resize,
                 #[cfg(target_os = "linux")]
                 run_loop,
+                #[cfg(target_os = "linux")]
+                _factory: factory,
                 _module: module,
                 _host_app: host_app,
                 control_thread: thread::current().id(),
@@ -1567,6 +1576,8 @@ impl PluginImpl {
             // From here on `plugin` owns the teardown: dropping it runs the same ordered
             // sequence the guard would.
             initialized.disarm();
+            #[cfg(target_os = "linux")]
+            run_loop_cleanup.disarm();
 
             // IMidiMapping and unit/program metadata are controller calls and therefore belong
             // here on the loading thread, never in process() or a playback command drain.
@@ -3078,6 +3089,15 @@ impl PluginInternal for PluginImpl {
             ));
         }
 
+        // Give each attachment a new frame/registry. Old retained frame pointers remain
+        // closed forever, so release callbacks cannot resurrect a removed view's handlers.
+        #[cfg(target_os = "linux")]
+        {
+            self.run_loop = Arc::new(Mutex::new(RunLoopRegistry::new()));
+            self.plug_frame =
+                create_host_plug_frame(self.editor_resize.clone(), self.run_loop.clone());
+        }
+
         if let Some(ref controller) = self.controller {
             unsafe {
                 // Create editor view
@@ -3189,59 +3209,25 @@ impl PluginInternal for PluginImpl {
         // `Plugin::service_run_loop` is public with no editor-open guard, a host driving it from
         // its frame loop would then dispatch straight into the removed view.
         #[cfg(target_os = "linux")]
-        if let Ok(mut reg) = self.run_loop.lock() {
-            reg.handlers.clear();
-            reg.timers.clear();
+        {
+            // Only the frame registry belongs to this view. Factory-context registrations
+            // remain live until plugin teardown and must continue to be serviced while closed.
+            let retired = self.run_loop.lock().ok().map(|mut reg| {
+                reg.closed = true;
+                (
+                    std::mem::take(&mut reg.handlers),
+                    std::mem::take(&mut reg.timers),
+                )
+            });
+            drop(retired);
         }
         close_error.map_or(Ok(()), Err)
     }
 
     #[cfg(target_os = "linux")]
     fn service_run_loop(&mut self) {
-        use vst3::Steinberg::Linux::{IEventHandlerTrait, ITimerHandlerTrait};
-
-        // Fire due timers. Snapshot the handlers, then invoke with the lock
-        // RELEASED: a callback may re-enter registerTimer/unregisterTimer
-        // (VSTGUI does), which takes the same lock.
-        let now = std::time::Instant::now();
-        let mut due = Vec::new();
-        if let Ok(mut reg) = self.run_loop.lock() {
-            for timer in reg.timers.iter_mut() {
-                if now >= timer.due {
-                    timer.due = now + std::time::Duration::from_millis(timer.interval_ms);
-                    due.push(timer.handler.clone());
-                }
-            }
-        }
-        for handler in due {
-            unsafe { handler.onTimer() };
-        }
-
-        // Poll registered fds (zero timeout - never blocks the UI thread)
-        // and notify ready ones. Same snapshot-then-invoke pattern.
-        let handlers: Vec<_> = match self.run_loop.lock() {
-            Ok(reg) => reg.handlers.clone(),
-            Err(_) => return,
-        };
-        if handlers.is_empty() {
-            return;
-        }
-        let mut fds: Vec<libc::pollfd> = handlers
-            .iter()
-            .map(|&(_, fd)| libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            })
-            .collect();
-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, 0) };
-        if ready > 0 {
-            for (pfd, (handler, fd)) in fds.iter().zip(handlers.iter()) {
-                if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
-                    unsafe { handler.onFDIsSet(*fd) };
-                }
-            }
-        }
+        self._host_app.service_run_loop();
+        super::com_implementations::service_linux_run_loop(&self.run_loop);
     }
 
     fn get_editor_size(&self) -> Result<(i32, i32)> {
@@ -4809,6 +4795,8 @@ impl Drop for PluginImpl {
                 self.connection.as_ref(),
             );
         }
+        #[cfg(target_os = "linux")]
+        self._host_app.clear_run_loop();
     }
 }
 

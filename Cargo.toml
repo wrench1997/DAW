@@ -14,7 +14,7 @@ required-features = ["vst3"]
 [features]
 default = ["vst2", "vst3"]
 vst2 = ["dep:vst"]
-vst3 = ["dep:vst3-host"]
+vst3 = ["dep:vst3-host", "dep:xcb"]
 
 [dependencies]
 anyhow = "1.0"
@@ -31,6 +31,9 @@ thiserror = "2.0"
 walkdir = "2.5"
 vst = { version = "0.4", optional = true }
 vst3-host = { version = "0.9", optional = true, default-features = false, features = ["cpal-backend", "process-isolation"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+xcb = { version = "1.7", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # Keep midir's default WinMM backend. In particular, do not enable its optional `winrt` feature.

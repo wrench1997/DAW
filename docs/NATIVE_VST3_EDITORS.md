@@ -1,4 +1,4 @@
-# Windows VST3 native editors
+# Native VST3 editors
 
 ## Implementation stages and current verification boundary
 
@@ -104,9 +104,10 @@ plugin downloads, commercial SDK agreements, or user computer access are require
 ## Stage 2: application controls and state safety
 
 The channel device inspector and mixer insert rows expose **EDITOR** (open/focus) and a close
-control. Capability comes from the actual worker/helper snapshot. On Linux the button is disabled,
-`open` and `supported` remain false, and `has_editor` still reflects plugin metadata. Generic
-parameters remain available. Native VST2 editors are not implemented.
+control. Capability comes from the actual worker/helper snapshot. Linux uses standalone X11 containers
+(including system XWayland) with `Open { owner: None }`; see [Linux lifecycle and acceptance](LINUX_VST3_EDITORS.md).
+Display/open failure remains explicit and generic parameters remain available. Native VST2
+editors are not implemented.
 
 Editor commands carry exact running endpoint/instance/slot identity and use the existing bounded
 worker admin queue. Per-slot control-only snapshots retain pending/completed commands, actual

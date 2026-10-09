@@ -473,3 +473,22 @@ Windows desktop acceptance. No publication was performed from this worktree.
 - New Windows CI remains required and native paint remains a failing gate. Linux native-editor and metronome implementations are separate approved/reviewed work and are not included here. No main merge, Release or binary artifact publication.
 
 - Final publication checks reject six receipt-corruption/source-binding/negative-erasure cases. A staged Git checkout with `core.autocrlf=true` / `core.eol=crlf` preserves all **91 QA files** byte-for-byte and passes both canonical inventories. Original captured log endings are preserved with a log-only `blank-at-eof` whitespace exemption; no measured byte is trimmed to satisfy a style check.
+## 2026-10-09 10:39 UTC — Linux standalone native VST3 functional preview
+
+- Integrated standalone X11 plugin windows compatible with system XWayland while retaining
+  the DAW's independent backend. Linux Open uses no owner; Windows HWND/PID checks remain.
+- Added bounded main-thread helper pumping, factory and per-attachment frame IRunLoop,
+  lifetime/reentry guards, WM_DELETE/focus-proxy XEmbed, resize and Xft.dpi handling.
+  Unix protocol claims now fail closed. Original upstream MIT bytes and exact patch pins
+  are preserved and reconstructed against the registry archive.
+- Production source gates passed: 1,131 all-feature app +21 helper tests, 1,127 no-default
+  app tests, both strict Clippy modes, Windows app/helper and fixture source checks,
+  seven run-loop +one claim unit regressions, four live protocol tests, 64 harness and
+  92 packaging tests. Actual source-built fixture mouse, key press/release, focus,
+  callback retirement, state restore, native close/reopen and crash lifecycle passed.
+- Genuine Surge and Stochas native UI edits survived fresh-instance state restoration.
+  Surge generated finite nonzero PCM while its UI was active and edited; native resize
+  caused a measured 346.9 ms request stall. This functional preview does not pass realtime
+  continuity, hardware-device or mixed Wayland/XWayland acceptance. No sanitizer run.
+- Exact executable identity and measured results: [Linux validation](LINUX_VST3_EDITOR_VALIDATION.md).
+  No publication or release was performed by this worker.

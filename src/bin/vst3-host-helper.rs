@@ -25,10 +25,12 @@
 //! On Windows, stdin reading/parsing alone runs on a bounded-queue worker. The main
 //! thread owns the native message pump, every plugin call, and every protocol reply.
 //! Window callbacks only record intent; editor lifecycle and resize calls happen after
-//! native dispatch returns. Other platforms retain the headless stdin loop.
+//! native dispatch returns. Linux uses the same ownership model with a standalone X11
+//! container (including system XWayland), XEmbed and factory/frame IRunLoop servicing.
+//! Other platforms retain the headless stdin loop.
 
 use std::io::Write;
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 use std::io::{self, BufRead};
 use std::sync::{Arc, Mutex};
 
@@ -38,6 +40,9 @@ use vst3_host::{
     process_isolation::{HostCommand, HostResponse, ProtocolChannel},
 };
 
+#[cfg(target_os = "linux")]
+#[path = "vst3_editor_linux/mod.rs"]
+mod linux;
 #[cfg(any(target_os = "windows", test))]
 #[path = "vst3_editor_windows/mod.rs"]
 mod windows;
@@ -66,7 +71,10 @@ fn main() {
     #[cfg(target_os = "windows")]
     windows::run(plugin, protocol);
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    linux::run(plugin, protocol);
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         // No UI run loop needed: process commands on this (main) thread directly.
         let mut protocol = protocol;
@@ -87,7 +95,7 @@ fn main() {
 }
 
 /// Parse one stdin line into a command, reporting (and skipping) blank/invalid lines.
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn parse_line(line: io::Result<String>, protocol: &mut ProtocolChannel) -> Option<HostCommand> {
     let line = match line {
         Ok(l) => l,
@@ -1008,7 +1016,7 @@ mod isolated_editor_tests {
     use vst3_host::IsolatedEditorCommand;
 
     #[test]
-    fn typed_editor_lifecycle_is_explicitly_unsupported_off_windows() {
+    fn generic_dispatch_never_claims_a_native_window() {
         let plugin = Arc::new(Mutex::new(None));
         let mut sample_rate = 44_100.0;
         for command in [

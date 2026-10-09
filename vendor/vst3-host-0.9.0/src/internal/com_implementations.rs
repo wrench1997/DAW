@@ -37,6 +37,8 @@ impl Default for ProgressState {
 pub struct HostApplication {
     progress: Mutex<ProgressState>,
     data_exchange: Arc<super::data_exchange::DataExchangeState>,
+    #[cfg(target_os = "linux")]
+    run_loop: Arc<Mutex<RunLoopRegistry>>,
 }
 
 impl Default for HostApplication {
@@ -44,11 +46,36 @@ impl Default for HostApplication {
         Self {
             progress: Mutex::new(ProgressState::default()),
             data_exchange: super::data_exchange::DataExchangeState::new(),
+            #[cfg(target_os = "linux")]
+            run_loop: Arc::new(Mutex::new(RunLoopRegistry::new())),
         }
     }
 }
 
 impl HostApplication {
+    #[cfg(target_os = "linux")]
+    pub fn service_run_loop(&self) {
+        service_linux_run_loop(&self.run_loop);
+    }
+    #[cfg(target_os = "linux")]
+    pub fn run_loop_cleanup(&self) -> RunLoopCleanup {
+        RunLoopCleanup {
+            registry: self.run_loop.clone(),
+            armed: true,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    pub fn clear_run_loop(&self) {
+        let retired = self.run_loop.lock().ok().map(|mut reg| {
+            reg.closed = true;
+            (
+                std::mem::take(&mut reg.handlers),
+                std::mem::take(&mut reg.timers),
+            )
+        });
+        drop(retired);
+    }
+
     pub fn take_progress_notifications(&self) -> Vec<crate::plugin::HostNotification> {
         let mut state = self
             .progress
@@ -90,6 +117,7 @@ impl HostApplication {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 impl Class for HostApplication {
     // The standard SDK host context implements both IHostApplication and
     // IPlugInterfaceSupport; plugins query the context for either.
@@ -98,6 +126,17 @@ impl Class for HostApplication {
         IPlugInterfaceSupport,
         IProgress,
         IDataExchangeHandler,
+    );
+}
+
+#[cfg(target_os = "linux")]
+impl Class for HostApplication {
+    type Interfaces = (
+        IHostApplication,
+        IPlugInterfaceSupport,
+        IProgress,
+        IDataExchangeHandler,
+        vst3::Steinberg::Linux::IRunLoop,
     );
 }
 
@@ -1158,15 +1197,19 @@ pub fn create_state_restore_stream(
 /// the plugin impl (servicing, driven by the host each UI frame).
 #[cfg(target_os = "linux")]
 pub struct RunLoopRegistry {
+    pub(super) closed: bool,
+    next_registration: u64,
     pub handlers: Vec<(
         vst3::ComPtr<vst3::Steinberg::Linux::IEventHandler>,
         vst3::Steinberg::Linux::FileDescriptor,
+        u64,
     )>,
     pub timers: Vec<RunLoopTimer>,
 }
 
 #[cfg(target_os = "linux")]
 pub struct RunLoopTimer {
+    pub registration: u64,
     pub handler: vst3::ComPtr<vst3::Steinberg::Linux::ITimerHandler>,
     pub interval_ms: u64,
     pub due: std::time::Instant,
@@ -1178,6 +1221,37 @@ impl RunLoopRegistry {
         Self {
             handlers: Vec::new(),
             timers: Vec::new(),
+            closed: false,
+            next_registration: 1,
+        }
+    }
+}
+
+/// Loading failure must release plugin callbacks before the module is unmapped. This guard
+/// is declared after the module/factory and disarmed only after PluginImpl owns teardown.
+#[cfg(target_os = "linux")]
+pub struct RunLoopCleanup {
+    registry: Arc<Mutex<RunLoopRegistry>>,
+    armed: bool,
+}
+#[cfg(target_os = "linux")]
+impl RunLoopCleanup {
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for RunLoopCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let retired = self.registry.lock().ok().map(|mut reg| {
+                reg.closed = true;
+                (
+                    std::mem::take(&mut reg.handlers),
+                    std::mem::take(&mut reg.timers),
+                )
+            });
+            drop(retired);
         }
     }
 }
@@ -1230,70 +1304,201 @@ impl Class for HostPlugFrame {
     type Interfaces = (IPlugFrame,);
 }
 
+// Registries are bounded and invoked only by the owning helper's main thread.
 #[cfg(target_os = "linux")]
-impl vst3::Steinberg::Linux::IRunLoopTrait for HostPlugFrame {
-    unsafe fn registerEventHandler(
-        &self,
-        handler: *mut vst3::Steinberg::Linux::IEventHandler,
-        fd: vst3::Steinberg::Linux::FileDescriptor,
-    ) -> tresult {
-        let Some(handler) = vst3::ComRef::from_raw(handler) else {
-            return kInvalidArgument;
-        };
-        match self.run_loop.lock() {
-            Ok(mut reg) => {
-                reg.handlers.push((handler.to_com_ptr(), fd));
+const MAX_RUN_LOOP_REGISTRATIONS: usize = 1024;
+
+#[cfg(target_os = "linux")]
+macro_rules! impl_linux_run_loop {
+    ($host:ty) => {
+        impl vst3::Steinberg::Linux::IRunLoopTrait for $host {
+            unsafe fn registerEventHandler(
+                &self,
+                handler: *mut vst3::Steinberg::Linux::IEventHandler,
+                fd: vst3::Steinberg::Linux::FileDescriptor,
+            ) -> tresult {
+                let Some(handler) = vst3::ComRef::from_raw(handler) else {
+                    return kInvalidArgument;
+                };
+                if fd < 0 {
+                    return kInvalidArgument;
+                }
+                match self.run_loop.lock() {
+                    Ok(mut reg) => {
+                        if reg.closed {
+                            return kResultFalse;
+                        }
+                        if reg
+                            .handlers
+                            .iter()
+                            .any(|(h, old_fd, _)| h.as_ptr() == handler.as_ptr() && *old_fd == fd)
+                        {
+                            return kResultFalse;
+                        }
+                        if reg.handlers.len() >= MAX_RUN_LOOP_REGISTRATIONS {
+                            return kOutOfMemory;
+                        }
+                        let registration = reg.next_registration;
+                        let Some(next) = registration.checked_add(1) else {
+                            return kInternalError;
+                        };
+                        reg.next_registration = next;
+                        reg.handlers.push((handler.to_com_ptr(), fd, registration));
+                        kResultOk
+                    }
+                    Err(_) => kInternalError,
+                }
+            }
+            unsafe fn unregisterEventHandler(
+                &self,
+                handler: *mut vst3::Steinberg::Linux::IEventHandler,
+            ) -> tresult {
+                if handler.is_null() {
+                    return kInvalidArgument;
+                }
+                let retired = match self.run_loop.lock() {
+                    Ok(mut reg) => {
+                        let (removed, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut reg.handlers)
+                            .into_iter()
+                            .partition(|(h, _, _)| h.as_ptr() == handler);
+                        reg.handlers = kept;
+                        removed
+                    }
+                    Err(_) => return kInternalError,
+                };
+                // Releasing plugin COM references can itself re-enter the registry.
+                drop(retired);
                 kResultOk
             }
-            Err(_) => kInternalError,
-        }
-    }
-
-    unsafe fn unregisterEventHandler(
-        &self,
-        handler: *mut vst3::Steinberg::Linux::IEventHandler,
-    ) -> tresult {
-        match self.run_loop.lock() {
-            Ok(mut reg) => {
-                reg.handlers.retain(|(h, _)| h.as_ptr() != handler);
+            unsafe fn registerTimer(
+                &self,
+                handler: *mut vst3::Steinberg::Linux::ITimerHandler,
+                milliseconds: vst3::Steinberg::Linux::TimerInterval,
+            ) -> tresult {
+                let Some(handler) = vst3::ComRef::from_raw(handler) else {
+                    return kInvalidArgument;
+                };
+                let interval_ms = milliseconds.max(1);
+                let Some(due) = std::time::Instant::now()
+                    .checked_add(std::time::Duration::from_millis(interval_ms))
+                else {
+                    return kInvalidArgument;
+                };
+                match self.run_loop.lock() {
+                    Ok(mut reg) => {
+                        if reg.closed {
+                            return kResultFalse;
+                        }
+                        if reg
+                            .timers
+                            .iter()
+                            .any(|timer| timer.handler.as_ptr() == handler.as_ptr())
+                        {
+                            return kResultFalse;
+                        }
+                        if reg.timers.len() >= MAX_RUN_LOOP_REGISTRATIONS {
+                            return kOutOfMemory;
+                        }
+                        let registration = reg.next_registration;
+                        let Some(next) = registration.checked_add(1) else {
+                            return kInternalError;
+                        };
+                        reg.next_registration = next;
+                        reg.timers.push(RunLoopTimer {
+                            handler: handler.to_com_ptr(),
+                            interval_ms,
+                            due,
+                            registration,
+                        });
+                        kResultOk
+                    }
+                    Err(_) => kInternalError,
+                }
+            }
+            unsafe fn unregisterTimer(
+                &self,
+                handler: *mut vst3::Steinberg::Linux::ITimerHandler,
+            ) -> tresult {
+                if handler.is_null() {
+                    return kInvalidArgument;
+                }
+                let retired = match self.run_loop.lock() {
+                    Ok(mut reg) => {
+                        let (removed, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut reg.timers)
+                            .into_iter()
+                            .partition(|t| t.handler.as_ptr() == handler);
+                        reg.timers = kept;
+                        removed
+                    }
+                    Err(_) => return kInternalError,
+                };
+                drop(retired);
                 kResultOk
             }
-            Err(_) => kInternalError,
+        }
+    };
+}
+#[cfg(target_os = "linux")]
+impl_linux_run_loop!(HostPlugFrame);
+#[cfg(target_os = "linux")]
+impl_linux_run_loop!(HostApplication);
+
+/// Snapshot under the registry lock, call with it released, and recheck membership before
+/// every callback. A callback may unregister itself or another due handler reentrantly.
+#[cfg(target_os = "linux")]
+pub(crate) fn service_linux_run_loop(registry: &Arc<Mutex<RunLoopRegistry>>) {
+    use vst3::Steinberg::Linux::{IEventHandlerTrait, ITimerHandlerTrait};
+    let now = std::time::Instant::now();
+    let mut due = Vec::new();
+    if let Ok(mut reg) = registry.lock() {
+        for timer in &mut reg.timers {
+            if now >= timer.due {
+                timer.due = now
+                    .checked_add(std::time::Duration::from_millis(timer.interval_ms))
+                    .unwrap_or(now);
+                due.push((timer.handler.clone(), timer.registration));
+            }
         }
     }
-
-    unsafe fn registerTimer(
-        &self,
-        handler: *mut vst3::Steinberg::Linux::ITimerHandler,
-        milliseconds: vst3::Steinberg::Linux::TimerInterval,
-    ) -> tresult {
-        let Some(handler) = vst3::ComRef::from_raw(handler) else {
-            return kInvalidArgument;
-        };
-        let interval_ms = milliseconds.max(1);
-        match self.run_loop.lock() {
-            Ok(mut reg) => {
-                reg.timers.push(RunLoopTimer {
-                    handler: handler.to_com_ptr(),
-                    interval_ms,
-                    due: std::time::Instant::now() + std::time::Duration::from_millis(interval_ms),
+    for (handler, registration) in due {
+        let registered = registry.lock().is_ok_and(|reg| {
+            reg.timers
+                .iter()
+                .any(|t| t.handler.as_ptr() == handler.as_ptr() && t.registration == registration)
+        });
+        if registered {
+            unsafe { handler.onTimer() };
+        }
+    }
+    let handlers = match registry.lock() {
+        Ok(reg) => reg.handlers.clone(),
+        Err(_) => return,
+    };
+    if handlers.is_empty() {
+        return;
+    }
+    let mut fds: Vec<libc::pollfd> = handlers
+        .iter()
+        .map(|(_, fd, _)| libc::pollfd {
+            fd: *fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, 0) } > 0 {
+        for (pfd, (handler, fd, registration)) in fds.iter().zip(&handlers) {
+            if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
+                let registered = registry.lock().is_ok_and(|reg| {
+                    reg.handlers.iter().any(|(h, registered_fd, current)| {
+                        h.as_ptr() == handler.as_ptr()
+                            && registered_fd == fd
+                            && current == registration
+                    })
                 });
-                kResultOk
+                if registered {
+                    unsafe { handler.onFDIsSet(*fd) };
+                }
             }
-            Err(_) => kInternalError,
-        }
-    }
-
-    unsafe fn unregisterTimer(
-        &self,
-        handler: *mut vst3::Steinberg::Linux::ITimerHandler,
-    ) -> tresult {
-        match self.run_loop.lock() {
-            Ok(mut reg) => {
-                reg.timers.retain(|t| t.handler.as_ptr() != handler);
-                kResultOk
-            }
-            Err(_) => kInternalError,
         }
     }
 }
@@ -4168,5 +4373,281 @@ mod output_event_loss_tests {
             assert_eq!(list.addEvent(std::ptr::null_mut()), kResultFalse);
         }
         assert!(list.take_loss());
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_run_loop_lifecycle_tests {
+    use super::*;
+    use vst3::Steinberg::Linux::*;
+
+    struct Probe {
+        registry: Arc<Mutex<RunLoopRegistry>>,
+        dropped: Arc<AtomicBool>,
+        hits: Arc<AtomicUsize>,
+    }
+    impl Class for Probe {
+        type Interfaces = (IEventHandler, ITimerHandler);
+    }
+    impl IEventHandlerTrait for Probe {
+        unsafe fn onFDIsSet(&self, _: FileDescriptor) {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    impl ITimerHandlerTrait for Probe {
+        unsafe fn onTimer(&self) {
+            assert!(self.registry.try_lock().is_ok());
+            self.hits.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            assert!(
+                self.registry.try_lock().is_ok(),
+                "plugin release under registry lock"
+            );
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+    fn probe(
+        registry: &Arc<Mutex<RunLoopRegistry>>,
+    ) -> (ComWrapper<Probe>, Arc<AtomicBool>, Arc<AtomicUsize>) {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let hits = Arc::new(AtomicUsize::new(0));
+        (
+            ComWrapper::new(Probe {
+                registry: registry.clone(),
+                dropped: dropped.clone(),
+                hits: hits.clone(),
+            }),
+            dropped,
+            hits,
+        )
+    }
+    #[test]
+    fn factory_context_exposes_a_separate_run_loop() {
+        let host = create_host_application();
+        let factory_loop = host
+            .to_com_ptr::<IHostApplication>()
+            .unwrap()
+            .cast::<IRunLoop>()
+            .expect("Factory3 context must expose IRunLoop");
+        let frame_registry = Arc::new(Mutex::new(RunLoopRegistry::new()));
+        let frame = ComWrapper::new(HostPlugFrame::new(
+            Arc::new(Mutex::new(None)),
+            frame_registry.clone(),
+        ));
+        let frame_loop = frame
+            .to_com_ptr::<IPlugFrame>()
+            .unwrap()
+            .cast::<IRunLoop>()
+            .unwrap();
+        let (wrapper, dropped, hits) = probe(&host.run_loop);
+        let timer = wrapper.to_com_ptr::<ITimerHandler>().unwrap();
+        drop(wrapper);
+        unsafe {
+            assert_eq!(factory_loop.registerTimer(timer.as_ptr(), 1), kResultOk);
+            assert_eq!(frame_loop.unregisterTimer(timer.as_ptr()), kResultOk);
+        }
+        host.run_loop.lock().unwrap().timers[0].due = std::time::Instant::now();
+        host.service_run_loop();
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert!(frame_registry.lock().unwrap().timers.is_empty());
+        host.clear_run_loop();
+        unsafe {
+            assert_eq!(factory_loop.registerTimer(timer.as_ptr(), 1), kResultFalse);
+        }
+        drop(timer);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+    #[test]
+    fn unregister_releases_last_reference_outside_lock() {
+        let registry = Arc::new(Mutex::new(RunLoopRegistry::new()));
+        let frame = HostPlugFrame::new(Arc::new(Mutex::new(None)), registry.clone());
+        let (event, dropped, _) = probe(&registry);
+        let raw = event.as_com_ref::<IEventHandler>().unwrap().as_ptr();
+        unsafe {
+            assert_eq!(frame.registerEventHandler(raw, 7), kResultOk);
+            assert_eq!(frame.registerEventHandler(raw, 7), kResultFalse);
+            assert_eq!(frame.registerEventHandler(raw, -1), kInvalidArgument);
+        }
+        drop(event);
+        assert!(!dropped.load(Ordering::SeqCst));
+        unsafe {
+            assert_eq!(frame.unregisterEventHandler(raw), kResultOk);
+        }
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+    #[test]
+    fn loading_failure_cleanup_releases_callbacks_before_unmap() {
+        let host = create_host_application();
+        let guard = host.run_loop_cleanup();
+        let (timer, dropped, _) = probe(&host.run_loop);
+        let raw = timer.as_com_ref::<ITimerHandler>().unwrap().as_ptr();
+        unsafe {
+            assert_eq!(host.registerTimer(raw, 0), kResultOk);
+            assert_eq!(host.registerTimer(raw, 16), kResultFalse);
+        }
+        drop(timer);
+        drop(guard);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(host.run_loop.lock().unwrap().closed);
+    }
+    #[test]
+    fn fd_callbacks_are_nonblocking_and_registration_is_bounded() {
+        use std::io::Write;
+        use std::os::fd::AsRawFd;
+        let registry = Arc::new(Mutex::new(RunLoopRegistry::new()));
+        let frame = HostPlugFrame::new(Arc::new(Mutex::new(None)), registry.clone());
+        let (event, _, hits) = probe(&registry);
+        let raw = event.as_com_ref::<IEventHandler>().unwrap().as_ptr();
+        let (read, mut write) = std::os::unix::net::UnixStream::pair().unwrap();
+        unsafe {
+            assert_eq!(frame.registerEventHandler(raw, read.as_raw_fd()), kResultOk);
+        }
+        service_linux_run_loop(&registry);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+        write.write_all(&[42]).unwrap();
+        service_linux_run_loop(&registry);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        unsafe {
+            assert_eq!(frame.unregisterEventHandler(raw), kResultOk);
+        }
+        for fd in 0..MAX_RUN_LOOP_REGISTRATIONS as i32 {
+            unsafe {
+                assert_eq!(frame.registerEventHandler(raw, fd), kResultOk);
+            }
+        }
+        unsafe {
+            assert_eq!(
+                frame.registerEventHandler(raw, MAX_RUN_LOOP_REGISTRATIONS as i32),
+                kOutOfMemory
+            );
+            assert_eq!(frame.unregisterEventHandler(raw), kResultOk);
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_run_loop_epoch_tests {
+    use super::*;
+    use vst3::Steinberg::Linux::*;
+    struct Timer {
+        hits: Arc<AtomicUsize>,
+    }
+    impl Class for Timer {
+        type Interfaces = (ITimerHandler,);
+    }
+    impl ITimerHandlerTrait for Timer {
+        unsafe fn onTimer(&self) {
+            self.hits.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    struct ReRegister {
+        frame: HostPlugFrame,
+        other: ComPtr<ITimerHandler>,
+    }
+    impl Class for ReRegister {
+        type Interfaces = (ITimerHandler,);
+    }
+    impl ITimerHandlerTrait for ReRegister {
+        unsafe fn onTimer(&self) {
+            self.frame.unregisterTimer(self.other.as_ptr());
+            assert_eq!(
+                self.frame.registerTimer(self.other.as_ptr(), 60_000),
+                kResultOk
+            );
+        }
+    }
+    #[test]
+    fn reregistered_due_timer_does_not_receive_old_dispatch() {
+        let registry = Arc::new(Mutex::new(RunLoopRegistry::new()));
+        let frame = HostPlugFrame::new(Arc::new(Mutex::new(None)), registry.clone());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let other = ComWrapper::new(Timer { hits: hits.clone() })
+            .to_com_ptr::<ITimerHandler>()
+            .unwrap();
+        let first = ComWrapper::new(ReRegister {
+            frame: HostPlugFrame::new(Arc::new(Mutex::new(None)), registry.clone()),
+            other: other.clone(),
+        })
+        .to_com_ptr::<ITimerHandler>()
+        .unwrap();
+        unsafe {
+            assert_eq!(frame.registerTimer(first.as_ptr(), 1), kResultOk);
+            assert_eq!(frame.registerTimer(other.as_ptr(), 1), kResultOk);
+        }
+        for timer in &mut registry.lock().unwrap().timers {
+            timer.due = std::time::Instant::now();
+        }
+        service_linux_run_loop(&registry);
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "old snapshot dispatched a newly registered timer early"
+        );
+        unsafe {
+            frame.unregisterTimer(first.as_ptr());
+            frame.unregisterTimer(other.as_ptr());
+        }
+    }
+    struct ReRegisterOnDrop {
+        frame: HostPlugFrame,
+        other: ComPtr<ITimerHandler>,
+        result: Arc<AtomicI32>,
+    }
+    impl Class for ReRegisterOnDrop {
+        type Interfaces = (ITimerHandler,);
+    }
+    impl ITimerHandlerTrait for ReRegisterOnDrop {
+        unsafe fn onTimer(&self) {}
+    }
+    impl Drop for ReRegisterOnDrop {
+        fn drop(&mut self) {
+            self.result.store(
+                unsafe { self.frame.registerTimer(self.other.as_ptr(), 1) },
+                Ordering::SeqCst,
+            );
+        }
+    }
+    #[test]
+    fn closed_registry_cannot_be_resurrected_by_release_callback() {
+        let host = create_host_application();
+        let result = Arc::new(AtomicI32::new(kInternalError));
+        let other = ComWrapper::new(Timer {
+            hits: Arc::new(AtomicUsize::new(0)),
+        })
+        .to_com_ptr::<ITimerHandler>()
+        .unwrap();
+        let object = ComWrapper::new(ReRegisterOnDrop {
+            frame: HostPlugFrame::new(Arc::new(Mutex::new(None)), host.run_loop.clone()),
+            other,
+            result: result.clone(),
+        });
+        unsafe {
+            assert_eq!(
+                host.registerTimer(object.as_com_ref::<ITimerHandler>().unwrap().as_ptr(), 1),
+                kResultOk
+            );
+        }
+        drop(object);
+        host.clear_run_loop();
+        assert_eq!(result.load(Ordering::SeqCst), kResultFalse);
+        assert!(host.run_loop.lock().unwrap().timers.is_empty());
+    }
+    #[test]
+    fn registration_identity_exhaustion_is_explicit() {
+        let registry = Arc::new(Mutex::new(RunLoopRegistry::new()));
+        registry.lock().unwrap().next_registration = u64::MAX;
+        let frame = HostPlugFrame::new(Arc::new(Mutex::new(None)), registry.clone());
+        let timer = ComWrapper::new(Timer {
+            hits: Arc::new(AtomicUsize::new(0)),
+        })
+        .to_com_ptr::<ITimerHandler>()
+        .unwrap();
+        unsafe {
+            assert_eq!(frame.registerTimer(timer.as_ptr(), 1), kInternalError);
+        }
+        assert!(registry.lock().unwrap().timers.is_empty());
     }
 }

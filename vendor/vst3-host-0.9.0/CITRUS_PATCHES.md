@@ -126,3 +126,28 @@ original LICENSE, `.cargo_vcs_info.json`, package version, and registry checksum
 Finally review the changes and update the explicitly pinned manifest/patch SHA-256 values in
 `scripts/package_windows_preview.py` and its packaging regression test. Those pins deliberately
 require a fresh source review when this extension changes.
+
+## Linux standalone native-editor extension
+
+The production helper now also implements standalone X11 plugin windows usable through the
+session's system XWayland server. Linux uses `Open { owner: None }`; Windows HWND/PID validation
+is unchanged. No compositor is spawned and no Wayland parent handle is reinterpreted as X11.
+See `docs/LINUX_VST3_EDITORS.md` for the window, focus, DPI and validation boundaries.
+
+- `com_implementations.rs` exposes Linux `IRunLoop` from both the factory host context and
+  each attachment's plug frame. Bounded registries use unique registration tokens to reject
+  stale readiness/timer snapshots after callback reentry. COM references are released outside
+  registry locks. Closing a registry permanently rejects reentrant registration; reopening an
+  editor creates a fresh frame registry. Factory callbacks continue while its editor is closed.
+- `plugin_impl.rs` retains the factory through plugin teardown, while keeping the host context
+  alive through module unload. Failure guards close registrations before unloading a partially
+  loaded module. Normal teardown closes factory registrations before module unload; retired frame
+  callbacks cannot run after detach. Factory and frame callbacks are serviced on the helper main
+  thread, including idle periods with no stdin traffic.
+- `process_isolation.rs` now fails closed on Unix protocol descriptor isolation errors. A private
+  close-on-exec descriptor is required, stdout redirection is checked, and absent or protocol-
+  aliasing stderr is replaced with a valid `/dev/null` diagnostic sink before plugin loading.
+
+Focused Linux regressions exercise callback reentry, registration identity, closed-registry
+resurrection, descriptor/timer bounds, factory/frame separation and failed protocol claims.
+They do not establish mixed Wayland/XWayland runtime acceptance or sanitizer coverage.

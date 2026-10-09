@@ -92,6 +92,13 @@ retesting the final integrated production helper. The tested source and binary
 hashes must accompany any result; no third-party binaries or plugin assets belong
 in the application release or source receipt package.
 
+## Current component results
+
+See [the exact production-helper validation](LINUX_VST3_EDITOR_VALIDATION.md).
+Native fixture and genuine Surge/Stochas UI/state checks passed on an existing X11
+desktop. Continuous Surge PCM remained finite, but native resize caused a measured
+346.9 ms request stall. This is a functional preview, not realtime-continuity acceptance.
+
 ## References
 
 - [Steinberg Linux run-loop contract](https://steinbergmedia.github.io/vst3_dev_portal/pages/Technical%2BDocumentation/Provide%2BA%2BRunloop%2BOn%2BLinux/Index.html)

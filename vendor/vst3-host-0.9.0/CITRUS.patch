@@ -98,7 +98,397 @@
          HostCommand::Shutdown => HostResponse::Success {
 --- a/src/internal/com_implementations.rs
 +++ b/src/internal/com_implementations.rs
-@@ -1646,6 +1646,12 @@
+@@ -37,6 +37,8 @@
+ pub struct HostApplication {
+     progress: Mutex<ProgressState>,
+     data_exchange: Arc<super::data_exchange::DataExchangeState>,
++    #[cfg(target_os = "linux")]
++    run_loop: Arc<Mutex<RunLoopRegistry>>,
+ }
+ 
+ impl Default for HostApplication {
+@@ -44,11 +46,36 @@
+         Self {
+             progress: Mutex::new(ProgressState::default()),
+             data_exchange: super::data_exchange::DataExchangeState::new(),
++            #[cfg(target_os = "linux")]
++            run_loop: Arc::new(Mutex::new(RunLoopRegistry::new())),
+         }
+     }
+ }
+ 
+ impl HostApplication {
++    #[cfg(target_os = "linux")]
++    pub fn service_run_loop(&self) {
++        service_linux_run_loop(&self.run_loop);
++    }
++    #[cfg(target_os = "linux")]
++    pub fn run_loop_cleanup(&self) -> RunLoopCleanup {
++        RunLoopCleanup {
++            registry: self.run_loop.clone(),
++            armed: true,
++        }
++    }
++    #[cfg(target_os = "linux")]
++    pub fn clear_run_loop(&self) {
++        let retired = self.run_loop.lock().ok().map(|mut reg| {
++            reg.closed = true;
++            (
++                std::mem::take(&mut reg.handlers),
++                std::mem::take(&mut reg.timers),
++            )
++        });
++        drop(retired);
++    }
++
+     pub fn take_progress_notifications(&self) -> Vec<crate::plugin::HostNotification> {
+         let mut state = self
+             .progress
+@@ -90,6 +117,7 @@
+     }
+ }
+ 
++#[cfg(not(target_os = "linux"))]
+ impl Class for HostApplication {
+     // The standard SDK host context implements both IHostApplication and
+     // IPlugInterfaceSupport; plugins query the context for either.
+@@ -98,6 +126,17 @@
+         IPlugInterfaceSupport,
+         IProgress,
+         IDataExchangeHandler,
++    );
++}
++
++#[cfg(target_os = "linux")]
++impl Class for HostApplication {
++    type Interfaces = (
++        IHostApplication,
++        IPlugInterfaceSupport,
++        IProgress,
++        IDataExchangeHandler,
++        vst3::Steinberg::Linux::IRunLoop,
+     );
+ }
+ 
+@@ -1158,15 +1197,19 @@
+ /// the plugin impl (servicing, driven by the host each UI frame).
+ #[cfg(target_os = "linux")]
+ pub struct RunLoopRegistry {
++    pub(super) closed: bool,
++    next_registration: u64,
+     pub handlers: Vec<(
+         vst3::ComPtr<vst3::Steinberg::Linux::IEventHandler>,
+         vst3::Steinberg::Linux::FileDescriptor,
++        u64,
+     )>,
+     pub timers: Vec<RunLoopTimer>,
+ }
+ 
+ #[cfg(target_os = "linux")]
+ pub struct RunLoopTimer {
++    pub registration: u64,
+     pub handler: vst3::ComPtr<vst3::Steinberg::Linux::ITimerHandler>,
+     pub interval_ms: u64,
+     pub due: std::time::Instant,
+@@ -1178,6 +1221,37 @@
+         Self {
+             handlers: Vec::new(),
+             timers: Vec::new(),
++            closed: false,
++            next_registration: 1,
++        }
++    }
++}
++
++/// Loading failure must release plugin callbacks before the module is unmapped. This guard
++/// is declared after the module/factory and disarmed only after PluginImpl owns teardown.
++#[cfg(target_os = "linux")]
++pub struct RunLoopCleanup {
++    registry: Arc<Mutex<RunLoopRegistry>>,
++    armed: bool,
++}
++#[cfg(target_os = "linux")]
++impl RunLoopCleanup {
++    pub fn disarm(&mut self) {
++        self.armed = false;
++    }
++}
++#[cfg(target_os = "linux")]
++impl Drop for RunLoopCleanup {
++    fn drop(&mut self) {
++        if self.armed {
++            let retired = self.registry.lock().ok().map(|mut reg| {
++                reg.closed = true;
++                (
++                    std::mem::take(&mut reg.handlers),
++                    std::mem::take(&mut reg.timers),
++                )
++            });
++            drop(retired);
+         }
+     }
+ }
+@@ -1230,70 +1304,201 @@
+     type Interfaces = (IPlugFrame,);
+ }
+ 
++// Registries are bounded and invoked only by the owning helper's main thread.
+ #[cfg(target_os = "linux")]
+-impl vst3::Steinberg::Linux::IRunLoopTrait for HostPlugFrame {
+-    unsafe fn registerEventHandler(
+-        &self,
+-        handler: *mut vst3::Steinberg::Linux::IEventHandler,
+-        fd: vst3::Steinberg::Linux::FileDescriptor,
+-    ) -> tresult {
+-        let Some(handler) = vst3::ComRef::from_raw(handler) else {
+-            return kInvalidArgument;
+-        };
+-        match self.run_loop.lock() {
+-            Ok(mut reg) => {
+-                reg.handlers.push((handler.to_com_ptr(), fd));
++const MAX_RUN_LOOP_REGISTRATIONS: usize = 1024;
++
++#[cfg(target_os = "linux")]
++macro_rules! impl_linux_run_loop {
++    ($host:ty) => {
++        impl vst3::Steinberg::Linux::IRunLoopTrait for $host {
++            unsafe fn registerEventHandler(
++                &self,
++                handler: *mut vst3::Steinberg::Linux::IEventHandler,
++                fd: vst3::Steinberg::Linux::FileDescriptor,
++            ) -> tresult {
++                let Some(handler) = vst3::ComRef::from_raw(handler) else {
++                    return kInvalidArgument;
++                };
++                if fd < 0 {
++                    return kInvalidArgument;
++                }
++                match self.run_loop.lock() {
++                    Ok(mut reg) => {
++                        if reg.closed {
++                            return kResultFalse;
++                        }
++                        if reg
++                            .handlers
++                            .iter()
++                            .any(|(h, old_fd, _)| h.as_ptr() == handler.as_ptr() && *old_fd == fd)
++                        {
++                            return kResultFalse;
++                        }
++                        if reg.handlers.len() >= MAX_RUN_LOOP_REGISTRATIONS {
++                            return kOutOfMemory;
++                        }
++                        let registration = reg.next_registration;
++                        let Some(next) = registration.checked_add(1) else {
++                            return kInternalError;
++                        };
++                        reg.next_registration = next;
++                        reg.handlers.push((handler.to_com_ptr(), fd, registration));
++                        kResultOk
++                    }
++                    Err(_) => kInternalError,
++                }
++            }
++            unsafe fn unregisterEventHandler(
++                &self,
++                handler: *mut vst3::Steinberg::Linux::IEventHandler,
++            ) -> tresult {
++                if handler.is_null() {
++                    return kInvalidArgument;
++                }
++                let retired = match self.run_loop.lock() {
++                    Ok(mut reg) => {
++                        let (removed, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut reg.handlers)
++                            .into_iter()
++                            .partition(|(h, _, _)| h.as_ptr() == handler);
++                        reg.handlers = kept;
++                        removed
++                    }
++                    Err(_) => return kInternalError,
++                };
++                // Releasing plugin COM references can itself re-enter the registry.
++                drop(retired);
+                 kResultOk
+             }
+-            Err(_) => kInternalError,
+-        }
+-    }
+-
+-    unsafe fn unregisterEventHandler(
+-        &self,
+-        handler: *mut vst3::Steinberg::Linux::IEventHandler,
+-    ) -> tresult {
+-        match self.run_loop.lock() {
+-            Ok(mut reg) => {
+-                reg.handlers.retain(|(h, _)| h.as_ptr() != handler);
++            unsafe fn registerTimer(
++                &self,
++                handler: *mut vst3::Steinberg::Linux::ITimerHandler,
++                milliseconds: vst3::Steinberg::Linux::TimerInterval,
++            ) -> tresult {
++                let Some(handler) = vst3::ComRef::from_raw(handler) else {
++                    return kInvalidArgument;
++                };
++                let interval_ms = milliseconds.max(1);
++                let Some(due) = std::time::Instant::now()
++                    .checked_add(std::time::Duration::from_millis(interval_ms))
++                else {
++                    return kInvalidArgument;
++                };
++                match self.run_loop.lock() {
++                    Ok(mut reg) => {
++                        if reg.closed {
++                            return kResultFalse;
++                        }
++                        if reg
++                            .timers
++                            .iter()
++                            .any(|timer| timer.handler.as_ptr() == handler.as_ptr())
++                        {
++                            return kResultFalse;
++                        }
++                        if reg.timers.len() >= MAX_RUN_LOOP_REGISTRATIONS {
++                            return kOutOfMemory;
++                        }
++                        let registration = reg.next_registration;
++                        let Some(next) = registration.checked_add(1) else {
++                            return kInternalError;
++                        };
++                        reg.next_registration = next;
++                        reg.timers.push(RunLoopTimer {
++                            handler: handler.to_com_ptr(),
++                            interval_ms,
++                            due,
++                            registration,
++                        });
++                        kResultOk
++                    }
++                    Err(_) => kInternalError,
++                }
++            }
++            unsafe fn unregisterTimer(
++                &self,
++                handler: *mut vst3::Steinberg::Linux::ITimerHandler,
++            ) -> tresult {
++                if handler.is_null() {
++                    return kInvalidArgument;
++                }
++                let retired = match self.run_loop.lock() {
++                    Ok(mut reg) => {
++                        let (removed, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut reg.timers)
++                            .into_iter()
++                            .partition(|t| t.handler.as_ptr() == handler);
++                        reg.timers = kept;
++                        removed
++                    }
++                    Err(_) => return kInternalError,
++                };
++                drop(retired);
+                 kResultOk
+             }
+-            Err(_) => kInternalError,
+-        }
+-    }
+-
+-    unsafe fn registerTimer(
+-        &self,
+-        handler: *mut vst3::Steinberg::Linux::ITimerHandler,
+-        milliseconds: vst3::Steinberg::Linux::TimerInterval,
+-    ) -> tresult {
+-        let Some(handler) = vst3::ComRef::from_raw(handler) else {
+-            return kInvalidArgument;
+-        };
+-        let interval_ms = milliseconds.max(1);
+-        match self.run_loop.lock() {
+-            Ok(mut reg) => {
+-                reg.timers.push(RunLoopTimer {
+-                    handler: handler.to_com_ptr(),
+-                    interval_ms,
+-                    due: std::time::Instant::now() + std::time::Duration::from_millis(interval_ms),
++        }
++    };
++}
++#[cfg(target_os = "linux")]
++impl_linux_run_loop!(HostPlugFrame);
++#[cfg(target_os = "linux")]
++impl_linux_run_loop!(HostApplication);
++
++/// Snapshot under the registry lock, call with it released, and recheck membership before
++/// every callback. A callback may unregister itself or another due handler reentrantly.
++#[cfg(target_os = "linux")]
++pub(crate) fn service_linux_run_loop(registry: &Arc<Mutex<RunLoopRegistry>>) {
++    use vst3::Steinberg::Linux::{IEventHandlerTrait, ITimerHandlerTrait};
++    let now = std::time::Instant::now();
++    let mut due = Vec::new();
++    if let Ok(mut reg) = registry.lock() {
++        for timer in &mut reg.timers {
++            if now >= timer.due {
++                timer.due = now
++                    .checked_add(std::time::Duration::from_millis(timer.interval_ms))
++                    .unwrap_or(now);
++                due.push((timer.handler.clone(), timer.registration));
++            }
++        }
++    }
++    for (handler, registration) in due {
++        let registered = registry.lock().is_ok_and(|reg| {
++            reg.timers
++                .iter()
++                .any(|t| t.handler.as_ptr() == handler.as_ptr() && t.registration == registration)
++        });
++        if registered {
++            unsafe { handler.onTimer() };
++        }
++    }
++    let handlers = match registry.lock() {
++        Ok(reg) => reg.handlers.clone(),
++        Err(_) => return,
++    };
++    if handlers.is_empty() {
++        return;
++    }
++    let mut fds: Vec<libc::pollfd> = handlers
++        .iter()
++        .map(|(_, fd, _)| libc::pollfd {
++            fd: *fd,
++            events: libc::POLLIN,
++            revents: 0,
++        })
++        .collect();
++    if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, 0) } > 0 {
++        for (pfd, (handler, fd, registration)) in fds.iter().zip(&handlers) {
++            if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
++                let registered = registry.lock().is_ok_and(|reg| {
++                    reg.handlers.iter().any(|(h, registered_fd, current)| {
++                        h.as_ptr() == handler.as_ptr()
++                            && registered_fd == fd
++                            && current == registration
++                    })
+                 });
+-                kResultOk
+-            }
+-            Err(_) => kInternalError,
+-        }
+-    }
+-
+-    unsafe fn unregisterTimer(
+-        &self,
+-        handler: *mut vst3::Steinberg::Linux::ITimerHandler,
+-    ) -> tresult {
+-        match self.run_loop.lock() {
+-            Ok(mut reg) => {
+-                reg.timers.retain(|t| t.handler.as_ptr() != handler);
+-                kResultOk
+-            }
+-            Err(_) => kInternalError,
++                if registered {
++                    unsafe { handler.onFDIsSet(*fd) };
++                }
++            }
+         }
+     }
+ }
+@@ -1646,6 +1851,12 @@
      // "re-read my parameters"), so accumulating them is both complete and inherently bounded —
      // a plugin that spams restartComponent while nothing polls costs one word, not a queue.
      restart_flags: AtomicI32,
@@ -111,7 +501,7 @@
      // Ordered IComponentHandler2 / IUnitHandler / IProgress / context-menu requests. These are
      // control-plane work items, never executed from inside the plugin callback. Ordered against
      // themselves only — not against `edits`. Capped at MAX_HOST_NOTIFICATIONS, and a push past
-@@ -1661,9 +1667,61 @@
+@@ -1661,9 +1872,61 @@
              parameter_changes,
              edits: Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK))),
              restart_flags: AtomicI32::new(0),
@@ -173,7 +563,7 @@
      }
  
      /// Take the accumulated `restartComponent` flags, clearing them.
-@@ -1761,16 +1819,19 @@
+@@ -1761,16 +2024,19 @@
      }
  
      unsafe fn performEdit(&self, id: u32, value_normalized: f64) -> i32 {
@@ -195,7 +585,7 @@
          }
          // ...and as an ordered gesture event for the richer `take_parameter_edits` drain.
          self.push_edit(crate::plugin::ParameterEdit {
-@@ -1792,6 +1853,9 @@
+@@ -1792,6 +2058,9 @@
      }
  
      unsafe fn restartComponent(&self, flags: i32) -> i32 {
@@ -205,7 +595,7 @@
          log::debug!("Host: Restart component requested with flags: {flags:#x}");
          // Recorded for the host to poll (`Plugin::take_restart_flags`), not acted on here: the
          // host decides what a restart means for it. See `RestartFlags` for which flags this
-@@ -1827,6 +1891,9 @@
+@@ -1827,6 +2096,9 @@
  
  impl IComponentHandler2Trait for ComponentHandler {
      unsafe fn setDirty(&self, state: u8) -> i32 {
@@ -215,7 +605,7 @@
          log::debug!("Host: Plugin marked state as dirty (state: {})", state);
          if self.push_notification(crate::plugin::HostNotification::DirtyChanged(state != 0)) {
              kResultOk
-@@ -1915,6 +1982,7 @@
+@@ -1915,6 +2187,7 @@
  pub struct HostEventList {
      pub events: Mutex<Vec<PluginEvent>>,
      payload_bytes: AtomicUsize,
@@ -223,7 +613,7 @@
  }
  
  impl HostEventList {
-@@ -1922,7 +1990,13 @@
+@@ -1922,7 +2195,13 @@
          Self {
              events: Mutex::new(Vec::with_capacity(MAX_QUEUED_EVENTS)),
              payload_bytes: AtomicUsize::new(0),
@@ -238,7 +628,7 @@
      }
  
      pub fn clear(&self) {
-@@ -1933,6 +2007,7 @@
+@@ -1933,6 +2212,7 @@
                  log::trace!("HostEventList: Cleared all events");
              }
              Err(_) => {
@@ -246,7 +636,7 @@
                  log::error!("HostEventList: Failed to lock events for clear");
              }
          }
-@@ -1951,6 +2026,7 @@
+@@ -1951,6 +2231,7 @@
      /// every other path into the list; the excess is dropped with a warning.
      pub fn reset_with(&self, events: impl IntoIterator<Item = PluginEvent>) {
          let Ok(mut queued) = self.events.lock() else {
@@ -254,7 +644,7 @@
              log::error!("HostEventList: Failed to lock events for reset_with");
              return;
          };
-@@ -1958,11 +2034,13 @@
+@@ -1958,11 +2239,13 @@
          let mut payload_bytes = 0usize;
          for event in events {
              if queued.len() >= MAX_QUEUED_EVENTS {
@@ -268,7 +658,7 @@
                  log::warn!(
                      "HostEventList: dropping event, payload budget exceeds \
                       {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
-@@ -1980,7 +2058,10 @@
+@@ -1980,7 +2263,10 @@
          self.events
              .lock()
              .map(|events| events.is_empty())
@@ -280,7 +670,7 @@
      }
  
      /// Move each queued event into `f`, leaving the list empty while retaining its backing
-@@ -1992,6 +2073,8 @@
+@@ -1992,6 +2278,8 @@
                  f(event);
              }
              self.payload_bytes.store(0, Ordering::Relaxed);
@@ -289,7 +679,7 @@
          }
      }
  
-@@ -1999,6 +2082,7 @@
+@@ -1999,6 +2287,7 @@
          match self.events.lock() {
              Ok(mut events) => {
                  if events.len() >= MAX_QUEUED_EVENTS {
@@ -297,7 +687,7 @@
                      log::warn!(
                          "HostEventList: dropping event, queue full at {MAX_QUEUED_EVENTS} \
                           (is the plugin processing?)"
-@@ -2009,6 +2093,7 @@
+@@ -2009,6 +2298,7 @@
                  if queued_payload_bytes.saturating_add(event.payload_bytes())
                      > MAX_QUEUED_EVENT_PAYLOAD_BYTES
                  {
@@ -305,7 +695,7 @@
                      log::warn!(
                          "HostEventList: dropping event, payload budget exceeds \
                           {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
-@@ -2026,6 +2111,7 @@
+@@ -2026,6 +2316,7 @@
                  );
              }
              Err(_) => {
@@ -313,7 +703,7 @@
                  log::error!("HostEventList: Failed to lock events for add_event");
              }
          }
-@@ -2034,6 +2120,7 @@
+@@ -2034,6 +2325,7 @@
      /// Deep-copy a raw SDK event into the owned list.
      pub fn add_raw_event(&self, event: &Event) -> bool {
          let Ok(event) = (unsafe { raw_event_to_plugin_event(event) }) else {
@@ -321,7 +711,7 @@
              return false;
          };
          self.add_event(event);
-@@ -2104,6 +2191,7 @@
+@@ -2104,6 +2396,7 @@
  
      unsafe fn addEvent(&self, event: *mut Event) -> i32 {
          if event.is_null() {
@@ -329,7 +719,7 @@
              log::warn!("HostEventList: addEvent called with null event pointer");
              return kResultFalse;
          }
-@@ -2113,6 +2201,7 @@
+@@ -2113,6 +2406,7 @@
                  // Bound what a plugin can emit into the output list in a single block, so a
                  // misbehaving plugin can't drive unbounded growth from inside `process()`.
                  if events.len() >= MAX_QUEUED_EVENTS {
@@ -337,7 +727,7 @@
                      log::warn!(
                          "HostEventList: dropping plugin event, queue full at {MAX_QUEUED_EVENTS}"
                      );
-@@ -2120,12 +2209,16 @@
+@@ -2120,12 +2414,16 @@
                  }
                  let owned = match raw_event_to_plugin_event(&*event) {
                      Ok(event) => event,
@@ -355,7 +745,7 @@
                      log::warn!(
                          "HostEventList: dropping plugin event, payload budget exceeds \
                           {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
-@@ -2141,6 +2234,7 @@
+@@ -2141,6 +2439,7 @@
                  kResultOk
              }
              Err(_) => {
@@ -363,7 +753,7 @@
                  log::error!("HostEventList: Failed to lock events for addEvent");
                  kResultFalse
              }
-@@ -2753,6 +2847,99 @@
+@@ -2753,6 +3052,99 @@
  mod component_handler_tests {
      use super::*;
      use crate::plugin::{ContextMenuItem, HostNotification, ParameterEdit, ParameterEditKind};
@@ -463,7 +853,7 @@
  
      struct TestContextMenuTarget {
          calls: Arc<Mutex<Vec<i32>>>,
-@@ -3958,3 +4145,28 @@
+@@ -3958,3 +4350,304 @@
          assert_eq!(read_attribute(&project, c"FilePathString"), None);
      }
  }
@@ -490,6 +880,282 @@
 +            assert_eq!(list.addEvent(std::ptr::null_mut()), kResultFalse);
 +        }
 +        assert!(list.take_loss());
++    }
++}
++
++#[cfg(all(test, target_os = "linux"))]
++mod linux_run_loop_lifecycle_tests {
++    use super::*;
++    use vst3::Steinberg::Linux::*;
++
++    struct Probe {
++        registry: Arc<Mutex<RunLoopRegistry>>,
++        dropped: Arc<AtomicBool>,
++        hits: Arc<AtomicUsize>,
++    }
++    impl Class for Probe {
++        type Interfaces = (IEventHandler, ITimerHandler);
++    }
++    impl IEventHandlerTrait for Probe {
++        unsafe fn onFDIsSet(&self, _: FileDescriptor) {
++            self.hits.fetch_add(1, Ordering::SeqCst);
++        }
++    }
++    impl ITimerHandlerTrait for Probe {
++        unsafe fn onTimer(&self) {
++            assert!(self.registry.try_lock().is_ok());
++            self.hits.fetch_add(1, Ordering::SeqCst);
++        }
++    }
++    impl Drop for Probe {
++        fn drop(&mut self) {
++            assert!(
++                self.registry.try_lock().is_ok(),
++                "plugin release under registry lock"
++            );
++            self.dropped.store(true, Ordering::SeqCst);
++        }
++    }
++    fn probe(
++        registry: &Arc<Mutex<RunLoopRegistry>>,
++    ) -> (ComWrapper<Probe>, Arc<AtomicBool>, Arc<AtomicUsize>) {
++        let dropped = Arc::new(AtomicBool::new(false));
++        let hits = Arc::new(AtomicUsize::new(0));
++        (
++            ComWrapper::new(Probe {
++                registry: registry.clone(),
++                dropped: dropped.clone(),
++                hits: hits.clone(),
++            }),
++            dropped,
++            hits,
++        )
++    }
++    #[test]
++    fn factory_context_exposes_a_separate_run_loop() {
++        let host = create_host_application();
++        let factory_loop = host
++            .to_com_ptr::<IHostApplication>()
++            .unwrap()
++            .cast::<IRunLoop>()
++            .expect("Factory3 context must expose IRunLoop");
++        let frame_registry = Arc::new(Mutex::new(RunLoopRegistry::new()));
++        let frame = ComWrapper::new(HostPlugFrame::new(
++            Arc::new(Mutex::new(None)),
++            frame_registry.clone(),
++        ));
++        let frame_loop = frame
++            .to_com_ptr::<IPlugFrame>()
++            .unwrap()
++            .cast::<IRunLoop>()
++            .unwrap();
++        let (wrapper, dropped, hits) = probe(&host.run_loop);
++        let timer = wrapper.to_com_ptr::<ITimerHandler>().unwrap();
++        drop(wrapper);
++        unsafe {
++            assert_eq!(factory_loop.registerTimer(timer.as_ptr(), 1), kResultOk);
++            assert_eq!(frame_loop.unregisterTimer(timer.as_ptr()), kResultOk);
++        }
++        host.run_loop.lock().unwrap().timers[0].due = std::time::Instant::now();
++        host.service_run_loop();
++        assert_eq!(hits.load(Ordering::SeqCst), 1);
++        assert!(frame_registry.lock().unwrap().timers.is_empty());
++        host.clear_run_loop();
++        unsafe {
++            assert_eq!(factory_loop.registerTimer(timer.as_ptr(), 1), kResultFalse);
++        }
++        drop(timer);
++        assert!(dropped.load(Ordering::SeqCst));
++    }
++    #[test]
++    fn unregister_releases_last_reference_outside_lock() {
++        let registry = Arc::new(Mutex::new(RunLoopRegistry::new()));
++        let frame = HostPlugFrame::new(Arc::new(Mutex::new(None)), registry.clone());
++        let (event, dropped, _) = probe(&registry);
++        let raw = event.as_com_ref::<IEventHandler>().unwrap().as_ptr();
++        unsafe {
++            assert_eq!(frame.registerEventHandler(raw, 7), kResultOk);
++            assert_eq!(frame.registerEventHandler(raw, 7), kResultFalse);
++            assert_eq!(frame.registerEventHandler(raw, -1), kInvalidArgument);
++        }
++        drop(event);
++        assert!(!dropped.load(Ordering::SeqCst));
++        unsafe {
++            assert_eq!(frame.unregisterEventHandler(raw), kResultOk);
++        }
++        assert!(dropped.load(Ordering::SeqCst));
++    }
++    #[test]
++    fn loading_failure_cleanup_releases_callbacks_before_unmap() {
++        let host = create_host_application();
++        let guard = host.run_loop_cleanup();
++        let (timer, dropped, _) = probe(&host.run_loop);
++        let raw = timer.as_com_ref::<ITimerHandler>().unwrap().as_ptr();
++        unsafe {
++            assert_eq!(host.registerTimer(raw, 0), kResultOk);
++            assert_eq!(host.registerTimer(raw, 16), kResultFalse);
++        }
++        drop(timer);
++        drop(guard);
++        assert!(dropped.load(Ordering::SeqCst));
++        assert!(host.run_loop.lock().unwrap().closed);
++    }
++    #[test]
++    fn fd_callbacks_are_nonblocking_and_registration_is_bounded() {
++        use std::io::Write;
++        use std::os::fd::AsRawFd;
++        let registry = Arc::new(Mutex::new(RunLoopRegistry::new()));
++        let frame = HostPlugFrame::new(Arc::new(Mutex::new(None)), registry.clone());
++        let (event, _, hits) = probe(&registry);
++        let raw = event.as_com_ref::<IEventHandler>().unwrap().as_ptr();
++        let (read, mut write) = std::os::unix::net::UnixStream::pair().unwrap();
++        unsafe {
++            assert_eq!(frame.registerEventHandler(raw, read.as_raw_fd()), kResultOk);
++        }
++        service_linux_run_loop(&registry);
++        assert_eq!(hits.load(Ordering::SeqCst), 0);
++        write.write_all(&[42]).unwrap();
++        service_linux_run_loop(&registry);
++        assert_eq!(hits.load(Ordering::SeqCst), 1);
++        unsafe {
++            assert_eq!(frame.unregisterEventHandler(raw), kResultOk);
++        }
++        for fd in 0..MAX_RUN_LOOP_REGISTRATIONS as i32 {
++            unsafe {
++                assert_eq!(frame.registerEventHandler(raw, fd), kResultOk);
++            }
++        }
++        unsafe {
++            assert_eq!(
++                frame.registerEventHandler(raw, MAX_RUN_LOOP_REGISTRATIONS as i32),
++                kOutOfMemory
++            );
++            assert_eq!(frame.unregisterEventHandler(raw), kResultOk);
++        }
++    }
++}
++
++#[cfg(all(test, target_os = "linux"))]
++mod linux_run_loop_epoch_tests {
++    use super::*;
++    use vst3::Steinberg::Linux::*;
++    struct Timer {
++        hits: Arc<AtomicUsize>,
++    }
++    impl Class for Timer {
++        type Interfaces = (ITimerHandler,);
++    }
++    impl ITimerHandlerTrait for Timer {
++        unsafe fn onTimer(&self) {
++            self.hits.fetch_add(1, Ordering::SeqCst);
++        }
++    }
++    struct ReRegister {
++        frame: HostPlugFrame,
++        other: ComPtr<ITimerHandler>,
++    }
++    impl Class for ReRegister {
++        type Interfaces = (ITimerHandler,);
++    }
++    impl ITimerHandlerTrait for ReRegister {
++        unsafe fn onTimer(&self) {
++            self.frame.unregisterTimer(self.other.as_ptr());
++            assert_eq!(
++                self.frame.registerTimer(self.other.as_ptr(), 60_000),
++                kResultOk
++            );
++        }
++    }
++    #[test]
++    fn reregistered_due_timer_does_not_receive_old_dispatch() {
++        let registry = Arc::new(Mutex::new(RunLoopRegistry::new()));
++        let frame = HostPlugFrame::new(Arc::new(Mutex::new(None)), registry.clone());
++        let hits = Arc::new(AtomicUsize::new(0));
++        let other = ComWrapper::new(Timer { hits: hits.clone() })
++            .to_com_ptr::<ITimerHandler>()
++            .unwrap();
++        let first = ComWrapper::new(ReRegister {
++            frame: HostPlugFrame::new(Arc::new(Mutex::new(None)), registry.clone()),
++            other: other.clone(),
++        })
++        .to_com_ptr::<ITimerHandler>()
++        .unwrap();
++        unsafe {
++            assert_eq!(frame.registerTimer(first.as_ptr(), 1), kResultOk);
++            assert_eq!(frame.registerTimer(other.as_ptr(), 1), kResultOk);
++        }
++        for timer in &mut registry.lock().unwrap().timers {
++            timer.due = std::time::Instant::now();
++        }
++        service_linux_run_loop(&registry);
++        assert_eq!(
++            hits.load(Ordering::SeqCst),
++            0,
++            "old snapshot dispatched a newly registered timer early"
++        );
++        unsafe {
++            frame.unregisterTimer(first.as_ptr());
++            frame.unregisterTimer(other.as_ptr());
++        }
++    }
++    struct ReRegisterOnDrop {
++        frame: HostPlugFrame,
++        other: ComPtr<ITimerHandler>,
++        result: Arc<AtomicI32>,
++    }
++    impl Class for ReRegisterOnDrop {
++        type Interfaces = (ITimerHandler,);
++    }
++    impl ITimerHandlerTrait for ReRegisterOnDrop {
++        unsafe fn onTimer(&self) {}
++    }
++    impl Drop for ReRegisterOnDrop {
++        fn drop(&mut self) {
++            self.result.store(
++                unsafe { self.frame.registerTimer(self.other.as_ptr(), 1) },
++                Ordering::SeqCst,
++            );
++        }
++    }
++    #[test]
++    fn closed_registry_cannot_be_resurrected_by_release_callback() {
++        let host = create_host_application();
++        let result = Arc::new(AtomicI32::new(kInternalError));
++        let other = ComWrapper::new(Timer {
++            hits: Arc::new(AtomicUsize::new(0)),
++        })
++        .to_com_ptr::<ITimerHandler>()
++        .unwrap();
++        let object = ComWrapper::new(ReRegisterOnDrop {
++            frame: HostPlugFrame::new(Arc::new(Mutex::new(None)), host.run_loop.clone()),
++            other,
++            result: result.clone(),
++        });
++        unsafe {
++            assert_eq!(
++                host.registerTimer(object.as_com_ref::<ITimerHandler>().unwrap().as_ptr(), 1),
++                kResultOk
++            );
++        }
++        drop(object);
++        host.clear_run_loop();
++        assert_eq!(result.load(Ordering::SeqCst), kResultFalse);
++        assert!(host.run_loop.lock().unwrap().timers.is_empty());
++    }
++    #[test]
++    fn registration_identity_exhaustion_is_explicit() {
++        let registry = Arc::new(Mutex::new(RunLoopRegistry::new()));
++        registry.lock().unwrap().next_registration = u64::MAX;
++        let frame = HostPlugFrame::new(Arc::new(Mutex::new(None)), registry.clone());
++        let timer = ComWrapper::new(Timer {
++            hits: Arc::new(AtomicUsize::new(0)),
++        })
++        .to_com_ptr::<ITimerHandler>()
++        .unwrap();
++        unsafe {
++            assert_eq!(frame.registerTimer(timer.as_ptr(), 1), kInternalError);
++        }
++        assert!(registry.lock().unwrap().timers.is_empty());
 +    }
 +}
 --- a/src/internal/isolated_plugin_impl.rs
@@ -1139,7 +1805,16 @@
  
      // Plugin view
      plugin_view: Option<ComPtr<IPlugView>>,
-@@ -284,6 +286,22 @@
+@@ -251,6 +253,8 @@
+ 
+     // VST3 module handle (kept alive). Declared after every plugin-side COM reference above so
+     // those are released while the module's vtables still exist, and before `_host_app` below.
++    #[cfg(target_os = "linux")]
++    _factory: ComPtr<IPluginFactory>,
+     _module: Box<dyn VstModule>,
+ 
+     // Host application context passed to initialize() — kept alive for the plugin's lifetime
+@@ -284,6 +288,22 @@
  enum CallerAudioBuffers<'a> {
      Flat(&'a mut AudioBuffers),
      Buses(&'a mut BusAudioBuffers),
@@ -1162,7 +1837,7 @@
  }
  
  impl CallerAudioBuffers<'_> {
-@@ -952,10 +970,13 @@
+@@ -952,10 +972,13 @@
  
      /// Update the transport tempo for the **next** processed block, even while processing is
      /// active: the stored tempo (used to rebuild the context after a reconfigure) and the live
@@ -1177,7 +1852,7 @@
          if let Some(ref mut data) = self.process_data {
              data.transport_tempo = bpm;
              if process_context_needs(
-@@ -971,6 +992,10 @@
+@@ -971,6 +994,10 @@
      /// processing is active (stored fields plus the live `ProcessContext`).
      #[allow(clippy::unnecessary_cast)]
      fn update_time_signature(&mut self, numerator: i32, denominator: i32) {
@@ -1188,7 +1863,7 @@
          self.time_sig_numerator = numerator;
          self.time_sig_denominator = denominator;
          if let Some(ref mut data) = self.process_data {
-@@ -988,6 +1013,9 @@
+@@ -988,6 +1015,9 @@
      /// while processing is active (stored field plus the live `ProcessContext.state`).
      fn update_playing(&mut self, playing: bool) {
          self.playing = playing;
@@ -1198,7 +1873,7 @@
          if let Some(ref mut data) = self.process_data {
              data.process_context.state =
                  process_context_state(data.process_context_requirements, playing);
-@@ -1026,6 +1054,11 @@
+@@ -1026,6 +1056,11 @@
          if !self.is_processing {
              if let Some(ref handler) = self.component_handler {
                  if let Ok(mut raw_changes) = handler.parameter_changes.lock() {
@@ -1210,7 +1885,27 @@
                      changes.extend(raw_changes.drain(..));
                  }
              }
-@@ -1493,6 +1526,7 @@
+@@ -1227,6 +1262,8 @@
+             // (whether via `InitializedComponent` or `Drop for PluginImpl`) must complete before
+             // the module unmaps.
+             log::debug!("Step 1: Loading VST3 module...");
++            #[cfg(target_os = "linux")]
++            let host_app = create_host_application();
+             let module = load_module(path)?;
+             log::debug!("VST3 module loaded successfully");
+ 
+@@ -1248,7 +1285,10 @@
+ 
+             // Factory3 must receive the host context before any class is instantiated. Keep the
+             // same context alive for the complete component/controller lifetime.
++            #[cfg(not(target_os = "linux"))]
+             let host_app = create_host_application();
++            #[cfg(target_os = "linux")]
++            let mut run_loop_cleanup = host_app.run_loop_cleanup();
+             let host_ctx = host_app.to_com_ptr::<IHostApplication>();
+             let context = host_ctx
+                 .as_ref()
+@@ -1493,6 +1533,7 @@
                  time_sig_numerator: 4,
                  time_sig_denominator: 4,
                  playing: true,
@@ -1218,7 +1913,7 @@
                  process_mode: crate::plugin::ProcessMode::Realtime,
                  process_context_requirements,
                  prefetchable_support,
-@@ -1519,6 +1553,7 @@
+@@ -1519,12 +1560,15 @@
                  output_events,
                  chunk_events: Vec::with_capacity(MAX_QUEUED_EVENTS),
                  output_events_owned: Arc::new(ArrayQueue::new(MAX_OUTPUT_MIDI)),
@@ -1226,7 +1921,24 @@
                  plugin_view: None,
                  editor_scale_factor: 1.0,
                  plug_frame,
-@@ -1891,6 +1926,14 @@
+                 editor_resize,
+                 #[cfg(target_os = "linux")]
+                 run_loop,
++                #[cfg(target_os = "linux")]
++                _factory: factory,
+                 _module: module,
+                 _host_app: host_app,
+                 control_thread: thread::current().id(),
+@@ -1532,6 +1576,8 @@
+             // From here on `plugin` owns the teardown: dropping it runs the same ordered
+             // sequence the guard would.
+             initialized.disarm();
++            #[cfg(target_os = "linux")]
++            run_loop_cleanup.disarm();
+ 
+             // IMidiMapping and unit/program metadata are controller calls and therefore belong
+             // here on the loading thread, never in process() or a playback command drain.
+@@ -1891,6 +1937,14 @@
              data.process_context.state =
                  process_context_state(self.process_context_requirements, self.playing);
  
@@ -1241,7 +1953,7 @@
              // Set up process data
              data.process_data.processMode = self.vst_process_mode();
              data.process_data.numSamples = self.block_size as i32;
-@@ -2116,9 +2159,11 @@
+@@ -2116,9 +2170,11 @@
                  // it unconditionally; a plugin that also self-relays just gets the same value
                  // twice in the same block, which is idempotent.) Drained here at offset 0 and
                  // stashed for the host's display poll (get_parameter_changes).
@@ -1253,7 +1965,7 @@
                              for &(id, value) in gui_changes.iter() {
                                  data.input_param_changes.enqueue(id, 0, value);
                              }
-@@ -2194,8 +2239,13 @@
+@@ -2194,8 +2250,13 @@
                      &mut data.process_context,
                      data.process_context_requirements,
                      data.transport_tempo,
@@ -1267,7 +1979,7 @@
  
                  // Clear the staged input events AFTER processing, so the plugin got to see them
                  // and the next chunk starts from an empty list.
-@@ -2221,11 +2271,21 @@
+@@ -2221,11 +2282,21 @@
                  if !self.output_events.is_empty() {
                      let out = &self.output_events_owned;
                      self.output_events.drain_each(|event| {
@@ -1290,7 +2002,7 @@
                      // Leave the caller's buffers as they were (the playback bridges pre-fill them
                      // with silence) rather than copying out whatever the failed call left behind.
                      Err(Error::ProcessFailed(process_result))
-@@ -2430,6 +2490,22 @@
+@@ -2430,6 +2501,22 @@
          Ok(())
      }
  
@@ -1313,7 +2025,7 @@
      fn set_tempo(&mut self, bpm: f64) -> Result<()> {
          self.update_tempo(bpm);
          Ok(())
-@@ -2939,13 +3015,13 @@
+@@ -2939,13 +3026,13 @@
      fn stop_processing(&mut self) -> Result<()> {
          unsafe {
              if self.is_processing {
@@ -1331,7 +2043,7 @@
              }
  
              // Nothing can still be sounding, so no note-on is outstanding.
-@@ -2953,6 +3029,10 @@
+@@ -2953,6 +3040,10 @@
  
              Ok(())
          }
@@ -1342,7 +2054,96 @@
      }
  
      fn has_editor(&self) -> bool {
-@@ -3334,6 +3414,13 @@
+@@ -2996,6 +3087,15 @@
+             return Err(Error::Other(
+                 "editor parent window handle is null".to_string(),
+             ));
++        }
++
++        // Give each attachment a new frame/registry. Old retained frame pointers remain
++        // closed forever, so release callbacks cannot resurrect a removed view's handlers.
++        #[cfg(target_os = "linux")]
++        {
++            self.run_loop = Arc::new(Mutex::new(RunLoopRegistry::new()));
++            self.plug_frame =
++                create_host_plug_frame(self.editor_resize.clone(), self.run_loop.clone());
+         }
+ 
+         if let Some(ref controller) = self.controller {
+@@ -3109,59 +3209,25 @@
+         // `Plugin::service_run_loop` is public with no editor-open guard, a host driving it from
+         // its frame loop would then dispatch straight into the removed view.
+         #[cfg(target_os = "linux")]
+-        if let Ok(mut reg) = self.run_loop.lock() {
+-            reg.handlers.clear();
+-            reg.timers.clear();
++        {
++            // Only the frame registry belongs to this view. Factory-context registrations
++            // remain live until plugin teardown and must continue to be serviced while closed.
++            let retired = self.run_loop.lock().ok().map(|mut reg| {
++                reg.closed = true;
++                (
++                    std::mem::take(&mut reg.handlers),
++                    std::mem::take(&mut reg.timers),
++                )
++            });
++            drop(retired);
+         }
+         close_error.map_or(Ok(()), Err)
+     }
+ 
+     #[cfg(target_os = "linux")]
+     fn service_run_loop(&mut self) {
+-        use vst3::Steinberg::Linux::{IEventHandlerTrait, ITimerHandlerTrait};
+-
+-        // Fire due timers. Snapshot the handlers, then invoke with the lock
+-        // RELEASED: a callback may re-enter registerTimer/unregisterTimer
+-        // (VSTGUI does), which takes the same lock.
+-        let now = std::time::Instant::now();
+-        let mut due = Vec::new();
+-        if let Ok(mut reg) = self.run_loop.lock() {
+-            for timer in reg.timers.iter_mut() {
+-                if now >= timer.due {
+-                    timer.due = now + std::time::Duration::from_millis(timer.interval_ms);
+-                    due.push(timer.handler.clone());
+-                }
+-            }
+-        }
+-        for handler in due {
+-            unsafe { handler.onTimer() };
+-        }
+-
+-        // Poll registered fds (zero timeout - never blocks the UI thread)
+-        // and notify ready ones. Same snapshot-then-invoke pattern.
+-        let handlers: Vec<_> = match self.run_loop.lock() {
+-            Ok(reg) => reg.handlers.clone(),
+-            Err(_) => return,
+-        };
+-        if handlers.is_empty() {
+-            return;
+-        }
+-        let mut fds: Vec<libc::pollfd> = handlers
+-            .iter()
+-            .map(|&(_, fd)| libc::pollfd {
+-                fd,
+-                events: libc::POLLIN,
+-                revents: 0,
+-            })
+-            .collect();
+-        let ready = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, 0) };
+-        if ready > 0 {
+-            for (pfd, (handler, fd)) in fds.iter().zip(handlers.iter()) {
+-                if pfd.revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0 {
+-                    unsafe { handler.onFDIsSet(*fd) };
+-                }
+-            }
+-        }
++        self._host_app.service_run_loop();
++        super::com_implementations::service_linux_run_loop(&self.run_loop);
+     }
+ 
+     fn get_editor_size(&self) -> Result<(i32, i32)> {
+@@ -3334,6 +3400,13 @@
              .unwrap_or_default()
      }
  
@@ -1356,7 +2157,7 @@
      fn take_host_notifications(&mut self) -> Vec<crate::plugin::HostNotification> {
          let mut notifications = self
              .component_handler
-@@ -3481,6 +3568,14 @@
+@@ -3481,6 +3554,14 @@
              out.push(event);
          }
          out
@@ -1371,7 +2172,7 @@
      }
  
      fn output_midi_handle(&self) -> Option<crate::plugin::OutputMidiConsumer> {
-@@ -4163,6 +4258,11 @@
+@@ -4163,6 +4244,11 @@
  
      fn save_state(&self) -> Result<Vec<u8>> {
          self.drain_deferred_controller_sync();
@@ -1383,7 +2184,7 @@
          unsafe {
              let component_stream =
                  create_memory_stream_with_metadata(None, StreamStateType::Project);
-@@ -4201,10 +4301,14 @@
+@@ -4201,10 +4287,14 @@
                  None
              };
  
@@ -1400,7 +2201,7 @@
          }
      }
  
-@@ -4284,6 +4388,15 @@
+@@ -4284,6 +4374,15 @@
                  }
  
                  self.pending_param_changes.clear();
@@ -1416,7 +2217,16 @@
                  if let Some(process_data) = self.process_data.as_ref() {
                      process_data.input_param_changes.clear_all();
                  }
-@@ -4776,18 +4889,53 @@
+@@ -4696,6 +4795,8 @@
+                 self.connection.as_ref(),
+             );
+         }
++        #[cfg(target_os = "linux")]
++        self._host_app.clear_run_loop();
+     }
+ }
+ 
+@@ -4776,18 +4877,53 @@
          .unwrap_or_default()
  }
  
@@ -1473,7 +2283,7 @@
      if process_context_needs(requirements, R::kNeedContinousTimeSamples as u32) {
          ctx.continousTimeSamples = ctx.continousTimeSamples.wrapping_add(frames);
      }
-@@ -4798,17 +4946,32 @@
+@@ -4798,17 +4934,32 @@
          let nanos = (frames as f64 * 1_000_000_000.0 / ctx.sampleRate).round() as i64;
          ctx.systemTime = ctx.systemTime.saturating_add(nanos);
      }
@@ -1510,7 +2320,7 @@
  
      fn buses(channels: &[i32]) -> Vec<AudioBusBuffers> {
          channels
-@@ -5053,7 +5216,7 @@
+@@ -5053,7 +5204,7 @@
          // One second of audio at 48 kHz in 512-sample blocks.
          let blocks = 48_000 / 512;
          for _ in 0..blocks {
@@ -1519,7 +2329,7 @@
          }
          let advanced = (blocks * 512) as i64;
          assert_eq!(ctx.projectTimeSamples, advanced);
-@@ -5448,3 +5611,66 @@
+@@ -5448,3 +5599,66 @@
          assert_eq!(calls.load(Ordering::SeqCst), 0);
      }
  }
@@ -2196,7 +3006,7 @@
      /// Owned VST3 data-exchange blocks drained from the helper.
      DataExchangeBlocks {
          /// Block snapshots, in delivery order.
-@@ -969,16 +1058,17 @@
+@@ -969,58 +1058,209 @@
  /// descriptor 1 at stderr, so plugin output is merged into the helper's stderr instead. Call
  /// it once, before any plugin code can run.
  ///
@@ -2219,11 +3029,77 @@
  type ProtocolChannelInner = std::io::Stdout;
  
  impl ProtocolChannel {
-@@ -1020,7 +1110,129 @@
-     }
- 
      /// Claim the protocol channel for this process. See the type documentation.
--    #[cfg(not(unix))]
+     #[cfg(unix)]
+     pub fn claim() -> Self {
+-        use std::os::fd::FromRawFd;
+-
+-        // SAFETY: `F_DUPFD_CLOEXEC`/`dup` return a fresh descriptor owned by this process, and
+-        // `dup2` rebinds STDOUT_FILENO, which this process also owns. Both are the documented
+-        // POSIX contracts; no descriptor Rust already owns as a `File` is aliased or closed.
++        match Self::claim_unix() {
++            Ok(channel) => channel,
++            Err(error) => {
++                eprintln!("Fatal: could not isolate helper protocol output: {error}");
++                std::process::exit(1)
++            }
++        }
++    }
++
++    #[cfg(unix)]
++    fn claim_unix() -> std::io::Result<Self> {
++        use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
++        // Require atomic close-on-exec duplication. A non-CLOEXEC fallback would leak the
++        // protocol pipe into plugin-spawned children and defeat EOF/crash detection.
++        let fd = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
++        if fd < 0 {
++            return Err(std::io::Error::last_os_error());
++        }
++        // Own the duplicate immediately, including every subsequent error path.
++        let inner = unsafe { std::fs::File::from_raw_fd(fd) };
++        let flags = unsafe { libc::fcntl(inner.as_raw_fd(), libc::F_GETFL) };
++        if flags < 0 {
++            return Err(std::io::Error::last_os_error());
++        }
++        if flags & libc::O_ACCMODE == libc::O_RDONLY {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::PermissionDenied,
++                "protocol stdout is not writable",
++            ));
++        }
++        // If stderr is absent or aliases stdout, use a fresh /dev/null sink. A duplicated
++        // protocol fd is never an acceptable destination for untrusted plugin logging.
++        let mut out: libc::stat = unsafe { std::mem::zeroed() };
++        let mut diagnostic: libc::stat = unsafe { std::mem::zeroed() };
++        let stderr_safe = unsafe {
++            libc::fstat(inner.as_raw_fd(), &mut out) == 0
++                && libc::fstat(libc::STDERR_FILENO, &mut diagnostic) == 0
++                && !(out.st_dev == diagnostic.st_dev && out.st_ino == diagnostic.st_ino)
++        };
++        let mut fallback = if stderr_safe {
++            None
++        } else {
++            Some(std::fs::OpenOptions::new().write(true).open("/dev/null")?)
++        };
++        let sink = fallback
++            .as_ref()
++            .map_or(libc::STDERR_FILENO, AsRawFd::as_raw_fd);
++        if unsafe { libc::dup2(sink, libc::STDOUT_FILENO) } < 0 {
++            return Err(std::io::Error::last_os_error());
++        }
++        if !stderr_safe && unsafe { libc::dup2(sink, libc::STDERR_FILENO) } < 0 {
++            return Err(std::io::Error::last_os_error());
++        }
++        if fallback
++            .as_ref()
++            .is_some_and(|file| file.as_raw_fd() == libc::STDERR_FILENO)
++        {
++            let _ = fallback.take().unwrap().into_raw_fd(); // stderr now owns fd 2.
++        }
++        Ok(Self { inner })
++    }
++
++    /// Claim the protocol channel for this process. See the type documentation.
 +    #[cfg(windows)]
 +    pub fn claim() -> Self {
 +        match Self::claim_windows() {
@@ -2306,7 +3182,37 @@
 +        // accidentally closing stderr when _dup2 closes/replaces the old stdout descriptor.
 +        let redirected_handle = redirect.into_raw_handle();
 +        let old_crt_stdout = unsafe { libc::get_osfhandle(1) } as RawHandle;
-+        let fd = unsafe {
+         let fd = unsafe {
+-            let private = match libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 3) {
+-                fd if fd >= 0 => Some(fd),
+-                _ => match libc::dup(libc::STDOUT_FILENO) {
+-                    fd if fd >= 0 => Some(fd),
+-                    _ => None,
+-                },
+-            };
+-            match private {
+-                Some(fd) => {
+-                    // Plugin (and helper) writes to stdout now land on stderr.
+-                    libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO);
+-                    fd
+-                }
+-                None => {
+-                    // Nothing to fall back to: keep speaking on fd 1 as-is, so the protocol
+-                    // still works even though plugin writes can pollute it.
+-                    eprintln!("helper: could not privatise the protocol channel; plugin writes to stdout may corrupt it");
+-                    libc::STDOUT_FILENO
+-                }
+-            }
+-        };
+-        // SAFETY: `fd` is a descriptor this process owns — a fresh duplicate, or stdout
+-        // itself when duplication failed — and this channel becomes its sole owner.
+-        Self {
+-            inner: unsafe { std::fs::File::from_raw_fd(fd) },
+-        }
+-    }
+-
+-    /// Claim the protocol channel for this process. See the type documentation.
+-    #[cfg(not(unix))]
 +            libc::open_osfhandle(
 +                redirected_handle as libc::intptr_t,
 +                libc::O_WRONLY | libc::O_BINARY,
@@ -2350,7 +3256,7 @@
      pub fn claim() -> Self {
          Self {
              inner: std::io::stdout(),
-@@ -1660,6 +1872,8 @@
+@@ -1660,6 +1900,8 @@
          // The Process response carries emitted MIDI alongside audio; check the variant
          // round-trips through the JSON transport host and helper share.
          let resp = HostResponse::AudioOutput {
@@ -2359,7 +3265,7 @@
              outputs: vec![vec![0.0, 0.5], vec![-0.5, 0.0]],
              output_events: vec![
                  MidiEvent::NoteOn {
-@@ -1682,6 +1896,7 @@
+@@ -1682,6 +1924,7 @@
              HostResponse::AudioOutput {
                  outputs,
                  output_events,
@@ -2367,7 +3273,7 @@
              } => {
                  assert_eq!(outputs, vec![vec![0.0, 0.5], vec![-0.5, 0.0]]);
                  assert_eq!(output_events.len(), 2);
-@@ -1809,6 +2024,8 @@
+@@ -1809,6 +2052,8 @@
          }
  
          let response = HostResponse::AudioOutput {
@@ -2376,7 +3282,7 @@
              outputs: Vec::new(),
              output_events: vec![event.clone()],
          };
-@@ -2108,6 +2325,32 @@
+@@ -2108,6 +2353,32 @@
          {
              HostResponse::ParameterEdits { edits: back } => assert_eq!(back, edits),
              other => panic!("ParameterEdits round-trip changed the variant: {other:?}"),
@@ -2409,7 +3315,7 @@
          }
      }
  
-@@ -2339,6 +2582,8 @@
+@@ -2339,6 +2610,8 @@
              f32::MIN_POSITIVE,
          ];
          let resp = HostResponse::AudioOutput {
@@ -2418,7 +3324,7 @@
              outputs: vec![channel.clone(), vec![]],
              output_events: Vec::new(),
          };
-@@ -2360,12 +2605,13 @@
+@@ -2360,12 +2633,13 @@
  
          // The same for the host -> helper direction.
          let cmd = HostCommand::Process {
@@ -2433,7 +3339,7 @@
                  assert_eq!(frames, 2);
                  assert!(inputs[0][0].is_nan());
                  assert_eq!(inputs[0][1], 1.0);
-@@ -2377,6 +2623,7 @@
+@@ -2377,6 +2651,7 @@
      #[test]
      fn bus_audio_wire_preserves_bus_boundaries_activation_and_sample_bits() {
          let command = HostCommand::ProcessBuses {
@@ -2441,7 +3347,7 @@
              inputs: vec![
                  crate::audio::AudioBusBuffer {
                      active: true,
-@@ -2405,6 +2652,7 @@
+@@ -2405,6 +2680,7 @@
                  inputs,
                  outputs,
                  frames,
@@ -2449,7 +3355,7 @@
              } => {
                  assert_eq!(frames, 2);
                  assert_eq!(inputs.len(), 2);
-@@ -2484,6 +2732,8 @@
+@@ -2484,6 +2760,8 @@
              .collect();
          let plain = serde_json::to_string(&block).expect("plain json").len();
          let encoded = serde_json::to_string(&HostResponse::AudioOutput {
@@ -2458,7 +3364,7 @@
              outputs: block,
              output_events: Vec::new(),
          })
-@@ -2568,6 +2818,7 @@
+@@ -2568,6 +2846,7 @@
              class_id: None,
          }));
          assert!(!is_slow_command(&HostCommand::Process {
@@ -2466,7 +3372,7 @@
              inputs: vec![],
              frames: 64
          }));
-@@ -2803,3 +3054,98 @@
+@@ -2803,3 +3082,122 @@
          })
      }
  }
@@ -2563,5 +3469,29 @@
 +        let value =
 +            serde_json::json!({"AudioOutput": {"outputs": [], "output_events": vec![note; 4097]}});
 +        assert!(serde_json::from_value::<HostResponse>(value).is_err());
++    }
++}
++
++#[cfg(all(test, unix))]
++mod unix_protocol_claim_tests {
++    use super::*;
++    #[test]
++    fn closed_stdout_fails_after_rust_runtime_initialization() {
++        const CHILD: &str = "CITRUS_TEST_CLOSED_PROTOCOL_STDOUT";
++        if std::env::var_os(CHILD).is_some() {
++            // Rust's Unix startup can repair stdio closed *before exec* using /dev/null.
++            // Close after startup to exercise the actual F_DUPFD_CLOEXEC failure path.
++            unsafe {
++                libc::close(libc::STDOUT_FILENO);
++            }
++            let _ = ProtocolChannel::claim();
++            std::process::exit(99); // Returning from a failed claim must never succeed.
++        }
++        let result = std::process::Command::new(std::env::current_exe().unwrap())
++            .arg("--exact").arg("process_isolation::unix_protocol_claim_tests::closed_stdout_fails_after_rust_runtime_initialization")
++            .arg("--nocapture").env(CHILD, "1").output().unwrap();
++        assert_eq!(result.status.code(), Some(1));
++        assert!(String::from_utf8_lossy(&result.stderr)
++            .contains("could not isolate helper protocol output"));
 +    }
 +}

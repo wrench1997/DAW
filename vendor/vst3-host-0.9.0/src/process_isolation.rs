@@ -1075,38 +1075,66 @@ impl ProtocolChannel {
     /// Claim the protocol channel for this process. See the type documentation.
     #[cfg(unix)]
     pub fn claim() -> Self {
-        use std::os::fd::FromRawFd;
-
-        // SAFETY: `F_DUPFD_CLOEXEC`/`dup` return a fresh descriptor owned by this process, and
-        // `dup2` rebinds STDOUT_FILENO, which this process also owns. Both are the documented
-        // POSIX contracts; no descriptor Rust already owns as a `File` is aliased or closed.
-        let fd = unsafe {
-            let private = match libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 3) {
-                fd if fd >= 0 => Some(fd),
-                _ => match libc::dup(libc::STDOUT_FILENO) {
-                    fd if fd >= 0 => Some(fd),
-                    _ => None,
-                },
-            };
-            match private {
-                Some(fd) => {
-                    // Plugin (and helper) writes to stdout now land on stderr.
-                    libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO);
-                    fd
-                }
-                None => {
-                    // Nothing to fall back to: keep speaking on fd 1 as-is, so the protocol
-                    // still works even though plugin writes can pollute it.
-                    eprintln!("helper: could not privatise the protocol channel; plugin writes to stdout may corrupt it");
-                    libc::STDOUT_FILENO
-                }
+        match Self::claim_unix() {
+            Ok(channel) => channel,
+            Err(error) => {
+                eprintln!("Fatal: could not isolate helper protocol output: {error}");
+                std::process::exit(1)
             }
-        };
-        // SAFETY: `fd` is a descriptor this process owns — a fresh duplicate, or stdout
-        // itself when duplication failed — and this channel becomes its sole owner.
-        Self {
-            inner: unsafe { std::fs::File::from_raw_fd(fd) },
         }
+    }
+
+    #[cfg(unix)]
+    fn claim_unix() -> std::io::Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+        // Require atomic close-on-exec duplication. A non-CLOEXEC fallback would leak the
+        // protocol pipe into plugin-spawned children and defeat EOF/crash detection.
+        let fd = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // Own the duplicate immediately, including every subsequent error path.
+        let inner = unsafe { std::fs::File::from_raw_fd(fd) };
+        let flags = unsafe { libc::fcntl(inner.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if flags & libc::O_ACCMODE == libc::O_RDONLY {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "protocol stdout is not writable",
+            ));
+        }
+        // If stderr is absent or aliases stdout, use a fresh /dev/null sink. A duplicated
+        // protocol fd is never an acceptable destination for untrusted plugin logging.
+        let mut out: libc::stat = unsafe { std::mem::zeroed() };
+        let mut diagnostic: libc::stat = unsafe { std::mem::zeroed() };
+        let stderr_safe = unsafe {
+            libc::fstat(inner.as_raw_fd(), &mut out) == 0
+                && libc::fstat(libc::STDERR_FILENO, &mut diagnostic) == 0
+                && !(out.st_dev == diagnostic.st_dev && out.st_ino == diagnostic.st_ino)
+        };
+        let mut fallback = if stderr_safe {
+            None
+        } else {
+            Some(std::fs::OpenOptions::new().write(true).open("/dev/null")?)
+        };
+        let sink = fallback
+            .as_ref()
+            .map_or(libc::STDERR_FILENO, AsRawFd::as_raw_fd);
+        if unsafe { libc::dup2(sink, libc::STDOUT_FILENO) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if !stderr_safe && unsafe { libc::dup2(sink, libc::STDERR_FILENO) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if fallback
+            .as_ref()
+            .is_some_and(|file| file.as_raw_fd() == libc::STDERR_FILENO)
+        {
+            let _ = fallback.take().unwrap().into_raw_fd(); // stderr now owns fd 2.
+        }
+        Ok(Self { inner })
     }
 
     /// Claim the protocol channel for this process. See the type documentation.
@@ -3147,5 +3175,29 @@ mod process_transport_wire_tests {
         let value =
             serde_json::json!({"AudioOutput": {"outputs": [], "output_events": vec![note; 4097]}});
         assert!(serde_json::from_value::<HostResponse>(value).is_err());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_protocol_claim_tests {
+    use super::*;
+    #[test]
+    fn closed_stdout_fails_after_rust_runtime_initialization() {
+        const CHILD: &str = "CITRUS_TEST_CLOSED_PROTOCOL_STDOUT";
+        if std::env::var_os(CHILD).is_some() {
+            // Rust's Unix startup can repair stdio closed *before exec* using /dev/null.
+            // Close after startup to exercise the actual F_DUPFD_CLOEXEC failure path.
+            unsafe {
+                libc::close(libc::STDOUT_FILENO);
+            }
+            let _ = ProtocolChannel::claim();
+            std::process::exit(99); // Returning from a failed claim must never succeed.
+        }
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact").arg("process_isolation::unix_protocol_claim_tests::closed_stdout_fails_after_rust_runtime_initialization")
+            .arg("--nocapture").env(CHILD, "1").output().unwrap();
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stderr)
+            .contains("could not isolate helper protocol output"));
     }
 }

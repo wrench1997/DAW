@@ -645,6 +645,7 @@ dependencies = [
  "vst3-host",
  "walkdir",
  "winapi",
+ "xcb",
 ]
 
 [[package]]

@@ -766,7 +766,10 @@ impl Editor {
     }
     fn close(&mut self) -> Result<(), String> {
         if let Some(mut window) = self.window.take() {
-            let mut guard = self.plugin.lock().map_err(|_| "plugin lock poisoned")?;
+            let mut guard = self
+                .plugin
+                .lock()
+                .unwrap_or_else(|_| fatal("plugin lock poisoned before editor detachment"));
             if let Some(plugin) = guard.as_mut() {
                 plugin
                     .close_editor()
