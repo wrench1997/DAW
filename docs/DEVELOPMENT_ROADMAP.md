@@ -1,17 +1,36 @@
 # Development roadmap
 
-Updated: 2026-10-09 15:45 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-09 16:38 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
 - Development branch: `ci/windows-reliability-20261009`. Last fully validated Windows checkpoint: **`53494d518bfc4bad7304f25c127491a0c67d7cd8`**, including Browser, measured meters, v11 split fidelity, WAV/media/export controls and responsive UI QA. [Quality 37886481852](https://github.com/wrench1997/DAW/actions/runs/37886481852) passed **909 Rust tests**, 14 helper-harness tests and actual helper smoke. [Preview 37886481857](https://github.com/wrench1997/DAW/actions/runs/37886481857) passed optimized static-CRT builds, 57 Python tests, PE/import audit, ZIP/hash checks and extracted-helper smoke; no artifact upload.
 - Application **0.5.0-alpha.1** uses Project **v12**. v10/v11 inputs load with ports Off and source audio monitoring enabled; new saves need a v12 build. Preserve original projects before evaluation.
 - Historical ownership-preparation source **`3fb549a059916dca7b3af3eff00ff27fba0bddd4`** passes 1,137 app +21 helper +5 editor protocol +2 transport protocol Linux all-feature tests, 1,133 core tests, both strict Clippy modes, fmt/build/helper smoke, both MSVC source profiles and 195 Python tests. The available vendor suite passes 270 cases serially with one explicit missing upstream fixture exclusion; all 26 doctests pass, including five new facade cases. App/UI/audio are unchanged. Its exact published checkpoint 5befb51 completed its own Windows runs; no worker or latency improvement is claimed.
-- At **`b92c394`**, Windows source gates pass 1,165 app +15 helper +5 editor protocol +2 transport protocol tests. [Preview 37950671153](https://github.com/wrench1997/DAW/actions/runs/37950671153) passes the optimized/provenance/package/extracted-helper lane, with 231 Python cases (227 passed, four Unix-only skips) and upload disabled. [Quality 37950671033](https://github.com/wrench1997/DAW/actions/runs/37950671033) passes independent native state/interaction/lifecycle but still fails before/after paint; repaint is SKIP. Overall quality is failed.
+- At **`20a9dfc`**, Windows source gates pass 1,165 app +15 helper +5 editor protocol +2 transport protocol tests. [Preview 37955606487](https://github.com/wrench1997/DAW/actions/runs/37955606487) passes the optimized/provenance/package/extracted-helper lane, with 239 Python cases (235 passed, four Unix-only skips) and upload disabled. [Quality 37955606457](https://github.com/wrench1997/DAW/actions/runs/37955606457) passes independent native state/interaction/lifecycle but still fails before/after paint; repaint is SKIP. Overall quality is failed.
 - The integrated [simultaneous workspace](MULTIWINDOW_WORKSPACE.md) is a real shared-project, internal-window implementation. The latest requested [compact refinement](COMPACT_WORKSPACE.md) keeps useful task density, persistent migration, continuous held gestures and bounded release snapping; controlled unoptimized CPU comparisons do not establish a general speedup or displayed FPS. Focused Piano session-local note clipboard now has bounded data, semantic input/text isolation and explicit Undo. Offscreen frames validate app paint/layout rather than cloud X11 presentation, OS-detached editors, device audio or native VST3 editor paint.
 - Evidence levels stay distinct: **implemented/source-inspected**; **executed code tests** at an exact revision; **GUI/device scenario passed** with artifacts; **release candidate accepted** on the intended package; **commercial maturity** from broader workflow, compatibility and sustained-use coverage. None implies the next.
 
 - Follow-on guarded state source **`60134a5`** is locally integrated from reviewed `c056dc5`. It rejects used/editor-opened exact Surge XT 1.3.4 before helper detachment or mutation, with fresh-instance/native rejection evidence. This guard later passed combined gates and exact Windows source/preview at244f622. The [state report](PLUGIN_STATE_RESTORE_LIMITS.md) retains previous failures, the legacy Admin caller limitation and absence of silent settlement. It now combines with reviewed timing source at **4fdfbc2**, whose fresh aggregate gates now pass1,170 app +22 helper +5 editor protocol +2 transport protocol,1,166 core,207 Python,276 available vendor tests (one named missing-fixture exclusion),26 doctests, both strict Clippy modes and both MSVC source profiles. Combined default2048 four-case delivery and fresh-state checks passed with helper9dd18d74; its exact244f622 Windows results are recorded above.
+
+## Current scoped-session and reset-origin integration
+
+Reviewed source1f021b1 combines private borrowed control/processor sessions with
+owner-only reset-origin processing. Independent semantic review confirms SDK-only
+RAII in both normal and reset paths, checked FIFO origin staging, output discard,
+actual native acknowledgment and reset exclusion from both facades. A combined COM
+test covers success, SDK error and pre-SDK staging failure; compiler contracts add
+six reset exclusions to the original47 cases. Full merged gates and new-helper
+native graph/UI/state checks are separate pending acceptance at this entry.
+
+The correction targets host-induced one-frame Surge FX mode changes, preserving
+strict metadata and faults. Standalone small blocks remain valid; only the DAW
+requires prepared maximum128..=2048 for Q128 reset. Fresh graph playback/replay
+slice evidence does not establish universal tail clearing: immediate held NoteOn
+after stop/start is transient in both old and new reset traces. Keep that negative,
+old performance matrices and historical resize stall. See [reset contract](PLUGIN_RESET_ORIGIN.md).
+No worker/thread migration or helper latency improvement follows from the private
+session factoring.
 
 ## Historical bounded native-edit preparation
 

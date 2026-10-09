@@ -8,11 +8,13 @@
 
 ## 当前验证状态（2026-10-09）
 
-本页记录固定 gnullvm 发布流程，不能当作当前 prerelease 的发布验收。最新终态 `b92c394` 的 [MSVC preview](https://github.com/wrench1997/DAW/actions/runs/37950671153) 完整通过：231 Python cases（227 passed、四项 Unix-only skip）、1165 app +15 helper +5 editor protocol +2 transport protocol Rust tests、optimized static-CRT、MIT/vendor provenance、PE/ZIP/hash 与解压 helper smoke；上传关闭、artifacts 为0。[Quality](https://github.com/wrench1997/DAW/actions/runs/37950671033) 源码与独立 native state/interaction/lifecycle 通过，paint 前后失败、repaint comparison 跳过，整个 quality 仍失败。
+本页记录固定 gnullvm 发布流程，不能当作当前 prerelease 的发布验收。最新终态 `20a9dfc` 的 [MSVC preview](https://github.com/wrench1997/DAW/actions/runs/37955606487) 完整通过：239 Python cases（235 passed、四项 Unix-only skip）、1165 app +15 helper +5 editor protocol +2 transport protocol Rust tests、optimized static-CRT、MIT/vendor provenance、PE/ZIP/hash 与解压 helper smoke；上传关闭、artifacts 为0。[Quality](https://github.com/wrench1997/DAW/actions/runs/37955606457) 源码与独立 native state/interaction/lifecycle 通过，paint 前后失败、repaint comparison 跳过，整个 quality 仍失败。
 
 上一轮 native-edit 合并源码 `87ceb06` 已通过Linux1170 app +22 helper +5+2 protocol、1166 core、215 Python、304 available vendor cases（一个明确fixture排除）、26 doctests、fmt/两套严格root Clippy/build/helper smoke和两种MSVC source checks。新helper default2048四项/fresh-state回归已通过，对应e487a50的Windows结果见上，不能沿用更旧helper的优化测量。它只更换原生编辑交付/捕获的内部通道；App/timing/wire 未变，helper 仍单线程。旧4fdf/244优化结果为 quiet12/16、load12/16，512/2048全部delivery组合通过，但loaded2048仍有raw-interval overrun，不能称实时/设备认证。默认2048、128/256/512 Experimental保持不变。0.5.0-alpha.1加载v10/v11、保存v12；旧项目MIDI ports默认Off，先保留备份。
 
 下文 `$Version` 和目录名的 0.4.0 是历史示例；构建当前候选时必须使用 `Cargo.toml` 的实际版本 `0.5.0-alpha.1`，不得把新 v12 构建标成旧 0.4.0。Rust/LLVM-MinGW 固定工具链及三文件发布契约不变。
+
+当前session/reset源码1f021b1已完成语义合并审查，完整组合门禁和新helper真实图/UI/state验收另行执行。私有capability仍同线程，reset在session rejoin后由owner调用；DAW要求prepared maximum128..=2048，standalone小block不受该DAW限制。旧/新reset均出现的立即held-note transient限制保留，不以正常图重放通过替代。新候选Windows CI不得借用20a9dfc结论。
 
 ## 开发 CI（独立分支验证）
 

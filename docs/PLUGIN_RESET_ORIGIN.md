@@ -80,3 +80,18 @@ Surge FX latency across epochs, an already-32 instance, held-note/tail/retrigger
 MIDI discard, and ordinary/routed playback. Historical timing failures and one-frame traces must
 not be overwritten or reclassified as passes. This change does not qualify native editor DSP
 thread isolation, hardware callback bounds, or universal real-time/plugin compatibility.
+
+## Retained real-plugin counterexamples
+
+The reset-only validation retains initial failed assertions that treated every
+replay as a fresh silent onset or assumed stop/start clears all plugin tails.
+An actually advancing blank-source control distinguishes retained audio from new
+source delivery. A further direct comparison finds immediate held NoteOn after
+stop/start produces only a transient with BOTH legacy one-frame cleanup and the
+new128-frame reset; a fresh no-reset instance sustains. Component state hash and
+controller/component volume remain unchanged. Normal graph first/replay can pass
+without proving this separate immediate retrigger contract. This existing limit
+is not silently fixed or waived. In the reset-only four-arm after-decay control,
+a distinct G4 sustains after four seconds of genuinely advancing silent DSP;
+this does not establish immediate-note success or a general required wait time.
+Combined-source acceptance is separately bound.

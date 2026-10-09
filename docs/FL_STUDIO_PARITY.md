@@ -9,9 +9,15 @@ Status terms:
 - **In progress**: core pieces exist, but end-to-end behavior is not connected or verified
 - **Not implemented**: no usable product path exists yet
 
-## 0.4 implementation progress
+## Current implementation and historical evidence
 
-Current follow-on source87ceb06 adds bounded acknowledged native-edit transport,
+Current combined source1f021b1 has independently reviewed private same-thread
+scoped domains and an [owner-only reset-origin transaction](PLUGIN_RESET_ORIGIN.md).
+Ordinary/reset SDK calls share the restricted RAII gate. New combined source and
+actual-helper acceptance are pending; no worker, GUI stall or realtime improvement
+is claimed. Old/new immediate held-note retrigger limitations remain explicit.
+
+Historical follow-on source87ceb06 adds bounded acknowledged native-edit transport,
 not a DSP thread. Display polling no longer steals pending processor edits;
 stopped native edit/save/fresh-state and guard preservation pass scoped real-plugin
 checks. Fresh aggregate gates pass1,170 app +22 helper +5+2 protocol,1,166 core,207 Python,304 available vendor cases and26 doctests; new-helper default2048/fresh-state passes; new Windows verification remains separate. Previous
