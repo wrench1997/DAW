@@ -1,4 +1,8 @@
 mod audio_import;
+#[cfg(test)]
+mod headless_ui_capture;
+#[cfg(test)]
+mod headless_ui_tests;
 mod project_media_ui;
 mod sample_browser_ui;
 
@@ -3312,18 +3316,22 @@ struct MidiInputControl {
 }
 
 impl MidiInputControl {
-    fn new() -> Self {
+    fn new(discover_devices: bool) -> Self {
         let mut devices = WindowsMidiDeviceManager::new();
-        let (catalog_error, selected_port_id) = match devices.refresh_ports() {
-            Ok(refresh) => (
-                None,
-                refresh
-                    .ports
-                    .iter()
-                    .find(|port| port.key.direction == MidiPortDirection::Input)
-                    .map(|port| port.key.stable_id.clone()),
-            ),
-            Err(error) => (Some(error.to_string()), None),
+        let (catalog_error, selected_port_id) = if discover_devices {
+            match devices.refresh_ports() {
+                Ok(refresh) => (
+                    None,
+                    refresh
+                        .ports
+                        .iter()
+                        .find(|port| port.key.direction == MidiPortDirection::Input)
+                        .map(|port| port.key.stable_id.clone()),
+                ),
+                Err(error) => (Some(error.to_string()), None),
+            }
+        } else {
+            (None, None)
         };
         Self {
             devices,
@@ -4817,11 +4825,24 @@ pub struct CitrusApp {
 
 impl CitrusApp {
     pub fn new_boxed(cc: &eframe::CreationContext<'_>) -> Box<Self> {
+        Self::new_boxed_with_services(cc, true)
+    }
+
+    // The isolated test path shares all app initialization and UI code, but never discovers
+    // devices, starts a stream, or reads/writes the real user profile. Native startup uses true.
+    fn new_boxed_with_services(
+        cc: &eframe::CreationContext<'_>,
+        external_services: bool,
+    ) -> Box<Self> {
         theme::install(&cc.egui_ctx);
         let project = Project::default();
         let project_fingerprint = project_fingerprint(&project);
         let history_snapshot = project.clone();
-        let (autosave_path, plugin_cache_path, recordings_dir) = app_data_paths();
+        let (autosave_path, plugin_cache_path, recordings_dir) = if external_services {
+            app_data_paths()
+        } else {
+            (None, None, None)
+        };
         let plugins = plugin_cache_path
             .as_ref()
             .and_then(|path| std::fs::read_to_string(path).ok())
@@ -4856,7 +4877,11 @@ impl CitrusApp {
         let mut startup_failures = Vec::new();
         let mut startup_source = None;
         let mut audio = None;
-        for attempt in startup_context.attempts {
+        for attempt in startup_context
+            .attempts
+            .into_iter()
+            .filter(|_| external_services)
+        {
             match AudioEngine::start_with_profile(&attempt.profile) {
                 Ok(engine) => {
                     startup_source = Some(attempt.source);
@@ -5033,7 +5058,7 @@ impl CitrusApp {
                 last_master_capture: None,
                 pending_midi_import: None,
                 pending_midi_export: None,
-                midi_input: MidiInputControl::new(),
+                midi_input: MidiInputControl::new(external_services),
                 midi_recording: AppMidiRecordingState::Idle,
                 next_midi_record_session_id: 1,
                 pending_midi_disconnect_after_record: None,
@@ -5113,7 +5138,9 @@ impl CitrusApp {
         app.sync_mixer_to_audio();
         app.rebuild_all_insert_chains();
         app.rebuild_all_generator_chains();
-        app.request_audio_device_catalog_refresh(&cc.egui_ctx);
+        if external_services {
+            app.request_audio_device_catalog_refresh(&cc.egui_ctx);
+        }
         app
     }
 
