@@ -1,0 +1,77 @@
+name: Windows MSVC preview package
+
+on:
+  push:
+    branches: [ci/windows-reliability-20261009]
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'scripts/**'
+      - '.github/workflows/windows-preview.yml'
+      - 'LICENSE'
+      - 'THIRD_PARTY_NOTICES.md'
+      - 'README.md'
+      - 'docs/WINDOWS_PREVIEW.md'
+      - 'docs/BUILD_AND_RELEASE.md'
+  workflow_dispatch:
+    inputs:
+      upload_preview:
+        description: 'Upload the validated unsigned PREVIEW ZIP (not an official release)'
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+# Branch pushes validate without publishing. Dispatch requires this workflow on
+# the default branch; the narrow push route works before any main merge.
+# A maintainer can explicitly review a later change to enable branch uploads.
+env:
+  UPLOAD_PREVIEW_ARTIFACT: 'false'
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: '1'
+
+jobs:
+  windows-preview:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install pinned official MSVC preview toolchain
+        run: rustup toolchain install 1.99.0-x86_64-pc-windows-msvc --profile minimal --component rustfmt --component clippy
+
+      - name: Test packaging and helper harnesses
+        timeout-minutes: 3
+        run: python -B -m unittest discover -s scripts -p "test_*.py" -v
+
+      - name: Validate source, build static-CRT preview and verify archive
+        run: ./scripts/build_windows_preview.ps1
+
+      - name: Smoke test helper extracted from final ZIP with sanitized PATH
+        timeout-minutes: 1
+        run: ./scripts/smoke_windows_preview.ps1
+
+      # Upload only the verified archive and its outer checksum, never target/,
+      # raw metadata, extracted directories, user profile data, plugins or logs.
+      - name: Upload explicitly requested developer PREVIEW
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.upload_preview) || env.UPLOAD_PREVIEW_ARTIFACT == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Citrus-Studio-MSVC-PREVIEW-${{ github.sha }}
+          path: |
+            artifacts/windows-preview/*.zip
+            artifacts/windows-preview/*.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
