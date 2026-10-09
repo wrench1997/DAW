@@ -21490,6 +21490,7 @@ impl CitrusApp {
     }
 
     fn mixer(&mut self, ui: &mut egui::Ui) {
+        crate::mixer_meter_ui::request_meter_repaint(ui.ctx());
         self.workspace_header(ui, "MIXER", "Insert routing & effects");
         let active = if self
             .project
