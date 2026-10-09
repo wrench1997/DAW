@@ -204,12 +204,15 @@ impl PianoChordStamp {
     }
 }
 
+use crate::piano_snap::{self, PianoSnap};
+
 pub const PIANO_ROLL_PREFERENCES_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PianoRollPreferences {
     pub version: u32,
+    pub local_snap: PianoSnap,
     pub scale_root: u8,
     pub scale: PianoScale,
     pub scale_highlighting: bool,
@@ -222,6 +225,7 @@ impl Default for PianoRollPreferences {
     fn default() -> Self {
         Self {
             version: PIANO_ROLL_PREFERENCES_VERSION,
+            local_snap: PianoSnap::default(),
             scale_root: 0,
             scale: PianoScale::Major,
             scale_highlighting: true,
@@ -238,12 +242,31 @@ impl PianoRollPreferences {
     }
 }
 
+/// Half-open edit range, independent of selected notes and transport playback.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PianoTimeRange {
+    pub start: f64,
+    pub end: f64,
+}
+impl PianoTimeRange {
+    pub fn new(start: f64, end: f64) -> Option<Self> {
+        if !start.is_finite() || !end.is_finite() {
+            return None;
+        }
+        let start = start.clamp(0.0, MAX_PIANO_BEAT);
+        let end = end.clamp(0.0, MAX_PIANO_BEAT);
+        (end > start).then_some(Self { start, end })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PianoRollState {
     pub tool: PianoRollTool,
     pub selection_ids: HashSet<u64>,
     pub last_note_length: f32,
-    pub local_snap: f32,
+    pub local_snap: PianoSnap,
+    pub repeat_range: Option<PianoTimeRange>,
+    pub range_owner: Option<(u64, usize, u32, Option<u32>)>,
     pub ghosts_visible: bool,
     pub grouping_enabled: bool,
     pub scale_root: u8,
@@ -271,7 +294,9 @@ impl PianoRollState {
             tool: PianoRollTool::Draw,
             selection_ids: HashSet::new(),
             last_note_length: 1.0,
-            local_snap: 0.25,
+            local_snap: preferences.local_snap,
+            repeat_range: None,
+            range_owner: None,
             ghosts_visible: true,
             grouping_enabled: true,
             scale_root: preferences.scale_root,
@@ -286,6 +311,7 @@ impl PianoRollState {
     pub fn preferences(&self) -> PianoRollPreferences {
         PianoRollPreferences {
             version: PIANO_ROLL_PREFERENCES_VERSION,
+            local_snap: self.local_snap,
             scale_root: self.scale_root,
             scale: self.scale,
             scale_highlighting: self.scale_highlighting,
@@ -1249,7 +1275,7 @@ fn quantize_notes(
 }
 
 fn sensitive_grid_target(value: f32, snap: f32, sensitivity: f32) -> f32 {
-    let target = (value / snap).round() * snap;
+    let target = quantize_beat(value, snap, false).unwrap_or(value);
     let threshold = snap * 0.5 * sensitivity;
     if (target - value).abs() <= threshold + NOTE_TIME_EPSILON {
         target
@@ -1410,6 +1436,31 @@ fn tension_curve(progress: f32, tension: f32) -> f32 {
     progress.powf(2.0_f32.powf(tension.clamp(-1.0, 1.0) * 2.0))
 }
 
+fn exact_grid_step(snap: f32) -> f64 {
+    PianoSnap::from_step(snap)
+        .and_then(PianoSnap::step)
+        .unwrap_or(f64::from(snap))
+}
+
+fn bounded_length_before_end(
+    start: f32,
+    end: f64,
+    requested: f64,
+) -> Result<f32, PianoRollEditError> {
+    let remaining = end - f64::from(start);
+    let raw = requested
+        .max(f64::from(MIN_NOTE_LENGTH_BEATS))
+        .min(remaining);
+    let mut length = raw as f32;
+    if f64::from(start) + f64::from(length) > end {
+        length = length.next_down();
+    }
+    if !length.is_finite() || length < MIN_NOTE_LENGTH_BEATS {
+        return Err(PianoRollEditError::InvalidNumber);
+    }
+    Ok(length)
+}
+
 fn chop_notes(
     notes: &[PianoNote],
     target_ids: &HashSet<u64>,
@@ -1422,8 +1473,8 @@ fn chop_notes(
     {
         return Err(PianoRollEditError::InvalidSnap);
     }
-    let step = settings.step_beats * settings.time_multiplier;
-    if !step.is_finite() || step < MIN_NOTE_LENGTH_BEATS {
+    let step = exact_grid_step(settings.step_beats) * f64::from(settings.time_multiplier);
+    if !step.is_finite() || step < f64::from(MIN_NOTE_LENGTH_BEATS) {
         return Err(PianoRollEditError::InvalidSnap);
     }
     let mut ids = NoteIdAllocator::new(notes)?;
@@ -1435,31 +1486,48 @@ fn chop_notes(
             result.push(note.clone());
             continue;
         }
-        let end = note.start + note.length;
+        let end = f64::from(note.start) + f64::from(note.length);
         let mut starts = vec![note.start];
-        let mut boundary = if settings.absolute_pattern {
-            ((note.start / step).floor() + 1.0) * step
+        let phase = if settings.absolute_pattern {
+            0.0
         } else {
-            note.start + step
+            f64::from(note.start)
         };
-        while boundary < end - MIN_NOTE_LENGTH_BEATS {
+        let first_index = if settings.absolute_pattern {
+            (f64::from(note.start) / step).floor() + 1.0
+        } else {
+            1.0
+        };
+        // Each boundary is derived from the fixed phase and index. A rational
+        // triplet never accumulates f32 error across a long/late phrase.
+        for offset in 0..=MAX_TRANSFORM_NOTES {
+            let boundary = phase + (first_index + offset as f64) * step;
+            if !boundary.is_finite() {
+                return Err(PianoRollEditError::InvalidNumber);
+            }
+            let boundary = boundary as f32;
+            if f64::from(boundary) > end - f64::from(MIN_NOTE_LENGTH_BEATS) {
+                break;
+            }
+            if offset == MAX_TRANSFORM_NOTES {
+                return Err(PianoRollEditError::TransformTooLarge);
+            }
             let previous = *starts.last().expect("the note start is present");
             if boundary - previous >= MIN_NOTE_LENGTH_BEATS {
                 starts.push(boundary);
-            }
-            boundary += step;
-            if !boundary.is_finite() || starts.len() > MAX_TRANSFORM_NOTES {
-                return Err(PianoRollEditError::TransformTooLarge);
             }
         }
         for (slice_index, start) in starts.iter().copied().enumerate() {
             if result.len() >= MAX_TRANSFORM_NOTES {
                 return Err(PianoRollEditError::TransformTooLarge);
             }
-            let slice_end = starts.get(slice_index + 1).copied().unwrap_or(end);
+            let slice_end = starts
+                .get(slice_index + 1)
+                .map_or(end, |value| f64::from(*value));
             let mut slice = note.clone();
             slice.start = start;
-            slice.length = (slice_end - start).max(MIN_NOTE_LENGTH_BEATS);
+            slice.length =
+                bounded_length_before_end(start, slice_end, slice_end - f64::from(start))?;
             if slice_index != 0 {
                 slice.id = ids.allocate()?;
                 generated_notes += 1;
@@ -1647,8 +1715,8 @@ fn arpeggiate_notes(
     {
         return Err(PianoRollEditError::InvalidNumber);
     }
-    let step = settings.step_beats * settings.time_multiplier;
-    if !step.is_finite() || step < MIN_NOTE_LENGTH_BEATS {
+    let step = exact_grid_step(settings.step_beats) * f64::from(settings.time_multiplier);
+    if !step.is_finite() || step < f64::from(MIN_NOTE_LENGTH_BEATS) {
         return Err(PianoRollEditError::InvalidSnap);
     }
 
@@ -1671,15 +1739,15 @@ fn arpeggiate_notes(
             .ok_or(PianoRollEditError::InvalidTarget)?;
         let chord_end = source_indices
             .iter()
-            .map(|index| notes[*index].start + notes[*index].length)
-            .reduce(f32::min)
+            .map(|index| f64::from(notes[*index].start) + f64::from(notes[*index].length))
+            .reduce(f64::min)
             .ok_or(PianoRollEditError::InvalidTarget)?;
         let block_end = source_indices
             .iter()
-            .map(|index| notes[*index].start + notes[*index].length)
-            .reduce(f32::max)
+            .map(|index| f64::from(notes[*index].start) + f64::from(notes[*index].length))
+            .reduce(f64::max)
             .ok_or(PianoRollEditError::InvalidTarget)?;
-        let one_pass_end = source_start + step * pattern.len() as f32;
+        let one_pass_end = f64::from(source_start) + step * pattern.len() as f64;
         if !one_pass_end.is_finite() {
             return Err(PianoRollEditError::InvalidNumber);
         }
@@ -1696,10 +1764,10 @@ fn arpeggiate_notes(
         reusable_ids.sort_unstable();
         let mut generated = Vec::new();
         let mut event_index = 0_usize;
-        let mut start = source_start;
-        while start < end - NOTE_TIME_EPSILON {
-            let remaining = end - start;
-            if remaining < MIN_NOTE_LENGTH_BEATS - NOTE_TIME_EPSILON {
+        loop {
+            let start = (f64::from(source_start) + step * event_index as f64) as f32;
+            let remaining = end - f64::from(start);
+            if remaining < f64::from(MIN_NOTE_LENGTH_BEATS) {
                 break;
             }
             if notes.len() - target_ids.len() + output_count + generated.len()
@@ -1719,17 +1787,13 @@ fn arpeggiate_notes(
                 group_id: None,
                 note: pitch.note,
                 start,
-                length: (step * settings.gate)
-                    .max(MIN_NOTE_LENGTH_BEATS)
-                    .min(remaining)
-                    .max(MIN_NOTE_LENGTH_BEATS),
+                length: bounded_length_before_end(start, end, step * f64::from(settings.gate))?,
                 velocity: pitch.velocity,
                 selected: false,
                 muted: pitch.muted,
             });
             selection_ids.insert(id);
             event_index += 1;
-            start += step;
             if !start.is_finite() || event_index > MAX_TRANSFORM_NOTES {
                 return Err(PianoRollEditError::TransformTooLarge);
             }
@@ -1854,7 +1918,11 @@ pub fn quantize_beat(value: f32, snap: f32, bypass_snap: bool) -> Result<f32, Pi
     if !snap.is_finite() || snap <= 0.0 {
         return Err(PianoRollEditError::InvalidSnap);
     }
-    Ok((value / snap).round() * snap)
+    Ok(if let Some(mode) = PianoSnap::from_step(snap) {
+        piano_snap::quantize_nearest(f64::from(value), mode) as f32
+    } else {
+        (f64::from(value) / f64::from(snap)).round() as f32 * snap
+    })
 }
 
 pub fn moved_note_start(
@@ -2037,7 +2105,7 @@ fn validate_keyboard_notes(
 /// The caller supplies the maximum note ID across the entire project, so phrase
 /// copies cannot collide with another pattern. Inputs remain untouched on error.
 /// Repeat spacing is Citrus's explicit selected extent, not an undocumented FL
-/// bar-rounding approximation. A separate repeat time-range is not implemented.
+/// bar-rounding approximation. The range-aware entry point overrides that spacing.
 pub fn edit_piano_notes_from_keyboard(
     notes: &[PianoNote],
     targets: &HashSet<u64>,
@@ -2045,6 +2113,28 @@ pub fn edit_piano_notes_from_keyboard(
     snap: f32,
     project_note_id_floor: u64,
 ) -> Result<DuplicateNotesResult, PianoRollEditError> {
+    edit_piano_notes_from_keyboard_with_range(
+        notes,
+        targets,
+        edit,
+        snap,
+        project_note_id_floor,
+        None,
+    )
+}
+
+pub fn edit_piano_notes_from_keyboard_with_range(
+    notes: &[PianoNote],
+    targets: &HashSet<u64>,
+    edit: PianoKeyboardEdit,
+    snap: f32,
+    project_note_id_floor: u64,
+    repeat_range: Option<PianoTimeRange>,
+) -> Result<DuplicateNotesResult, PianoRollEditError> {
+    if repeat_range.is_some_and(|range| PianoTimeRange::new(range.start, range.end) != Some(range))
+    {
+        return Err(PianoRollEditError::InvalidNumber);
+    }
     validate_keyboard_notes(notes, targets)?;
     if targets.is_empty() {
         return Ok(DuplicateNotesResult {
@@ -2057,6 +2147,9 @@ pub fn edit_piano_notes_from_keyboard(
     {
         return Err(PianoRollEditError::InvalidSnap);
     }
+    let exact_snap = PianoSnap::from_step(snap)
+        .and_then(PianoSnap::step)
+        .unwrap_or(f64::from(snap));
     let origins: Vec<_> = notes
         .iter()
         .filter(|n| targets.contains(&n.id))
@@ -2095,7 +2188,18 @@ pub fn edit_piano_notes_from_keyboard(
                 })
                 .reduce(f64::min)
                 .unwrap();
-            let delta = (f64::from(snap) * f64::from(steps)).clamp(-minimum_start, maximum_delta);
+            // Canonical on-grid f32 anchors retain their rational grid index
+            // through repeated nudges instead of accumulating model rounding.
+            // Off-grid phrases keep their common relative offset and are not quantized.
+            let requested_delta = PianoSnap::from_step(snap)
+                .filter(|mode| *mode != PianoSnap::Off)
+                .and_then(|mode| {
+                    let canonical = piano_snap::quantize_nearest(minimum_start, mode);
+                    ((canonical as f32) == minimum_start as f32)
+                        .then_some(canonical + exact_snap * f64::from(steps) - minimum_start)
+                })
+                .unwrap_or(exact_snap * f64::from(steps));
+            let delta = requested_delta.clamp(-minimum_start, maximum_delta);
             for n in result.notes.iter_mut().filter(|n| targets.contains(&n.id)) {
                 n.start = (f64::from(n.start) + delta) as f32;
             }
@@ -2107,7 +2211,10 @@ pub fn edit_piano_notes_from_keyboard(
             }
         }
         PianoKeyboardEdit::RepeatRight => {
-            let delta = (maximum_end - minimum_start).max(f64::from(snap));
+            let delta = repeat_range.map_or_else(
+                || (maximum_end - minimum_start).max(exact_snap),
+                |range| range.end - range.start,
+            );
             if maximum_end + delta > MAX_PIANO_BEAT {
                 return Err(PianoRollEditError::InvalidNumber);
             }
@@ -3335,5 +3442,437 @@ mod keyboard_edit_tests {
             .len(),
             MAX_TRANSFORM_NOTES
         );
+    }
+}
+
+#[cfg(test)]
+mod repeat_range_tests {
+    use super::*;
+    #[test]
+    fn explicit_range_overrides_extent_preserves_fields_and_can_overlap() {
+        let source = vec![
+            PianoNote {
+                id: 10,
+                channel_id: Some(1),
+                group_id: Some(9),
+                note: 64,
+                start: 20.0,
+                length: 3.0,
+                velocity: 0.375,
+                selected: false,
+                muted: true,
+            },
+            PianoNote {
+                id: 20,
+                channel_id: Some(1),
+                group_id: Some(9),
+                note: 67,
+                start: 24.0,
+                length: 0.5,
+                velocity: 0.75,
+                selected: false,
+                muted: false,
+            },
+        ];
+        let range = PianoTimeRange::new(0.0, 1.0 / 3.0).unwrap();
+        let result = edit_piano_notes_from_keyboard_with_range(
+            &source,
+            &HashSet::from([10, 20]),
+            PianoKeyboardEdit::RepeatRight,
+            0.25,
+            100_000,
+            Some(range),
+        )
+        .unwrap();
+        assert_eq!(result.notes.len(), 4);
+        assert_eq!(result.notes[2].id, 100_001);
+        assert_eq!(result.notes[3].id, 100_002);
+        for (original, copy) in source.iter().zip(&result.notes[2..]) {
+            assert!((copy.start - original.start - 1.0 / 3.0).abs() < 0.00001);
+            assert_eq!(
+                (
+                    original.note,
+                    original.length,
+                    original.velocity,
+                    original.muted,
+                    original.channel_id
+                ),
+                (
+                    copy.note,
+                    copy.length,
+                    copy.velocity,
+                    copy.muted,
+                    copy.channel_id
+                )
+            );
+            assert_ne!(original.group_id, copy.group_id);
+        }
+        assert_eq!(result.notes[2].group_id, result.notes[3].group_id);
+        assert_eq!(result.selection_ids, HashSet::from([100_001, 100_002]));
+    }
+    #[test]
+    fn invalid_range_and_repeat_overflow_fail_atomically() {
+        let source = vec![PianoNote {
+            id: 10,
+            channel_id: Some(1),
+            group_id: None,
+            note: 64,
+            start: 4095.0,
+            length: 1.0,
+            velocity: 0.5,
+            selected: false,
+            muted: false,
+        }];
+        for range in [
+            PianoTimeRange {
+                start: 0.0,
+                end: f64::NAN,
+            },
+            PianoTimeRange {
+                start: 3.0,
+                end: 2.0,
+            },
+            PianoTimeRange {
+                start: 0.0,
+                end: 1.0,
+            },
+            PianoTimeRange {
+                start: -1.0,
+                end: 1.0,
+            },
+        ] {
+            assert!(
+                edit_piano_notes_from_keyboard_with_range(
+                    &source,
+                    &HashSet::from([10]),
+                    PianoKeyboardEdit::RepeatRight,
+                    0.25,
+                    10,
+                    Some(range)
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(source[0].start, 4095.0);
+        assert_eq!(
+            PianoTimeRange::new(-3.0, 5000.0),
+            Some(PianoTimeRange {
+                start: 0.0,
+                end: 4096.0
+            })
+        );
+    }
+    #[test]
+    fn old_snap_preferences_migrate_and_off_triplet_preferences_roundtrip() {
+        let old: PianoRollPreferences =
+            serde_json::from_str(r#"{"version":1,"scale_root":9,"snap_to_scale":true}"#).unwrap();
+        assert_eq!(old.local_snap, PianoSnap::QuarterBeat);
+        assert_eq!(old.scale_root, 9);
+        for snap in PianoSnap::ALL {
+            let prefs = PianoRollPreferences {
+                local_snap: snap,
+                ..old.clone()
+            };
+            let raw = serde_json::to_string(&prefs).unwrap();
+            assert_eq!(
+                PianoRollState::from_preferences(serde_json::from_str(&raw).unwrap()).preferences(),
+                prefs
+            );
+        }
+        assert!(
+            serde_json::from_str::<PianoRollPreferences>(r#"{"local_snap":"not-a-grid"}"#).is_err()
+        );
+        assert!(serde_json::from_str::<PianoRollPreferences>(r#"{"local_snap":0}"#).is_err());
+    }
+}
+
+#[cfg(test)]
+mod fine_grid_transform_tests {
+    use super::*;
+    fn source(start: f32, length: f32) -> Vec<PianoNote> {
+        vec![PianoNote {
+            id: 1,
+            channel_id: Some(1),
+            group_id: None,
+            note: 60,
+            start,
+            length,
+            velocity: 0.5,
+            selected: false,
+            muted: false,
+        }]
+    }
+    #[test]
+    fn indexed_triplet_transforms_keep_rational_phase_and_bounds_at_late_times() {
+        for snap in [
+            PianoSnap::TwentyFourthBeat,
+            PianoSnap::TwelfthBeat,
+            PianoSnap::SixthBeat,
+            PianoSnap::ThirdBeat,
+        ] {
+            let step = snap.step().unwrap();
+            for length in [1.0, 2.0] {
+                for start in [0.0_f32, 0.137, 4094.0, 4093.875] {
+                    let notes = source(start, length);
+                    for absolute in [false, true] {
+                        if absolute && start.fract() != 0.0 {
+                            continue;
+                        }
+                        let mut settings = ChopSettings::new(snap.keyboard_step());
+                        settings.absolute_pattern = absolute;
+                        let result = chop_notes(&notes, &HashSet::from([1]), settings).unwrap();
+                        assert_eq!(
+                            result.notes.len(),
+                            (f64::from(length) / step).round() as usize
+                        );
+                        for (index, note) in result.notes.iter().enumerate() {
+                            assert_eq!(note.start, (f64::from(start) + index as f64 * step) as f32);
+                            assert!(
+                                f64::from(note.start) + f64::from(note.length)
+                                    <= f64::from(start) + f64::from(length)
+                            );
+                            assert!(note.length >= MIN_NOTE_LENGTH_BEATS);
+                        }
+                    }
+                    let result = arpeggiate_notes(
+                        &notes,
+                        &HashSet::from([1]),
+                        ArpeggiateSettings::new(snap.keyboard_step()),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        result.notes.len(),
+                        (f64::from(length) / step).round() as usize
+                    );
+                    for (index, note) in result.notes.iter().enumerate() {
+                        assert_eq!(note.start, (f64::from(start) + index as f64 * step) as f32);
+                        assert!(
+                            f64::from(note.start) + f64::from(note.length)
+                                <= f64::from(start) + f64::from(length)
+                        );
+                        assert!(note.length >= MIN_NOTE_LENGTH_BEATS);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn minimum_chop_includes_last_legal_slice_and_transforms_reject_unbounded_generation() {
+        let notes = source(0.0, 1.0);
+        let chopped = chop_notes(
+            &notes,
+            &HashSet::from([1]),
+            ChopSettings::new(PianoSnap::Off.transform_step()),
+        )
+        .unwrap();
+        assert_eq!(chopped.notes.len(), 64);
+        assert!(
+            chopped
+                .notes
+                .iter()
+                .all(|n| n.length == MIN_NOTE_LENGTH_BEATS)
+        );
+        let huge = source(0.0, 4096.0);
+        assert!(matches!(
+            chop_notes(&huge, &HashSet::from([1]), ChopSettings::new(1.0 / 24.0)),
+            Err(PianoRollEditError::TransformTooLarge)
+        ));
+        assert!(matches!(
+            arpeggiate_notes(
+                &huge,
+                &HashSet::from([1]),
+                ArpeggiateSettings::new(1.0 / 24.0)
+            ),
+            Err(PianoRollEditError::TransformTooLarge)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod repeated_triplet_nudge_tests {
+    use super::*;
+    #[test]
+    fn repeated_on_grid_nudges_keep_canonical_positions_and_off_grid_moves_do_not_quantize() {
+        for snap in [
+            PianoSnap::TwentyFourthBeat,
+            PianoSnap::TwelfthBeat,
+            PianoSnap::SixthBeat,
+            PianoSnap::ThirdBeat,
+        ] {
+            let mut notes = vec![PianoNote {
+                id: 1,
+                channel_id: Some(1),
+                group_id: None,
+                note: 60,
+                start: 4094.0,
+                length: 0.02,
+                velocity: 0.5,
+                selected: false,
+                muted: false,
+            }];
+            let count = (1.9 / snap.step().unwrap()).floor() as usize;
+            for index in 1..=count {
+                notes = edit_piano_notes_from_keyboard(
+                    &notes,
+                    &HashSet::from([1]),
+                    PianoKeyboardEdit::MoveSteps(1),
+                    snap.keyboard_step(),
+                    1,
+                )
+                .unwrap()
+                .notes;
+                assert_eq!(
+                    notes[0].start,
+                    (4094.0 + index as f64 * snap.step().unwrap()) as f32
+                );
+            }
+            for index in (0..count).rev() {
+                notes = edit_piano_notes_from_keyboard(
+                    &notes,
+                    &HashSet::from([1]),
+                    PianoKeyboardEdit::MoveSteps(-1),
+                    snap.keyboard_step(),
+                    1,
+                )
+                .unwrap()
+                .notes;
+                assert_eq!(
+                    notes[0].start,
+                    (4094.0 + index as f64 * snap.step().unwrap()) as f32
+                );
+            }
+            notes[0].start = 0.137;
+            let shifted = edit_piano_notes_from_keyboard(
+                &notes,
+                &HashSet::from([1]),
+                PianoKeyboardEdit::MoveSteps(1),
+                snap.keyboard_step(),
+                1,
+            )
+            .unwrap();
+            assert_eq!(
+                shifted.notes[0].start,
+                (f64::from(notes[0].start) + snap.step().unwrap()) as f32
+            );
+        }
+    }
+    #[test]
+    fn repeated_triplet_nudges_apply_one_delta_to_mixed_offset_selection() {
+        for start in [1.0_f32, 4094.0] {
+            for snap in [PianoSnap::TwentyFourthBeat, PianoSnap::ThirdBeat] {
+                let anchor = PianoNote {
+                    id: 1,
+                    channel_id: Some(1),
+                    group_id: Some(7),
+                    note: 60,
+                    start,
+                    length: 0.02,
+                    velocity: 0.5,
+                    selected: false,
+                    muted: false,
+                };
+                let partner = PianoNote {
+                    id: 2,
+                    start: start + 0.137,
+                    note: 67,
+                    ..anchor.clone()
+                };
+                let initial_offset = partner.start - anchor.start;
+                let mut notes = vec![anchor, partner];
+                let targets = HashSet::from([1, 2]);
+                let count = (1.7 / snap.step().unwrap()).floor() as usize;
+                for direction in [1, -1] {
+                    for _ in 0..count {
+                        notes = edit_piano_notes_from_keyboard(
+                            &notes,
+                            &targets,
+                            PianoKeyboardEdit::MoveSteps(direction),
+                            snap.keyboard_step(),
+                            2,
+                        )
+                        .unwrap()
+                        .notes;
+                        let error = ((notes[1].start - notes[0].start) - initial_offset).abs();
+                        assert!(
+                            error <= notes[1].start.abs().max(1.0) * f32::EPSILON * 2.0,
+                            "common group offset changed: {notes:?}"
+                        );
+                        assert_eq!(notes[1].note - notes[0].note, 7);
+                    }
+                }
+                assert_eq!(notes[0].start, start);
+                assert!(
+                    (notes[1].start - (start + initial_offset)).abs()
+                        <= notes[1].start.abs().max(1.0) * f32::EPSILON * 2.0
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod repeated_range_precision_tests {
+    use super::*;
+    #[test]
+    fn repeated_triplet_range_copy_has_bounded_f32_error_unique_ids_and_atomic_endpoint() {
+        let mut notes = vec![PianoNote {
+            id: 1,
+            channel_id: Some(1),
+            group_id: None,
+            note: 60,
+            start: 4094.0,
+            length: 0.02,
+            velocity: 0.5,
+            selected: false,
+            muted: false,
+        }];
+        let mut targets = HashSet::from([1]);
+        let range = PianoTimeRange::new(0.0, 1.0 / 24.0).unwrap();
+        let mut rounding_bound = 0.0;
+        for index in 1..=47 {
+            let floor = notes.iter().map(|n| n.id).max().unwrap();
+            let result = edit_piano_notes_from_keyboard_with_range(
+                &notes,
+                &targets,
+                PianoKeyboardEdit::RepeatRight,
+                1.0 / 24.0,
+                floor,
+                Some(range),
+            )
+            .unwrap();
+            let copy = result.notes.last().unwrap();
+            // One f32 addition and one f32 width conversion per repeat. A copy
+            // preserves arbitrary phrase phase; it is not silently re-quantized.
+            rounding_bound += f64::from(copy.start.next_up() - copy.start) * 0.5
+                + (f64::from((1.0 / 24.0) as f32) - 1.0 / 24.0).abs();
+            let exact = 4094.0 + f64::from(index) / 24.0;
+            assert!((f64::from(copy.start) - exact).abs() <= rounding_bound + 1e-10);
+            assert!(f64::from(copy.start) + f64::from(copy.length) <= MAX_PIANO_BEAT);
+            assert_eq!(result.notes.len(), index as usize + 1);
+            assert_eq!(
+                result
+                    .notes
+                    .iter()
+                    .map(|n| n.id)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                result.notes.len()
+            );
+            targets = result.selection_ids;
+            notes = result.notes;
+        }
+        let before = serde_json::to_string(&notes).unwrap();
+        assert!(
+            edit_piano_notes_from_keyboard_with_range(
+                &notes,
+                &targets,
+                PianoKeyboardEdit::RepeatRight,
+                1.0 / 24.0,
+                48,
+                Some(range)
+            )
+            .is_err()
+        );
+        assert_eq!(serde_json::to_string(&notes).unwrap(), before);
     }
 }

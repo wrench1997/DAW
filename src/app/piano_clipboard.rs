@@ -269,6 +269,7 @@ impl CitrusApp {
             && !ctx.text_edit_focused()
             && (menu_command || !ctx.any_popup_open())
             && !self.editor_pointer_gesture_active()
+            && !piano_range::active(ctx)
             && self.playlist_gesture_before.is_none()
             && self.piano_roll_gesture_before.is_none()
             && self.top_shortcut_modal().is_none()
@@ -277,21 +278,27 @@ impl CitrusApp {
             && !self.project_lifecycle_barriers_active()
     }
 
-    fn piano_paste_anchor(&self) -> Result<f64, &'static str> {
-        // There is no independent Piano ruler cursor. Song time cannot be treated as pattern time.
-        if self.transport_mode == TransportMode::Song {
-            return Ok(0.0);
+    pub(super) fn piano_paste_anchor(&self) -> Result<f64, &'static str> {
+        let left = self.piano_viewport.x.origin();
+        if !left.is_finite() || !(0.0..MAX_BEAT).contains(&left) {
+            return Err("Invalid Piano paste position");
         }
-        let beat = f64::from(self.beat_position);
-        let snap = f64::from(self.piano_roll_state.local_snap);
-        if !beat.is_finite() || beat < 0.0 || !snap.is_finite() || snap <= 0.0 {
-            return Err("Invalid Piano paste position or snap");
-        }
-        Ok((beat / snap).floor() * snap)
+        Ok((left / 4.0).floor() * 4.0)
     }
 
     pub(super) fn piano_clipboard_action(&mut self, ctx: &egui::Context, action: ShortcutAction) {
-        if !self.piano_clipboard_ready(ctx) || ctx.input(|i| i.pointer.any_down()) {
+        self.piano_clipboard_action_impl(ctx, action, false);
+    }
+
+    fn piano_clipboard_action_impl(
+        &mut self,
+        ctx: &egui::Context,
+        action: ShortcutAction,
+        menu_command: bool,
+    ) {
+        if !self.piano_editor_command_ready(ctx, menu_command)
+            || ctx.input(|i| i.pointer.any_down())
+        {
             return;
         }
         if action == ShortcutAction::SelectAllNotes {
@@ -420,8 +427,8 @@ impl CitrusApp {
         Ok(())
     }
 
-    pub(super) fn piano_clipboard_toolbar(&mut self, ui: &mut egui::Ui) {
-        let ready = self.piano_clipboard_ready(ui.ctx());
+    pub(super) fn piano_clipboard_toolbar(&mut self, ui: &mut egui::Ui, menu_command: bool) {
+        let ready = self.piano_editor_command_ready(ui.ctx(), menu_command);
         let selected = !self.piano_roll_state.selection_ids.is_empty();
         let copied = self.piano_clipboard.payload.is_some();
         let mut action = None;
@@ -436,10 +443,13 @@ impl CitrusApp {
             }
             let anchor = self.piano_paste_anchor().map(|beat| format!("Paste beat {beat:.2}")).unwrap_or_else(|_| "Paste position invalid".into());
             ui.label(RichText::new(anchor).size(9.0).color(theme::MUTED)).on_hover_text(
-                "Session-local Citrus notes. Pattern mode: transport cursor snapped down. Song mode: pattern start (beat 0). Repeated paste uses the same anchor. Original channels and pitches are preserved; TARGET does not remap them. Copy/Cut writes Citrus text to the OS clipboard; Paste notes uses the last local copy. Not MIDI interchange.");
+                "Session-local Citrus notes. Both transport modes: start of the bar containing the left edge of the Piano grid. Range and playhead do not change this anchor. Repeated paste uses the same anchor. Original channels and pitches are preserved; TARGET does not remap them. Copy/Cut writes Citrus text to the OS clipboard; Paste notes uses the last local copy. Not MIDI interchange.");
         });
         if let Some(action) = action {
-            self.piano_clipboard_action(ui.ctx(), action);
+            if menu_command {
+                ui.close();
+            }
+            self.piano_clipboard_action_impl(ui.ctx(), action, menu_command);
         }
     }
 }

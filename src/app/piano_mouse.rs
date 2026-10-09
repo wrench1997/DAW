@@ -176,13 +176,16 @@ pub(super) fn selecting(ctx: &egui::Context) -> bool {
         .is_some_and(|g| matches!(g.kind, GestureKind::Selection | GestureKind::Marquee { .. }))
 }
 
-pub(super) fn insertion_start(raw: f32, snap: f32, bypass: bool) -> f32 {
+pub(super) fn insertion_start(raw: f64, snap: PianoSnap, bypass: bool) -> f32 {
     (if bypass {
         raw
     } else {
-        (raw / snap).floor() * snap
+        crate::piano_snap::quantize_floor(raw, snap)
     })
-    .clamp(0.0, MAX_BEAT - crate::piano_roll::MIN_NOTE_LENGTH_BEATS)
+    .clamp(
+        0.0,
+        f64::from(MAX_BEAT - crate::piano_roll::MIN_NOTE_LENGTH_BEATS),
+    ) as f32
 }
 
 fn clone_notes(project: &Project, origins: &[PianoNote]) -> Option<Vec<PianoNote>> {
@@ -380,8 +383,7 @@ impl CitrusApp {
                     let start = insertion_start(
                         self.piano_viewport
                             .x
-                            .content_at_pixel(f64::from(pointer.x - grid.left()))
-                            as f32,
+                            .content_at_pixel(f64::from(pointer.x - grid.left())),
                         self.piano_roll_state.local_snap,
                         modifiers.alt,
                     );
@@ -548,8 +550,8 @@ impl CitrusApp {
                             moved_note_start(
                                 anchor_note.start,
                                 delta.x / gesture.coordinates[2] as f32,
-                                self.piano_roll_state.local_snap,
-                                modifiers.alt,
+                                self.piano_roll_state.local_snap.keyboard_step(),
+                                modifiers.alt || self.piano_roll_state.local_snap == PianoSnap::Off,
                             )
                             .unwrap_or(anchor_note.start)
                         };
@@ -623,14 +625,15 @@ impl CitrusApp {
                         let raw_end = self
                             .piano_viewport
                             .x
-                            .content_at_pixel(f64::from(pointer.x - grid.left()))
-                            as f32;
+                            .content_at_pixel(f64::from(pointer.x - grid.left()));
                         let end = if modifiers.alt {
                             raw_end
                         } else {
-                            (raw_end / self.piano_roll_state.local_snap).round()
-                                * self.piano_roll_state.local_snap
-                        };
+                            crate::piano_snap::quantize_nearest(
+                                raw_end,
+                                self.piano_roll_state.local_snap,
+                            )
+                        } as f32;
                         next.length = (end - origin.start)
                             .max(crate::piano_roll::MIN_NOTE_LENGTH_BEATS)
                             .min(MAX_BEAT - origin.start);
@@ -640,8 +643,8 @@ impl CitrusApp {
                             next.start = moved_note_start(
                                 origin.start,
                                 delta.x / gesture.coordinates[2] as f32,
-                                self.piano_roll_state.local_snap,
-                                modifiers.alt,
+                                self.piano_roll_state.local_snap.keyboard_step(),
+                                modifiers.alt || self.piano_roll_state.local_snap == PianoSnap::Off,
                             )
                             .unwrap_or(origin.start)
                             .min(MAX_BEAT - origin.length);

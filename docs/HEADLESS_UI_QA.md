@@ -286,3 +286,11 @@ small imported notes, press-event modifiers, numeric keyboard ownership, one-ste
 Apply, Cancel/Reset, save/reopen and import barriers are covered. See
 [Note expression](PIANO_NOTE_EXPRESSION.md). This remains production app input and
 offscreen evidence, not native OS/Windows/hardware or native plug-in paint acceptance.
+
+## Piano edit ranges and local snap
+
+`src/app/piano_range_tests.rs` adds production ruler/key/window tests for the
+independent repeat interval and viewport-bar paste. `src/piano_snap.rs` tests
+finite rational snapping, triplet boundaries and bounded visible-grid generation.
+See [Piano ranges and snap](PIANO_RANGES_AND_SNAP.md) for the explicit edit-only
+scope, selection boundary rules, settings migration and Off behavior.

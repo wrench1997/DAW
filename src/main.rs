@@ -24,6 +24,7 @@ mod mixer_meter_ui;
 mod model;
 pub mod pdc;
 mod piano_roll;
+mod piano_snap;
 mod playlist;
 pub mod plugin_graph;
 pub mod plugin_parameter_edit;

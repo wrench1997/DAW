@@ -1,6 +1,9 @@
 //! Guarded, discrete melody keyboard edits share the note clipboard's ownership barriers.
 use super::*;
-use crate::piano_roll::{edit_piano_notes_from_keyboard, piano_keyboard_targets};
+use crate::piano_roll::{
+    edit_piano_notes_from_keyboard, edit_piano_notes_from_keyboard_with_range,
+    piano_keyboard_targets,
+};
 
 impl CitrusApp {
     pub(super) fn piano_immediate_action(&mut self, ctx: &egui::Context, action: ShortcutAction) {
@@ -22,7 +25,9 @@ impl CitrusApp {
     }
 
     fn apply_ready_piano_immediate_action(&mut self, action: ShortcutAction) {
+        self.sync_piano_range_owner();
         match action {
+            ShortcutAction::PianoRange(action) => self.apply_piano_range_action(action),
             ShortcutAction::DeselectNotes => {
                 self.piano_roll_state.clear_selection();
             }
@@ -65,13 +70,30 @@ impl CitrusApp {
                     .map(|n| n.id)
                     .max()
                     .unwrap_or(0);
-                let result = match edit_piano_notes_from_keyboard(
-                    notes,
-                    &targets,
-                    edit,
-                    self.piano_roll_state.local_snap,
-                    id_floor,
-                ) {
+                let snap = self.piano_roll_state.local_snap;
+                if snap == PianoSnap::Off && matches!(edit, PianoKeyboardEdit::QuickQuantize { .. })
+                {
+                    self.notify("Quick quantize needs a Piano snap grid. Choose a grid or use the Quantize dialog.".into());
+                    return;
+                }
+                let result = match if let Some(range) = self.piano_roll_state.repeat_range {
+                    edit_piano_notes_from_keyboard_with_range(
+                        notes,
+                        &targets,
+                        edit,
+                        snap.keyboard_step(),
+                        id_floor,
+                        Some(range),
+                    )
+                } else {
+                    edit_piano_notes_from_keyboard(
+                        notes,
+                        &targets,
+                        edit,
+                        snap.keyboard_step(),
+                        id_floor,
+                    )
+                } {
                     Ok(result) => result,
                     Err(error) => {
                         self.notify(format!("Piano edit was not applied: {error}"));

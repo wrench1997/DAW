@@ -1665,7 +1665,7 @@ fn piano_clipboard_fixture(ui: &mut UiHarness) -> u32 {
     ui.app.piano_roll_state.selection_ids.clear();
     ui.app.transport_mode = TransportMode::Pattern;
     ui.app.beat_position = 1.49;
-    ui.app.piano_roll_state.local_snap = 0.25;
+    ui.app.piano_roll_state.local_snap = PianoSnap::QuarterBeat;
     ui.app.sync_history_observer();
     ui.app.undo_stack.clear();
     ui.app.redo_stack.clear();
@@ -1705,7 +1705,7 @@ fn piano_clipboard_real_semantic_keys_preserve_notes_and_one_step_history() {
     assert_eq!(ui.app.undo_stack.len(), 1);
     let pasted = ui.app.project.active_pattern().notes[3..].to_vec();
     assert_eq!(pasted.len(), 2, "semantic + raw paste must dispatch once");
-    assert_eq!((pasted[0].start, pasted[1].start), (1.25, 1.625));
+    assert_eq!((pasted[0].start, pasted[1].start), (0.0, 0.375));
     assert_eq!((pasted[0].length, pasted[1].length), (0.75, 0.25));
     assert_eq!((pasted[0].velocity, pasted[1].velocity), (0.625, 0.25));
     assert_eq!((pasted[0].note, pasted[1].note), (60, 64));
@@ -1789,7 +1789,7 @@ fn piano_clipboard_buttons_cut_empty_invalid_text_and_local_paste_are_deliberate
 }
 
 #[test]
-fn piano_clipboard_cross_pattern_retains_channels_and_song_anchor_is_zero() {
+fn piano_clipboard_cross_pattern_retains_channels_and_visible_zero_bar_anchor() {
     let mut ui = UiHarness::floating();
     let channel = piano_clipboard_fixture(&mut ui);
     ui.key(egui::Key::A, piano_clipboard_command());
@@ -2088,14 +2088,23 @@ fn piano_clipboard_copy_cut_buttons_emit_one_payload_and_cut_is_one_undo() {
 }
 
 #[test]
-fn piano_clipboard_minimum_floating_toolbar_buttons_remain_reachable() {
+fn piano_clipboard_minimum_floating_overflow_buttons_remain_reachable() {
     let mut ui = UiHarness::floating();
     piano_clipboard_fixture(&mut ui);
     ui.key(egui::Key::A, piano_clipboard_command());
     copied_note_text(&ui.run(vec![egui::Event::Copy]));
     ui.size = Vec2::new(1080.0, 680.0);
     ui.settle();
-    let editor = ui.editor_rect(StudioView::PianoRoll);
+    let in_overflow = ui
+        .nodes
+        .iter()
+        .any(|node| node.label() == Some("NOTE EDIT v"));
+    let bounds = if in_overflow {
+        ui.click("NOTE EDIT v");
+        ui.ctx.content_rect()
+    } else {
+        ui.editor_rect(StudioView::PianoRoll)
+    };
     for label in ["Select all notes", "Copy notes", "Cut notes", "Paste notes"] {
         let b = ui.button(label).bounds().unwrap();
         let rect = Rect::from_min_max(
@@ -2103,8 +2112,8 @@ fn piano_clipboard_minimum_floating_toolbar_buttons_remain_reachable() {
             Pos2::new(b.x1 as f32, b.y1 as f32),
         );
         assert!(
-            editor.contains_rect(rect),
-            "{label} must stay inside the small Piano window"
+            bounds.contains_rect(rect),
+            "{label} must stay inside the small Piano window or visible overflow"
         );
     }
     ui.click("Paste notes");
@@ -2529,3 +2538,9 @@ include!("piano_keyboard_tests.rs");
 mod piano_expression_tests;
 #[path = "piano_mouse_tests.rs"]
 mod piano_mouse_tests;
+
+#[path = "piano_range_tests.rs"]
+mod piano_range_tests;
+
+#[path = "piano_snap_integration_tests.rs"]
+mod piano_snap_integration_tests;

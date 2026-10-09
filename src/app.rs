@@ -6,6 +6,7 @@ mod headless_ui_tests;
 mod piano_clipboard;
 mod piano_expression;
 mod piano_mouse;
+mod piano_range;
 mod piano_shortcuts;
 mod project_media_ui;
 mod sample_browser_ui;
@@ -87,6 +88,7 @@ use crate::{
         stamp_chord_notes, toggle_note_group_selection, transform_piano_notes,
         ungroup_selected_notes,
     },
+    piano_snap::PianoSnap,
     playlist::{
         PlaylistFadeSide, PlaylistGestureSnapshot,
         clamp_group_move_delta as clamp_playlist_group_move_delta,
@@ -2045,6 +2047,7 @@ enum ShortcutAction {
     DeselectNotes,
     ToggleGhostNotes,
     PianoEdit(PianoKeyboardEdit),
+    PianoRange(piano_range::RangeAction),
     CopyNotes,
     CutNotes,
     PasteNotes,
@@ -2106,6 +2109,21 @@ impl ShortcutPolicy {
         if self.context.piano_active {
             let m = chord.modifiers;
             let edit = match chord.key {
+                ShortcutKey::Enter if m.is_command_only() => {
+                    return Some(ShortcutAction::PianoRange(
+                        piano_range::RangeAction::FromSelection,
+                    ));
+                }
+                ShortcutKey::ArrowLeft if m.is_command_only() => {
+                    return Some(ShortcutAction::PianoRange(piano_range::RangeAction::Move(
+                        -1,
+                    )));
+                }
+                ShortcutKey::ArrowRight if m.is_command_only() => {
+                    return Some(ShortcutAction::PianoRange(piano_range::RangeAction::Move(
+                        1,
+                    )));
+                }
                 ShortcutKey::D if m.is_command_only() => {
                     return Some(ShortcutAction::DeselectNotes);
                 }
@@ -11198,7 +11216,7 @@ impl CitrusApp {
             ));
             return;
         }
-        let snap = self.piano_roll_state.local_snap.max(0.05);
+        let snap = self.piano_roll_state.local_snap.transform_step();
         self.piano_roll_transform = Some(PianoRollTransformSession {
             kind,
             settings: PianoRollTransformSettings::for_kind(kind, snap),
@@ -12008,6 +12026,11 @@ impl CitrusApp {
     }
 
     fn apply_shortcut_action(&mut self, ctx: &egui::Context, action: ShortcutAction) {
+        self.sync_piano_range_owner();
+        if matches!(action, ShortcutAction::Undo | ShortcutAction::Redo) && piano_range::active(ctx)
+        {
+            return;
+        }
         if !self.workspace.windows[workspace::index(self.workspace.focused)].visible
             && matches!(
                 action,
@@ -12040,7 +12063,8 @@ impl CitrusApp {
         match action {
             ShortcutAction::DeselectNotes
             | ShortcutAction::ToggleGhostNotes
-            | ShortcutAction::PianoEdit(_) => self.piano_immediate_action(ctx, action),
+            | ShortcutAction::PianoEdit(_)
+            | ShortcutAction::PianoRange(_) => self.piano_immediate_action(ctx, action),
             ShortcutAction::TogglePlay => self.toggle_play(),
             ShortcutAction::ToggleTransportMode => self.toggle_transport_mode(),
             ShortcutAction::TogglePlaylistFades => {
@@ -12085,7 +12109,9 @@ impl CitrusApp {
                 }
             }
             ShortcutAction::PianoTransform(kind) => {
-                if self.workspace.focused == StudioView::PianoRoll {
+                if self.piano_editor_command_ready(ctx, false)
+                    && !ctx.input(|i| i.pointer.any_down())
+                {
                     self.begin_piano_roll_transform(kind);
                 }
             }
@@ -14097,6 +14123,8 @@ impl CitrusApp {
         self.playlist_viewport = default_playlist_viewport(self.project.song_length_beats);
         self.piano_viewport = default_piano_viewport();
         self.piano_roll_state.clear_selection();
+        self.piano_roll_state.repeat_range = None;
+        self.piano_roll_state.range_owner = None;
         self.piano_roll_gesture_before = None;
         self.piano_roll_transform = None;
         self.piano_note_properties = None;
@@ -18323,11 +18351,16 @@ fn lcd(ui: &mut egui::Ui, label: &str, value: &mut f32, unit: &str, width: f32) 
         });
 }
 
-fn piano_transform_grid_choices() -> [(f32, &'static str); 7] {
+fn piano_transform_grid_choices() -> [(f32, &'static str); 12] {
     [
+        (1.0 / 64.0, "1/64 beat (Off fallback)"),
+        (1.0 / 24.0, "1/24 beat · Triplet"),
         (1.0 / 16.0, "1/16 beat"),
+        (1.0 / 12.0, "1/12 beat · Triplet"),
         (1.0 / 8.0, "1/8 beat"),
+        (1.0 / 6.0, "1/6 beat · Triplet"),
         (0.25, "Step (1/4 beat)"),
+        (1.0 / 3.0, "1/3 beat · Triplet"),
         (0.5, "1/2 beat"),
         (1.0, "1 beat"),
         (2.0, "2 beats"),
@@ -18562,13 +18595,18 @@ impl CitrusApp {
                     // Reserve the entire snap group before laying it out. In a wrapped
                     // row this moves the group intact instead of overlapping previous tools.
                     ui.allocate_ui_with_layout(
-                        Vec2::new((ui.available_size_before_wrap().x - ui.spacing().item_spacing.x).max(176.0), 24.0),
+                        Vec2::new((ui.available_size_before_wrap().x - ui.spacing().item_spacing.x).max(if view == StudioView::PianoRoll { 232.0 } else { 176.0 }), 24.0),
                         Layout::right_to_left(Align::Center), |ui| {
-                        let snap = if view == StudioView::PianoRoll {
-                            &mut self.piano_roll_state.local_snap
+                        if view == StudioView::PianoRoll {
+                            egui::ComboBox::from_id_salt(format!("snap-{title}"))
+                                .selected_text(self.piano_roll_state.local_snap.label())
+                                .show_ui(ui, |ui| {
+                                    for snap in PianoSnap::ALL {
+                                        ui.selectable_value(&mut self.piano_roll_state.local_snap, snap, snap.label());
+                                    }
+                                }).response.on_hover_text("Piano-local time snap. Off: raw pointer editing; keyboard nudge/discard uses 1/64 beat; quick quantize is unavailable. Fine grid lines thin at low zoom, keeping their original phase. Playlist snap is independent.");
                         } else {
-                            &mut self.snap
-                        };
+                            let snap = &mut self.snap;
                         egui::ComboBox::from_id_salt(format!("snap-{title}"))
                             .selected_text(match *snap {
                                 0.125 => "1/8 beat",
@@ -18587,6 +18625,7 @@ impl CitrusApp {
                                 ui.selectable_value(snap, 2.0, "2 beats");
                                 ui.selectable_value(snap, 4.0, "1 bar");
                             });
+                        }
                         ui.label(RichText::new("SNAP").size(8.0).color(theme::MUTED));
                         let icon_rect = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover()).0;
                         icons::paint_icon(
@@ -20309,147 +20348,7 @@ impl CitrusApp {
         }
     }
 
-    fn piano_roll(&mut self, ui: &mut egui::Ui) {
-        // A whole-project import/save/native snapshot must not race a note preview.
-        if self.project_snapshot_transition_pending()
-            || self.project_lifecycle_barriers_active()
-            || !ui.input(|input| input.focused)
-        {
-            ui.disable();
-        }
-        let channel_choices = self
-            .project
-            .channels
-            .iter()
-            .map(|channel| {
-                (
-                    channel.id,
-                    channel.name.clone(),
-                    channel.mixer_track,
-                    channel.color,
-                )
-            })
-            .collect::<Vec<_>>();
-        self.piano_roll_state
-            .retain_existing(&self.project.active_pattern().notes);
-        let piano_snap = self.piano_roll_state.local_snap;
-        let piano_content_end = piano_pattern_content_end(self.project.active_pattern());
-        let channel_name = self
-            .project
-            .channels
-            .get(self.selected_channel)
-            .map(|channel| channel.name.as_str())
-            .unwrap_or("Unassigned");
-        let piano_subtitle = format!("{} — {}", channel_name, self.project.active_pattern().name);
-        self.workspace_header(ui, StudioView::PianoRoll, "PIANO ROLL", &piano_subtitle);
-        let selected_note_count = self.piano_roll_state.selection_ids.len();
-        let unassigned_count = self
-            .project
-            .active_pattern()
-            .notes
-            .iter()
-            .filter(|note| note.channel_id.is_none())
-            .count();
-        let mut assignment = self
-            .project
-            .active_pattern()
-            .notes
-            .iter()
-            .find(|note| self.piano_roll_state.selection_ids.contains(&note.id))
-            .and_then(|note| note.channel_id);
-        let mut assignment_changed = false;
-        let populated_channel_ids = self
-            .project
-            .active_pattern()
-            .notes
-            .iter()
-            .filter_map(|note| note.channel_id)
-            .collect::<HashSet<_>>();
-        let mut target_channel_index = self
-            .selected_channel
-            .min(channel_choices.len().saturating_sub(1));
-        let mut target_channel_changed = false;
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("TARGET").size(9.0).color(theme::MUTED));
-            egui::ComboBox::from_id_salt("piano-target-channel")
-                .width(160.0)
-                .selected_text(
-                    channel_choices
-                        .get(target_channel_index)
-                        .map(|(_, name, ..)| name.as_str())
-                        .unwrap_or("No channels"),
-                )
-                .show_ui(ui, |ui| {
-                    for (index, (channel_id, name, ..)) in channel_choices.iter().enumerate() {
-                        let label = if populated_channel_ids.contains(channel_id) {
-                            format!("● {name}")
-                        } else {
-                            format!("  {name}")
-                        };
-                        target_channel_changed |= ui
-                            .selectable_value(&mut target_channel_index, index, label)
-                            .changed();
-                    }
-                });
-            ui.separator();
-            ui.label(
-                RichText::new(format!(
-                    "{selected_note_count} selected / {unassigned_count} unassigned"
-                ))
-                .size(9.0)
-                .color(if unassigned_count == 0 {
-                    theme::MUTED
-                } else {
-                    theme::AMBER
-                }),
-            );
-            ui.add_enabled_ui(selected_note_count != 0, |ui| {
-                egui::ComboBox::from_id_salt("piano-note-channel-assignment")
-                    .selected_text(
-                        assignment
-                            .and_then(|id| {
-                                channel_choices
-                                    .iter()
-                                    .find(|(channel_id, ..)| *channel_id == id)
-                                    .map(|(_, name, ..)| name.as_str())
-                            })
-                            .unwrap_or("Unassigned / mixed"),
-                    )
-                    .show_ui(ui, |ui| {
-                        assignment_changed |= ui
-                            .selectable_value(&mut assignment, None, "Unassigned")
-                            .changed();
-                        for (channel_id, name, ..) in &channel_choices {
-                            assignment_changed |= ui
-                                .selectable_value(&mut assignment, Some(*channel_id), name)
-                                .changed();
-                        }
-                    });
-            });
-            ui.separator();
-            ui.toggle_value(&mut self.piano_roll_state.ghosts_visible, "GHOST NOTES")
-                .on_hover_text("Show notes from other Channels — Alt+V");
-        });
-        if target_channel_changed {
-            self.selected_channel = target_channel_index;
-            self.piano_roll_state.selection_ids.clear();
-        }
-        if assignment_changed {
-            let selected = expand_note_group_selection(
-                &self.project.active_pattern().notes,
-                &self.piano_roll_state.selection_ids,
-                self.piano_roll_state.grouping_enabled,
-            );
-            for note in &mut self.project.active_pattern_mut().notes {
-                if selected.contains(&note.id) {
-                    note.channel_id = assignment;
-                }
-            }
-            normalize_piano_note_groups(&mut self.project.active_pattern_mut().notes);
-            self.piano_roll_state.selection_ids = selected;
-        }
-        self.piano_clipboard_toolbar(ui);
-        let piano_preferences_before = self.piano_roll_state.preferences();
+    fn piano_scale_tools(&mut self, ui: &mut egui::Ui) {
         let mut activate_stamp = false;
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("SCALE").size(9.0).color(theme::ORANGE));
@@ -20487,6 +20386,8 @@ impl CitrusApp {
                     "Constrain notes when they are added, moved or pitch-edited; untouched notes stay unchanged",
                 );
             ui.separator();
+            ui.allocate_ui_with_layout(Vec2::new(172.0,24.0), Layout::left_to_right(Align::Center), |ui| {
+                ui.set_min_width(172.0);
             ui.label(RichText::new("CHORD").size(9.0).color(theme::ORANGE));
             egui::ComboBox::from_id_salt("piano-chord-stamp")
                 .width(132.0)
@@ -20505,6 +20406,7 @@ impl CitrusApp {
                         }
                     }
                 });
+            });
             if icons::icon_button(
                 ui,
                 StudioIcon::Stamp,
@@ -20522,6 +20424,177 @@ impl CitrusApp {
         if activate_stamp {
             self.piano_roll_state.tool = PianoRollTool::Stamp;
         }
+    }
+
+    fn piano_roll(&mut self, ui: &mut egui::Ui) {
+        self.sync_piano_range_owner();
+        // A whole-project import/save/native snapshot must not race a note preview.
+        if self.project_snapshot_transition_pending()
+            || self.project_lifecycle_barriers_active()
+            || !ui.input(|input| input.focused)
+        {
+            ui.disable();
+        }
+        let channel_choices = self
+            .project
+            .channels
+            .iter()
+            .map(|channel| {
+                (
+                    channel.id,
+                    channel.name.clone(),
+                    channel.mixer_track,
+                    channel.color,
+                )
+            })
+            .collect::<Vec<_>>();
+        self.piano_roll_state
+            .retain_existing(&self.project.active_pattern().notes);
+        let piano_content_end = piano_pattern_content_end(self.project.active_pattern());
+        let channel_name = self
+            .project
+            .channels
+            .get(self.selected_channel)
+            .map(|channel| channel.name.as_str())
+            .unwrap_or("Unassigned");
+        let piano_subtitle = format!("{} — {}", channel_name, self.project.active_pattern().name);
+        let piano_preferences_before = self.piano_roll_state.preferences();
+        self.workspace_header(ui, StudioView::PianoRoll, "PIANO ROLL", &piano_subtitle);
+        let selected_note_count = self.piano_roll_state.selection_ids.len();
+        let unassigned_count = self
+            .project
+            .active_pattern()
+            .notes
+            .iter()
+            .filter(|note| note.channel_id.is_none())
+            .count();
+        let mut assignment = self
+            .project
+            .active_pattern()
+            .notes
+            .iter()
+            .find(|note| self.piano_roll_state.selection_ids.contains(&note.id))
+            .and_then(|note| note.channel_id);
+        let mut assignment_changed = false;
+        let populated_channel_ids = self
+            .project
+            .active_pattern()
+            .notes
+            .iter()
+            .filter_map(|note| note.channel_id)
+            .collect::<HashSet<_>>();
+        let mut target_channel_index = self
+            .selected_channel
+            .min(channel_choices.len().saturating_sub(1));
+        let mut target_channel_changed = false;
+        let compact_piano = ui.available_width() < 640.0;
+        let mut assignment_ui = |ui: &mut egui::Ui| {
+            ui.add_enabled_ui(selected_note_count != 0, |ui| {
+                egui::ComboBox::from_id_salt("piano-note-channel-assignment")
+                    .selected_text(
+                        assignment
+                            .and_then(|id| {
+                                channel_choices
+                                    .iter()
+                                    .find(|(channel_id, ..)| *channel_id == id)
+                                    .map(|(_, name, ..)| name.as_str())
+                            })
+                            .unwrap_or("Unassigned / mixed"),
+                    )
+                    .show_ui(ui, |ui| {
+                        assignment_changed |= ui
+                            .selectable_value(&mut assignment, None, "Unassigned")
+                            .changed();
+                        for (channel_id, name, ..) in &channel_choices {
+                            assignment_changed |= ui
+                                .selectable_value(&mut assignment, Some(*channel_id), name)
+                                .changed();
+                        }
+                    });
+            });
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("TARGET").size(9.0).color(theme::MUTED));
+            egui::ComboBox::from_id_salt("piano-target-channel")
+                .width(160.0)
+                .selected_text(
+                    channel_choices
+                        .get(target_channel_index)
+                        .map(|(_, name, ..)| name.as_str())
+                        .unwrap_or("No channels"),
+                )
+                .show_ui(ui, |ui| {
+                    for (index, (channel_id, name, ..)) in channel_choices.iter().enumerate() {
+                        let label = if populated_channel_ids.contains(channel_id) {
+                            format!("● {name}")
+                        } else {
+                            format!("  {name}")
+                        };
+                        target_channel_changed |= ui
+                            .selectable_value(&mut target_channel_index, index, label)
+                            .changed();
+                    }
+                });
+            ui.separator();
+            ui.label(
+                RichText::new(format!(
+                    "{selected_note_count} selected / {unassigned_count} unassigned"
+                ))
+                .size(9.0)
+                .color(if unassigned_count == 0 {
+                    theme::MUTED
+                } else {
+                    theme::AMBER
+                }),
+            );
+            if !compact_piano {
+                assignment_ui(ui);
+            }
+            ui.separator();
+            ui.toggle_value(&mut self.piano_roll_state.ghosts_visible, "GHOST NOTES")
+                .on_hover_text("Show notes from other Channels — Alt+V");
+        });
+        if target_channel_changed {
+            self.selected_channel = target_channel_index;
+            self.piano_roll_state.selection_ids.clear();
+            self.sync_piano_range_owner();
+        }
+        if compact_piano {
+            ui.horizontal_wrapped(|ui| {
+                ui.menu_button("NOTE EDIT v", |ui| {
+                    ui.set_width(440.0);
+                    self.piano_clipboard_toolbar(ui, true);
+                    ui.separator();
+                    self.piano_range_toolbar(ui, true);
+                    ui.separator();
+                    ui.label("Selected note Channel");
+                    assignment_ui(ui);
+                });
+                ui.menu_button("SCALE / CHORD v", |ui| { ui.set_width(540.0); self.piano_scale_tools(ui); });
+                let range = self.piano_roll_state.repeat_range.map_or_else(|| "Range none".to_owned(), |r| format!("Range {:.2}–{:.2}", r.start,r.end));
+                let paste = self.piano_paste_anchor().map_or_else(|_| "Paste invalid".to_owned(),|beat|format!("Paste {beat:.2}"));
+                ui.label(RichText::new(format!("{range} · {paste}")).size(9.0).color(theme::ORANGE))
+                    .on_hover_text("Edit/repeat range, not a playback loop. Ctrl/Cmd-drag or double-click-and-drag the ruler. Clipboard and range commands are in NOTE EDIT. Paste uses the bar containing the viewport's left edge.");
+            });
+        } else {
+            self.piano_clipboard_toolbar(ui, false);
+            self.piano_range_toolbar(ui, false);
+            self.piano_scale_tools(ui);
+        }
+        if assignment_changed {
+            let selected = expand_note_group_selection(
+                &self.project.active_pattern().notes,
+                &self.piano_roll_state.selection_ids,
+                self.piano_roll_state.grouping_enabled,
+            );
+            for note in &mut self.project.active_pattern_mut().notes {
+                if selected.contains(&note.id) {
+                    note.channel_id = assignment;
+                }
+            }
+            normalize_piano_note_groups(&mut self.project.active_pattern_mut().notes);
+            self.piano_roll_state.selection_ids = selected;
+        }
         if self.piano_roll_state.preferences() != piano_preferences_before {
             self.piano_roll_preferences_dirty = true;
         }
@@ -20530,6 +20603,7 @@ impl CitrusApp {
             .channels
             .get(self.selected_channel)
             .map(|channel| (channel.id, channel.mixer_track));
+        let piano_snap = self.piano_roll_state.local_snap;
         let available = ui.available_rect_before_wrap();
         let keyboard_w = 72.0;
         let velocity_h = 75.0;
@@ -20689,33 +20763,46 @@ impl CitrusApp {
                 audition_notes.push((channel_id, note as u8, 0.75, 0.25, mixer_track));
             }
         }
-        let first_unit = (beat_start * 4.0).floor() as i64;
-        let last_unit = (beat_end * 4.0).ceil() as i64;
-        for unit in first_unit..=last_unit {
-            let beat = unit as f64 / 4.0;
-            let x = grid.left() + self.piano_viewport.x.pixel_for_content(beat) as f32;
-            let major = unit.rem_euclid(16) == 0;
+        self.piano_range_ruler(
+            ui,
+            Rect::from_min_max(Pos2::new(grid.left(), available.top()), grid.right_top()),
+            grid,
+        );
+        for line in crate::piano_snap::grid_lines(
+            f64::from(beat_start),
+            f64::from(beat_end),
+            f64::from(beat_w),
+            piano_snap,
+        ) {
+            let x = grid.left() + self.piano_viewport.x.pixel_for_content(line.beat) as f32;
             note_grid_painter.line_segment(
                 [Pos2::new(x, grid.top()), Pos2::new(x, grid.bottom())],
                 Stroke::new(
-                    if major { 1.1 } else { 0.6 },
-                    if major {
+                    if line.bar { 1.1 } else { 0.6 },
+                    if line.bar {
                         Color32::from_rgb(80, 85, 86)
-                    } else if unit.rem_euclid(4) == 0 {
+                    } else if !line.snap_target {
+                        theme::GRID.gamma_multiply(0.45)
+                    } else if line.beat_line {
                         theme::GRID
                     } else {
                         Color32::from_rgb(37, 41, 43)
                     },
                 ),
             );
-            if major && beat < piano_content_end {
-                painter.text(
-                    Pos2::new(x + 4.0, available.top() + 13.0),
-                    Align2::LEFT_CENTER,
-                    format!("{}", unit.div_euclid(16) + 1),
-                    FontId::monospace(9.0),
-                    theme::MUTED,
-                );
+            if line.bar && line.beat < piano_content_end {
+                painter
+                    .with_clip_rect(Rect::from_min_max(
+                        Pos2::new(grid.left(), available.top()),
+                        grid.right_top(),
+                    ))
+                    .text(
+                        Pos2::new(x + 4.0, available.top() + 13.0),
+                        Align2::LEFT_CENTER,
+                        format!("{}", (line.beat / 4.0) as u64 + 1),
+                        FontId::monospace(9.0),
+                        theme::MUTED,
+                    );
             }
         }
         painter.rect_filled(
@@ -20794,7 +20881,7 @@ impl CitrusApp {
             let start = piano_mouse::insertion_start(
                 self.piano_viewport
                     .x
-                    .content_at_pixel(f64::from(pointer.x - grid.left())) as f32,
+                    .content_at_pixel(f64::from(pointer.x - grid.left())),
                 piano_snap,
                 bypass_snap,
             );
@@ -20995,16 +21082,21 @@ impl CitrusApp {
                         }
                         PianoRollTool::Slice => {
                             if let Some(pointer) = response.interact_pointer_pos() {
-                                let beat = (self
+                                let raw = self
                                     .piano_viewport
                                     .x
-                                    .content_at_pixel(f64::from(pointer.x - grid.left()))
-                                    as f32
-                                    / piano_snap)
-                                    .round()
-                                    * piano_snap;
-                                if beat > note.start + 0.05
-                                    && beat < note.start + note.length - 0.05
+                                    .content_at_pixel(f64::from(pointer.x - grid.left()));
+                                let beat = crate::piano_snap::quantize_nearest(
+                                    raw,
+                                    if bypass_snap {
+                                        PianoSnap::Off
+                                    } else {
+                                        piano_snap
+                                    },
+                                ) as f32;
+                                if beat - note.start >= crate::piano_roll::MIN_NOTE_LENGTH_BEATS
+                                    && note.start + note.length - beat
+                                        >= crate::piano_roll::MIN_NOTE_LENGTH_BEATS
                                 {
                                     split_note = Some((index, beat));
                                 }
@@ -21094,8 +21186,8 @@ impl CitrusApp {
                 && let Ok(length) = resized_note_length(
                     anchor.length,
                     (pointer.x - drag.pointer_origin_x) / beat_w,
-                    piano_snap,
-                    bypass_snap,
+                    piano_snap.keyboard_step(),
+                    bypass_snap || piano_snap == PianoSnap::Off,
                 )
                 && let Ok(delta) = clamp_group_resize_delta(&drag.origins, length - anchor.length)
             {
@@ -21299,7 +21391,7 @@ impl CitrusApp {
             let start = piano_mouse::insertion_start(
                 self.piano_viewport
                     .x
-                    .content_at_pixel(f64::from(pointer.x - grid.left())) as f32,
+                    .content_at_pixel(f64::from(pointer.x - grid.left())),
                 piano_snap,
                 bypass_snap,
             );
@@ -21386,8 +21478,7 @@ impl CitrusApp {
                 let start = piano_mouse::insertion_start(
                     self.piano_viewport
                         .x
-                        .content_at_pixel(f64::from(pointer.x - grid.left()))
-                        as f32,
+                        .content_at_pixel(f64::from(pointer.x - grid.left())),
                     piano_snap,
                     bypass_snap,
                 );
@@ -22005,7 +22096,7 @@ impl CitrusApp {
         } else if cancel || !open {
             self.cancel_piano_roll_transform();
         } else if reset {
-            let snap = self.piano_roll_state.local_snap.max(0.05);
+            let snap = self.piano_roll_state.local_snap.transform_step();
             if let Some(session) = self.piano_roll_transform.as_mut() {
                 session.settings = PianoRollTransformSettings::for_kind(kind, snap);
             }

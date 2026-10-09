@@ -32,10 +32,12 @@ discard, deselect and ghost toggle do not autorepeat. No-op steps create no hist
 
 ## Explicit Citrus policies and limits
 
-- Phrase-repeat spacing is the selected extent (latest end minus earliest start),
-  with a minimum of one Piano snap step. Repeating selects the generated phrase,
-  so the next press repeats it again. An independent Piano time-range/repeat region
-  and exact FL default bar/gap rounding are not implemented.
+- Phrase-repeat spacing uses the independent Piano edit range when present;
+  otherwise it uses the selected extent, with at least one keyboard snap step.
+  Repeating selects the generated phrase and leaves the range fixed. See
+  [Piano ranges and snap](PIANO_RANGES_AND_SNAP.md) for range ownership, empty
+  selection, Off fallback, and supported fine/triplet grids. Exact FL default
+  bar/gap rounding remains unspecified and is not invented.
 - Quick quantize uses the local Piano snap. FL's manual describes global snap;
   Citrus deliberately retains independent Piano and Playlist snap settings.
   Its basic quick quantize uses the existing starts-and-durations quantizer;
