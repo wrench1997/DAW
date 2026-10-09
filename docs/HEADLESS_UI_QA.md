@@ -152,3 +152,34 @@ worker, rather than drawing an invented wave. The small two-frame fixture remain
 in the import-recovery tests for its original purpose. Fader/pan pointer tests call
 the production controls and compare actual painted geometry with interaction state.
 All existing native-desktop and hardware acceptance boundaries still apply.
+
+## Native editor inspector layout regression
+
+The production-app harness reproduces clipped generator actions and Mixer action/status
+crowding in the FL-inspired checkpoint `76232d9`. The generator action strip now wraps;
+the Mixer puts status on its own row and wraps its actions. Runtime commands, native
+owner validation, automation exclusion, snapshot/save barriers and plug-in loading
+are unchanged.
+
+The regression exercises first-frame layout at the inspector's configured 240 and
+340 logical-point widths, then settled layout, for both Channel Rack and Mixer.
+It checks action bounds, nonoverlap with siblings/status, supported/open/closed,
+pending, unsupported and no-editor presentations, and real Replace/LOAD pointer
+clicks followed by Escape and reopening. Project data stays unchanged and no
+runtime chain is created. Existing ordinary inspector controls impose a settled
+content minimum of about 258 points for Rack and 270 for Mixer when 240 is requested;
+the test checks the first requested-width frame as well as that settled layout.
+This correction does not claim that unrelated inspector controls now resize to 240.
+
+A `cfg(test)` presentation-only snapshot exposes the Windows-specific Open/Close
+controls on Linux. Only the two inspector render sites consume it. Native commands
+and persistence/topology predicates still use the real runtime snapshot accessor;
+the regression explicitly confirms that it returns no native runtime state. The
+fixture is labeled `UI test only` and is never loaded from disk. These controls are
+not evidence of native Windows editor execution or Linux editor support.
+
+Capture mode adds four genuine offscreen frames named `native-generator-inspector-*`
+and `native-effect-inspector-*`; their 240/340 suffix is the requested panel width.
+The complete capture suite passes 12 tests and emits 23 real app renders, including
+all existing navigation, modal, Browser and decoded-waveform checkpoints. All native
+desktop, file-dialog, hardware and real vendor plug-in acceptance limits still apply.

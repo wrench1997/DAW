@@ -756,3 +756,170 @@ fn mixer_pan_knob_pointer_drag_changes_pan_without_changing_gain() {
     );
     assert_eq!(gain, 0.5);
 }
+
+#[test]
+fn full_app_native_inspector_actions_fit_narrow_and_wide_panels() {
+    let mut failures = Vec::new();
+    for width in [240.0, 340.0] {
+        for view in [StudioView::ChannelRack, StudioView::Mixer] {
+            let mut ui = UiHarness::new();
+            ui.app.view = view;
+            ui.app.selected_channel = 0;
+            ui.app.selected_mixer = 1;
+            let target = if view == StudioView::ChannelRack {
+                PluginPickerTarget::ChannelDevice { channel: 0 }
+            } else {
+                PluginPickerTarget::MixerSlot { track: 1, slot: 0 }
+            };
+            // Model-only descriptor: no file is created and no plug-in is loaded.
+            let id = commit_loaded_plugin(
+                &mut ui.app.project,
+                target,
+                &PluginDescriptor {
+                    id: "layout-only-native-editor".into(),
+                    name: "UI test only: native editor".into(),
+                    vendor: "UI TEST ONLY".into(),
+                    path: PathBuf::from("/not-a-real-plugin/ui-layout-only.vst3"),
+                    format: ScannedPluginFormat::Vst3,
+                    category: String::new(),
+                    is_instrument: view == StudioView::ChannelRack,
+                    verified: false,
+                },
+            )
+            .unwrap();
+            let mut snapshot = NativeEditorSnapshot::default();
+            snapshot.state.supported = true;
+            snapshot.state.has_editor = true;
+            snapshot.state.open = true;
+            ui.app.native_editor_ui_test_snapshot = Some((id, snapshot));
+            assert!(ui.app.native_editor_snapshot(id).is_none());
+            let original_project = project_fingerprint(&ui.app.project);
+            let mut state =
+                egui::containers::panel::PanelState::load(&ui.ctx, egui::Id::new("inspector"))
+                    .unwrap();
+            state.outer_rect.min.x = state.outer_rect.max.x - width;
+            ui.ctx
+                .data_mut(|data| data.insert_persisted(egui::Id::new("inspector"), state));
+            ui.run(Vec::new());
+            let first_frame_labels: &[&str] = if view == StudioView::ChannelRack {
+                &["REPLACE…", "EDITOR", "CLOSE EDITOR", "PARAMETERS", "REMOVE"]
+            } else {
+                &["EDITOR", "CLOSE UI", "PARAMS", "X", "LOAD", "BYPASS"]
+            };
+            for label in first_frame_labels {
+                let rect = node_rect(ui.button(label));
+                if !state.outer_rect.shrink(10.0).contains_rect(rect) {
+                    failures.push(format!("{view:?} first frame width {width}: {label} escaped requested panel: {rect:?} versus {:?}", state.outer_rect));
+                }
+            }
+            ui.settle();
+            let panel =
+                egui::containers::panel::PanelState::load(&ui.ctx, egui::Id::new("inspector"))
+                    .unwrap()
+                    .outer_rect;
+            let labels: &[&str] = if view == StudioView::ChannelRack {
+                &["REPLACE…", "EDITOR", "CLOSE EDITOR", "PARAMETERS", "REMOVE"]
+            } else {
+                &["EDITOR", "CLOSE UI", "PARAMS", "X", "LOAD", "BYPASS"]
+            };
+            ui.capture(match (view, width as u32) {
+                (StudioView::ChannelRack, 240) => "native-generator-inspector-240",
+                (StudioView::ChannelRack, _) => "native-generator-inspector-340",
+                (StudioView::Mixer, 240) => "native-effect-inspector-240",
+                _ => "native-effect-inspector-340",
+            });
+            let rects: Vec<_> = labels
+                .iter()
+                .map(|label| (*label, node_rect(ui.button(label))))
+                .collect();
+            eprintln!("{view:?} width {width}: panel {panel:?}; actions {rects:?}");
+            for (index, (label, rect)) in rects.iter().enumerate() {
+                if !panel.shrink(10.0).contains_rect(*rect) {
+                    failures.push(format!(
+                        "{view:?} width {width}: {label} escaped panel: {rect:?} versus {panel:?}"
+                    ));
+                }
+                for (other_label, other) in &rects[index + 1..] {
+                    let overlap = rect.intersect(*other);
+                    if overlap.width() > 0.0 && overlap.height() > 0.0 {
+                        failures.push(format!(
+                            "{view:?} width {width}: {label} overlaps {other_label}"
+                        ));
+                    }
+                }
+            }
+            // Status remains readable, with every action on a separate, nonoverlapping row.
+            for status in ["VST3", "Runtime pending"] {
+                let node = ui
+                    .nodes
+                    .iter()
+                    .find(|node| {
+                        node.value().or_else(|| node.label()) == Some(status)
+                            && node.bounds().is_some()
+                            && panel.contains_rect(node_rect(node))
+                    })
+                    .expect("plug-in status text must remain inside the inspector");
+                for (_, rect) in &rects {
+                    assert_disjoint(node_rect(node), *rect);
+                }
+            }
+            let close_label = if view == StudioView::ChannelRack {
+                "CLOSE EDITOR"
+            } else {
+                "CLOSE UI"
+            };
+            for (supported, has_editor, open, pending, enabled) in [
+                (true, true, false, None, true),
+                (true, true, true, Some(7), false),
+                (false, false, false, None, false),
+                (true, false, false, None, false),
+                (true, true, true, None, true),
+            ] {
+                let snapshot = &mut ui.app.native_editor_ui_test_snapshot.as_mut().unwrap().1;
+                snapshot.state.supported = supported;
+                snapshot.state.has_editor = has_editor;
+                snapshot.state.open = open;
+                snapshot.pending_request = pending;
+                ui.settle();
+                assert_eq!(!ui.button("EDITOR").is_disabled(), enabled);
+                assert_eq!(
+                    ui.nodes
+                        .iter()
+                        .any(|node| node.label() == Some(close_label)),
+                    open
+                );
+                for label in labels.iter().filter(|label| open || **label != close_label) {
+                    let rect = node_rect(ui.button(label));
+                    assert!(
+                        panel.shrink(10.0).contains_rect(rect),
+                        "{label} escaped in native presentation state {supported}/{has_editor}/{open}/{pending:?}"
+                    );
+                    assert!(ui.ctx.content_rect().contains_rect(rect));
+                }
+                assert!(
+                    ui.app.native_editor_snapshot(id).is_none(),
+                    "presentation fixture must never create native runtime state"
+                );
+            }
+            // Operate a real action on each wrapped row; Escape/reopen must retain the
+            // target and leave project data unchanged without loading any plug-in.
+            let replace_label = if view == StudioView::ChannelRack {
+                "REPLACE…"
+            } else {
+                "LOAD"
+            };
+            for _ in 0..2 {
+                ui.click(replace_label);
+                assert!(ui.app.show_plugins);
+                assert_eq!(ui.app.plugin_picker_target, Some(target));
+                ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+                assert!(!ui.app.show_plugins);
+                assert!(ui.app.plugin_picker_target.is_none());
+            }
+            assert_eq!(project_fingerprint(&ui.app.project), original_project);
+            assert!(ui.app.running_generator_chains.is_empty());
+            assert!(ui.app.running_insert_chains.is_empty());
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

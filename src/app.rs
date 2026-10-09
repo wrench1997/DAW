@@ -4719,6 +4719,9 @@ pub struct CitrusApp {
     show_plugins: bool,
     plugin_parameter_editor: Option<PluginParameterEditorWindow>,
     native_editor_owner: Option<(u64, u32)>,
+    // Presentation-only fixture; never used by native commands or persistence barriers.
+    #[cfg(test)]
+    native_editor_ui_test_snapshot: Option<(u64, NativeEditorSnapshot)>,
     // Exact endpoint/instance/slot identity, reset with each project session. Values are the
     // observed dirty revision, state capture serial, command request, and parameter-base serial.
     native_editor_seen: HashMap<(u64, u64, usize), NativeEditorSeen>,
@@ -5038,6 +5041,8 @@ impl CitrusApp {
                 show_plugins: false,
                 plugin_parameter_editor: None,
                 native_editor_owner: None,
+                #[cfg(test)]
+                native_editor_ui_test_snapshot: None,
                 native_editor_seen: HashMap::new(),
                 next_plugin_parameter_request_id: 1,
                 plugin_parameter_edits: PluginParameterEditState::default(),
@@ -8243,6 +8248,16 @@ impl CitrusApp {
     fn native_editor_snapshot(&self, instance_id: u64) -> Option<NativeEditorSnapshot> {
         let (control, slot) = self.native_editor_control(instance_id).ok()?;
         control.native_editor_snapshot(slot)
+    }
+
+    fn native_editor_ui_snapshot(&self, instance_id: u64) -> Option<NativeEditorSnapshot> {
+        #[cfg(test)]
+        if let Some((test_instance_id, snapshot)) = &self.native_editor_ui_test_snapshot
+            && *test_instance_id == instance_id
+        {
+            return Some(snapshot.clone());
+        }
+        self.native_editor_snapshot(instance_id)
     }
 
     fn request_native_editor(&mut self, instance_id: u64, close: bool) {
@@ -16074,11 +16089,11 @@ impl CitrusApp {
                             });
                         }
                     });
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if ui.button("REPLACE…").clicked() {
                             slot_action = Some(PluginSlotAction::Pick(target));
                         }
-                        let native = self.native_editor_snapshot(plugin.instance_id);
+                        let native = self.native_editor_ui_snapshot(plugin.instance_id);
                         let enabled = native.as_ref().is_some_and(|snapshot| snapshot.state.supported && snapshot.state.has_editor && snapshot.pending_request.is_none()
                                 && !plugin_has_parameter_automation(&self.project, plugin.instance_id));
                         if ui.add_enabled(enabled, egui::Button::new("EDITOR"))
@@ -16420,63 +16435,65 @@ impl CitrusApp {
                                     .size(8.0)
                                     .color(plugin_runtime_status_color(plugin.runtime_status)),
                             );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let native = self.native_editor_snapshot(plugin.instance_id);
-                                let enabled = native.as_ref().is_some_and(|snapshot| {
-                                    snapshot.state.supported
-                                        && snapshot.state.has_editor
-                                        && snapshot.pending_request.is_none()
-                                        && !plugin_has_parameter_automation(&self.project, plugin.instance_id)
-                                });
-                                if ui
-                                    .add_enabled(enabled, egui::Button::new("EDITOR").small())
-                                    .on_hover_text(
-                                        if plugin_has_parameter_automation(&self.project, plugin.instance_id) { "Native editing of automated plug-ins is unavailable in this preview; use PARAMS" } else { "Open or focus native VST3 editor (Windows only)" },
-                                    )
-                                    .clicked()
-                                {
-                                    slot_action = Some(PluginSlotAction::OpenNativeEditor {
-                                        instance_id: plugin.instance_id,
-                                    });
-                                }
-                                if native.as_ref().is_some_and(|snapshot| snapshot.state.open)
-                                    && ui.small_button("CLOSE UI").clicked()
-                                {
-                                    slot_action = Some(PluginSlotAction::CloseNativeEditor {
-                                        instance_id: plugin.instance_id,
-                                    });
-                                }
-                                if ui
-                                    .small_button("PARAMS")
-                                    .on_hover_text("Browse plug-in parameters")
-                                    .clicked()
-                                {
-                                    slot_action = Some(PluginSlotAction::EditParameters {
-                                        instance_id: plugin.instance_id,
-                                    });
-                                }
-                                if ui
-                                    .small_button("X")
-                                    .on_hover_text("Remove plug-in")
-                                    .clicked()
-                                {
-                                    slot_action = Some(PluginSlotAction::Remove(target));
-                                }
-                                if ui
-                                    .small_button("LOAD")
-                                    .on_hover_text("Replace plug-in")
-                                    .clicked()
-                                {
-                                    slot_action = Some(PluginSlotAction::Pick(target));
-                                }
-                                let mut bypass = plugin.bypass;
-                                if ui.toggle_value(&mut bypass, "BYPASS").changed() {
-                                    slot_action = Some(PluginSlotAction::SetBypass {
-                                        instance_id: plugin.instance_id,
-                                        bypass,
-                                    });
-                                }
+                        });
+                        // Keep status text separate: a right-to-left child can extend over
+                        // earlier siblings when all native-editor actions do not fit.
+                        ui.horizontal_wrapped(|ui| {
+                            let native = self.native_editor_ui_snapshot(plugin.instance_id);
+                            let enabled = native.as_ref().is_some_and(|snapshot| {
+                                snapshot.state.supported
+                                    && snapshot.state.has_editor
+                                    && snapshot.pending_request.is_none()
+                                    && !plugin_has_parameter_automation(&self.project, plugin.instance_id)
                             });
+                            if ui
+                                .add_enabled(enabled, egui::Button::new("EDITOR").small())
+                                .on_hover_text(
+                                    if plugin_has_parameter_automation(&self.project, plugin.instance_id) { "Native editing of automated plug-ins is unavailable in this preview; use PARAMS" } else { "Open or focus native VST3 editor (Windows only)" },
+                                )
+                                .clicked()
+                            {
+                                slot_action = Some(PluginSlotAction::OpenNativeEditor {
+                                    instance_id: plugin.instance_id,
+                                });
+                            }
+                            if native.as_ref().is_some_and(|snapshot| snapshot.state.open)
+                                && ui.small_button("CLOSE UI").clicked()
+                            {
+                                slot_action = Some(PluginSlotAction::CloseNativeEditor {
+                                    instance_id: plugin.instance_id,
+                                });
+                            }
+                            if ui
+                                .small_button("PARAMS")
+                                .on_hover_text("Browse plug-in parameters")
+                                .clicked()
+                            {
+                                slot_action = Some(PluginSlotAction::EditParameters {
+                                    instance_id: plugin.instance_id,
+                                });
+                            }
+                            if ui
+                                .small_button("X")
+                                .on_hover_text("Remove plug-in")
+                                .clicked()
+                            {
+                                slot_action = Some(PluginSlotAction::Remove(target));
+                            }
+                            if ui
+                                .small_button("LOAD")
+                                .on_hover_text("Replace plug-in")
+                                .clicked()
+                            {
+                                slot_action = Some(PluginSlotAction::Pick(target));
+                            }
+                            let mut bypass = plugin.bypass;
+                            if ui.toggle_value(&mut bypass, "BYPASS").changed() {
+                                slot_action = Some(PluginSlotAction::SetBypass {
+                                    instance_id: plugin.instance_id,
+                                    bypass,
+                                });
+                            }
                         });
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("WET").size(8.0).color(theme::MUTED));
