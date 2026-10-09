@@ -235,3 +235,19 @@ These tests inspect actual egui platform clipboard commands and inject semantic
 clipboard events; they do not perform an OS clipboard round trip. Windows runtime,
 native desktop focus/window presentation, external MIDI clipboard exchange and
 physical audio/MIDI acceptance are not established by these checks.
+
+
+## Combined compact workspace and clipboard validation
+
+Exact integrated source `8d6b54c11fe07386b105de8d41e209bb0f45af5e` passed the complete
+production-input capture suite: **36 harness entries**, comprising 35 flow/input
+checks plus the included opt-in CPU benchmark entry. Timing mode was not enabled
+in this capture run. All 33 Vulkan PPM frames were converted to RGB-identical PNGs.
+The ten clipboard flows and five compact interaction flows run with the twenty
+preceding flows; the full aggregate counts are executed results, not summed claims.
+The merged wide/minimum layouts retain accessible wrapped clipboard controls.
+
+The independent controlled motion benchmark and its mixed debug-CPU result are
+recorded in [COMPACT_WORKSPACE.md](COMPACT_WORKSPACE.md). Neither that measurement,
+the app footer nor offscreen captures establishes physical desktop smoothness or
+native OS clipboard behavior. Existing native paint acceptance remains failed.

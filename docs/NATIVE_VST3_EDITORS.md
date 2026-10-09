@@ -262,3 +262,31 @@ capture revision and exact restored component/controller bytes remain mandatory.
 This is the pinned fixture/host contract, not a universal VST3 notification rule.
 Paint is still independently failed, and the corrected state check needs actual
 Windows execution before state restore can be called verified.
+
+
+## Verified exact state restore and lifecycle at c88c7fd
+
+At `c88c7fd2fc368ab1e358f1726b64cb72a10fcfda`, [quality 37893177378](https://github.com/wrench1997/DAW/actions/runs/37893177378)
+passed all source gates (951 application + 13 helper + 5 protocol Rust tests),
+14 ordinary helper and 61 native harness Python tests, and fixture build/receipts.
+Actual Windows execution now passes the corrected fixture-specific two-record
+assertion, exactly two dirty/value revision increments, stopped SaveState with
+detach/zero-sample flush, stable capture revision, and fresh-instance Project-context
+restore with exact component/controller bytes. This supersedes the earlier pending
+state-restore evidence; it does not broaden the fixture's feedback contract.
+
+The same native run passed stdout isolation, exact attach/resize/content-scale
+request, trusted-HWND-validated programmatic interaction and ordered gestures,
+repeat focus/owner rejection, repeated close/open, WM_CLOSE, owner loss,
+unload/reload/no-editor, normal session completion, and independent Shutdown/EOF/
+forced-termination cleanup. Full native acceptance still **FAILS**: both before/after
+PrintWindow captures fail, including same-process diagnostic Button probes;
+repaint comparison is **SKIP**. No speculative driver/security change, synthetic
+paint replacement or overall-success reinterpretation is used.
+
+[Preview 37893177401](https://github.com/wrench1997/DAW/actions/runs/37893177401) separately passed the full 167-Python-test,
+optimized-build, static-CRT/PE, provenance/license, ZIP/hash/extraction and real
+extracted-helper smoke lane, with upload disabled and zero artifacts. These results
+do not establish physical pointer/keyboard input, actual DPI transitions, real-vendor
+compatibility, forced detach/destruction failure injection, whole-app native GUI,
+Linux native editors or hardware audio/MIDI acceptance.

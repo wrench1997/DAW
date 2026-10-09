@@ -129,3 +129,25 @@ These counts describe this isolated compact-workspace slice based on c88c7fd. Th
 must not be added arithmetically to a separately developed feature's test counts;
 combined source, including newer Piano clipboard controls, needs fresh integration
 checks and captures. No Windows runtime or native desktop acceptance is inferred.
+
+
+### Combined compact workspace and Piano clipboard checkpoint
+
+At `8d6b54c11fe07386b105de8d41e209bb0f45af5e`, both reviewed features are integrated.
+Fresh full Linux locked/offline tests pass **991 application + 14 helper + 5 protocol**
+with all features and **989 application** without default features, zero failures or
+ignored tests on the default stack. Formatting, both strict Clippy configurations,
+app/helper builds and actual ordinary helper smoke pass. Windows MSVC no-default/
+all-target cross-check and all **167 Python tests** pass.
+
+The combined genuine Vulkan run passes **36 harness entries**: 35 actual input/flow
+checks and the opt-in benchmark entry, whose timing mode was not enabled here. It
+produces **33 actual app renders**, every PNG RGB-identical to PPM readback. Both
+clipboard semantic/text/history barriers and compact title/all-edge/Alt/snap/modal/
+migration regressions execute together. Wide/minimum layouts and clipboard controls
+were visually inspected. Independent source integration review found no blocker.
+
+The six controlled baseline/refined timing runs above describe the isolated compact
+slice and do not establish a general speedup for this merged candidate. This source
+checkpoint still requires its own Windows execution; native paint, physical devices,
+OS clipboard round-trip and detached OS editor windows are not inferred as passing.

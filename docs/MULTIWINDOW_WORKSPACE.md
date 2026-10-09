@@ -183,3 +183,13 @@ compact chrome/Rack controls, useful two-column defaults, backward-compatible
 Inspector visibility, corrected reset geometry, and release-only edge alignment.
 It includes continuous-pointer regressions and a same-scene baseline/refined CPU
 comparison without inferring native-desktop smoothness from offscreen or footer FPS.
+
+
+### Combined compact and clipboard integration
+
+The compact feature and Piano clipboard integrate as `8d6b54c`. Fresh combined gates
+pass 991 app +14 helper +5 protocol all-feature tests, 989 no-default tests, both
+strict Clippy modes, fmt, app/helper build, ordinary helper smoke, 167 Python tests
+and the Windows source cross-check. The actual UI suite passes 36 entries (35 flows
+and the opt-in benchmark entry) with 33 genuine Vulkan frames. Details and the
+performance/desktop boundaries remain in [COMPACT_WORKSPACE.md](COMPACT_WORKSPACE.md).
