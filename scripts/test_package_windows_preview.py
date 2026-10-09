@@ -68,6 +68,17 @@ class PeTests(unittest.TestCase):
                 result = pkg.inspect_pe(image)
                 self.assertIn("combase.dll", result["delay_imports" if delayed else "imports"])
 
+    def test_windows_ui_automation_system_import(self):
+        # Microsoft's UI Automation OS provider; do not package a private DLL copy.
+        result = pkg.inspect_pe(pe_image(("UIAutomationCore.dll",), ("UIAutomationCore.dll",)))
+        self.assertEqual(result["imports"], ["uiautomationcore.dll"])
+        self.assertEqual(result["delay_imports"], ["uiautomationcore.dll"])
+
+    def test_all_unapproved_direct_and_delay_imports_are_reported(self):
+        with self.assertRaisesRegex(
+                pkg.PackageError, "Unapproved runtime imports: libunwind.dll, plugin.dll, vcruntime140.dll"):
+            pkg.inspect_pe(pe_image(("plugin.dll", "KERNEL32.dll"), ("vcruntime140.dll", "libunwind.dll")))
+
     def test_reject_dynamic_crt_and_unknown_libraries(self):
         for name in ("vcruntime140.dll", "msvcp140.dll", "libunwind.dll", "plugin.dll"):
             with self.subTest(name=name), self.assertRaises(pkg.PackageError):
@@ -180,6 +191,15 @@ class PackageTests(unittest.TestCase):
         self.assertIn("PREVIEW", archive.name)
         checksum = archive.with_suffix(".zip.sha256").read_text().split()[0]
         self.assertEqual(checksum, hashlib.sha256(archive.read_bytes()).hexdigest())
+
+    def test_audit_reports_both_binaries_before_rejecting_package(self):
+        (self.binaries / pkg.BINARIES[0]).write_bytes(pe_image(("plugin.dll",)))
+        (self.binaries / pkg.BINARIES[1]).write_bytes(pe_image(delayed=("libunwind.dll",)))
+        with self.assertRaises(pkg.PackageError) as error:
+            self.create()
+        self.assertIn("citrus-studio.exe: Unapproved runtime imports: plugin.dll", str(error.exception))
+        self.assertIn("vst3-host-helper.exe: Unapproved runtime imports: libunwind.dll", str(error.exception))
+        self.assertFalse((self.root / "out").exists())
 
     def test_deterministic_archive_for_identical_inputs(self):
         self.assertEqual(self.create("one").read_bytes(), self.create("two").read_bytes())

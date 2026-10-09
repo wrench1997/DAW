@@ -49,7 +49,7 @@ gdi32.dll hid.dll imm32.dll iphlpapi.dll kernel32.dll kernelbase.dll
 mmdevapi.dll mpr.dll msimg32.dll msvcrt.dll ncrypt.dll netapi32.dll ntdll.dll
 ole32.dll oleaut32.dll opengl32.dll powrprof.dll propsys.dll rpcrt4.dll
 runtimeobject.dll secur32.dll setupapi.dll shell32.dll shlwapi.dll
-synchronization.dll ucrtbase.dll user32.dll userenv.dll usp10.dll uxtheme.dll
+synchronization.dll ucrtbase.dll uiautomationcore.dll user32.dll userenv.dll usp10.dll uxtheme.dll
 version.dll windowscodecs.dll winhttp.dll wininet.dll winmm.dll winspool.drv
 wintrust.dll ws2_32.dll wtsapi32.dll
 """.split())
@@ -135,8 +135,6 @@ def inspect_pe(data):
         except UnicodeDecodeError as error:
             raise PackageError("Non-ASCII DLL name") from error
         require(re.fullmatch(r"[a-z0-9_.-]+", name), "Invalid DLL name/path")
-        require(name in SYSTEM_DLLS or API_SET.fullmatch(name),
-                f"Non-Windows runtime import {name}; this PREVIEW must use static CRT")
         return name
 
     def imports(directory, stride, name_index):
@@ -157,8 +155,14 @@ def inspect_pe(data):
 
     direct = imports(1, 20, 3)
     require(direct, "Expected nonempty Windows OS import table")
+    delayed = imports(13, 32, 1)
+    unapproved = sorted(name for name in set(direct + delayed)
+                        if name not in SYSTEM_DLLS and not API_SET.fullmatch(name))
+    require(not unapproved,
+            f"Unapproved runtime imports: {', '.join(unapproved)}; "
+            "this PREVIEW requires reviewed Windows OS imports and static CRT")
     return {"machine": "AMD64", "subsystem": "Windows GUI", "imports": direct,
-            "delay_imports": imports(13, 32, 1)}
+            "delay_imports": delayed}
 
 
 def dependency_inventory(metadata, lock):
@@ -244,9 +248,14 @@ def create_package(repo, binaries, metadata, build_info, output):
     sources = set(SOURCE_FILES) | {p for p in OPTIONAL_SOURCE_FILES if (repo / p).exists()}
     payload = {path: read_input(repo / path) for path in sources}
     audits = {}
+    audit_errors = []
     for binary in BINARIES:
-        payload[binary] = read_input(binaries / binary)
-        audits[binary] = inspect_pe(payload[binary])
+        try:
+            payload[binary] = read_input(binaries / binary)
+            audits[binary] = inspect_pe(payload[binary])
+        except PackageError as error:
+            audit_errors.append(f"{binary}: {error}")
+    require(not audit_errors, "Binary audit failed: " + "; ".join(audit_errors))
     payload["DEPENDENCIES.json"] = json_bytes(dependency_inventory(metadata, tomllib.loads(lock_bytes.decode())))
     payload["START_HERE_PREVIEW.txt"] = (
         f"Citrus Studio {version} — UNSIGNED MSVC DEVELOPER PREVIEW\n\n"
