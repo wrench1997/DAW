@@ -42,7 +42,7 @@ MAX_FILE_BYTES = 256 * 1024 * 1024
 # These are Windows 10/11 OS components, never copied from a developer PATH.
 # Unknown imports must be investigated; do not 'fix' a failure by collecting DLLs.
 SYSTEM_DLLS = frozenset("""
-advapi32.dll avrt.dll bcrypt.dll cfgmgr32.dll combase.dll comctl32.dll comdlg32.dll
+advapi32.dll avrt.dll bcrypt.dll bcryptprimitives.dll cfgmgr32.dll combase.dll comctl32.dll comdlg32.dll
 crypt32.dll cryptbase.dll d2d1.dll d3d11.dll d3d12.dll d3dcompiler_47.dll
 dcomp.dll dbghelp.dll dnsapi.dll dsound.dll dwmapi.dll dwrite.dll dxgi.dll
 gdi32.dll hid.dll imm32.dll iphlpapi.dll kernel32.dll kernelbase.dll

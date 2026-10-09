@@ -74,6 +74,12 @@ class PeTests(unittest.TestCase):
         self.assertEqual(result["imports"], ["uiautomationcore.dll"])
         self.assertEqual(result["delay_imports"], ["uiautomationcore.dll"])
 
+    def test_windows_random_number_generator_system_import(self):
+        # ProcessPrng is supplied by the Windows OS, independently of the VC CRT.
+        result = pkg.inspect_pe(pe_image(("BCryptPrimitives.dll",), ("BCryptPrimitives.dll",)))
+        self.assertEqual(result["imports"], ["bcryptprimitives.dll"])
+        self.assertEqual(result["delay_imports"], ["bcryptprimitives.dll"])
+
     def test_all_unapproved_direct_and_delay_imports_are_reported(self):
         with self.assertRaisesRegex(
                 pkg.PackageError, "Unapproved runtime imports: libunwind.dll, plugin.dll, vcruntime140.dll"):
