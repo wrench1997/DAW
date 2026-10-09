@@ -1,6 +1,6 @@
 # Windows x64 构建与发布
 
-适用版本：Citrus Studio 0.4.0  
+当前源码候选：Citrus Studio 0.5.0-alpha.1；下文固定发布流程/示例继承自 0.4.0
 目标系统：Windows 10/11 x64  
 目标三元组：x86_64-pc-windows-gnullvm
 
@@ -8,11 +8,13 @@
 
 ## 当前验证状态（2026-10-09）
 
-本页是 Windows 发布流程和历史工具链记录，不代表当前版本已完成发布验收。提交 `acdcf236d49cd3e5cd4d09506856c935b79eb12a` 已通过 [Windows MSVC 开发 CI](https://github.com/wrench1997/DAW/actions/runs/37873807018)：775 项 Rust 测试、14 项 Python harness 回归、实际 helper 协议 smoke 及全部开发门禁通过。以下固定 gnullvm Release 流程尚未在本轮执行；不能用 MSVC debug 构建替代发布验收。完整命令与历史失败见 `WORK_LOG.md`。
+本页记录固定 gnullvm 发布流程，不能当作当前 prerelease 的发布验收。`43e7e41` 已通过 [Windows MSVC 开发 CI](https://github.com/wrench1997/DAW/actions/runs/37878962285)：805 项 Rust 测试、14 项 helper harness、实际 helper smoke 和全部开发门禁。后续 v11 split 候选的完整 Windows 验证仍待执行。0.5.0-alpha.1 加载旧 v10，但新保存的 v11 需要新构建；先备份旧项目。独立 [MSVC preview 流程](WINDOWS_PREVIEW.md) 不替代以下固定 Release 验收。
+
+下文 `$Version` 和目录名的 0.4.0 是历史示例；构建当前候选时必须使用 `Cargo.toml` 的实际版本 `0.5.0-alpha.1`，不得把新 v11 构建标成旧 0.4.0。Rust/LLVM-MinGW 固定工具链及三文件发布契约不变。
 
 ## 开发 CI（独立分支验证）
 
-`.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build、独立的 helper harness 回归 / 实际 helper 协议 smoke 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；含 helper 自动 smoke 的运行已在 Rust/Cargo 1.99.0、Python 3.12.10 上全部通过。验证摘要后续提交只改文档，分支后续运行见 GitHub Actions。开发 smoke 不替代下述历史固定 gnullvm 发布流程、Release helper smoke、干净 Windows 实机验收与打包校验。
+`.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build、独立的 helper harness 回归 / 实际 helper 协议 smoke 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；含 helper 自动 smoke 的运行已在 Rust/Cargo 1.99.0、Python 3.12.10 上全部通过。后续源码候选分别在相同门禁验证，确切提交/结果见 GitHub Actions 和 WORK_LOG。开发 smoke 不替代下述历史固定 gnullvm 发布流程、Release helper smoke、干净 Windows 实机验收与打包校验。
 
 ## 发布契约
 
