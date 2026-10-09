@@ -137,3 +137,7 @@ and Group/Snap crowding are gone; normal-width layout remains compact. The
 minimum-size export review footer remains fully visible. Minimum-size Playlist
 and Mixer captures are 1123 × 707 physical pixels at the existing 1.04 zoom.
 All earlier desktop/dialog/device acceptance boundaries still apply.
+
+## Integrated checkpoint, 2026-10-09 04:58 UTC
+
+Reviewed commits `cb49961` and `493cc89` integrated cleanly as `1663f8f` and `dda0ccadbb5e7351889f9d085727c9e344ff6119`. The complete combined Linux no-default/all-target suite was rerun: **910 passed, 0 failed, 0 ignored**, default test stack; formatting, strict Clippy and app build also pass. No source conflict or extra executable change was introduced. The 17-image Vulkan capture evidence above belongs to the reviewed feature source; integration preserves it but does not assert a new native desktop capture. Fresh Windows execution for the integrated candidate remains pending.

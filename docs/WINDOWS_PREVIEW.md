@@ -37,6 +37,8 @@ The allowlist includes `ComBase.dll`, the Windows Runtime/COM OS component
 identified in Microsoft's [WindowsPreallocateStringBuffer requirements](https://learn.microsoft.com/en-us/windows/win32/api/winstring/nf-winstring-windowspreallocatestringbuffer).
 It also includes `UIAutomationCore.dll`, explicitly documented as a Windows OS
 provider in Microsoft's [UiaHostProviderFromHwnd requirements](https://learn.microsoft.com/en-us/windows/win32/api/uiautomationcoreapi/nf-uiautomationcoreapi-uiahostproviderfromhwnd).
+`BCryptPrimitives.dll` is included for the OS random generator described in
+Microsoft's [ProcessPrng requirements](https://learn.microsoft.com/en-us/windows/win32/seccng/processprng).
 Normal/delay-import regressions cover these exact names. The validator reports all
 unapproved imports for both binaries before rejecting the package. Dynamic VC
 runtimes and unknown DLLs remain rejected; no system DLL is copied into the archive.
@@ -109,7 +111,7 @@ Its required files are:
 The explicitly reviewed optional `docs/PROJECT_MEDIA.md` and
 `docs/OFFLINE_EXPORT_WORKFLOW.md`, `docs/AUDIO_SPLIT_FIDELITY.md` and
 `docs/WAV_EXPORT_OPTIONS.md`, `docs/MIXER_METERING.md` and
-`docs/LOCAL_SAMPLE_BROWSER.md` are included
+`docs/LOCAL_SAMPLE_BROWSER.md` and `docs/HEADLESS_UI_QA.md` are included
 when present in the source checkout.
 This supports their independent implementation branches without requiring an
 unrelated code merge to test the packager. Any new

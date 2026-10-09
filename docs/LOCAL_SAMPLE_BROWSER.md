@@ -52,3 +52,7 @@ Manual acceptance still required:
 ### Integrated verification, 2026-10-09 04:37 UTC
 
 Reviewed feature commit `3e4335ed4a8152884640be821d603f75d12a8010` integrated cleanly as `abc9ec888a5b4c96ca229cc8544d15aabf3700ec`. The combined metering/browser source passes **901 Linux no-default/all-target tests** with zero failures/ignored on default stack, formatting, strict Clippy and application build. No executable changes were made during integration. The guide is explicitly included in the preview packaging whitelist; local packaging/helper discovery passes 56 tests and all packaged document links resolve. Windows and actual native-dialog/GUI/audio acceptance remain pending for this new slice.
+
+### Production UI input follow-up
+
+The [headless app UI suite](HEADLESS_UI_QA.md) now drives actual Browser text focus, hidden-selection filtering, Refresh/Up, failed WAV import followed by success, one-step Undo/Redo and dirty-project Cancel using real egui input. Folder selection is injected only at the native picker return boundary; the OS picker itself remains untested. Genuine Vulkan offscreen render checkpoints cover these states without claiming native desktop or audible-output acceptance.

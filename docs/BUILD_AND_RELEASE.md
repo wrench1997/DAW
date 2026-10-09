@@ -8,7 +8,7 @@
 
 ## 当前验证状态（2026-10-09）
 
-本页记录固定 gnullvm 发布流程，不能当作当前 prerelease 的发布验收。`0b9cfa1a` 已通过 [Windows MSVC 开发 CI](https://github.com/wrench1997/DAW/actions/runs/37883317515)：880 项 Rust 测试、14 项 helper harness、实际 helper smoke 和全部开发门禁；对应真实电平表 Linux no-default suite 为878项通过。0.5.0-alpha.1 加载旧 v10，但新保存的 v11 需要新构建；先备份旧项目。新本地 WAV 素材浏览器已集成，最新测试记录见 DEV_STATE/WORK_LOG。独立 [MSVC preview 流程](WINDOWS_PREVIEW.md) 已完成优化构建但因 UIAutomationCore.dll 系统导入白名单漏项而尚未完成包验收；窄修复待 Windows 重跑，不替代以下固定 Release 验收。
+本页记录固定 gnullvm 发布流程，不能当作当前 prerelease 的发布验收。`0ff5e6e` 已通过 [Windows MSVC 开发 CI](https://github.com/wrench1997/DAW/actions/runs/37884873705)：900 项 Rust 测试、14 项 helper harness、实际 helper smoke 和全部开发门禁；对应素材浏览器 Linux no-default suite 为901项通过。0.5.0-alpha.1 加载旧 v10，但新保存的 v11 需要新构建；先备份旧项目。新真实 UI 输入/布局回归与响应式修复已集成，最新测试记录见 DEV_STATE/WORK_LOG。独立 [MSVC preview 流程](WINDOWS_PREVIEW.md) 已完成优化构建但因 BCryptPrimitives.dll 系统导入白名单漏项而尚未完成包验收；窄修复待 Windows 重跑，不替代以下固定 Release 验收。
 
 下文 `$Version` 和目录名的 0.4.0 是历史示例；构建当前候选时必须使用 `Cargo.toml` 的实际版本 `0.5.0-alpha.1`，不得把新 v11 构建标成旧 0.4.0。Rust/LLVM-MinGW 固定工具链及三文件发布契约不变。
 

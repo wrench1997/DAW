@@ -11,7 +11,7 @@ Status terms:
 
 ## 0.4 implementation progress
 
-Evidence note (2026-10-09): the 0.5.0-alpha.1/v11 metering checkpoint `0b9cfa1a` passed all Windows development gates with **880 Rust tests** and corresponding Linux no-default gates with **878 tests**, both on default stack. It includes media relinking, cancellable export, WAV format/level review and split preservation. The new local WAV Browser has been integrated from its separately verified 901-test source; exact latest combined evidence is in WORK_LOG/DEV_STATE. v10 inputs load; v11 saves require the new build. Preview package validation remains open after an OS-import allowlist finding. Actual cloud X11 presentation fails with EGL_BAD_SURFACE, so no visible GUI or physical-device/commercial acceptance is claimed.
+Evidence note (2026-10-09): the 0.5.0-alpha.1/v11 browser/meter checkpoint `0ff5e6e` passed all Windows gates with **900 Rust tests** and corresponding Linux no-default gates with **901 tests**, on default stack. New [production UI input/layout QA](HEADLESS_UI_QA.md) and responsive toolbar/About corrections are integrated; genuine Vulkan offscreen rendering is available, but native desktop presentation still fails in the cloud Mesa/X11 path. Exact latest source gates are in WORK_LOG/DEV_STATE. Preview packaging remains open after an OS-import allowlist finding. Offscreen/input evidence does not certify native dialogs, physical devices, real vendor plug-ins or commercial acceptance.
 
 | Area | Current 0.4 state | Status |
 |---|---|---|
