@@ -132,3 +132,37 @@ are exercised by real egui pointer/AccessKit tests, with separate image review.
 Exact source-bound final gates and genuine plug-in pacing results are recorded
 with the implementation delivery. The historical e54a6e4 routing receipt is
 unchanged and cannot certify this new timing implementation.
+
+### Preserved genuine-plug-in evidence and Experimental profiles
+
+The source-bound `f68b9a0` unoptimized Linux harness, using official Stochas, Surge XT
+and Surge XT Effects binaries, passed **13/16 quiet** one-second profile cases and
+**10/16 under four-thread controlled CPU load** with the same executed binary.
+B2048 passed all four ordinary/routed × fixed/changing cases under each condition.
+It remains the default operating ceiling, not a realtime or hardware certification.
+The smaller B128/B256/B512 choices are explicitly **Experimental** in Settings,
+with a visible warning that callbacks fitting B do not guarantee worker deadlines.
+No guard, hardware-buffer request or default was retuned to erase failures.
+
+Quiet failures were B128 ordinary/fixed (sink sequence 336), B128 routed/fixed
+(source sequence 1), and B256 ordinary/fixed (sink sequence 70). Under load all
+four B128 cases missed the FX sequence-1 deadline, B256 routed/changing missed FX
+sequence 1, and B512 routed/fixed missed sink sequence 2. One-second B512 quiet
+passes did not establish longer-run reliability: separate four-second cleanup
+and further Retry runs also encountered deadlines. All are preserved as negative
+product evidence, alongside earlier attempts, rather than replaced by later passes.
+
+Every B+1 callback was rejected before submission; explicit restart after that test
+passed B256/B512/B2048 but encountered a B128 sink deadline. Blank-source cleanup
+emitted no source MIDI, and a retained run's natural post-FX tail fell below 1e-6
+by 1.75 seconds, before a later deadline. Forced silence after a fault is not counted
+as tail-decay proof, and the longer cleanup run is not labeled a full pass.
+
+These captures use an unoptimized, source-linked test wrapper with allocation-based
+recording outside the callback allocation proof. Measured wrapper/render time and
+callback-start lateness are reported separately from plug-in DSP time. Optimized,
+bounded-capture measurements are still pending. Fresh-instance Surge state restore
+preserved the immediate first note and captured volume after actual processing;
+this does not validate live restore into an already-used instance. Native editor
+serialization, physical-device performance and optimized-release behavior remain
+unqualified. The full raw receipts retain source/build and helper/harness hashes.

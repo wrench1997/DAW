@@ -662,3 +662,14 @@ immediate render. The same invocation recorded a two-second `wait_until` timeout
 identify which of its several predicates timed out, so it is retained without assigning an
 unproven cause. `wait_until` now tracks the caller for any future failure. No processing block,
 longer timeout, weakened assertion, or runtime-path wait was added.
+
+## 2026-10-09 — Mark smaller plug-in timing profiles Experimental
+
+After preserving the same-binary genuine quiet 13/16 and four-thread-load 10/16 matrix,
+B2048 remains the default. The 128/256/512 choices now explicitly say Experimental;
+Settings visibly warns that worker deadlines can fail even when callbacks fit the
+ceiling and that a fault requires Retry. Focused pointer/AccessKit tests assert the
+warning/default, retained admission rules and clickable footer/Retry at both sizes.
+The timing contract, guard, device preferences and runtime processing are unchanged.
+`PLUGIN_TIMING.md` preserves every final matrix failure and long-cleanup limitation;
+optimized bounded-capture evidence remains future work.

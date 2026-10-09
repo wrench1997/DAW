@@ -2841,10 +2841,17 @@ fn full_app_plugin_profile_controls_require_observations_and_keep_device_prefere
     let before_input = ui.app.audio_input_draft.clone();
     let before_project = project_fingerprint(&ui.app.project);
     ui.key(egui::Key::F10, egui::Modifiers::NONE);
-    assert!(ui.button("128 frames").is_disabled());
-    assert!(ui.button("256 frames").is_disabled());
-    assert!(ui.button("512 frames").is_disabled());
+    assert!(ui.button("128 frames (Experimental)").is_disabled());
+    assert!(ui.button("256 frames (Experimental)").is_disabled());
+    assert!(ui.button("512 frames (Experimental)").is_disabled());
     assert!(!ui.button("2048 frames").is_disabled());
+    assert_eq!(ui.app.audio_preferences.plugin_callback_budget_frames, 2048);
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|node| node.value().or_else(|| node.label()))
+            .any(|label| label.contains("worker deadlines can fail even when callbacks fit"))
+    );
     assert!(ui.button("RETRY AUDIO PROCESSING").is_disabled());
     assert!(!ui.app.audio_preferences.metronome_enabled);
 
@@ -2852,18 +2859,18 @@ fn full_app_plugin_profile_controls_require_observations_and_keep_device_prefere
     engine.observe_test_callback(256);
     ui.app.audio = Some(engine);
     ui.settle();
-    assert!(ui.button("128 frames").is_disabled());
-    assert!(!ui.button("256 frames").is_disabled());
-    assert!(!ui.button("512 frames").is_disabled());
+    assert!(ui.button("128 frames (Experimental)").is_disabled());
+    assert!(!ui.button("256 frames (Experimental)").is_disabled());
+    assert!(!ui.button("512 frames (Experimental)").is_disabled());
     let generation = ui.app.timeline_desired_generation;
     ui.app.playing = true;
-    ui.click("512 frames");
+    ui.click("512 frames (Experimental)");
     assert_eq!(ui.app.audio.as_ref().unwrap().plugin_timing_profile(), 512);
     assert_eq!(ui.app.audio_preferences.plugin_callback_budget_frames, 512);
     assert!(ui.app.plugin_processing_retry_pending.is_some());
     assert!(ui.app.timeline_desired_generation > generation);
     assert!(!ui.app.playing);
-    assert!(ui.button("512 frames").is_disabled());
+    assert!(ui.button("512 frames (Experimental)").is_disabled());
     assert!(ui.button("RETRY AUDIO PROCESSING").is_disabled());
     assert!(
         ui.nodes
@@ -3120,6 +3127,13 @@ fn full_app_plugin_settings_retry_and_device_footer_remain_clickable_at_small_si
         ui.key(egui::Key::F10, egui::Modifiers::NONE);
         ui.app.audio_output_draft.buffer_size = AudioBufferSizeRequest::Fixed(256);
         ui.settle();
+        assert!(
+            ui.nodes
+                .iter()
+                .filter_map(|node| node.value().or_else(|| node.label()))
+                .any(|label| label.contains("worker deadlines can fail even when callbacks fit"))
+        );
+        assert!(!ui.button("2048 frames").is_disabled());
         ui.capture(capture);
         ui.click("REVERT");
         assert_eq!(

@@ -5898,11 +5898,15 @@ impl CitrusApp {
                 let evidence = self.plugin_callback_profile_has_evidence(budget);
                 let response = ui.add_enabled(
                     can_change && evidence,
-                    egui::Button::new(format!("{budget} frames")).selected(requested == budget),
+                    egui::Button::new(if budget == 2_048 {
+                        format!("{budget} frames")
+                    } else {
+                        format!("{budget} frames (Experimental)")
+                    }).selected(requested == budget),
                 ).on_hover_text(if budget == 2_048 {
                     "Conservative operating ceiling; not a guaranteed maximum callback or a hardware certification. Selecting it stops playback and prepares a fresh timing epoch."
                 } else {
-                    "Explicit provisional profile. Requires observed callbacks no larger than this ceiling; future callbacks can still exceed it and fault closed. Selecting it stops playback."
+                    "Experimental operating profile with observed worker deadline failures. Callbacks fitting this ceiling do not guarantee processing deadlines. Selecting it stops playback."
                 });
                 if response.clicked() && requested != budget {
                     self.request_plugin_processing_replan(Some(budget));
@@ -5911,6 +5915,8 @@ impl CitrusApp {
         });
         ui.label(RichText::new("Hardware buffer requests do not guarantee a backend maximum. Smaller ceilings require observed callback evidence; none is hardware-certified.")
             .size(8.5).color(theme::SETTINGS_MUTED));
+        ui.label(RichText::new("Experimental 128/256/512: worker deadlines can fail even when callbacks fit. A fault silences processing and requires Retry.")
+            .size(8.5).color(theme::SETTINGS_ERROR));
         if let Some(snapshot) = &snapshot {
             let per_stage_ms = f64::from(snapshot.plugin_bridge_latency_frames) * 1_000.0
                 / f64::from(snapshot.sample_rate.max(1));
