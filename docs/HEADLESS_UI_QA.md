@@ -251,3 +251,21 @@ The independent controlled motion benchmark and its mixed debug-CPU result are
 recorded in [COMPACT_WORKSPACE.md](COMPACT_WORKSPACE.md). Neither that measurement,
 the app footer nor offscreen captures establishes physical desktop smoothness or
 native OS clipboard behavior. Existing native paint acceptance remains failed.
+
+
+## Combined Piano keyboard and mouse composition validation
+
+Exact source `43fc5a388a292cd15503cc3759c24ba420fcb7f4` passes **64 harness entries**
+(63 production-input/flow checks plus the opt-in benchmark entry, timing disabled)
+and produces **37 genuine Vulkan frames** with lossless RGB-identical PNG conversion.
+The new six keyboard and 22 pointer flows execute with all preceding workspace,
+clipboard, inspector, modal and import flows. In particular, production Undo/Redo
+waits for active/interrupted held gestures but ordinary released menu actions remain
+usable. First-event modifier order, frontmost clipped ownership, hidden/host focus,
+global Stamp/Paint/clone identities and legacy group bounds are checked.
+
+The merged Tools menu, simultaneous cloned phrase and minimum-size drawn length
+were visually inspected. These are real application input/render tests, not native
+OS clipboard/keyboard/plugin focus, Windows desktop or hardware acceptance. See
+[Piano keyboard editing](PIANO_KEYBOARD_EDITING.md) and
+[Piano mouse composition](PIANO_MOUSE_WORKFLOW.md) for exact implemented semantics.

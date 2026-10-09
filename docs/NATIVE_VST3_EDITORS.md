@@ -290,3 +290,11 @@ extracted-helper smoke lane, with upload disabled and zero artifacts. These resu
 do not establish physical pointer/keyboard input, actual DPI transitions, real-vendor
 compatibility, forced detach/destruction failure injection, whole-app native GUI,
 Linux native editors or hardware audio/MIDI acceptance.
+
+
+At later exact `42393c66567f5f362e19230eabbba71b8d41a3d8`, [quality 37897795277](https://github.com/wrench1997/DAW/actions/runs/37897795277)
+repeats the successful source/interaction/state/lifecycle stages with 988 application,
+13 helper and 5 protocol Rust tests. The two PrintWindow stages still FAIL and repaint
+comparison remains SKIP. [Preview37897795252](https://github.com/wrench1997/DAW/actions/runs/37897795252) fully passes all 167 Python tests and
+the optimized provenance/package/extracted-helper lane, upload disabled. These are
+terminal results for that checkpoint, not inferred results for newer Piano edits.

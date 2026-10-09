@@ -193,3 +193,13 @@ strict Clippy modes, fmt, app/helper build, ordinary helper smoke, 167 Python te
 and the Windows source cross-check. The actual UI suite passes 36 entries (35 flows
 and the opt-in benchmark entry) with 33 genuine Vulkan frames. Details and the
 performance/desktop boundaries remain in [COMPACT_WORKSPACE.md](COMPACT_WORKSPACE.md).
+
+
+### Melody-input follow-through
+
+The active Piano window now supports the bounded [keyboard composition commands](PIANO_KEYBOARD_EDITING.md)
+and [mouse composition gestures](PIANO_MOUSE_WORKFLOW.md), retaining separate
+Playlist behavior and ordinary text ownership. Production Undo/Redo waits for an
+active or interrupted held gesture, then remains available through keyboard and
+menus after release. Combined source/input/render results are recorded in those
+guides; the same shared project/history and native/import barriers remain in force.

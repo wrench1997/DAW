@@ -8,7 +8,7 @@
 
 ## 当前验证状态（2026-10-09）
 
-本页记录固定 gnullvm 发布流程，不能当作当前 prerelease 的发布验收。最新终态 `c88c7fd` 的 [MSVC preview](https://github.com/wrench1997/DAW/actions/runs/37893177401) 完整通过：167 Python tests、951 app +13 helper +5 protocol Rust tests、optimized static-CRT 构建、MIT/vendor provenance、PE/ZIP/hash 与解压 helper smoke；上传关闭、artifact 为 0。[Quality](https://github.com/wrench1997/DAW/actions/runs/37893177378) 源码门禁和真实 MIT fixture 的 stopped-state 精确保存/恢复、interaction/lifecycle 通过，但 native paint 前后捕获失败、repaint comparison 跳过，整个 quality 仍失败。后续 compact workspace/Piano clipboard 候选必须重新执行完整门禁，不能继承旧 Windows 结果。0.5.0-alpha.1 加载 v10、保存 v11，先备份旧项目。独立 [MSVC preview](WINDOWS_PREVIEW.md) 不替代固定 Release 或干净系统验收。
+本页记录固定 gnullvm 发布流程，不能当作当前 prerelease 的发布验收。最新终态 `42393c6` 的 [MSVC preview](https://github.com/wrench1997/DAW/actions/runs/37897795252) 完整通过：167 Python tests、988 app +13 helper +5 protocol Rust tests、optimized static-CRT 构建、MIT/vendor provenance、PE/ZIP/hash 与解压 helper smoke；上传关闭、artifact 为0。[Quality](https://github.com/wrench1997/DAW/actions/runs/37897795277) 源码门禁和真实 MIT fixture 的 stopped-state 保存/恢复、interaction/lifecycle 通过，但 native paint 前后捕获失败、repaint comparison 跳过，整个 quality 仍失败。后续 Piano keyboard/mouse 新候选必须重新执行完整门禁。0.5.0-alpha.1 加载 v10、保存 v11，先备份旧项目。独立 [MSVC preview](WINDOWS_PREVIEW.md) 不替代固定 Release 或干净系统验收。
 
 下文 `$Version` 和目录名的 0.4.0 是历史示例；构建当前候选时必须使用 `Cargo.toml` 的实际版本 `0.5.0-alpha.1`，不得把新 v11 构建标成旧 0.4.0。Rust/LLVM-MinGW 固定工具链及三文件发布契约不变。
 

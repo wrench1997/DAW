@@ -92,3 +92,27 @@ The capture adapter was the installed SwiftShader CPU Vulkan implementation,
 without a display surface or native window. Fresh combined-tree and Windows
 checks remain the integration stage; none of these isolated Linux results claim
 Windows/native-editor or physical audio/MIDI acceptance.
+
+
+## Verified combined keyboard and mouse source
+
+The reviewed keyboard and mouse slices integrate at
+`43fc5a388a292cd15503cc3759c24ba420fcb7f4`. Fresh full locked/offline Linux gates pass
+**1,028 application +14 helper +5 protocol tests** with all features and **1,026
+application tests** without default features, with zero failed/ignored on default
+stack. Formatting, both strict Clippy profiles, app/helper builds, actual ordinary
+helper smoke, Windows MSVC no-default/all-target source cross-check and **167 Python
+regressions** pass. Independent merge review found no blocker.
+
+The fresh complete production-input Vulkan run passes **64 entries**: 63 flow/input
+checks plus the included opt-in benchmark entry, whose timing mode was disabled.
+It produces **37 genuine app frames**, all PNGs RGB-identical to readback. Both
+keyboard and pointer paths execute together, including semantic/text/modal/snapshot
+ownership, held-pointer Undo/Redo protection, ordinary menu Undo after release,
+first-event modifiers, global IDs and legacy geometry bounds. Merged Tools-menu,
+cloned-phrase and minimum-size drawn-length frames were inspected.
+
+These are combined source/input/offscreen results. This candidate needs its own
+Windows runtime run; native OS/plugin keyboard focus, physical input/audio, full
+FL parity and native paint acceptance remain separate. Velocity-wheel and numeric
+note-properties work belongs to a later slice and is not included here.
