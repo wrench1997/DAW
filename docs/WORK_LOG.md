@@ -148,3 +148,9 @@ Append-only from 2026-10-08 UTC. Timestamps use UTC. Source inspection, executed
 - Canonical documents now distinguish the green media checkpoint from the new export/preview candidate. Split-fidelity source is still not integrated. Local integrated fmt and diff checks passed before publication.
 
 - Integration packaging follow-through: explicitly allowlisted `docs/OFFLINE_EXPORT_WORKFLOW.md` beside the media guide, with a regression verifying both guides and their README links are packaged together. Full local Python discovery passed **50 tests** (36 packager + 14 helper harness); real-source packaged Markdown-link validation passed.
+
+## 2026-10-09 03:24 UTC — First preview run exposes Windows fixture newline issue
+
+- Workflow `43e7e418cf0dbb895593f3dc74d6d85ef1d6b2c2` started [preview run 37878961519](https://github.com/wrench1997/DAW/actions/runs/37878961519). Its Python stage ran 50 tests and failed with 14 fixture errors before any static-CRT application validation or package creation. The ordinary quality run is separate.
+- Every error was the synthetic Cargo.lock integrity guard: Windows text-mode fixture writing converted LF to CRLF, but the fixture expected a hash of the pre-write LF string. Changed only the test fixture to hash actual persisted bytes and added explicit CRLF coverage. The production lock-integrity guard is unchanged.
+- After correction, local Python packaging/helper discovery passed **51 tests**. Fresh Windows execution is still required; no preview package or upload is claimed from the failed run.

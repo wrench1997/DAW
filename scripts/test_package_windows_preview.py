@@ -145,7 +145,8 @@ class PackageTests(unittest.TestCase):
                      "profile": "release", "features": ["vst2", "vst3"],
                      "rustc": f"rustc 1.99.0 (fixture)\nhost: {pkg.TARGET}\nrelease: 1.99.0",
                      "cargo": "cargo 1.99.0 (fixture)", "source_commit": "b" * 40,
-                     "source_epoch": 1791514800, "cargo_lock_sha256": pkg.digest(lock.encode()),
+                     "source_epoch": 1791514800,
+                     "cargo_lock_sha256": pkg.digest((self.repo / "Cargo.lock").read_bytes()),
                      "msvc_linker_version": "fixture"}
 
     def create(self, directory="out"):
@@ -213,6 +214,12 @@ class PackageTests(unittest.TestCase):
         (self.repo / "LICENSE").unlink()
         with self.assertRaises(pkg.PackageError):
             self.create()
+
+    def test_crlf_lock_hashes_actual_file_bytes(self):
+        lock_path = self.repo / "Cargo.lock"
+        lock_path.write_bytes(lock_path.read_text().replace("\n", "\r\n").encode("utf-8"))
+        self.info["cargo_lock_sha256"] = pkg.digest(lock_path.read_bytes())
+        pkg.verify_package(self.create())
 
     def test_modified_lock_fails(self):
         with (self.repo / "Cargo.lock").open("a") as handle:
