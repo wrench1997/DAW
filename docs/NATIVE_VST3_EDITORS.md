@@ -43,8 +43,9 @@ owner cannot silently take over an already open generation.
 The Windows helper's main thread initializes STA/OLE before any plugin is loaded, and fails
 explicitly if initialization fails. OLE is released only after plugin/view teardown. That thread
 owns plugin loading/unloading, controller/control calls, processing requests, and native window
-operations. This is a required lifecycle condition, not broad plugin-compatibility evidence. A separate stdin reader only parses and queues requests. Bounded alternation of commands and native messages prevents an input/resize
-flood from monopolizing the event pump. Native callbacks record intent; plugin calls happen
+operations. This is a required lifecycle condition, not broad plugin-compatibility evidence. A
+separate stdin reader only parses and queues requests. Bounded alternation of commands and native
+messages prevents an input/resize flood from monopolizing the event pump. Native callbacks record intent; plugin calls happen
 outside those callbacks to avoid reentrant host locking. Teardown detaches the view before
 native destruction, including explicit close, titlebar close, unload, replacement, owner loss,
 stdin EOF, and Shutdown.
@@ -126,23 +127,51 @@ Feedback loss, capture failure or required component reload remains a visible un
 there is no automatic default-state recovery.
 
 A native preset can change unreported parameters. Its captured opaque state therefore supersedes
-persisted generic base overrides; those stale overrides are cleared, and an open generic catalog
-is refreshed after capture. Native gestures are not currently written into Citrus automation or
-individual undo steps. Generic live edits are disabled while native editing or capture is pending.
-Topology changes and Undo/Redo are blocked until the editor is closed and the app has consumed
-its exact retained capture. Save/restore and unload all detach first; normal project save barriers
-still require their exact tagged state receipts. Unsupported editor actions do not fault an
+stale generic base overrides. Existing automation/base keys are retained while capture is pending,
+then refreshed atomically from actual plugin values for the same generation and native revision
+as the opaque snapshot. Saved base IDs are first checked against one current metadata snapshot
+(with the generic catalog's 4,096-item validation limit), so an unknown VST3 ID returning zero
+cannot masquerade as a valid base. Empty base sets need no generic metadata. Failed/removed
+parameter reads or unsupported metadata fail capture visibly; missing values never become zero
+bases. A later generic edit survives subsequent saves until another
+native revision or editor generation requires refreshed bases. An open generic catalog is refreshed
+after capture. Native gestures are not currently written into Citrus automation or
+individual undo steps. This preview refuses native Open for any instance referenced by a plugin-
+parameter automation lane, even if stopped or the lane is unplaced. Open also waits for the exact
+callback timeline/fingerprint to be synchronized and for any previous resident/legacy automation
+ownership to be released after a lane is removed or retargeted. Existing generic editing and
+automation remain available. Assigning/retargeting automation to an instance with a native editor
+pending/open or an unconsumed capture is blocked. This prevents transient automated controller
+values from silently replacing release bases until controller/base ownership is separated.
+Generic live edits are disabled while native editing or capture is pending.
+Topology changes, Undo/Redo and whole-project transform previews are blocked until the editor is
+closed and the app has consumed its exact retained capture. Native Open is refused while transform
+previews, editing gestures, deferred MIDI/project candidates or project lifecycle transitions hold
+an older project snapshot; native Close remains available outside state-save transactions.
+Save/restore and unload all detach first; normal project save barriers still require their exact
+tagged state receipts. Unsupported editor actions do not fault an
 otherwise healthy plugin. Best-effort close remains available for a faulted instance.
 
 ## Verification record (2026-10-09)
 
-- Stage-1 Python protocol/build-receipt/package regressions: 83 tests passed on Linux.
-- Stage-1 pure closed-state validation tests: 3 passed in a source-based standalone harness.
+- Linux `cargo test --offline --locked --all-features --all-targets`: 883 tests passed
+  (864 application, 14 helper, 5 editor protocol), using the default thread stack.
+- Linux strict all-feature/all-target Clippy and Windows MSVC all-feature/all-target typecheck:
+  passed. The preceding safety candidate also passed Windows strict Clippy. One unchanged
+  upstream dependency deprecation warning remains in `internal/data_exchange.rs`.
+- Windows source fixture all-feature/all-target strict Clippy: passed, including all three
+  deliberate stdout-pollution paths. This is cross-target compilation, not Windows execution.
+- Python protocol/build-receipt/package regressions: 89 tests passed on Linux.
+- Real Linux helper no-plugin smoke: three valid replies, invalid-command recovery, explicit
+  shutdown/exit zero and child reaping passed.
+- Focused exact-source vendored-library audit: 9 native/revision tests passed using a temporary
+  production-dependency manifest (upstream's unused example dev dependencies were not fetched).
+  Stage-1 closed-state validators additionally passed 3 source-based standalone tests.
 - Linux native GUI gate: exit 77, **UNSUPPORTED / NOT VERIFIED**.
 - Windows GUI rendering, keyboard/mouse interaction, DPI, audio load and real-plugin compatibility:
   **NOT VERIFIED** in this Linux environment. Windows MSVC cross-target checks verify types only.
-- Stage-2 final Cargo, fixture and Python results are recorded with the final review commit/report;
-  they must not be interpreted as interactive Windows acceptance.
+- Independent source review covered parameter-base preservation, missing IDs, native/automation
+  exclusion, callback timeline handoff and stale project-snapshot barriers. It did not execute GUI.
 
 The production helper privately owns a duplicate protocol output handle before loading any plugin.
 Windows public Win32 stdout and CRT descriptor 1 are redirected to stderr (or NUL if no diagnostic

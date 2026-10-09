@@ -208,6 +208,9 @@ pub struct NativeEditorSnapshot {
     pub native_used: bool,
     pub dirty_revision: u64,
     pub captured_dirty_revision: u64,
+    pub captured_generation: u64,
+    pub parameter_capture_serial: u64,
+    pub captured_parameters: Option<Arc<Vec<(u32, f32)>>>,
     pub capture_serial: u64,
     pub captured_state: Option<Arc<Vec<u8>>>,
     pub pending_request: Option<u64>,
@@ -1618,6 +1621,7 @@ enum AdminCommand {
         slot: usize,
         request_id: u64,
         command: NativeEditorCommand,
+        base_parameter_ids: Vec<u32>,
     },
     SetSlotConfig {
         slot: usize,
@@ -1817,8 +1821,12 @@ impl PluginChainControl {
         slot: usize,
         request_id: u64,
         command: NativeEditorCommand,
+        base_parameter_ids: &[u32],
     ) -> bool {
-        if request_id == 0 || !manifest_accepts_slot(self.manifest, slot) {
+        if request_id == 0
+            || !manifest_accepts_slot(self.manifest, slot)
+            || base_parameter_ids.len() > MAX_PLUGIN_PARAMETER_CATALOG_ITEMS
+        {
             return false;
         }
         let Ok(mut snapshots) = self.metrics.native_editors.lock() else {
@@ -1832,6 +1840,7 @@ impl PluginChainControl {
             slot,
             request_id,
             command,
+            base_parameter_ids: base_parameter_ids.to_vec(),
         }) {
             snapshot.pending_request = Some(request_id);
             snapshot.error = None;
@@ -2371,6 +2380,7 @@ struct WorkerSlot {
     config: SlotConfig,
     fault: Option<String>,
     parameter_catalog_cache: Option<WorkerParameterCatalogCache>,
+    native_base_ids: Vec<u32>,
 }
 
 struct WorkerParameterCatalogCache {
@@ -2414,6 +2424,7 @@ fn run_worker(
                                 config: slot.config,
                                 fault: None,
                                 parameter_catalog_cache: None,
+                                native_base_ids: Vec::new(),
                             });
                         }
                         Err(message) => {
@@ -2423,6 +2434,7 @@ fn run_worker(
                                 config: slot.config,
                                 fault: Some(message),
                                 parameter_catalog_cache: None,
+                                native_base_ids: Vec::new(),
                             });
                         }
                     },
@@ -2433,6 +2445,7 @@ fn run_worker(
                             config: slot.config,
                             fault: Some(message),
                             parameter_catalog_cache: None,
+                            native_base_ids: Vec::new(),
                         });
                     }
                 }
@@ -2444,6 +2457,7 @@ fn run_worker(
                     config: SlotConfig::default(),
                     fault: Some(message),
                     parameter_catalog_cache: None,
+                    native_base_ids: Vec::new(),
                 });
             }
         }
@@ -2940,6 +2954,7 @@ fn handle_admin(
             slot,
             request_id,
             command,
+            base_parameter_ids,
         } => {
             if slot >= MAX_PLUGIN_CHAIN_SLOTS {
                 return false;
@@ -2953,6 +2968,11 @@ fn handle_admin(
                 .and_then(|runtime| runtime.backend.as_mut())
                 .ok_or_else(|| "plug-in runtime is not available".to_owned())
                 .and_then(|backend| catch_backend(|| backend.native_editor(command)));
+            if result.is_ok()
+                && let Some(runtime) = slots.get_mut(slot)
+            {
+                runtime.native_base_ids = base_parameter_ids;
+            }
             if let Ok(mut snapshots) = metrics.native_editors.lock() {
                 let snapshot = &mut snapshots[slot];
                 snapshot.capture_in_progress =
@@ -3087,15 +3107,12 @@ fn handle_admin(
             {
                 runtime.parameter_catalog_cache = None;
                 let result = catch_backend(|| {
-                    close_native_before_state(backend.as_mut())?;
-                    let before = backend.native_editor_feedback()?.dirty_revision;
-                    let bytes = backend.save_state()?;
-                    let feedback = backend.native_editor_feedback()?;
-                    if feedback.dirty_revision != before {
-                        return Err("Native state changed across the capture barrier".into());
-                    }
-                    publish_native_capture(slot, feedback, &bytes, metrics);
-                    Ok(bytes)
+                    capture_native_backend(
+                        slot,
+                        backend.as_mut(),
+                        &runtime.native_base_ids,
+                        metrics,
+                    )
                 });
                 match result {
                     Ok(bytes) => {
@@ -3159,6 +3176,7 @@ fn publish_native_capture(
     slot: usize,
     feedback: NativeEditorFeedback,
     bytes: &[u8],
+    parameters: Option<Vec<(u32, f32)>>,
     metrics: &BridgeMetrics,
 ) {
     if let Ok(mut snapshots) = metrics.native_editors.lock() {
@@ -3169,11 +3187,78 @@ fn publish_native_capture(
         // omits dirty callbacks. Retain them independently of best-effort event delivery.
         if snapshot.native_used || snapshot.dirty_revision != 0 {
             snapshot.captured_dirty_revision = snapshot.dirty_revision;
+            snapshot.captured_generation = feedback.state.generation;
+            if let Some(parameters) = parameters {
+                snapshot.parameter_capture_serial =
+                    snapshot.parameter_capture_serial.saturating_add(1);
+                snapshot.captured_parameters = Some(Arc::new(parameters));
+            }
             snapshot.capture_serial = snapshot.capture_serial.saturating_add(1);
             snapshot.captured_state = Some(Arc::new(bytes.to_vec()));
         }
         snapshot.capture_in_progress = false;
     }
+}
+
+fn capture_native_backend(
+    slot: usize,
+    backend: &mut dyn PluginBackend,
+    base_parameter_ids: &[u32],
+    metrics: &BridgeMetrics,
+) -> Result<Vec<u8>, String> {
+    close_native_before_state(backend)?;
+    let before = backend.native_editor_feedback()?;
+    let refresh_bases = metrics
+        .native_editors
+        .lock()
+        .map_err(|_| "native snapshot lock poisoned".to_owned())?
+        .get(slot)
+        .is_some_and(|snapshot| {
+            snapshot.native_used
+                && (snapshot.captured_generation != before.state.generation
+                    || snapshot.captured_dirty_revision != before.dirty_revision)
+        });
+    // Production SaveState flushes pending DSP parameters with zero samples. Read controller
+    // values afterward, still inside the same native-revision barrier as the opaque bytes.
+    let bytes = backend.save_state()?;
+    let parameters = if refresh_bases {
+        // VST3 getParamNormalized has no error result: an unknown ID can look like a valid
+        // zero. Check membership against current metadata, never the generic UI's cache.
+        // Native-only instances need no generic catalog; oversized/invalid catalogs fail
+        // explicitly only when saved generic base keys actually require reconciliation.
+        let known_ids = if base_parameter_ids.is_empty() {
+            HashSet::new()
+        } else {
+            let (_, catalog) = validate_catalog_snapshot(backend.parameter_catalog_snapshot()?)?;
+            catalog.into_iter().map(|parameter| parameter.id).collect()
+        };
+        let mut values = Vec::with_capacity(base_parameter_ids.len());
+        for &id in base_parameter_ids {
+            if !known_ids.contains(&id) {
+                return Err(format!(
+                    "Native parameter base {id} is absent from the current parameter catalog"
+                ));
+            }
+            let value = backend.get_parameter(id).map_err(|error| {
+                format!("Native parameter base {id} could not be captured: {error}")
+            })?;
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return Err(format!(
+                    "Native parameter base {id} is not a finite normalized value"
+                ));
+            }
+            values.push((id, value));
+        }
+        Some(values)
+    } else {
+        None
+    };
+    let feedback = backend.native_editor_feedback()?;
+    if feedback.dirty_revision != before.dirty_revision {
+        return Err("Native state changed across the capture barrier".into());
+    }
+    publish_native_capture(slot, feedback, &bytes, parameters, metrics);
+    Ok(bytes)
 }
 
 fn capture_native_slot(
@@ -3193,15 +3278,7 @@ fn capture_native_slot(
         return;
     };
     let result = catch_backend(|| {
-        close_native_before_state(backend.as_mut())?;
-        let before = backend.native_editor_feedback()?.dirty_revision;
-        let bytes = backend.save_state()?;
-        let feedback = backend.native_editor_feedback()?;
-        if feedback.dirty_revision != before {
-            return Err("Native state changed across the capture barrier".into());
-        }
-        publish_native_capture(slot, feedback, &bytes, metrics);
-        Ok(())
+        capture_native_backend(slot, backend.as_mut(), &runtime.native_base_ids, metrics)
     });
     if let Err(error) = result {
         if let Ok(mut snapshots) = metrics.native_editors.lock() {
@@ -4663,6 +4740,10 @@ mod tests {
         calls: Vec<&'static str>,
         fail_feedback: bool,
         reject_open: bool,
+        parameter_value: f32,
+        query_error: bool,
+        missing_parameter: bool,
+        edit_during_capture: bool,
     }
 
     struct NativeMockBackend(Arc<Mutex<NativeMock>>);
@@ -4683,12 +4764,35 @@ mod tests {
             Ok(())
         }
         fn get_parameter(&mut self, _: u32) -> Result<f32, String> {
-            Ok(0.5)
+            let mut mock = self.0.lock().unwrap();
+            mock.calls.push("parameter");
+            if mock.query_error {
+                Err("parameter disappeared".into())
+            } else {
+                Ok(mock.parameter_value)
+            }
+        }
+        fn parameter_catalog_snapshot(&mut self) -> Result<PluginParameterCatalogPage, String> {
+            let mut mock = self.0.lock().unwrap();
+            mock.calls.push("catalog");
+            let items = if mock.missing_parameter {
+                Vec::new()
+            } else {
+                vec![parameter_descriptor(17)]
+            };
+            Ok(PluginParameterCatalogPage {
+                catalog_revision: 1,
+                total_items: items.len(),
+                items,
+            })
         }
         fn save_state(&mut self) -> Result<Vec<u8>, String> {
             let mut mock = self.0.lock().unwrap();
             assert!(!mock.open, "snapshot must detach editor first");
             mock.calls.push("save");
+            if mock.edit_during_capture {
+                mock.revision += 1;
+            }
             Ok(mock.bytes.clone())
         }
         fn load_state(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -4760,6 +4864,7 @@ mod tests {
             config: SlotConfig::default(),
             fault: None,
             parameter_catalog_cache: None,
+            native_base_ids: Vec::new(),
         }]
     }
 
@@ -4831,6 +4936,7 @@ mod tests {
             AdminCommand::NativeEditor {
                 slot: 0,
                 request_id: 7,
+                base_parameter_ids: vec![],
                 command: NativeEditorCommand::Open {
                     owner_window: 123,
                     owner_process: 456,
@@ -4880,6 +4986,7 @@ mod tests {
                 slot: 0,
                 request_id: 8,
                 command: NativeEditorCommand::Close,
+                base_parameter_ids: vec![],
             },
             &mut slots,
             &mut events,
@@ -4890,6 +4997,126 @@ mod tests {
         assert!(snapshot.has_uncaptured_changes());
         assert!(snapshot.error.unwrap().contains("DSP failed"));
         assert_eq!(mock.lock().unwrap().calls, ["close"]);
+    }
+
+    #[test]
+    fn native_capture_refreshes_only_known_bases_once_per_native_change() {
+        let mock = Arc::new(Mutex::new(NativeMock {
+            open: true,
+            bytes: vec![7],
+            parameter_value: 0.625,
+            ..Default::default()
+        }));
+        let mut slots = native_slots(mock.clone());
+        slots[0].native_base_ids = vec![17];
+        let metrics = BridgeMetrics::default();
+        let (mut events, _rx) = RingBuffer::new(1);
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        mock.lock().unwrap().open = false;
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        let first = metrics.native_editors.lock().unwrap()[0].clone();
+        assert_eq!(
+            first.captured_parameters.as_deref(),
+            Some(&vec![(17, 0.625)])
+        );
+        assert_eq!(first.parameter_capture_serial, 1);
+        // Later generic edit changes live value but does not create another native revision.
+        mock.lock().unwrap().parameter_value = 0.875;
+        handle_admin(
+            AdminCommand::SaveState {
+                slot: 0,
+                request_id: 2,
+            },
+            &mut slots,
+            &mut events,
+            &metrics,
+        );
+        let second = metrics.native_editors.lock().unwrap()[0].clone();
+        assert_eq!(
+            second.parameter_capture_serial,
+            first.parameter_capture_serial
+        );
+        assert!(second.capture_serial > first.capture_serial);
+        assert_eq!(
+            mock.lock()
+                .unwrap()
+                .calls
+                .iter()
+                .filter(|call| **call == "parameter")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn missing_native_automation_base_fails_capture_without_clean_receipt() {
+        let mock = Arc::new(Mutex::new(NativeMock {
+            open: true,
+            query_error: true,
+            ..Default::default()
+        }));
+        let mut slots = native_slots(mock.clone());
+        slots[0].native_base_ids = vec![17];
+        let metrics = BridgeMetrics::default();
+        let (mut events, _rx) = RingBuffer::new(1);
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        mock.lock().unwrap().open = false;
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        let snapshot = metrics.native_editors.lock().unwrap()[0].clone();
+        assert!(snapshot.has_uncaptured_changes());
+        assert!(snapshot.captured_state.is_none());
+        assert!(snapshot.error.unwrap().contains("base 17"));
+    }
+
+    #[test]
+    fn unknown_native_base_returning_zero_is_rejected_by_current_metadata() {
+        let mock = Arc::new(Mutex::new(NativeMock {
+            open: true,
+            missing_parameter: true,
+            parameter_value: 0.0, // Real VST3 controllers may return zero for unknown IDs.
+            ..Default::default()
+        }));
+        let mut slots = native_slots(mock.clone());
+        slots[0].native_base_ids = vec![17];
+        let metrics = BridgeMetrics::default();
+        let (mut events, _rx) = RingBuffer::new(1);
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        mock.lock().unwrap().open = false;
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        let snapshot = metrics.native_editors.lock().unwrap()[0].clone();
+        assert!(snapshot.has_uncaptured_changes());
+        assert!(snapshot.captured_state.is_none());
+        assert!(snapshot.captured_parameters.is_none());
+        assert!(
+            snapshot
+                .error
+                .unwrap()
+                .contains("absent from the current parameter catalog")
+        );
+        let calls = &mock.lock().unwrap().calls;
+        assert!(calls.contains(&"catalog"));
+        assert!(!calls.contains(&"parameter"));
+    }
+
+    #[test]
+    fn native_revision_change_rejects_mismatched_parameter_and_opaque_snapshots() {
+        let mock = Arc::new(Mutex::new(NativeMock {
+            open: true,
+            edit_during_capture: true,
+            parameter_value: 0.625,
+            ..Default::default()
+        }));
+        let mut slots = native_slots(mock.clone());
+        slots[0].native_base_ids = vec![17];
+        let metrics = BridgeMetrics::default();
+        let (mut events, _rx) = RingBuffer::new(1);
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        mock.lock().unwrap().open = false;
+        poll_native_editors(&mut slots, &mut events, &metrics);
+        let snapshot = metrics.native_editors.lock().unwrap()[0].clone();
+        assert!(snapshot.captured_state.is_none());
+        assert!(snapshot.captured_parameters.is_none());
+        assert!(snapshot.error.unwrap().contains("capture barrier"));
     }
 
     #[test]

@@ -2173,6 +2173,14 @@ enum MixerGraphProjectEdit {
     },
 }
 
+#[derive(Default)]
+struct NativeEditorSeen {
+    dirty_revision: u64,
+    capture_serial: u64,
+    completed_request: u64,
+    parameter_capture_serial: u64,
+}
+
 struct PluginParameterEditorWindow {
     catalog: PluginParameterEditorState,
     plugin_name: String,
@@ -4712,8 +4720,8 @@ pub struct CitrusApp {
     plugin_parameter_editor: Option<PluginParameterEditorWindow>,
     native_editor_owner: Option<(u64, u32)>,
     // Exact endpoint/instance/slot identity, reset with each project session. Values are the
-    // observed dirty revision, reliable capture serial, and completed command request.
-    native_editor_seen: HashMap<(u64, u64, usize), (u64, u64, u64)>,
+    // observed dirty revision, state capture serial, command request, and parameter-base serial.
+    native_editor_seen: HashMap<(u64, u64, usize), NativeEditorSeen>,
     next_plugin_parameter_request_id: u64,
     plugin_parameter_edits: PluginParameterEditState,
     plugin_parameter_edit_draft_desired: HashMap<ParameterEditRoute, f32>,
@@ -8247,6 +8255,27 @@ impl CitrusApp {
             );
             return;
         }
+        if !close
+            && native_open_snapshot_barrier(
+                self.piano_roll_transform.is_some(),
+                self.piano_roll_gesture_before.is_some() || self.playlist_gesture_before.is_some(),
+                self.deferred_generator_candidate_after_midi.is_some()
+                    || self.deferred_project_intent_after_midi.is_some()
+                    || self.deferred_recovery_project_after_midi.is_some(),
+                !self.project_lifecycle.is_idle() || self.queued_save_request.is_some(),
+            )
+        {
+            self.notify("Finish or cancel the current project edit/transition before opening a native editor".into());
+            return;
+        }
+        if !close && plugin_has_parameter_automation(&self.project, instance_id) {
+            self.notify("Native editors are unavailable for automated plug-ins in this preview; use PARAMETERS".into());
+            return;
+        }
+        if !close && !self.native_editor_timeline_ready(instance_id) {
+            self.notify("Native editor is waiting for the callback timeline to release parameter automation".into());
+            return;
+        }
         if !close && self.plugin_parameter_edits.reserved_len() != 0 {
             self.notify("Wait for pending parameter edits before opening the native editor".into());
             return;
@@ -8265,9 +8294,18 @@ impl CitrusApp {
         };
         let request_id = self.next_plugin_parameter_request_id.max(1);
         self.next_plugin_parameter_request_id = request_id.wrapping_add(1).max(1);
+        let base_parameter_ids: Vec<_> = self
+            .project
+            .plugin_instances
+            .iter()
+            .find(|instance| instance.id == instance_id)
+            .map(|instance| instance.parameters.keys().copied().collect())
+            .unwrap_or_default();
         let result = self
             .native_editor_control(instance_id)
-            .map(|(control, slot)| control.request_native_editor(slot, request_id, command));
+            .map(|(control, slot)| {
+                control.request_native_editor(slot, request_id, command, &base_parameter_ids)
+            });
         match result {
             Ok(true) => {
                 // Conservative intent protection: a user may edit and immediately close the DAW
@@ -8294,8 +8332,34 @@ impl CitrusApp {
             snapshot,
             self.native_editor_seen
                 .get(&(endpoint_id, instance_id, slot))
-                .map_or(0, |seen| seen.1),
+                .map_or(0, |seen| seen.capture_serial),
         )
+    }
+
+    fn native_editor_timeline_ready(&self, instance_id: u64) -> bool {
+        let Some(source) = &self.timeline_audio_source else {
+            return false;
+        };
+        let fingerprint_current = source.fingerprint
+            == timeline_playback_fingerprint(
+                &self.project,
+                self.transport_mode,
+                self.timeline_sample_rate(),
+            );
+        native_timeline_editor_allowed(self.timeline_audio_matches_desired(), fingerprint_current,
+            source.timeline.driven_automation_targets(), instance_id)
+            && !self.automation_evaluator.previous().is_some_and(|frame| frame.ordered_values().iter()
+                .any(|value| matches!(value.target, AutomationTarget::PluginParameter { instance, .. } if instance == instance_id)))
+    }
+
+    fn native_editor_instance_pending(&self, instance_id: u64) -> bool {
+        let Ok((endpoint_id, slot)) = self.plugin_parameter_runtime_binding(instance_id) else {
+            return false;
+        };
+        self.native_editor_snapshot(instance_id)
+            .is_some_and(|snapshot| {
+                self.native_snapshot_pending(endpoint_id, instance_id, slot, &snapshot)
+            })
     }
 
     fn native_editor_topology_guard(&self) -> Result<(), String> {
@@ -8367,20 +8431,10 @@ impl CitrusApp {
         let mut refresh_catalog = false;
         for (key, snapshot) in updates {
             let previous = self.native_editor_seen.entry(key).or_default();
-            if snapshot.dirty_revision != previous.0 {
+            if snapshot.dirty_revision != previous.dirty_revision {
                 self.dirty = true;
                 if let Some(error) = &snapshot.error {
                     messages.push(format!("Native editor state is unsaved: {error}"));
-                }
-                if let Some(instance) = self
-                    .project
-                    .plugin_instances
-                    .iter_mut()
-                    .find(|instance| instance.id == key.1)
-                {
-                    // A native preset may change many parameters without reporting every value.
-                    // Old generic base values must never overwrite the authoritative opaque state.
-                    instance.parameters.clear();
                 }
                 if let Some(editor) = &mut self.plugin_parameter_editor
                     && editor.catalog.binding().is_some_and(|binding| {
@@ -8392,9 +8446,9 @@ impl CitrusApp {
                         "Native editor changed this plug-in; close it to refresh parameters".into(),
                     );
                 }
-                previous.0 = snapshot.dirty_revision;
+                previous.dirty_revision = snapshot.dirty_revision;
             }
-            if snapshot.capture_serial != previous.1 {
+            if snapshot.capture_serial != previous.capture_serial {
                 if let Some(bytes) = &snapshot.captured_state
                     && let Some(instance) = self
                         .project
@@ -8403,7 +8457,11 @@ impl CitrusApp {
                         .find(|instance| instance.id == key.1)
                 {
                     instance.opaque_state.clone_from(bytes.as_ref());
-                    instance.parameters.clear();
+                    apply_native_parameter_bases(
+                        instance,
+                        &snapshot,
+                        previous.parameter_capture_serial,
+                    );
                 }
                 refresh_catalog |= self
                     .plugin_parameter_editor
@@ -8412,13 +8470,14 @@ impl CitrusApp {
                     .is_some_and(|binding| {
                         binding.instance_id == key.1 && binding.endpoint_id == key.0
                     });
-                previous.1 = snapshot.capture_serial;
+                previous.capture_serial = snapshot.capture_serial;
+                previous.parameter_capture_serial = snapshot.parameter_capture_serial;
             }
-            if snapshot.completed_request != previous.2 {
+            if snapshot.completed_request != previous.completed_request {
                 if let Some(error) = &snapshot.error {
                     messages.push(format!("Native editor: {error}"));
                 }
-                previous.2 = snapshot.completed_request;
+                previous.completed_request = snapshot.completed_request;
             }
         }
         if refresh_catalog {
@@ -10939,6 +10998,11 @@ impl CitrusApp {
     }
 
     fn begin_piano_roll_transform(&mut self, kind: PianoRollTransformKind) {
+        self.poll_native_editor_snapshots();
+        if let Err(error) = self.native_editor_topology_guard() {
+            self.notify(error);
+            return;
+        }
         if self.piano_roll_transform.is_some() {
             return;
         }
@@ -15548,6 +15612,13 @@ impl CitrusApp {
             .iter()
             .map(|channel| channel.id)
             .collect::<Vec<_>>();
+        let native_pending: HashSet<_> = self
+            .project
+            .plugin_instances
+            .iter()
+            .filter(|instance| self.native_editor_instance_pending(instance.id))
+            .map(|instance| instance.id)
+            .collect();
         let Some(automation) = self
             .project
             .automation_lanes
@@ -15643,6 +15714,15 @@ impl CitrusApp {
                         );
                     }
                 });
+            if selected_target != original_target
+                && !native_automation_target_allowed(&selected_target, &native_pending)
+            {
+                ui.colored_label(
+                    theme::AMBER,
+                    "Close the native editor before assigning automation",
+                );
+                selected_target = original_target.clone();
+            }
             if selected_target != original_target {
                 automation.lane.set_target(selected_target.clone());
             }
@@ -15977,9 +16057,10 @@ impl CitrusApp {
                             slot_action = Some(PluginSlotAction::Pick(target));
                         }
                         let native = self.native_editor_snapshot(plugin.instance_id);
-                        let enabled = native.as_ref().is_some_and(|snapshot| snapshot.state.supported && snapshot.state.has_editor && snapshot.pending_request.is_none());
+                        let enabled = native.as_ref().is_some_and(|snapshot| snapshot.state.supported && snapshot.state.has_editor && snapshot.pending_request.is_none()
+                                && !plugin_has_parameter_automation(&self.project, plugin.instance_id));
                         if ui.add_enabled(enabled, egui::Button::new("EDITOR"))
-                            .on_hover_text("Open or focus the native VST3 editor (Windows only)").clicked() {
+                            .on_hover_text(if plugin_has_parameter_automation(&self.project, plugin.instance_id) { "Native editing of automated plug-ins is unavailable in this preview; use PARAMETERS" } else { "Open or focus the native VST3 editor (Windows only)" }).clicked() {
                             slot_action = Some(PluginSlotAction::OpenNativeEditor { instance_id: plugin.instance_id });
                         }
                         if native.as_ref().is_some_and(|snapshot| snapshot.state.open)
@@ -16323,11 +16404,12 @@ impl CitrusApp {
                                     snapshot.state.supported
                                         && snapshot.state.has_editor
                                         && snapshot.pending_request.is_none()
+                                        && !plugin_has_parameter_automation(&self.project, plugin.instance_id)
                                 });
                                 if ui
                                     .add_enabled(enabled, egui::Button::new("EDITOR").small())
                                     .on_hover_text(
-                                        "Open or focus native VST3 editor (Windows only)",
+                                        if plugin_has_parameter_automation(&self.project, plugin.instance_id) { "Native editing of automated plug-ins is unavailable in this preview; use PARAMS" } else { "Open or focus native VST3 editor (Windows only)" },
                                     )
                                     .clicked()
                                 {
@@ -22432,6 +22514,12 @@ impl CitrusApp {
         current_normalized: f32,
         parameter_name: &str,
     ) {
+        self.poll_native_editor_snapshots();
+        if self.native_editor_instance_pending(instance_id) {
+            self.notify("Close the native editor before changing parameter automation".into());
+            return;
+        }
+
         let playlist_track = plugin_parameter_playlist_track(&self.project, instance_id)
             .unwrap_or(self.selected_mixer)
             .min(PLAYLIST_TRACK_COUNT.saturating_sub(1));
@@ -25443,6 +25531,55 @@ fn ensure_plugin_parameter_automation(
         created_lane,
         created_clip: true,
     })
+}
+
+fn native_open_snapshot_barrier(
+    transform_active: bool,
+    gesture_active: bool,
+    deferred_candidate: bool,
+    lifecycle_active: bool,
+) -> bool {
+    transform_active || gesture_active || deferred_candidate || lifecycle_active
+}
+
+fn native_timeline_editor_allowed(
+    synchronized: bool,
+    fingerprint_current: bool,
+    targets: &[CompiledAutomationTarget],
+    instance_id: u64,
+) -> bool {
+    synchronized && fingerprint_current && !targets.iter().any(|target| matches!(target,
+        CompiledAutomationTarget::PluginParameter { instance_id: owner, .. } if *owner == instance_id))
+}
+
+fn plugin_has_parameter_automation(project: &Project, instance_id: u64) -> bool {
+    project.automation_lanes.iter().any(|automation| {
+        matches!(automation.lane.target(),
+        AutomationTarget::PluginParameter { instance, .. } if *instance == instance_id)
+    })
+}
+
+fn native_automation_target_allowed(
+    target: &AutomationTarget,
+    pending_instances: &HashSet<u64>,
+) -> bool {
+    !matches!(target, AutomationTarget::PluginParameter { instance, .. } if pending_instances.contains(instance))
+}
+
+fn apply_native_parameter_bases(
+    instance: &mut PluginInstance,
+    snapshot: &NativeEditorSnapshot,
+    seen_parameter_serial: u64,
+) {
+    if snapshot.parameter_capture_serial != seen_parameter_serial
+        && let Some(parameters) = &snapshot.captured_parameters
+    {
+        for &(id, value) in parameters.iter() {
+            if let Some(base) = instance.parameters.get_mut(&id) {
+                *base = value;
+            }
+        }
+    }
 }
 
 fn native_editor_snapshot_pending(
@@ -33005,5 +33142,132 @@ mod playback_tests {
         ] {
             assert!(native_editor_snapshot_pending(&pending, 3));
         }
+    }
+    #[test]
+    fn native_capture_preserves_automation_bases_and_later_generic_overrides() {
+        let mut project = Project::default();
+        let id = commit_loaded_plugin(
+            &mut project,
+            PluginPickerTarget::MixerSlot { track: 3, slot: 0 },
+            &plugin_descriptor(
+                ScannedPluginFormat::Vst3,
+                "native.bases",
+                "Native Bases",
+                "native.vst3",
+            ),
+        )
+        .unwrap();
+        ensure_plugin_parameter_automation(&mut project, id, 17, 0.625, "Cutoff", 0.0, 0.25, 3)
+            .unwrap();
+        let instance = project
+            .plugin_instances
+            .iter_mut()
+            .find(|instance| instance.id == id)
+            .unwrap();
+        let pending = NativeEditorSnapshot {
+            dirty_revision: 1,
+            ..Default::default()
+        };
+        apply_native_parameter_bases(instance, &pending, 0);
+        assert_eq!(
+            instance.parameters.get(&17),
+            Some(&0.625),
+            "pending editor state cannot erase the automation release base"
+        );
+        let captured = NativeEditorSnapshot {
+            parameter_capture_serial: 1,
+            captured_parameters: Some(Arc::new(vec![(17, 0.75)])),
+            ..pending
+        };
+        apply_native_parameter_bases(instance, &captured, 0);
+        assert_eq!(instance.parameters.get(&17), Some(&0.75));
+        // Acknowledged generic edit after native close is newer than retained native readback.
+        instance.parameters.insert(17, 0.875);
+        let generic_save = NativeEditorSnapshot {
+            capture_serial: captured.capture_serial + 1,
+            ..captured
+        };
+        apply_native_parameter_bases(instance, &generic_save, 1);
+        assert_eq!(instance.parameters.get(&17), Some(&0.875));
+        assert_eq!(
+            plugin_parameter_replay_values(&project, id),
+            vec![(17, 0.875)]
+        );
+    }
+    #[test]
+    fn native_editor_gate_rejects_automated_instances_even_without_active_clips() {
+        let mut project = Project::default();
+        project.automation_lanes.push(ProjectAutomation {
+            id: 999,
+            name: "Unplaced".into(),
+            lane: AutomationLane::new(AutomationTarget::PluginParameter {
+                instance: 77,
+                parameter: 17,
+            }),
+        });
+        assert!(plugin_has_parameter_automation(&project, 77));
+        assert!(!plugin_has_parameter_automation(&project, 78));
+        // A project/session replacement must re-evaluate the actual new lanes, not a stale UI flag.
+        project.automation_lanes.clear();
+        assert!(!plugin_has_parameter_automation(&project, 77));
+    }
+
+    #[test]
+    fn native_pending_instance_blocks_automation_retarget_without_blocking_other_plugins() {
+        let pending = HashSet::from([77]);
+        assert!(!native_automation_target_allowed(
+            &AutomationTarget::PluginParameter {
+                instance: 77,
+                parameter: 1
+            },
+            &pending
+        ));
+        assert!(native_automation_target_allowed(
+            &AutomationTarget::PluginParameter {
+                instance: 78,
+                parameter: 1
+            },
+            &pending
+        ));
+        assert!(native_automation_target_allowed(
+            &AutomationTarget::MasterVolume,
+            &pending
+        ));
+    }
+    #[test]
+    fn native_open_cannot_cross_project_snapshot_or_transition_barriers() {
+        assert!(!native_open_snapshot_barrier(false, false, false, false));
+        for flags in [
+            (true, false, false, false),
+            (false, true, false, false),
+            (false, false, true, false),
+            (false, false, false, true),
+        ] {
+            assert!(native_open_snapshot_barrier(
+                flags.0, flags.1, flags.2, flags.3
+            ));
+        }
+    }
+    #[test]
+    fn native_open_waits_for_resident_automation_to_release_after_lane_removal() {
+        let stale_targets = [CompiledAutomationTarget::PluginParameter {
+            instance_id: 77,
+            parameter_id: 17,
+        }];
+        assert!(!native_timeline_editor_allowed(
+            true,
+            true,
+            &stale_targets,
+            77
+        ));
+        assert!(!native_timeline_editor_allowed(false, true, &[], 77));
+        assert!(!native_timeline_editor_allowed(true, false, &[], 77));
+        assert!(native_timeline_editor_allowed(true, true, &[], 77));
+        assert!(native_timeline_editor_allowed(
+            true,
+            true,
+            &stale_targets,
+            78
+        ));
     }
 }
