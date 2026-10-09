@@ -329,3 +329,24 @@ Windows desktop acceptance. No publication was performed from this worktree.
   not claim a native OS clipboard round trip, native desktop/Windows execution,
   cross-DAW MIDI paste or physical device acceptance. Main and remote CI checkpoint
   are unchanged by this isolated worktree.
+
+## 2026-10-09 — Compact simultaneous editor workspace
+
+- Refined real egui surfaces into a compact two-column default workspace: contextual
+  title bars, reduced duplicated chrome/padding, narrower fresh Browser and compact
+  Rack rows with 24-point targets, real Mute/Solo labels/state and geometry-aligned
+  beat headers. Existing v1 custom layouts keep their rectangles and legacy Inspector
+  visibility; subsequent Inspector choices persist.
+- Fixed reset placement using stale egui area sizes. Added bounded release-only
+  workspace/visible-window edge alignment with Alt bypass, preserving native held
+  movement and canceling stale gestures on sidebar/viewport changes.
+- Continuous title/all-eight-edge pointer, snap-away/Alt/peer resize, minimum Rack
+  scroll/hit-area, repeat-arrange, laptop split-boundary and migration regressions pass.
+- Full isolated gates: 975 no-default; 977 app +14 helper +5 protocol all-feature;
+  fmt, two strict Clippy modes, app/helper build, Windows source cross-check and 167
+  Python tests pass. 26 harness entries pass and 30 genuine Vulkan frames convert
+  losslessly; details and precise boundaries are in [COMPACT_WORKSPACE.md](COMPACT_WORKSPACE.md).
+- Three same-profile baseline/refined CPU pairs show similar timings, not a general
+  speedup. Geometry continuity is unchanged during held native gestures; alignment
+  applies only after release. Native display smoothness and physical devices remain
+  unmeasured. This slice does not substitute for the combined clipboard integration.

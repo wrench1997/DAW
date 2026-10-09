@@ -7,6 +7,7 @@ mod piano_clipboard;
 mod project_media_ui;
 mod sample_browser_ui;
 mod workspace;
+mod workspace_geometry;
 
 use std::{
     collections::{HashMap, HashSet, hash_map::DefaultHasher},
@@ -5070,7 +5071,7 @@ impl CitrusApp {
                 piano_roll_transform: None,
                 tool_mode: ToolMode::Select,
                 show_browser: true,
-                show_inspector: true,
+                show_inspector: workspace::Workspace::load(cc.storage).inspector_visible,
                 show_settings: false,
                 settings_page: SettingsPage::Audio,
                 browser_tab: BrowserTab::Sounds,
@@ -15093,8 +15094,8 @@ impl CitrusApp {
 
     fn browser(&mut self, root: &mut egui::Ui) {
         egui::Panel::left("browser")
-            .default_size(224.0)
-            .size_range(216.0..=360.0)
+            .default_size(196.0)
+            .size_range(184.0..=360.0)
             .resizable(true)
             .frame(
                 egui::Frame::NONE
@@ -18305,6 +18306,10 @@ impl CitrusApp {
         title: &str,
         subtitle: &str,
     ) {
+        if !self.workspace.maximized && matches!(view, StudioView::ChannelRack | StudioView::Mixer)
+        {
+            return;
+        }
         let mut piano_transform_request = None;
         let mut piano_group_request = None;
         let mut playlist_group_request = None;
@@ -18312,10 +18317,11 @@ impl CitrusApp {
         let mut piano_quick_legato_request = false;
         egui::Frame::NONE
             .fill(theme::PANEL_ALT)
-            .inner_margin(egui::Margin::symmetric(9, 4))
+            .inner_margin(egui::Margin::symmetric(4, 1))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
+                    if self.workspace.maximized {
                     ui.label(
                         RichText::new(title)
                             .strong()
@@ -18323,6 +18329,7 @@ impl CitrusApp {
                             .color(theme::TEXT),
                     );
                     ui.label(RichText::new(subtitle).size(9.0).color(theme::MUTED));
+                    }
                     if matches!(view, StudioView::Playlist | StudioView::PianoRoll) {
                     ui.separator();
                     if view == StudioView::PianoRoll {
@@ -18343,7 +18350,7 @@ impl CitrusApp {
                                 ui,
                                 icon,
                                 self.piano_roll_state.tool == mode,
-                                27.0,
+                                24.0,
                             )
                             .on_hover_text(hint)
                             .clicked()
@@ -18361,7 +18368,7 @@ impl CitrusApp {
                             ui,
                             StudioIcon::Group,
                             self.piano_roll_state.grouping_enabled,
-                            27.0,
+                            24.0,
                         )
                         .on_hover_text(if self.piano_roll_state.grouping_enabled {
                             "Note grouping enabled — click to suspend group behavior"
@@ -18421,7 +18428,7 @@ impl CitrusApp {
                             (ToolMode::Slip, StudioIcon::Slip, "Slip edit — S"),
                             (ToolMode::Select, StudioIcon::Pointer, "Select / move — E"),
                         ] {
-                            if icons::icon_button(ui, icon, self.tool_mode == mode, 27.0)
+                            if icons::icon_button(ui, icon, self.tool_mode == mode, 24.0)
                                 .on_hover_text(hint)
                                 .clicked()
                             {
@@ -18439,7 +18446,7 @@ impl CitrusApp {
                                 ui,
                                 StudioIcon::Fade,
                                 self.show_playlist_fades,
-                                27.0,
+                                24.0,
                             )
                             .on_hover_text("Show Audio Clip fade controls — Shift+F")
                             .clicked()
@@ -18459,7 +18466,7 @@ impl CitrusApp {
                                 ui,
                                 StudioIcon::Group,
                                 self.piano_roll_state.grouping_enabled,
-                                27.0,
+                                24.0,
                             )
                             .on_hover_text(if self.piano_roll_state.grouping_enabled {
                                 "Clip grouping enabled — click to suspend group behavior"
@@ -18495,7 +18502,7 @@ impl CitrusApp {
                     // Reserve the entire snap group before laying it out. In a wrapped
                     // row this moves the group intact instead of overlapping previous tools.
                     ui.allocate_ui_with_layout(
-                        Vec2::new((ui.available_size_before_wrap().x - ui.spacing().item_spacing.x).max(196.0), 28.0),
+                        Vec2::new((ui.available_size_before_wrap().x - ui.spacing().item_spacing.x).max(176.0), 24.0),
                         Layout::right_to_left(Align::Center), |ui| {
                         let snap = if view == StudioView::PianoRoll {
                             &mut self.piano_roll_state.local_snap
@@ -18573,14 +18580,14 @@ impl CitrusApp {
         let mut fit = false;
         egui::Frame::NONE
             .fill(theme::BG)
-            .inner_margin(egui::Margin::symmetric(10, 4))
+            .inner_margin(egui::Margin::symmetric(4, 1))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("VIEW").size(8.0).color(theme::MUTED));
                     scroll_changed |= ui
                         .add_sized(
-                            [170.0, 20.0],
+                            [112.0, 24.0],
                             egui::Slider::new(&mut normalized_scroll, 0.0..=1.0).show_value(false),
                         )
                         .on_hover_text("Scroll arrangement")
@@ -18612,7 +18619,7 @@ impl CitrusApp {
                         Vec2::new(
                             (ui.available_size_before_wrap().x - ui.spacing().item_spacing.x)
                                 .max(172.0),
-                            28.0,
+                            24.0,
                         ),
                         Layout::right_to_left(Align::Center),
                         |ui| {
@@ -20009,7 +20016,7 @@ impl CitrusApp {
             self.project.active_pattern().length_steps
         );
         self.workspace_header(ui, StudioView::ChannelRack, "CHANNEL RACK", &pattern_label);
-        let step_width = ((ui.available_width() - 420.0) / 16.0).clamp(31.0, 76.0);
+        let step_width = ((ui.available_width() - 332.0) / 16.0).clamp(24.0, 40.0);
         let active_step = if self.playing {
             self.last_step
         } else {
@@ -20023,22 +20030,13 @@ impl CitrusApp {
 
         egui::Frame::NONE
             .fill(theme::PANEL)
-            .inner_margin(egui::Margin::same(12))
+            .inner_margin(egui::Margin::same(4))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.add_space(252.0);
-                    for group in 0..4 {
-                        ui.add_sized(
-                            [step_width * 4.0 + 27.0, 18.0],
-                            egui::Label::new(
-                                RichText::new(format!("BEAT {}", group + 1))
-                                    .size(8.0)
-                                    .color(theme::MUTED),
-                            ),
-                        );
-                    }
-                });
+                ui.spacing_mut().item_spacing = Vec2::new(2.0, 2.0);
+                let beat_header = ui
+                    .allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover())
+                    .0;
                 let pattern_index = self
                     .project
                     .active_pattern
@@ -20057,11 +20055,11 @@ impl CitrusApp {
                     egui::Frame::NONE
                         .fill(row_fill)
                         .corner_radius(4)
-                        .inner_margin(egui::Margin::symmetric(7, 5))
+                        .inner_margin(egui::Margin::symmetric(4, 2))
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 let (color_rect, _) =
-                                    ui.allocate_exact_size(Vec2::new(4.0, 30.0), Sense::hover());
+                                    ui.allocate_exact_size(Vec2::new(4.0, 24.0), Sense::hover());
                                 ui.painter().rect_filled(
                                     color_rect,
                                     2.0,
@@ -20070,7 +20068,7 @@ impl CitrusApp {
                                 let selected = self.selected_channel == channel_index;
                                 if ui
                                     .add_sized(
-                                        [109.0, 30.0],
+                                        [104.0, 24.0],
                                         egui::Button::new(RichText::new(&channel.name).size(10.0))
                                             .selected(selected),
                                     )
@@ -20084,31 +20082,56 @@ impl CitrusApp {
                                         channel.mixer_track,
                                     ));
                                 }
-                                if ui
-                                    .small_button(if channel.muted { "M" } else { "●" })
-                                    .clicked()
-                                {
+                                let mute = ui
+                                    .add_sized(
+                                        [24.0, 24.0],
+                                        egui::Button::new("M").selected(channel.muted),
+                                    )
+                                    .on_hover_text("Mute this channel");
+                                mute.widget_info(|| {
+                                    egui::WidgetInfo::selected(
+                                        egui::WidgetType::Button,
+                                        ui.is_enabled(),
+                                        channel.muted,
+                                        format!("Mute {}", channel.name),
+                                    )
+                                });
+                                if mute.clicked() {
                                     channel.muted = !channel.muted;
                                 }
-                                if ui.small_button("S").clicked() {
+                                let solo = ui
+                                    .add_sized(
+                                        [24.0, 24.0],
+                                        egui::Button::new("S").selected(channel.solo),
+                                    )
+                                    .on_hover_text("Solo this channel");
+                                solo.widget_info(|| {
+                                    egui::WidgetInfo::selected(
+                                        egui::WidgetType::Button,
+                                        ui.is_enabled(),
+                                        channel.solo,
+                                        format!("Solo {}", channel.name),
+                                    )
+                                });
+                                if solo.clicked() {
                                     channel.solo = !channel.solo;
                                 }
                                 knob(
                                     ui,
                                     &mut channel.pan,
                                     -1.0..=1.0,
-                                    27.0,
+                                    24.0,
                                     theme::color(channel.color),
                                 )
                                 .on_hover_text("Pan");
-                                knob(ui, &mut channel.volume, 0.0..=1.0, 27.0, theme::ORANGE)
+                                knob(ui, &mut channel.volume, 0.0..=1.0, 24.0, theme::ORANGE)
                                     .on_hover_text("Volume");
                                 let mut mixer_runtime_slot = mixer_track_ids_by_runtime_slot
                                     .iter()
                                     .position(|track_id| *track_id == Some(channel.mixer_track))
                                     .unwrap_or(0);
                                 let destination_response = ui.add_sized(
-                                    [43.0, 27.0],
+                                    [43.0, 24.0],
                                     egui::DragValue::new(&mut mixer_runtime_slot)
                                         .range(
                                             0..=mixer_track_ids_by_runtime_slot
@@ -20127,12 +20150,25 @@ impl CitrusApp {
                                 ui.add_space(5.0);
                                 for (step, enabled) in steps.iter_mut().enumerate() {
                                     if step > 0 && step % 4 == 0 {
-                                        ui.add_space(6.0);
+                                        ui.add_space(4.0);
                                     }
                                     let on = *enabled;
-                                    let size = Vec2::new(step_width, 27.0);
+                                    let size = Vec2::new(step_width, 24.0);
                                     let (rect, response) =
                                         ui.allocate_exact_size(size, Sense::click());
+                                    if channel_index == 0 && step % 4 == 0 {
+                                        let center = rect.left()
+                                            + (step_width * 4.0
+                                                + ui.spacing().item_spacing.x * 3.0)
+                                                * 0.5;
+                                        ui.painter().text(
+                                            Pos2::new(center, beat_header.center().y),
+                                            Align2::CENTER_CENTER,
+                                            format!("BEAT {}", step / 4 + 1),
+                                            FontId::proportional(8.0),
+                                            theme::MUTED,
+                                        );
+                                    }
                                     response.widget_info(|| {
                                         egui::WidgetInfo::labeled(
                                             egui::WidgetType::Button,
@@ -20183,11 +20219,11 @@ impl CitrusApp {
                                 }
                             });
                         });
-                    ui.add_space(3.0);
+                    ui.add_space(0.0);
                 }
-                ui.add_space(10.0);
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    if ui.button("＋ ADD CHANNEL").clicked() {
+                    if ui.button("+ ADD CHANNEL").clicked() {
                         self.show_plugins = true;
                     }
                     ui.separator();

@@ -30,6 +30,7 @@ impl UiHarness {
         // These pre-existing app-flow checks exercise the supported maximized editor layout.
         // Dedicated multiwindow tests below exercise the default floating workspace.
         if maximized_baseline {
+            app.show_inspector = true;
             app.workspace.maximized = true;
             app.focus_editor(StudioView::Playlist);
         }
@@ -53,6 +54,14 @@ impl UiHarness {
     }
 
     fn run(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+        self.run_with_modifiers(events, egui::Modifiers::NONE)
+    }
+
+    fn run_with_modifiers(
+        &mut self,
+        events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+    ) -> egui::FullOutput {
         // The constructor performs no device discovery. Prevent the periodic MIDI refresh
         // as well; tests never click device refresh/apply or native file-dialog controls.
         self.app.midi_input.last_refresh = Instant::now();
@@ -60,6 +69,7 @@ impl UiHarness {
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
             time: Some(self.time),
+            modifiers,
             events,
             ..Default::default()
         };
@@ -1201,7 +1211,7 @@ fn floating_workspace_shared_channel_edit_and_modal_text_isolation() {
         output
             .shapes
             .iter()
-            .any(|shape| contains_text(&shape.shape, &format!("{} —", channel_name))),
+            .any(|shape| contains_text(&shape.shape, &format!("{} ·", channel_name))),
         "the simultaneously painted Piano editor must show the shared Rack channel selection"
     );
     let step_before = ui.app.project.active_pattern().channel_steps[1][0];
@@ -1297,6 +1307,7 @@ fn floating_workspace_all_hidden_keeps_project_and_reopens_keyboard_target() {
 #[test]
 fn floating_workspace_actual_stacking_survives_restore_and_blocked_clicks() {
     let mut ui = UiHarness::floating();
+    ui.click("Cascade windows");
     ui.key(egui::Key::F7, egui::Modifiers::NONE);
     ui.click("Maximize editor");
     ui.key(egui::Key::F5, egui::Modifiers::NONE);
@@ -1325,6 +1336,7 @@ fn floating_workspace_actual_stacking_survives_restore_and_blocked_clicks() {
         workspace::window_id(StudioView::Playlist)
     );
     ui.click("Arrange windows");
+    ui.click("Cascade windows");
     for _ in 0..8 {
         ui.run(Vec::new());
     }
@@ -2138,4 +2150,376 @@ fn piano_clipboard_partial_group_cut_keeps_preceding_edit_separate_in_history() 
         pasted.group_id.is_none(),
         "a one-member copied group must not join the source group"
     );
+}
+
+impl UiHarness {
+    fn arrange_test_windows(&mut self, windows: &[(StudioView, Rect)], focus: StudioView) {
+        for view in workspace::EDITORS {
+            let window = &mut self.app.workspace.windows[workspace::index(view)];
+            window.visible = false;
+        }
+        for (view, rect) in windows {
+            let window = &mut self.app.workspace.windows[workspace::index(*view)];
+            window.visible = true;
+            window.rect = Some(*rect);
+        }
+        self.app.workspace.reset_for_test();
+        self.app.focus_editor(focus);
+        for _ in 0..8 {
+            self.run(Vec::new());
+        }
+    }
+}
+
+#[test]
+fn compact_workspace_native_motion_is_continuous_and_snaps_only_on_release() {
+    let mut ui = UiHarness::floating();
+    let project = project_fingerprint(&ui.app.project);
+    let view = StudioView::Playlist;
+    let input = Rect::from_min_size(Pos2::new(120.0, 80.0), Vec2::new(600.0, 360.0));
+    ui.arrange_test_windows(&[(view, input)], view);
+    let before = ui.editor_rect(view);
+    let origin = before.left_top() + Vec2::new(110.0, 13.0);
+    let pixel = 1.0 / ui.ctx.pixels_per_point();
+    let warm = 12.0 * pixel;
+    let increment = 4.0 * pixel;
+    ui.run(mixer_pointer_button(origin, true));
+    // Cross egui's six-point click/drag slop once, then measure every held update.
+    ui.run(vec![egui::Event::PointerMoved(
+        origin - Vec2::new(warm, 0.0),
+    )]);
+    for step in 1..=27 {
+        ui.run(vec![egui::Event::PointerMoved(
+            origin - Vec2::new(warm + step as f32 * increment, 0.0),
+        )]);
+        let actual = ui.editor_rect(view);
+        let expected = before.translate(Vec2::new(-warm - (step as f32) * increment, 0.0));
+        assert!(
+            (actual.min - expected.min).length() < 1.5,
+            "held native title movement: step {step}, {actual:?} vs {expected:?}"
+        );
+        assert!((actual.size() - before.size()).length() < 1.0);
+    }
+    let held = ui.editor_rect(view);
+    let bounds = ui.app.workspace.bounds.unwrap();
+    assert!(
+        (2.0..8.0).contains(&(held.left() - bounds.left())),
+        "must remain unsnapped while held: {held:?}"
+    );
+    ui.run(mixer_pointer_button(
+        origin - Vec2::new(warm + 27.0 * increment, 0.0),
+        false,
+    ));
+    ui.settle();
+    let snapped = ui.editor_rect(view);
+    assert!((snapped.left() - bounds.left()).abs() < 1.0);
+    assert!((snapped.size() - before.size()).length() < 1.0);
+    let away = snapped.left_top() + Vec2::new(110.0, 13.0);
+    ui.run(mixer_pointer_button(away, true));
+    ui.run(vec![egui::Event::PointerMoved(away + Vec2::new(32.0, 0.0))]);
+    ui.run(mixer_pointer_button(away + Vec2::new(32.0, 0.0), false));
+    ui.settle();
+    assert!(
+        (ui.editor_rect(view).left() - bounds.left() - 32.0).abs() < 1.5,
+        "a snapped window must release immediately on the next drag"
+    );
+
+    // The modifier lives in RawInput as well as the pointer event, as in real egui input.
+    let before = ui.editor_rect(view);
+    let origin = before.left_top() + Vec2::new(110.0, 13.0);
+    let delta = Vec2::new(bounds.left() + 6.0 - before.left(), 0.0);
+    ui.run(mixer_pointer_button(origin, true));
+    ui.run(vec![egui::Event::PointerMoved(origin + delta)]);
+    let mut alt = egui::Modifiers::NONE;
+    alt.alt = true;
+    ui.run_with_modifiers(mixer_pointer_button(origin + delta, false), alt);
+    ui.settle();
+    assert!(
+        (ui.editor_rect(view).left() - bounds.left() - 6.0).abs() < 1.5,
+        "Alt release must bypass magnetic alignment"
+    );
+    assert_eq!(project_fingerprint(&ui.app.project), project);
+    assert!(ui.app.undo_stack.is_empty());
+}
+
+#[test]
+fn compact_workspace_all_resize_edges_remain_live_and_preserve_opposite_edges() {
+    for (left, right, top, bottom) in [
+        (true, false, false, false),
+        (false, true, false, false),
+        (false, false, true, false),
+        (false, false, false, true),
+        (true, false, true, false),
+        (true, false, false, true),
+        (false, true, true, false),
+        (false, true, false, true),
+    ] {
+        let mut ui = UiHarness::floating();
+        let view = StudioView::Playlist;
+        let project = project_fingerprint(&ui.app.project);
+        ui.arrange_test_windows(
+            &[(
+                view,
+                Rect::from_min_size(Pos2::new(180.0, 100.0), Vec2::new(720.0, 440.0)),
+            )],
+            view,
+        );
+        let before = ui.editor_rect(view);
+        let origin = Pos2::new(
+            if left {
+                before.left() + 1.0
+            } else if right {
+                before.right() - 1.0
+            } else {
+                before.center().x
+            },
+            if top {
+                before.top() + 1.0
+            } else if bottom {
+                before.bottom() - 1.0
+            } else {
+                before.center().y
+            },
+        );
+        let delta = Vec2::new(
+            if left {
+                40.0
+            } else if right {
+                -40.0
+            } else {
+                0.0
+            },
+            if top {
+                30.0
+            } else if bottom {
+                -30.0
+            } else {
+                0.0
+            },
+        );
+        ui.run(mixer_pointer_button(origin, true));
+        let mut changes = 0;
+        let mut previous = before;
+        for step in 1..=20 {
+            ui.run(vec![egui::Event::PointerMoved(
+                origin + delta * (step as f32 / 20.0),
+            )]);
+            let actual = ui.editor_rect(view);
+            changes += usize::from((actual.size() - previous.size()).length() > 0.5);
+            assert!(
+                (actual.size() - previous.size()).length() < 8.0,
+                "unexpected held resize jump: {previous:?} -> {actual:?}"
+            );
+            if left {
+                // Native egui queues the new width for the next input pass while
+                // updating the left/top position now. Allow exactly that one-step lag.
+                assert!((actual.right() - before.right()).abs() < delta.x.abs() / 20.0 + 1.0);
+            }
+            if right {
+                assert!((actual.left() - before.left()).abs() < 1.5);
+            }
+            if top {
+                assert!((actual.bottom() - before.bottom()).abs() < delta.y.abs() / 20.0 + 1.0);
+            }
+            if bottom {
+                assert!((actual.top() - before.top()).abs() < 1.5);
+            }
+            previous = actual;
+        }
+        assert!(
+            changes >= 15,
+            "native resize must update continuously while held: {changes}"
+        );
+        ui.run(mixer_pointer_button(origin + delta, false));
+        ui.settle();
+        let actual = ui.editor_rect(view);
+        assert!((actual.width() - (before.width() - delta.x.abs())).abs() < 2.0);
+        assert!((actual.height() - (before.height() - delta.y.abs())).abs() < 2.0);
+        assert_eq!(project_fingerprint(&ui.app.project), project);
+        assert!(ui.app.undo_stack.is_empty());
+    }
+}
+
+#[test]
+fn compact_workspace_peer_resize_snap_and_interruption_are_bounded() {
+    let mut ui = UiHarness::floating();
+    let view = StudioView::Playlist;
+    ui.arrange_test_windows(
+        &[
+            (
+                view,
+                Rect::from_min_size(Pos2::new(70.0, 80.0), Vec2::new(600.0, 360.0)),
+            ),
+            (
+                StudioView::Mixer,
+                Rect::from_min_size(Pos2::new(800.0, 80.0), Vec2::new(600.0, 420.0)),
+            ),
+        ],
+        view,
+    );
+    let before = ui.editor_rect(view);
+    let peer = ui.editor_rect(StudioView::Mixer);
+    let origin = Pos2::new(before.right() - 1.0, before.center().y);
+    let delta = Vec2::new(peer.left() - 6.0 - before.right(), 0.0);
+    ui.drag_pointer(origin, delta);
+    let snapped = ui.editor_rect(view);
+    assert!(
+        (snapped.right() - peer.left()).abs() < 1.5,
+        "resize edge must align to visible peer: {snapped:?} / {peer:?}"
+    );
+    assert!((snapped.left() - before.left()).abs() < 1.0);
+    ui.drag_pointer(
+        Pos2::new(snapped.right() - 1.0, snapped.center().y),
+        Vec2::new(-30.0, 0.0),
+    );
+    assert!((ui.editor_rect(view).right() - (peer.left() - 30.0)).abs() < 2.0);
+
+    let rect = ui.editor_rect(view);
+    let title = rect.left_top() + Vec2::new(100.0, 13.0);
+    ui.run(mixer_pointer_button(title, true));
+    ui.run(vec![egui::Event::PointerMoved(
+        title + Vec2::new(20.0, 20.0),
+    )]);
+    ui.app.show_inspector = true;
+    ui.run(vec![egui::Event::PointerMoved(
+        title + Vec2::new(40.0, 40.0),
+    )]);
+    let canceled = ui.editor_rect(view);
+    ui.run(vec![egui::Event::PointerMoved(
+        title + Vec2::new(80.0, 80.0),
+    )]);
+    assert!(
+        (ui.editor_rect(view).min - canceled.min).length() < 1.0,
+        "bounds change must cancel stale held drag"
+    );
+    ui.run(mixer_pointer_button(title + Vec2::new(80.0, 80.0), false));
+    ui.settle();
+    assert!(
+        (ui.editor_rect(view).min - canceled.min).length() < 1.0,
+        "interrupted release must not apply a late snap"
+    );
+    for view in [view, StudioView::Mixer] {
+        assert!(
+            ui.app
+                .workspace
+                .bounds
+                .unwrap()
+                .expand(1.0)
+                .contains_rect(ui.editor_rect(view))
+        );
+    }
+}
+
+#[test]
+fn compact_workspace_default_and_repeated_arrange_use_the_available_desktop() {
+    let mut ui = UiHarness::floating();
+    let project = project_fingerprint(&ui.app.project);
+    let original: Vec<_> = workspace::EDITORS
+        .into_iter()
+        .map(|view| ui.editor_rect(view))
+        .collect();
+    for _ in 0..10 {
+        ui.click("Cascade windows");
+        ui.click("Arrange windows");
+        for (i, view) in workspace::EDITORS.into_iter().enumerate() {
+            let actual = ui.editor_rect(view);
+            assert!((actual.min - original[i].min).length() < 1.0);
+            assert!((actual.size() - original[i].size()).length() < 1.0);
+            assert!(
+                ui.app
+                    .workspace
+                    .bounds
+                    .unwrap()
+                    .expand(1.0)
+                    .contains_rect(actual)
+            );
+            for other in workspace::EDITORS.into_iter().skip(i + 1) {
+                assert!(!actual.intersect(ui.editor_rect(other)).is_positive());
+            }
+        }
+    }
+    assert_eq!(project_fingerprint(&ui.app.project), project);
+    assert!(ui.app.undo_stack.is_empty());
+    ui.capture("compact-workspace-arranged");
+    ui.size = Vec2::new(1080.0, 680.0);
+    ui.settle();
+    ui.click("Arrange windows");
+    for view in workspace::EDITORS {
+        assert!(
+            ui.app
+                .workspace
+                .bounds
+                .unwrap()
+                .expand(1.0)
+                .contains_rect(ui.editor_rect(view))
+        );
+    }
+    ui.capture("compact-workspace-minimum");
+}
+
+include!("workspace_motion_benchmark.rs");
+
+#[test]
+fn compact_rack_retains_accessible_controls_and_scrolls_at_minimum_width() {
+    let mut ui = UiHarness::floating();
+    ui.size = Vec2::new(1080.0, 680.0);
+    ui.settle();
+    ui.arrange_test_windows(
+        &[(
+            StudioView::ChannelRack,
+            Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(400.0, 260.0)),
+        )],
+        StudioView::ChannelRack,
+    );
+    let rack = ui.editor_rect(StudioView::ChannelRack);
+    let channel = ui.app.project.channels[0].name.clone();
+    for label in [
+        &channel,
+        &format!("Mute {channel}"),
+        &format!("Solo {channel}"),
+        &format!("{channel} step 1"),
+    ] {
+        let node = ui.button(label);
+        let bounds = node.bounds().unwrap();
+        assert!(
+            bounds.y1 - bounds.y0 >= 23.5,
+            "compact hit height must remain 24 points: {label} {bounds:?}"
+        );
+        assert!(
+            bounds.x1 - bounds.x0 >= 23.5,
+            "compact hit width must remain 24 points: {label} {bounds:?}"
+        );
+    }
+    let muted = ui.app.project.channels[0].muted;
+    ui.click(&format!("Mute {channel}"));
+    assert_eq!(ui.app.project.channels[0].muted, !muted);
+    ui.click(&format!("Mute {channel}"));
+    let step_before = ui.app.project.active_pattern().channel_steps[0][15];
+    ui.run(vec![
+        egui::Event::PointerMoved(rack.center()),
+        egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            phase: egui::TouchPhase::Move,
+            delta: Vec2::new(-600.0, 0.0),
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]);
+    for _ in 0..10 {
+        ui.run(Vec::new());
+    }
+    let bounds = ui.button(&format!("{channel} step 16")).bounds().unwrap();
+    let center = Pos2::new(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    );
+    assert!(
+        rack.contains(center),
+        "last step must be reachable by real horizontal scroll: {center:?} / {rack:?}"
+    );
+    ui.click(&format!("{channel} step 16"));
+    assert_eq!(
+        ui.app.project.active_pattern().channel_steps[0][15],
+        !step_before
+    );
+    ui.capture("compact-rack-minimum");
 }

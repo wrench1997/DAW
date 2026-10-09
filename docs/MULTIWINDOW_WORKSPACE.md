@@ -175,3 +175,11 @@ conversion. Independent source review's quadratic-selection finding was fixed wi
 a two-pass clipboard selection path, with a full-limit regression; channel checks
 and fresh identity allocation also avoid repeated per-note scans. These results
 remain separate from native OS clipboard and Windows runtime acceptance.
+
+### Compact workspace refinement
+
+[COMPACT_WORKSPACE.md](COMPACT_WORKSPACE.md) records the next native layout pass:
+compact chrome/Rack controls, useful two-column defaults, backward-compatible
+Inspector visibility, corrected reset geometry, and release-only edge alignment.
+It includes continuous-pointer regressions and a same-scene baseline/refined CPU
+comparison without inferring native-desktop smoothness from offscreen or footer FPS.
