@@ -454,6 +454,59 @@ class PackageTests(unittest.TestCase):
         with self.assertRaisesRegex(pkg.PackageError, "pinned inventory/hash mismatch"):
             pkg.validate_timing_combined_qa(payload)
 
+    def native_edit_qa_payload(self):
+        source = Path(__file__).resolve().parents[1]
+        return {name: (source / name).read_bytes() for name in pkg.NATIVE_EDIT_QA_FILES}
+
+    def test_native_edit_receipts_are_distinct_complete_and_packaged(self):
+        payload = self.native_edit_qa_payload()
+        pkg.validate_native_edit_qa(payload)
+        self.assertFalse(pkg.NATIVE_EDIT_QA_FILES & (pkg.TIMING_COMBINED_QA_FILES | pkg.TIMING_DEBUG_QA_FILES))
+        for name, data in payload.items():
+            destination = self.repo / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        info = pkg.verify_package(self.create())
+        self.assertTrue(pkg.NATIVE_EDIT_QA_FILES <= set(info["source_documents"]))
+
+    def test_native_edit_receipts_reject_missing_changed_or_extra_payload(self):
+        original = self.native_edit_qa_payload()
+        name = pkg.NATIVE_EDIT_QA_ROOT + "RESULT.md"
+        payload = dict(original); del payload[name]
+        with self.assertRaisesRegex(pkg.PackageError, "Incomplete native edit"):
+            pkg.validate_native_edit_qa(payload)
+        payload = dict(original); payload[name] += b"changed outcome"
+        with self.assertRaisesRegex(pkg.PackageError, "inventory/hash mismatch"):
+            pkg.validate_native_edit_qa(payload)
+        for extra in ("undeclared.txt", "../escape.txt", "runs\\bad.txt"):
+            with self.subTest(extra=extra):
+                payload = dict(original); payload[pkg.NATIVE_EDIT_QA_ROOT + extra] = b"extra"
+                with self.assertRaisesRegex(pkg.PackageError, "Unexpected native edit"):
+                    pkg.validate_native_edit_qa(payload)
+
+    def test_native_edit_receipts_reject_rewritten_inventory(self):
+        payload = self.native_edit_qa_payload()
+        name = pkg.NATIVE_EDIT_QA_ROOT + "SHA256SUMS.json"
+        report = pkg.NATIVE_EDIT_QA_ROOT + "RESULT.md"
+        old = pkg.digest(payload[report]).encode()
+        payload[report] += b"changed outcome"
+        payload[name] = payload[name].replace(old, pkg.digest(payload[report]).encode())
+        with self.assertRaisesRegex(pkg.PackageError, "pinned inventory/hash mismatch"):
+            pkg.validate_native_edit_qa(payload)
+
+    def test_native_edit_receipts_pin_scope_and_lf_policy(self):
+        source = Path(__file__).resolve().parents[1]
+        self.assertIn("/qa/native_edit_regression/** text eol=lf", (source / ".gitattributes").read_text())
+        payload = self.native_edit_qa_payload()
+        summary = json.loads(payload[pkg.NATIVE_EDIT_QA_ROOT + "SUMMARY.json"])
+        self.assertEqual(summary["source_commit"], "87ceb06ce3dc23d817b1623093c8a51fddc2bea3")
+        self.assertEqual(summary["manifested_production_files"], 124)
+        self.assertEqual(summary["binaries"]["vst3-host-helper"], "dca08353e3f23308d535a791c9fa2c89635ee683db29625fa8d2a3d0a988cbe8")
+        self.assertEqual([run["exit_status"] for run in summary["runs"].values()], [0, 0])
+        report = payload[pkg.NATIVE_EDIT_QA_ROOT + "RESULT.md"].decode()
+        self.assertIn("11/14 raw-core interval overruns", report)
+        self.assertIn("historical4fdfbc2/244f622", report)
+
     def test_prerelease_package_version_is_preserved(self):
         for name in ("Cargo.toml", "Cargo.lock"):
             path = self.repo / name

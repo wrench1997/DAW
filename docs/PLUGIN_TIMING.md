@@ -201,3 +201,17 @@ changing cases recorded18/24. Preallocated capture separates capture cost and
 outer scheduling, but the wrapper and builds are still unoptimized. Release
 qualification is a separate ongoing experiment. No smaller-profile reliability,
 dropout-free operation, physical device or native-GUI continuity is established.
+
+
+### Later helper changes do not renew these measurements
+
+The native-edit transport follow-on48d3f97/87ceb06 changes vendored helper behavior
+without changing App/timing source or wire messages. All earlier debug, combined
+and optimized matrices retain their exact original source/helper identities. The
+optimized12/16 quiet and12/16 loaded result was added as a separately attributed
+post-freeze appendix to the244f622 source delivery; it is not a current-helper
+performance result. The new helper requires only a separately recorded bounded
+default2048/fresh-state regression for this correctness checkpoint, not a relabeled
+performance pass. The2048 default and Experimental128/256/512 labels are unchanged.
+
+The separately source-bound [new-helper correctness receipt](../qa/native_edit_regression/RESULT.md) retains all four default2048 delivery passes, fresh-state immediate-note proof, and the11/14 changing-callback debug interval overruns for87ceb06/helperdca08353. The historical optimized4fdfbc2/244f622 results are not reattributed to this helper.

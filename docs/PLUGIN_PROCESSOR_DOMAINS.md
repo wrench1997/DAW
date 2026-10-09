@@ -235,3 +235,26 @@ stall fixture demonstrates that an independent consumer can finish already-admit
 work before those guards are released. It does not run a real plugin or demonstrate independent
 DSP execution in the still-single-threaded helper. COM integration fixtures intentionally allocate
 and lock and cannot be used as whole-process real-time evidence.
+
+
+### New-helper integration verification
+
+Runtime87ceb06 matches reviewed48d3f97 for all41 bound source files; App/timing,
+helper dispatch/wire and Cargo remain unchanged from244f622. Fresh integration
+passes1,170 app +22 helper +5+2 protocol tests,1,166 core,215 Python,304 available
+vendor cases (one missing upstream fixture explicitly filtered),26 doctests, fmt,
+both strict root Clippy modes, all-bin build/helper smoke and both MSVC profiles.
+Pristine registry archive plus the exact cumulative patch reproduces44 files.
+
+The copied helper hash is
+`dca08353e3f23308d535a791c9fa2c89635ee683db29625fa8d2a3d0a988cbe8`,
+matching independent native stopped-edit/poll/save/fresh-state checks. A separate
+bounded production-graph regression on this helper passes all four default2048
+ordinary/routed × fixed/changing cases plus fresh-state immediate-note behavior.
+Expected PDC4896/7328 and routed8on/8off remain exact, with no new worker fault or
+capture overflow. Both test invocations exit0. Changing debug callbacks still have
+11/14 raw-core interval overruns; this is correctness acceptance, not a new
+performance matrix, device or realtime qualification. Older optimized results keep
+their original helper/source identity. New exact Windows CI remains required.
+
+The separately source-bound [new-helper correctness receipt](../qa/native_edit_regression/RESULT.md) retains all four default2048 delivery passes, fresh-state immediate-note proof, and the11/14 changing-callback debug interval overruns for87ceb06/helperdca08353. The historical optimized4fdfbc2/244f622 results are not reattributed to this helper.

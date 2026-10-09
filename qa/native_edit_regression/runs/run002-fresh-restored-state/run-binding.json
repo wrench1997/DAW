@@ -1,0 +1,12 @@
+{
+  "started_utc": "2026-10-09T13:44:27.607249+00:00",
+  "test_sha256": "876dfe3105289120693a807374fca2361b338783b62c42d273d76bb92130743a",
+  "helper_sha256": "dca08353e3f23308d535a791c9fa2c89635ee683db29625fa8d2a3d0a988cbe8",
+  "source_manifest_sha256": "70d3a44d147fbed2223a7d218adf594c7b09e187df5fc5a117015b7cf01d883d",
+  "source_commit": "87ceb06ce3dc23d817b1623093c8a51fddc2bea3",
+  "build_profile": "debug",
+  "budget_filter": null,
+  "profile_filter": null,
+  "cpu_load_threads": "0",
+  "declared_environment": "Changed native-edit helper fresh Surge initial-state immediate-note correctness; no reused-instance restore or hidden settling"
+}

@@ -1,0 +1,6 @@
+{
+  "commit": "87ceb06ce3dc23d817b1623093c8a51fddc2bea3",
+  "production_files_verified": 124,
+  "harness_identical_to_prior_preallocated_qa": "c38f30c4b50fe7eb1c5d69acec6c59dd941ba394797b21e3960acb6b5d37b072",
+  "scope": "new correctness regression only; previous optimized results remain tied to their old source/helper"
+}

@@ -8,7 +8,7 @@ Citrus Studio is a clean-room, native music-production application written in Ru
 
 Development is continuing toward a complete song workflow: create and edit an arrangement, save it, recover missing media, export the supported mix, and reopen it without losing work. Passing CI is a development baseline, not completion of that workflow or commercial release acceptance. Current implementation status is in [DEV_STATE.md](DEV_STATE.md); prioritized acceptance and dated evidence are in the [development roadmap](docs/DEVELOPMENT_ROADMAP.md) and [work log](docs/WORK_LOG.md).
 
-The development branch is `ci/windows-reliability-20261009`; Linux remains primary. The [compact workspace](docs/COMPACT_WORKSPACE.md), [Piano melody shortcuts](docs/PIANO_KEYBOARD_EDITING.md), [mouse composition](docs/PIANO_MOUSE_WORKFLOW.md), typed clipboard and [note expression](docs/PIANO_NOTE_EXPRESSION.md) now include [independent edit/repeat ranges, precise local snap and compact minimum-window controls](docs/PIANO_RANGES_AND_SNAP.md). Range metadata is session UI state, not an audio playback loop; paste uses the containing left-visible four-beat bar. Citrus boundary/precision policies and remaining FL/OS/device gaps are explicit. At **`5befb51`**, [Windows preview](https://github.com/wrench1997/DAW/actions/runs/37926251178) passed 195 Python cases (191 passed, four Unix-only skips), 1,132 app +14 helper +5 editor protocol +2 transport protocol Rust tests, optimized static-CRT/provenance/PE/ZIP/hash checks and extracted-helper smoke; upload was disabled. [Quality](https://github.com/wrench1997/DAW/actions/runs/37926251171) passed source and trusted native state/interaction/lifecycle checks, while before/after paint failed and repaint comparison was skipped. The follow-on Surge guard needs its own combined gates and Windows run; exact local results are in DEV_STATE/WORK_LOG.
+The development branch is `ci/windows-reliability-20261009`; Linux remains primary. The [compact workspace](docs/COMPACT_WORKSPACE.md), [Piano melody shortcuts](docs/PIANO_KEYBOARD_EDITING.md), [mouse composition](docs/PIANO_MOUSE_WORKFLOW.md), typed clipboard and [note expression](docs/PIANO_NOTE_EXPRESSION.md) now include [independent edit/repeat ranges, precise local snap and compact minimum-window controls](docs/PIANO_RANGES_AND_SNAP.md). Range metadata is session UI state, not an audio playback loop; paste uses the containing left-visible four-beat bar. Citrus boundary/precision policies and remaining FL/OS/device gaps are explicit. At **`244f622`**, [Windows preview](https://github.com/wrench1997/DAW/actions/runs/37933923565) passed 207 Python cases (203 passed, four Unix-only skips), 1,165 app +15 helper +5 editor protocol +2 transport protocol Rust tests, optimized static-CRT/provenance/PE/ZIP/hash checks and extracted-helper smoke; upload was disabled. [Quality](https://github.com/wrench1997/DAW/actions/runs/37933923608) passed source and trusted native state/interaction/lifecycle checks, while before/after paint failed and repaint comparison was skipped. The follow-on native-edit transport needs its own combined gates and Windows run; exact local results are in DEV_STATE/WORK_LOG.
 
 [VST3 scanning](docs/VST3_SCANNING.md) now reads real default-class metadata and
 MIDI capabilities through the isolated production helper rather than guessing from
@@ -34,6 +34,14 @@ passed both, while smaller profiles retained deadline failures. This is function
 evidence, not optimized/hardware qualification or a claim that dropouts are solved.
 Stopped configuration changes capture live state and prepare replacements before
 retiring the old endpoint. Device XRUN=0 alone is not realtime qualification.
+
+[Bounded native-edit delivery](docs/PLUGIN_PROCESSOR_DOMAINS.md#bounded-native-edit-delivery-and-capture-fence)
+now separates processor-bound edits from display polling, with explicit successful
+Process acknowledgment and guarded state capture. Stopped native editing followed
+by repeated polling and zero-sample save retains the edit. The helper still runs
+GUI and DSP on one thread; the transport-only 350 ms fixture does not establish
+native resize or whole-process realtime performance. Prior optimized timing
+measurements remain attributed to their older helper, not this new one.
 
 ## Architecture
 

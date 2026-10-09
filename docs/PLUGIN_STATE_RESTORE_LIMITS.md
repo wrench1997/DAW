@@ -1,5 +1,19 @@
 # Observed VST3 state-restore limits
 
+## Native-edit polling follow-on
+
+Reviewed48d3f97 (integrated87ceb06) separates display polling from DSP-bound edits.
+A stopped native Surge edit survives20 polling rounds, zero-sample SaveState and
+fresh numeric/component/first-note restoration at17/47/128/256 frames. This is a
+newly tested save path, not successful LoadState into an already-used Surge.
+The exact-class/version guard below still rejects that unsafe path before mutation
+or editor closure. Same-window rejection, Stochas and trusted native fixture pass
+on helper `dca08353e3f23308d535a791c9fa2c89635ee683db29625fa8d2a3d0a988cbe8`.
+See [native evidence](LINUX_VST3_EDITOR_VALIDATION.md#bounded-native-edit-transport-follow-on)
+and [transport/capture fences](PLUGIN_PROCESSOR_DOMAINS.md#bounded-native-edit-delivery-and-capture-fence).
+The helper remains single-threaded; fresh combined source gates pass and the new
+bounded real-plugin regression passes separately from the historical optimized measurement.
+
 ## Current guard and remaining limits
 
 Reviewed guard `c056dc5ce72a78bf1c4b32b5f831fe39303b6866`, integrated as

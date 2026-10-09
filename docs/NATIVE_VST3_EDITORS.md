@@ -9,6 +9,12 @@ used/editor-opened exact1.3.4 loads before helper closure/mutation. It does not 
 the legacy full-chain Admin caller: it closes the editor before backend LoadState
 and faults its slot when that call rejects.
 
+The later [bounded native-edit channel](PLUGIN_PROCESSOR_DOMAINS.md#bounded-native-edit-delivery-and-capture-fence)
+separates display/gesture polling from pending processor edits and requires explicit
+successful Process acknowledgment before capture. Actual stopped Surge edit/poll/
+save/fresh-state checks pass on the new helper; this does not create a DSP thread
+or remove the historical native resize stall.
+
 ## Implementation stages and current verification boundary
 
 This work adds a real helper-owned native VST3 editor lifecycle in stages. It is not a claim of

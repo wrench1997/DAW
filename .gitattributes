@@ -17,3 +17,7 @@
 /qa/plugin_timing_debug/**/*.log whitespace=-blank-at-eof
 
 /qa/plugin_timing_combined/** text eol=lf
+
+# Changed-helper correctness receipts remain separately source-bound.
+/qa/native_edit_regression/** text eol=lf
+/qa/native_edit_regression/**/*.log whitespace=-blank-at-eof

@@ -390,6 +390,62 @@ TIMING_COMBINED_QA_FILES = frozenset((
     "qa/plugin_timing_combined/summary.json",
 ))
 TIMING_COMBINED_INVENTORY_SHA256 = "942e22d6d6e9d75c163d88023823011adec12ed529d401de0c84820dd34bf96d"
+NATIVE_EDIT_QA_ROOT = "qa/native_edit_regression/"
+NATIVE_EDIT_QA_FILES = frozenset((
+    "qa/native_edit_regression/INVENTORY.json",
+    "qa/native_edit_regression/README.md",
+    "qa/native_edit_regression/REPRODUCE.md",
+    "qa/native_edit_regression/RESULT.md",
+    "qa/native_edit_regression/SHA256SUMS.json",
+    "qa/native_edit_regression/SUMMARY.json",
+    "qa/native_edit_regression/build_and_copy.py",
+    "qa/native_edit_regression/native_timing_tests.rs",
+    "qa/native_edit_regression/prepare_snapshot.py",
+    "qa/native_edit_regression/receipts/build-binding.json",
+    "qa/native_edit_regression/receipts/build-environment.json",
+    "qa/native_edit_regression/receipts/debug-resource-watch.jsonl",
+    "qa/native_edit_regression/receipts/executable-attribution.json",
+    "qa/native_edit_regression/receipts/git-object-verification.json",
+    "qa/native_edit_regression/receipts/helper-build.jsonl",
+    "qa/native_edit_regression/receipts/helper-build.stderr",
+    "qa/native_edit_regression/receipts/native-build.jsonl",
+    "qa/native_edit_regression/receipts/native-build.stderr",
+    "qa/native_edit_regression/receipts/plugin-provenance.json",
+    "qa/native_edit_regression/receipts/source-snapshot.json",
+    "qa/native_edit_regression/run_profiles.sh",
+    "qa/native_edit_regression/runs/run001-default2048/b2048_routedfalse_changingfalse-cold-trace.json",
+    "qa/native_edit_regression/runs/run001-default2048/b2048_routedfalse_changingfalse.json",
+    "qa/native_edit_regression/runs/run001-default2048/b2048_routedfalse_changingtrue-cold-trace.json",
+    "qa/native_edit_regression/runs/run001-default2048/b2048_routedfalse_changingtrue.json",
+    "qa/native_edit_regression/runs/run001-default2048/b2048_routedtrue_changingfalse-cold-trace.json",
+    "qa/native_edit_regression/runs/run001-default2048/b2048_routedtrue_changingfalse.json",
+    "qa/native_edit_regression/runs/run001-default2048/b2048_routedtrue_changingtrue-cold-trace.json",
+    "qa/native_edit_regression/runs/run001-default2048/b2048_routedtrue_changingtrue.json",
+    "qa/native_edit_regression/runs/run001-default2048/build-binding.json",
+    "qa/native_edit_regression/runs/run001-default2048/build_and_copy.py",
+    "qa/native_edit_regression/runs/run001-default2048/executable-attribution.json",
+    "qa/native_edit_regression/runs/run001-default2048/exit-status.txt",
+    "qa/native_edit_regression/runs/run001-default2048/host-resources-after.json",
+    "qa/native_edit_regression/runs/run001-default2048/host-resources-before.json",
+    "qa/native_edit_regression/runs/run001-default2048/native_timing_tests.rs",
+    "qa/native_edit_regression/runs/run001-default2048/prepare_snapshot.py",
+    "qa/native_edit_regression/runs/run001-default2048/raw.log",
+    "qa/native_edit_regression/runs/run001-default2048/run-binding.json",
+    "qa/native_edit_regression/runs/run001-default2048/source-snapshot.json",
+    "qa/native_edit_regression/runs/run002-fresh-restored-state/build-binding.json",
+    "qa/native_edit_regression/runs/run002-fresh-restored-state/build_and_copy.py",
+    "qa/native_edit_regression/runs/run002-fresh-restored-state/executable-attribution.json",
+    "qa/native_edit_regression/runs/run002-fresh-restored-state/exit-status.txt",
+    "qa/native_edit_regression/runs/run002-fresh-restored-state/fresh-restored-surge.json",
+    "qa/native_edit_regression/runs/run002-fresh-restored-state/host-resources-after.json",
+    "qa/native_edit_regression/runs/run002-fresh-restored-state/host-resources-before.json",
+    "qa/native_edit_regression/runs/run002-fresh-restored-state/native_timing_tests.rs",
+    "qa/native_edit_regression/runs/run002-fresh-restored-state/prepare_snapshot.py",
+    "qa/native_edit_regression/runs/run002-fresh-restored-state/raw.log",
+    "qa/native_edit_regression/runs/run002-fresh-restored-state/run-binding.json",
+    "qa/native_edit_regression/runs/run002-fresh-restored-state/source-snapshot.json",
+))
+NATIVE_EDIT_INVENTORY_SHA256 = "2d23f1e0a049feabd04925287a6924bf65d2350baaa518a3c18125c7f0b29f6a"
 # Explicitly reviewed documentation that may land on an independent branch.
 OPTIONAL_SOURCE_FILES = frozenset((
     "docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md",
@@ -402,7 +458,7 @@ OPTIONAL_SOURCE_FILES = frozenset((
     "docs/PLUGIN_MIDI_ROUTING.md", "docs/PLUGIN_MIDI_ROUTE_VALIDATION.md",
     "docs/PLUGIN_PROCESSOR_DOMAINS.md", "docs/PLUGIN_STATE_RESTORE_LIMITS.md", "docs/PLUGIN_TIMING.md",
     "docs/LINUX_VST3_EDITORS.md", "docs/LINUX_VST3_EDITOR_VALIDATION.md", "docs/METRONOME.md",
-)) | REAL_VST3_QA_FILES | MIDI_ROUTE_QA_FILES | TIMING_DEBUG_QA_FILES | TIMING_COMBINED_QA_FILES
+)) | REAL_VST3_QA_FILES | MIDI_ROUTE_QA_FILES | TIMING_DEBUG_QA_FILES | TIMING_COMBINED_QA_FILES | NATIVE_EDIT_QA_FILES
 GENERATED_FILES = ("START_HERE_PREVIEW.txt", "BUILD_PROVENANCE.json", "DEPENDENCIES.json")
 PAYLOAD_FILES = frozenset(BINARIES + SOURCE_FILES + GENERATED_FILES)
 PACKAGE_FILES = PAYLOAD_FILES | {"SHA256SUMS.txt"}
@@ -821,6 +877,24 @@ def validate_timing_combined_qa(payload):
     require(payload[inventory] == expected, "Timing combined QA inventory/hash mismatch")
 
 
+def validate_native_edit_qa(payload):
+    """Pin the changed-helper correctness receipt separately from historical performance."""
+    present = set(payload) & NATIVE_EDIT_QA_FILES
+    unexpected = {name for name in payload if name.startswith(NATIVE_EDIT_QA_ROOT)} - NATIVE_EDIT_QA_FILES
+    require(not unexpected, "Unexpected native edit QA path")
+    if not present:
+        return
+    require(present == NATIVE_EDIT_QA_FILES, "Incomplete native edit QA source bundle")
+    inventory = NATIVE_EDIT_QA_ROOT + "SHA256SUMS.json"
+    require(digest(payload[inventory]) == NATIVE_EDIT_INVENTORY_SHA256,
+            "Native edit QA pinned inventory/hash mismatch")
+    expected = {
+        path.removeprefix(NATIVE_EDIT_QA_ROOT): digest(payload[path])
+        for path in NATIVE_EDIT_QA_FILES - {inventory}
+    }
+    require(json.loads(payload[inventory]) == expected, "Native edit QA inventory/hash mismatch")
+
+
 def create_package(repo, binaries, metadata, build_info, output):
     validate_build_info(build_info)
     manifest = tomllib.loads(read_input(repo / "Cargo.toml").decode())
@@ -875,6 +949,7 @@ def create_package(repo, binaries, metadata, build_info, output):
     validate_midi_route_qa(payload)
     validate_timing_debug_qa(payload)
     validate_timing_combined_qa(payload)
+    validate_native_edit_qa(payload)
     payload["SHA256SUMS.txt"] = "".join(f"{digest(payload[p])}  {p}\n" for p in sorted(payload)).encode("ascii")
     output.mkdir(parents=True, exist_ok=True)
     epoch = max(315532800, min(build_info["source_epoch"], 4354819198))
@@ -931,6 +1006,7 @@ def verify_package(path, extract_to=None):
     validate_midi_route_qa(payload)
     validate_timing_debug_qa(payload)
     validate_timing_combined_qa(payload)
+    validate_native_edit_qa(payload)
     for binary in BINARIES:
         require(inspect_pe(payload[binary]) == info["pe_audit"][binary], "PE audit/provenance mismatch")
     inventory = json.loads(payload["DEPENDENCIES.json"])

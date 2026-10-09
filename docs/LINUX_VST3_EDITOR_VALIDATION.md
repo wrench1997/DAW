@@ -128,3 +128,37 @@ exact scope and historical defects. This is a refusal before helper detachment o
 state mutation, not successful used-instance restoration or preservation through
 the legacy full-chain Admin caller. The 346.9ms resize stall remains; no realtime
 continuity or latency improvement is claimed. Fresh combined gates are pending.
+
+
+## Bounded native-edit transport follow-on
+
+Reviewed48d3f97, integrated as87ceb06, has helper SHA256
+`dca08353e3f23308d535a791c9fa2c89635ee683db29625fa8d2a3d0a988cbe8`.
+Independent native QA verifies41 source hashes and the exact copied helper before
+and after testing. A real stopped Surge edit changes volume from1.0 to
+0.8691863417625427 (native−6.28dB), followed by20 polling rounds/80 dirty/value/
+change/gesture requests and SaveState with no positive Process. The helper's
+existing zero-sample flush applies the pending edit; newly captured state SHA256
+`011ded9e14952b8a631e9e9b443fad6f0997daf641919862e95f5e860f414272`
+contains component−6.27905654907227dB. Separate exact-blob fresh-instance tests at
+17/47/128/256 frames retain matching getter/component and immediate first-note PCM,
+with no positive warmup. The native session itself did not run continuous audio.
+
+Same-XID/generation2/1178×735/menu preservation on rejected different-state Surge
+LoadState passes, as do closed-used rejection and normal generation3 reopen.
+Stochas row115/step3 native-created cell survives used/open reset/restore/re-export/
+repaint. Trusted fixture mouse/focus/key release, callbacks/retirement, state,
+close/reopen, owner/no-editor rejection and Shutdown/EOF/crash cleanup pass.
+There are no submitted/applied wire counters; fence semantics are proved by source
+fixtures and this independently observed outcome, not invented native telemetry.
+
+This fixes polling versus pending-edit ownership, not thread serialization. The
+350ms transport fixture is not a real native resize benchmark. Earlier346.9ms
+processing stall and hardware/mixed-Wayland/sanitizer limitations remain. Legacy
+full-chain Admin closes before backend LoadState and faults after rejection.
+The old optimized matrix is not reattributed to the changed helper. Fresh combined source gates pass1,170 app +22 helper +5+2 protocol,1,166 core,
+207 Python,304 available vendor cases with one named fixture exclusion,26 doctests
+and strict root/cross checks. New-helper default2048/fresh-state passes; new Windows execution remains a
+separate candidate gate.
+
+The separately source-bound [new-helper correctness receipt](../qa/native_edit_regression/RESULT.md) retains all four default2048 delivery passes, fresh-state immediate-note proof, and the11/14 changing-callback debug interval overruns for87ceb06/helperdca08353. The historical optimized4fdfbc2/244f622 results are not reattributed to this helper.

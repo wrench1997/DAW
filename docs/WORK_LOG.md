@@ -739,8 +739,9 @@ Executed against the final frozen Rust source:
 Copied helper SHA256: `dca08353e3f23308d535a791c9fa2c89635ee683db29625fa8d2a3d0a988cbe8`.
 Frozen Rust diff SHA256: `810e6a4f85c043c154a0ed90aa61110d660c6be98e377cf596f684646f90d2e6`.
 Independent review verified all 41 source hashes and the helper and found no blocking issue.
-Evidence index: `/workspace/shared/DAW-native-edit-transport-qa/validation-receipt.json`;
-new native receipts: `/workspace/shared/DAW-linux-editors-qa/native-edit-transport`.
+Evidence index: `validation-receipt.json` in the native-edit development QA record;
+the independent native record is `native-transport-receipt.json`. No raw task paths,
+plugin states or executables are added to the source package.
 
 The channel tests establish no per-operation allocation/free and consumer independence while
 producer/display guards are held at least 350 ms, with a 3 s scheduling watchdog. They do not
@@ -748,3 +749,27 @@ establish whole-plugin real-time safety or remove the helper's single-threaded G
 Legacy COM parameter/event allocation/locks, data exchange/metering, hardware qualification and
 Windows/macOS native execution remain separate work. The legacy full-chain Admin LoadState
 closure/fault limitation is unchanged. No DSP latency/dropout improvement is claimed.
+
+
+## 2026-10-09 13:44 UTC — Integrate native-edit transport after terminal timing checkpoint
+
+- Previous exact `244f6220233a9a415f503b921da3b94b1130575c` completes [preview37933923565](https://github.com/wrench1997/DAW/actions/runs/37933923565) successfully:207 Python cases (203 passed/four Unix-only skips),1,165 app +15 helper +5 editor protocol +2 transport protocol tests, optimized/static-CRT build, strict package/provenance/PE/ZIP/hash and extracted-helper smoke. Upload is skipped and both artifact APIs return0. [Quality37933923608](https://github.com/wrench1997/DAW/actions/runs/37933923608) passes source and independent native interaction/state/lifecycle/cleanup, fails known before/after PrintWindow and skips repaint comparison; overall FAILURE remains.
+- Its final source ZIP retains525 Git source files and original-main patch plus a separate post-freeze optimized receipt appendix. Final SHA256 `b187b32a4fbce7b7d36368bcc8a905f9334dfa95969b011ea90dd09df711c9b3`; source/patch/terminal receipt bytes unchanged from the pre-appendix archive. Original optimized archive SHA256 `9ffb53a5a2df46bb4e122d5bb4e6d0ad6603cc905101a0301faa3bc99f029d3b` retains199 text/source files, exact123-file4fdf/244 binding, all failed attempts,12/16 quiet and12/16 load delivery, and loaded2048 raw-interval overrun. It is not a new-helper performance qualification.
+- Reviewed native-edit48d3f97 integrates without conflicts as **87ceb06ce3dc23d817b1623093c8a51fddc2bea3**. All41 source hashes match; App/audio/timing/helper dispatcher/wire/Cargo/fixtures are unchanged. Native queue/display ownership is the only runtime slice. The fresh copied helper is byte-identical to independent native/PCM helper **dca08353e3f23308d535a791c9fa2c89635ee683db29625fa8d2a3d0a988cbe8**.
+- Fresh Linux all-feature/all-target tests pass **1,170 app +22 helper +5 editor protocol +2 transport protocol**, core **1,166**, zero failed/ignored/default stack. fmt, both strict root Clippy modes, all-bin build, ordinary actual helper smoke and both MSVC source profiles pass. **304 available vendor cases** pass with one explicitly filtered missing upstream Dexed fixture; all **26 doctests** pass. **207 Python tests** pass, including four actual Unix descriptor cases. No original vendor manifests/dependencies or lint policy were changed. The owner's separate direct-vendor lint exceptions remain disclosed rather than called an unqualified strict upstream pass.
+- Pristine registry archive plus pinned patch reproduces **44 original/added files**, keeping original license/manifests/checksum. Existing **383 packaged inputs** have closed links/provenance and every historical QA payload remains unchanged. There is no new App/UI rendering claim: existing input suites rerun;123-entry/49-frame capture remains attributed to4fdfbc2.
+- Current native outcome is stopped real edit→20 polling rounds→zero-sample SaveState→fresh numeric/component/first-note agreement, plus mutation-free Surge guard/Stochas/fixture checks. The350ms blocked-producer fixture tests transport independence only; GUI/DSP remain serialized and the346.9ms native resize stall is not solved. COM/event allocations/locks, data exchange/metering and full realtime qualification remain. New default2048/fresh-state regression and new exact Windows CI are still required at this entry.
+
+
+## 2026-10-09 13:46 UTC — New-helper bounded correctness acceptance
+
+- Exact87ceb06/new helperdca08353 passes four default2048 ordinary/routed × fixed/changing production-graph cases, including actual stopped Retry/native FX32 replan, exact delivery/events and PDC4896/7328. Routed notes remain8on/8off. Fresh-state immediate-note behavior also passes. Both invocations exit0; no new worker faults or capture overflow.
+- Debug changing callbacks retain11/14 raw-core interval overruns. This bounded check does not renew the previous full profile matrix or certify hardware/native-GUI continuity. Historical optimized244f622 appendix remains byte-unchanged and separately attributed. New Windows checks are still pending until source publication.
+
+
+## 2026-10-09 13:52 UTC — Preserve exact changed-helper regression receipts
+
+- Imported52 source/text files byte-for-byte from the normalized archive SHA256 `b745b80f17572c51164839d89682caae9d4c607564d203beb860f6e5f8e94bf8` (134116bytes), under [qa/native_edit_regression](../qa/native_edit_regression/RESULT.md). Its own inventory retains raw versus normalized hashes; only task-local path prefixes differ from original records. No plugin binary, preset/state blob, executable, audio payload or private path is included.
+- Exact124 production-file hashes bind to87ceb06, helper `dca08353e3f23308d535a791c9fa2c89635ee683db29625fa8d2a3d0a988cbe8` and test `876dfe3105289120693a807374fca2361b338783b62c42d273d76bb92130743a`. Four default2048 delivery cases and fresh restore exit0. The fresh note starts atframe28, peak0.2264193892478943, controller0.8691863417625427 and component−6.27905654907227dB retained. Both changing cases preserve11/14 raw-core interval overruns; this remains correctness-only acceptance.
+- Packaging uses an exact52-path whitelist, pinned inventory bytes and every payload hash. Regressions reject missing/changed/extra/escaping/backslash paths and self-consistent rewritten inventories; the tree is pinned toLF on Windows. All historical QA trees and the separately delivered optimized244f622 appendix stay unchanged. Windows CI for the new publication is pending.
+- Receipt/package regressions now pass **215 Python tests**, including all four actual Unix descriptor tests. Actual package closure contains **435 inputs**; all new52 files retain reviewed bytes. No Rust production file changed after the complete source/native gates.
