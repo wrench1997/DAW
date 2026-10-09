@@ -1,0 +1,53 @@
+name: Rust quality checks
+
+on:
+  push:
+    branches: [main, ci/windows-reliability-20261009]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Development checks use Windows MSVC. They do not produce or attest the
+# separately documented, pinned Windows gnullvm release package.
+jobs:
+  windows-quality:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare stable MSVC development toolchain
+        run: rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --component rustfmt --component clippy
+
+      - name: Record compiler and dependency inputs
+        run: |
+          rustc +stable-x86_64-pc-windows-msvc --version --verbose
+          cargo +stable-x86_64-pc-windows-msvc --version --verbose
+          Get-FileHash Cargo.lock -Algorithm SHA256
+
+      - name: Check formatting
+        run: cargo +stable-x86_64-pc-windows-msvc fmt --all -- --check
+
+      - name: Run locked all-feature tests
+        run: cargo +stable-x86_64-pc-windows-msvc test --locked --all-features --all-targets
+
+      - name: Check Clippy warnings
+        run: cargo +stable-x86_64-pc-windows-msvc clippy --locked --all-features --all-targets -- -D warnings
+
+      - name: Build application and VST3 helper
+        run: cargo +stable-x86_64-pc-windows-msvc build --locked --all-features --bins
+
+      - name: Check internal-only feature configuration
+        run: cargo +stable-x86_64-pc-windows-msvc check --locked --no-default-features --all-targets
