@@ -35,8 +35,11 @@ Microsoft's [PE format reference](https://learn.microsoft.com/en-us/windows/win3
 
 The allowlist includes `ComBase.dll`, the Windows Runtime/COM OS component
 identified in Microsoft's [WindowsPreallocateStringBuffer requirements](https://learn.microsoft.com/en-us/windows/win32/api/winstring/nf-winstring-windowspreallocatestringbuffer).
-A normal/delay-import regression covers this exact name. Dynamic VC runtimes and
-unknown DLLs remain rejected; no system DLL is copied into the archive.
+It also includes `UIAutomationCore.dll`, explicitly documented as a Windows OS
+provider in Microsoft's [UiaHostProviderFromHwnd requirements](https://learn.microsoft.com/en-us/windows/win32/api/uiautomationcoreapi/nf-uiautomationcoreapi-uiahostproviderfromhwnd).
+Normal/delay-import regressions cover these exact names. The validator reports all
+unapproved imports for both binaries before rejecting the package. Dynamic VC
+runtimes and unknown DLLs remain rejected; no system DLL is copied into the archive.
 
 The preview includes **no `libunwind.dll`**. Do not mix these two MSVC executables
 into the gnullvm release package, which still requires the matching LLVM-MinGW
@@ -105,7 +108,8 @@ Its required files are:
 
 The explicitly reviewed optional `docs/PROJECT_MEDIA.md` and
 `docs/OFFLINE_EXPORT_WORKFLOW.md`, `docs/AUDIO_SPLIT_FIDELITY.md` and
-`docs/WAV_EXPORT_OPTIONS.md` and `docs/MIXER_METERING.md` are included
+`docs/WAV_EXPORT_OPTIONS.md`, `docs/MIXER_METERING.md` and
+`docs/LOCAL_SAMPLE_BROWSER.md` are included
 when present in the source checkout.
 This supports their independent implementation branches without requiring an
 unrelated code merge to test the packager. Any new

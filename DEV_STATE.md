@@ -1,28 +1,28 @@
 # 当前开发状态
 
-最后更新：2026-10-09 04:18 UTC。以当前源码、集成状态和实际执行结果为准。
+最后更新：2026-10-09 04:37 UTC。以当前源码、集成状态和实际执行结果为准。
 
 ## 当前目标与状态
 
 Citrus Studio 0.5.0-alpha.1 是 clean-room Rust DAW 开发版，尚未达到完整 FL-class 商用品质。Linux 优先开发与验证，Windows 持续检查兼容性。当前产品目标仍是「做一首歌 → 无损编辑 → 保存 → 找回缺失媒体 → 导出 → 重新打开」。
 
-- **当前 Linux 已验证源码：`4045cb24da846057461dd6e464b1c90058a0835f`。** 集成真实电平表、空闲 transport 的 live-MIDI 重绘及精确平台编译条件。完整 no-default/all-target Rust **878 项通过、0 失败/忽略**，fmt、Clippy `-D warnings` 与应用 debug build 全部通过；保持默认测试栈，使用真实已安装 ALSA 运行库。该模式不含 VST2/VST3。
+- **当前 Linux 已验证源码：`abc9ec888a5b4c96ca229cc8544d15aabf3700ec`。** 已集成真实电平表、暂停 live-MIDI 重绘、精确平台编译条件与本地 WAV 素材浏览器。完整 no-default/all-target Rust **901 项通过、0 失败/忽略**，fmt、Clippy `-D warnings` 与应用 debug build 全部通过；保持默认测试栈，使用真实已安装 ALSA 运行库。该模式不含 VST2/VST3。
 - **真实 Mixer 电平表已集成：** `21989d0` + `ad565d7`，读取实际 post-fader stereo 图缓冲；Master 在 tanh 保护前测量，显示 dBFS、hold、CLIP/fault。稳定 track ID/graph/epoch 防错位，排队峰值、超时失效、点击 reset 和暂停时 live-MIDI 路径均有回归。已移除 UI 假 sine 动画。详见 [MIXER_METERING](docs/MIXER_METERING.md)。
-- **最近已完成 Windows 验证：`2c9d81174e676272c70666ac56519084d7d55d20`。** [Quality 37881848416](https://github.com/wrench1997/DAW/actions/runs/37881848416) 成功，862 项 Rust 测试、14 项 Python helper tests、实际 helper smoke 及全部开发门禁通过。它是电平表集成前的 checkpoint；新源码需独立 Windows 结果。
-- **Preview 尚未通过包验收。** [Run 37881848475](https://github.com/wrench1997/DAW/actions/runs/37881848475) 已通过 52 项 Python 测试、Rust 门禁和实际 optimized static-CRT 构建；包检查因漏列 Windows 系统 `ComBase.dll` 而拒绝。已根据 Microsoft 文档精确补充该名称及 normal/delay import 回归，未知 DLL/动态 VC runtime 仍拒绝。当前本地 packaging/helper **53 项通过**；新 Windows 包/ZIP helper smoke 待运行。默认不上传 artifact，不改变固定 gnullvm Release 契约。
+- **最近已完成 Windows 验证：`0b9cfa1a5d7e8c3384bc3ac435bcedc834c005af`。** [Quality 37883317515](https://github.com/wrench1997/DAW/actions/runs/37883317515) 成功，**880 项 Rust 测试**、14 项 Python helper tests、实际 helper smoke 及全部开发门禁通过，已包含真实电平表。新本地素材浏览器候选需独立 Windows 结果。
+- **Preview 尚未通过包验收。** [Run 37883317601](https://github.com/wrench1997/DAW/actions/runs/37883317601) 已通过 53 项 Python 测试、880 项 Rust 测试、严格门禁和实际 optimized static-CRT 构建；ComBase.dll 修复已通过，随后漏列 Windows `UIAutomationCore.dll` 而拒绝。已按 Microsoft 文档精确补列该 OS component；normal/delay imports 及 app/helper 的拒绝原因现在合并报告，仍拒绝所有未审核 DLL/动态 VC runtime。当前本地 packaging/helper **56 项通过**；包/ZIP helper smoke 待重跑。默认不上传 artifact，不改变固定 gnullvm Release 契约。
 - 项目格式 **v11**，旧 v10 文件可加载；新保存需新版本重新打开。评估前保留原项目备份。`main` 未合并，未发布 Release 或二进制 artifact。
 
 ## 已执行的验证与边界
 
-- Linux `cargo test --offline --locked --no-default-features --all-targets`：**878 passed / 0 failed / 0 ignored**。`cargo fmt --all -- --check`、`cargo clippy --offline --locked --no-default-features --all-targets -- -D warnings` 与 `cargo build --offline --locked --no-default-features --bins` 全部成功。
+- Linux `cargo test --offline --locked --no-default-features --all-targets`：**901 passed / 0 failed / 0 ignored**。`cargo fmt --all -- --check`、`cargo clippy --offline --locked --no-default-features --all-targets -- -D warnings` 与 `cargo build --offline --locked --no-default-features --bins` 全部成功。
 - 为实现严格 Linux 门禁，将仅 Windows backend 与测试使用的 MIDI helper 用 `cfg(any(windows, test))` 编译，并把 BTreeMap import 移到 Windows 模块。没有关闭 warning、删除测试或改动 Windows backend 行为；Linux 物理 MIDI backend 仍未实现。
 - Windows 历史完整门禁使用 Windows Server 2025 / MSVC / Rust 1.99，包含 all-features app/helper、严格 Clippy、helper smoke 和 no-default all-target check；测试数量按平台/feature 分别记录，不能互相代替。
 - helper smoke 只证实 JSON 协议、错误恢复、Shutdown/子进程回收；不加载真实插件。Python 是开发验证工具，不是应用运行依赖。
-- Linux 应用二进制已经编译并尝试启动，但云端图形栈尚未获得可靠可见 UI；**没有把启动进程或单元测试当作 GUI 验收**。真实设备/插件、固定 gnullvm Release、干净系统安装/启动及完整歌曲场景仍待验收。
+- Linux `4045cb24` 实际创建了原生 X11 窗口，但 Mesa `eglSwapBuffers` 在 `xcb_shm_attach_checked` 报 `EGL_BAD_SURFACE`，界面无法显示。create/edit/undo/save/reopen、WAV native picker/cancel 与真实电平表 GUI 流程均 **BLOCKED / NOT RUN**；没有把启动进程或单元测试当作 GUI 验收。云端也没有物理音频设备。真实设备/插件、固定 gnullvm Release、干净系统安装/启动及完整歌曲场景仍待验收。
 
 ## 当前源码已经具备什么
 
-- 本地素材浏览器：SOUNDS 已替换硬编码假条目/假预览，增加显式文件夹选择、有界单层 WAV 列表、搜索、Up/Refresh/Cancel 和复用真实 decoder 的 Playlist 导入；成功导入独立 Undo。实现与验收边界见 [Local sample browser](docs/LOCAL_SAMPLE_BROWSER.md)，独立工作树 Linux no-default/all-target **901 项通过**，fmt、严格 Clippy 和 debug build 通过；最终集成/Windows 验证另记，不宣称 audition、GUI/设备验收或完整素材库完成。
+- 本地素材浏览器：SOUNDS 已替换硬编码假条目/假预览，增加显式文件夹选择、有界单层 WAV 列表、搜索、Up/Refresh/Cancel 和复用真实 decoder 的 Playlist 导入；成功导入独立 Undo。实现与验收边界见 [Local sample browser](docs/LOCAL_SAMPLE_BROWSER.md)，最终集成源码 Linux no-default/all-target **901 项通过**，fmt、严格 Clippy 和 debug build 通过；新 Windows 验证待运行，不宣称 audition、GUI/设备验收或完整素材库完成。
 - 编辑：Pattern/Piano Roll、Playlist 分组、Slip、Fade/Crossfade、手势 Undo/Redo 已接线。`playlist::create_audio_crossfade` 支持同轨、非嵌套重叠的两条 Audio Clips；`clip_fade.rs` 的等功率 envelope 由实时与离线路径复用。
 - 保存/恢复：blank project、Save/Save As、New/Open/Quit 未保存变更保护、插件状态屏障、同步后原子替换、autosave 和恢复/丢弃对话框已存在。不能把本轮媒体恢复工作描述成首次加入自动保存。
 - 导出：`export.rs` 支持 plugin-free Pattern/WAV arrangement 的 stereo PCM24 WAV；会阻止可能漏掉启用插件或 sidechain 的离线导出。`master_capture.rs` / `audio.rs` / `app.rs` 已连接实时 Master Capture，包含有界队列、PCM24 后台写入、停止确认和无覆盖发布。

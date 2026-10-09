@@ -11,7 +11,7 @@ Status terms:
 
 ## 0.4 implementation progress
 
-Evidence note (2026-10-09): the current 0.5.0-alpha.1/v11 candidate at `a760313d` passed all Windows development gates with862 Rust tests, while the equivalent Linux no-default suite passed860 tests on default stack. Media relinking, cancellable export, WAV format/level review and split-envelope/source-phase persistence are included. v10 inputs load; v11 saves require the new build. Preview packaging and GUI/physical-device/commercial acceptance remain distinct; exact evidence is in WORK_LOG/DEV_STATE. The new [measured-meter slice](MIXER_METERING.md) replaces placeholder UI levels; its integration evidence is recorded separately.
+Evidence note (2026-10-09): the 0.5.0-alpha.1/v11 metering checkpoint `0b9cfa1a` passed all Windows development gates with **880 Rust tests** and corresponding Linux no-default gates with **878 tests**, both on default stack. It includes media relinking, cancellable export, WAV format/level review and split preservation. The new local WAV Browser has been integrated from its separately verified 901-test source; exact latest combined evidence is in WORK_LOG/DEV_STATE. v10 inputs load; v11 saves require the new build. Preview package validation remains open after an OS-import allowlist finding. Actual cloud X11 presentation fails with EGL_BAD_SURFACE, so no visible GUI or physical-device/commercial acceptance is claimed.
 
 | Area | Current 0.4 state | Status |
 |---|---|---|
