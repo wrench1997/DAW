@@ -1,6 +1,6 @@
 # Development roadmap
 
-Updated: 2026-10-09 UTC. This roadmap tracks acceptance, not promised delivery dates. Current changes are published on an independent validation branch. Current handoff: source fixes and independent static review complete; all Windows development gates passed at `122596a`, including 775 tests with all 15 new reliability regressions. The following validation-summary commit changes documentation only.
+Updated: 2026-10-09 UTC. This roadmap tracks acceptance, not promised delivery dates. Current changes are published on an independent validation branch. Current handoff: source fixes and independent static review complete; all Windows development gates passed at `122596a`, including 775 tests with all 15 new reliability regressions. A follow-up adds a plugin-free helper-protocol smoke harness and CI step; actual Windows smoke execution is pending.
 
 ## P0 — Establish a trustworthy baseline
 

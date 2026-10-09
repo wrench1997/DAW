@@ -12,7 +12,7 @@
 
 ## 开发 CI（独立分支验证）
 
-`.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；第三次运行已在 Rust/Cargo 1.99.0 上全部通过。验证摘要后续提交仅更新文档，源码、依赖锁和工作流不变，分支后续运行见 GitHub Actions。它不替代下述历史固定 gnullvm 发布流程、helper smoke、干净 Windows 实机验收与打包校验。
+`.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build、独立的 helper harness 回归 / 实际 helper 协议 smoke 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；第三次运行已在 Rust/Cargo 1.99.0 上全部通过。本次追加 helper 自动 smoke 后的 Windows 结果待验证，分支后续运行见 GitHub Actions。开发 smoke 不替代下述历史固定 gnullvm 发布流程、Release helper smoke、干净 Windows 实机验收与打包校验。
 
 ## 发布契约
 
@@ -126,34 +126,24 @@ Cargo 不保证把 gnullvm 运行时 DLL 复制到输出目录。必须显式复
 
 ## 5. VST3 helper 协议 smoke test
 
-下面的 smoke test 不加载任何第三方插件。第 4 节的 PE 检查负责确认 helper 是 Windows GUI subsystem；本测试再以 CreateNoWindow 启动它，验证 stdin/stdout JSON 协议和正常退出：
+复用的 `scripts/smoke_vst3_helper.py` 不加载任何第三方插件，也不启动 DAW 主程序。它只需要 Python 3.8+ 标准库：Python 是开发 / CI 验收工具，**不是应用运行或发布包依赖**，不加入第 7 节的发布白名单。Windows hosted runner [官方软件清单](https://github.com/actions/runner-images/blob/main/images/windows/Windows2025-Readme.md) 包含 Python；CI 记录实际解释器版本并运行 harness 自测。
 
-    $Helper = Join-Path $ReleaseOut "vst3-host-helper.exe"
-    $StartInfo = [System.Diagnostics.ProcessStartInfo]::new($Helper)
-    $StartInfo.WorkingDirectory = $ReleaseOut
-    $StartInfo.UseShellExecute = $false
-    $StartInfo.CreateNoWindow = $true
-    $StartInfo.RedirectStandardInput = $true
-    $StartInfo.RedirectStandardOutput = $true
-    $StartInfo.RedirectStandardError = $true
-    $HelperProcess = [System.Diagnostics.Process]::Start($StartInfo)
-    $HelperProcess.StandardInput.WriteLine('"GetAllParameters"')
-    $HelperProcess.StandardInput.WriteLine('"Shutdown"')
-    $HelperProcess.StandardInput.Close()
-    if (-not $HelperProcess.WaitForExit(5000)) {
-        $HelperProcess.Kill()
-        throw "VST3 helper protocol timed out"
-    }
-    $ProtocolResponse = $HelperProcess.StandardOutput.ReadToEnd().Trim()
-    $HelperDiagnostics = $HelperProcess.StandardError.ReadToEnd().Trim()
-    if ($HelperProcess.ExitCode -ne 0) {
-        throw "VST3 helper exited with code $($HelperProcess.ExitCode): $HelperDiagnostics"
-    }
-    if ($ProtocolResponse -ne '{"Error":{"message":"No plugin loaded"}}') {
-        throw "Unexpected VST3 helper response: $ProtocolResponse"
-    }
+在仓库根目录运行（先完成上面的 Release 构建及运行时 DLL 复制）：
 
-预期响应是 No plugin loaded，因为 smoke test 故意没有加载插件。该错误响应证明 host/helper 的 0.9.0 wire protocol 可通信；随后 Shutdown 必须在五秒内使进程以 0 退出。
+    python -B -m unittest discover -s scripts -p "test_smoke_vst3_helper.py" -v
+    python -B scripts/smoke_vst3_helper.py (Join-Path $ReleaseOut "vst3-host-helper.exe") --timeout 5
+
+开发 CI 对 `target/debug/vst3-host-helper.exe` 执行相同脚本。第 4 节 PE 检查仍负责确认 Release helper 的 Windows GUI subsystem；脚本在 Windows 使用 CREATE_NO_WINDOW，并以 helper 所在目录为工作目录。
+
+协议顺序与断言：
+
+1. 空行后发送 `"GetAllParameters"`，必须收到 JSON `{"Error":{"message":"No plugin loaded"}}`，不能出现额外 stdout。
+2. 发送无效 JSON，必须收到 `Invalid command:` 错误；再次发送 `"GetAllParameters"`，验证解析错误不会破坏后续响应。
+3. 发送 `"Shutdown"`，**保持 stdin 打开**，确认进程因命令而非 EOF 正常退出，退出码为 0；Shutdown 不应额外回复。
+
+启动、三次回复及正常退出共享五秒总超时。stdout / stderr 并行读取，保留的诊断和协议队列有上限；失败时终止 helper，并用独立的有界等待回收子进程及管道。CI 步骤另有 1 分钟外层超时。脚本自测使用临时 Python 子进程覆盖正常协议、stderr 大量输出、无响应 / 退出超时、无效回复、早退、非零退出、协议恢复失败和清理，不加载插件。
+
+这证明被测二进制的 0.9.0 wire protocol 可启动、通信、恢复和关闭，不证明插件加载、DSP、设备或 GUI 可用；MSVC debug smoke 也不证明 gnullvm Release 的 DLL 和打包正确。
 
 如组织拥有可用于测试的合法 VST3 插件，再执行一次主程序端加载、音频处理、保存状态和卸载测试，但不要把测试插件复制进 Citrus Studio 发布包。
 
