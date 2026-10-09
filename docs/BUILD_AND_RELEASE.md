@@ -8,9 +8,9 @@
 
 ## 当前验证状态（2026-10-09）
 
-本页记录固定 gnullvm 发布流程，不能当作当前 prerelease 的发布验收。最新终态 `244f622` 的 [MSVC preview](https://github.com/wrench1997/DAW/actions/runs/37933923565) 完整通过：207 Python cases（203 passed、四项 Unix-only skip）、1165 app +15 helper +5 editor protocol +2 transport protocol Rust tests、optimized static-CRT、MIT/vendor provenance、PE/ZIP/hash 与解压 helper smoke；上传关闭、artifacts 为0。[Quality](https://github.com/wrench1997/DAW/actions/runs/37933923608) 源码与独立 native state/interaction/lifecycle 通过，paint 前后失败、repaint comparison 跳过，整个 quality 仍失败。
+本页记录固定 gnullvm 发布流程，不能当作当前 prerelease 的发布验收。最新终态 `e487a50` 的 [MSVC preview](https://github.com/wrench1997/DAW/actions/runs/37940326948) 完整通过：215 Python cases（211 passed、四项 Unix-only skip）、1165 app +15 helper +5 editor protocol +2 transport protocol Rust tests、optimized static-CRT、MIT/vendor provenance、PE/ZIP/hash 与解压 helper smoke；上传关闭、artifacts 为0。[Quality](https://github.com/wrench1997/DAW/actions/runs/37940326370) 源码与独立 native state/interaction/lifecycle 通过，paint 前后失败、repaint comparison 跳过，整个 quality 仍失败。
 
-新 native-edit 合并源码 `87ceb06` 已通过Linux1170 app +22 helper +5+2 protocol、1166 core、215 Python、304 available vendor cases（一个明确fixture排除）、26 doctests、fmt/两套严格root Clippy/build/helper smoke和两种MSVC source checks。新helper default2048四项/fresh-state回归已通过，新WindowsCI仍需独立执行，不能沿用旧helper的优化测量。它只更换原生编辑交付/捕获的内部通道；App/timing/wire 未变，helper 仍单线程。旧4fdf/244优化结果为 quiet12/16、load12/16，512/2048全部delivery组合通过，但loaded2048仍有raw-interval overrun，不能称实时/设备认证。默认2048、128/256/512 Experimental保持不变。0.5.0-alpha.1加载v10/v11、保存v12；旧项目MIDI ports默认Off，先保留备份。
+上一轮 native-edit 合并源码 `87ceb06` 已通过Linux1170 app +22 helper +5+2 protocol、1166 core、215 Python、304 available vendor cases（一个明确fixture排除）、26 doctests、fmt/两套严格root Clippy/build/helper smoke和两种MSVC source checks。新helper default2048四项/fresh-state回归已通过，对应e487a50的Windows结果见上，不能沿用更旧helper的优化测量。它只更换原生编辑交付/捕获的内部通道；App/timing/wire 未变，helper 仍单线程。旧4fdf/244优化结果为 quiet12/16、load12/16，512/2048全部delivery组合通过，但loaded2048仍有raw-interval overrun，不能称实时/设备认证。默认2048、128/256/512 Experimental保持不变。0.5.0-alpha.1加载v10/v11、保存v12；旧项目MIDI ports默认Off，先保留备份。
 
 下文 `$Version` 和目录名的 0.4.0 是历史示例；构建当前候选时必须使用 `Cargo.toml` 的实际版本 `0.5.0-alpha.1`，不得把新 v12 构建标成旧 0.4.0。Rust/LLVM-MinGW 固定工具链及三文件发布契约不变。
 
@@ -268,3 +268,25 @@ Citrus Studio 在 Windows 上使用 directories crate 的本地数据目录。�
 - SHA256SUMS.txt 与最终签名后的包内文件一致，并另行发布 ZIP 的 SHA-256。
 - LICENSE、THIRD_PARTY_NOTICES.md、README.md 与保持相对路径的 docs 文档已随包。
 - 未包含任何用户缓存、录音、项目或第三方插件。
+
+
+## Bounded parameter-storage follow-on
+
+Reviewedbf573a4 integrates atfb7b91a; helper/vendor source is exact and App/timing/wire
+is unchanged. Input8192/output4096 parameter policies, checked admission and sticky
+output-fault capture/Process fences are source-scoped. The new copied helper must
+matcha29e4942b5fe027e9891a28e5d7f7611d2c5b2f12ef5f283599d15c4278aee64.
+Fresh combined gates pass1170 app +22 helper +5+2 protocol,1166 core,339 available
+vendor cases/one explicit fixture exclusion,26 doctests,231 Python, fmt/two strict
+root Clippy modes/build/helper smoke and both MSVC source checks. New-helper bounded
+default2048 four-case/fresh-state acceptance passes, both exits0, with13/14 changing
+debug core overruns retained. Exact Windows CI is pending here;
+prior source and optimized measurements retain their actual helper identities.
+No fixed gnullvm Release, installer or physical-device qualification follows.
+
+
+Parameter comparative evidence is carried as a separate immutable source-only
+appendix, with [concise pinned records](../qa/parameter_storage_cost/README.md) in
+the preview source-document whitelist. The full appendix is not a preview executable
+payload. Source ZIP verification separately counts tracked Git files, original-main
+patch and appendices; every original negative/source/profile identity is retained.

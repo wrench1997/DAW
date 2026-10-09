@@ -21,3 +21,11 @@
 # Changed-helper correctness receipts remain separately source-bound.
 /qa/native_edit_regression/** text eol=lf
 /qa/native_edit_regression/**/*.log whitespace=-blank-at-eof
+
+/qa/parameter_storage_regression/** text eol=lf
+/qa/parameter_storage_regression/**/*.log whitespace=-blank-at-eof
+
+# Preserve reviewed raw cost CSV bytes rather than normalizing CRLF measurements.
+/qa/parameter_storage_cost/** text eol=lf
+/qa/parameter_storage_cost/final-summary.csv -text -whitespace
+/qa/parameter_storage_cost/final-empty-summary.csv -text -whitespace

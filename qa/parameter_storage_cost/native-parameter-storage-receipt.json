@@ -1,0 +1,104 @@
+{
+  "result": "PASS: scoped native bounded parameter-container regression",
+  "completed_utc": "2026-10-09T14:59:22.467672+00:00",
+  "base_commit": "48d3f9706b49430c8cfd1556325bf6f0d6d3b8b6",
+  "source_diff_sha256": "b77e86e385579a919961e1a9600dd4dd77f25d0b96fe08446070633ef27fedcd",
+  "source_manifest_sha256": "9c8a79450a8770f9d87aa9b3042f90215579e958dc8244576b902940900dd194",
+  "source_hash_entries_verified_before_and_after": 41,
+  "helper_sha256": "a29e4942b5fe027e9891a28e5d7f7611d2c5b2f12ef5f283599d15c4278aee64",
+  "environment": {
+    "DISPLAY": ":0",
+    "XDG_SESSION_TYPE": "x11",
+    "XDG_RUNTIME_DIR": "__SESSION_RUNTIME_ROOT__",
+    "helper": "__EVIDENCE_ROOT__/DAW-linux-editors-qa/parameter-storage-sparse/vst3-host-helper",
+    "helper_sha256": "a29e4942b5fe027e9891a28e5d7f7611d2c5b2f12ef5f283599d15c4278aee64"
+  },
+  "fixture": "PASS native mouse, focus away/back, key press and release with pointer outside, callbacks/retirement, state, close/reopen, no-editor/owner rejection, EOF/Shutdown/forced termination",
+  "surge_stopped_edit": {
+    "poll_rounds": 20,
+    "requests_per_round": [
+      "NativeDirtyRevision",
+      "GetParameter",
+      "TakeParameterChanges",
+      "TakeParameterEdits"
+    ],
+    "native_global_volume_db": -6.28,
+    "getter_before_edit": 1.0,
+    "getter_after_edit_and_all_polls": 0.8691863417625427,
+    "dirty_revision": 64,
+    "initial_feedback_entries": 63,
+    "initial_gesture_entries": 65,
+    "subsequent_drained_feedback_and_gestures_empty": true,
+    "positive_process_calls_before_save": 0,
+    "save": "Helper SaveState detaches and performs its internal zero-sample flush; no direct submitted/applied counters exposed",
+    "saved_state_sha256": "011ded9e14952b8a631e9e9b443fad6f0997daf641919862e95f5e860f414272",
+    "saved_component_volume_db": -6.27905654907227,
+    "fresh_restore": "Success: default1.0 -> restored getter0.8691863417625427 and native menu -6.28 dB",
+    "first_note_owner_result": {
+      "path": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/genuine-headless/native-polled-first-note/result.json",
+      "sha256": "a3088006d873fe471bfc42cc89d973a840d800d8a0a38f5d60c958cec9b38b0e",
+      "profiles": [
+        17,
+        47,
+        128,
+        256
+      ],
+      "warmup_positive_blocks": 0,
+      "status": "passed; controller getter and component volume agree before/after processing"
+    }
+  },
+  "surge_guard": {
+    "different_default_state_rejected_while_open": true,
+    "same_xid": 31457280,
+    "before": {
+      "supported": true,
+      "has_editor": true,
+      "open": true,
+      "width": 1178,
+      "height": 735,
+      "generation": 2
+    },
+    "after": {
+      "supported": true,
+      "has_editor": true,
+      "open": true,
+      "width": 1178,
+      "height": 735,
+      "generation": 2
+    },
+    "native_menu_and_content_unchanged": true,
+    "closed_previously_opened_and_stopped_rejected": true,
+    "value_preserved": 0.8691863417625427,
+    "normal_reopen_generation": 3
+  },
+  "stochas": {
+    "native_created_cell": {
+      "layer": 0,
+      "row": 115,
+      "step": 4,
+      "probability": 20,
+      "velocity": 127,
+      "length": 0,
+      "offset": 0
+    },
+    "used_open_restore_default": "Success; component cells empty",
+    "used_restore_edited": "Success; exact cell reexported and native view repainted",
+    "edited_state_sha256": "7e35d35ef82a1141255ef2e2f5cb283572e586799a109cb4aaea8141e29e459d",
+    "headless_midi": {
+      "owner": "separate_plugin_control_runtime",
+      "path": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/genuine-headless/compatibility-guard/result.json",
+      "sha256": "a7558c21bf4a3852513a11dad39a8373b502f705a60c31e91fc5b241fd0635e4",
+      "result": "Passed separate deterministic-pattern playback, stop, active-state restoration and fresh-instance MIDI regression. This is not MIDI from the native single-cell state."
+    }
+  },
+  "shutdown_exit": 0,
+  "source_changes_and_builds_by_native_qa": false,
+  "scope_limits": [
+    "No submitted/applied wire counters exist; fence semantics belong to owner unit/COM tests, combined with this real native outcome.",
+    "No positive Process or hardware audio in GUI session; exact saved-blob first-note PCM delegated and separately attributed to source owner.",
+    "No DSP thread, performance or realtime continuity improvement claim. Historical346.9ms native resize processing stall remains relevant;350ms transport fixture is not actual helper GUI/DSP stall proof.",
+    "No mixed Wayland/XWayland or sanitizer acceptance. Main DAW X11 renderer was not launched.",
+    "Helper-local Surge guard only; legacy full-chain Admin LoadState transaction behavior is not established by this test.",
+    "Parameter storage/admission/overflow microbenchmark and unit-test acceptance belong to the source owner/reviewer; this receipt establishes only actual native functional regression."
+  ]
+}

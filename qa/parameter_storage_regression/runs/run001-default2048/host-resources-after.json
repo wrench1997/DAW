@@ -1,0 +1,5 @@
+{
+  "/sys/fs/cgroup/cpu.stat": "[Errno 2] No such file or directory: '/sys/fs/cgroup/cpu.stat'",
+  "/sys/fs/cgroup/memory.current": "[Errno 2] No such file or directory: '/sys/fs/cgroup/memory.current'",
+  "/proc/loadavg": "0.72 1.45 0.95 1/655 131"
+}

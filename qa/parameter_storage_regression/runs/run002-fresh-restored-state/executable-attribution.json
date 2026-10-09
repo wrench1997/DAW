@@ -1,0 +1,83 @@
+{
+  "native-route-tests": {
+    "sha256": "d09d2d72e4a5c76adad988c475247911713075e5a1d96570e1b396df96836362",
+    "compiler_artifact": {
+      "reason": "compiler-artifact",
+      "package_id": "path+file://${QA_ROOT}/source#citrus-studio@0.5.0-alpha.1",
+      "manifest_path": "${QA_ROOT}/source/Cargo.toml",
+      "target": {
+        "kind": [
+          "bin"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "citrus-studio",
+        "src_path": "${QA_ROOT}/source/src/main.rs",
+        "edition": "2024",
+        "doc": true,
+        "doctest": false,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "features": [
+        "default",
+        "vst2",
+        "vst3"
+      ],
+      "filenames": [
+        "${CARGO_TARGET_DIR}/debug/deps/citrus_studio-cebfaa4e92f5602e"
+      ],
+      "executable": "${CARGO_TARGET_DIR}/debug/deps/citrus_studio-cebfaa4e92f5602e",
+      "fresh": false
+    }
+  },
+  "vst3-host-helper": {
+    "sha256": "a29e4942b5fe027e9891a28e5d7f7611d2c5b2f12ef5f283599d15c4278aee64",
+    "compiler_artifact": {
+      "reason": "compiler-artifact",
+      "package_id": "path+file://${QA_ROOT}/source#citrus-studio@0.5.0-alpha.1",
+      "manifest_path": "${QA_ROOT}/source/Cargo.toml",
+      "target": {
+        "kind": [
+          "bin"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "vst3-host-helper",
+        "src_path": "${QA_ROOT}/source/src/bin/vst3-host-helper.rs",
+        "edition": "2024",
+        "required-features": [
+          "vst3"
+        ],
+        "doc": true,
+        "doctest": false,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": false
+      },
+      "features": [
+        "default",
+        "vst2",
+        "vst3"
+      ],
+      "filenames": [
+        "${CARGO_TARGET_DIR}/debug/vst3-host-helper"
+      ],
+      "executable": "${CARGO_TARGET_DIR}/debug/vst3-host-helper",
+      "fresh": false
+    }
+  }
+}

@@ -1,29 +1,29 @@
 # Development roadmap
 
-Updated: 2026-10-09 13:44 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-09 15:02 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
 - Development branch: `ci/windows-reliability-20261009`. Last fully validated Windows checkpoint: **`53494d518bfc4bad7304f25c127491a0c67d7cd8`**, including Browser, measured meters, v11 split fidelity, WAV/media/export controls and responsive UI QA. [Quality 37886481852](https://github.com/wrench1997/DAW/actions/runs/37886481852) passed **909 Rust tests**, 14 helper-harness tests and actual helper smoke. [Preview 37886481857](https://github.com/wrench1997/DAW/actions/runs/37886481857) passed optimized static-CRT builds, 57 Python tests, PE/import audit, ZIP/hash checks and extracted-helper smoke; no artifact upload.
 - Application **0.5.0-alpha.1** uses Project **v12**. v10/v11 inputs load with ports Off and source audio monitoring enabled; new saves need a v12 build. Preserve original projects before evaluation.
 - Historical ownership-preparation source **`3fb549a059916dca7b3af3eff00ff27fba0bddd4`** passes 1,137 app +21 helper +5 editor protocol +2 transport protocol Linux all-feature tests, 1,133 core tests, both strict Clippy modes, fmt/build/helper smoke, both MSVC source profiles and 195 Python tests. The available vendor suite passes 270 cases serially with one explicit missing upstream fixture exclusion; all 26 doctests pass, including five new facade cases. App/UI/audio are unchanged. Its exact published checkpoint 5befb51 completed its own Windows runs; no worker or latency improvement is claimed.
-- At **`244f622`**, Windows source gates pass 1,165 app +15 helper +5 editor protocol +2 transport protocol tests. [Preview 37933923565](https://github.com/wrench1997/DAW/actions/runs/37933923565) passes the optimized/provenance/package/extracted-helper lane, with 207 Python cases (203 passed, four Unix-only skips) and upload disabled. [Quality 37933923608](https://github.com/wrench1997/DAW/actions/runs/37933923608) passes independent native state/interaction/lifecycle but still fails before/after paint; repaint is SKIP. Overall quality is failed.
+- At **`e487a50`**, Windows source gates pass 1,165 app +15 helper +5 editor protocol +2 transport protocol tests. [Preview 37940326948](https://github.com/wrench1997/DAW/actions/runs/37940326948) passes the optimized/provenance/package/extracted-helper lane, with 215 Python cases (211 passed, four Unix-only skips) and upload disabled. [Quality 37940326370](https://github.com/wrench1997/DAW/actions/runs/37940326370) passes independent native state/interaction/lifecycle but still fails before/after paint; repaint is SKIP. Overall quality is failed.
 - The integrated [simultaneous workspace](MULTIWINDOW_WORKSPACE.md) is a real shared-project, internal-window implementation. The latest requested [compact refinement](COMPACT_WORKSPACE.md) keeps useful task density, persistent migration, continuous held gestures and bounded release snapping; controlled unoptimized CPU comparisons do not establish a general speedup or displayed FPS. Focused Piano session-local note clipboard now has bounded data, semantic input/text isolation and explicit Undo. Offscreen frames validate app paint/layout rather than cloud X11 presentation, OS-detached editors, device audio or native VST3 editor paint.
 - Evidence levels stay distinct: **implemented/source-inspected**; **executed code tests** at an exact revision; **GUI/device scenario passed** with artifacts; **release candidate accepted** on the intended package; **commercial maturity** from broader workflow, compatibility and sustained-use coverage. None implies the next.
 
 - Follow-on guarded state source **`60134a5`** is locally integrated from reviewed `c056dc5`. It rejects used/editor-opened exact Surge XT 1.3.4 before helper detachment or mutation, with fresh-instance/native rejection evidence. This guard later passed combined gates and exact Windows source/preview at244f622. The [state report](PLUGIN_STATE_RESTORE_LIMITS.md) retains previous failures, the legacy Admin caller limitation and absence of silent settlement. It now combines with reviewed timing source at **4fdfbc2**, whose fresh aggregate gates now pass1,170 app +22 helper +5 editor protocol +2 transport protocol,1,166 core,207 Python,276 available vendor tests (one named missing-fixture exclusion),26 doctests, both strict Clippy modes and both MSVC source profiles. Combined default2048 four-case delivery and fresh-state checks passed with helper9dd18d74; its exact244f622 Windows results are recorded above.
 
-## Current bounded native-edit preparation
+## Historical bounded native-edit preparation
 
 Reviewed48d3f97 integrates as **87ceb06** with App/timing/helper wire unchanged.
 The fixed-capacity native edit channel separates display polling from DSP input,
 requires complete admission and successful SDK Process acknowledgment, and refuses
 state capture on sticky loss, exhaustion or an unstable dirty revision. Successful
 state application supersedes earlier native packets without pretending they were
-applied. Rejected Surge eligibility remains nonmutating. Current-source gates pass1,170 app +22 helper +5+2 protocol,1,166 core,207 Python,
+applied. Rejected Surge eligibility remains nonmutating. Current-source gates pass1,170 app +22 helper +5+2 protocol,1,166 core,215 Python after receipt packaging,
 304 available vendor cases (one named fixture exclusion),26 doctests, both strict
 root Clippy modes and both MSVC source profiles. The bounded new-helper default2048/fresh-state check passes; new exact Windows CI
-remains a separate gate.
+completed at e487a50 with source/preview pass and retained paint failure.
 
 Actual stopped Surge edit,20 polling rounds, zero-sample SaveState, fresh numeric/
 component/first-note behavior and unchanged same-window rejection passed on the
@@ -32,6 +32,27 @@ fixture is transport independence only. GUI/DSP remain single-threaded; COM/even
 allocation, native resize346.9ms stall, hardware and broader realtime safety remain
 open. Prior optimized12/16 quiet and12/16 loaded results belong to4fdf/244 and its
 older helper; they cannot qualify this changed helper.
+
+## Current bounded parameter-container preparation
+
+Reviewedbf573a4 integrates asfb7b91a. Stable prepared COM queues, finite shared
+point storage and checked input admission replace per-operation queue allocation;
+output loss remains latched across administrative lifecycle operations and blocks
+Process/SaveState until a fresh instance. Native channel/Surge guard semantics and
+App/timing/wire are unchanged. Source/native/comparative review is clear; combined aggregate gates pass1170 app,
+22 helper +5+2 protocol,1166 core,339 available vendor cases/one explicit fixture
+exclusion,26 doctests and231 Python, plus fmt/strict root Clippy/build/cross checks.
+New-helper default2048 four cases plus fresh state pass (both exits0), retaining
+13/14 changing debug core overruns. Exact Windows CI remains required.
+
+Constructor requested bytes total1,573,104, excluding outer wrappers and allocator
+metadata. Tested cold/reused container operations allocate/free zero while the host
+owner exists. Final retained-after-owner Release may free on the plugin's thread.
+Sparse populated-queue indexing fixes measured draft regressions; large populated
+suffix movement and some read/small cases remain slower, with aggregate quadratic
+worst cases. Whole-Process no-allocation, mutex/event/metering removal, independent
+GUI/DSP execution and the346.9ms resize stall remain open. See [exact scope and
+comparative costs](PLUGIN_PROCESSOR_DOMAINS.md#prepared-bounded-parameter-com-storage).
 
 ## Current product priority — detailed Piano melody composition
 

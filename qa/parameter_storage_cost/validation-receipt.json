@@ -1,0 +1,270 @@
+{
+  "status": "PASS: scoped bounded parameter storage, source/cost/native/headless gates complete",
+  "commit": "bf573a45826466db0952eb1f4bd598937c68d1c5",
+  "branch": "refactor/bounded-parameter-storage",
+  "worktree": "__EVIDENCE_ROOT__/DAW-parameter-storage",
+  "clean_worktree": true,
+  "pushed_or_merged": false,
+  "completed_utc": "2026-10-09T15:00:40Z",
+  "frozen_source": {
+    "base_commit": "48d3f9706b49430c8cfd1556325bf6f0d6d3b8b6",
+    "status": "completed; exact source and copied helper unchanged since native freeze",
+    "source_diff_sha256": "b77e86e385579a919961e1a9600dd4dd77f25d0b96fe08446070633ef27fedcd",
+    "source_sha256": {
+      "vendor/vst3-host-0.9.0/src/audio.rs": "a3f78a9d6190aca7f93c898270665c569b87ce05d2f47c6a1c20f58b461e826c",
+      "vendor/vst3-host-0.9.0/src/backends/cpal_backend.rs": "81ac2fb61dc337957e168c0927bd382ebb937b4d83ba33b18e1aca49b798361e",
+      "vendor/vst3-host-0.9.0/src/backends/mod.rs": "5d0bbb62d5bfeb1ec8fe4e097fed6ae1de62fb2f394092a1107978830f1c419f",
+      "vendor/vst3-host-0.9.0/src/bin/vst3-host-helper.rs": "f069fb714a2b6cf0f21c6021a1f0c53e5a6b694cbfc349711538847fab7869ad",
+      "vendor/vst3-host-0.9.0/src/bin/vst3-host-probe.rs": "9e2cc17f41aabbd8302fe171e2211c18bba4e0698de6aaee48abcfb101d1b110",
+      "vendor/vst3-host-0.9.0/src/discovery.rs": "568bab9374fd746e3ff983bd3364c1a64a3ec19cc5c77967c6bfcf01df51efec",
+      "vendor/vst3-host-0.9.0/src/embed.rs": "00cf4880ff976ad7ebe4491cf48e944986cc27a23148017922dc9b04390150f6",
+      "vendor/vst3-host-0.9.0/src/error.rs": "788c16c69cedf066975cf712718eb2d2ad131b6b2f7096ca36c93635c8b05fc1",
+      "vendor/vst3-host-0.9.0/src/host.rs": "dd80c12a52823b5f88bbc1f1f459edb0078763d025c8239820b1493746e25f42",
+      "vendor/vst3-host-0.9.0/src/internal/com_implementations.rs": "cf82a47eb29745f2c8c8ed93f2fe06092c1d333109b4fcf9eb55159b1d0b13c7",
+      "vendor/vst3-host-0.9.0/src/internal/data_exchange.rs": "a3312da17e69533edcbe8cf28c1df55d4f93e5fc31cddd1d4ebea95d59bf1423",
+      "vendor/vst3-host-0.9.0/src/internal/denormal.rs": "3a30c5e0067d32dab0ef8e5f49f9bac195e635c86cd83e265b3ccbdc4e397ab2",
+      "vendor/vst3-host-0.9.0/src/internal/isolated_plugin_impl.rs": "08420e18dafd0917593137ef4423c2e427a23afe89e17f01e6f5b308e10bd7fd",
+      "vendor/vst3-host-0.9.0/src/internal/mod.rs": "8b29bcf7a78cc7b89f81221e1386818030e5bdacc4c5efc77180b6b5583f39ae",
+      "vendor/vst3-host-0.9.0/src/internal/module_info.rs": "2c837fb62c8582f45f72aafa0d54a20848008e871a72d004f1e640d0e91d4ef3",
+      "vendor/vst3-host-0.9.0/src/internal/module_loader/linux.rs": "97a1f7e293f39fa61cebc38fb07df3ab3477f542b04303a4c01109a621bb1eab",
+      "vendor/vst3-host-0.9.0/src/internal/module_loader/macos.rs": "72eb4dbd44ba420dff1fa8197d6538415794b9a598cb05dff1a7f2cf033ca16b",
+      "vendor/vst3-host-0.9.0/src/internal/module_loader/mod.rs": "d7f0924f20602757c0e546ed6ac375819358c6ed4fecd6b52f38c4a92d80dd07",
+      "vendor/vst3-host-0.9.0/src/internal/module_loader/private_namespace.rs": "8eeda22b33aa1cca2aac3a361786572079371dd9252ddd8c2720fc991d47b0a0",
+      "vendor/vst3-host-0.9.0/src/internal/module_loader/windows.rs": "1bc518762553ae6c012d4f38f9b864d9105515d15c208635d7c72556580a9844",
+      "vendor/vst3-host-0.9.0/src/internal/native_edit_transport.rs": "4ecb133a07b36d336fe5b15260de8989bb35b52c4da166880b1019efdb14674e",
+      "vendor/vst3-host-0.9.0/src/internal/plugin_impl/domain_tests.rs": "470a60014d9d96a4e8fbce4eaf93fc7ae4545f002a47cd1e423ccb92432bffb4",
+      "vendor/vst3-host-0.9.0/src/internal/plugin_impl.rs": "50946dfa193160d69f68ff7594b88986cd155dad1da2f9b99068f479f8176f91",
+      "vendor/vst3-host-0.9.0/src/internal/processor_lease.rs": "a504a608df097aa5680f2829d91098b5b7cfecb1578838219485a72710671789",
+      "vendor/vst3-host-0.9.0/src/internal/utils.rs": "3619b511f1a2ac5d48a7f954bdd4d721627008a831130720f7d058b883cd2e19",
+      "vendor/vst3-host-0.9.0/src/lib.rs": "a63c6213080780e65b361a669cb38a8f35d5956869e49d451d3ad6acb36714a5",
+      "vendor/vst3-host-0.9.0/src/midi.rs": "13bf1e7e6dbed088adbc742a6c36366bac1c9b116c9881be76cda692a1a7a06e",
+      "vendor/vst3-host-0.9.0/src/midi_input.rs": "00eb0c1be43c99bae187951991f0ebba1ee5d34eeae00a6d3588c4b244fe4c56",
+      "vendor/vst3-host-0.9.0/src/parameters.rs": "b48bc7daa017470411370d0d540d3dde10c0bb2aea22efd32e910706e95817ef",
+      "vendor/vst3-host-0.9.0/src/playback.rs": "8fa44b9d3f425630bb2061dc20d624f5d121356eacbb218cac815f2662670e33",
+      "vendor/vst3-host-0.9.0/src/plugin.rs": "6486fc48fe9119ba6f07f00e1360ba07c54ae679cf54da32f146eb7d44afb06f",
+      "vendor/vst3-host-0.9.0/src/process_isolation.rs": "6dae6c1f678c877acba5306f62e62022e3c4a1a3062e03674f7779cb12de74ea",
+      "vendor/vst3-host-0.9.0/src/realtime.rs": "538129d630954d15e1cb0b5469d99da202350370552fa0f985102f56b62ea7d6",
+      "vendor/vst3-host-0.9.0/src/simple.rs": "fe3879f15c2b3c9283c671d537b69436abf553935b6778f4726ae85e1f4f5978",
+      "vendor/vst3-host-0.9.0/src/transport.rs": "46285c2b3405cde078c15c49799f7a0d51fd4a719badbb9ecd5174fe64208d79",
+      "vendor/vst3-host-0.9.0/src/window.rs": "5f38ebba09c39c783ee13711281dedc5f4655e33a30007b4df4c0f057a5b5f74",
+      "src/bin/vst3-host-helper.rs": "6074f28480354b55655312a5a1ec6dc9a65ef4cb489d771244238e4f5855443d",
+      "src/bin/vst3_editor_linux/mod.rs": "44313e71750dd42a74ca133c0e6d4d72852a1404934ad67424b026c19467c291",
+      "src/bin/vst3_editor_windows/mod.rs": "e26b6ed8782c97e515f5717d05525db2d76c3b714a18f679ec0aba4bf21d8e97",
+      "Cargo.toml": "e8576ce486f251e9f898ed1d90d8be769c270dd5b2f1ccb47ed92a7b8bde3eaf",
+      "Cargo.lock": "0322f74be21de8778b341959ea1453f84f6efa9274c5aec53a0ad8b1e8e04802"
+    },
+    "helper": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/vst3-host-helper",
+    "helper_sha256": "a29e4942b5fe027e9891a28e5d7f7611d2c5b2f12ef5f283599d15c4278aee64",
+    "features": "default root helper; source-linked vendor harness cpal-backend,process-isolation",
+    "build_log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/build.log",
+    "commit": "bf573a45826466db0952eb1f4bd598937c68d1c5"
+  },
+  "source_manifest": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/source/manifest.json",
+  "source_manifest_sha256": "9c8a79450a8770f9d87aa9b3042f90215579e958dc8244576b902940900dd194",
+  "provenance_receipt": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/provenance-populated/receipt.json",
+  "provenance_receipt_sha256": "bc7a2e3ca148f603e25a594c7a494b4ec280502944e10014e3dec70205fc970b",
+  "gates": {
+    "vendor_available_passed": 339,
+    "vendor_excluded": {
+      "count": 1,
+      "name": "reads_sdk_generated_bundle_metadata",
+      "reason": "upstream registry archive lacks ../test_plugins/Dexed.vst3"
+    },
+    "parameter_storage_focused_passed": 31,
+    "doctests_passed": 26,
+    "helper_passed": 22,
+    "editor_protocol_passed": 5,
+    "transport_protocol_passed": 2,
+    "python_smoke_passed": 79,
+    "unix_descriptors_passed": 4,
+    "packaging_passed": 124,
+    "direct_helper_smoke": "passed",
+    "root_strict_clippy": "passed",
+    "direct_vendor_clippy": "passed with existing deprecated and clippy::drain_collect exceptions",
+    "rustfmt_and_diff_check": "passed",
+    "headless_genuine": "12 Surge cases plus Stochas state/MIDI; no hidden caller warmup",
+    "exact_new_native_blob_first_note": "17/47/128/256 profiles; correct controller/component before and after finite nonzero PCM; no positive warmup",
+    "native_gui": "trusted fixture, stopped Surge edit/polls/save/fresh numeric, same-window and closed-used guard, Stochas used native restore/reexport/repaint, Shutdown0"
+  },
+  "independent_review": "Hash-bound source and comparative-cost approval; no source/cost blocker. Exact final native receipt and commit supplied for closing review.",
+  "native_receipt": "__EVIDENCE_ROOT__/DAW-linux-editors-qa/parameter-storage-sparse/native-parameter-storage-receipt.json",
+  "native_receipt_sha256": "450ee6a6153866195d4d6297f6cb3b7da521bad6c006f8f5d0e8d5c7ada7f8fc",
+  "headless_result": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/genuine-headless/compatibility-guard/result.json",
+  "headless_result_sha256": "a7558c21bf4a3852513a11dad39a8373b502f705a60c31e91fc5b241fd0635e4",
+  "native_polled_first_note_result": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/genuine-headless/native-polled-first-note/result.json",
+  "native_polled_first_note_result_sha256": "a3088006d873fe471bfc42cc89d973a840d800d8a0a38f5d60c958cec9b38b0e",
+  "native_polled_state": {
+    "path": "__EVIDENCE_ROOT__/DAW-linux-editors-qa/parameter-storage-sparse/surge-native-polled.state",
+    "sha256": "011ded9e14952b8a631e9e9b443fad6f0997daf641919862e95f5e860f414272",
+    "source_run": "new sparse-helper actual native drag and 20 stopped polling rounds; deterministic hash matches earlier state, but new creation is independently recorded"
+  },
+  "parameter_storage_policy": {
+    "input_queues": 8192,
+    "input_total_points": 8192,
+    "output_queues": 4096,
+    "output_total_points": 4096,
+    "output_fault_recovery": "fresh instance only; Process and Save fences survive lifecycle/state/rebuild; native ack follows actual SDK result"
+  },
+  "constructor_measurements": {
+    "input": {
+      "allocations": 8198,
+      "requested_bytes": 1048696
+    },
+    "output": {
+      "allocations": 4102,
+      "requested_bytes": 524408
+    },
+    "combined_requested_bytes": 1573104,
+    "sparse_index_added_bytes": 98352,
+    "excluded": "two outer runtime ComWrapper<ParameterChanges>, allocator metadata and RSS",
+    "post_constructor_parameter_regions": "zero allocation, reallocation and free; per-thread counting before cold first use, including high-water/reuse/errors"
+  },
+  "comparative_receipts": {
+    "review-summary.md": {
+      "path": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/parameter-comparison/populated/review-summary.md",
+      "sha256": "af314cda484e1420d3b90878115727aaadb533c0c804fa07edd8c5f1fe8186da"
+    },
+    "comparison-report.md": {
+      "path": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/parameter-comparison/populated/comparison-report.md",
+      "sha256": "0bb9ca8a42aecde51f748f6967bbecdbd2aa26bc2485954468d7dc6fddac4d9e"
+    },
+    "diagnostic-report.md": {
+      "path": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/parameter-comparison/populated/diagnostic-report.md",
+      "sha256": "30f85d6a85c99ac0895bc352e0ec91234affe4c984f83aa9e041580b432d9750"
+    },
+    "summary.json": {
+      "path": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/parameter-comparison/populated/summary.json",
+      "sha256": "80696c93fd6dce4eed7c3d35db4c48a15902d6d050aa0e51eb9485fb3fce99b3"
+    },
+    "empty-summary.json": {
+      "path": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/parameter-comparison/populated/empty-summary.json",
+      "sha256": "6da302df016979aec37317099783751e736d41ce989165362f00203aa55c7e28"
+    },
+    "source-manifest.json": {
+      "path": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/parameter-comparison/populated/source-manifest.json",
+      "sha256": "2c562dab42554d409403f931040e697e8fea46b153841d0a73f046a1546d4491"
+    },
+    "environment.txt": {
+      "path": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/parameter-comparison/populated/environment.txt",
+      "sha256": "3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307"
+    },
+    "run-comparisons.sh": {
+      "path": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/parameter-comparison/populated/run-comparisons.sh",
+      "sha256": "9c3405ae438f858ffbb2f9e747ce547f9914da8226a440e1b676bda9782ff6ce"
+    }
+  },
+  "comparison_scope": "matched baseline48d3f970 plus archived cursor/indexed drafts and final sparse source; debug opt0 and test release opt3/debug0; 5 samples cold/reused with real offset/value checksums; 32/128/512/4096/8192 sizes and max-empty-queue stress",
+  "superseded_evidence": {
+    "dense_index_helper_and_gates": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/superseded-dense-index",
+    "dense_index_native": "__EVIDENCE_ROOT__/DAW-linux-editors-qa/parameter-storage",
+    "performance_snapshots": [
+      "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/parameter-comparison/extended",
+      "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/parameter-comparison/maintained",
+      "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/parameter-comparison/final",
+      "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic"
+    ],
+    "acceptance": "superseded candidates are retained negative/intermediate evidence, never final acceptance"
+  },
+  "harness": {
+    "manifest": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/vendor-tests/Cargo.toml",
+    "manifest_sha256": "9d4051275578207e82be4d5687a7e2a4945b7c2b9c99678b695c97b01e46d4f8",
+    "lockfile": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/vendor-tests/Cargo.lock",
+    "lockfile_sha256": "56bf99c983a93f9209c77cd5d3db691052cbb6b42f3a4b549afe261d82e67f66",
+    "enabled_features": [
+      "cpal-backend",
+      "process-isolation"
+    ],
+    "production_sources": "direct lib.path to exact worktree source, no source/cfg exclusions; original full upstream offline dev manifest unavailable",
+    "dependency_versions": {
+      "vst3": [
+        "0.3.0"
+      ],
+      "rtrb": [
+        "0.3.4"
+      ],
+      "crossbeam-queue": [
+        "0.3.13"
+      ],
+      "cpal": [
+        "0.18.1"
+      ],
+      "xcb": [
+        "1.7.0"
+      ],
+      "serde": [
+        "1.0.229"
+      ],
+      "thiserror": [
+        "1.0.69",
+        "2.0.20"
+      ]
+    }
+  },
+  "logs": {
+    "build.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/build.log",
+    "clippy.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/clippy.log",
+    "diff-check.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/diff-check.log",
+    "doctests.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/doctests.log",
+    "format.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/format.log",
+    "genuine-headless.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/genuine-headless.log",
+    "helper-check-initial.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/helper-check-initial.log",
+    "helper-smoke.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/helper-smoke.log",
+    "helper-tests.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/helper-tests.log",
+    "native-polled-first-note.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/native-polled-first-note.log",
+    "packaging.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/packaging.log",
+    "provenance.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/provenance.log",
+    "python-smoke.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/python-smoke.log",
+    "sparse-parameter-tests.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/sparse-parameter-tests.log",
+    "sparse-vendor-clippy.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/sparse-vendor-clippy.log",
+    "storage-measurement-debug.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/storage-measurement-debug.log",
+    "storage-measurement-initial.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/storage-measurement-initial.log",
+    "unix-protocol.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/unix-protocol.log",
+    "vendor-clippy-initial.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/vendor-clippy-initial.log",
+    "vendor-clippy.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/vendor-clippy.log",
+    "vendor-format.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/vendor-format.log",
+    "vendor-tests-append-cache.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/vendor-tests-append-cache.log",
+    "vendor-tests-final.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/vendor-tests-final.log",
+    "vendor-tests-initial.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/vendor-tests-initial.log",
+    "vendor-tests.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/vendor-tests.log",
+    "vendor-typecheck-initial.log": "__EVIDENCE_ROOT__/DAW-parameter-storage-qa/vendor-typecheck-initial.log"
+  },
+  "log_sha256": {
+    "build.log": "42c1cbf6ac34b12680d9bca2ada284915b32dbce2c0d426d84858020447b708e",
+    "clippy.log": "dcf15912133968c8110ef8c2f7ebf9680d4b89fc82396abab05e3ce08f76820e",
+    "diff-check.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "doctests.log": "3bc2eef603bf35a954e0c51156688057fb12e4acdd1ebac930ea8c8b4420fe2b",
+    "format.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "genuine-headless.log": "610b67b49be42c8c19b8373a92c3d5d768d4b22f7ffa103d06114d78a6370a63",
+    "helper-check-initial.log": "d916ed6692eb6ead4889293d796f7417fab6512538fd4fa33696189618e56f7f",
+    "helper-smoke.log": "8c71de1a0bb5d485b834ac7f27d1633614abb522e0ca7f8500ee2c9c009a41fd",
+    "helper-tests.log": "869afff85d2a078b9eebbf9149061bfe726e1552179e110209bd43f608ffe695",
+    "native-polled-first-note.log": "40ff810ff0090c64f69ff2e7aca73d4e1e1ba182abbb2e73b71522aa78d4cdbb",
+    "packaging.log": "24391c4be84eb5500d8cb87e69b22835628ab01152e64590b7eb79d4dc66a979",
+    "provenance.log": "bc7a2e3ca148f603e25a594c7a494b4ec280502944e10014e3dec70205fc970b",
+    "python-smoke.log": "deacd452cd53cd3d2d92c329eccf8782116a9509a743bed8aecc9650c68d2b8d",
+    "sparse-parameter-tests.log": "4655b7ec13c115ef7e61c11ecba212c0569a167d7f141fcdc0e97398334c32bf",
+    "sparse-vendor-clippy.log": "c2150462a9b9ee2757239d6e9a52a5b0c1c06d26196334464172f5db0e678005",
+    "storage-measurement-debug.log": "a6aac736259094547929a07d1ac55a6ea05f01c7dbbd0a555bb9f390f46f4f0a",
+    "storage-measurement-initial.log": "4fee09c3482725a8cc604d4d3e2e2523b74a69999998f8a90129947a6f75e89f",
+    "unix-protocol.log": "3b0dbb90387b342ccecc50446a0fb5e4385d86a3f467e5b97d63f8924fc08aff",
+    "vendor-clippy-initial.log": "fcb3ef6c20b64a71d94723a3a88058d38d605e4de05462f10135327f202651d5",
+    "vendor-clippy.log": "9ddcb7a97f3589835ba8f354c41d25b0a805bd5f85ddbccaff009e6f6dc7236c",
+    "vendor-format.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "vendor-tests-append-cache.log": "b510e1a08bd295bafc7ae831ecd091c7abacb753e0396cad46718bba89eb3bdd",
+    "vendor-tests-final.log": "ebd532ae2d5aa5e0681d1c37a41a860feab61517975d6d6663ffb98906ea8260",
+    "vendor-tests-initial.log": "f9a37b561fce7aabe3cf353f94ef3974e2c12e3dda146abf28f46d4ed43e78ca",
+    "vendor-tests.log": "27a053b7b03d30465a8018c4fae6d15af6df0dcff3496863898fe87f3eeee365",
+    "vendor-typecheck-initial.log": "3d6a1b632e90c703b5c2bc483148cbf3509046fc2875fe57f39b5fd4e416de3a"
+  },
+  "limits": [
+    "No DSP worker, helper/wire/App/timing or event-container changes.",
+    "Mutexes remain. Only host parameter storage regions are allocation-free; arbitrary plugin/controller/event/data-exchange/metering work is outside scope.",
+    "An explicitly retained retired queue can free itself/arena on final Release after its owner is gone; whole-Process no-free across reconfiguration is unproven.",
+    "Random reads and some small/distinct/global populated-suffix workloads remain slower; repeated suffix/populated metadata and ID lookup retain quadratic aggregate worst cases.",
+    "Finite capacity/no-allocation is not a deadline guarantee or a native resize latency/dropout improvement. Historical346.9ms resize stall remains unresolved.",
+    "Capture/restore requires main-thread administrative serialization; native transport semantics unchanged.",
+    "Legacy full-chain live-admin LoadState closure/fault limitation remains; current App fresh candidates are distinct.",
+    "Windows/macOS native runtime, hardware, mixed-Wayland and sanitizer qualification not established.",
+    "No full application test suite was run by this parameter-only worker; integration remains the parent/integrator gate."
+  ]
+}

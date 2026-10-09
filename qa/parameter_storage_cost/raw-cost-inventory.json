@@ -1,0 +1,1555 @@
+{
+  "implementation_commit": "bf573a45826466db0952eb1f4bd598937c68d1c5",
+  "archive": {
+    "filename": "parameter-storage-bf573a4-source-evidence.zip",
+    "size_bytes": 5092126,
+    "sha256": "1bd33df7c1ec9afa58cd5b6a508b7af12c4a84f68ce4ad12cda5dca3f388773c"
+  },
+  "policy": "Complete comparative measured/raw, summary, source-manifest and reproduction-harness inventory. Sources and lockfiles are in the full logical map. Every earlier experiment remains historical and every original measurement is retained in the archive; there is no negative sampling.",
+  "final_cost_directory": "DAW-parameter-storage-qa/parameter-comparison/populated",
+  "historical_index": [
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison",
+      "scope": "Only this directory\u2019s own files and baseline/candidate/indexed subdirectories; child experiment directories are separate entries below.",
+      "status": "HISTORICAL initial baseline/cursor/indexed comparison; not final acceptance.",
+      "note": "The cursor source is stored under candidate/ as identified by the original manifest."
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended",
+      "status": "HISTORICAL append-indexed experiment and controls; not final acceptance.",
+      "note": "The original extended/final-parameter-tests.log filename is historical append-candidate evidence. Its internal text is unchanged."
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/maintained",
+      "status": "HISTORICAL maintained-indexed experiment and controls; not final acceptance.",
+      "note": "Retain its exact partial raw debug coverage; no release results or missing summaries are invented."
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final",
+      "status": "HISTORICAL superseded dense-index candidate and controls; directory name final does not mean current final acceptance."
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic",
+      "status": "HISTORICAL dense-index empty-registered-queue regression and controls; not final acceptance."
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated",
+      "status": "CURRENT final sparse populated-index comparison; baseline/cursor/indexed remain historical controls.",
+      "note": "Full raw debug/release cold/reused matrices, costs, source snapshots, test appendices and harness lockfiles retained."
+    },
+    {
+      "path": "DAW-parameter-storage-qa/superseded-dense-index",
+      "status": "HISTORICAL superseded dense-index gates, source, provenance and documentation; not final acceptance."
+    },
+    {
+      "path": "DAW-parameter-storage-qa/provenance",
+      "status": "HISTORICAL dense-index patch replay; final replay is provenance-populated/."
+    },
+    {
+      "path": "DAW-linux-editors-qa/parameter-storage",
+      "status": "HISTORICAL superseded partial native candidate; not final acceptance."
+    }
+  ],
+  "concise_exact_copies": [
+    {
+      "file": "final-review-summary.md",
+      "archive_logical_path": "DAW-parameter-storage-qa/parameter-comparison/populated/review-summary.md",
+      "original_sha256": "af314cda484e1420d3b90878115727aaadb533c0c804fa07edd8c5f1fe8186da",
+      "portable_sha256": "af314cda484e1420d3b90878115727aaadb533c0c804fa07edd8c5f1fe8186da",
+      "normalization": []
+    },
+    {
+      "file": "final-summary.csv",
+      "archive_logical_path": "DAW-parameter-storage-qa/parameter-comparison/populated/summary.csv",
+      "original_sha256": "113a9df91300755a6e1caf53d7ef7f6d31caff2cd357c3303fcac3d708e3d319",
+      "portable_sha256": "113a9df91300755a6e1caf53d7ef7f6d31caff2cd357c3303fcac3d708e3d319",
+      "normalization": []
+    },
+    {
+      "file": "final-empty-summary.csv",
+      "archive_logical_path": "DAW-parameter-storage-qa/parameter-comparison/populated/empty-summary.csv",
+      "original_sha256": "fe9940039848f1f8e3e1bcd5b8b77a92db7f3348297c1316877e9b114ed70bcf",
+      "portable_sha256": "fe9940039848f1f8e3e1bcd5b8b77a92db7f3348297c1316877e9b114ed70bcf",
+      "normalization": []
+    },
+    {
+      "file": "validation-receipt.json",
+      "archive_logical_path": "DAW-parameter-storage-qa/validation-receipt.json",
+      "original_sha256": "5e6f4301ca799b80284c3a0a663e6801172d0f23a9ac77c6599e0e2d41ba303a",
+      "portable_sha256": "39dc8ef9ded4ad2cfd5077df16e9d281a19cacf1ea0f5e6686e996487691b210",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 51
+        }
+      ]
+    },
+    {
+      "file": "native-parameter-storage-receipt.json",
+      "archive_logical_path": "DAW-linux-editors-qa/parameter-storage-sparse/native-parameter-storage-receipt.json",
+      "original_sha256": "450ee6a6153866195d4d6297f6cb3b7da521bad6c006f8f5d0e8d5c7ada7f8fc",
+      "portable_sha256": "a72808eafc86861818e237f6900bb2a6d6955a2396c4d3e85b9d6c9d5454de84",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 3
+        },
+        {
+          "prefix_role": "task-local desktop runtime directory",
+          "portable_prefix": "__SESSION_RUNTIME_ROOT__",
+          "occurrences": 1
+        }
+      ]
+    }
+  ],
+  "comparative_evidence": [
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/all-samples.json",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 734151,
+      "original_sha256": "5c24bac8db283a602cd4a5e9c526a08891bfa8e5e83c2cfc103029771fdb381b",
+      "portable_size_bytes": 734151,
+      "portable_sha256": "5c24bac8db283a602cd4a5e9c526a08891bfa8e5e83c2cfc103029771fdb381b",
+      "object": "objects/sha256/5c/5c24bac8db283a602cd4a5e9c526a08891bfa8e5e83c2cfc103029771fdb381b.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/baseline-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 82146,
+      "original_sha256": "40280fd4befcf5687e6e3be4589d9ac27d3447545d5aeebf0432476c66bd52b0",
+      "portable_size_bytes": 82146,
+      "portable_sha256": "8d80b04b0bf6f8017c40af03b2e3835235c9acab065f53882b6e8caf17dd0974",
+      "object": "objects/sha256/8d/8d80b04b0bf6f8017c40af03b2e3835235c9acab065f53882b6e8caf17dd0974.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/baseline-release.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 84210,
+      "original_sha256": "2e1b123a3a248a053042b096eab609ba74fff4799546c6dc5c3523894316d378",
+      "portable_size_bytes": 84210,
+      "portable_sha256": "2e4797e18e1d8e78a83c0fb32bd3ecb584f2b584b0be8628bb70973c411f57a2",
+      "object": "objects/sha256/2e/2e4797e18e1d8e78a83c0fb32bd3ecb584f2b584b0be8628bb70973c411f57a2.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/candidate-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 81377,
+      "original_sha256": "70997d790666ce4e0a7c72b6c33bf283d5605a599b992470f20f8028bf1431e8",
+      "portable_size_bytes": 81377,
+      "portable_sha256": "bd1023e29b6917d401f5e6c9e65172e408cc3067e5634df9c0466f2e947556b0",
+      "object": "objects/sha256/bd/bd1023e29b6917d401f5e6c9e65172e408cc3067e5634df9c0466f2e947556b0.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/candidate-release.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 82604,
+      "original_sha256": "8d1750363cb35ef6e596af590868ed8a3a040f6a87fedb60c8c9495a4fc8286f",
+      "portable_size_bytes": 82604,
+      "portable_sha256": "c32c55507e7b4f095cbb29b88893972e11453433ce190015acc4a94cb14138ee",
+      "object": "objects/sha256/c3/c32c55507e7b4f095cbb29b88893972e11453433ce190015acc4a94cb14138ee.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/comparison-report.md",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 42998,
+      "original_sha256": "13444d30914cf2f10a754100ed0d64743ac85daea4874e1a2a476447efe0e849",
+      "portable_size_bytes": 42998,
+      "portable_sha256": "13444d30914cf2f10a754100ed0d64743ac85daea4874e1a2a476447efe0e849",
+      "object": "objects/sha256/13/13444d30914cf2f10a754100ed0d64743ac85daea4874e1a2a476447efe0e849.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic/all-samples.json",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 225964,
+      "original_sha256": "04625b7c009fde4eb00f821f6b9cd268c14f01fa8f226d2d8c7ce28892a7019e",
+      "portable_size_bytes": 225964,
+      "portable_sha256": "04625b7c009fde4eb00f821f6b9cd268c14f01fa8f226d2d8c7ce28892a7019e",
+      "object": "objects/sha256/04/04625b7c009fde4eb00f821f6b9cd268c14f01fa8f226d2d8c7ce28892a7019e.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic/baseline-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 39430,
+      "original_sha256": "fe250c91ee7af2be9433ff19103bb4f35e5646b2c9cb29208b97acb9ff479476",
+      "portable_size_bytes": 39430,
+      "portable_sha256": "2956d4a326b46033389b4fa1c3f86a8b96352afc8e231015bd83887b9897a32e",
+      "object": "objects/sha256/29/2956d4a326b46033389b4fa1c3f86a8b96352afc8e231015bd83887b9897a32e.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic/baseline-release.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 39934,
+      "original_sha256": "6b27cda554dc812a909693d21e54c7e6cb7084ac3c837c60bcfa7c10a4530696",
+      "portable_size_bytes": 39934,
+      "portable_sha256": "4f6f238174e7a5d052ed16baccf478c705e088af7f3f02466bae1a736a954045",
+      "object": "objects/sha256/4f/4f6f238174e7a5d052ed16baccf478c705e088af7f3f02466bae1a736a954045.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic/diagnostic-report.md",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 16758,
+      "original_sha256": "a9262c3f5de14a31bb59345cb818da83a763591e3e64986582bcfe8fe2d62179",
+      "portable_size_bytes": 16758,
+      "portable_sha256": "a9262c3f5de14a31bb59345cb818da83a763591e3e64986582bcfe8fe2d62179",
+      "object": "objects/sha256/a9/a9262c3f5de14a31bb59345cb818da83a763591e3e64986582bcfe8fe2d62179.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic/environment.txt",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 390,
+      "original_sha256": "3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307",
+      "portable_size_bytes": 390,
+      "portable_sha256": "3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307",
+      "object": "objects/sha256/3f/3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic/final_indexed-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 40282,
+      "original_sha256": "3133e7da5b0e5779a112ce919cccaa709b8a5e339dec20e0bd8683f8204a671e",
+      "portable_size_bytes": 40282,
+      "portable_sha256": "11fd82e23fa4caf25ac797d12772ff4a918957f07202134a0a4915491e48082d",
+      "object": "objects/sha256/11/11fd82e23fa4caf25ac797d12772ff4a918957f07202134a0a4915491e48082d.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic/final_indexed-release.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 40812,
+      "original_sha256": "c2b2a25485d49b6fe9932b552339bb2cf671d29d5c5e442cd9e708a21d2ec3ba",
+      "portable_size_bytes": 40812,
+      "portable_sha256": "cfd4191a1358d789952fe4dd7b2529a5e33dd3f63514f6d393f3a1811d25c8be",
+      "object": "objects/sha256/cf/cfd4191a1358d789952fe4dd7b2529a5e33dd3f63514f6d393f3a1811d25c8be.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic/measurement-appendix.rs",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 4561,
+      "original_sha256": "be361157b8786375b5335ebd171e021e9f1fc24f60ad255f47aa88c3e15126ca",
+      "portable_size_bytes": 4561,
+      "portable_sha256": "be361157b8786375b5335ebd171e021e9f1fc24f60ad255f47aa88c3e15126ca",
+      "object": "objects/sha256/be/be361157b8786375b5335ebd171e021e9f1fc24f60ad255f47aa88c3e15126ca.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic/run-diagnostic.sh",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 1113,
+      "original_sha256": "26dcf5fabcb3494c788a9061649c1e31d486ea080688801d75940bea7a60d77d",
+      "portable_size_bytes": 1107,
+      "portable_sha256": "f886dddc422ccac7d64cc6140addbf997c341e4df73f5d07c7f5b073495beab8",
+      "object": "objects/sha256/f8/f886dddc422ccac7d64cc6140addbf997c341e4df73f5d07c7f5b073495beab8.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 7
+        },
+        {
+          "prefix_role": "task-local ALSA pkg-config probe directory",
+          "portable_prefix": "__ALSA_PROBE_ROOT__",
+          "occurrences": 1
+        },
+        {
+          "prefix_role": "task-local native editor linker directory",
+          "portable_prefix": "__EDITOR_LINK_ROOT__",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic/source-manifest.json",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 19983,
+      "original_sha256": "64adb2d0430c0bacda7975c2b2735b28da7827c90a3efaf7f319830e746f4226",
+      "portable_size_bytes": 19983,
+      "portable_sha256": "16e212d84e6d5e7f381e88f18831bb4cbd44cfd957dd92992910a5027d1f708b",
+      "object": "objects/sha256/16/16e212d84e6d5e7f381e88f18831bb4cbd44cfd957dd92992910a5027d1f708b.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 4
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic/summarize.py",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 4861,
+      "original_sha256": "16bf3a14d23e727ba9664622e1c74cdce0427d2d57b2a2b53a0a6ff3c73434ad",
+      "portable_size_bytes": 4861,
+      "portable_sha256": "08019e74f7a05549e3adcd5edf59f4f00ee193babe78d4ed0bbcd8abcf79d62c",
+      "object": "objects/sha256/08/08019e74f7a05549e3adcd5edf59f4f00ee193babe78d4ed0bbcd8abcf79d62c.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic/summary.csv",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 12209,
+      "original_sha256": "2392fbd6a86c2838963ecf85c561757037a6d0d43efb606bf36e9dfeede9b062",
+      "portable_size_bytes": 12209,
+      "portable_sha256": "2392fbd6a86c2838963ecf85c561757037a6d0d43efb606bf36e9dfeede9b062",
+      "object": "objects/sha256/23/2392fbd6a86c2838963ecf85c561757037a6d0d43efb606bf36e9dfeede9b062.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/empty-queue-diagnostic/summary.json",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 49232,
+      "original_sha256": "79b73eb84cc6ec1edb9b5cf684b11d25799368c5a620f8fe7a8137cf0233e46c",
+      "portable_size_bytes": 49232,
+      "portable_sha256": "79b73eb84cc6ec1edb9b5cf684b11d25799368c5a620f8fe7a8137cf0233e46c",
+      "object": "objects/sha256/79/79b73eb84cc6ec1edb9b5cf684b11d25799368c5a620f8fe7a8137cf0233e46c.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/environment.txt",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 390,
+      "original_sha256": "3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307",
+      "portable_size_bytes": 390,
+      "portable_sha256": "3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307",
+      "object": "objects/sha256/3f/3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/all-samples.json",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 3540456,
+      "original_sha256": "29aa5f499e67cad4448c232cb456ffac75e44b795540eb833107591b5bda72a8",
+      "portable_size_bytes": 3540456,
+      "portable_sha256": "29aa5f499e67cad4448c232cb456ffac75e44b795540eb833107591b5bda72a8",
+      "object": "objects/sha256/29/29aa5f499e67cad4448c232cb456ffac75e44b795540eb833107591b5bda72a8.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/append_indexed-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 300600,
+      "original_sha256": "e01b7acfe6c463e888aa0a862b1def9ca5e2ec783f21f5d4ea5958ccd4ac15ea",
+      "portable_size_bytes": 300600,
+      "portable_sha256": "b6c781aecd1d559ba330ba5f96f13e8547d65fa7014539b5d2f12bac86a9d373",
+      "object": "objects/sha256/b6/b6c781aecd1d559ba330ba5f96f13e8547d65fa7014539b5d2f12bac86a9d373.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/append_indexed-release.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 305038,
+      "original_sha256": "6e8e96168e9168e23023141b65daff87ecc172775cfbefb9bf3066bc9126f9a9",
+      "portable_size_bytes": 305038,
+      "portable_sha256": "59f2316db684cd3ba3c9ae916981f48c2bed141a43eee8104d901661183d704f",
+      "object": "objects/sha256/59/59f2316db684cd3ba3c9ae916981f48c2bed141a43eee8104d901661183d704f.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/baseline-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 292499,
+      "original_sha256": "4326092d1d6f10bc7081c11cfdbd5a17ffe228f0aa83369c7d2192e869076d1e",
+      "portable_size_bytes": 292499,
+      "portable_sha256": "d6055932e23e1007e5c01743b8c86aa41e7fd276ebf1ebe4f494f44589ef86d0",
+      "object": "objects/sha256/d6/d6055932e23e1007e5c01743b8c86aa41e7fd276ebf1ebe4f494f44589ef86d0.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/baseline-release.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 296664,
+      "original_sha256": "a241b3ba725e5919942828b67051254ec09d2134a77096a3dff076d5e6b4b945",
+      "portable_size_bytes": 296664,
+      "portable_sha256": "17900215ee29f829187aa3253af0ed49da7391a1627956b18f454fb72c4e568a",
+      "object": "objects/sha256/17/17900215ee29f829187aa3253af0ed49da7391a1627956b18f454fb72c4e568a.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/comparison-report.md",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 209260,
+      "original_sha256": "102eb5c190018c7c03aa7d4eccee6eb8760f283c4535c645e50f199dd217ae9b",
+      "portable_size_bytes": 209260,
+      "portable_sha256": "102eb5c190018c7c03aa7d4eccee6eb8760f283c4535c645e50f199dd217ae9b",
+      "object": "objects/sha256/10/102eb5c190018c7c03aa7d4eccee6eb8760f283c4535c645e50f199dd217ae9b.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/cursor-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 289698,
+      "original_sha256": "7587fac3633149f0b1241f2b6691d8c6070b487bb2715d56dfc36ba2302c5987",
+      "portable_size_bytes": 289698,
+      "portable_sha256": "f5c3a7885b804e2ea5de877c52eb150214190798724e814322dc6bcd1eff24e9",
+      "object": "objects/sha256/f5/f5c3a7885b804e2ea5de877c52eb150214190798724e814322dc6bcd1eff24e9.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/cursor-release.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 294169,
+      "original_sha256": "62393ecf185ff72b546ae21a6cf011959030dd2e42b0e43e3e88d07ffdfc3cfb",
+      "portable_size_bytes": 294169,
+      "portable_sha256": "bc649fc8d02b37976ba84319ec6c4a9af7fbe0444f76c656b3b5c79fdd37a429",
+      "object": "objects/sha256/bc/bc649fc8d02b37976ba84319ec6c4a9af7fbe0444f76c656b3b5c79fdd37a429.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/environment.txt",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 390,
+      "original_sha256": "3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307",
+      "portable_size_bytes": 390,
+      "portable_sha256": "3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307",
+      "object": "objects/sha256/3f/3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/final-parameter-tests.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 2954,
+      "original_sha256": "07e2ec2033c70b7fc48764cb471b4e2c46ce8e42db6cfe50aac3a145f20857e8",
+      "portable_size_bytes": 2954,
+      "portable_sha256": "07e2ec2033c70b7fc48764cb471b4e2c46ce8e42db6cfe50aac3a145f20857e8",
+      "object": "objects/sha256/07/07e2ec2033c70b7fc48764cb471b4e2c46ce8e42db6cfe50aac3a145f20857e8.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/indexed-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 290939,
+      "original_sha256": "8854a872345284ff10c79cd9cfe71693ba2dacc37a98f429d13e9a6b4e305e86",
+      "portable_size_bytes": 290939,
+      "portable_sha256": "06db3fcd22d84068a3fa247d10a6fe630aaa74ebb2edcf68918b9390a44a9a91",
+      "object": "objects/sha256/06/06db3fcd22d84068a3fa247d10a6fe630aaa74ebb2edcf68918b9390a44a9a91.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/indexed-release.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 295359,
+      "original_sha256": "d612443944fa88457b122e071ebcc5dfc98b410ba6dd5bd5cc8cc5e6c5eb95a2",
+      "portable_size_bytes": 295359,
+      "portable_sha256": "4dca6bf5ecf8492a33ba40f366504c005b92988adeb2f229e19d380eeb7b11a1",
+      "object": "objects/sha256/4d/4dca6bf5ecf8492a33ba40f366504c005b92988adeb2f229e19d380eeb7b11a1.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/measurement-appendix.rs",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 9863,
+      "original_sha256": "0f63f379e6fe672734a5ae0f56b0b177ea9ac33e0a9935273f258a438bf0d63d",
+      "portable_size_bytes": 9863,
+      "portable_sha256": "0f63f379e6fe672734a5ae0f56b0b177ea9ac33e0a9935273f258a438bf0d63d",
+      "object": "objects/sha256/0f/0f63f379e6fe672734a5ae0f56b0b177ea9ac33e0a9935273f258a438bf0d63d.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/run-comparison.sh",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 1106,
+      "original_sha256": "8b838bdc827763f2ff41f5bcb26cd07fba27b28fdc60baafb5ef32cf3bb43dc5",
+      "portable_size_bytes": 1100,
+      "portable_sha256": "b2201556fd90811f03e9e1a7ae74341de60b413f4271cb46e1cd2b2db1214150",
+      "object": "objects/sha256/b2/b2201556fd90811f03e9e1a7ae74341de60b413f4271cb46e1cd2b2db1214150.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 7
+        },
+        {
+          "prefix_role": "task-local ALSA pkg-config probe directory",
+          "portable_prefix": "__ALSA_PROBE_ROOT__",
+          "occurrences": 1
+        },
+        {
+          "prefix_role": "task-local native editor linker directory",
+          "portable_prefix": "__EDITOR_LINK_ROOT__",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/source-manifest.json",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 39521,
+      "original_sha256": "d6bab913a8903257a147a99fda4b445dcff242c8efe416279191a778750850b5",
+      "portable_size_bytes": 39521,
+      "portable_sha256": "da61cae6b8fb85d7a73d773e7bbf719f0bebf2db284214f55d8c5289fd9857f5",
+      "object": "objects/sha256/da/da61cae6b8fb85d7a73d773e7bbf719f0bebf2db284214f55d8c5289fd9857f5.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 9
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/summarize.py",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 5081,
+      "original_sha256": "924d1f6f38ec2dc167c91a946bea1c26ee6ef0bfed671900f27ad45f53dacdb8",
+      "portable_size_bytes": 5081,
+      "portable_sha256": "924d1f6f38ec2dc167c91a946bea1c26ee6ef0bfed671900f27ad45f53dacdb8",
+      "object": "objects/sha256/92/924d1f6f38ec2dc167c91a946bea1c26ee6ef0bfed671900f27ad45f53dacdb8.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/summary.csv",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 179214,
+      "original_sha256": "bfc17fa34022e461f2be55aea51efa10456c90df0d5dbdfd2615caf3b556a530",
+      "portable_size_bytes": 179214,
+      "portable_sha256": "bfc17fa34022e461f2be55aea51efa10456c90df0d5dbdfd2615caf3b556a530",
+      "object": "objects/sha256/bf/bfc17fa34022e461f2be55aea51efa10456c90df0d5dbdfd2615caf3b556a530.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/extended/summary.json",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 765963,
+      "original_sha256": "2975760c6574fe49f77ff881517bf5ea4c701d1993ea08dd1544a2cf9839e861",
+      "portable_size_bytes": 765963,
+      "portable_sha256": "2975760c6574fe49f77ff881517bf5ea4c701d1993ea08dd1544a2cf9839e861",
+      "object": "objects/sha256/29/2975760c6574fe49f77ff881517bf5ea4c701d1993ea08dd1544a2cf9839e861.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/all-samples.json",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 4706509,
+      "original_sha256": "e998f940a7a81d344ec63cba9ac01f5f576195eb0127c4acc0fda22992116bd7",
+      "portable_size_bytes": 4706509,
+      "portable_sha256": "e998f940a7a81d344ec63cba9ac01f5f576195eb0127c4acc0fda22992116bd7",
+      "object": "objects/sha256/e9/e998f940a7a81d344ec63cba9ac01f5f576195eb0127c4acc0fda22992116bd7.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/baseline-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 390511,
+      "original_sha256": "009809ef02533eb94959e8881d5389f5e5f2f52134c8cef2061b109942668315",
+      "portable_size_bytes": 390511,
+      "portable_sha256": "26d18864b02b97747a1a5b86e7cc352cdd08e4106aa6559e92074b0da5674188",
+      "object": "objects/sha256/26/26d18864b02b97747a1a5b86e7cc352cdd08e4106aa6559e92074b0da5674188.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/baseline-release.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 395984,
+      "original_sha256": "799a958436b1376c8e1ba7c05633bae7eb9aea40f943c56b84f529ad9f875fa1",
+      "portable_size_bytes": 395984,
+      "portable_sha256": "b079ff9fb4e356ce6961fd93307e183b2b262bf02df9cebf5af52001ebafc6c0",
+      "object": "objects/sha256/b0/b079ff9fb4e356ce6961fd93307e183b2b262bf02df9cebf5af52001ebafc6c0.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/comparison-report.md",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 281185,
+      "original_sha256": "d38c1a0cd715f514cb987d5547b76eeb4a8ccf3bc8c718714507e9537415a8a6",
+      "portable_size_bytes": 281185,
+      "portable_sha256": "d38c1a0cd715f514cb987d5547b76eeb4a8ccf3bc8c718714507e9537415a8a6",
+      "object": "objects/sha256/d3/d38c1a0cd715f514cb987d5547b76eeb4a8ccf3bc8c718714507e9537415a8a6.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/cursor-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 386326,
+      "original_sha256": "0a3212f97606f15b7ddfb24e430e4305162573280a1a284439ce772c0b001bf1",
+      "portable_size_bytes": 386326,
+      "portable_sha256": "6492effcec02517a5520f55eef2133d8bb62a4c47f4079d8bdbd15d5c62cdc18",
+      "object": "objects/sha256/64/6492effcec02517a5520f55eef2133d8bb62a4c47f4079d8bdbd15d5c62cdc18.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/cursor-release.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 392239,
+      "original_sha256": "2b6e4e9b6e3e87e80530a04be7de5f6e18cea8a1e088a6dd63f625a235350349",
+      "portable_size_bytes": 392239,
+      "portable_sha256": "94be00c720f4e6712ebc537a737471a435eabc7ce78fb9d25bed93fa4f482096",
+      "object": "objects/sha256/94/94be00c720f4e6712ebc537a737471a435eabc7ce78fb9d25bed93fa4f482096.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/environment.txt",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 390,
+      "original_sha256": "3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307",
+      "portable_size_bytes": 390,
+      "portable_sha256": "3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307",
+      "object": "objects/sha256/3f/3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/final-parameter-tests.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 3622,
+      "original_sha256": "3529291caae9b8a5f3214d2655745f86ce4ec427db2f27d960570e1b7707664e",
+      "portable_size_bytes": 3622,
+      "portable_sha256": "3529291caae9b8a5f3214d2655745f86ce4ec427db2f27d960570e1b7707664e",
+      "object": "objects/sha256/35/3529291caae9b8a5f3214d2655745f86ce4ec427db2f27d960570e1b7707664e.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/final_indexed-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 399172,
+      "original_sha256": "3cac38deb00fb78fc9f67b8369c56b7868f11a943c6322258bf7d7b18321823a",
+      "portable_size_bytes": 399172,
+      "portable_sha256": "0500a240a2c699b92d9d5f9bb77f431e224420ab09d4a84e9fd6d5e8d460d92b",
+      "object": "objects/sha256/05/0500a240a2c699b92d9d5f9bb77f431e224420ab09d4a84e9fd6d5e8d460d92b.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/final_indexed-release.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 404850,
+      "original_sha256": "ffe31ac3d7152959cfa9a0c77d6e02cedabd0679f6704f9bc89fd28e17428542",
+      "portable_size_bytes": 404850,
+      "portable_sha256": "8ee11fe507c76484d0e96c6fbfe424ada555598fa1ff20517ccf94ec1a032a44",
+      "object": "objects/sha256/8e/8ee11fe507c76484d0e96c6fbfe424ada555598fa1ff20517ccf94ec1a032a44.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/indexed-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 388152,
+      "original_sha256": "bee78c4c7847365fa9b8cd9a92a9d84caebc2756fedc05a04a434fd37409a8a3",
+      "portable_size_bytes": 388152,
+      "portable_sha256": "0b5a55932c5569c03416d6d2d14acafb48a2d5eb0741a70a65bdd394d75b0282",
+      "object": "objects/sha256/0b/0b5a55932c5569c03416d6d2d14acafb48a2d5eb0741a70a65bdd394d75b0282.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/indexed-release.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 394002,
+      "original_sha256": "41a2e069b9285ff8bdd7e1244359a3ac66e57388bd73311fcc3e7327a62033b2",
+      "portable_size_bytes": 394002,
+      "portable_sha256": "d58402f0004094773a21995f9143bbe0aca638afd4787189eb35baa244e8dddb",
+      "object": "objects/sha256/d5/d58402f0004094773a21995f9143bbe0aca638afd4787189eb35baa244e8dddb.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/key-receipts.txt",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 1674,
+      "original_sha256": "e0eb67b026485c752108dd889d01af4cafa52092931987f1ab81298efcf50aae",
+      "portable_size_bytes": 1674,
+      "portable_sha256": "e0eb67b026485c752108dd889d01af4cafa52092931987f1ab81298efcf50aae",
+      "object": "objects/sha256/e0/e0eb67b026485c752108dd889d01af4cafa52092931987f1ab81298efcf50aae.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/measurement-appendix.rs",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 12848,
+      "original_sha256": "f1ca17373be3ba5d33d52e1fa12d51e9c6791e01fb9e8f7cccaf6a5ab8e8a4f9",
+      "portable_size_bytes": 12848,
+      "portable_sha256": "f1ca17373be3ba5d33d52e1fa12d51e9c6791e01fb9e8f7cccaf6a5ab8e8a4f9",
+      "object": "objects/sha256/f1/f1ca17373be3ba5d33d52e1fa12d51e9c6791e01fb9e8f7cccaf6a5ab8e8a4f9.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/review-summary.md",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 8721,
+      "original_sha256": "16e86988401fff0800b6d25eb26dca402937a90ff93295c1e74b597ec1a0ffa3",
+      "portable_size_bytes": 8721,
+      "portable_sha256": "16e86988401fff0800b6d25eb26dca402937a90ff93295c1e74b597ec1a0ffa3",
+      "object": "objects/sha256/16/16e86988401fff0800b6d25eb26dca402937a90ff93295c1e74b597ec1a0ffa3.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/run-comparison.sh",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 1099,
+      "original_sha256": "7740c4fedb19a7ac4edbbdba6ce2ed701da278ec7c2e7aa3282824868d84bb43",
+      "portable_size_bytes": 1093,
+      "portable_sha256": "a97364b0289b99d5f1866ef5f5db4d326ef63baac672e0ab9ae64cbb8443f50e",
+      "object": "objects/sha256/a9/a97364b0289b99d5f1866ef5f5db4d326ef63baac672e0ab9ae64cbb8443f50e.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 7
+        },
+        {
+          "prefix_role": "task-local ALSA pkg-config probe directory",
+          "portable_prefix": "__ALSA_PROBE_ROOT__",
+          "occurrences": 1
+        },
+        {
+          "prefix_role": "task-local native editor linker directory",
+          "portable_prefix": "__EDITOR_LINK_ROOT__",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/source-manifest.json",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 39681,
+      "original_sha256": "aaa13e06c8887bfa8d920f1295e930a04303af0023c3f751dab9f2753808a1aa",
+      "portable_size_bytes": 39681,
+      "portable_sha256": "83fecce07f8c0d3f7ddd59ddf4ced3dfeacb250bb8100124e3706b37e4ab82ad",
+      "object": "objects/sha256/83/83fecce07f8c0d3f7ddd59ddf4ced3dfeacb250bb8100124e3706b37e4ab82ad.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 10
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/summarize.py",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 5227,
+      "original_sha256": "c54c979493581d08ad3f85e103b0086a3f088e1baae827435380e3d2789c38a5",
+      "portable_size_bytes": 5227,
+      "portable_sha256": "c54c979493581d08ad3f85e103b0086a3f088e1baae827435380e3d2789c38a5",
+      "object": "objects/sha256/c5/c54c979493581d08ad3f85e103b0086a3f088e1baae827435380e3d2789c38a5.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/summary.csv",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 242539,
+      "original_sha256": "2bf85f3ba718caf7fd427a3cf3773bdfa5068a0260362298818fbfda9c790af1",
+      "portable_size_bytes": 242539,
+      "portable_sha256": "2bf85f3ba718caf7fd427a3cf3773bdfa5068a0260362298818fbfda9c790af1",
+      "object": "objects/sha256/2b/2bf85f3ba718caf7fd427a3cf3773bdfa5068a0260362298818fbfda9c790af1.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/final/summary.json",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 1017928,
+      "original_sha256": "99b2aecf129d38184a6d56b0c52a6ef82a598b50694660b2db2a334eadb6aa14",
+      "portable_size_bytes": 1017928,
+      "portable_sha256": "99b2aecf129d38184a6d56b0c52a6ef82a598b50694660b2db2a334eadb6aa14",
+      "object": "objects/sha256/99/99b2aecf129d38184a6d56b0c52a6ef82a598b50694660b2db2a334eadb6aa14.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/indexed-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 81591,
+      "original_sha256": "a6f13cda040c9ce33e3c06aed28ff0496a6265efffd3c6c59a5a4d2864be05b3",
+      "portable_size_bytes": 81591,
+      "portable_sha256": "3ed127f7214fc7171299f9b4982661bfdaa7bb81000d242b3eebee61513bdd4e",
+      "object": "objects/sha256/3e/3ed127f7214fc7171299f9b4982661bfdaa7bb81000d242b3eebee61513bdd4e.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/indexed-parameter-tests.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 2678,
+      "original_sha256": "780dd79153b6791b679d7dea27f883def1e99429e7eda5c5b605948345acb364",
+      "portable_size_bytes": 2678,
+      "portable_sha256": "780dd79153b6791b679d7dea27f883def1e99429e7eda5c5b605948345acb364",
+      "object": "objects/sha256/78/780dd79153b6791b679d7dea27f883def1e99429e7eda5c5b605948345acb364.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/indexed-release.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 82816,
+      "original_sha256": "fe030ba91fa9500d8d3e90b6885ab3733146f0df20d39e8fe1059bd146d16808",
+      "portable_size_bytes": 82816,
+      "portable_sha256": "3ba93a7530f034e2ea07b0aaf35b43d36e3aa93bc85b6b5c40a969bd73560662",
+      "object": "objects/sha256/3b/3ba93a7530f034e2ea07b0aaf35b43d36e3aa93bc85b6b5c40a969bd73560662.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/maintained/baseline-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 390528,
+      "original_sha256": "13ca8710b23b9b40550e78ec16beda09f1059584856ddab51e688fc69e682540",
+      "portable_size_bytes": 390528,
+      "portable_sha256": "d343bd64123b4c9aa03a9f118e07058dcb15c2255938da5ccd6ec9b75db9a9f0",
+      "object": "objects/sha256/d3/d343bd64123b4c9aa03a9f118e07058dcb15c2255938da5ccd6ec9b75db9a9f0.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/maintained/cursor-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 386385,
+      "original_sha256": "5b8b1b9b27b75911a22c071ab09d61f024811100754131c666d4f517d990d813",
+      "portable_size_bytes": 386385,
+      "portable_sha256": "bf1c1bb972a9b3a08645dfc478ce75b87f68b5e0a8bb6640240d37692ff945f6",
+      "object": "objects/sha256/bf/bf1c1bb972a9b3a08645dfc478ce75b87f68b5e0a8bb6640240d37692ff945f6.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/maintained/environment.txt",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 390,
+      "original_sha256": "3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307",
+      "portable_size_bytes": 390,
+      "portable_sha256": "3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307",
+      "object": "objects/sha256/3f/3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/maintained/indexed-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 388173,
+      "original_sha256": "fec8d31cd7aff3b37b581a1ccbe3aeb111284ddeab6d794ed3886c0ba3c8add0",
+      "portable_size_bytes": 388173,
+      "portable_sha256": "b5ca164c2eda97777fdf38fa1e579be74b7b238f0857f76b5908b6523dba46c0",
+      "object": "objects/sha256/b5/b5ca164c2eda97777fdf38fa1e579be74b7b238f0857f76b5908b6523dba46c0.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/maintained/maintained_indexed-debug.log",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 408276,
+      "original_sha256": "98cca2f2ae61724bfc27b5cd4254ac39b0c16b74751b770aadcf7975a44fca45",
+      "portable_size_bytes": 408276,
+      "portable_sha256": "e8e8c99fdaa2b3dfd9308e04ca747e52938da3f83df3488ca47643446befe6d8",
+      "object": "objects/sha256/e8/e8e8c99fdaa2b3dfd9308e04ca747e52938da3f83df3488ca47643446befe6d8.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/maintained/measurement-appendix.rs",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 12848,
+      "original_sha256": "f1ca17373be3ba5d33d52e1fa12d51e9c6791e01fb9e8f7cccaf6a5ab8e8a4f9",
+      "portable_size_bytes": 12848,
+      "portable_sha256": "f1ca17373be3ba5d33d52e1fa12d51e9c6791e01fb9e8f7cccaf6a5ab8e8a4f9",
+      "object": "objects/sha256/f1/f1ca17373be3ba5d33d52e1fa12d51e9c6791e01fb9e8f7cccaf6a5ab8e8a4f9.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/maintained/run-comparison.sh",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 1114,
+      "original_sha256": "26467f2d09509581973a89ab6a94a420336644ef515b0d75a5d433d42240a608",
+      "portable_size_bytes": 1108,
+      "portable_sha256": "b412ddd0facb177a99fc49313181e88237d737dab7576ab69595de7f373c58cc",
+      "object": "objects/sha256/b4/b412ddd0facb177a99fc49313181e88237d737dab7576ab69595de7f373c58cc.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 7
+        },
+        {
+          "prefix_role": "task-local ALSA pkg-config probe directory",
+          "portable_prefix": "__ALSA_PROBE_ROOT__",
+          "occurrences": 1
+        },
+        {
+          "prefix_role": "task-local native editor linker directory",
+          "portable_prefix": "__EDITOR_LINK_ROOT__",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/maintained/source-manifest.json",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 39608,
+      "original_sha256": "b148cdd72484ebf1670ed877730c66b38b90acecbfcff1e19d0aa5a7192bbd82",
+      "portable_size_bytes": 39608,
+      "portable_sha256": "faeecaec9bb7a1be351d34ba383d05dccf24544d42b068532033baa83f9cb574",
+      "object": "objects/sha256/fa/faeecaec9bb7a1be351d34ba383d05dccf24544d42b068532033baa83f9cb574.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 9
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/maintained/summarize.py",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 5202,
+      "original_sha256": "80ca1c60378fdb9d8c127762d97c3a8ccd629c53ea1ca4131a17b88da578cb78",
+      "portable_size_bytes": 5202,
+      "portable_sha256": "80ca1c60378fdb9d8c127762d97c3a8ccd629c53ea1ca4131a17b88da578cb78",
+      "object": "objects/sha256/80/80ca1c60378fdb9d8c127762d97c3a8ccd629c53ea1ca4131a17b88da578cb78.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/measurement-appendix.rs",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 6506,
+      "original_sha256": "4a0a7866da325ba990e7607299e0676639356487685b858ea89e45a5e2ad8263",
+      "portable_size_bytes": 6506,
+      "portable_sha256": "4a0a7866da325ba990e7607299e0676639356487685b858ea89e45a5e2ad8263",
+      "object": "objects/sha256/4a/4a0a7866da325ba990e7607299e0676639356487685b858ea89e45a5e2ad8263.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/all-samples.json",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 4703134,
+      "original_sha256": "a1ad00b03877368f6e2362f0dd3d39cf13939fa0981524a897d3fbdea57eb19b",
+      "portable_size_bytes": 4703134,
+      "portable_sha256": "a1ad00b03877368f6e2362f0dd3d39cf13939fa0981524a897d3fbdea57eb19b",
+      "object": "objects/sha256/a1/a1ad00b03877368f6e2362f0dd3d39cf13939fa0981524a897d3fbdea57eb19b.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/baseline-debug.log",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 390557,
+      "original_sha256": "3d5948980a447e3e2d2a119cb6be31647793136bbf2373f377b35e99f404586c",
+      "portable_size_bytes": 390557,
+      "portable_sha256": "2a86c75fc794f5fea3c1451ed9e1ac9c9e1e38d555e313c1a9627bb9615ab1c2",
+      "object": "objects/sha256/2a/2a86c75fc794f5fea3c1451ed9e1ac9c9e1e38d555e313c1a9627bb9615ab1c2.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/baseline-empty-debug.log",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 39270,
+      "original_sha256": "94f054782e9f286a7205911b2d37c20a59488ea76b5da7c8afa4fe62222b1a86",
+      "portable_size_bytes": 39270,
+      "portable_sha256": "57f930c94343f5a68b9eea4d21948a06dba04a2211d76c5e7fa6e03167b8b3c6",
+      "object": "objects/sha256/57/57f930c94343f5a68b9eea4d21948a06dba04a2211d76c5e7fa6e03167b8b3c6.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/baseline-empty-release.log",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 39747,
+      "original_sha256": "186798ba5cf93687a220d92cf7b48de3d81f5bb1cb8e879c226b9e29da201d2f",
+      "portable_size_bytes": 39747,
+      "portable_sha256": "3a3aaeb8db8be20013872d198bfe9a75a66a1b4c758e77f8a252ec118ff2740c",
+      "object": "objects/sha256/3a/3a3aaeb8db8be20013872d198bfe9a75a66a1b4c758e77f8a252ec118ff2740c.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/baseline-release.log",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 396006,
+      "original_sha256": "924f7dcf2274616f01e88c5a75d3b918b3b9e8e3c4fd14261f92d30e57b76675",
+      "portable_size_bytes": 396006,
+      "portable_sha256": "589cf5e59a020ee3783816b0602ed86e5deb84966ede75cc3a4f7f91da756c33",
+      "object": "objects/sha256/58/589cf5e59a020ee3783816b0602ed86e5deb84966ede75cc3a4f7f91da756c33.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/comparison-report.md",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 280450,
+      "original_sha256": "0bb9ca8a42aecde51f748f6967bbecdbd2aa26bc2485954468d7dc6fddac4d9e",
+      "portable_size_bytes": 280450,
+      "portable_sha256": "0bb9ca8a42aecde51f748f6967bbecdbd2aa26bc2485954468d7dc6fddac4d9e",
+      "object": "objects/sha256/0b/0bb9ca8a42aecde51f748f6967bbecdbd2aa26bc2485954468d7dc6fddac4d9e.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/cursor-debug.log",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 386366,
+      "original_sha256": "0c724396a546468e97b109a4fa188fafbbb2e48cc35c9fde9aa38241ac14bf8b",
+      "portable_size_bytes": 386366,
+      "portable_sha256": "67ca23879ea47af0ff5f3ab6ff8543c8110139507317a47c6fb2aea48cff32ee",
+      "object": "objects/sha256/67/67ca23879ea47af0ff5f3ab6ff8543c8110139507317a47c6fb2aea48cff32ee.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/cursor-release.log",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 392278,
+      "original_sha256": "9792016373e2e0ec41b4d376c492c997b18850292ec6ee9e049e8b9009357973",
+      "portable_size_bytes": 392278,
+      "portable_sha256": "092758655133a28c7222d6b93469e4de2b5936b74839924cf813e355dbe33ba3",
+      "object": "objects/sha256/09/092758655133a28c7222d6b93469e4de2b5936b74839924cf813e355dbe33ba3.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/diagnostic-report.md",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 16710,
+      "original_sha256": "30f85d6a85c99ac0895bc352e0ec91234affe4c984f83aa9e041580b432d9750",
+      "portable_size_bytes": 16710,
+      "portable_sha256": "30f85d6a85c99ac0895bc352e0ec91234affe4c984f83aa9e041580b432d9750",
+      "object": "objects/sha256/30/30f85d6a85c99ac0895bc352e0ec91234affe4c984f83aa9e041580b432d9750.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/empty-all-samples.json",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 225460,
+      "original_sha256": "a8d775db616081fd0b61b23c48dba67677f8b0f1de1ab9a55b3eaebda3b95248",
+      "portable_size_bytes": 225460,
+      "portable_sha256": "a8d775db616081fd0b61b23c48dba67677f8b0f1de1ab9a55b3eaebda3b95248",
+      "object": "objects/sha256/a8/a8d775db616081fd0b61b23c48dba67677f8b0f1de1ab9a55b3eaebda3b95248.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/empty-appendix.rs",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 4561,
+      "original_sha256": "be361157b8786375b5335ebd171e021e9f1fc24f60ad255f47aa88c3e15126ca",
+      "portable_size_bytes": 4561,
+      "portable_sha256": "be361157b8786375b5335ebd171e021e9f1fc24f60ad255f47aa88c3e15126ca",
+      "object": "objects/sha256/be/be361157b8786375b5335ebd171e021e9f1fc24f60ad255f47aa88c3e15126ca.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/empty-summary.csv",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 12038,
+      "original_sha256": "fe9940039848f1f8e3e1bcd5b8b77a92db7f3348297c1316877e9b114ed70bcf",
+      "portable_size_bytes": 12038,
+      "portable_sha256": "fe9940039848f1f8e3e1bcd5b8b77a92db7f3348297c1316877e9b114ed70bcf",
+      "object": "objects/sha256/fe/fe9940039848f1f8e3e1bcd5b8b77a92db7f3348297c1316877e9b114ed70bcf.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/empty-summary.json",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 49061,
+      "original_sha256": "6da302df016979aec37317099783751e736d41ce989165362f00203aa55c7e28",
+      "portable_size_bytes": 49061,
+      "portable_sha256": "6da302df016979aec37317099783751e736d41ce989165362f00203aa55c7e28",
+      "object": "objects/sha256/6d/6da302df016979aec37317099783751e736d41ce989165362f00203aa55c7e28.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/environment.txt",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 390,
+      "original_sha256": "3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307",
+      "portable_size_bytes": 390,
+      "portable_sha256": "3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307",
+      "object": "objects/sha256/3f/3fec78d55913554a7b414d695abf9f38dc07efcdfaab279d95048322418e4307.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/full-appendix.rs",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 12848,
+      "original_sha256": "f1ca17373be3ba5d33d52e1fa12d51e9c6791e01fb9e8f7cccaf6a5ab8e8a4f9",
+      "portable_size_bytes": 12848,
+      "portable_sha256": "f1ca17373be3ba5d33d52e1fa12d51e9c6791e01fb9e8f7cccaf6a5ab8e8a4f9",
+      "object": "objects/sha256/f1/f1ca17373be3ba5d33d52e1fa12d51e9c6791e01fb9e8f7cccaf6a5ab8e8a4f9.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/indexed-debug.log",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 388170,
+      "original_sha256": "6e606ad0dec20feb661b7e90aa43f79f4b1c7909136b5f4bd33f1516fa469b2e",
+      "portable_size_bytes": 388170,
+      "portable_sha256": "fef2abb8f46d3b5b79d2a268efa5880933479581d836b4026db987f3bd10391b",
+      "object": "objects/sha256/fe/fef2abb8f46d3b5b79d2a268efa5880933479581d836b4026db987f3bd10391b.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/indexed-release.log",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 393956,
+      "original_sha256": "cfdbb55bceb650494a975342319a802d2143ba4f912d75ed5f5128338cbe51a7",
+      "portable_size_bytes": 393956,
+      "portable_sha256": "c26e52c1c89e04e8c3f7ba58341e10e7edd7134a279f0485d015e7ef4d2d3be8",
+      "object": "objects/sha256/c2/c26e52c1c89e04e8c3f7ba58341e10e7edd7134a279f0485d015e7ef4d2d3be8.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/key-full-receipts.txt",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 1673,
+      "original_sha256": "62634409b97cbe5b3de81e368045efd1009d94912bed5a28dc847c7e69bed61b",
+      "portable_size_bytes": 1673,
+      "portable_sha256": "62634409b97cbe5b3de81e368045efd1009d94912bed5a28dc847c7e69bed61b",
+      "object": "objects/sha256/62/62634409b97cbe5b3de81e368045efd1009d94912bed5a28dc847c7e69bed61b.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/review-summary.md",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 9501,
+      "original_sha256": "af314cda484e1420d3b90878115727aaadb533c0c804fa07edd8c5f1fe8186da",
+      "portable_size_bytes": 9501,
+      "portable_sha256": "af314cda484e1420d3b90878115727aaadb533c0c804fa07edd8c5f1fe8186da",
+      "object": "objects/sha256/af/af314cda484e1420d3b90878115727aaadb533c0c804fa07edd8c5f1fe8186da.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/run-comparisons.sh",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 1627,
+      "original_sha256": "9c3405ae438f858ffbb2f9e747ce547f9914da8226a440e1b676bda9782ff6ce",
+      "portable_size_bytes": 1621,
+      "portable_sha256": "fdad0452ea4938314240f5a43cccb8c46f970ece2eab4c7977355b1d3e46a1ce",
+      "object": "objects/sha256/fd/fdad0452ea4938314240f5a43cccb8c46f970ece2eab4c7977355b1d3e46a1ce.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 9
+        },
+        {
+          "prefix_role": "task-local ALSA pkg-config probe directory",
+          "portable_prefix": "__ALSA_PROBE_ROOT__",
+          "occurrences": 1
+        },
+        {
+          "prefix_role": "task-local native editor linker directory",
+          "portable_prefix": "__EDITOR_LINK_ROOT__",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/source-manifest.json",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 39879,
+      "original_sha256": "2c562dab42554d409403f931040e697e8fea46b153841d0a73f046a1546d4491",
+      "portable_size_bytes": 39879,
+      "portable_sha256": "46e528a533453c378d71fbbd3f69722cde98950953c7d42c547796e3f580e3a4",
+      "object": "objects/sha256/46/46e528a533453c378d71fbbd3f69722cde98950953c7d42c547796e3f580e3a4.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 10
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/sparse_final-debug.log",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 397476,
+      "original_sha256": "1e120783831ad8d9aaff5e9e0d19b595e0dc8f8b3067b0acbc7133a6bbdcf320",
+      "portable_size_bytes": 397476,
+      "portable_sha256": "a333ba0c611f37abec3af3e99f6b33f49b54926e3952c8885b3df744d9c2807f",
+      "object": "objects/sha256/a3/a333ba0c611f37abec3af3e99f6b33f49b54926e3952c8885b3df744d9c2807f.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/sparse_final-empty-debug.log",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 39820,
+      "original_sha256": "c78d7ee5503fb85ed70eca9711b1e464aeff3c734a82c23056c96bab4a8e8f8f",
+      "portable_size_bytes": 39820,
+      "portable_sha256": "c3a4c8caa6b34290766491e63747bb7e037ff30933976c211c7e3d124b7ecca6",
+      "object": "objects/sha256/c3/c3a4c8caa6b34290766491e63747bb7e037ff30933976c211c7e3d124b7ecca6.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/sparse_final-empty-release.log",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 40355,
+      "original_sha256": "9710a6d21bfe2f44a1515aa5dd456b663e46bb683724870b0b67308638e535a9",
+      "portable_size_bytes": 40355,
+      "portable_sha256": "562da57a450e39f6ca199ad13afa5571dd282ecd932ed4fda0f7246650f27538",
+      "object": "objects/sha256/56/562da57a450e39f6ca199ad13afa5571dd282ecd932ed4fda0f7246650f27538.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/sparse_final-release.log",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 403171,
+      "original_sha256": "93a858ec9c9eac6ddb9594667fd87a74d174306712483c1d371c204d97c6e272",
+      "portable_size_bytes": 403171,
+      "portable_sha256": "67fbd4379ca0c27fcbc977785059c2feb7187dbdbba4df43456b3a9338e2b0f7",
+      "object": "objects/sha256/67/67fbd4379ca0c27fcbc977785059c2feb7187dbdbba4df43456b3a9338e2b0f7.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 2
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/summarize-empty.py",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 4912,
+      "original_sha256": "3a043106d51a67dba79224a15f150adb48ffbb4714d52a0c70c592c7e45677b8",
+      "portable_size_bytes": 4912,
+      "portable_sha256": "89e4fa7ad19d562a97bfd2ba28e588367b43330c51a79d622cf7d7b56a755f53",
+      "object": "objects/sha256/89/89e4fa7ad19d562a97bfd2ba28e588367b43330c51a79d622cf7d7b56a755f53.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/summarize-full.py",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 5209,
+      "original_sha256": "5d932ade2746d5131c7a5d07a65c0591d8fa97cb7d7a2f7a966bececab70bcbf",
+      "portable_size_bytes": 5209,
+      "portable_sha256": "5d932ade2746d5131c7a5d07a65c0591d8fa97cb7d7a2f7a966bececab70bcbf",
+      "object": "objects/sha256/5d/5d932ade2746d5131c7a5d07a65c0591d8fa97cb7d7a2f7a966bececab70bcbf.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/summary.csv",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 241950,
+      "original_sha256": "113a9df91300755a6e1caf53d7ef7f6d31caff2cd357c3303fcac3d708e3d319",
+      "portable_size_bytes": 241950,
+      "portable_sha256": "113a9df91300755a6e1caf53d7ef7f6d31caff2cd357c3303fcac3d708e3d319",
+      "object": "objects/sha256/11/113a9df91300755a6e1caf53d7ef7f6d31caff2cd357c3303fcac3d708e3d319.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/populated/summary.json",
+      "provenance_class": "final-sparse-comparison-with-historical-controls",
+      "original_size_bytes": 1017339,
+      "original_sha256": "80696c93fd6dce4eed7c3d35db4c48a15902d6d050aa0e51eb9485fb3fce99b3",
+      "portable_size_bytes": 1017339,
+      "portable_sha256": "80696c93fd6dce4eed7c3d35db4c48a15902d6d050aa0e51eb9485fb3fce99b3",
+      "object": "objects/sha256/80/80696c93fd6dce4eed7c3d35db4c48a15902d6d050aa0e51eb9485fb3fce99b3.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/run-comparison.sh",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 1076,
+      "original_sha256": "0f561e0862f5969f2d31b60905383c64956bb6807388c5ec0a933c484ff9f83c",
+      "portable_size_bytes": 1070,
+      "portable_sha256": "3d2ce8e4238744f845eca1e2d550d067eb32a836f47d56ac2c94770c5583b381",
+      "object": "objects/sha256/3d/3d2ce8e4238744f845eca1e2d550d067eb32a836f47d56ac2c94770c5583b381.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 7
+        },
+        {
+          "prefix_role": "task-local ALSA pkg-config probe directory",
+          "portable_prefix": "__ALSA_PROBE_ROOT__",
+          "occurrences": 1
+        },
+        {
+          "prefix_role": "task-local native editor linker directory",
+          "portable_prefix": "__EDITOR_LINK_ROOT__",
+          "occurrences": 1
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/source-manifest.json",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 29240,
+      "original_sha256": "30e756e20569f9dc2b30c8f07c119608947db8fc056c675d3d892f12b0fcaa12",
+      "portable_size_bytes": 29240,
+      "portable_sha256": "03856e2f1d70912f9ef34b788adc530ec6bdfd501621b6cf6e152e084d0906da",
+      "object": "objects/sha256/03/03856e2f1d70912f9ef34b788adc530ec6bdfd501621b6cf6e152e084d0906da.txt",
+      "normalization": [
+        {
+          "prefix_role": "shared task root",
+          "portable_prefix": "__EVIDENCE_ROOT__",
+          "occurrences": 3
+        }
+      ]
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/summarize.py",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 4872,
+      "original_sha256": "45a291cfe28b98dabf349fd8a8577c221ad928c45d22f54a19990abc8895f791",
+      "portable_size_bytes": 4872,
+      "portable_sha256": "45a291cfe28b98dabf349fd8a8577c221ad928c45d22f54a19990abc8895f791",
+      "object": "objects/sha256/45/45a291cfe28b98dabf349fd8a8577c221ad928c45d22f54a19990abc8895f791.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/summary.csv",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 36913,
+      "original_sha256": "385cc5730a712f6f0e0ad4d9cbac37ba47be950dae4149af2f976d9cbd0ef758",
+      "portable_size_bytes": 36913,
+      "portable_sha256": "385cc5730a712f6f0e0ad4d9cbac37ba47be950dae4149af2f976d9cbd0ef758",
+      "object": "objects/sha256/38/385cc5730a712f6f0e0ad4d9cbac37ba47be950dae4149af2f976d9cbd0ef758.txt",
+      "normalization": []
+    },
+    {
+      "path": "DAW-parameter-storage-qa/parameter-comparison/summary.json",
+      "provenance_class": "historical-comparison-never-final-acceptance",
+      "original_size_bytes": 159398,
+      "original_sha256": "d725cf8636d3ab624bca8c3b4100f960999131668f1524337df6964f72da1ad2",
+      "portable_size_bytes": 159398,
+      "portable_sha256": "d725cf8636d3ab624bca8c3b4100f960999131668f1524337df6964f72da1ad2",
+      "object": "objects/sha256/d7/d725cf8636d3ab624bca8c3b4100f960999131668f1524337df6964f72da1ad2.txt",
+      "normalization": []
+    }
+  ]
+}

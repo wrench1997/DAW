@@ -1,0 +1,12 @@
+{
+  "started_utc": "2026-10-09T15:07:07.869676+00:00",
+  "test_sha256": "d09d2d72e4a5c76adad988c475247911713075e5a1d96570e1b396df96836362",
+  "helper_sha256": "a29e4942b5fe027e9891a28e5d7f7611d2c5b2f12ef5f283599d15c4278aee64",
+  "source_manifest_sha256": "537556050359bce593205d6be30835a192acbc3e6af44ca5ef80aefbb78fa9d1",
+  "source_commit": "fb7b91a82d31226485a22e9e5e0b73d1f9a1fe3f",
+  "build_profile": "debug",
+  "budget_filter": null,
+  "profile_filter": null,
+  "cpu_load_threads": "0",
+  "declared_environment": "New parameter-storage helper fresh initial-state immediate-note correctness; direct production PluginChain, no reused-instance restore or hidden settling"
+}

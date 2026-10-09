@@ -845,3 +845,35 @@ Stochas used-instance empty reset then exact native-created row115/step4 cell re
 repaint (probability 20, velocity 127, length/offset 0). All windows close and Shutdown exits 0.
 Native receipt directory: the separately retained `parameter-storage-sparse` QA directory.
 The prior dense-index native run remains explicitly superseded and is not counted here.
+
+
+## 2026-10-09 15:02 UTC — Integrate reviewed parameter storage
+
+- Prior exacte487a50 completes preview37940326948 successfully:215 Python cases (211 passed/four Unix-only skips),1,165 app +15 helper +5+2 protocol tests, optimized/static-CRT/provenance/PE/ZIP and extracted-helper checks. Quality37940326370 retains only before/after native paint failure; repaint comparison skipped, source/state/control/lifecycle pass. Upload skipped and both artifact APIs0. Delivered-source candidate578 tracked files plus separately historical optimized244f622 appendix has SHAac79bb1d60c4ab2fc151607e5aacf116cd2e035e0b0babbe425d3b1ad32101e2.
+- Only reviewedbf573a4 integrates asfb7b91a82d31226485a22e9e5e0b73d1f9a1fe3f. Additive docs conflicts preserve both histories; production/vendor/Cargo/tests byte-match the approved feature. All41 receipt hashes and native receipt450ee6a6 independently verified. Original registry archive + cumulative patch reconstruct44 files; original license/manifests unchanged. Complete combined gates and a new-helper2048/fresh-state regression are now running, independently of older optimized evidence.
+
+
+## 2026-10-09 15:05 UTC — Exact combined parameter source gates pass
+
+- Fresh1170 app +22 helper +5+2 protocol and1166 core tests pass, zero failed/ignored on default stack. Both strict root Clippy modes,fmt,all-bin build,actual helper smoke,both MSVC source profiles pass. Actual vendor harness passes339 available cases with one known missing upstream fixture excluded and all26 doctests; no source/cfg/lint relaxation.215 Python tests pass, including four actual Unix descriptor cases.
+- Copied combined helper SHAa29e4942b5fe027e9891a28e5d7f7611d2c5b2f12ef5f283599d15c4278aee64 matches the independently reviewed/native-tested final sparse helper. No production source changed after those gates. Existing435 package inputs close links/vendor/historical QA hashes; new source-only cost/regression receipt publication will be checked separately. Shared build target handed to the bounded default2048/fresh-state validator; no new performance matrix implied.
+
+
+## 2026-10-09 15:07 UTC — New parameter helper bounded correctness pass
+
+- Exactfb7b91a/helpera29e4942 passes four default2048 production-graph ordinary/routed × fixed/changing cases plus fresh-state immediate-note; both invocations exit0. Actual stopped Retry/new timing revision/epoch after genuine FX0→32 change retains exact4896/7328 PDC, routed8on/8off, finite nonzero PCM and exact worker delivery. No new worker fault or capture overflow.
+- Changing debug ordinary/routed callbacks retain13/14 core and15/14 outer interval overruns. The new source-linked receipt is correctness-only; no old optimized result is relabeled for this changed helper. Root approved a separate immutable full comparative-history appendix and concise hash-bound summary/raw-cost index in Git. Original rejected sources/observations remain preserved; no binaries/assets/captured state/audio are included in that new evidence.
+
+
+## 2026-10-09 15:10 UTC — Parameter helper correctness receipt publication
+
+- Preserved52 source/text files byte-exact from archivea02b5d2deee6793902a067897ad36b025728a50f237f47a3da65417921e1cc37 (134041bytes), under [qa/parameter_storage_regression](../qa/parameter_storage_regression/RESULT.md). All124 production hashes matchfb7b91a; testd09d2d72e4a5c76adad988c475247911713075e5a1d96570e1b396df96836362 uses exact helpera29e4942 and unchanged raw harnessc38f30c4. Original/published hashes and all observations remain; only task-root prefixes are normalized.
+- The separate combined fresh-state test uses captured input104bc8ab… and first nonzero sample24/peak0.22329643368721008. This is not the source-owner's newly native-created011ded9e… state with per-profile60/18/73/55 onsets. Both are independently successful and separately attributed.
+- New exact whitelist/pinned-inventory packaging tests and all other Python suites pass223 cases; actual package input closure is487 before the concise comparative-cost set. Root/vendor/runtime bytes remain unchanged. Historical QA and old optimized244f622 evidence are not relabeled.
+
+
+## 2026-10-09 15:15 UTC — Preserve full comparative history separately
+
+- Approved immutable source-only appendix `parameter-storage-bf573a4-source-evidence.zip`:5092126bytes,SHA1bd33df7c1ec9afa58cd5b6a508b7af12c4a84f68ce4ad12cda5dca3f388773c. Content-addressed435 text objects reconstruct1677 logical files, with450 members verified,28 source/license associations and no binaries/assets/state/audio/cache payload. All rejected drafts and original observations remain; the archive avoids redundant copies without losing reconstructability.
+- [Nine concise Git records](../qa/parameter_storage_cost/README.md) preserve complete final matrices, constructor/native/source results,105-entry raw-cost inventory and exact full-archive identity. Raw/published hashes and normalization counts remain explicit; the private reverse map is not published. The two original CSVs keep their CRLF bytes with exact file-specific attributes; every other new text file usesLF. Strict whitelists/inventories reject tampering and partial sets.
+- Exact final Python aggregate passes **231 cases**, including four actual Unix descriptor tests. Real package closure is **496 inputs** with all existing and new provenance/link checks; all61 new correctness/cost files retain publication bytes, including raw CRLF CSVs. Production source remainsfb7b91a and helpera29e4942, with no post-gate runtime edits.

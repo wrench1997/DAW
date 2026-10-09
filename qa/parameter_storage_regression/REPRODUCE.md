@@ -1,0 +1,7 @@
+# Reproduce as new evidence
+
+This archive is immutable source-and-receipt evidence, not an application distribution. Use a clean source checkout at the recorded commit, the recorded Rust1.99 toolchain/native dependencies, and the verified official GPL-family plugin versions/module hashes in receipts/plugin-provenance.json. Provide the original input states locally (or separately record newly generated inputs); none are bundled. The exact Surge input-state hash is in SUMMARY.json.
+
+Retained script templates contain semantic ${...} path tokens after publication normalization. Before executing, copy templates to a NEW workspace and replace these tokens with appropriate local paths; never mutate this evidence archive. Set DAW_SOURCE, DAW_SOURCE_COMMIT, NATIVE_HARNESS_PROFILE=debug, CARGO_BUILD_JOBS=2, CARGO_TARGET_DIR and the recorded toolchain/linker environment. Run build_and_copy.py to create a fresh source snapshot and compiler-artifact-bound test/helper. Rebuilding produces new hashes and observations, not a claim to duplicate historical timing.
+
+After all builds stop, run run_profiles.sh with REQUIRED_TIMING_SOURCE_COMMIT and NATIVE_TIMING_BUDGETS=2048, filter native_timing_all_exposed_profiles. Run a second unique directory with filter native_timing_fresh_restored_surge_first_note_and_state. The runner sets NATIVE_TIMING_QA_ROOT and VST3_VALIDATION_ROOT; supply the plugin bundles and input files beneath that fixture root. Preserve any failed run; do not retry until success. No GUI or hardware audio is needed or qualified.

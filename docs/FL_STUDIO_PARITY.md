@@ -209,3 +209,14 @@ Official workflow references used to define high-level capability targets:
 - [Automation](https://www.image-line.com/fl-studio-learning/fl-studio-online-manual/html/automation.htm)
 - [Audio recording](https://www.image-line.com/fl-studio-learning/fl-studio-online-manual/html/recording_audio.htm)
 - [Supported plug-in standards](https://www.image-line.com/fl-studio-learning/fl-studio-online-manual/html/plugins_supported.htm)
+
+
+## Bounded parameter-storage follow-on
+
+Reviewedbf573a4, integratedfb7b91a, prepares finite8192 input/4096 output queue/total
+point storage with checked admission and sticky output-fault Process/Save fences.
+Measured parameter operations allocate/free zero only while their container owner
+exists. Construction1,573,104 requested bytes excludes outer wrappers/allocator
+metadata. Small/read/populated-suffix cost regressions remain documented alongside
+corrected drafts. App/timing/wire and single-thread GUI/DSP remain unchanged; this
+is not hardware realtime qualification or native resize latency improvement.

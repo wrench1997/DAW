@@ -507,6 +507,120 @@ class PackageTests(unittest.TestCase):
         self.assertIn("11/14 raw-core interval overruns", report)
         self.assertIn("historical4fdfbc2/244f622", report)
 
+    def parameter_qa_payload(self):
+        source = Path(__file__).resolve().parents[1]
+        return {name: (source / name).read_bytes() for name in pkg.PARAMETER_QA_FILES}
+
+    def test_parameter_receipts_are_distinct_complete_and_packaged(self):
+        payload = self.parameter_qa_payload()
+        pkg.validate_parameter_qa(payload)
+        self.assertFalse(pkg.PARAMETER_QA_FILES & (pkg.TIMING_COMBINED_QA_FILES | pkg.TIMING_DEBUG_QA_FILES | pkg.NATIVE_EDIT_QA_FILES))
+        for name, data in payload.items():
+            destination = self.repo / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        info = pkg.verify_package(self.create())
+        self.assertTrue(pkg.PARAMETER_QA_FILES <= set(info["source_documents"]))
+
+    def test_parameter_receipts_reject_missing_changed_or_extra_payload(self):
+        original = self.parameter_qa_payload()
+        name = pkg.PARAMETER_QA_ROOT + "RESULT.md"
+        payload = dict(original); del payload[name]
+        with self.assertRaisesRegex(pkg.PackageError, "Incomplete parameter"):
+            pkg.validate_parameter_qa(payload)
+        payload = dict(original); payload[name] += b"changed outcome"
+        with self.assertRaisesRegex(pkg.PackageError, "inventory/hash mismatch"):
+            pkg.validate_parameter_qa(payload)
+        for extra in ("undeclared.txt", "../escape.txt", "runs\\bad.txt"):
+            with self.subTest(extra=extra):
+                payload = dict(original); payload[pkg.PARAMETER_QA_ROOT + extra] = b"extra"
+                with self.assertRaisesRegex(pkg.PackageError, "Unexpected parameter"):
+                    pkg.validate_parameter_qa(payload)
+
+    def test_parameter_receipts_reject_rewritten_inventory(self):
+        payload = self.parameter_qa_payload()
+        name = pkg.PARAMETER_QA_ROOT + "SHA256SUMS.json"
+        report = pkg.PARAMETER_QA_ROOT + "RESULT.md"
+        old = pkg.digest(payload[report]).encode()
+        payload[report] += b"changed outcome"
+        payload[name] = payload[name].replace(old, pkg.digest(payload[report]).encode())
+        with self.assertRaisesRegex(pkg.PackageError, "pinned inventory/hash mismatch"):
+            pkg.validate_parameter_qa(payload)
+
+    def test_parameter_receipts_pin_scope_and_lf_policy(self):
+        source = Path(__file__).resolve().parents[1]
+        self.assertIn("/qa/parameter_storage_regression/** text eol=lf", (source / ".gitattributes").read_text())
+        payload = self.parameter_qa_payload()
+        summary = json.loads(payload[pkg.PARAMETER_QA_ROOT + "SUMMARY.json"])
+        self.assertEqual(summary["source_commit"], "fb7b91a82d31226485a22e9e5e0b73d1f9a1fe3f")
+        self.assertEqual(summary["manifested_production_files"], 124)
+        self.assertEqual(summary["binaries"]["vst3-host-helper"], "a29e4942b5fe027e9891a28e5d7f7611d2c5b2f12ef5f283599d15c4278aee64")
+        self.assertEqual([run["exit_status"] for run in summary["runs"].values()], [0, 0])
+        report = payload[pkg.PARAMETER_QA_ROOT + "RESULT.md"].decode()
+        self.assertEqual([case["core_interval_overruns"] for case in summary["cases"]], [0, 13, 0, 14])
+        self.assertEqual([case["outer_interval_overruns"] for case in summary["cases"]], [0, 15, 0, 14])
+        self.assertIn("historical 4fdfbc2/244f622", report)
+
+    def parameter_cost_qa_payload(self):
+        source = Path(__file__).resolve().parents[1]
+        return {name: (source / name).read_bytes() for name in pkg.PARAMETER_COST_QA_FILES}
+
+    def test_parameter_cost_receipts_are_distinct_complete_and_packaged(self):
+        payload = self.parameter_cost_qa_payload()
+        pkg.validate_parameter_cost_qa(payload)
+        self.assertFalse(pkg.PARAMETER_COST_QA_FILES & (pkg.TIMING_COMBINED_QA_FILES | pkg.TIMING_DEBUG_QA_FILES | pkg.NATIVE_EDIT_QA_FILES))
+        for name, data in payload.items():
+            destination = self.repo / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        info = pkg.verify_package(self.create())
+        self.assertTrue(pkg.PARAMETER_COST_QA_FILES <= set(info["source_documents"]))
+
+    def test_parameter_cost_receipts_reject_missing_changed_or_extra_payload(self):
+        original = self.parameter_cost_qa_payload()
+        name = pkg.PARAMETER_COST_QA_ROOT + "README.md"
+        payload = dict(original); del payload[name]
+        with self.assertRaisesRegex(pkg.PackageError, "Incomplete parameter cost"):
+            pkg.validate_parameter_cost_qa(payload)
+        payload = dict(original); payload[name] += b"changed outcome"
+        with self.assertRaisesRegex(pkg.PackageError, "inventory/hash mismatch"):
+            pkg.validate_parameter_cost_qa(payload)
+        for extra in ("undeclared.txt", "../escape.txt", "runs\\bad.txt"):
+            with self.subTest(extra=extra):
+                payload = dict(original); payload[pkg.PARAMETER_COST_QA_ROOT + extra] = b"extra"
+                with self.assertRaisesRegex(pkg.PackageError, "Unexpected parameter cost"):
+                    pkg.validate_parameter_cost_qa(payload)
+
+    def test_parameter_cost_receipts_reject_rewritten_inventory(self):
+        payload = self.parameter_cost_qa_payload()
+        name = pkg.PARAMETER_COST_QA_ROOT + "SHA256SUMS.txt"
+        report = pkg.PARAMETER_COST_QA_ROOT + "README.md"
+        old = pkg.digest(payload[report]).encode()
+        payload[report] += b"changed outcome"
+        payload[name] = payload[name].replace(old, pkg.digest(payload[report]).encode())
+        with self.assertRaisesRegex(pkg.PackageError, "pinned inventory/hash mismatch"):
+            pkg.validate_parameter_cost_qa(payload)
+
+    def test_parameter_cost_receipts_pin_scope_and_byte_policy(self):
+        source = Path(__file__).resolve().parents[1]
+        attrs = (source / ".gitattributes").read_text()
+        self.assertIn("/qa/parameter_storage_cost/** text eol=lf", attrs)
+        payload = self.parameter_cost_qa_payload()
+        for name in ("final-summary.csv", "final-empty-summary.csv"):
+            self.assertIn(f"/qa/parameter_storage_cost/{name} -text -whitespace", attrs)
+            self.assertIn(b"\r\n", payload[pkg.PARAMETER_COST_QA_ROOT + name])
+        receipt = json.loads(payload[pkg.PARAMETER_COST_QA_ROOT + "archive-receipt.json"])
+        self.assertEqual(receipt["implementation_commit"], "bf573a45826466db0952eb1f4bd598937c68d1c5")
+        self.assertEqual(receipt["archive"]["sha256"], "1bd33df7c1ec9afa58cd5b6a508b7af12c4a84f68ce4ad12cda5dca3f388773c")
+        self.assertEqual(receipt["archive"]["size_bytes"], 5092126)
+        self.assertEqual(receipt["logical_files"], 1677)
+        self.assertEqual(receipt["unique_text_objects"], 435)
+        validation = json.loads(payload[pkg.PARAMETER_COST_QA_ROOT + "validation-receipt.json"])
+        self.assertEqual(validation["constructor_measurements"]["combined_requested_bytes"], 1573104)
+        self.assertEqual(validation["frozen_source"]["helper_sha256"], "a29e4942b5fe027e9891a28e5d7f7611d2c5b2f12ef5f283599d15c4278aee64")
+        report = payload[pkg.PARAMETER_COST_QA_ROOT + "README.md"].decode()
+        self.assertIn("Some random reads, small/distinct workloads and large populated suffixes remain slower", report)
+
     def test_prerelease_package_version_is_preserved(self):
         for name in ("Cargo.toml", "Cargo.lock"):
             path = self.repo / name

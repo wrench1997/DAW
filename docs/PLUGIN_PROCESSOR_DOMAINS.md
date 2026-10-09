@@ -64,8 +64,9 @@ Linux factory/frame IRunLoop ownership remain in the existing synchronous paths.
 worker to detach and no module-unload-on-hung-worker policy implied by this commit.
 
 At the ownership checkpoint the temporary `LegacyProcessBridge` retained GUI-parameter locks, feedback
-behavior and host data-exchange callbacks. ParameterChanges/EventList storage and public plugin
-metering still require bounded, allocation/lock-safe replacements before enabling a processor
+behavior and host data-exchange callbacks. The follow-on parameter storage below supplies
+bounded prepared parameter containers, but their mutexes remain; EventList storage, data exchange
+and public metering still need separate allocation/lock-safe work before enabling a processor
 thread. An `Arc<Mutex<Plugin>>` would not solve native editor stalls.
 
 ## Subsequent work, separately reviewed
@@ -238,7 +239,7 @@ DSP execution in the still-single-threaded helper. COM integration fixtures inte
 and lock and cannot be used as whole-process real-time evidence.
 
 
-### New-helper integration verification
+### Historical native-edit integration verification
 
 Runtime87ceb06 matches reviewed48d3f97 for all41 bound source files; App/timing,
 helper dispatch/wire and Cargo remain unchanged from244f622. Fresh integration
@@ -256,7 +257,7 @@ Expected PDC4896/7328 and routed8on/8off remain exact, with no new worker fault 
 capture overflow. Both test invocations exit0. Changing debug callbacks still have
 11/14 raw-core interval overruns; this is correctness acceptance, not a new
 performance matrix, device or realtime qualification. Older optimized results keep
-their original helper/source identity. New exact Windows CI remains required.
+their original helper/source identity. This native-edit source subsequently passed Windows source/preview at e487a50; known paint failure remains.
 
 The separately source-bound [new-helper correctness receipt](../qa/native_edit_regression/RESULT.md) retains all four default2048 delivery passes, fresh-state immediate-note proof, and the11/14 changing-callback debug interval overruns for87ceb06/helperdca08353. The historical optimized4fdfbc2/244f622 results are not reattributed to this helper.
 
@@ -393,3 +394,41 @@ cases retain small overhead: 4096 queues 0.001081→0.001473 ms; 8192 queues
 0.001412→0.001802 ms. These figures include real reads/checksums; construction, preparation,
 reset and empty-queue verification are separately measured. All superseded results remain
 in the comparison receipt.
+
+
+### Combined parameter-source verification
+
+Integratedfb7b91a is byte-identical to reviewedbf573a4 for production/vendor/Cargo/
+root tests; App/timing/wire are unchanged. Fresh Linux1170 app +22 helper +5+2
+protocol tests,1166 core,339 available vendor cases (one explicit missing fixture),
+26 doctests,231 Python, fmt, both strict root Clippy modes, all-bin build/helper
+smoke and both MSVC source checks pass. Pristine archive plus pinned patch rebuilds
+44 source files and preserves original license/manifests. Fresh copied helper
+`a29e4942b5fe027e9891a28e5d7f7611d2c5b2f12ef5f283599d15c4278aee64`
+matches the independent native/first-note evidence. New bounded default2048/fresh-
+state production-graph regression passes all four default2048 cases plus fresh state,
+both exits0, with exact PDC4896/7328 and routed8on/8off. Changing debug cases retain
+13/14 core and15/14 outer interval overruns; no performance upgrade is claimed.
+Exact Windows CI remains a separate gate.
+
+The [exact parameter-helper regression](../qa/parameter_storage_regression/RESULT.md) binds124 production files tofb7b91a and new helpera29e4942. Its separate fresh-instance case uses historical captured input state104bc8ab… (not the newly authored011ded9e… native blob), with onset24/peak0.22329643368721008 and exact controller/component values. Both inputs have independent functional proof; their test identities and13/14 debug core interval overruns remain distinct.
+
+
+### Portable comparative evidence
+
+The [concise cost/source record](../qa/parameter_storage_cost/README.md) retains
+complete final debug/optimized CSV matrices, constructor accounting, native/source
+receipts and the exhaustive105-entry raw-cost index. The separate source-bundle
+appendix `parameter-storage-bf573a4-source-evidence.zip` has SHA256
+`1bd33df7c1ec9afa58cd5b6a508b7af12c4a84f68ce4ad12cda5dca3f388773c`
+and5092126 bytes. Its1677 logical files are losslessly represented by435 unique
+text objects with path maps and a reconstruction verifier; all450 archive members,
+source identities and28 license/provenance associations are checked. Prior cursor,
+indexed, maintained and dense candidates remain explicitly historical, including
+original folders named `final`; no failed comparison is sampled away.
+
+Only named private path prefixes are normalized, with original and published hashes.
+Raw cost CSV CRLF bytes are preserved exactly. The archive excludes executables,
+plugin assets, captured state/audio, caches and unrelated files. It is a validation
+appendix, not another Git source tree or a renewed whole-plugin realtime measurement.
+The earlier optimized244f622 appendix stays independently historical.

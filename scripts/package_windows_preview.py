@@ -446,6 +446,75 @@ NATIVE_EDIT_QA_FILES = frozenset((
     "qa/native_edit_regression/runs/run002-fresh-restored-state/source-snapshot.json",
 ))
 NATIVE_EDIT_INVENTORY_SHA256 = "2d23f1e0a049feabd04925287a6924bf65d2350baaa518a3c18125c7f0b29f6a"
+PARAMETER_QA_ROOT = "qa/parameter_storage_regression/"
+PARAMETER_QA_FILES = frozenset((
+    "qa/parameter_storage_regression/INVENTORY.json",
+    "qa/parameter_storage_regression/README.md",
+    "qa/parameter_storage_regression/REPRODUCE.md",
+    "qa/parameter_storage_regression/RESULT.md",
+    "qa/parameter_storage_regression/SHA256SUMS.json",
+    "qa/parameter_storage_regression/SUMMARY.json",
+    "qa/parameter_storage_regression/build_and_copy.py",
+    "qa/parameter_storage_regression/native_timing_tests.rs",
+    "qa/parameter_storage_regression/prepare_snapshot.py",
+    "qa/parameter_storage_regression/receipts/build-binding.json",
+    "qa/parameter_storage_regression/receipts/build-environment.json",
+    "qa/parameter_storage_regression/receipts/debug-resource-watch.jsonl",
+    "qa/parameter_storage_regression/receipts/executable-attribution.json",
+    "qa/parameter_storage_regression/receipts/git-object-verification.json",
+    "qa/parameter_storage_regression/receipts/helper-build.jsonl",
+    "qa/parameter_storage_regression/receipts/helper-build.stderr",
+    "qa/parameter_storage_regression/receipts/native-build.jsonl",
+    "qa/parameter_storage_regression/receipts/native-build.stderr",
+    "qa/parameter_storage_regression/receipts/plugin-provenance.json",
+    "qa/parameter_storage_regression/receipts/source-snapshot.json",
+    "qa/parameter_storage_regression/run_profiles.sh",
+    "qa/parameter_storage_regression/runs/run001-default2048/b2048_routedfalse_changingfalse-cold-trace.json",
+    "qa/parameter_storage_regression/runs/run001-default2048/b2048_routedfalse_changingfalse.json",
+    "qa/parameter_storage_regression/runs/run001-default2048/b2048_routedfalse_changingtrue-cold-trace.json",
+    "qa/parameter_storage_regression/runs/run001-default2048/b2048_routedfalse_changingtrue.json",
+    "qa/parameter_storage_regression/runs/run001-default2048/b2048_routedtrue_changingfalse-cold-trace.json",
+    "qa/parameter_storage_regression/runs/run001-default2048/b2048_routedtrue_changingfalse.json",
+    "qa/parameter_storage_regression/runs/run001-default2048/b2048_routedtrue_changingtrue-cold-trace.json",
+    "qa/parameter_storage_regression/runs/run001-default2048/b2048_routedtrue_changingtrue.json",
+    "qa/parameter_storage_regression/runs/run001-default2048/build-binding.json",
+    "qa/parameter_storage_regression/runs/run001-default2048/build_and_copy.py",
+    "qa/parameter_storage_regression/runs/run001-default2048/executable-attribution.json",
+    "qa/parameter_storage_regression/runs/run001-default2048/exit-status.txt",
+    "qa/parameter_storage_regression/runs/run001-default2048/host-resources-after.json",
+    "qa/parameter_storage_regression/runs/run001-default2048/host-resources-before.json",
+    "qa/parameter_storage_regression/runs/run001-default2048/native_timing_tests.rs",
+    "qa/parameter_storage_regression/runs/run001-default2048/prepare_snapshot.py",
+    "qa/parameter_storage_regression/runs/run001-default2048/raw.log",
+    "qa/parameter_storage_regression/runs/run001-default2048/run-binding.json",
+    "qa/parameter_storage_regression/runs/run001-default2048/source-snapshot.json",
+    "qa/parameter_storage_regression/runs/run002-fresh-restored-state/build-binding.json",
+    "qa/parameter_storage_regression/runs/run002-fresh-restored-state/build_and_copy.py",
+    "qa/parameter_storage_regression/runs/run002-fresh-restored-state/executable-attribution.json",
+    "qa/parameter_storage_regression/runs/run002-fresh-restored-state/exit-status.txt",
+    "qa/parameter_storage_regression/runs/run002-fresh-restored-state/fresh-restored-surge.json",
+    "qa/parameter_storage_regression/runs/run002-fresh-restored-state/host-resources-after.json",
+    "qa/parameter_storage_regression/runs/run002-fresh-restored-state/host-resources-before.json",
+    "qa/parameter_storage_regression/runs/run002-fresh-restored-state/native_timing_tests.rs",
+    "qa/parameter_storage_regression/runs/run002-fresh-restored-state/prepare_snapshot.py",
+    "qa/parameter_storage_regression/runs/run002-fresh-restored-state/raw.log",
+    "qa/parameter_storage_regression/runs/run002-fresh-restored-state/run-binding.json",
+    "qa/parameter_storage_regression/runs/run002-fresh-restored-state/source-snapshot.json",
+))
+PARAMETER_INVENTORY_SHA256 = "ccdf6dad6dffa54a6f986a9ab607d6f8f27a7b29626eaac50232accffa8d9a14"
+PARAMETER_COST_QA_ROOT = "qa/parameter_storage_cost/"
+PARAMETER_COST_QA_FILES = frozenset((
+    "qa/parameter_storage_cost/README.md",
+    "qa/parameter_storage_cost/SHA256SUMS.txt",
+    "qa/parameter_storage_cost/archive-receipt.json",
+    "qa/parameter_storage_cost/final-empty-summary.csv",
+    "qa/parameter_storage_cost/final-review-summary.md",
+    "qa/parameter_storage_cost/final-summary.csv",
+    "qa/parameter_storage_cost/native-parameter-storage-receipt.json",
+    "qa/parameter_storage_cost/raw-cost-inventory.json",
+    "qa/parameter_storage_cost/validation-receipt.json",
+))
+PARAMETER_COST_INVENTORY_SHA256 = "da353fbbc050cd18f9855934c73b9969f411a71cfe3249168b827663af285436"
 # Explicitly reviewed documentation that may land on an independent branch.
 OPTIONAL_SOURCE_FILES = frozenset((
     "docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md",
@@ -458,7 +527,7 @@ OPTIONAL_SOURCE_FILES = frozenset((
     "docs/PLUGIN_MIDI_ROUTING.md", "docs/PLUGIN_MIDI_ROUTE_VALIDATION.md",
     "docs/PLUGIN_PROCESSOR_DOMAINS.md", "docs/PLUGIN_STATE_RESTORE_LIMITS.md", "docs/PLUGIN_TIMING.md",
     "docs/LINUX_VST3_EDITORS.md", "docs/LINUX_VST3_EDITOR_VALIDATION.md", "docs/METRONOME.md",
-)) | REAL_VST3_QA_FILES | MIDI_ROUTE_QA_FILES | TIMING_DEBUG_QA_FILES | TIMING_COMBINED_QA_FILES | NATIVE_EDIT_QA_FILES
+)) | REAL_VST3_QA_FILES | MIDI_ROUTE_QA_FILES | TIMING_DEBUG_QA_FILES | TIMING_COMBINED_QA_FILES | NATIVE_EDIT_QA_FILES | PARAMETER_QA_FILES | PARAMETER_COST_QA_FILES
 GENERATED_FILES = ("START_HERE_PREVIEW.txt", "BUILD_PROVENANCE.json", "DEPENDENCIES.json")
 PAYLOAD_FILES = frozenset(BINARIES + SOURCE_FILES + GENERATED_FILES)
 PACKAGE_FILES = PAYLOAD_FILES | {"SHA256SUMS.txt"}
@@ -895,6 +964,40 @@ def validate_native_edit_qa(payload):
     require(json.loads(payload[inventory]) == expected, "Native edit QA inventory/hash mismatch")
 
 
+def validate_parameter_qa(payload):
+    """Pin exact parameter-helper correctness evidence, preserving historical runs."""
+    present = set(payload) & PARAMETER_QA_FILES
+    unexpected = {name for name in payload if name.startswith(PARAMETER_QA_ROOT)} - PARAMETER_QA_FILES
+    require(not unexpected, "Unexpected parameter QA path")
+    if not present:
+        return
+    require(present == PARAMETER_QA_FILES, "Incomplete parameter QA source bundle")
+    inventory = PARAMETER_QA_ROOT + "SHA256SUMS.json"
+    require(digest(payload[inventory]) == PARAMETER_INVENTORY_SHA256,
+            "Parameter QA pinned inventory/hash mismatch")
+    expected = {path.removeprefix(PARAMETER_QA_ROOT): digest(payload[path])
+                for path in PARAMETER_QA_FILES - {inventory}}
+    require(json.loads(payload[inventory]) == expected, "Parameter QA inventory/hash mismatch")
+
+
+def validate_parameter_cost_qa(payload):
+    """Preserve finite-storage cost tradeoffs and the immutable full-appendix identity."""
+    present = set(payload) & PARAMETER_COST_QA_FILES
+    unexpected = {name for name in payload if name.startswith(PARAMETER_COST_QA_ROOT)} - PARAMETER_COST_QA_FILES
+    require(not unexpected, "Unexpected parameter cost QA path")
+    if not present:
+        return
+    require(present == PARAMETER_COST_QA_FILES, "Incomplete parameter cost QA source bundle")
+    inventory = PARAMETER_COST_QA_ROOT + "SHA256SUMS.txt"
+    require(digest(payload[inventory]) == PARAMETER_COST_INVENTORY_SHA256,
+            "Parameter cost QA pinned inventory/hash mismatch")
+    expected = "".join(
+        f"{digest(payload[path])}  {path.removeprefix(PARAMETER_COST_QA_ROOT)}\n"
+        for path in sorted(PARAMETER_COST_QA_FILES - {inventory})
+    ).encode("utf-8")
+    require(payload[inventory] == expected, "Parameter cost QA inventory/hash mismatch")
+
+
 def create_package(repo, binaries, metadata, build_info, output):
     validate_build_info(build_info)
     manifest = tomllib.loads(read_input(repo / "Cargo.toml").decode())
@@ -950,6 +1053,8 @@ def create_package(repo, binaries, metadata, build_info, output):
     validate_timing_debug_qa(payload)
     validate_timing_combined_qa(payload)
     validate_native_edit_qa(payload)
+    validate_parameter_qa(payload)
+    validate_parameter_cost_qa(payload)
     payload["SHA256SUMS.txt"] = "".join(f"{digest(payload[p])}  {p}\n" for p in sorted(payload)).encode("ascii")
     output.mkdir(parents=True, exist_ok=True)
     epoch = max(315532800, min(build_info["source_epoch"], 4354819198))
@@ -1007,6 +1112,8 @@ def verify_package(path, extract_to=None):
     validate_timing_debug_qa(payload)
     validate_timing_combined_qa(payload)
     validate_native_edit_qa(payload)
+    validate_parameter_qa(payload)
+    validate_parameter_cost_qa(payload)
     for binary in BINARIES:
         require(inspect_pe(payload[binary]) == info["pe_audit"][binary], "PE audit/provenance mismatch")
     inventory = json.loads(payload["DEPENDENCIES.json"])

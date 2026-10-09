@@ -157,8 +157,39 @@ This fixes polling versus pending-edit ownership, not thread serialization. The
 processing stall and hardware/mixed-Wayland/sanitizer limitations remain. Legacy
 full-chain Admin closes before backend LoadState and faults after rejection.
 The old optimized matrix is not reattributed to the changed helper. Fresh combined source gates pass1,170 app +22 helper +5+2 protocol,1,166 core,
-207 Python,304 available vendor cases with one named fixture exclusion,26 doctests
-and strict root/cross checks. New-helper default2048/fresh-state passes; new Windows execution remains a
-separate candidate gate.
+215 Python after receipt packaging,304 available vendor cases with one named fixture exclusion,26 doctests
+and strict root/cross checks. New-helper default2048/fresh-state passes; subsequent exacte487a50 Windows source/preview passes while known native paint remains failed.
 
 The separately source-bound [new-helper correctness receipt](../qa/native_edit_regression/RESULT.md) retains all four default2048 delivery passes, fresh-state immediate-note proof, and the11/14 changing-callback debug interval overruns for87ceb06/helperdca08353. The historical optimized4fdfbc2/244f622 results are not reattributed to this helper.
+
+
+## Bounded parameter-container native follow-on
+
+Reviewedbf573a4 integrates atfb7b91a. Exact41 production hashes and helper
+`a29e4942b5fe027e9891a28e5d7f7611d2c5b2f12ef5f283599d15c4278aee64` bind the final
+sparse-storage native receipt SHA256
+`450ee6a6153866195d4d6297f6cb3b7da521bad6c006f8f5d0e8d5c7ada7f8fc`.
+The earlier dense-index helper/native run is superseded and not counted as final.
+
+Actual stopped Surge volume edit,20 polling rounds/80 requests, zero-positive-call
+SaveState/internal zero-sample flush and fresh numeric/native/component agreement
+pass. Newly authored state has deterministic SHA011ded9e14952b8a631e9e9b443fad6f0997daf641919862e95f5e860f414272;
+its new creation is recorded separately, not inferred from that hash. Exact-blob
+first-note checks at17/47/128/256 pass with no positive warmup; first nonzero samples
+are60/18/73/55. Twelve fresh/used-active/used-stopped Surge compatibility cases and
+separate Stochas deterministic-pattern state/MIDI checks also pass.
+
+Same-window Surge rejection retains XID31457280/generation2/1178x735 and volume;
+closed-used rejection and reopen pass. Native Stochas layer0,row115,step4 cell
+(probability20,velocity127,length/offset0) survives empty reset and used-instance
+restore/reexport/repaint. This single native cell is distinct from the deterministic
+MIDI-pattern proof. Trusted fixture input/focus/key release/state/retirement/owner/
+EOF/Shutdown/crash checks pass; all windows close, Shutdown0.
+
+GUI session executes no positive Process or hardware audio; first-note PCM belongs
+to the separate source-owner test. No new wire submitted/applied counters exist.
+The helper remains single-threaded, with historical346.9ms resize stall and mixed
+Wayland/DPI/sanitizer/device limitations unchanged. Parameter microbenchmarks and
+allocation fences are separate source tests, not GUI continuity qualification.
+
+The [exact parameter-helper regression](../qa/parameter_storage_regression/RESULT.md) binds124 production files tofb7b91a and new helpera29e4942. Its separate fresh-instance case uses historical captured input state104bc8ab… (not the newly authored011ded9e… native blob), with onset24/peak0.22329643368721008 and exact controller/component values. Both inputs have independent functional proof; their test identities and13/14 debug core interval overruns remain distinct.

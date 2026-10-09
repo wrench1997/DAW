@@ -1,0 +1,123 @@
+{
+  "source_commit": "fb7b91a82d31226485a22e9e5e0b73d1f9a1fe3f",
+  "manifested_production_files": 124,
+  "harness_sha256": "c38f30c4b50fe7eb1c5d69acec6c59dd941ba394797b21e3960acb6b5d37b072",
+  "prepared_test_module_sha256": "8bf1a557bfbff03ae0f7e06f41c417c35a0117a56ecf4e53f1f7f3d2466e8064",
+  "build_profile": "debug, unoptimized; bounded correctness regression only",
+  "binaries": {
+    "native-route-tests": "d09d2d72e4a5c76adad988c475247911713075e5a1d96570e1b396df96836362",
+    "vst3-host-helper": "a29e4942b5fe027e9891a28e5d7f7611d2c5b2f12ef5f283599d15c4278aee64"
+  },
+  "runs": {
+    "run001-default2048": {
+      "exit_status": 0,
+      "raw_log_sha256": "8974cc845ac573a42d826f4c19fca05a33a0cb618d3f872cf8702391ed707b4c",
+      "run_binding_sha256": "2e6cd4545e4c6e0149e33600d7fb93336ec7e9a660e1bff21d2dbb067f368ecc"
+    },
+    "run002-fresh-restored-state": {
+      "exit_status": 0,
+      "raw_log_sha256": "27c83a2c4d4b2f81ee7ad3ebec9ec8a62ee7c9f05d4855827190965bfb6fc7c7",
+      "run_binding_sha256": "fde9afca06f6aab9f1f5dd58443e4f25b36c2d67eb663793b4534321d86dbc0a"
+    }
+  },
+  "cases": [
+    {
+      "case": "b2048_routedfalse_changingfalse",
+      "outcome": "PASS",
+      "declared_pdc_samples": 4896,
+      "first_sink_sample": 10969,
+      "source_note_on_count": 0,
+      "source_note_off_count": 0,
+      "fault": null,
+      "core_interval_overruns": 0,
+      "outer_interval_overruns": 0,
+      "capture_overflow": false,
+      "capture_overflow_frames": 0,
+      "capture_overflow_events": 0,
+      "callback_render_max_us": 17825,
+      "callback_core_max_us": 18024,
+      "callback_capture_max_us": 15,
+      "callback_outer_max_us": 18034,
+      "start_lateness_max_us": 389
+    },
+    {
+      "case": "b2048_routedfalse_changingtrue",
+      "outcome": "PASS",
+      "declared_pdc_samples": 4896,
+      "first_sink_sample": 10947,
+      "source_note_on_count": 0,
+      "source_note_off_count": 0,
+      "fault": null,
+      "core_interval_overruns": 13,
+      "outer_interval_overruns": 15,
+      "capture_overflow": false,
+      "capture_overflow_frames": 0,
+      "capture_overflow_events": 0,
+      "callback_render_max_us": 16056,
+      "callback_core_max_us": 16221,
+      "callback_capture_max_us": 69,
+      "callback_outer_max_us": 16245,
+      "start_lateness_max_us": 806
+    },
+    {
+      "case": "b2048_routedtrue_changingfalse",
+      "outcome": "PASS",
+      "declared_pdc_samples": 7328,
+      "first_sink_sample": 7408,
+      "source_note_on_count": 8,
+      "source_note_off_count": 8,
+      "fault": null,
+      "core_interval_overruns": 0,
+      "outer_interval_overruns": 0,
+      "capture_overflow": false,
+      "capture_overflow_frames": 0,
+      "capture_overflow_events": 0,
+      "callback_render_max_us": 17940,
+      "callback_core_max_us": 19696,
+      "callback_capture_max_us": 1932,
+      "callback_outer_max_us": 19730,
+      "start_lateness_max_us": 394
+    },
+    {
+      "case": "b2048_routedtrue_changingtrue",
+      "outcome": "PASS",
+      "declared_pdc_samples": 7328,
+      "first_sink_sample": 7412,
+      "source_note_on_count": 8,
+      "source_note_off_count": 8,
+      "fault": null,
+      "core_interval_overruns": 14,
+      "outer_interval_overruns": 14,
+      "capture_overflow": false,
+      "capture_overflow_frames": 0,
+      "capture_overflow_events": 0,
+      "callback_render_max_us": 20229,
+      "callback_core_max_us": 20368,
+      "callback_capture_max_us": 29,
+      "callback_outer_max_us": 20398,
+      "start_lateness_max_us": 1676
+    }
+  ],
+  "fresh_state": {
+    "after_component_volume": "<volume type=\"2\" value=\"-6.27905654907227\" />",
+    "before_component_volume": "<volume type=\"2\" value=\"-6.27905654907227\" />",
+    "case": "fresh Surge loaded with captured UI state before first Process",
+    "controller_after": 0.8691863417625427,
+    "controller_before": 0.8691863417625427,
+    "expected_normalized": 0.8691863417625427,
+    "first_nonzero": 24,
+    "first_note_frames": 1024,
+    "first_note_peak": 0.22329643368721008,
+    "input_component_volume": "<volume type=\"2\" value=\"-6.27905654907227\" />",
+    "input_state_sha256": "104bc8ab0945eda2b2873ac43da12dfff67f1e4cbb4863b6827a220740d35a42",
+    "one_note_on_only": [
+      144,
+      60,
+      100
+    ],
+    "parameter_id": 1336600346,
+    "scope": "actual production PluginChain/backend state and first-note proof, not a paced graph or GUI test",
+    "worker_stats": "BridgeStats { current_epoch: 1, epoch_resets: 0, worker_epoch_resets: 0, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 8, submitted: 8, completed: 8, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_loss_epoch: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 128, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }"
+  },
+  "scope": "No new performance matrix, no physical CPAL/device/GUI qualification. Prior optimized evidence remains bound to4fdfbc2/244f622."
+}

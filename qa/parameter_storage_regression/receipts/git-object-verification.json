@@ -1,0 +1,7 @@
+{
+  "commit": "fb7b91a82d31226485a22e9e5e0b73d1f9a1fe3f",
+  "reviewed_feature_commit": "bf573a45826466db0952eb1f4bd598937c68d1c5",
+  "production_files_verified": 124,
+  "unchanged_preallocated_harness_sha256": "c38f30c4b50fe7eb1c5d69acec6c59dd941ba394797b21e3960acb6b5d37b072",
+  "scope": "bounded new-helper correctness regression only, not updated optimized performance evidence"
+}

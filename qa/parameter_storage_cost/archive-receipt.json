@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "implementation_commit": "bf573a45826466db0952eb1f4bd598937c68d1c5",
+  "archive": {
+    "filename": "parameter-storage-bf573a4-source-evidence.zip",
+    "size_bytes": 5092126,
+    "sha256": "1bd33df7c1ec9afa58cd5b6a508b7af12c4a84f68ce4ad12cda5dca3f388773c"
+  },
+  "logical_files": 1677,
+  "unique_text_objects": 435,
+  "archive_members": 450,
+  "all_archive_members_verified": true,
+  "archive_crc_verified": true,
+  "binary_and_excluded_filetype_scan": "PASS; all members UTF-8 text, regular files, no executables/plugin assets/state/audio/screenshots/caches/targets",
+  "private_prefix_scan": "PASS; reverse prefix map excluded; no original private prefix appears in any member",
+  "source_binding_verification": {
+    "frozen_source_entries": 41,
+    "comparative_instrumented_source_entries": 966,
+    "fixture_source_entries": 6,
+    "original_raw_hashes": 1677,
+    "actual_reconstruction": "PASS; all 1677 logical files matched portable hashes; malicious relative-path cases rejected"
+  },
+  "normalization_occurrences": {
+    "__EVIDENCE_ROOT__": 439,
+    "__SESSION_RUNTIME_ROOT__": 5,
+    "__ALSA_PROBE_ROOT__": 7,
+    "__EDITOR_LINK_ROOT__": 7
+  },
+  "complete_member_inventory_filename": "parameter-storage-evidence-inventory.json",
+  "complete_member_inventory_sha256": "d8d1af3b59753bd133cfc26420f8073fe8730837b6449905e6dadad80e17a9ba",
+  "reconstruction_verification": {
+    "status": "PASS",
+    "commit": "bf573a45826466db0952eb1f4bd598937c68d1c5",
+    "logical_files_verified": 1677,
+    "unique_text_objects_verified": 435,
+    "physical_package_members_verified": 450,
+    "portable_path_safety_verified": true,
+    "all_portable_hashes_verified": true,
+    "original_hashes_verified": 1677,
+    "normalized_original_hashes_requiring_local_map": 0,
+    "normalization_counts_verified": {
+      "__EVIDENCE_ROOT__": 439,
+      "__SESSION_RUNTIME_ROOT__": 5,
+      "__ALSA_PROBE_ROOT__": 7,
+      "__EDITOR_LINK_ROOT__": 7
+    },
+    "reconstructed": true,
+    "builds_tests_or_plugins_run": false
+  }
+}

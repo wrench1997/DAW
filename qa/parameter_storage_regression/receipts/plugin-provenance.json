@@ -1,0 +1,29 @@
+[
+  {
+    "bundle": "Stochas.vst3",
+    "version": "1.3.13",
+    "official_release": "https://github.com/surge-synthesizer/stochas/releases/tag/v1.3.13",
+    "module_relative_to_bundle": "Contents/x86_64-linux/Stochas.so",
+    "module_sha256": "5f7f44ddffcd7c4cbc0a68ce3b9eee71232a23024d7daec7cf792b2b45492c5c",
+    "license": "GPL-family; see original official-release provenance receipt",
+    "reused_existing_official_bundle": true
+  },
+  {
+    "bundle": "Surge XT.vst3",
+    "version": "1.3.4",
+    "official_release": "https://github.com/surge-synthesizer/releases-xt/releases/tag/1.3.4",
+    "module_relative_to_bundle": "Contents/x86_64-linux/Surge XT.so",
+    "module_sha256": "b8584398f314819241ca7287117d5559ed838d37ef08faab9847f27ba2993cec",
+    "license": "GPL-family; see original official-release provenance receipt",
+    "reused_existing_official_bundle": true
+  },
+  {
+    "bundle": "Surge XT Effects.vst3",
+    "version": "1.3.4",
+    "official_release": "https://github.com/surge-synthesizer/releases-xt/releases/tag/1.3.4",
+    "module_relative_to_bundle": "Contents/x86_64-linux/Surge XT Effects.so",
+    "module_sha256": "9b2da5f1b4a81a02ad55c88eba55257eb4a7f1747a1fd0866b8eaf5b7c8d0f45",
+    "license": "GPL-family; see original official-release provenance receipt",
+    "reused_existing_official_bundle": true
+  }
+]
