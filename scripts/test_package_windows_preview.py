@@ -220,13 +220,14 @@ class PackageTests(unittest.TestCase):
         self.assertIn("docs/PROJECT_MEDIA.md", info["source_documents"])
 
     def test_optional_feature_guides_are_packaged_together(self):
-        for path in ("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md", "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md", "docs/LOCAL_SAMPLE_BROWSER.md", "docs/HEADLESS_UI_QA.md", "docs/FL_INSPIRED_NATIVE_THEME.md"):
+        for path in ("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md", "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md", "docs/LOCAL_SAMPLE_BROWSER.md", "docs/HEADLESS_UI_QA.md", "docs/FL_INSPIRED_NATIVE_THEME.md", "docs/MULTIWINDOW_WORKSPACE.md"):
             (self.repo / path).write_text("[README](../README.md)\n")
         (self.repo / "README.md").write_text(
             "[Media](docs/PROJECT_MEDIA.md) [Export](docs/OFFLINE_EXPORT_WORKFLOW.md) "
             "[Split](docs/AUDIO_SPLIT_FIDELITY.md) [Options](docs/WAV_EXPORT_OPTIONS.md) "
             "[Meters](docs/MIXER_METERING.md) [Samples](docs/LOCAL_SAMPLE_BROWSER.md) "
-            "[UI QA](docs/HEADLESS_UI_QA.md) [Native theme](docs/FL_INSPIRED_NATIVE_THEME.md)\n"
+            "[UI QA](docs/HEADLESS_UI_QA.md) [Native theme](docs/FL_INSPIRED_NATIVE_THEME.md) "
+            "[Workspace](docs/MULTIWINDOW_WORKSPACE.md)\n"
         )
         archive = self.create()
         info = pkg.verify_package(archive)
@@ -238,6 +239,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn("docs/LOCAL_SAMPLE_BROWSER.md", info["source_documents"])
         self.assertIn("docs/HEADLESS_UI_QA.md", info["source_documents"])
         self.assertIn("docs/FL_INSPIRED_NATIVE_THEME.md", info["source_documents"])
+        self.assertIn("docs/MULTIWINDOW_WORKSPACE.md", info["source_documents"])
 
     def test_prerelease_package_version_is_preserved(self):
         for name in ("Cargo.toml", "Cargo.lock"):

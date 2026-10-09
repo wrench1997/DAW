@@ -241,3 +241,24 @@ PID, HWND classes/ancestry/control ID and exact dimensions immediately before na
 Non-paint identity/protocol failures stop dependent session operations; separate fresh-helper
 Shutdown/EOF/crash checks remain bounded. These new results require a Windows run and are not
 inferred from Python orchestration tests. No desktop/driver/security settings are changed.
+
+## Exact trusted-fixture feedback correction
+
+At `2e49883`, [quality 37891374461](https://github.com/wrench1997/DAW/actions/runs/37891374461)
+additionally passed native button interaction with ordered gesture/dirty feedback,
+repeat focus/owner rejection and all three fresh-helper Shutdown/EOF/crash cleanup
+cases. Paint remained failed. SaveState returned and detached, but the next assertion
+expected one legacy feedback record and received two identical Cutoff=0.25 records;
+restore and the remaining same-session lifecycle were therefore not run.
+
+Exact reviewed source explains that pair: the zero-sample native flush stashes one
+controller performEdit, the trusted fixture echoes the applied value through DSP
+outputParameterChanges, and the host drains DSP output before the GUI stash. The
+corrected harness requires exactly these two integer-typed records, with no sorting,
+deduplication or arbitrary duplicate tolerance. It rejects wrong counts/IDs, divergent
+values and malformed types. The fixture's one performEdit plus one setDirty(true)
+must advance its native revision exactly twice; ordered begin/value/end, stable
+capture revision and exact restored component/controller bytes remain mandatory.
+This is the pinned fixture/host contract, not a universal VST3 notification rule.
+Paint is still independently failed, and the corrected state check needs actual
+Windows execution before state restore can be called verified.

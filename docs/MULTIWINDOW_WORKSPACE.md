@@ -93,3 +93,14 @@ acceptance. Those boundaries are unchanged.
 - Independent source review checked interaction ownership and the native safety
   boundaries. Its discovered drag/modal/stacking issues were fixed and covered by
   the final input regressions.
+
+### Verified integrated source
+
+Feature `8b9f2c7` integrates as `bffc6f48f47dfe241809a852951bb393ab3ea402` without
+runtime conflicts; additive documentation histories were both retained. The entire
+integrated src tree matches the independently reviewed feature. A fresh full main
+rerun passed 954 app + 14 helper + 5 protocol all-feature tests, 952 no-default tests,
+fmt, both strict Clippy modes, app/helper build and ordinary helper smoke. The fresh
+combined UI capture rerun passed 20 actual-app tests and produced 27 genuine Vulkan
+frames, converted losslessly to RGB-identical PNGs. These are integrated-source
+results; Windows runtime and detached-OS-window claims are not inferred.
