@@ -20,9 +20,13 @@ disabled slots, which admit controls but skip ordinary processing. A zero-sample
 also insufficient: the pinned JUCE wrapper skips `processAudio/processBlock` when the host hides
 all audio buses for a zero-sample call. Parameter-flush success does not establish note cleanup.
 
-The DAW VST3 backend now requires a prepared maximum in 128..=2048, checked before loading or
-prepare-time stop/reconfigure/state restoration. This restriction belongs only to the DAW's
-fixed-Q128 adapter. Standalone vendor/helper processing at 17, 47, or other supported positive
+The DAW VST3 backend requires a prepared maximum in 128..=2048 generally, and 256..=2048
+for the exact Surge XT instrument compatibility case below. The generic floor is checked before
+loading; after loading supplies actual factory identity, the selected floor is checked before
+pending state, prepare-time stop/reconfigure/state restoration, and every reset's first safety CC.
+A rejected fresh load may already have initialized a new instance. Insufficient capacity never
+raises the requested maximum or changes device preferences. This restriction belongs only to
+the DAW backend; ordinary worker processing remains fixed-Q128. Standalone vendor/helper processing at 17, 47, or other supported positive
 sizes is unchanged. An explicit reset-origin request must fit that instance's prepared maximum;
 it is never silently clipped, split into smaller calls, or enlarged past the maximum.
 
@@ -35,7 +39,7 @@ state-restore fallback exists. Loading may already have initialized a new plug-i
 precedes reset-specific mutation and prepare-time state/lifecycle changes.
 
 The worker calls backend reset preflight before the first of its 48 safety CC messages. VST3
-checks the fixed quantum, stopped finite transport, ready processing, and supported contract.
+checks the selected reset size, stopped finite transport, ready processing, and supported contract.
 It repeats preflight before native panic. The additive `process_reset_origin(frames, transport)`
 operation then revalidates before staging or changing transport. Ordinary `MidiPanic` admission
 and partial-prefix tracking are unchanged. A rejected panic does not run the reset Process or
@@ -48,8 +52,10 @@ Neither scoped control nor processor facade exposes it. It processes one positiv
   retaining FIFO/equal-offset order, matching the former one-frame input behavior.
 - Native edits use their existing bounded staging and actual SDK-success acknowledgment.
 - Project sample/PPQ position is stationary with `playing=false`. Requested continuous/system
-  clocks and free-running internal DSP can advance by the frame count. DAW Q128 is 2.667ms at48k,
-  127 internal samples more than the former flush. This is not hidden warmup or state settling.
+  clocks and free-running internal DSP can advance by the frame count. The default128 is
+  2.667ms at48k; the exact instrument256 exception is 5.333ms at48k (255 samples beyond the
+  legacy one-frame flush). These durations scale with sample rate. This is explicit reset cleanup,
+  not a general state-settling contract.
 - Audio is discarded inside the owner. Prior undrained processor MIDI/parameter feedback is
   invalidated as old-epoch data with separate counts. Reset-generated processor output goes to
   a private discard sink. Native UI/display feedback is not drained by this operation.
@@ -66,6 +72,35 @@ A fresh aligned Surge FX instance is expected to avoid the host-induced mode tra
 already-32-frame instance is never relabeled as zero. Delayed or genuine latency changes still
 require the existing visible fault/replan workflow. Stop/start is not a universal tail-clearing
 contract for arbitrary plug-ins.
+
+## Exact Surge XT 1.3.4 instrument cleanup bound
+
+Only actual loaded factory UID `ABCDEF019182FAEB566D624153675854` with version exactly `1.3.4`
+selects **one** explicit reset-origin256 operation. This UID is the genuine instrument class;
+Surge XT Effects has UID `ABCDEF019182FAEB566D624153465854` and retains128. Other versions,
+classes, display names, requested class metadata, and bundle paths do not select this policy.
+Factory identity selects a compatibility rule; it is not binary-authenticity attestation.
+
+[Surge 1.3.4's CC120 handler and engine](https://github.com/surge-synthesizer/surge/blob/release_xt_1.3.4/src/common/SurgeSynthesizer.cpp)
+set a pending all-sound-off fade, decrement it by0.125 per internal block, then release both
+scenes at zero. Its [default internal block is32](https://github.com/surge-synthesizer/surge/blob/release_xt_1.3.4/src/CMakeLists.txt#L9-L11):
+eight blocks require256 samples. The existing128 cleanup can leave this release pending and
+truncate a newly submitted immediate note. [Surge's reset callback](https://github.com/surge-synthesizer/surge/blob/release_xt_1.3.4/src/surge-xt/SurgeSynthProcessor.cpp)
+resets block position without cancelling that fade, so merely moving stop/start did not fix it.
+
+Preserved reset-origin diagnostic runs011–016 compare legacy1, reset128, lifecycle reordering,
+a matched CC120-only contrast, and explicit256. Both legacy1 and128 truncated the immediate new
+note; removing only CC120 in the diagnostic sustained it;256 sustained it with **all** safety
+messages retained and unchanged state/native latency. Production retains every safety message,
+input-origin ordering, stopped project position, output discard/loss reporting, and stop/start
+order. One operation avoids a native-edit interleaving gap between two reset calls. There is no
+extra ordinary Process, bridge/PDC change, generic warmup, or relaxed latency/tail query.
+
+Historical `fd6f5b1` first/replay scheduled-graph successes remain valid within their measured
+scope; they did not establish direct immediate-note sustain. Its original128 traces and all
+failed diagnostic hypotheses remain immutable. The bounded256 policy requires its own exact
+source-bound immediate-note offsets0/1/127, state, latency, held/future-input cleanup, and graph
+qualification. It makes no guarantee for unknown versions or arbitrary internal tail behavior.
 
 ## Regression and qualification boundaries
 

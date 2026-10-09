@@ -4792,11 +4792,24 @@ impl Drop for Vst2Backend {
 }
 
 #[cfg(feature = "vst3")]
-fn validate_vst3_reset_maximum(max_block_frames: usize) -> Result<(), String> {
-    let quantum = crate::plugin_timing::PLUGIN_QUANTUM_FRAMES as usize;
-    if !(quantum..=MAX_PLUGIN_BLOCK_FRAMES).contains(&max_block_frames) {
+fn vst3_reset_origin_frames(uid: &str, version: &str) -> usize {
+    // Surge XT 1.3.4 completes CC120's deferred all-sound-off fade after eight
+    // internal 32-sample blocks. One explicit 256-frame origin reset completes
+    // that bounded cleanup before an immediate new note. Match actual factory
+    // identity, not the requested class, display name, or bundle path. FX and
+    // every other version retain the normal Q128 reset. See PLUGIN_RESET_ORIGIN.
+    if uid == "ABCDEF019182FAEB566D624153675854" && version == "1.3.4" {
+        256
+    } else {
+        crate::plugin_timing::PLUGIN_QUANTUM_FRAMES as usize
+    }
+}
+
+#[cfg(feature = "vst3")]
+fn validate_vst3_reset_maximum(max_block_frames: usize, reset_frames: usize) -> Result<(), String> {
+    if !(reset_frames..=MAX_PLUGIN_BLOCK_FRAMES).contains(&max_block_frames) {
         return Err(format!(
-            "DAW VST3 backend requires a prepared maximum of at least {quantum} frames for reset-origin processing"
+            "DAW VST3 backend requires a prepared maximum of at least {reset_frames} frames for this plug-in's reset-origin processing (maximum {MAX_PLUGIN_BLOCK_FRAMES})"
         ));
     }
     Ok(())
@@ -4818,6 +4831,10 @@ struct Vst3Backend {
 
 #[cfg(feature = "vst3")]
 impl Vst3Backend {
+    fn reset_origin_frames(&self) -> usize {
+        vst3_reset_origin_frames(&self.plugin.info().uid, &self.plugin.info().version)
+    }
+
     fn stopped_reset_transport(&self) -> vst3_host::ProcessTransport {
         vst3_host::ProcessTransport {
             sample_position: self.last_transport.sample_position,
@@ -4830,7 +4847,10 @@ impl Vst3Backend {
     }
 
     fn load(spec: PluginLoadSpec, config: PluginPrepareConfig) -> Result<Self, String> {
-        validate_vst3_reset_maximum(config.max_block_frames)?;
+        validate_vst3_reset_maximum(
+            config.max_block_frames,
+            crate::plugin_timing::PLUGIN_QUANTUM_FRAMES as usize,
+        )?;
         let helper_path = match spec.vst3_helper_path {
             Some(path) if path.is_file() => path,
             Some(path) => {
@@ -4865,6 +4885,12 @@ impl Vst3Backend {
                 helper_path.display()
             )
         })?;
+        // Actual identity is available only after loading. Refuse insufficient
+        // capacity before pending state, reconfiguration, or prepare lifecycle.
+        validate_vst3_reset_maximum(
+            config.max_block_frames,
+            vst3_reset_origin_frames(&plugin.info().uid, &plugin.info().version),
+        )?;
         let layout = plugin.audio_bus_layout().ok();
         let input_channels = layout.as_ref().map_or_else(
             || usize::from(plugin.info().audio_inputs != 0) * 2,
@@ -4917,7 +4943,7 @@ impl PluginBackend for Vst3Backend {
     }
 
     fn prepare(&mut self, config: PluginPrepareConfig) -> Result<(), String> {
-        validate_vst3_reset_maximum(config.max_block_frames)?;
+        validate_vst3_reset_maximum(config.max_block_frames, self.reset_origin_frames())?;
         // Negotiate before reset-specific lifecycle/state changes. A loaded old helper may
         // have initialized the plugin, but it cannot receive panic or a fallback Process.
         let support = self
@@ -4927,6 +4953,13 @@ impl PluginBackend for Vst3Backend {
         if support.contract_version != 1 {
             return Err("VST3 helper does not support reset-origin contract version 1".into());
         }
+        // The helper's actual prepared capacity must already support this
+        // identity's cleanup before any state/lifecycle mutation. The DAW never
+        // loaded this identity with a smaller supported maximum in the first place.
+        validate_vst3_reset_maximum(
+            support.max_block_frames as usize,
+            self.reset_origin_frames(),
+        )?;
         if self.prepared {
             self.plugin
                 .stop_processing()
@@ -5306,14 +5339,11 @@ impl PluginBackend for Vst3Backend {
         if !self.prepared {
             return Err("VST3 reset requested before preparation".into());
         }
-        validate_vst3_reset_maximum(self.max_block_frames)?;
+        validate_vst3_reset_maximum(self.max_block_frames, self.reset_origin_frames())?;
         self.plugin
             .reset_origin_support()
             .and_then(|support| {
-                support.validate(
-                    crate::plugin_timing::PLUGIN_QUANTUM_FRAMES as usize,
-                    self.stopped_reset_transport(),
-                )
+                support.validate(self.reset_origin_frames(), self.stopped_reset_transport())
             })
             .map_err(|error| error.to_string())
     }
@@ -5321,18 +5351,16 @@ impl PluginBackend for Vst3Backend {
     fn reset_processing(&mut self) -> Result<(), String> {
         self.preflight_reset_processing()?;
         // Native releases are necessary when CC mapping is absent. The origin-only reset
-        // preserves old one-frame input ordering, but uses the normal worker quantum so
-        // processors never receive an exceptional positive one-sample cleanup block.
+        // preserves old one-frame input ordering. The exact Surge XT 1.3.4
+        // instrument uses its bounded 256-frame CC120 cleanup; all others use
+        // Q128. This is one admitted operation, never an extra warmup Process.
         self.plugin
             .midi_panic()
             .map_err(|error| error.to_string())?;
         let transport = self.stopped_reset_transport();
         let report = self
             .plugin
-            .process_reset_origin(
-                crate::plugin_timing::PLUGIN_QUANTUM_FRAMES as usize,
-                transport,
-            )
+            .process_reset_origin(self.reset_origin_frames(), transport)
             .map_err(|error| error.to_string())?;
         self.last_transport.playing = false;
         report
@@ -8163,7 +8191,7 @@ mod tests {
     #[test]
     fn only_daw_vst3_backend_requires_normal_quantum_reset_capacity() {
         for frames in [1, 17, 47, 64, 127] {
-            assert!(validate_vst3_reset_maximum(frames).is_err());
+            assert!(validate_vst3_reset_maximum(frames, 128).is_err());
             assert!(
                 PluginPrepareConfig {
                     max_block_frames: frames,
@@ -8174,9 +8202,9 @@ mod tests {
             );
         }
         for frames in [128, 256, 2048] {
-            assert!(validate_vst3_reset_maximum(frames).is_ok());
+            assert!(validate_vst3_reset_maximum(frames, 128).is_ok());
         }
-        assert!(validate_vst3_reset_maximum(2049).is_err());
+        assert!(validate_vst3_reset_maximum(2049, 128).is_err());
     }
 
     #[test]

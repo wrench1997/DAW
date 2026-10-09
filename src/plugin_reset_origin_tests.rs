@@ -7,6 +7,8 @@ struct ResetHelper {
     script: PathBuf,
     log: PathBuf,
     mode: PathBuf,
+    identity: PathBuf,
+    maximum: PathBuf,
 }
 
 impl ResetHelper {
@@ -22,20 +24,27 @@ impl ResetHelper {
         let log = root.join("commands.jsonl");
         let mode = root.join("mode");
         std::fs::write(&mode, "ok").unwrap();
+        let identity = root.join("identity.json");
+        std::fs::write(&identity, r#"["00000000000000000000000000000001","1"]"#).unwrap();
+        let maximum = root.join("maximum");
+        std::fs::write(&maximum, "2048").unwrap();
         let source = format!(
             r#"#!/usr/bin/python3
 import json,sys,pathlib
 log=pathlib.Path({log:?})
 mode=pathlib.Path({mode:?})
+identity=pathlib.Path({identity:?})
+maximum=pathlib.Path({maximum:?})
 for line in sys.stdin:
     command=json.loads(line)
     with log.open('a') as f: f.write(json.dumps(command)+'\n')
     kind=command if isinstance(command,str) else next(iter(command))
     selected=mode.read_text()
     if kind=='LoadPlugin':
-        response={{'PluginInfo':{{'vendor':'Citrus tests','name':'Reset probe','version':'1','category':'Instrument','uid':'00000000000000000000000000000001','has_gui':False,'audio_inputs':0,'audio_outputs':1,'output_channels':2,'has_midi_input':True,'has_midi_output':False}}}}
+        uid,version=json.loads(identity.read_text())
+        response={{'PluginInfo':{{'vendor':'Citrus tests','name':'Reset probe','version':version,'category':'Instrument','uid':uid,'has_gui':False,'audio_inputs':0,'audio_outputs':1,'output_channels':2,'has_midi_input':True,'has_midi_output':False}}}}
     elif kind=='ResetOriginSupport':
-        response=({{'Error':{{'message':'old helper unsupported'}}}} if selected=='old' else {{'ResetOriginSupport':{{'support':{{'contract_version':1,'max_block_frames':2048,'processing':True}}}}}})
+        response=({{'Error':{{'message':'old helper unsupported'}}}} if selected=='old' else {{'ResetOriginSupport':{{'support':{{'contract_version':1,'max_block_frames':int(maximum.read_text()),'processing':True}}}}}})
     elif selected==kind:
         response={{'Error':{{'message':'deliberate '+kind+' refusal'}}}}
     elif kind=='ProcessResetOrigin':
@@ -45,7 +54,9 @@ for line in sys.stdin:
     print(json.dumps(response),flush=True)
 "#,
             log = log.to_string_lossy(),
-            mode = mode.to_string_lossy()
+            mode = mode.to_string_lossy(),
+            identity = identity.to_string_lossy(),
+            maximum = maximum.to_string_lossy()
         );
         std::fs::write(&script, source).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -54,7 +65,15 @@ for line in sys.stdin:
             script,
             log,
             mode,
+            identity,
+            maximum,
         }
+    }
+    fn set_identity(&self, uid: &str, version: &str) {
+        std::fs::write(&self.identity, serde_json::to_vec(&(uid, version)).unwrap()).unwrap();
+    }
+    fn set_maximum(&self, frames: usize) {
+        std::fs::write(&self.maximum, frames.to_string()).unwrap();
     }
     fn spec(&self) -> PluginLoadSpec {
         let path = self.root.join("fixture.vst3");
@@ -169,104 +188,262 @@ fn daw_reset_old_helper_is_rejected_before_pending_state_and_lifecycle() {
 
 #[test]
 fn daw_reset_transaction_orders_preflight_panic_origin_and_lifecycle_on_every_slot_mode() {
-    for (enabled, bypassed) in [(true, false), (true, true), (false, false)] {
-        for mode in [
-            "ok",
-            "old",
-            "MidiPanic",
-            "sdk",
-            "loss",
-            "StopProcessing",
-            "StartProcessing",
-        ] {
-            let helper = ResetHelper::new();
-            let mut backend = helper.backend();
-            backend
-                .set_transport(PluginTransport {
-                    sample_position: 65_432,
-                    quarter_note_position: 23.5,
-                    playing: true,
-                    ..PluginTransport::default()
-                })
-                .unwrap();
-            backend
-                .send_midi(MidiMessage::new([0x90, 60, 100], 64))
-                .unwrap();
-            helper.clear();
-            helper.select(mode);
-            let mut slots = vec![WorkerSlot {
-                backend: Some(Box::new(backend)),
-                config: SlotConfig {
-                    enabled,
-                    bypassed,
-                    wet: 1.0,
-                },
-                fault: None,
-                parameter_catalog_cache: None,
-                native_base_ids: Vec::new(),
-            }];
-            let metrics = BridgeMetrics::default();
-            let (mut events, _) = RingBuffer::new(8);
-            reset_worker_epoch(91, &mut slots, &mut events, &metrics);
-            let commands = helper.commands();
-            let kinds = commands.iter().map(kind).collect::<Vec<_>>();
-            assert_eq!(kinds[0], "ResetOriginSupport");
-            assert!(!kinds.iter().any(|kind| {
-                [
-                    "Process",
-                    "SaveState",
-                    "TakeParameterChanges",
-                    "TakeParameterEdits",
-                ]
-                .contains(kind)
-            }));
-            if mode == "old" {
-                assert_eq!(kinds, ["ResetOriginSupport"]);
-            } else {
-                assert_eq!(
-                    kinds.iter().filter(|kind| **kind == "SendMidiAt").count(),
-                    48
-                );
-                let panic = kinds.iter().position(|kind| *kind == "MidiPanic").unwrap();
-                assert!(panic > 48);
-                if mode == "MidiPanic" {
-                    assert!(!kinds.contains(&"ProcessResetOrigin"));
+    for (uid, version, reset_frames) in [
+        ("00000000000000000000000000000001", "1", 128),
+        ("ABCDEF019182FAEB566D624153675854", "1.3.4", 256),
+    ] {
+        for (enabled, bypassed) in [(true, false), (true, true), (false, false)] {
+            for mode in [
+                "ok",
+                "old",
+                "MidiPanic",
+                "sdk",
+                "loss",
+                "StopProcessing",
+                "StartProcessing",
+            ] {
+                let helper = ResetHelper::new();
+                helper.set_identity(uid, version);
+                let mut backend = helper.backend();
+                backend
+                    .set_transport(PluginTransport {
+                        sample_position: 65_432,
+                        quarter_note_position: 23.5,
+                        playing: true,
+                        ..PluginTransport::default()
+                    })
+                    .unwrap();
+                backend
+                    .send_midi(MidiMessage::new([0x90, 60, 100], 64))
+                    .unwrap();
+                helper.clear();
+                helper.select(mode);
+                let mut slots = vec![WorkerSlot {
+                    backend: Some(Box::new(backend)),
+                    config: SlotConfig {
+                        enabled,
+                        bypassed,
+                        wet: 1.0,
+                    },
+                    fault: None,
+                    parameter_catalog_cache: None,
+                    native_base_ids: Vec::new(),
+                }];
+                let metrics = BridgeMetrics::default();
+                let (mut events, _) = RingBuffer::new(8);
+                reset_worker_epoch(91, &mut slots, &mut events, &metrics);
+                let commands = helper.commands();
+                let kinds = commands.iter().map(kind).collect::<Vec<_>>();
+                assert_eq!(kinds[0], "ResetOriginSupport");
+                assert!(!kinds.iter().any(|kind| {
+                    [
+                        "Process",
+                        "SaveState",
+                        "TakeParameterChanges",
+                        "TakeParameterEdits",
+                    ]
+                    .contains(kind)
+                }));
+                if mode == "old" {
+                    assert_eq!(kinds, ["ResetOriginSupport"]);
                 } else {
-                    let process = kinds
-                        .iter()
-                        .position(|kind| *kind == "ProcessResetOrigin")
-                        .unwrap();
-                    assert!(process > panic);
-                    let request = &commands[process]["ProcessResetOrigin"];
-                    assert_eq!(request["frames"], 128);
-                    assert_eq!(request["transport"]["playing"], false);
-                    assert_eq!(request["transport"]["sample_position"], 65_432);
-                    assert_eq!(request["transport"]["quarter_note_position"], 23.5);
-                    if ["sdk", "loss"].contains(&mode) {
-                        assert!(!kinds.contains(&"StopProcessing"));
+                    assert_eq!(
+                        kinds.iter().filter(|kind| **kind == "SendMidiAt").count(),
+                        48
+                    );
+                    let panic = kinds.iter().position(|kind| *kind == "MidiPanic").unwrap();
+                    assert!(panic > 48);
+                    if mode == "MidiPanic" {
+                        assert!(!kinds.contains(&"ProcessResetOrigin"));
                     } else {
-                        assert!(
+                        let process = kinds
+                            .iter()
+                            .position(|kind| *kind == "ProcessResetOrigin")
+                            .unwrap();
+                        assert!(process > panic);
+                        let request = &commands[process]["ProcessResetOrigin"];
+                        assert_eq!(request["frames"], reset_frames);
+                        assert_eq!(
                             kinds
                                 .iter()
-                                .position(|kind| *kind == "StopProcessing")
-                                .unwrap()
-                                > process
+                                .filter(|kind| **kind == "ProcessResetOrigin")
+                                .count(),
+                            1
                         );
-                        assert_eq!(kinds.contains(&"StartProcessing"), mode != "StopProcessing");
+                        assert_eq!(request["transport"]["playing"], false);
+                        assert_eq!(request["transport"]["sample_position"], 65_432);
+                        assert_eq!(request["transport"]["quarter_note_position"], 23.5);
+                        if ["sdk", "loss"].contains(&mode) {
+                            assert!(!kinds.contains(&"StopProcessing"));
+                        } else {
+                            assert!(
+                                kinds
+                                    .iter()
+                                    .position(|kind| *kind == "StopProcessing")
+                                    .unwrap()
+                                    > process
+                            );
+                            assert_eq!(
+                                kinds.contains(&"StartProcessing"),
+                                mode != "StopProcessing"
+                            );
+                        }
                     }
                 }
+                assert_eq!(slots[0].fault.is_some(), mode != "ok");
+                assert_eq!(
+                    metrics.reset_faults.load(Ordering::Acquire),
+                    u64::from(mode != "ok")
+                );
+                if mode != "ok" {
+                    helper.clear();
+                    helper.select("ok");
+                    reset_worker_epoch(92, &mut slots, &mut events, &metrics);
+                    assert!(helper.commands().is_empty());
+                }
             }
-            assert_eq!(slots[0].fault.is_some(), mode != "ok");
-            assert_eq!(
-                metrics.reset_faults.load(Ordering::Acquire),
-                u64::from(mode != "ok")
+        }
+    }
+}
+
+#[test]
+fn daw_reset_policy_uses_exact_loaded_factory_identity_and_version() {
+    const INSTRUMENT: &str = "ABCDEF019182FAEB566D624153675854";
+    const FX: &str = "ABCDEF019182FAEB566D624153465854";
+    for (uid, version, expected) in [
+        (INSTRUMENT, "1.3.4", 256),
+        (INSTRUMENT, "1.3.3", 128),
+        (INSTRUMENT, "1.3.5", 128),
+        (INSTRUMENT, "1.3.4 ", 128),
+        (FX, "1.3.4", 128),
+        ("00000000000000000000000000000001", "1.3.4", 128),
+    ] {
+        let helper = ResetHelper::new();
+        helper.set_identity(uid, version);
+        let mut spec = helper.spec();
+        // Requested metadata cannot choose the compatibility policy.
+        spec.class_uid = Some(INSTRUMENT.into());
+        spec.descriptor.name = "Surge XT".into();
+        let backend = Vst3Backend::load(spec, reset_config()).unwrap();
+        assert_eq!(backend.reset_origin_frames(), expected);
+    }
+}
+
+#[test]
+fn daw_surge_reset_capacity_is_checked_before_state_and_prepare_mutation() {
+    let helper = ResetHelper::new();
+    helper.set_identity("ABCDEF019182FAEB566D624153675854", "1.3.4");
+    for maximum in [128, 255] {
+        helper.clear();
+        let error = Vst3Backend::load(
+            helper.spec(),
+            PluginPrepareConfig {
+                max_block_frames: maximum,
+                ..reset_config()
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("at least 256"));
+        let commands = helper.commands();
+        assert!(commands.iter().any(|command| kind(command) == "LoadPlugin"));
+        assert!(!commands.iter().any(|command| {
+            [
+                "LoadState",
+                "Reconfigure",
+                "StartProcessing",
+                "MidiPanic",
+                "SendMidiAt",
+                "ProcessResetOrigin",
+            ]
+            .contains(&kind(command))
+        }));
+    }
+    for maximum in [256, 2048] {
+        let config = PluginPrepareConfig {
+            max_block_frames: maximum,
+            ..reset_config()
+        };
+        let mut backend = Vst3Backend::load(helper.spec(), config).unwrap();
+        backend.prepare(config).unwrap();
+        assert_eq!(backend.reset_origin_frames(), 256);
+        helper.clear();
+        backend.pending_state = vec![7, 8, 9];
+        for insufficient in [128, 255] {
+            assert!(
+                backend
+                    .prepare(PluginPrepareConfig {
+                        max_block_frames: insufficient,
+                        ..reset_config()
+                    })
+                    .unwrap_err()
+                    .contains("at least 256")
             );
-            if mode != "ok" {
-                helper.clear();
-                helper.select("ok");
-                reset_worker_epoch(92, &mut slots, &mut events, &metrics);
-                assert!(helper.commands().is_empty());
-            }
+            assert!(helper.commands().is_empty());
+            assert_eq!(backend.pending_state, [7, 8, 9]);
+            assert!(backend.prepared);
+            assert_eq!(backend.max_block_frames, maximum);
+        }
+    }
+}
+
+#[test]
+fn daw_surge_reset_support_capacity_refuses_before_worker_safety_on_every_slot_mode() {
+    for (enabled, bypassed) in [(true, false), (true, true), (false, false)] {
+        let helper = ResetHelper::new();
+        helper.set_identity("ABCDEF019182FAEB566D624153675854", "1.3.4");
+        let backend = helper.backend();
+        helper.set_maximum(128);
+        helper.clear();
+        let mut slots = vec![WorkerSlot {
+            backend: Some(Box::new(backend)),
+            config: SlotConfig {
+                enabled,
+                bypassed,
+                wet: 1.0,
+            },
+            fault: None,
+            parameter_catalog_cache: None,
+            native_base_ids: Vec::new(),
+        }];
+        let metrics = BridgeMetrics::default();
+        let (mut events, _) = RingBuffer::new(8);
+        reset_worker_epoch(91, &mut slots, &mut events, &metrics);
+        assert_eq!(
+            helper.commands().iter().map(kind).collect::<Vec<_>>(),
+            ["ResetOriginSupport"]
+        );
+        assert!(slots[0].fault.is_some());
+        assert_eq!(metrics.reset_faults.load(Ordering::Acquire), 1);
+    }
+}
+
+#[test]
+fn daw_surge_prepare_rejects_authoritative_helper_capacity_before_state_or_lifecycle() {
+    for already_prepared in [false, true] {
+        let helper = ResetHelper::new();
+        helper.set_identity("ABCDEF019182FAEB566D624153675854", "1.3.4");
+        let mut backend = Vst3Backend::load(helper.spec(), reset_config()).unwrap();
+        if already_prepared {
+            backend.prepare(reset_config()).unwrap();
+        }
+        backend.pending_state = vec![7, 8, 9];
+        for maximum in [128, 255] {
+            helper.set_maximum(maximum);
+            helper.clear();
+            assert!(
+                backend
+                    .prepare(reset_config())
+                    .unwrap_err()
+                    .contains("at least 256")
+            );
+            assert_eq!(
+                helper.commands().iter().map(kind).collect::<Vec<_>>(),
+                ["ResetOriginSupport"]
+            );
+            assert_eq!(backend.pending_state, [7, 8, 9]);
+            assert_eq!(backend.prepared, already_prepared);
+            assert_eq!(backend.max_block_frames, 2048);
         }
     }
 }

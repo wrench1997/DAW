@@ -1066,3 +1066,29 @@ helper passes ordinary no-plug-in protocol smoke. These checks are not native Wi
 - Source-bound interimhelper421a8d7d is independently linked from current vendor and copied byte-exact. Fresh combined native graph/UI acceptance is intentionally NOT RUN while a narrowly reviewed reset correction is prepared. Direct vendor Clippy will run on the final corrected combination; this entry does not expand strict root Clippy to an unexecuted vendor check.
 - Historical fd6 reset diagnosis archive3ff69eaba1a11b8640e6b83534768d13f395430be92be6ec9085818b97e4320d (814776bytes,335files/24directories) preserves all16 invocations and failed onset/silence hypotheses. Four after-decay arms sustain a distinct G4 after genuinely advancing four seconds. A matched control adding onlyCC120 reproduces the immediate truncation; an explicit diagnostic256 reset retaining CC120/panic sustains. No omission of safety CC or global reset256 policy was authorized.
 - Root approved only exact loaded Surge XT instrument factoryUID/version1.3.4 for one reset256 operation, others128, with prepared maximum rejection before state/CC/lifecycle. The correction, final source gates and new genuine acceptance remain separate from this baseline; publication is held.
+
+## Exact Surge XT 1.3.4 reset cleanup policy
+
+A narrowly scoped follow-up to the reviewed reset-origin/session combination selects one
+256-frame owner-only reset for actual loaded instrument UID
+`ABCDEF019182FAEB566D624153675854`, version exactly `1.3.4`. All other identities (including
+Surge FX) retain128. Normal worker Q128, device/prepared maximum, wire, safety CCs, lifecycle,
+metadata reads, output discard/loss policy, and restricted session data-exchange gate are unchanged.
+Capacity refusal precedes pending-state/prepare mutation and every worker's first safety message;
+prepare checks both requested configuration and the helper's authoritative existing capacity.
+
+The prior source/helper-bound diagnostics remain preserved under
+`reset-origin-regression/runs/run011-post-reset-note-contrast` through
+`run016-single-cc120-contrast`. Both legacy1 and reset128 truncated an immediate new held note;
+lifecycle reorder alone also failed. The matched CC120-only contrast and full-safety256 positive
+control agree with official source's eight32-sample deferred all-sound-off blocks. Scheduled
+playback success is not represented as proof of immediate-note sustain. See
+`docs/PLUGIN_RESET_ORIGIN.md` for identity scope, source links, internal-state advance, and limits.
+
+Validation for this correction is recorded separately; historical receipt bytes are not modified.
+
+The seven focused fake-helper/backend regressions passed on the corrected source. The matrix
+also verifies exactly one reset request, unchanged stopped sample/PPQ position, all48 safety
+messages, and no ordinary Process/SaveState/merged feedback poll. Two setup-only command
+mistakes (wrong binary name, then a zero-match filter) are retained in the separate QA directory;
+the final filter executed seven tests. Aggregate/source-bound genuine gates follow separately.
