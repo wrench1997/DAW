@@ -654,17 +654,40 @@ fn maximum_frames_for_file_bytes(channels: u16, maximum_file_bytes: u64) -> Resu
 }
 
 fn run_collector(
+    consumer: Consumer<CapturedFrame>,
+    shutdown: &AtomicU8,
+    writer: StreamingPcm24Writer,
+    stats: &CaptureStats,
+    maximum_frames: u64,
+) -> Result<MasterCaptureMetadata> {
+    run_collector_with_drain_observer(
+        consumer,
+        shutdown,
+        writer,
+        stats,
+        maximum_frames,
+        || {},
+    )
+}
+
+// The observer is a deterministic test seam on the disk thread, never the audio callback.
+fn run_collector_with_drain_observer(
     mut consumer: Consumer<CapturedFrame>,
     shutdown: &AtomicU8,
     mut writer: StreamingPcm24Writer,
     stats: &CaptureStats,
     maximum_frames: u64,
+    mut after_drain: impl FnMut(),
 ) -> Result<MasterCaptureMetadata> {
     let mut encoded = [0_u8; STREAMING_ENCODE_BUFFER_BYTES];
     let mut encoded_len = 0_usize;
     let mut next_timeline_frame = 0_u64;
 
     loop {
+        // COMMIT is published after the producer is dropped. Observe it BEFORE draining:
+        // otherwise a final push between an empty pop and this load can be mistaken for
+        // a missing frame and replaced with silence without ever reading the queued audio.
+        let shutdown_state = shutdown.load(Ordering::Acquire);
         let mut made_progress = false;
         while let Ok(frame) = consumer.pop() {
             made_progress = true;
@@ -685,7 +708,8 @@ fn run_collector(
             next_timeline_frame += 1;
         }
 
-        match shutdown.load(Ordering::Acquire) {
+        after_drain();
+        match shutdown_state {
             COLLECTOR_ABORT => bail!("Master capture was aborted before commit"),
             COLLECTOR_COMMIT => {
                 let timeline_frames = stats
@@ -1309,6 +1333,47 @@ mod tests {
         assert!(metadata.invalid);
         let bytes = std::fs::read(target).unwrap();
         assert_eq!(&bytes[50..62], &[0; 12]);
+    }
+
+    #[test]
+    fn commit_after_empty_drain_preserves_final_queued_audio() {
+        let directory = TestDirectory::new("stop-race");
+        let target = directory.target("final-frame.wav");
+        let (endpoint, consumer, stats, shutdown) = capture_fixture(4, 8);
+        let mut endpoint = Some(endpoint);
+        let writer = StreamingPcm24Writer::create(
+            target.clone(),
+            48_000,
+            MASTER_CAPTURE_CHANNELS,
+            8,
+            PCM_WAV_HEADER_BYTES + 8 * 6,
+        )
+        .unwrap();
+        let metadata = run_collector_with_drain_observer(
+            consumer,
+            &shutdown,
+            writer,
+            &stats,
+            8,
+            || {
+                if let Some(mut endpoint) = endpoint.take() {
+                    assert!(matches!(
+                        endpoint.push_frame(100, [0.5, -0.5]),
+                        CapturePushResult::Captured { .. }
+                    ));
+                    drop(endpoint);
+                    shutdown.store(COLLECTOR_COMMIT, Ordering::Release);
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(metadata.frames, 1);
+        assert_eq!(metadata.captured_frames, 1);
+        assert_eq!(metadata.inserted_silence_frames, 0);
+        assert!(metadata.is_valid());
+        let bytes = std::fs::read(target).unwrap();
+        assert_eq!(&bytes[44..47], &encode_pcm24(0.5));
+        assert_eq!(&bytes[47..50], &encode_pcm24(-0.5));
     }
 
     #[test]

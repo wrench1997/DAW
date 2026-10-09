@@ -72,7 +72,8 @@ use crate::{
         ungroup_selected_notes,
     },
     playlist::{
-        PlaylistFadeSide, clamp_group_move_delta as clamp_playlist_group_move_delta,
+        PlaylistFadeSide, PlaylistGestureSnapshot,
+        clamp_group_move_delta as clamp_playlist_group_move_delta,
         clamp_group_resize_delta as clamp_playlist_group_resize_delta, clip_group_members,
         create_audio_crossfade, dragged_fade_fraction, ensure_clip_group_selected,
         expand_clip_group_selection, group_selected_clips, select_clip_group_members,
@@ -18159,7 +18160,8 @@ impl CitrusApp {
         self.retain_playlist_selection();
         let grouping_enabled = self.piano_roll_state.grouping_enabled;
         let bypass_snap = ui.input(|input| input.modifiers.alt);
-        let clip_snapshot = self.project.clips.clone();
+        let gesture_snapshot = PlaylistGestureSnapshot::capture(&self.project);
+        let clip_snapshot = &gesture_snapshot.clips;
         let pattern_periods = self
             .project
             .patterns
@@ -18177,7 +18179,7 @@ impl CitrusApp {
         let mut fade_crossfade_request = false;
         let mut project_gesture_started = false;
         let mut project_gesture_stopped = false;
-        let automation_lanes = self.project.automation_lanes.clone();
+        let automation_lanes = &gesture_snapshot.automation_lanes;
         let audio_assets = self.project.audio_assets.clone();
         let mut automation_update_request = None;
         let mut automation_delete_request = None;
@@ -18473,6 +18475,8 @@ impl CitrusApp {
                                     Stroke::new(2.0, Color32::WHITE),
                                 );
                                 if node_response.drag_started() {
+                                    project_gesture_started = true;
+                                    clip_consumed_click = true;
                                     ui.ctx().data_mut(|data| {
                                         data.insert_temp(node_id.with("origin"), point)
                                     });
@@ -18504,7 +18508,14 @@ impl CitrusApp {
                                         ),
                                     ));
                                 }
+                                if node_response.drag_stopped() {
+                                    project_gesture_stopped = true;
+                                    ui.ctx().data_mut(|data| {
+                                        data.remove::<AutomationPoint>(node_id.with("origin"));
+                                    });
+                                }
                                 if node_response.secondary_clicked() {
+                                    clip_consumed_click = true;
                                     automation_delete_request = Some((automation.id, point_index));
                                 }
                             }
@@ -18606,7 +18617,7 @@ impl CitrusApp {
                 {
                     clip_consumed_click = true;
                     ensure_clip_group_selected(
-                        &clip_snapshot,
+                        clip_snapshot,
                         &mut self.playlist_selection_ids,
                         clip.id,
                         grouping_enabled,
@@ -18668,14 +18679,14 @@ impl CitrusApp {
                         let modifiers = ui.input(|input| input.modifiers);
                         if modifiers.command || modifiers.ctrl {
                             toggle_clip_group_selection(
-                                &clip_snapshot,
+                                clip_snapshot,
                                 &mut self.playlist_selection_ids,
                                 clip.id,
                                 grouping_enabled,
                             );
                         } else {
                             select_clip_group_members(
-                                &clip_snapshot,
+                                clip_snapshot,
                                 &mut self.playlist_selection_ids,
                                 clip.id,
                                 grouping_enabled,
@@ -18689,20 +18700,20 @@ impl CitrusApp {
                             .or_else(|| self.playlist_selection_ids.iter().copied().min());
                     }
                     ToolMode::Delete => {
-                        let members = clip_group_members(&clip_snapshot, clip.id, grouping_enabled);
+                        let members = clip_group_members(clip_snapshot, clip.id, grouping_enabled);
                         self.playlist_selection_ids = members.clone();
                         self.selected_clip = Some(clip.id);
                         delete_clip_ids = Some(members);
                     }
                     ToolMode::Mute => {
-                        let members = clip_group_members(&clip_snapshot, clip.id, grouping_enabled);
+                        let members = clip_group_members(clip_snapshot, clip.id, grouping_enabled);
                         self.playlist_selection_ids = members.clone();
                         self.selected_clip = Some(clip.id);
                         group_mute_request = Some((members, !clip.muted));
                     }
                     ToolMode::Slice => {
                         select_clip_group_members(
-                            &clip_snapshot,
+                            clip_snapshot,
                             &mut self.playlist_selection_ids,
                             clip.id,
                             grouping_enabled,
@@ -18729,14 +18740,14 @@ impl CitrusApp {
             }
             if response.secondary_clicked() {
                 clip_consumed_click = true;
-                let members = clip_group_members(&clip_snapshot, clip.id, grouping_enabled);
+                let members = clip_group_members(clip_snapshot, clip.id, grouping_enabled);
                 self.playlist_selection_ids = members.clone();
                 self.selected_clip = Some(clip.id);
                 delete_clip_ids = Some(members);
             }
             if resize_response.clicked() {
                 ensure_clip_group_selected(
-                    &clip_snapshot,
+                    clip_snapshot,
                     &mut self.playlist_selection_ids,
                     clip.id,
                     grouping_enabled,
@@ -18753,7 +18764,7 @@ impl CitrusApp {
             {
                 project_gesture_started = true;
                 ensure_clip_group_selected(
-                    &clip_snapshot,
+                    clip_snapshot,
                     &mut self.playlist_selection_ids,
                     clip.id,
                     grouping_enabled,
@@ -18810,7 +18821,7 @@ impl CitrusApp {
             {
                 project_gesture_started = true;
                 ensure_clip_group_selected(
-                    &clip_snapshot,
+                    clip_snapshot,
                     &mut self.playlist_selection_ids,
                     clip.id,
                     grouping_enabled,
@@ -18850,6 +18861,17 @@ impl CitrusApp {
             {
                 project_gesture_stopped = true;
             }
+        }
+        // Discrete edits are complete transactions, just like drag gestures.
+        // Otherwise fast consecutive deletes/splits can merge in timed history capture.
+        if split_request.is_some()
+            || delete_clip_ids.is_some()
+            || group_mute_request.is_some()
+            || automation_delete_request.is_some()
+            || automation_insert_request.is_some()
+        {
+            project_gesture_started = true;
+            project_gesture_stopped = true;
         }
         if let Some((clip_id, side)) = fade_reset_request
             && let Some(clip) = self
@@ -19155,7 +19177,7 @@ impl CitrusApp {
                     })
                     .collect::<HashSet<_>>();
                 let hit_ids =
-                    expand_clip_group_selection(&clip_snapshot, &hit_ids, grouping_enabled);
+                    expand_clip_group_selection(clip_snapshot, &hit_ids, grouping_enabled);
                 let modifiers = ui.input(|input| input.modifiers);
                 if modifiers.command || modifiers.ctrl {
                     let remove = !hit_ids.is_empty()
@@ -19283,9 +19305,7 @@ impl CitrusApp {
             project_gesture_stopped |= canvas_response.drag_stopped();
         }
         if project_gesture_started && self.playlist_gesture_before.is_none() {
-            let mut before = self.project.clone();
-            before.clips = clip_snapshot;
-            self.playlist_gesture_before = Some(before);
+            self.playlist_gesture_before = Some(gesture_snapshot.restore_into(self.project.clone()));
         }
         if project_gesture_stopped {
             self.finish_playlist_gesture();
@@ -28505,6 +28525,72 @@ mod playback_tests {
             project_fingerprint(&project),
             project_fingerprint(&original)
         );
+    }
+
+    #[test]
+    fn playlist_gesture_history_round_trips_point_edits_deletions_and_split_routes() {
+        for operation in 0..3 {
+            let mut project = Project::default();
+            let mut lane = AutomationLane::new(AutomationTarget::MasterPan);
+            lane.replace_points([AutomationPoint::new(0.0, 0.25)]);
+            project.automation_lanes = vec![ProjectAutomation {
+                id: 42,
+                name: "Pan".into(),
+                lane,
+            }];
+            project.audio_clip_mixer_destinations = vec![AudioClipMixerDestination {
+                clip_id: project.clips[0].id,
+                mixer_track_id: 1,
+            }];
+            let original = project_fingerprint(&project);
+            let mut history_snapshot = project.clone();
+            let mut history_fingerprint = original;
+            let mut undo = Vec::new();
+            let mut redo = Vec::new();
+            let mut dirty = false;
+            let snapshot = PlaylistGestureSnapshot::capture(&project);
+            match operation {
+                0 => {
+                    project.automation_lanes[0]
+                        .lane
+                        .replace_points([AutomationPoint::new(0.0, 0.75)]);
+                }
+                1 => {
+                    project.clips.clear();
+                    project.automation_lanes.clear();
+                    project.audio_clip_mixer_destinations.clear();
+                }
+                _ => {
+                    let mut right = project.clips[0].clone();
+                    right.id = 999;
+                    project.clips.push(right);
+                    project
+                        .audio_clip_mixer_destinations
+                        .push(AudioClipMixerDestination {
+                            clip_id: 999,
+                            mixer_track_id: 1,
+                        });
+                }
+            }
+            let edited = project_fingerprint(&project);
+            let before = snapshot.restore_into(project.clone());
+            let after = std::mem::replace(&mut project, before);
+            assert!(commit_explicit_project_history_transaction(
+                &mut project,
+                &mut history_snapshot,
+                &mut history_fingerprint,
+                &mut undo,
+                &mut redo,
+                &mut dirty,
+                after,
+            ));
+            assert_eq!(undo.len(), 1);
+            assert!(dirty);
+            redo.push(std::mem::replace(&mut project, undo.pop().unwrap()));
+            assert_eq!(project_fingerprint(&project), original);
+            undo.push(std::mem::replace(&mut project, redo.pop().unwrap()));
+            assert_eq!(project_fingerprint(&project), edited);
+        }
     }
 
     #[test]

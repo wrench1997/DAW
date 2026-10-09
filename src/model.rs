@@ -735,6 +735,73 @@ impl Project {
         }
     }
 
+    /// JSON encodes non-finite floats as `null`, which cannot be loaded into
+    /// the project's required numeric fields. Reject them before touching the
+    /// filesystem rather than replacing a recoverable project with corrupt data.
+    fn validate_persisted_numbers(&self) -> Result<()> {
+        fn finite(values: &[f32], location: impl std::fmt::Display) -> Result<()> {
+            anyhow::ensure!(
+                values.iter().all(|value| value.is_finite()),
+                "Non-finite numeric value in {location}"
+            );
+            Ok(())
+        }
+
+        finite(
+            &[self.tempo, self.swing, self.song_length_beats],
+            "project settings",
+        )?;
+        for channel in &self.channels {
+            finite(
+                &[channel.volume, channel.pan],
+                format_args!("channel {}", channel.id),
+            )?;
+        }
+        for pattern in &self.patterns {
+            for note in &pattern.notes {
+                finite(
+                    &[note.start, note.length, note.velocity],
+                    format_args!("pattern {} note {}", pattern.id, note.id),
+                )?;
+            }
+        }
+        for clip in &self.clips {
+            finite(
+                &[
+                    clip.start,
+                    clip.length,
+                    clip.source_offset,
+                    clip.gain,
+                    clip.fade_in,
+                    clip.fade_out,
+                ],
+                format_args!("clip {}", clip.id),
+            )?;
+        }
+        for track in &self.mixer_tracks {
+            finite(
+                &[track.volume, track.pan, track.peak],
+                format_args!("mixer track {}", track.id),
+            )?;
+        }
+        for route in &self.mixer_routes {
+            finite(&[route.gain], format_args!("mixer route {}", route.id))?;
+        }
+        for plugin in &self.plugin_instances {
+            finite(&[plugin.wet], format_args!("plug-in {} wet mix", plugin.id))?;
+            for (parameter, value) in &plugin.parameters {
+                finite(
+                    &[*value],
+                    format_args!("plug-in {} parameter {parameter}", plugin.id),
+                )?;
+            }
+        }
+        // AutomationLane's private fields are kept finite by its editing and
+        // deserialization APIs. Legacy piano_notes and waveform_peaks are not
+        // serialized, so they must not prevent saving the musical project.
+        Ok(())
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
         self.save_with_commit(path, commit_project_save)
     }
@@ -743,6 +810,8 @@ impl Project {
     where
         Commit: FnOnce(&Path, &Path) -> io::Result<()>,
     {
+        self.validate_persisted_numbers()
+            .context("Refusing to save non-finite project data")?;
         self.validate_mixer_graph()
             .context("Refusing to save an invalid v8 mixer graph")?;
         if path.file_name().is_none() {
@@ -757,15 +826,17 @@ impl Project {
             format!("Unable to create project directory {}", directory.display())
         })?;
 
-        let (temporary, mut staged_file) =
-            create_project_save_temp(directory).with_context(|| {
-                format!(
-                    "Unable to create a staging file for project {} in {}",
-                    path.display(),
-                    directory.display()
-                )
-            })?;
+        let (temporary, file) = create_project_save_temp(directory).with_context(|| {
+            format!(
+                "Unable to create a staging file for project {} in {}",
+                path.display(),
+                directory.display()
+            )
+        })?;
         let mut cleanup = ProjectSaveTemp::new(temporary.clone());
+        // Drop the open handle before the cleanup guard on every error path.
+        // This also avoids relying on platform-specific open-file deletion.
+        let mut staged_file = file;
 
         serde_json::to_writer_pretty(&mut staged_file, self)
             .with_context(|| format!("Unable to serialize project into {}", temporary.display()))?;
@@ -1911,6 +1982,111 @@ mod tests {
         assert_eq!(restored.name, "Safely replaced");
         assert_eq!(restored.tempo, 137.25);
         assert_ne!(std::fs::read(&target).unwrap(), b"original project bytes");
+        assert_no_project_save_temps(directory.path());
+    }
+
+    #[test]
+    fn project_save_rejects_non_finite_numbers_without_replacing_good_data() {
+        let directory = TestDirectory::new("non-finite-save");
+        let target = directory.path().join("session.citrus");
+        let mut baseline = Project::default();
+        baseline
+            .plugin_instances
+            .push(test_plugin(42, PluginFormat::Vst3, "synth.vst3"));
+        baseline.plugin_instances[0].parameters.insert(7, 0.5);
+        baseline.save(&target).unwrap();
+        let original = std::fs::read(&target).unwrap();
+
+        let cases: &[(&str, fn(&mut Project, f32))] = &[
+            ("tempo", |p, v| p.tempo = v),
+            ("swing", |p, v| p.swing = v),
+            ("song length", |p, v| p.song_length_beats = v),
+            ("channel volume", |p, v| p.channels[0].volume = v),
+            ("channel pan", |p, v| p.channels[0].pan = v),
+            ("note start", |p, v| p.patterns[0].notes[0].start = v),
+            ("note length", |p, v| p.patterns[0].notes[0].length = v),
+            ("note velocity", |p, v| p.patterns[0].notes[0].velocity = v),
+            ("clip start", |p, v| p.clips[0].start = v),
+            ("clip length", |p, v| p.clips[0].length = v),
+            ("clip source offset", |p, v| p.clips[0].source_offset = v),
+            ("clip gain", |p, v| p.clips[0].gain = v),
+            ("clip fade in", |p, v| p.clips[0].fade_in = v),
+            ("clip fade out", |p, v| p.clips[0].fade_out = v),
+            ("mixer volume", |p, v| p.mixer_tracks[0].volume = v),
+            ("mixer pan", |p, v| p.mixer_tracks[0].pan = v),
+            ("mixer peak", |p, v| p.mixer_tracks[0].peak = v),
+            ("route gain", |p, v| p.mixer_routes[0].gain = v),
+            ("plugin wet", |p, v| p.plugin_instances[0].wet = v),
+            ("plugin parameter", |p, v| {
+                p.plugin_instances[0].parameters.insert(7, v);
+            }),
+        ];
+        for (label, corrupt) in cases {
+            for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut project = baseline.clone();
+                corrupt(&mut project, value);
+                let error = project.save(&target).unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("Non-finite numeric value"),
+                    "{label}: {error:#}"
+                );
+                assert_eq!(std::fs::read(&target).unwrap(), original, "{label}");
+                Project::load(&target).unwrap();
+                assert_no_project_save_temps(directory.path());
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_numeric_save_does_not_create_directories() {
+        let directory = TestDirectory::new("non-finite-new-save");
+        let target = directory.path().join("not-created/session.citrus");
+        let project = Project {
+            tempo: f32::NAN,
+            ..Project::default()
+        };
+        assert!(project.save(&target).is_err());
+        assert!(!target.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn non_finite_session_only_data_does_not_prevent_saving() {
+        let directory = TestDirectory::new("session-only-floats");
+        let target = directory.path().join("session.citrus");
+        let mut project = Project::default();
+        let mut legacy_note = project.patterns[0].notes[0].clone();
+        legacy_note.velocity = f32::NAN;
+        project.piano_notes.push(legacy_note);
+        project.save(&target).unwrap();
+        assert!(Project::load(&target).unwrap().piano_notes.is_empty());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn project_serialization_failure_preserves_old_data_and_removes_staging_file() {
+        let directory = TestDirectory::new("serialization-failure");
+        let target = directory.path().join("session.citrus");
+        let mut project = Project::default();
+        project.save(&target).unwrap();
+        let original = std::fs::read(&target).unwrap();
+        #[cfg(unix)]
+        let invalid_path = {
+            use std::os::unix::ffi::OsStringExt;
+            PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]))
+        };
+        #[cfg(windows)]
+        let invalid_path = {
+            use std::os::windows::ffi::OsStringExt;
+            PathBuf::from(std::ffi::OsString::from_wide(&[0xd800]))
+        };
+        let mut plugin = test_plugin(42, PluginFormat::Vst3, "synth.vst3");
+        plugin.path = invalid_path;
+        project.plugin_instances.push(plugin);
+
+        let error = project.save(&target).unwrap_err();
+        assert!(format!("{error:#}").contains("Unable to serialize project"));
+        assert_eq!(std::fs::read(&target).unwrap(), original);
+        Project::load(&target).unwrap();
         assert_no_project_save_temps(directory.path());
     }
 

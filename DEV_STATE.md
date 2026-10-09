@@ -1,1 +1,36 @@
-当前目标仍是以 clean-room、全 Rust 架构逐步实现 FL Studio 级原生 DAW，当前 0.4.0 是可运行且经过验证的纵向切片而不是“完整复刻”；既有 PAT/SONG Transport、全局 `Space` 播放/暂停、`Escape` 停止、Playlist、Channel Rack、Mixer、Piano Roll、插件、自动化、录音与导出继续保留，本轮主要修改 `src/app.rs`、新增 `src/playlist.rs`，并同步 `src/model.rs`、`src/timeline.rs`、`src/export.rs`、`src/icons.rs`、`README.md` 与 `docs/FL_STUDIO_PARITY.md`：Project 格式升到 v10，Clip 持久化稳定 `group_id` 并迁移/清理非法单成员组；Playlist 支持 Ctrl/Shift 多选、框选、Shift+G 分组、Alt+G 解组、分组行为临时关闭，以及组移动、组缩放、删除和复制；`S` 是非破坏 Slip Edit，Pattern 源偏移按内容周期循环并同时作用于实时 Timeline 和导出，Automation 偏移受源范围约束，Audio 偏移以原生 frame 持久化并按 TempoMap 换算，Clip 起止位置不随 Slip 改变；Playlist 工具栏已提供 FL 风格 P/B/D/T/C/S/E 工具。实机诊断确认 egui 0.35 的 `Response::drag_delta()` 只是本帧位移，旧实现却按拖拽起点快照使用它，导致鼠标停一帧时 Clip 或音符恢复原值；现已在 Playlist 移动、缩放、Slip、Automation 点和 Piano Roll 音符移动中统一使用累计 `total_drag_delta()`，Piano Roll 音符右缘仍使用显式按下位置与原始音符组计算，因此用户指出的“音符大小拖不动”已修复。修复后的同源可见窗口 QA 和自动保存证明：`Intro drums` 与 `Warm chords` 分组后 `group_id=1` 且两者 Start 均从 0.00 移到 4.00；`Main groove` 的 Start/Length 保持 4.00/8.00 而 Source offset 变为 1.75；E5 音符 Start 保持 1.00、Length 从 1.50 拖到 4.00 并在停手后保持；最终 Release 本体再次验证 `Space` 令位置从 `001:01:00` 连续推进到 `002:02:75`，第二次 `Space` 后稳定停在 `002:02:77`，并再次将 E5 从 1.50 拖到 4.00。最终 `cargo fmt --all -- --check`、锁定离线全 feature 的 752 项测试和 `cargo clippy --workspace --all-targets --all-features -- -D warnings` 均通过；Release 位于 `target-playlist-group-slip/release`，9 文件发布目录 `dist/Citrus-Studio-0.4.0-Playlist-Group-Slip-Windows-x64` 与 ZIP `dist/Citrus-Studio-0.4.0-Playlist-Group-Slip-Windows-x64.zip` 已生成，主程序、helper、`libunwind.dll` SHA-256 分别为 `8075F8403A04E75A698DBFF9437F300315DA5E4F8FF0987DE4213F917715A574`、`DE015D0456308337AE79B0E814702E2E89AACE4F5F1D1D650F65734BE3AD5199`、`8D9F60801F50C0A6CB7BEB7FD2E121F98BF39EBE40E6C7E07A8A39FCCB817C03`，ZIP SHA-256 为 `BDBE89ACBF9F92166E4D1897EC400FDB5DC0BA7FF743B912656E849CB77DE2BC`，校验表 8/8 通过、两个 EXE 均为 AMD64 Windows GUI 且导入同目录 `libunwind.dll`，VST3 helper 独立协议烟测以 0 退出并返回预期的 `No plugin loaded`；桌面 `C:\Users\Administrator\Desktop\Citrus Studio.lnk` 已回读确认目标、工作目录、图标和哈希均指向新包。当前目录不是 Git 仓库，`git status --short` 返回 fatal，故无 Git diff；直接用 Rust 自带 `rust-lld` 做诊断链接曾因缺少完整 MinGW 导入库失败，改用文档锁定的 LLVM-MinGW 20260616 后成功，其解压工具链保留在 `artifacts/llvm-mingw-20260616-ucrt-x86_64` 供后续复现，临时诊断构建目录和下载 ZIP 因本地删除策略拒绝而仍可能存在但不属于发布包。已知缺口仍包括 Audio/Automation Slip 的真实媒体可见 QA、Playlist 组右缘缩放的最终 Release 鼠标回归、crossfade/ripple editing/track playlist、更多 FL Piano Roll/事件编辑、`.fsc`、Note Levels、自动音阶检测、expression/MPE 和大量原版工作流；下一步优先补真实音频 Slip/拉伸与 Playlist 高级编辑，并继续按官方手册逐项验收而不是宣称已完整复刻。
+# 当前开发状态
+
+最后更新：2026-10-09 01:27 UTC。以当前源码和实际命令结果为准。
+
+## 当前基线与验证边界
+
+- 项目：Citrus Studio 0.4.0，clean-room Rust DAW；尚未达到完整 FL-class 商用品质。
+- 本次 Git 基线：`9c159953163763a354634b3a9f95f84de174641b`。
+- 已完成源码核对：Playlist 分组/Slip、Audio Crossfade、Realtime Master Capture 已有实现与 UI 接线，不能列为完全未实现。
+- 本地环境缺少 `cargo` / `rustc`，基线测试命令退出 127，测试未执行。本轮改用 GitHub Actions Windows MSVC 执行开发质量门禁。
+- **当前会话通过的 Rust 测试数：未建立。** 源码中的测试标记数量不是通过数；旧文档的 752 项通过属于另一环境的历史记录。
+- 当前尚未验证：编译、fmt、Clippy、完整 Rust 测试、Windows GUI、真实音频设备、真实 VST、Release 打包。独立分支 `ci/windows-reliability-20261009` 正在准备首次推送；尚无托管运行结果，未发布 Release。
+
+## 源码已经具备的能力
+
+- `src/playlist.rs::create_audio_crossfade`：两条同轨、非嵌套重叠 Audio Clips，按重叠长度设置淡出/淡入；工具栏及 Clip 菜单在 `src/app.rs` 接线。`src/clip_fade.rs` 的等功率 envelope 供实时音频与离线导出复用。真实媒体、TempoMap 与鼠标回归仍待执行。
+- `src/master_capture.rs`：有界 SPSC 和后台 PCM24 WAV 写入、同步后无覆盖发布、连续性诊断；`src/audio.rs::capture_rendered_master` 捕获已渲染 Master，`src/app.rs` 提供启动/停止/结束写入状态。
+- Master Capture 是实时输出录制，**不能据此宣称 VST 离线 bounce、自动 tails、stems 或实时/离线等价已完成**。离线 exporter 对可能遗漏的启用插件/sidechain 仍会阻止导出。
+
+## 本轮已完成的源码修改（尚未运行验证）
+
+1. 存储可靠性：`src/model.rs` 已增加保存前有限数检查与错误清理，避免 NaN/Infinity 将原文件替换为不可回读 JSON；新增四项测试（含 60 个字段/值组合），尚未执行。
+2. Playlist 编辑可靠性：已在 `src/playlist.rs` 加固组缩放最小边界、Slip 数值溢出与循环半开区间、Audio Slip 极值以及 Fade/Crossfade 非有限终点；新增边界回归测试，尚未执行。`src/app.rs` / `src/playlist.rs` 的 Playlist 手势快照也已扩展为 Clips、Automation lanes 与 Clip mixer routing 一起恢复，补充 Undo/Redo 测试。
+3. 构建验证：Windows MSVC GitHub Actions 工作流已配置；首次运行结果待建立。
+4. 音频/导出安全：`src/master_capture.rs` 已修复停止时最终队列帧可能变成静音的竞态；`src/export.rs` 拒绝超出 8000..=192000 Hz 的采样率与非有限音频数据，替代静默裁剪采样率。新增四项测试，尚未执行。
+5. 文档同步：README、能力矩阵、构建文档、开发路线图与工作日志已同步。独立静态审查完成；它不替代编译、测试或实机验证。
+
+本轮新增 15 个 `#[test]` 标记：存储 4、导出/捕获 4、Playlist/手势历史 7；总标记数从 760 到 775。这是源码计数，**不是执行数或通过数**。Automation point 拖动已显式开/关事务，分割、删除、静音、点插入/删除改为独立提交，避免依赖延迟通用快照。
+
+## 已识别但未修复
+
+Audio Clip 在淡入/淡出内部切分时，当前 split 会复制归一化 fade 到两段，无法保证原 envelope 完整保持。精确修复需要 envelope 原点/范围信息及模型、迁移、实时/离线渲染和 UI 协同；不能把该缺口列为本轮已修复。
+
+## 下一步与验收
+
+完整优先级、完成条件见 [开发路线图](docs/DEVELOPMENT_ROADMAP.md)；逐次变更与执行证据见 [工作日志](docs/WORK_LOG.md)。构建和发布流程见 [构建文档](docs/BUILD_AND_RELEASE.md)。旧环境交接原文保存在 `docs/HISTORICAL_DEV_STATE.md`，仅用于追溯，不能替代当前验证。

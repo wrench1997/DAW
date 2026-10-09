@@ -1,6 +1,34 @@
 use std::{collections::HashSet, fmt};
 
-use crate::model::{Clip, ClipKind, normalize_playlist_clip_groups};
+use crate::model::{
+    AudioClipMixerDestination, Clip, ClipKind, Project, ProjectAutomation,
+    normalize_playlist_clip_groups,
+};
+
+/// The data a Playlist gesture can mutate, captured before its first frame.
+/// Keeping related lanes and routes together prevents undo from restoring orphaned clips.
+pub struct PlaylistGestureSnapshot {
+    pub clips: Vec<Clip>,
+    pub automation_lanes: Vec<ProjectAutomation>,
+    audio_clip_mixer_destinations: Vec<AudioClipMixerDestination>,
+}
+
+impl PlaylistGestureSnapshot {
+    pub fn capture(project: &Project) -> Self {
+        Self {
+            clips: project.clips.clone(),
+            automation_lanes: project.automation_lanes.clone(),
+            audio_clip_mixer_destinations: project.audio_clip_mixer_destinations.clone(),
+        }
+    }
+
+    pub fn restore_into(self, mut project: Project) -> Project {
+        project.clips = self.clips;
+        project.automation_lanes = self.automation_lanes;
+        project.audio_clip_mixer_destinations = self.audio_clip_mixer_destinations;
+        project
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaylistEditError {
@@ -305,6 +333,9 @@ pub fn clamp_group_resize_delta(
         .map(|clip| song_length_beats - clip.start - clip.length)
         .reduce(f32::min)
         .unwrap();
+    if lower > upper {
+        return Err(PlaylistEditError::InvalidBounds);
+    }
     Ok(requested_length_delta.clamp(lower, upper))
 }
 
@@ -322,7 +353,13 @@ pub fn quantized_slip_delta(
     if !snap_beats.is_finite() || snap_beats <= 0.0 {
         return Err(PlaylistEditError::InvalidSnap);
     }
-    Ok((pointer_delta_beats / snap_beats).round() * snap_beats)
+    // Compute in a wider domain: finite f32 inputs can overflow their ratio.
+    let delta = ((f64::from(pointer_delta_beats) / f64::from(snap_beats)).round()
+        * f64::from(snap_beats)) as f32;
+    if !delta.is_finite() {
+        return Err(PlaylistEditError::InvalidNumber);
+    }
+    Ok(delta)
 }
 
 pub fn slipped_looping_source_offset(
@@ -336,7 +373,9 @@ pub fn slipped_looping_source_offset(
         return Err(PlaylistEditError::InvalidBounds);
     }
     let delta = quantized_slip_delta(pointer_delta_beats, snap_beats, bypass_snap)?;
-    Ok((origin - delta).rem_euclid(period_beats))
+    let offset = (f64::from(origin) - f64::from(delta)).rem_euclid(f64::from(period_beats)) as f32;
+    // Rounding at the wrap boundary must not produce the excluded endpoint.
+    Ok(if offset >= period_beats { 0.0 } else { offset })
 }
 
 pub fn slipped_bounded_source_offset(
@@ -351,7 +390,8 @@ pub fn slipped_bounded_source_offset(
         return Err(PlaylistEditError::InvalidBounds);
     }
     let delta = quantized_slip_delta(pointer_delta_beats, snap_beats, bypass_snap)?;
-    Ok((origin - delta).clamp(minimum, maximum))
+    Ok((f64::from(origin) - f64::from(delta))
+        .clamp(f64::from(minimum), f64::from(maximum)) as f32)
 }
 
 pub fn slipped_audio_source_offset(
@@ -359,7 +399,9 @@ pub fn slipped_audio_source_offset(
     pointer_delta_frames: i128,
     maximum_frame: u64,
 ) -> u64 {
-    (i128::from(origin_frame) - pointer_delta_frames).clamp(0, i128::from(maximum_frame)) as u64
+    i128::from(origin_frame)
+        .saturating_sub(pointer_delta_frames)
+        .clamp(0, i128::from(maximum_frame)) as u64
 }
 
 pub fn dragged_fade_fraction(
@@ -385,17 +427,20 @@ pub fn dragged_fade_fraction(
     }
 
     let clip_end = clip.start + clip.length;
+    if !clip_end.is_finite() {
+        return Err(PlaylistEditError::InvalidTarget);
+    }
     let origin_handle = match side {
         PlaylistFadeSide::In => clip.start + origin_fraction.clamp(0.0, 1.0) * clip.length,
         PlaylistFadeSide::Out => clip_end - origin_fraction.clamp(0.0, 1.0) * clip.length,
     };
-    let raw_handle = origin_handle + pointer_delta_beats;
+    let raw_handle = f64::from(origin_handle) + f64::from(pointer_delta_beats);
     let handle = if bypass_snap {
         raw_handle
     } else {
-        (raw_handle / snap_beats).round() * snap_beats
+        (raw_handle / f64::from(snap_beats)).round() * f64::from(snap_beats)
     }
-    .clamp(clip.start, clip_end);
+    .clamp(f64::from(clip.start), f64::from(clip_end)) as f32;
 
     Ok(match side {
         PlaylistFadeSide::In => (handle - clip.start) / clip.length,
@@ -439,6 +484,9 @@ pub fn create_audio_crossfade(
     let right = selected[1];
     let left_end = left.start + left.length;
     let right_end = right.start + right.length;
+    if !left_end.is_finite() || !right_end.is_finite() {
+        return Err(PlaylistEditError::InvalidTarget);
+    }
     if left.start >= right.start || right.start >= left_end || left_end >= right_end {
         return Err(PlaylistEditError::CrossfadeGeometry);
     }
@@ -483,6 +531,129 @@ mod tests {
             fade_out: 0.0,
             muted: false,
         }
+    }
+
+    #[test]
+    fn gesture_snapshot_restores_clips_automation_and_audio_routes_together() {
+        use crate::automation::{AutomationLane, AutomationPoint, AutomationTarget};
+
+        let mut project = Project::default();
+        let mut lane = AutomationLane::new(AutomationTarget::MasterPan);
+        lane.replace_points([AutomationPoint::new(0.0, 0.25)]);
+        project.automation_lanes = vec![ProjectAutomation {
+            id: 42,
+            name: "Pan".into(),
+            lane,
+        }];
+        project.audio_clip_mixer_destinations = vec![AudioClipMixerDestination {
+            clip_id: 1,
+            mixer_track_id: 1,
+        }];
+        let original = serde_json::to_value(&project).unwrap();
+        let snapshot = PlaylistGestureSnapshot::capture(&project);
+        project.clips.clear();
+        project.automation_lanes.clear();
+        project.audio_clip_mixer_destinations.clear();
+        assert_eq!(
+            serde_json::to_value(snapshot.restore_into(project)).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn gesture_snapshot_restores_point_edits_and_removes_new_split_routes() {
+        use crate::automation::{AutomationLane, AutomationPoint, AutomationTarget};
+
+        let mut project = Project::default();
+        let mut lane = AutomationLane::new(AutomationTarget::MasterPan);
+        lane.replace_points([AutomationPoint::new(0.0, 0.25)]);
+        project.automation_lanes = vec![ProjectAutomation {
+            id: 42,
+            name: "Pan".into(),
+            lane,
+        }];
+        let original = serde_json::to_value(&project).unwrap();
+        let snapshot = PlaylistGestureSnapshot::capture(&project);
+        project.automation_lanes[0]
+            .lane
+            .replace_points([AutomationPoint::new(0.0, 0.75)]);
+        project
+            .audio_clip_mixer_destinations
+            .push(AudioClipMixerDestination {
+                clip_id: 999,
+                mixer_track_id: 1,
+            });
+        assert_eq!(
+            serde_json::to_value(snapshot.restore_into(project)).unwrap(),
+            original
+        );
+    }
+
+    #[test]
+    fn impossible_group_resize_returns_error_instead_of_panicking() {
+        let clips = vec![clip(1, 0, 3.0, 1.0, None)];
+        assert_eq!(
+            clamp_group_resize_delta(&clips, 0.0, 2.0, 4.0),
+            Err(PlaylistEditError::InvalidBounds)
+        );
+    }
+
+    #[test]
+    fn finite_slip_inputs_do_not_overflow_intermediate_arithmetic() {
+        assert_eq!(
+            quantized_slip_delta(f32::MAX, f32::MIN_POSITIVE, false),
+            Ok(f32::MAX)
+        );
+        assert_eq!(
+            quantized_slip_delta(f32::MAX, f32::MAX * 0.75, false),
+            Ok(f32::MAX * 0.75)
+        );
+        let offset = slipped_looping_source_offset(f32::MAX, -f32::MAX, 4.0, 1.0, true).unwrap();
+        assert!(offset.is_finite() && (0.0..4.0).contains(&offset));
+        let offset = slipped_looping_source_offset(0.0, f32::MIN_POSITIVE, 4.0, 1.0, true).unwrap();
+        assert!((0.0..4.0).contains(&offset));
+        assert_eq!(
+            slipped_bounded_source_offset(f32::MAX, -f32::MAX, 0.0, 4.0, 1.0, true),
+            Ok(4.0)
+        );
+        assert_eq!(slipped_audio_source_offset(1, i128::MIN, 100), 100);
+        assert_eq!(slipped_audio_source_offset(1, i128::MAX, 100), 0);
+        assert_eq!(
+            slipped_audio_source_offset(u64::MAX, i128::MIN, u64::MAX),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn quantized_slip_rejects_an_unrepresentable_result() {
+        assert_eq!(
+            quantized_slip_delta(f32::MAX, f32::MAX * 0.6, false),
+            Err(PlaylistEditError::InvalidNumber)
+        );
+    }
+
+    #[test]
+    fn fades_reject_overflowing_clip_ends_and_handle_tiny_snap() {
+        let invalid = clip(1, 0, f32::MAX, f32::MAX, None);
+        assert_eq!(
+            dragged_fade_fraction(&invalid, PlaylistFadeSide::In, 0.0, 0.0, 1.0, true),
+            Err(PlaylistEditError::InvalidTarget)
+        );
+        let valid = clip(1, 0, 1.0, 4.0, None);
+        assert_eq!(
+            dragged_fade_fraction(&valid, PlaylistFadeSide::In, 0.0, 1.0, f32::MIN_POSITIVE, false),
+            Ok(0.25)
+        );
+        let mut left = clip(1, 0, 0.0, f32::MAX, None);
+        let mut right = invalid;
+        right.id = 2;
+        right.start = f32::MAX * 0.5;
+        left.kind = ClipKind::Audio;
+        right.kind = ClipKind::Audio;
+        assert_eq!(
+            create_audio_crossfade(&[left, right], &HashSet::from([1, 2])).unwrap_err(),
+            PlaylistEditError::InvalidTarget
+        );
     }
 
     #[test]

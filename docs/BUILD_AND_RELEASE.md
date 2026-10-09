@@ -6,6 +6,14 @@
 
 本流程锁定 Cargo.lock、Rust 工具链、LLVM-MinGW 版本、feature 集与发布文件白名单。它使发布输入和步骤可追溯；除非已在独立干净环境中比较结果，否则不要宣称不同机器上的输出逐字节完全相同。最终发布身份以签名后的 SHA-256 为准。
 
+## 当前会话验证状态（2026-10-08）
+
+本页是 Windows 发布流程和历史工具链记录，不代表当前版本已完成发布验收。本次本地基线命令因缺少 Cargo 退出 127，测试没有执行；开发质量门禁改用 GitHub Actions Windows MSVC。后续实际命令、版本、退出状态和测试数写入 `WORK_LOG.md`。历史版本仍须通过下载、工具输出及目标平台验证后才能称为本次已验证；不可把源码中的测试标记数当作通过数。
+
+## 开发 CI（独立分支验证）
+
+`.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 会触发首次验证，结果记录于 `WORK_LOG.md`；YAML 可解析不等于 Rust 构建通过。它不替代下述历史固定 gnullvm 发布流程、helper smoke、干净 Windows 实机验收与打包校验。
+
 ## 发布契约
 
 一个可运行的 Windows 发布包必须在同一 ZIP 根目录中携带以下三个二进制文件：
@@ -18,7 +26,7 @@ vst3-host-helper.exe 不是可选示例程序。主程序启用 VST3 process iso
 
 ZIP 还必须携带仓库根目录的 LICENSE、THIRD_PARTY_NOTICES.md、README.md、保持原相对路径的 docs/FL_STUDIO_PARITY.md 与 docs/BUILD_AND_RELEASE.md，以及发布时生成的 SHA256SUMS.txt。保留 docs 子目录可保证 README 中的仓库内链接在解压后继续有效。
 
-## 已验证构建基线
+## 历史 Windows 构建基线（本次待复验）
 
 | 组件 | 固定版本 |
 | --- | --- |
@@ -256,7 +264,7 @@ Citrus Studio 在 Windows 上使用 directories crate 的本地数据目录。�
 
 ## 最终发布检查表
 
-- fmt、148 项或更多当前测试、Clippy -D warnings、all-features --bins Release 全部通过。
+- fmt、当前完整测试集、Clippy -D warnings、all-features --bins Release 全部通过，并记录实际执行数、结果及对应提交；不能用历史固定测试数代替门禁。
 - 两个 EXE 均为 AMD64 Windows GUI subsystem。
 - helper 协议 smoke 通过且没有残留进程。
 - libunwind.dll 与本次 LLVM-MinGW 20260616 副本哈希一致。

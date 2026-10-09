@@ -4,6 +4,8 @@
 
 Citrus Studio is a clean-room, native music-production application written in Rust. It follows a pattern-first workflow while using its own product identity, vector iconography, layout, project format, DSP, and implementation.
 
+Current checkout status and validation limits are recorded in `DEV_STATE.md`; development milestones and dated evidence are in `docs/DEVELOPMENT_ROADMAP.md` and `docs/WORK_LOG.md`. Historical Windows validation is not a fresh test result for this checkout. New Windows MSVC checks are being prepared on the independent `ci/windows-reliability-20261009` branch.
+
 ## Architecture
 
 - `eframe`, `egui`, and `wgpu`: native GPU-rendered desktop UI
@@ -50,6 +52,7 @@ Useful shortcuts:
 - Playlist horizontal and vertical scrolling, pointer-anchored time/track zoom, and viewport-culling across all 32 tracks and the complete configured song length
 - Pattern, audio, and automation Clip modifier-click/marquee selection, Draw/Paint placement, group-aware movement and resizing, snapping with `Alt` bypass, splitting, muting, duplication, and deletion
 - Playlist `S` Slip Edit moves Pattern, Audio, and Automation source content without moving Clip edges; Pattern phase reaches both realtime Timeline playback and offline export, Audio uses native asset-frame bounds, and visible Pattern ticks, waveform ranges, and automation curves follow the source offset
+- Audio Clip fade handles and a two-Clip equal-power crossfade command: select exactly two same-track Audio Clips with a non-nested overlap; the command matches fade-out/fade-in to the overlap while preserving the opposite fades
 - Automation data is shifted or split with its owning automation clip
 - Piano Roll time/key scrolling and zoom across MIDI 0..127 and the complete active-pattern time range, with an explicit target-Channel selector, FL-style Draw/Paint/Delete/Mute/Slice/Select/Chord Stamp tools, keyboard audition, active-pattern ghost channels, marquee and modifier selection, independent time snap, note drawing, a forgiving right-edge resize grip available from every tool, duplicate, and one-step drag gestures
 - Persistent Project v10 Playlist Clip groups and v9 Piano note groups with `Shift+G`/`Alt+G`, a nondestructive grouping-behavior switch, linked visual markers, and group-aware click/marquee selection, movement, resizing, mute, delete, duplicate, transforms/Inspector edits where applicable, and history
@@ -132,17 +135,21 @@ Current PDC covers the active MainInput DAG. It includes fixed-quantum and repor
 
 The arrangement exporter now mixes Pattern clips and referenced WAV Audio Clips with placement, source offset, sample-rate conversion, gain, fades, and the compiled plugin-free Mixer DAG, including chain/fan-out/diamond path summation and stable-ID display reordering. It still omits VST output/effects, automation-accurate parameter rendering, realtime nonlinear equivalence, stems, dithering choices, and plug-in delay compensation. To avoid silently producing the wrong mix, the 0.4 UI refuses offline WAV export while an enabled, non-bypassed plug-in placement or active sidechain route would be omitted.
 
+Realtime Master Capture is connected through the File menu and diagnostics UI. It records the rendered stereo Master in real time, including whatever the live graph actually renders, using a bounded callback queue and background PCM24 writer. Install/stop are callback-confirmed; the writer synchronizes a temporary file before no-clobber publication. Gaps/overflow are surfaced as invalid-capture diagnostics. This does not implement deterministic offline plug-in bounce, automatic tails or stems. Current-session hardware validation is still pending.
+
+Latest local hardening (not yet compiled or test-run in this environment): project-save preflight rejects non-finite persisted numbers before touching the destination; offline WAV export rejects rates outside 8000..=192000 Hz and non-finite rendered audio instead of silently changing the rate or encoding invalid samples. Master Capture collector shutdown ordering has also been corrected to drain final queued frames. See the work log for validation status.
+
 ## Commercial gaps
 
 The following are required before Citrus Studio can be described as an FL-class commercial DAW:
 
 - Sidechain and multi-output plug-in bus transport, automated route gain, graph-aware freeze/bounce, and richer routing ergonomics; the current MainInput DAG already supports bounded sends, submixes, display reordering, callback scheduling, and graph PDC
 - Vendor editor windows, MIDI learn/controller mapping, gesture begin/end with grouped undo, touch/latch/write automation, preset management, VST2 process isolation, hardened probing, crash recovery, Master Insert and multi-slot Generator automation, and sample-exact parameter delivery
-- A full sample editor with time-stretching, warping, pitch shifting, transient slicing, crossfades, and sample-accurate realtime/offline Audio Clip conformance under rapid seeks and tempo changes
+- A full sample editor with time-stretching, warping, pitch shifting, transient slicing, richer crossfade workflows, and sample-accurate realtime/offline Audio Clip conformance under rapid seeks and tempo changes
 - ASIO and exclusive-mode support, vendor control-panel integration, seamless device hot-swap, hardened device-loss recovery, and sustained real-hardware validation; the current device profiles already cover selectable input/output devices plus deterministic sample-rate, channel, format, and buffer negotiation
 - General track arming, multi-destination monitoring, input-latency compensation, punch/loop recording, overdub, take lanes, comping, and take management; with an exact MIDI route active, the current Record action captures only that one Generator into a fresh 16-beat Pattern placement
-- Advanced Playlist and Piano Roll tools beyond the current Clip grouping/Slip core, manual scale, Chord Stamp, built-in Articulate, and Arpeggiate core: crossfades, ripple editing, track playlists, consolidation, Audio Track linking, `.fsc` groove/slice/custom-Stamp/arpeggio templates, automatic top-down/bottom-up scale detection, Quantize/Arpeggio Note Levels, richer group management, advanced articulation banks, per-note expression, richer event lanes, and cross-pattern ghost sources
-- Unified full-mix rendering with plugins/effects, automation-accurate parameters, stems, multiple bit depths, dithering, tails, PDC, and realtime export
+- Advanced Playlist and Piano Roll tools beyond the current Clip grouping/Slip core, manual scale, Chord Stamp, built-in Articulate, and Arpeggiate core: richer crossfade workflows, ripple editing, track playlists, consolidation, Audio Track linking, `.fsc` groove/slice/custom-Stamp/arpeggio templates, automatic top-down/bottom-up scale detection, Quantize/Arpeggio Note Levels, richer group management, advanced articulation banks, per-note expression, richer event lanes, and cross-pattern ghost sources
+- Unified full-mix rendering with plugins/effects, automation-accurate parameters, stems, multiple bit depths, dithering, tails, PDC, and production-grade realtime export controls beyond the connected Master Capture
 - Broader live MIDI: multi-input/multi-target and native-Channel routing, CC/pedal/pitch/aftertouch capture, MPE, SysEx, MIDI clock, controller learn/mapping, loop/punch/take recording, long-term input-clock drift and latency calibration, audio-clock/deadline-integrated output, and sustained physical-hardware stress
 - Long-run stress, corrupt-plugin, device-change, project-migration, crash-recovery, and sample-accurate realtime/offline conformance testing
 - Incremental command-based undo/dirty tracking and byte-bounded history for large projects; the current 50 ms change detector avoids per-frame clones but still serializes for detection and stores whole-project snapshots

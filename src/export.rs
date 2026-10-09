@@ -262,7 +262,7 @@ struct PreparedAudioClip {
 }
 
 pub fn render_project_wav(project: &Project, path: &Path, sample_rate: u32) -> Result<()> {
-    let sample_rate = sample_rate.clamp(8_000, 192_000);
+    validate_export_sample_rate(sample_rate)?;
     let mixer_plan = OfflineMixerPlan::build(project)?;
     let tempo_map = TempoMap::from_project(project, sample_rate)
         .context("Unable to build the project tempo map for WAV export")?;
@@ -778,12 +778,31 @@ fn midi_frequency(note: u8) -> f32 {
     440.0 * 2.0_f32.powf((note as f32 - 69.0) / 12.0)
 }
 
+fn validate_export_sample_rate(sample_rate: u32) -> Result<()> {
+    ensure!(
+        (8_000..=192_000).contains(&sample_rate),
+        "WAV export sample rate {sample_rate} Hz is outside the supported range 8000..=192000 Hz"
+    );
+    Ok(())
+}
+
 fn write_stereo_pcm24(
     path: &Path,
     sample_rate: u32,
     stereo: &[StereoFrame],
     gain: f32,
 ) -> Result<()> {
+    validate_export_sample_rate(sample_rate)?;
+    ensure!(gain.is_finite(), "WAV export gain must be finite");
+    for (index, frame) in stereo.iter().enumerate() {
+        ensure!(
+            frame.left.is_finite()
+                && frame.right.is_finite()
+                && (frame.left * gain).is_finite()
+                && (frame.right * gain).is_finite(),
+            "WAV export contains non-finite audio at frame {index}"
+        );
+    }
     let channels = 2_u16;
     let bits_per_sample = 24_u16;
     let bytes_per_sample = 3_u32;
@@ -2008,6 +2027,52 @@ mod tests {
         assert!(message.contains("Unable to allocate"));
         assert!(message.contains("stereo render buffer"));
         assert!(message.contains("address space"));
+    }
+
+    #[test]
+    fn unsupported_export_sample_rates_preserve_existing_destination() {
+        let path = temporary_wav("invalid-export-rate");
+        std::fs::write(&path, b"previous export").unwrap();
+        let project = arrangement_project();
+        for rate in [0, 7_999, 192_001, u32::MAX] {
+            let error = render_project_wav(&project, &path, rate).unwrap_err();
+            assert!(error.to_string().contains("sample rate"));
+            assert_eq!(std::fs::read(&path).unwrap(), b"previous export");
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn export_sample_rate_boundaries_are_written_exactly() {
+        let path = temporary_wav("export-rate-boundaries");
+        for rate in [8_000, 192_000] {
+            write_stereo_pcm24(&path, rate, &[StereoFrame::default()], 1.0).unwrap();
+            let decoded = wav::read_wav(&path).unwrap();
+            assert_eq!(decoded.metadata.sample_rate, rate);
+            assert_eq!(decoded.metadata.frames, 1);
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn pcm24_writer_rejects_non_finite_audio_and_preserves_destination() {
+        let path = temporary_wav("non-finite-export");
+        std::fs::write(&path, b"previous export").unwrap();
+        for (sample, gain) in [
+            (f32::NAN, 1.0),
+            (f32::INFINITY, 1.0),
+            (f32::NEG_INFINITY, 1.0),
+            (0.5, f32::NAN),
+            (f32::MAX, 2.0),
+        ] {
+            let frames = [StereoFrame {
+                left: 0.25,
+                right: sample,
+            }];
+            assert!(write_stereo_pcm24(&path, 48_000, &frames, gain).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"previous export");
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
