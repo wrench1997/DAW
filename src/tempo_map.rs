@@ -301,6 +301,26 @@ impl TempoMap {
             .map(|seconds| seconds_to_frame(seconds, self.sample_rate))
     }
 
+    /// Reference envelopes may extend outside the playable song after a trim
+    /// or move. Continue the boundary tempo instead of clipping their phase or
+    /// dropping the valid slice. This is compilation-only, never callback work.
+    pub(crate) fn extended_beat_to_frame(&self, beat: f64) -> Option<i64> {
+        if !beat.is_finite() {
+            return None;
+        }
+        let seconds = if beat < 0.0 {
+            beat * self.source.seconds_per_beat(0.0)
+        } else if beat > self.max_beat {
+            self.duration_seconds
+                + (beat - self.max_beat) * self.source.seconds_per_beat(self.max_beat)
+        } else {
+            self.beat_to_seconds(beat).ok()?
+        };
+        let frames = (seconds * f64::from(self.sample_rate)).round();
+        (frames.is_finite() && frames > i64::MIN as f64 && frames < i64::MAX as f64)
+            .then_some(frames as i64)
+    }
+
     pub fn frame_to_beat(&self, frame: u64) -> Result<f64, TempoMapError> {
         let seconds = frame as f64 / f64::from(self.sample_rate);
         if frame > self.duration_frames() {
@@ -759,6 +779,10 @@ mod tests {
             audio_asset_id: None,
             source_offset: 0.0,
             audio_source_offset_frame: None,
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -809,6 +833,10 @@ mod tests {
             audio_asset_id: None,
             source_offset: 0.5,
             audio_source_offset_frame: None,
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,

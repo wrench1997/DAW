@@ -23,6 +23,7 @@ use crate::{
         MasterCaptureEndpointEvent, MidiGeneratorRouteStamp, MidiInputRouteEvent,
         MidiRecordingEndpointEvent, PreparedMidiInputRoute,
     },
+    audio_clip::{slip_audio_clip_source, source_position_seconds, split_audio_clip},
     audio_device::{
         AUDIO_PREFERENCES_VERSION, AudioBufferCapability, AudioBufferSizeRequest,
         AudioChannelRequest, AudioDeviceCatalog, AudioDeviceCatalogEntry, AudioDeviceDirection,
@@ -35,7 +36,7 @@ use crate::{
         canonicalize_automation_target,
     },
     automation_runtime,
-    clip_fade::equal_power_normalized_gain,
+    clip_fade::{clip_normalized_gain, fade_handle_fraction, set_clip_fade},
     editor_viewport::{AxisViewport, Viewport2D},
     export,
     export_job::{ExportCancelled, ExportJob, ExportOutcome},
@@ -80,8 +81,8 @@ use crate::{
         clamp_group_resize_delta as clamp_playlist_group_resize_delta, clip_group_members,
         create_audio_crossfade, dragged_fade_fraction, ensure_clip_group_selected,
         expand_clip_group_selection, group_selected_clips, select_clip_group_members,
-        slipped_audio_source_offset, slipped_bounded_source_offset, slipped_looping_source_offset,
-        toggle_clip_group_selection, ungroup_selected_clips,
+        slipped_bounded_source_offset, slipped_looping_source_offset, toggle_clip_group_selection,
+        ungroup_selected_clips,
     },
     plugin_parameter_edit::{
         ParameterEditCancelReason, ParameterEditCancelScope, ParameterEditEffect,
@@ -242,6 +243,10 @@ fn transport_playback_project(project: &Project, mode: TransportMode) -> Project
                 audio_asset_id: None,
                 source_offset: 0.0,
                 audio_source_offset_frame: None,
+                audio_source_reference: None,
+                audio_length_reference: None,
+                fade_in_reference: None,
+                fade_out_reference: None,
                 gain: 1.0,
                 fade_in: 0.0,
                 fade_out: 0.0,
@@ -3949,6 +3954,10 @@ fn build_new_pattern_midi_take(
         audio_asset_id: None,
         source_offset: 0.0,
         audio_source_offset_frame: None,
+        audio_source_reference: None,
+        audio_length_reference: None,
+        fade_in_reference: None,
+        fade_out_reference: None,
         gain: 1.0,
         fade_in: 0.0,
         fade_out: 0.0,
@@ -9821,6 +9830,10 @@ impl CitrusApp {
             audio_asset_id: None,
             source_offset: 0.0,
             audio_source_offset_frame: None,
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -11346,6 +11359,10 @@ impl CitrusApp {
             audio_asset_id: Some(asset_id),
             source_offset: 0.0,
             audio_source_offset_frame: Some(0),
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -13839,7 +13856,11 @@ impl CitrusApp {
                 self.saved_path = Some(path.clone());
                 if stale_count == 0 {
                     self.mark_saved();
-                    self.notify(format!("Saved {}", path.display()));
+                    self.notify(format!(
+                        "Saved {} · format v{} requires an updated Citrus Studio build",
+                        path.display(),
+                        crate::model::CURRENT_PROJECT_FORMAT_VERSION
+                    ));
                 } else {
                     self.dirty = true;
                     self.last_autosave = Instant::now();
@@ -15188,8 +15209,22 @@ impl CitrusApp {
             });
             inspector_section(ui, "CLIP ENVELOPE", |ui| {
                 property_slider(ui, "Gain", &mut clip.gain, 0.0..=1.5, "");
-                property_slider(ui, "Fade in", &mut clip.fade_in, 0.0..=1.0, "");
-                property_slider(ui, "Fade out", &mut clip.fade_out, 0.0..=1.0, "");
+                if clip.fade_in_reference.is_some() || clip.fade_out_reference.is_some() {
+                    ui.label(
+                        RichText::new("Inherited fades keep their original envelope. Controls show the visible portion; editing replaces only that side.")
+                            .size(9.0)
+                            .color(theme::MUTED),
+                    );
+                }
+                for (is_in, label) in [(true, "Fade in"), (false, "Fade out")] {
+                    let mut fraction = fade_handle_fraction(clip, is_in);
+                    if property_slider(ui, label, &mut fraction, 0.0..=1.0, "")
+                        .on_hover_text(clip_fade_tooltip(clip, is_in))
+                        .changed()
+                    {
+                        set_clip_fade(clip, is_in, fraction);
+                    }
+                }
                 ui.toggle_value(&mut clip.muted, "MUTED");
             });
             (
@@ -15207,7 +15242,19 @@ impl CitrusApp {
             self.automation_inspector(ui, automation_id, clip_start, clip_length, source_offset);
         }
         if kind == ClipKind::Audio {
-            self.audio_asset_inspector(ui, audio_asset_id, audio_source_offset_frame);
+            let resolved_source = audio_asset_id
+                .and_then(|id| {
+                    self.project
+                        .audio_assets
+                        .iter()
+                        .find(|asset| asset.id == id)
+                })
+                .and_then(|asset| {
+                    source_position_seconds(&self.project.clips[index], asset.sample_rate)
+                })
+                .map(|frame| frame.round() as u64)
+                .or(audio_source_offset_frame);
+            self.audio_asset_inspector(ui, audio_asset_id, resolved_source);
         }
     }
 
@@ -16468,6 +16515,10 @@ impl CitrusApp {
             audio_asset_id: Some(asset_id),
             source_offset: 0.0,
             audio_source_offset_frame: Some(0),
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -18348,8 +18399,8 @@ impl CitrusApp {
                 ui.interact(resize_rect, id.with("resize-disabled"), Sense::hover())
             };
             let fade_handle_y = clip_rect.top() + 7.0;
-            let fade_in_x = clip_left + clip.fade_in * clip.length * beat_w;
-            let fade_out_x = clip_right - clip.fade_out * clip.length * beat_w;
+            let fade_in_x = clip_left + fade_handle_fraction(clip, true) * clip.length * beat_w;
+            let fade_out_x = clip_right - fade_handle_fraction(clip, false) * clip.length * beat_w;
             let fade_in_response = (show_fade_controls
                 && fade_in_x >= canvas.left() - 7.0
                 && fade_in_x <= canvas.right() + 7.0)
@@ -18364,7 +18415,7 @@ impl CitrusApp {
                         Sense::click_and_drag(),
                     )
                     .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
-                    .on_hover_text("Drag Fade In horizontally · snaps to grid · Alt bypasses snap")
+                    .on_hover_text(clip_fade_tooltip(clip, true))
                 });
             let fade_out_response = (show_fade_controls
                 && fade_out_x >= canvas.left() - 7.0
@@ -18380,7 +18431,7 @@ impl CitrusApp {
                         Sense::click_and_drag(),
                     )
                     .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
-                    .on_hover_text("Drag Fade Out horizontally · snaps to grid · Alt bypasses snap")
+                    .on_hover_text(clip_fade_tooltip(clip, false))
                 });
             let selected = self.playlist_selection_ids.contains(&clip.id);
             let base = theme::color(clip.color);
@@ -18443,41 +18494,37 @@ impl CitrusApp {
                             .iter()
                             .find(|asset| asset.id == asset_id && !asset.waveform_peaks.is_empty())
                     }) {
-                        let source_start = clip
-                            .audio_source_offset_frame
-                            .unwrap_or(0)
-                            .saturating_add(audio_source_frame_delta(
+                        let source_start = source_position_seconds(clip, asset.sample_rate)
+                            .unwrap_or(0.0)
+                            + audio_source_frame_delta(
                                 self.tempo_map.as_ref(),
                                 clip.start,
                                 visible_start,
                                 self.effective_tempo,
                                 asset.sample_rate,
-                            ));
-                        let source_end = clip
-                            .audio_source_offset_frame
-                            .unwrap_or(0)
-                            .saturating_add(audio_source_frame_delta(
+                            ) as f64;
+                        let source_end = source_position_seconds(clip, asset.sample_rate)
+                            .unwrap_or(0.0)
+                            + audio_source_frame_delta(
                                 self.tempo_map.as_ref(),
                                 clip.start,
                                 visible_end,
                                 self.effective_tempo,
                                 asset.sample_rate,
-                            ));
+                            ) as f64;
                         draw_waveform_peaks_range(
                             &canvas_painter,
                             wave_rect,
                             &asset.waveform_peaks,
                             base,
                             WaveformSourceRange {
-                                start_ratio: source_start as f64 / asset.frames.max(1) as f64,
-                                end_ratio: source_end as f64 / asset.frames.max(1) as f64,
+                                start_ratio: source_start / asset.frames.max(1) as f64,
+                                end_ratio: source_end / asset.frames.max(1) as f64,
                             },
                             WaveformPreviewEnvelope {
-                                start_progress: (visible_start - clip.start) / clip.length,
-                                end_progress: (visible_end - clip.start) / clip.length,
-                                gain: clip.gain,
-                                fade_in: clip.fade_in,
-                                fade_out: clip.fade_out,
+                                start_relative_beat: f64::from(visible_start - clip.start),
+                                end_relative_beat: f64::from(visible_end - clip.start),
+                                clip,
                             },
                         );
                     } else {
@@ -18699,10 +18746,8 @@ impl CitrusApp {
                 {
                     let pointer_delta =
                         handle_response.total_drag_delta().unwrap_or_default().x / beat_w;
-                    let origin_fraction = match side {
-                        PlaylistFadeSide::In => origin.fade_in,
-                        PlaylistFadeSide::Out => origin.fade_out,
-                    };
+                    let is_in = side == PlaylistFadeSide::In;
+                    let origin_fraction = fade_handle_fraction(&origin, is_in);
                     if let Ok(fraction) = dragged_fade_fraction(
                         &origin,
                         side,
@@ -18711,18 +18756,12 @@ impl CitrusApp {
                         self.snap,
                         bypass_snap,
                     ) {
-                        match side {
-                            PlaylistFadeSide::In => clip.fade_in = fraction,
-                            PlaylistFadeSide::Out => clip.fade_out = fraction,
-                        }
+                        set_clip_fade(clip, is_in, fraction);
                     }
                 }
                 if handle_response.double_clicked() {
                     project_gesture_started = true;
-                    match side {
-                        PlaylistFadeSide::In => clip.fade_in = 0.0,
-                        PlaylistFadeSide::Out => clip.fade_out = 0.0,
-                    }
+                    set_clip_fade(clip, side == PlaylistFadeSide::In, 0.0);
                     project_gesture_stopped = true;
                 }
                 if handle_response.drag_stopped() {
@@ -18941,10 +18980,7 @@ impl CitrusApp {
                 .find(|clip| clip.id == clip_id)
         {
             project_gesture_started = true;
-            match side {
-                PlaylistFadeSide::In => clip.fade_in = 0.0,
-                PlaylistFadeSide::Out => clip.fade_out = 0.0,
-            }
+            set_clip_fade(clip, side == PlaylistFadeSide::In, 0.0);
             project_gesture_stopped = true;
         }
         if fade_crossfade_request {
@@ -19043,13 +19079,13 @@ impl CitrusApp {
                             self.effective_tempo,
                             asset.sample_rate,
                         );
-                        if let Some(origin_frame) = origin.audio_source_offset_frame {
-                            clip.audio_source_offset_frame = Some(slipped_audio_source_offset(
-                                origin_frame,
-                                pointer_delta_frames,
-                                maximum_frame,
-                            ));
-                        }
+                        *clip = origin.clone();
+                        slip_audio_clip_source(
+                            clip,
+                            pointer_delta_frames,
+                            maximum_frame,
+                            asset.sample_rate,
+                        );
                     }
                 }
             }
@@ -19124,17 +19160,42 @@ impl CitrusApp {
                 .max()
                 .unwrap_or(0)
                 + 1;
-            let mut right = self.project.clips[index].clone();
-            let original_id = right.id;
-            let original_start = right.start;
-            let end = right.start + right.length;
-            right.id = next_id;
-            right.start = beat;
-            right.length = end - beat;
-            match right.kind {
-                ClipKind::Audio => {
-                    if let Some(mixer_track_id) =
-                        self.project.audio_clip_mixer_track_id(original_id)
+            let original = &self.project.clips[index];
+            let split = if original.kind == ClipKind::Audio {
+                split_audio_clip(
+                    original,
+                    beat,
+                    next_id,
+                    self.tempo_map.as_ref(),
+                    self.effective_tempo,
+                )
+            } else {
+                let mut left = original.clone();
+                let mut right = original.clone();
+                let original_start = original.start;
+                right.id = next_id;
+                right.start = beat;
+                right.length = original.start + original.length - beat;
+                left.length = beat - original.start;
+                match right.kind {
+                    ClipKind::Automation => right.source_offset += beat - original_start,
+                    ClipKind::Pattern => {
+                        let period = pattern_periods
+                            .get(&right.pattern_id)
+                            .copied()
+                            .unwrap_or(4.0);
+                        right.source_offset =
+                            (right.source_offset + beat - original_start).rem_euclid(period);
+                    }
+                    ClipKind::Audio => unreachable!(),
+                }
+                Ok((left, right))
+            };
+            match split {
+                Ok((left, right)) => {
+                    if right.kind == ClipKind::Audio
+                        && let Some(mixer_track_id) =
+                            self.project.audio_clip_mixer_track_id(left.id)
                     {
                         self.project.audio_clip_mixer_destinations.push(
                             AudioClipMixerDestination {
@@ -19143,47 +19204,19 @@ impl CitrusApp {
                             },
                         );
                     }
-                    let sample_rate = right
-                        .audio_asset_id
-                        .and_then(|asset_id| {
-                            self.project
-                                .audio_assets
-                                .iter()
-                                .find(|asset| asset.id == asset_id)
-                        })
-                        .map(|asset| asset.sample_rate)
-                        .unwrap_or(0);
-                    let frame_delta = audio_source_frame_delta(
-                        self.tempo_map.as_ref(),
-                        original_start,
-                        beat,
-                        self.effective_tempo,
-                        sample_rate,
+                    self.project.clips[index] = left;
+                    self.project.clips.push(right);
+                    select_clip_group_members(
+                        &self.project.clips,
+                        &mut self.playlist_selection_ids,
+                        next_id,
+                        grouping_enabled,
+                        false,
                     );
-                    right.audio_source_offset_frame = right
-                        .audio_source_offset_frame
-                        .map(|frame| frame.saturating_add(frame_delta));
+                    self.selected_clip = Some(next_id);
                 }
-                ClipKind::Automation => right.source_offset += beat - original_start,
-                ClipKind::Pattern => {
-                    let period = pattern_periods
-                        .get(&right.pattern_id)
-                        .copied()
-                        .unwrap_or(4.0);
-                    right.source_offset =
-                        (right.source_offset + beat - original_start).rem_euclid(period);
-                }
+                Err(error) => self.notify(format!("Clip was not split: {error}")),
             }
-            self.project.clips[index].length = beat - self.project.clips[index].start;
-            self.project.clips.push(right);
-            select_clip_group_members(
-                &self.project.clips,
-                &mut self.playlist_selection_ids,
-                next_id,
-                grouping_enabled,
-                false,
-            );
-            self.selected_clip = Some(next_id);
         }
         let marquee_key = Id::new("playlist-selection-marquee-origin");
         if self.tool_mode == ToolMode::Select
@@ -19318,6 +19351,10 @@ impl CitrusApp {
                         audio_asset_id: None,
                         source_offset: 0.0,
                         audio_source_offset_frame: None,
+                        audio_source_reference: None,
+                        audio_length_reference: None,
+                        fade_in_reference: None,
+                        fade_out_reference: None,
                         gain: 1.0,
                         fade_in: 0.0,
                         fade_out: 0.0,
@@ -24054,7 +24091,7 @@ fn property_slider(
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     suffix: &str,
-) {
+) -> Response {
     ui.horizontal(|ui| {
         ui.add_sized(
             [62.0, 22.0],
@@ -24064,8 +24101,9 @@ fn property_slider(
             egui::Slider::new(value, range)
                 .show_value(true)
                 .suffix(suffix),
-        );
-    });
+        )
+    })
+    .inner
 }
 
 fn property_drag<T>(
@@ -25013,6 +25051,10 @@ fn ensure_plugin_parameter_automation(
         audio_asset_id: None,
         source_offset: 0.0,
         audio_source_offset_frame: None,
+        audio_source_reference: None,
+        audio_length_reference: None,
+        fade_in_reference: None,
+        fade_out_reference: None,
         gain: 1.0,
         fade_in: 0.0,
         fade_out: 0.0,
@@ -25856,10 +25898,42 @@ fn timeline_compile_fingerprint(project: &Project, sample_rate: u32) -> u64 {
         clip.automation_id.hash(&mut hasher);
         clip.audio_asset_id.hash(&mut hasher);
         clip.source_offset.to_bits().hash(&mut hasher);
+        clip.audio_length_reference.is_some().hash(&mut hasher);
+        if let Some(reference) = clip.audio_length_reference {
+            reference.stored_length_beats.to_bits().hash(&mut hasher);
+            reference.length_beats.to_bits().hash(&mut hasher);
+            reference.export_length_beats.to_bits().hash(&mut hasher);
+        }
         clip.audio_source_offset_frame.hash(&mut hasher);
+        clip.audio_source_reference.is_some().hash(&mut hasher);
+        if let Some(reference) = &clip.audio_source_reference {
+            reference.elapsed_spans_seconds.len().hash(&mut hasher);
+            for span in &reference.elapsed_spans_seconds {
+                span.start_seconds.to_bits().hash(&mut hasher);
+                span.end_seconds.to_bits().hash(&mut hasher);
+            }
+        }
         clip.gain.to_bits().hash(&mut hasher);
         clip.fade_in.to_bits().hash(&mut hasher);
         clip.fade_out.to_bits().hash(&mut hasher);
+        for reference in [
+            clip.fade_in_reference.as_ref(),
+            clip.fade_out_reference.as_ref(),
+        ] {
+            reference.is_some().hash(&mut hasher);
+            if let Some(reference) = reference {
+                reference.offset_beats.to_bits().hash(&mut hasher);
+                reference.length_beats.to_bits().hash(&mut hasher);
+                reference
+                    .export_length_beats
+                    .map(f64::to_bits)
+                    .hash(&mut hasher);
+                reference
+                    .end_limit_beats
+                    .map(f64::to_bits)
+                    .hash(&mut hasher);
+            }
+        }
         clip.muted.hash(&mut hasher);
     }
 
@@ -26103,7 +26177,7 @@ fn audio_clip_playback_state(
     {
         return None;
     }
-    let source_offset_frame = clip.audio_source_offset_frame?;
+    let source_offset_frame = source_position_seconds(clip, asset.sample_rate)?;
     let relative = (beat - clip.start).max(0.0);
     let elapsed_seconds = tempo_map
         .filter(|map| f64::from(beat) <= map.max_beat())
@@ -26113,14 +26187,13 @@ fn audio_clip_playback_state(
             Some((current - start).max(0.0))
         })
         .unwrap_or_else(|| f64::from(relative) * 60.0 / f64::from(fallback_tempo.max(20.0)));
-    let source_frame = source_offset_frame as f64 + elapsed_seconds * f64::from(asset.sample_rate);
+    let source_frame = source_offset_frame + elapsed_seconds * f64::from(asset.sample_rate);
     if !source_frame.is_finite() || source_frame >= asset.frames as f64 {
         return None;
     }
-    let progress = (relative / clip.length.max(0.0625)).clamp(0.0, 1.0);
     Some((
         source_frame,
-        clip.gain * equal_power_normalized_gain(progress, clip.fade_in, clip.fade_out),
+        clip.gain * clip_normalized_gain(clip, f64::from(relative)),
         (clip.track + 1).min(31),
     ))
 }
@@ -26259,12 +26332,18 @@ struct WaveformSourceRange {
 }
 
 #[derive(Clone, Copy)]
-struct WaveformPreviewEnvelope {
-    start_progress: f32,
-    end_progress: f32,
-    gain: f32,
-    fade_in: f32,
-    fade_out: f32,
+struct WaveformPreviewEnvelope<'a> {
+    start_relative_beat: f64,
+    end_relative_beat: f64,
+    clip: &'a Clip,
+}
+
+impl WaveformPreviewEnvelope<'_> {
+    fn gain_at(self, position: f64) -> f32 {
+        let relative_beat = self.start_relative_beat
+            + (self.end_relative_beat - self.start_relative_beat) * position;
+        self.clip.gain.clamp(0.0, 1.5) * clip_normalized_gain(self.clip, relative_beat)
+    }
 }
 
 fn draw_waveform_peaks_range(
@@ -26273,7 +26352,7 @@ fn draw_waveform_peaks_range(
     peaks: &[f32],
     color: Color32,
     source: WaveformSourceRange,
-    envelope: WaveformPreviewEnvelope,
+    envelope: WaveformPreviewEnvelope<'_>,
 ) {
     if rect.width() < 3.0 || rect.height() < 3.0 || peaks.is_empty() {
         return;
@@ -26293,10 +26372,7 @@ fn draw_waveform_peaks_range(
         let ratio = (bar as f64 + 0.5) / bars as f64;
         let source_ratio = source_start_ratio + (source_end_ratio - source_start_ratio) * ratio;
         let source = (source_ratio * peaks.len() as f64).floor() as usize;
-        let timeline_progress = envelope.start_progress
-            + (envelope.end_progress - envelope.start_progress) * ratio as f32;
-        let envelope_gain = envelope.gain.clamp(0.0, 1.5)
-            * equal_power_normalized_gain(timeline_progress, envelope.fade_in, envelope.fade_out);
+        let envelope_gain = envelope.gain_at(ratio);
         let amplitude = peaks[source.min(peaks.len() - 1)].max(0.02) * envelope_gain;
         let x = rect.left() + (bar as f32 + 0.5) / bars as f32 * rect.width();
         let half_height = (amplitude * rect.height() * 0.5).min(rect.height() * 0.5);
@@ -26307,6 +26383,24 @@ fn draw_waveform_peaks_range(
             ],
             Stroke::new(1.0, color),
         );
+    }
+}
+
+fn clip_fade_tooltip(clip: &Clip, is_in: bool) -> String {
+    let side = if is_in { "Fade In" } else { "Fade Out" };
+    let inherited = if is_in {
+        clip.fade_in_reference.is_some()
+    } else {
+        clip.fade_out_reference.is_some()
+    };
+    if inherited {
+        format!(
+            "Inherited {side}: this Clip shows part of the original envelope. The handle is clamped to the visible Clip, so it may sit at an edge while the curve continues beyond it. Drag to replace only this side · double-click to reset · Alt bypasses snap"
+        )
+    } else {
+        format!(
+            "Drag {side} horizontally · snaps to grid · double-click to reset · Alt bypasses snap"
+        )
     }
 }
 
@@ -26325,8 +26419,7 @@ fn draw_audio_clip_fade_envelope(
         .map(|index| {
             let amount = index as f32 / samples as f32;
             let beat = visible_start + (visible_end - visible_start) * amount;
-            let progress = ((beat - clip.start) / clip.length).clamp(0.0, 1.0);
-            let gain = equal_power_normalized_gain(progress, clip.fade_in, clip.fade_out);
+            let gain = clip_normalized_gain(clip, f64::from(beat - clip.start));
             Pos2::new(
                 rect.left() + amount * rect.width(),
                 egui::lerp((rect.bottom() - 4.0)..=(rect.top() + 4.0), gain),
@@ -27012,6 +27105,10 @@ mod playback_tests {
             audio_asset_id: None,
             source_offset: 0.0,
             audio_source_offset_frame: None,
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -28081,6 +28178,10 @@ mod playback_tests {
             audio_asset_id: None,
             source_offset: 0.0,
             audio_source_offset_frame: None,
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -28656,6 +28757,121 @@ mod playback_tests {
     }
 
     #[test]
+    fn inherited_fade_edits_crossfade_and_resize_round_trip_undo_redo() {
+        use crate::model::AudioFadeReference;
+
+        for operation in 0..4 {
+            let mut project = Project::default();
+            let mut left = audio_clip();
+            left.start = 2.0;
+            left.fade_in_reference = Some(AudioFadeReference {
+                offset_beats: -1.0,
+                length_beats: 8.0,
+                end_limit_beats: None,
+                export_length_beats: None,
+            });
+            left.fade_out_reference = left.fade_in_reference;
+            let mut right = left.clone();
+            right.id += 1;
+            right.start = 4.0;
+            project.clips = vec![left, right];
+            let original = serde_json::to_value(&project).unwrap();
+            let mut history_snapshot = project.clone();
+            let mut history_fingerprint = project_fingerprint(&project);
+            let mut undo = Vec::new();
+            let mut redo = Vec::new();
+            let mut dirty = false;
+            let snapshot = PlaylistGestureSnapshot::capture(&project);
+            match operation {
+                0 => set_clip_fade(&mut project.clips[0], true, 0.0),
+                1 => set_clip_fade(&mut project.clips[0], false, 0.125),
+                2 => {
+                    let selected = project.clips.iter().map(|clip| clip.id).collect();
+                    project.clips = create_audio_crossfade(&project.clips, &selected)
+                        .unwrap()
+                        .clips;
+                }
+                _ => {
+                    project.clips[0].start = 0.0;
+                    project.clips[0].length = 5.0;
+                }
+            }
+            let edited = serde_json::to_value(&project).unwrap();
+            assert_ne!(edited, original);
+            let before = snapshot.restore_into(project.clone());
+            let after = std::mem::replace(&mut project, before);
+            assert!(commit_explicit_project_history_transaction(
+                &mut project,
+                &mut history_snapshot,
+                &mut history_fingerprint,
+                &mut undo,
+                &mut redo,
+                &mut dirty,
+                after,
+            ));
+            assert_eq!(undo.len(), 1);
+            assert!(dirty);
+            redo.push(std::mem::replace(&mut project, undo.pop().unwrap()));
+            assert_eq!(serde_json::to_value(&project).unwrap(), original);
+            undo.push(std::mem::replace(&mut project, redo.pop().unwrap()));
+            assert_eq!(serde_json::to_value(&project).unwrap(), edited);
+        }
+    }
+
+    #[test]
+    fn actual_audio_split_history_restores_complete_clock_domains_and_routes() {
+        let mut project = Project::default();
+        project.clips = vec![audio_clip()];
+        project.clips[0].start = 0.071;
+        project.clips[0].length = 4.223;
+        project.tempo = 127.0;
+        let clip_id = project.clips[0].id;
+        project.audio_clip_mixer_destinations = vec![AudioClipMixerDestination {
+            clip_id,
+            mixer_track_id: 1,
+        }];
+        let before = serde_json::to_value(&project).unwrap();
+        let mut candidate = project.clone();
+        let map = TempoMap::from_project(&project, 96_000).unwrap();
+        let (left, right) = split_audio_clip(
+            &candidate.clips[0],
+            1.409_691,
+            clip_id + 1,
+            Some(&map),
+            127.0,
+        )
+        .unwrap();
+        candidate.clips = vec![left, right];
+        candidate
+            .audio_clip_mixer_destinations
+            .push(AudioClipMixerDestination {
+                clip_id: clip_id + 1,
+                mixer_track_id: 1,
+            });
+        let after = serde_json::to_value(&candidate).unwrap();
+        let mut snapshot = project.clone();
+        let mut fingerprint = project_fingerprint(&project);
+        let mut undo = Vec::new();
+        let mut redo = Vec::new();
+        let mut dirty = false;
+        assert!(commit_explicit_project_history_transaction(
+            &mut project,
+            &mut snapshot,
+            &mut fingerprint,
+            &mut undo,
+            &mut redo,
+            &mut dirty,
+            candidate
+        ));
+        assert!(project.clips[1].audio_source_reference.is_some());
+        assert!(project.clips[1].audio_length_reference.is_some());
+        redo.push(std::mem::replace(&mut project, undo.pop().unwrap()));
+        assert_eq!(serde_json::to_value(&project).unwrap(), before);
+        undo.push(std::mem::replace(&mut project, redo.pop().unwrap()));
+        assert_eq!(serde_json::to_value(&project).unwrap(), after);
+    }
+
+    #[test]
     fn chord_stamp_candidate_is_exactly_one_undo_transaction() {
         let mut project = Project::default();
         let channel_id = project.channels[0].id;
@@ -28948,6 +29164,10 @@ mod playback_tests {
             audio_asset_id: Some(3),
             source_offset: 1.0,
             audio_source_offset_frame: Some(24_000),
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 0.8,
             fade_in: 0.25,
             fade_out: 0.25,
@@ -29267,6 +29487,10 @@ mod playback_tests {
             audio_asset_id: None,
             source_offset: 0.0,
             audio_source_offset_frame: None,
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -29370,6 +29594,10 @@ mod playback_tests {
             audio_asset_id: None,
             source_offset: 1.0,
             audio_source_offset_frame: None,
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -29625,6 +29853,109 @@ mod playback_tests {
             audio_clip_playback_state(&clip, &asset, 5.0, None, 120.0).unwrap();
         assert_eq!(middle_frame, 48_000.0);
         assert!((middle_gain - 0.8).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn inherited_fade_preview_and_fallback_preserve_the_original_curve() {
+        use crate::model::AudioFadeReference;
+
+        let original = audio_clip();
+        let mut slice = original.clone();
+        slice.start += 0.5;
+        slice.length -= 0.5;
+        let reference = AudioFadeReference {
+            offset_beats: -0.5,
+            length_beats: f64::from(original.length),
+            end_limit_beats: None,
+            export_length_beats: None,
+        };
+        slice.fade_in_reference = Some(reference);
+        slice.fade_out_reference = Some(reference);
+        let asset = audio_asset();
+        for relative_beat in [0.0, 0.125, 0.5, 1.5, 2.75, 3.25] {
+            let expected = original.gain * clip_normalized_gain(&original, relative_beat + 0.5);
+            let (_, actual, _) = audio_clip_playback_state(
+                &slice,
+                &asset,
+                slice.start + relative_beat as f32,
+                None,
+                120.0,
+            )
+            .unwrap();
+            assert!((actual - expected).abs() < 1.0e-6);
+            // Zoomed/cropped waveform windows still sample the same inherited domain.
+            let preview = WaveformPreviewEnvelope {
+                start_relative_beat: relative_beat,
+                end_relative_beat: relative_beat + 0.125,
+                clip: &slice,
+            };
+            assert!((preview.gain_at(0.0) - expected).abs() < 1.0e-6);
+            let midpoint = slice.gain * clip_normalized_gain(&original, relative_beat + 0.5625);
+            assert!((preview.gain_at(0.5) - midpoint).abs() < 1.0e-6);
+        }
+        assert!((fade_handle_fraction(&slice, true) - 0.5 / 3.5).abs() < 1.0e-6);
+        assert!(clip_fade_tooltip(&slice, true).contains("Inherited Fade In"));
+        set_clip_fade(&mut slice, true, 0.0);
+        assert!(!clip_fade_tooltip(&slice, true).contains("Inherited"));
+        assert!(clip_fade_tooltip(&slice, false).contains("Inherited Fade Out"));
+    }
+
+    #[test]
+    fn inherited_clip_references_invalidate_the_timeline_fingerprint() {
+        use crate::model::{AudioFadeReference, AudioSourceReference, AudioSourceSpan};
+
+        let mut project = Project::default();
+        project.clips = vec![audio_clip()];
+        let baseline = timeline_compile_fingerprint(&project, 48_000);
+        for is_in in [true, false] {
+            let mut changed = project.clone();
+            let reference = if is_in {
+                &mut changed.clips[0].fade_in_reference
+            } else {
+                &mut changed.clips[0].fade_out_reference
+            };
+            *reference = Some(AudioFadeReference {
+                offset_beats: -0.5,
+                length_beats: 8.0,
+                end_limit_beats: None,
+                export_length_beats: None,
+            });
+            let inherited = timeline_compile_fingerprint(&changed, 48_000);
+            assert_ne!(inherited, baseline);
+            let reference = if is_in {
+                changed.clips[0].fade_in_reference.as_mut().unwrap()
+            } else {
+                changed.clips[0].fade_out_reference.as_mut().unwrap()
+            };
+            reference.offset_beats -= 0.25;
+            assert_ne!(timeline_compile_fingerprint(&changed, 48_000), inherited);
+            let shifted = timeline_compile_fingerprint(&changed, 48_000);
+            let reference = if is_in {
+                changed.clips[0].fade_in_reference.as_mut().unwrap()
+            } else {
+                changed.clips[0].fade_out_reference.as_mut().unwrap()
+            };
+            reference.length_beats += 1.0;
+            assert_ne!(timeline_compile_fingerprint(&changed, 48_000), shifted);
+        }
+        project.clips[0].audio_source_reference = Some(AudioSourceReference {
+            elapsed_spans_seconds: vec![AudioSourceSpan {
+                start_seconds: 0.125,
+                end_seconds: 0.25,
+            }],
+        });
+        let inherited_source = timeline_compile_fingerprint(&project, 48_000);
+        assert_ne!(inherited_source, baseline);
+        project.clips[0]
+            .audio_source_reference
+            .as_mut()
+            .unwrap()
+            .elapsed_spans_seconds[0]
+            .end_seconds += 0.001;
+        assert_ne!(
+            timeline_compile_fingerprint(&project, 48_000),
+            inherited_source
+        );
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 mod app;
 pub mod audio;
+mod audio_clip;
 pub mod audio_device;
 pub mod automation;
 pub mod automation_runtime;

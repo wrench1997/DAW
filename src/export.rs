@@ -10,8 +10,9 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::{
+    audio_clip::{audio_end_beat, audio_metadata_valid, source_elapsed_frames},
     automation::AutomationTarget,
-    clip_fade::equal_power_frame_gain,
+    clip_fade::{CompiledClipFades, compile_clip_fades},
     export_job::ExportControl,
     mixer_graph::{
         CompiledMixerGraph, MIXER_GRAPH_MAX_NODES, MixerRouteTap, MixerTrackId, compile_mixer_graph,
@@ -324,9 +325,7 @@ struct PreparedAudioClip {
     output_start: usize,
     source_start: usize,
     frame_count: usize,
-    timeline_frames: usize,
-    fade_in_frames: usize,
-    fade_out_frames: usize,
+    fades: CompiledClipFades,
     gain: f32,
     route: MixerRoute,
 }
@@ -792,14 +791,23 @@ fn prepare_audio_clip(
     if f64::from(clip.start) >= tempo_map.max_beat() {
         return Ok(None);
     }
-    let clip_end_beats = f64::from(clip.start + clip.length).min(tempo_map.max_beat()) as f32;
+    let clip_end_beats = audio_end_beat(clip, true)
+        .ok_or_else(|| anyhow!("clip has invalid exact end metadata"))?
+        .min(tempo_map.max_beat());
     ensure!(
         clip_end_beats.is_finite(),
         "clip end overflows the timeline"
     );
 
     let output_start = tempo_frame(tempo_map, clip.start)?.min(output_frames);
-    let output_end = tempo_frame(tempo_map, clip_end_beats)?.min(output_frames);
+    let output_end = usize::try_from(tempo_map.beat_to_frame(clip_end_beats)?)?.min(output_frames);
+    ensure!(
+        audio_metadata_valid(clip),
+        "clip contains invalid inherited audio timing"
+    );
+    let elapsed_frames =
+        source_elapsed_frames(clip.audio_source_reference.as_ref(), sample_rate)
+            .ok_or_else(|| anyhow!("clip source timing exceeds the render frame range"))?;
     let native_source_start = clip.audio_source_offset_frame.ok_or_else(|| {
         anyhow!(
             "Audio clip '{}' (clip id {}) has no resolved native-frame source offset",
@@ -807,18 +815,24 @@ fn prepare_audio_clip(
             clip.id
         )
     })?;
+    let native_position = native_source_start as f64
+        + elapsed_frames as f64 * f64::from(asset.source_sample_rate) / f64::from(sample_rate);
+    // Root offsets must still identify real media. An inherited elapsed clock
+    // can run beyond it; exhaustion is decided below on the RESAMPLED grid,
+    // whose endpoint-preserving interpolation may retain one last output frame.
     ensure!(
-        native_source_start < asset.source_frames,
-        "native source frame {} is outside the {}-frame audio asset",
-        native_source_start,
-        asset.source_frames
+        native_source_start < asset.source_frames
+            && native_position.is_finite()
+            && native_position >= 0.0,
+        "native source position is outside the audio asset"
     );
     let scaled_source_start = u128::from(native_source_start)
         .saturating_mul(u128::from(sample_rate))
         .saturating_add(u128::from(asset.source_sample_rate / 2))
         / u128::from(asset.source_sample_rate);
-    let source_start = usize::try_from(scaled_source_start)
-        .context("native audio source offset exceeds the render frame range")?;
+    let source_start =
+        usize::try_from(i128::try_from(scaled_source_start)? + i128::from(elapsed_frames))
+            .context("native audio source offset exceeds the render frame range")?;
     let timeline_frames = output_end.saturating_sub(output_start);
     let available_source_frames = asset.frame_count().saturating_sub(source_start);
     let frame_count = timeline_frames.min(available_source_frames);
@@ -826,22 +840,24 @@ fn prepare_audio_clip(
         return Ok(None);
     }
 
-    let fade_in_end_beat = clip.start + clip.length * clip.fade_in.clamp(0.0, 1.0);
-    let fade_out_start_beat = clip.start + clip.length * (1.0 - clip.fade_out.clamp(0.0, 1.0));
-    let fade_in_end =
-        tempo_frame(tempo_map, fade_in_end_beat.min(clip_end_beats))?.min(output_frames);
-    let fade_out_start =
-        tempo_frame(tempo_map, fade_out_start_beat.min(clip_end_beats))?.min(output_frames);
-    let fade_in_frames = fade_in_end.saturating_sub(output_start);
-    let fade_out_frames = output_end.saturating_sub(fade_out_start);
+    let fades = compile_clip_fades(
+        clip.start,
+        clip.length,
+        clip.audio_length_reference,
+        clip.fade_in,
+        clip.fade_out,
+        clip.fade_in_reference,
+        clip.fade_out_reference,
+        tempo_map,
+        true,
+    )
+    .ok_or_else(|| anyhow!("clip has invalid fade reference domains"))?;
     Ok(Some(PreparedAudioClip {
         asset_id,
         output_start,
         source_start,
         frame_count,
-        timeline_frames,
-        fade_in_frames,
-        fade_out_frames,
+        fades,
         gain: clip.gain,
         route,
     }))
@@ -884,12 +900,7 @@ fn mix_prepared_audio(
                     6500,
                 )?;
             }
-            let envelope = equal_power_frame_gain(
-                index as u64,
-                clip.timeline_frames as u64,
-                clip.fade_in_frames as u64,
-                clip.fade_out_frames as u64,
-            );
+            let envelope = clip.fades.gain_at((clip.output_start + index) as u64);
             let gain = clip.gain * clip.route.gain * envelope;
             let source_frame = clip.source_start + index;
             let source_offset = source_frame * asset.channels;
@@ -1228,6 +1239,10 @@ mod tests {
             audio_asset_id: None,
             source_offset: 0.0,
             audio_source_offset_frame: None,
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -1278,6 +1293,10 @@ mod tests {
             audio_asset_id: Some(700),
             source_offset: 0.0,
             audio_source_offset_frame: Some(source_offset_frame),
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -2517,5 +2536,590 @@ mod tests {
 
         std::fs::remove_file(marker).unwrap();
         std::fs::remove_dir(destination).unwrap();
+    }
+    /// Exercise the production edit and render paths with real media. The
+    /// fixtures intentionally have a non-grid start and native-frame in-point:
+    /// restarting resampling at each child can pass a DC-only envelope test.
+    struct SplitExportFiles(Vec<PathBuf>);
+
+    impl SplitExportFiles {
+        fn new() -> Self {
+            Self(Vec::new())
+        }
+
+        fn path(&mut self, label: &str, extension: &str) -> PathBuf {
+            let serial = STAGED_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "citrus-split-export-{label}-{}-{serial}.{extension}",
+                std::process::id()
+            ));
+            self.0.push(path.clone());
+            path
+        }
+    }
+
+    impl Drop for SplitExportFiles {
+        fn drop(&mut self) {
+            for path in &self.0 {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    fn split_export_source(
+        files: &mut SplitExportFiles,
+        source_rate: u32,
+        nonconstant: bool,
+    ) -> Project {
+        let source = files.path("source", "wav");
+        let frames = source_rate as usize * 2;
+        let mut input = Vec::with_capacity(frames * 2);
+        for frame in 0..frames {
+            let (left, right) = if nonconstant {
+                // Different ramps plus sparse, asymmetric impulses make a
+                // one-frame source-phase error visible in either channel.
+                let left = if frame % 997 == 137 {
+                    27_000
+                } else {
+                    ((frame * 73) % 24_001) as i16 - 12_000
+                };
+                let right = if frame % 619 == 71 {
+                    -25_000
+                } else {
+                    10_000 - ((frame * 31) % 20_003) as i16
+                };
+                (left, right)
+            } else {
+                (12_288, -8_192)
+            };
+            input.extend_from_slice(&[left, right]);
+        }
+        write_pcm16_wav(&source, source_rate, 2, &input);
+        let mut project = audio_project(&source, source_rate, 2, frames as u64);
+        project.tempo = 137.0;
+        project.song_length_beats = 0.65;
+        project.clips[0] = audio_clip(0.037_031_25, 0.5, 137);
+        project.clips[0].gain = 0.63;
+        project
+    }
+
+    fn set_split_export_tempo(project: &mut Project, curve: Option<AutomationCurve>) {
+        project.automation_lanes.clear();
+        if let Some(curve) = curve {
+            let mut lane = AutomationLane::new(AutomationTarget::Tempo);
+            lane.set_curve(curve);
+            lane.replace_points([
+                AutomationPoint::new(0.0, 103.0),
+                AutomationPoint::new(0.18, 191.0),
+                AutomationPoint::new(0.37, 83.0),
+                AutomationPoint::new(0.65, 151.0),
+            ]);
+            project.automation_lanes.push(ProjectAutomation {
+                id: 991,
+                name: "Split export tempo".into(),
+                lane,
+            });
+        }
+    }
+
+    fn split_export_clip(project: &mut Project, clip_id: u32, beat: f32, edit_rate: u32) -> u32 {
+        let index = project
+            .clips
+            .iter()
+            .position(|clip| clip.id == clip_id)
+            .unwrap();
+        let right_id = project.clips.iter().map(|clip| clip.id).max().unwrap() + 1;
+        let route = project.audio_clip_mixer_track_id(clip_id).unwrap();
+        let map = TempoMap::from_project(project, edit_rate).unwrap();
+        let (left, right) = crate::audio_clip::split_audio_clip(
+            &project.clips[index],
+            beat,
+            right_id,
+            Some(&map),
+            project.tempo,
+        )
+        .unwrap();
+        project.clips[index] = left;
+        project.clips.insert(index + 1, right);
+        project
+            .audio_clip_mixer_destinations
+            .push(AudioClipMixerDestination {
+                clip_id: right_id,
+                mixer_track_id: route,
+            });
+        right_id
+    }
+
+    fn prepared_audio_pcm(project: &Project, output_rate: u32) -> Vec<StereoFrame> {
+        let map = TempoMap::from_project(project, output_rate).unwrap();
+        let plan = OfflineMixerPlan::build(project).unwrap();
+        let mut output = vec![StereoFrame::default(); map.duration_frames() as usize];
+        let (assets, clips) = prepare_audio_clips(
+            project,
+            &plan,
+            output_rate,
+            &map,
+            output.len(),
+            &ExportControl::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            clips.len(),
+            project.clips.len(),
+            "a split child was not rendered"
+        );
+        mix_prepared_audio(&assets, &clips, &mut output, &ExportControl::default()).unwrap();
+        output
+    }
+
+    fn split_export_pcm_with_assets(
+        project: &Project,
+        output_rate: u32,
+        assets: &HashMap<u64, PreparedAudioAsset>,
+    ) -> Vec<StereoFrame> {
+        let map = TempoMap::from_project(project, output_rate).unwrap();
+        let plan = OfflineMixerPlan::build(project).unwrap();
+        let mut output = vec![StereoFrame::default(); map.duration_frames() as usize];
+        let clips: Vec<_> = project
+            .clips
+            .iter()
+            .map(|clip| {
+                let asset_id = clip.audio_asset_id.unwrap();
+                let route = plan
+                    .route_for_track_id(project.audio_clip_mixer_track_id(clip.id).unwrap())
+                    .unwrap();
+                prepare_audio_clip(
+                    clip,
+                    asset_id,
+                    &assets[&asset_id],
+                    route,
+                    &map,
+                    output_rate,
+                    output.len(),
+                )
+                .unwrap()
+                .expect("a split child was not rendered")
+            })
+            .collect();
+        mix_prepared_audio(assets, &clips, &mut output, &ExportControl::default()).unwrap();
+        output
+    }
+
+    fn assert_audio_pcm_bits_equal(expected: &[StereoFrame], actual: &[StereoFrame], case: &str) {
+        assert_eq!(
+            actual.len(),
+            expected.len(),
+            "{case}: render length changed"
+        );
+        if let Some((index, (expected, actual))) =
+            expected.iter().zip(actual).enumerate().find(|(_, (a, b))| {
+                a.left.to_bits() != b.left.to_bits() || a.right.to_bits() != b.right.to_bits()
+            })
+        {
+            panic!(
+                "{case}: PCM differs at frame {index}: expected {expected:?}, actual {actual:?}"
+            );
+        }
+    }
+
+    fn rendered_wav_bytes(
+        project: &Project,
+        output_rate: u32,
+        files: &mut SplitExportFiles,
+    ) -> Vec<u8> {
+        let path = files.path("render", "wav");
+        render_project_wav(project, &path, output_rate).unwrap();
+        let decoded = wav::read_wav(&path).unwrap();
+        assert_eq!(decoded.metadata.sample_rate, output_rate);
+        assert_eq!(decoded.metadata.channels, 2);
+        assert_eq!(decoded.metadata.bits_per_sample, 24);
+        assert!(decoded.samples.iter().any(|sample| sample.abs() > 0.01));
+        std::fs::read(path).unwrap()
+    }
+
+    #[test]
+    fn audio_split_export_pcm_is_bitwise_identical_across_fades_rates_and_tempo() {
+        let mut files = SplitExportFiles::new();
+        for nonconstant in [false, true] {
+            for (source_rate, output_rate) in [(48_000, 48_000), (44_100, 48_000), (48_000, 44_100)]
+            {
+                let source_project = split_export_source(&mut files, source_rate, nonconstant);
+                // Decode/resample each actual WAV once; all test permutations
+                // still run the production clip preparation and mixer.
+                let asset = load_audio_asset(&source_project.audio_assets[0], output_rate).unwrap();
+                let assets = HashMap::from([(700, asset)]);
+                for curve in [
+                    None,
+                    Some(AutomationCurve::Hold),
+                    Some(AutomationCurve::Linear),
+                ] {
+                    for (fade_in, fade_out) in [
+                        (0.0, 0.0),
+                        (0.25, 0.0),
+                        (0.0, 0.25),
+                        (0.25, 0.25),
+                        (0.75, 0.75),
+                        (1.0, 0.0),
+                        (0.0, 1.0),
+                        (1.0, 1.0),
+                    ] {
+                        let mut project = source_project.clone();
+                        set_split_export_tempo(&mut project, curve);
+                        project.clips[0].fade_in = fade_in;
+                        project.clips[0].fade_out = fade_out;
+                        let expected = split_export_pcm_with_assets(&project, output_rate, &assets);
+                        assert!(expected.iter().any(|frame| frame.left.abs() > 0.01));
+                        assert!(expected.iter().any(|frame| frame.left != frame.right));
+                        // Cover inside/outside each fade and both exact 25%/75%
+                        // boundaries, with both children subsequently split.
+                        for fraction in [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875] {
+                            let mut split = project.clone();
+                            let beat = split.clips[0].start + split.clips[0].length * fraction;
+                            // Edits use a fixed 48 kHz clock even when export is
+                            // 44.1 kHz; provenance must compile on either grid.
+                            let right_id = split_export_clip(&mut split, 70, beat, 48_000);
+                            let case = format!(
+                                "nonconstant={nonconstant}, {source_rate}->{output_rate}, tempo={curve:?}, fades={fade_in}/{fade_out}, cut={fraction}"
+                            );
+                            assert_audio_pcm_bits_equal(
+                                &expected,
+                                &split_export_pcm_with_assets(&split, output_rate, &assets),
+                                &case,
+                            );
+                            let left = split.clips.iter().find(|clip| clip.id == 70).unwrap();
+                            let left_cut = left.start + left.length * 0.5;
+                            split_export_clip(&mut split, 70, left_cut, 48_000);
+                            let right =
+                                split.clips.iter().find(|clip| clip.id == right_id).unwrap();
+                            let right_cut = right.start + right.length * 0.5;
+                            split_export_clip(&mut split, right_id, right_cut, 48_000);
+                            assert_eq!(split.clips.len(), 4);
+                            assert_audio_pcm_bits_equal(
+                                &expected,
+                                &split_export_pcm_with_assets(&split, output_rate, &assets),
+                                &format!("{case}, nested both children"),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn audio_split_export_wav_is_identical_after_moving_right_child_and_changing_tempo() {
+        let mut files = SplitExportFiles::new();
+        for (source_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100)] {
+            for original_curve in [
+                None,
+                Some(AutomationCurve::Hold),
+                Some(AutomationCurve::Linear),
+            ] {
+                let mut project = split_export_source(&mut files, source_rate, true);
+                set_split_export_tempo(&mut project, original_curve);
+                project.clips[0].fade_in = 0.75;
+                project.clips[0].fade_out = 1.0;
+                let cut = project.clips[0].start + project.clips[0].length * 0.375;
+                let right_id = split_export_clip(&mut project, 70, cut, 48_000);
+                project.clips.retain(|clip| clip.id == right_id);
+                project
+                    .audio_clip_mixer_destinations
+                    .retain(|route| route.clip_id == right_id);
+                project.clips[0].start = 0.0;
+                set_split_export_tempo(&mut project, Some(AutomationCurve::Linear));
+                project.automation_lanes[0].lane.replace_points([
+                    AutomationPoint::new(0.0, 181.0),
+                    AutomationPoint::new(0.22, 97.0),
+                    AutomationPoint::new(0.65, 143.0),
+                ]);
+                let expected_pcm = prepared_audio_pcm(&project, output_rate);
+                let expected_wav = rendered_wav_bytes(&project, output_rate, &mut files);
+                let next_cut = project.clips[0].length * 0.375;
+                let nested_right = split_export_clip(&mut project, right_id, next_cut, 48_000);
+                let last = project
+                    .clips
+                    .iter()
+                    .find(|clip| clip.id == nested_right)
+                    .unwrap();
+                let last_cut = last.start + last.length * 0.5;
+                split_export_clip(&mut project, nested_right, last_cut, 48_000);
+                let case = format!(
+                    "moved to zero, {source_rate}->{output_rate}, original tempo={original_curve:?}"
+                );
+                assert_audio_pcm_bits_equal(
+                    &expected_pcm,
+                    &prepared_audio_pcm(&project, output_rate),
+                    &case,
+                );
+                assert_eq!(
+                    rendered_wav_bytes(&project, output_rate, &mut files),
+                    expected_wav,
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn audio_split_export_v11_save_load_preserves_nested_split_pcm_and_wav() {
+        let mut files = SplitExportFiles::new();
+        for (source_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100)] {
+            let mut project = split_export_source(&mut files, source_rate, true);
+            project.clips[0].length = 2.0;
+            project.clips[0].fade_in = 0.75;
+            project.clips[0].fade_out = 1.0;
+            set_split_export_tempo(&mut project, Some(AutomationCurve::Linear));
+            // Normalize before the baseline so ordinary project load rules
+            // (minimum song and clip lengths) cannot mask a split regression.
+            project.normalize();
+            let expected_pcm = prepared_audio_pcm(&project, output_rate);
+            let expected_wav = rendered_wav_bytes(&project, output_rate, &mut files);
+            let start = project.clips[0].start;
+            let right_id = split_export_clip(&mut project, 70, start + 0.75, 48_000);
+            split_export_clip(&mut project, 70, start + 0.25, 48_000);
+            split_export_clip(&mut project, right_id, start + 1.25, 48_000);
+            let path = files.path("v11", "citrus");
+            project.save(&path).unwrap();
+            let restored = Project::load(&path).unwrap();
+            assert_eq!(restored.format_version, 11);
+            assert_eq!(restored.clips.len(), 4);
+            for (before, after) in project.clips.iter().zip(&restored.clips) {
+                assert_eq!(before.audio_source_reference, after.audio_source_reference);
+                assert_eq!(before.audio_length_reference, after.audio_length_reference);
+                assert_eq!(before.fade_in_reference, after.fade_in_reference);
+                assert_eq!(before.fade_out_reference, after.fade_out_reference);
+                assert_eq!(after.audio_source_offset_frame, Some(137));
+            }
+            let case = format!("v11 nested save/load {source_rate}->{output_rate}");
+            assert_audio_pcm_bits_equal(
+                &expected_pcm,
+                &prepared_audio_pcm(&restored, output_rate),
+                &case,
+            );
+            assert_eq!(
+                rendered_wav_bytes(&restored, output_rate, &mut files),
+                expected_wav,
+                "{case}"
+            );
+
+            // A moved slice followed by a tempo edit must retain both the old
+            // source interval and its new split interval through persistence.
+            let mut moved = restored;
+            let moved_id = moved.clips.last().unwrap().id;
+            moved.clips.retain(|clip| clip.id == moved_id);
+            moved
+                .audio_clip_mixer_destinations
+                .retain(|route| route.clip_id == moved_id);
+            moved.clips[0].start = 0.0;
+            set_split_export_tempo(&mut moved, Some(AutomationCurve::Hold));
+            let moved_pcm = prepared_audio_pcm(&moved, output_rate);
+            let moved_wav = rendered_wav_bytes(&moved, output_rate, &mut files);
+            let moved_cut = moved.clips[0].length * 0.375;
+            let moved_right = split_export_clip(&mut moved, moved_id, moved_cut, 48_000);
+            let reference = moved
+                .clips
+                .iter()
+                .find(|clip| clip.id == moved_right)
+                .unwrap()
+                .audio_source_reference
+                .as_ref()
+                .unwrap();
+            assert_eq!(reference.elapsed_spans_seconds.len(), 2);
+            let moved_path = files.path("v11-moved", "citrus");
+            moved.save(&moved_path).unwrap();
+            let reloaded = Project::load(&moved_path).unwrap();
+            let case = format!("v11 moved/retempo save/load {source_rate}->{output_rate}");
+            assert_audio_pcm_bits_equal(
+                &moved_pcm,
+                &prepared_audio_pcm(&reloaded, output_rate),
+                &case,
+            );
+            assert_eq!(
+                rendered_wav_bytes(&reloaded, output_rate, &mut files),
+                moved_wav,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_split_export_v10_without_references_preserves_legacy_pcm_and_wav() {
+        let mut files = SplitExportFiles::new();
+        for (source_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100)] {
+            for curve in [
+                None,
+                Some(AutomationCurve::Hold),
+                Some(AutomationCurve::Linear),
+            ] {
+                let mut project = split_export_source(&mut files, source_rate, true);
+                set_split_export_tempo(&mut project, curve);
+                project.clips[0].length = 1.0;
+                project.clips[0].fade_in = 0.625;
+                project.clips[0].fade_out = 0.875;
+                project.normalize();
+                let expected_pcm = prepared_audio_pcm(&project, output_rate);
+                let expected_wav = rendered_wav_bytes(&project, output_rate, &mut files);
+                // Independently preserve the v10 endpoint arithmetic and
+                // original equal-power envelope, rather than comparing only
+                // two invocations of the new reference compiler.
+                let clip = &project.clips[0];
+                let map = TempoMap::from_project(&project, output_rate).unwrap();
+                let start = tempo_frame(&map, clip.start).unwrap();
+                let end = tempo_frame(&map, clip.start + clip.length).unwrap();
+                let fade_in_end =
+                    tempo_frame(&map, clip.start + clip.length * clip.fade_in).unwrap();
+                let fade_out_start =
+                    tempo_frame(&map, clip.start + clip.length * (1.0 - clip.fade_out)).unwrap();
+                let source = load_audio_asset(&project.audio_assets[0], output_rate).unwrap();
+                let source_start = ((137_u64 * u64::from(output_rate) + u64::from(source_rate / 2))
+                    / u64::from(source_rate)) as usize;
+                let mut legacy_pcm = vec![StereoFrame::default(); expected_pcm.len()];
+                for (index, frame) in legacy_pcm[start..end].iter_mut().enumerate() {
+                    let envelope = crate::clip_fade::equal_power_frame_gain(
+                        index as u64,
+                        (end - start) as u64,
+                        (fade_in_end - start) as u64,
+                        (end - fade_out_start) as u64,
+                    );
+                    let gain = clip.gain * envelope;
+                    frame.left += source.samples[(source_start + index) * 2] * gain;
+                    frame.right += source.samples[(source_start + index) * 2 + 1] * gain;
+                }
+                let case = format!("v10 {source_rate}->{output_rate}, tempo={curve:?}");
+                assert_audio_pcm_bits_equal(&legacy_pcm, &expected_pcm, &case);
+                let mut value = serde_json::to_value(&project).unwrap();
+                value["format_version"] = serde_json::json!(10);
+                for clip in value["clips"].as_array().unwrap() {
+                    for field in [
+                        "audio_source_reference",
+                        "audio_length_reference",
+                        "fade_in_reference",
+                        "fade_out_reference",
+                    ] {
+                        assert!(
+                            clip.get(field).is_none(),
+                            "legacy fixture unexpectedly contains {field}"
+                        );
+                    }
+                }
+                let path = files.path("v10", "citrus");
+                std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+                let restored = Project::load(&path).unwrap();
+                assert!(
+                    restored
+                        .clips
+                        .iter()
+                        .all(|clip| clip.audio_source_reference.is_none()
+                            && clip.audio_length_reference.is_none()
+                            && clip.fade_in_reference.is_none()
+                            && clip.fade_out_reference.is_none())
+                );
+                assert_audio_pcm_bits_equal(
+                    &legacy_pcm,
+                    &prepared_audio_pcm(&restored, output_rate),
+                    &case,
+                );
+                assert_eq!(
+                    rendered_wav_bytes(&restored, output_rate, &mut files),
+                    expected_wav,
+                    "{case}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn audio_split_export_preserves_silence_after_source_exhaustion() {
+        let mut files = SplitExportFiles::new();
+        let path = files.path("short-source", "wav");
+        let samples: Vec<i16> = (0..800).map(|frame| frame * 23 - 9_000).collect();
+        write_pcm16_wav(&path, 8_000, 1, &samples);
+        for source_offset in [0, 137] {
+            for (fade_in, fade_out) in [(0.0, 0.0), (0.75, 1.0)] {
+                let mut project = audio_project(&path, 8_000, 1, samples.len() as u64);
+                project.tempo = 120.0;
+                project.song_length_beats = 1.0;
+                project.clips[0] = audio_clip(0.0, 1.0, source_offset);
+                project.clips[0].fade_in = fade_in;
+                project.clips[0].fade_out = fade_out;
+                let expected = rendered_wav_bytes(&project, 8_000, &mut files);
+                for cut in [0.1, 0.2, 0.5] {
+                    let mut split = project.clone();
+                    let right_id = split_export_clip(&mut split, 70, cut, 8_000);
+                    assert_eq!(
+                        rendered_wav_bytes(&split, 8_000, &mut files),
+                        expected,
+                        "source exhausted: offset={source_offset}, fades={fade_in}/{fade_out}, cut={cut}"
+                    );
+                    split_export_clip(&mut split, right_id, cut + (1.0 - cut) * 0.5, 8_000);
+                    assert_eq!(
+                        rendered_wav_bytes(&split, 8_000, &mut files),
+                        expected,
+                        "nested exhausted child: offset={source_offset}, fades={fade_in}/{fade_out}, cut={cut}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn audio_split_export_preserves_nonbinary_endpoints_at_high_sample_rates() {
+        let mut files = SplitExportFiles::new();
+        for output_rate in [44_100, 48_000, 96_000] {
+            for (fade_in, fade_out) in [(0.0, 0.0), (0.73, 0.82), (1.0, 1.0)] {
+                let mut project = split_export_source(&mut files, 48_000, true);
+                project.tempo = 127.0;
+                project.song_length_beats = 4.5;
+                project.clips[0].start = 0.071;
+                project.clips[0].length = 4.223;
+                project.clips[0].fade_in = fade_in;
+                project.clips[0].fade_out = fade_out;
+                let expected = prepared_audio_pcm(&project, output_rate);
+                let right_id = split_export_clip(&mut project, 70, 1.409_691, 48_000);
+                let case = format!(
+                    "nonbinary endpoints, 48000->{output_rate}, fades={fade_in}/{fade_out}"
+                );
+                assert_audio_pcm_bits_equal(
+                    &expected,
+                    &prepared_audio_pcm(&project, output_rate),
+                    &case,
+                );
+                split_export_clip(&mut project, 70, 0.533_71, 48_000);
+                let last_id = split_export_clip(&mut project, right_id, 1.791_139, 48_000);
+                split_export_clip(&mut project, last_id, 3.137_93, 48_000);
+                assert_audio_pcm_bits_equal(
+                    &expected,
+                    &prepared_audio_pcm(&project, output_rate),
+                    &format!("{case}, nested"),
+                );
+            }
+        }
+    }
+    #[test]
+    fn split_at_downsampled_native_end_keeps_the_resampler_endpoint_frame() {
+        use crate::audio_clip::split_audio_clip;
+        let source = temporary_wav("split-downsample-tail-source");
+        let output = temporary_wav("split-downsample-tail-output");
+        write_pcm16_wav(&source, 16_000, 1, &[16_384; 800]);
+        let mut project = audio_project(&source, 16_000, 1, 800);
+        project.tempo = 120.0;
+        project.song_length_beats = 1.0;
+        project.clips[0].length = 0.5;
+        render_project_wav(&project, &output, 8_000).unwrap();
+        let before = std::fs::read(&output).unwrap();
+        let map = TempoMap::from_project(&project, 8_000).unwrap();
+        let (left, right) =
+            split_audio_clip(&project.clips[0], 0.1, 71, Some(&map), 120.0).unwrap();
+        project.clips = vec![left, right];
+        project
+            .audio_clip_mixer_destinations
+            .push(AudioClipMixerDestination {
+                clip_id: 71,
+                mixer_track_id: project.audio_clip_mixer_destinations[0].mixer_track_id,
+            });
+        render_project_wav(&project, &output, 8_000).unwrap();
+        assert_eq!(std::fs::read(&output).unwrap(), before);
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
     }
 }

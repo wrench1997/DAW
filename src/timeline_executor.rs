@@ -664,7 +664,8 @@ impl ExecutorState {
             TimelineEventKind::AudioStart(descriptor) => {
                 let clip = ChasedAudioClip {
                     descriptor,
-                    source_position_frame: descriptor.source_offset_frame as f64,
+                    source_position_frame: descriptor
+                        .source_position_at(absolute_frame, descriptor.timeline_sample_rate),
                 };
                 if descriptor.start_frame != absolute_frame {
                     return Err(TimelineExecutorError::InvalidAudioClip);
@@ -1094,8 +1095,10 @@ fn validate_note(note: ChasedNote) -> Result<(), TimelineExecutorError> {
 fn validate_audio_clip(clip: ChasedAudioClip) -> Result<(), TimelineExecutorError> {
     let descriptor: AudioClipDescriptor = clip.descriptor;
     if descriptor.source_sample_rate == 0
+        || descriptor.timeline_sample_rate == 0
         || descriptor.stop_frame < descriptor.start_frame
         || descriptor.clip_end_frame < descriptor.start_frame
+        || clip.source_position_frame < 0.0
     {
         return Err(TimelineExecutorError::InvalidAudioClip);
     }
@@ -1227,12 +1230,13 @@ mod tests {
                 asset_id: 99,
                 start_frame: 0,
                 source_offset_frame: 10,
+                source_elapsed_frames: 0,
+                timeline_sample_rate: 48_000,
                 source_sample_rate: 48_000,
                 clip_end_frame: 1_000,
                 stop_frame: 1_000,
                 gain: 1.0,
-                fade_in_frames: 0,
-                fade_out_frames: 0,
+                fades: crate::clip_fade::CompiledClipFades::default(),
                 mixer_track: 3,
             },
             source_position_frame,

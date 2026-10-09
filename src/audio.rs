@@ -21,7 +21,7 @@ use crate::audio_device::{
     AudioEffectiveStreamConfig, AudioStreamTelemetrySnapshot, CallbackTelemetry,
     resolve_audio_device,
 };
-use crate::clip_fade::equal_power_frame_gain;
+use crate::clip_fade::CompiledClipFades;
 use crate::fixed_quantum::{
     FixedQuantumAdapter, FixedQuantumError, FixedQuantumProcessStatus, FixedQuantumStats,
     FrameEvent, MAX_FRAME_EVENTS_PER_CALLBACK, MAX_FRAME_EVENTS_PER_QUANTUM,
@@ -3045,8 +3045,9 @@ struct AudioClipVoice {
     timeline_clip_end_frame: u64,
     timeline_stop_frame: u64,
     timeline_frame: u64,
-    fade_in_frames: u64,
-    fade_out_frames: u64,
+    fades: CompiledClipFades,
+    timeline_source_root_frame: u64,
+    timeline_source_elapsed_frames: i64,
 }
 
 #[derive(Clone, Copy)]
@@ -9762,8 +9763,9 @@ impl DspState {
             voice.timeline_clip_end_frame = 0;
             voice.timeline_stop_frame = 0;
             voice.timeline_frame = 0;
-            voice.fade_in_frames = 0;
-            voice.fade_out_frames = 0;
+            voice.fades = CompiledClipFades::default();
+            voice.timeline_source_root_frame = 0;
+            voice.timeline_source_elapsed_frames = 0;
             if !sync || !same_asset {
                 voice.asset_slot = asset_slot;
                 voice.source_position = expected_position;
@@ -9796,8 +9798,9 @@ impl DspState {
             timeline_clip_end_frame: 0,
             timeline_stop_frame: 0,
             timeline_frame: 0,
-            fade_in_frames: 0,
-            fade_out_frames: 0,
+            fades: CompiledClipFades::default(),
+            timeline_source_root_frame: 0,
+            timeline_source_elapsed_frames: 0,
         };
         self.next_audio_voice = (voice_index + 1) % MAX_AUDIO_CLIP_VOICES;
     }
@@ -9844,8 +9847,9 @@ impl DspState {
             timeline_clip_end_frame: descriptor.clip_end_frame,
             timeline_stop_frame: descriptor.stop_frame,
             timeline_frame,
-            fade_in_frames: descriptor.fade_in_frames,
-            fade_out_frames: descriptor.fade_out_frames,
+            fades: descriptor.fades,
+            timeline_source_root_frame: descriptor.source_offset_frame,
+            timeline_source_elapsed_frames: descriptor.source_elapsed_frames,
         };
         self.next_audio_voice = (voice_index + 1) % MAX_AUDIO_CLIP_VOICES;
     }
@@ -9924,16 +9928,7 @@ impl DspState {
         {
             return 0.0;
         }
-        equal_power_frame_gain(
-            voice
-                .timeline_frame
-                .saturating_sub(voice.timeline_start_frame),
-            voice
-                .timeline_clip_end_frame
-                .saturating_sub(voice.timeline_start_frame),
-            voice.fade_in_frames,
-            voice.fade_out_frames,
-        )
+        voice.fades.gain_at(voice.timeline_frame)
     }
 
     #[cfg(test)]
@@ -10132,9 +10127,20 @@ impl DspState {
             bus[0] += source_left * gain;
             bus[1] += source_right * gain;
 
-            voice.source_position += f64::from(asset.sample_rate) / output_sample_rate;
             if voice.timeline_asset_id.is_some() {
                 voice.timeline_frame = voice.timeline_frame.saturating_add(1);
+                let elapsed = i128::from(voice.timeline_source_elapsed_frames)
+                    + i128::from(
+                        voice
+                            .timeline_frame
+                            .saturating_sub(voice.timeline_start_frame),
+                    );
+                // Derive from the preserved root clock, never cumulative float
+                // increments: split points, seeks and callback partitions agree.
+                voice.source_position = voice.timeline_source_root_frame as f64
+                    + elapsed as f64 * f64::from(asset.sample_rate) / output_sample_rate;
+            } else {
+                voice.source_position += f64::from(asset.sample_rate) / output_sample_rate;
             }
             if voice.source_position >= asset.frames as f64
                 || (voice.timeline_asset_id.is_some()
@@ -13177,6 +13183,10 @@ mod tests {
             audio_asset_id: None,
             source_offset: 0.0,
             audio_source_offset_frame: Some(0),
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -16675,12 +16685,18 @@ mod tests {
             asset_id: 88,
             start_frame: 10,
             source_offset_frame: 0,
+            source_elapsed_frames: 0,
+            timeline_sample_rate: 48_000,
             source_sample_rate: 48_000,
             clip_end_frame: 16,
             stop_frame: 16,
             gain: 1.0,
-            fade_in_frames: 2,
-            fade_out_frames: 2,
+            fades: CompiledClipFades {
+                fade_in_start: 10,
+                fade_out_end: 16,
+                fade_in_frames: 2,
+                fade_out_frames: 2,
+            },
             mixer_track: 1,
         };
 
@@ -16717,6 +16733,350 @@ mod tests {
             16,
         );
         assert!(!dsp.audio_voices.iter().any(|voice| voice.active));
+    }
+
+    // Exercise the production edit, compiler, scheduler and callback together.
+    // The source buffers are deliberately independent of the compiled metadata.
+    fn split_callback_timelines(
+        native_rate: u32,
+        output_rate: u32,
+        fade_in: f32,
+        fade_out: f32,
+    ) -> [Arc<CompiledTimeline>; 3] {
+        let mut project = timeline_test_project(0.5);
+        project.audio_assets.push(AudioAsset {
+            id: 89,
+            name: "Split callback PCM fixture".into(),
+            path: PathBuf::from("not-decoded-by-this-test.wav"),
+            sample_rate: native_rate,
+            channels: 2,
+            bits_per_sample: 24,
+            frames: 8_192,
+            waveform_peaks: Vec::new(),
+        });
+        let map = TempoMap::from_project(&project, output_rate).unwrap();
+        let mut original = timeline_pattern_clip(90, 0.1289, 0);
+        original.kind = ClipKind::Audio;
+        original.start = 0.0073;
+        original.audio_asset_id = Some(89);
+        original.audio_source_offset_frame = Some(137);
+        original.gain = 0.625;
+        original.fade_in = fade_in;
+        original.fade_out = fade_out;
+        let (left, right) = crate::audio_clip::split_audio_clip(
+            &original,
+            original.start + 0.0317,
+            91,
+            Some(&map),
+            project.tempo,
+        )
+        .unwrap();
+        let (middle, last) = crate::audio_clip::split_audio_clip(
+            &right,
+            original.start + 0.0793,
+            92,
+            Some(&map),
+            project.tempo,
+        )
+        .unwrap();
+        [
+            vec![original],
+            vec![left.clone(), right],
+            vec![left, middle, last],
+        ]
+        .map(|clips| {
+            let expected_clips = clips.len();
+            project.clips = clips;
+            let timeline =
+                CompiledTimeline::from_project(&project, &map, TimelineCompileOptions::default())
+                    .unwrap();
+            assert_eq!(timeline.audio_clips().len(), expected_clips);
+            Arc::new(timeline)
+        })
+    }
+
+    fn split_callback_samples(kind: usize) -> Vec<f32> {
+        (0..8_192)
+            .flat_map(|frame| match kind {
+                0 => [0.375, -0.25],
+                1 => [
+                    (frame % 257) as f32 / 256.0 - 0.5,
+                    ((frame * 17) % 509) as f32 / 512.0 - 0.5,
+                ],
+                2 => [
+                    if frame % 113 == 0 { 0.8 } else { 0.0 },
+                    if frame % 79 == 3 { -0.7 } else { 0.0 },
+                ],
+                _ => unreachable!("only DC, ramp and impulse fixtures are defined"),
+            })
+            .collect()
+    }
+
+    fn render_split_callback_pcm(
+        timeline: Arc<CompiledTimeline>,
+        samples: &[f32],
+        native_rate: u32,
+        start_frame: u64,
+        end_frame: u64,
+        partitions: &[usize],
+    ) -> Vec<[u32; 2]> {
+        let (mut controller, realtime) = create_timeline_runtime();
+        let chase = controller
+            .prepare_chase(
+                &timeline,
+                1,
+                3,
+                start_frame,
+                TimelineChaseOptions::default(),
+            )
+            .unwrap();
+        let mut dsp = DspState::try_new_inner(
+            timeline.sample_rate() as f32,
+            None,
+            None,
+            None,
+            None,
+            512,
+            Some(realtime),
+        )
+        .unwrap();
+        let (mut retired, _reclaimed) = test_reclaimer();
+        register_test_asset(&mut dsp, &mut retired, 89, samples, native_rate, 2);
+        install_test_timeline(&mut controller, 1, timeline);
+        controller.install_chase(chase).unwrap();
+        assert_eq!(dsp.apply_pending_timeline_commands(), 2);
+        let status = AudioStatus::default();
+        status.playing.store(true, Ordering::Release);
+        dsp.apply_transport_discontinuity(
+            &status,
+            3,
+            0,
+            start_frame,
+            TransportDiscontinuity::OneShot,
+        );
+
+        let mut pcm = Vec::new();
+        let mut position = start_frame;
+        let mut partition = 0;
+        while position < end_frame {
+            let frames =
+                partitions[partition % partitions.len()].min((end_frame - position) as usize);
+            assert!(frames > 0 && frames <= MAX_MIXER_BLOCK_FRAMES);
+            assert!(dsp.prepare_timeline_render(3, position, 0, frames, true));
+            // This calls apply_timeline_events_for_frame and render_audio_frame,
+            // including linear interpolation and the real AudioClipVoice clock.
+            dsp.render_block(&status, frames);
+            pcm.extend(
+                dsp.master_block[..frames]
+                    .iter()
+                    .map(|frame| [frame[0].to_bits(), frame[1].to_bits()]),
+            );
+            position += frames as u64;
+            partition += 1;
+        }
+        let runtime = dsp.timeline_runtime.as_ref().unwrap();
+        assert_eq!(runtime.next_frame(), Some(end_frame));
+        assert!(!runtime.stats().ownership_needs_resync);
+        assert_eq!(dsp.timeline_missing_assets, 0);
+        assert!(dsp.audio_voices.iter().all(|voice| !voice.active));
+        pcm
+    }
+
+    #[test]
+    fn timeline_split_callback_pcm_is_bit_exact_for_rates_signals_fades_and_partitions() {
+        for (native_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100)] {
+            for (fade_in, fade_out) in [
+                (0.0, 0.0),
+                (0.75, 0.625),
+                (1.0, 0.0),
+                (0.0, 1.0),
+                (1.0, 1.0),
+            ] {
+                let timelines =
+                    split_callback_timelines(native_rate, output_rate, fade_in, fade_out);
+                let root = timelines[0].audio_clips()[0];
+                let end_frame = root.stop_frame + 3;
+                for kind in 0..3 {
+                    let samples = split_callback_samples(kind);
+                    let before = render_split_callback_pcm(
+                        timelines[0].clone(),
+                        &samples,
+                        native_rate,
+                        0,
+                        end_frame,
+                        &[256],
+                    );
+                    assert!(before.iter().any(|frame| *frame != [0, 0]));
+                    assert!(before.iter().any(|frame| frame[0] != frame[1]));
+                    assert!(
+                        before[..root.start_frame as usize]
+                            .iter()
+                            .all(|frame| *frame == [0, 0])
+                    );
+                    assert!(
+                        before[root.stop_frame as usize..]
+                            .iter()
+                            .all(|frame| *frame == [0, 0])
+                    );
+                    for (edit, timeline) in timelines.iter().enumerate() {
+                        for partitions in [&[1, 7, 63, 257][..], &[17, 128, 31, 509][..]] {
+                            let after = render_split_callback_pcm(
+                                timeline.clone(),
+                                &samples,
+                                native_rate,
+                                0,
+                                end_frame,
+                                partitions,
+                            );
+                            assert_eq!(
+                                before, after,
+                                "native={native_rate}, output={output_rate}, signal={kind}, fades=({fade_in},{fade_out}), edit={edit}, partitions={partitions:?}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn timeline_split_callback_chase_matches_continuous_pcm_at_and_around_cuts() {
+        for (native_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100)] {
+            let timelines = split_callback_timelines(native_rate, output_rate, 1.0, 0.75);
+            let root = timelines[0].audio_clips()[0];
+            let end_frame = root.stop_frame + 3;
+            let samples = split_callback_samples(1);
+            let before = render_split_callback_pcm(
+                timelines[0].clone(),
+                &samples,
+                native_rate,
+                0,
+                end_frame,
+                &[251],
+            );
+            let mut seek_frames = vec![
+                root.start_frame,
+                root.start_frame + 1,
+                root.stop_frame - 1,
+                root.stop_frame,
+            ];
+            for clip in &timelines[2].audio_clips()[1..] {
+                seek_frames.extend([clip.start_frame - 1, clip.start_frame, clip.start_frame + 1]);
+            }
+            for seek_frame in seek_frames {
+                for (edit, timeline) in timelines.iter().enumerate() {
+                    let chased = render_split_callback_pcm(
+                        timeline.clone(),
+                        &samples,
+                        native_rate,
+                        seek_frame,
+                        end_frame,
+                        &[1, 29, 127, 509],
+                    );
+                    assert_eq!(
+                        before[seek_frame as usize..],
+                        chased,
+                        "native={native_rate}, output={output_rate}, seek={seek_frame}, edit={edit}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn timeline_audio_voice_long_clock_is_closed_form_and_chase_deterministic() {
+        // A 1 Hz native fixture keeps 24 hours of source addressable without
+        // allocating gigabytes; the real callback still resamples every frame.
+        let output_rate = 48_000;
+        let after_day = 24 * 60 * 60 * u64::from(output_rate);
+        let samples = (0..90_000)
+            .map(|frame| (frame % 19) as f32 / 32.0)
+            .collect::<Vec<_>>();
+        let mut dsp = DspState::new(output_rate as f32);
+        let (mut retired, _reclaimed) = test_reclaimer();
+        register_test_asset(&mut dsp, &mut retired, 93, &samples, 1, 1);
+        let descriptor = AudioClipDescriptor {
+            clip_id: 94,
+            asset_id: 93,
+            start_frame: 0,
+            source_offset_frame: 137,
+            source_elapsed_frames: 0,
+            timeline_sample_rate: output_rate,
+            source_sample_rate: 1,
+            clip_end_frame: after_day + 129,
+            stop_frame: after_day + 129,
+            gain: 1.0,
+            fades: CompiledClipFades::default(),
+            mixer_track: 0,
+        };
+        dsp.play_timeline_audio_clip(
+            ChasedAudioClip {
+                descriptor,
+                source_position_frame: descriptor.source_position_at(after_day, output_rate),
+            },
+            after_day,
+        );
+        let mut continuous = Vec::new();
+        for frame in after_day..descriptor.stop_frame {
+            dsp.track_block[0] = [0.0; 2];
+            dsp.render_audio_frame(0);
+            continuous.push(dsp.track_block[0].map(f32::to_bits));
+            let voice = dsp
+                .audio_voices
+                .iter()
+                .find(|voice| voice.clip_id == 94)
+                .unwrap();
+            assert_eq!(
+                voice.source_position.to_bits(),
+                descriptor
+                    .source_position_at(frame + 1, output_rate)
+                    .to_bits(),
+            );
+            let rational_position = 137.0
+                + ((frame + 1) / u64::from(output_rate)) as f64
+                + ((frame + 1) % u64::from(output_rate)) as f64 / f64::from(output_rate);
+            assert!(
+                (voice.source_position - rational_position).abs()
+                    <= 2.0 * f64::EPSILON * rational_position
+            );
+        }
+        let child = AudioClipDescriptor {
+            start_frame: after_day - 7,
+            source_elapsed_frames: (after_day - 7) as i64,
+            ..descriptor
+        };
+        let seek_frame = after_day + 13;
+        dsp.play_timeline_audio_clip(
+            ChasedAudioClip {
+                descriptor: child,
+                source_position_frame: child.source_position_at(seek_frame, output_rate),
+            },
+            seek_frame,
+        );
+        for expected in &continuous[13..] {
+            dsp.track_block[0] = [0.0; 2];
+            dsp.render_audio_frame(0);
+            assert_eq!(*expected, dsp.track_block[0].map(f32::to_bits));
+        }
+        assert!(dsp.audio_voices.iter().all(|voice| !voice.active));
+
+        // Quantify the intentionally changed legacy arithmetic, rather than
+        // asserting old incremental playback has identical floating-point PCM.
+        for (native_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100)] {
+            let frames = output_rate * 60;
+            let mut incremental = 137.0;
+            for _ in 0..frames {
+                incremental += f64::from(native_rate) / f64::from(output_rate);
+            }
+            let closed_form =
+                137.0 + f64::from(frames) * f64::from(native_rate) / f64::from(output_rate);
+            assert_eq!(closed_form, 137.0 + f64::from(native_rate) * 60.0);
+            let legacy_drift = (incremental - closed_form).abs();
+            assert!(
+                legacy_drift > 1.0e-6 && legacy_drift < 1.0e-3,
+                "legacy drift in source frames: {legacy_drift}"
+            );
+        }
     }
 
     #[test]

@@ -13,9 +13,14 @@ use std::{
 use thiserror::Error;
 
 use crate::{
+    audio_clip::{audio_end_beat_for, source_elapsed_frames},
     automation::{AutomationCurve, AutomationTarget, canonicalize_automation_target},
+    clip_fade::{CompiledClipFades, compile_clip_fades},
     mixer_graph::{CompiledMixerGraph, MixerTrackId, compile_mixer_graph},
-    model::{AudioAsset, Clip, ClipKind, Project},
+    model::{
+        AudioAsset, AudioFadeReference, AudioLengthReference, AudioSourceReference, Clip, ClipKind,
+        Project,
+    },
     tempo_map::TempoMap,
 };
 
@@ -238,6 +243,7 @@ pub enum TimelineDiagnosticKind {
         asset_id: u64,
     },
     InvalidAudioAsset,
+    InvalidAudioTiming,
     InvalidAudioSourceOffset {
         beat: f32,
     },
@@ -474,14 +480,16 @@ pub struct AudioClipDescriptor {
     pub start_frame: u64,
     /// Resolved native asset-frame position. Song tempo never reinterprets it.
     pub source_offset_frame: u64,
+    /// Signed, precompiled source-clock displacement at the timeline rate.
+    pub source_elapsed_frames: i64,
+    pub timeline_sample_rate: u32,
     /// Required to advance the source at original speed after a discontinuity.
     pub source_sample_rate: u32,
     /// Requested exclusive Playlist end, before truncation to available media.
     pub clip_end_frame: u64,
     pub stop_frame: u64,
     pub gain: f32,
-    pub fade_in_frames: u64,
-    pub fade_out_frames: u64,
+    pub fades: CompiledClipFades,
     pub mixer_track: u16,
 }
 
@@ -492,7 +500,8 @@ impl AudioClipDescriptor {
     pub fn source_position_at(self, timeline_frame: u64, timeline_sample_rate: u32) -> f64 {
         let elapsed = timeline_frame.saturating_sub(self.start_frame);
         self.source_offset_frame as f64
-            + elapsed as f64 * f64::from(self.source_sample_rate)
+            + (i128::from(self.source_elapsed_frames) + i128::from(elapsed)) as f64
+                * f64::from(self.source_sample_rate)
                 / f64::from(timeline_sample_rate.max(1))
     }
 }
@@ -1016,7 +1025,7 @@ impl Default for ChannelState {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct ClipView {
     id: u32,
     start: f32,
@@ -1027,6 +1036,10 @@ struct ClipView {
     audio_asset_id: Option<u64>,
     source_offset: f32,
     audio_source_offset_frame: Option<u64>,
+    audio_source_reference: Option<AudioSourceReference>,
+    audio_length_reference: Option<AudioLengthReference>,
+    fade_in_reference: Option<AudioFadeReference>,
+    fade_out_reference: Option<AudioFadeReference>,
     gain: f32,
     fade_in: f32,
     fade_out: f32,
@@ -1045,6 +1058,10 @@ impl From<&Clip> for ClipView {
             audio_asset_id: clip.audio_asset_id,
             source_offset: clip.source_offset,
             audio_source_offset_frame: clip.audio_source_offset_frame,
+            audio_source_reference: clip.audio_source_reference.clone(),
+            audio_length_reference: clip.audio_length_reference,
+            fade_in_reference: clip.fade_in_reference,
+            fade_out_reference: clip.fade_out_reference,
             gain: clip.gain,
             fade_in: clip.fade_in,
             fade_out: clip.fade_out,
@@ -2178,11 +2195,29 @@ impl<'a> Compiler<'a> {
             self.stats.invalid_items_skipped += 1;
             return Ok(());
         };
-        if source_offset_frame >= asset_frames {
+        let Some(source_elapsed_frames) = source_elapsed_frames(
+            clip.audio_source_reference.as_ref(),
+            self.tempo_map.sample_rate(),
+        ) else {
+            self.report(
+                TimelineEntity::Clip(clip.id),
+                TimelineDiagnosticKind::InvalidAudioTiming,
+            );
+            self.stats.invalid_items_skipped += 1;
+            return Ok(());
+        };
+        let source_position = source_offset_frame as f64
+            + source_elapsed_frames as f64 * f64::from(asset_sample_rate)
+                / f64::from(self.tempo_map.sample_rate());
+        if source_offset_frame >= asset_frames
+            || !source_position.is_finite()
+            || source_position < 0.0
+            || source_position >= asset_frames as f64
+        {
             self.report(
                 TimelineEntity::Clip(clip.id),
                 TimelineDiagnosticKind::AudioSourcePastEnd {
-                    source_frame: source_offset_frame,
+                    source_frame: source_position.max(0.0) as u64,
                     asset_frames,
                 },
             );
@@ -2196,24 +2231,41 @@ impl<'a> Compiler<'a> {
         else {
             return Ok(());
         };
-        let fade_in_end_beat = start_beat + (end_beat - start_beat) * f64::from(clip.fade_in);
-        let fade_out_start_beat = end_beat - (end_beat - start_beat) * f64::from(clip.fade_out);
-        let Some(fade_in_end_frame) =
-            self.frame_at(fade_in_end_beat, TimelineEntity::Clip(clip.id))
-        else {
+        let Some(fades) = compile_clip_fades(
+            clip.start,
+            clip.length,
+            clip.audio_length_reference,
+            clip.fade_in,
+            clip.fade_out,
+            clip.fade_in_reference,
+            clip.fade_out_reference,
+            self.tempo_map,
+            false,
+        ) else {
+            self.report(
+                TimelineEntity::Clip(clip.id),
+                TimelineDiagnosticKind::InvalidAudioTiming,
+            );
+            self.stats.invalid_items_skipped += 1;
             return Ok(());
         };
-        let Some(fade_out_start_frame) =
-            self.frame_at(fade_out_start_beat, TimelineEntity::Clip(clip.id))
-        else {
-            return Ok(());
+        let root_available_output_frames = if asset_frames >= source_offset_frame {
+            i128::from(scale_frames(
+                asset_frames - source_offset_frame,
+                self.tempo_map.sample_rate(),
+                asset_sample_rate,
+            ))
+        } else {
+            -i128::from(scale_frames(
+                source_offset_frame - asset_frames,
+                self.tempo_map.sample_rate(),
+                asset_sample_rate,
+            ))
         };
-        let available_asset_frames = asset_frames - source_offset_frame;
-        let available_output_frames = scale_frames(
-            available_asset_frames,
-            self.tempo_map.sample_rate(),
-            asset_sample_rate,
-        );
+        let available_output_frames = u64::try_from(
+            (root_available_output_frames - i128::from(source_elapsed_frames)).max(0),
+        )
+        .unwrap_or(u64::MAX);
         let stop_frame =
             requested_stop_frame.min(start_frame.saturating_add(available_output_frames));
         if stop_frame <= start_frame {
@@ -2229,12 +2281,13 @@ impl<'a> Compiler<'a> {
             asset_id,
             start_frame,
             source_offset_frame,
+            source_elapsed_frames,
+            timeline_sample_rate: self.tempo_map.sample_rate(),
             source_sample_rate: asset_sample_rate,
             clip_end_frame: requested_stop_frame,
             stop_frame,
             gain: clip.gain,
-            fade_in_frames: fade_in_end_frame.saturating_sub(start_frame),
-            fade_out_frames: requested_stop_frame.saturating_sub(fade_out_start_frame),
+            fades,
             mixer_track: u16::try_from(route).expect("route validated"),
         };
         self.audio_clips.push(descriptor);
@@ -2658,7 +2711,12 @@ impl<'a> Compiler<'a> {
 
     fn clip_range(&mut self, clip: &ClipView) -> Option<(f64, f64)> {
         let start = f64::from(clip.start);
-        let requested_end = start + f64::from(clip.length);
+        let requested_end = if clip.kind == ClipKind::Audio {
+            audio_end_beat_for(clip.start, clip.length, clip.audio_length_reference, false)
+                .unwrap_or(f64::NAN)
+        } else {
+            start + f64::from(clip.length)
+        };
         if !start.is_finite()
             || !requested_end.is_finite()
             || start < 0.0
@@ -3023,6 +3081,10 @@ mod tests {
             audio_asset_id: None,
             source_offset: 0.0,
             audio_source_offset_frame: Some(0),
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -4405,8 +4467,8 @@ mod tests {
         assert_eq!(descriptor.asset_id, 77);
         assert_eq!(descriptor.source_offset_frame, 12_000);
         assert_eq!(descriptor.mixer_track, 3);
-        assert_eq!(descriptor.fade_in_frames, 6_000);
-        assert_eq!(descriptor.fade_out_frames, 12_000);
+        assert_eq!(descriptor.fades.fade_in_frames, 6_000);
+        assert_eq!(descriptor.fades.fade_out_frames, 12_000);
     }
 
     #[test]
@@ -4443,8 +4505,8 @@ mod tests {
         let descriptor = timeline.audio_clips()[0];
         assert_eq!(descriptor.start_frame, 0);
         assert_eq!(descriptor.clip_end_frame, 72_000);
-        assert_eq!(descriptor.fade_in_frames, 48_000);
-        assert_eq!(descriptor.fade_out_frames, 24_000);
+        assert_eq!(descriptor.fades.fade_in_frames, 48_000);
+        assert_eq!(descriptor.fades.fade_out_frames, 24_000);
     }
 
     #[test]
@@ -4477,8 +4539,8 @@ mod tests {
         assert_eq!(descriptor.mixer_track, 31);
         assert_eq!(descriptor.clip_end_frame, 48_000);
         assert_eq!(descriptor.stop_frame, 20_000);
-        assert_eq!(descriptor.fade_in_frames, 24_000);
-        assert_eq!(descriptor.fade_out_frames, 24_000);
+        assert_eq!(descriptor.fades.fade_in_frames, 24_000);
+        assert_eq!(descriptor.fades.fade_out_frames, 24_000);
     }
 
     #[test]
@@ -4662,5 +4724,130 @@ mod tests {
                 maximum: MAX_TIMELINE_EVENTS,
             }
         );
+    }
+    #[test]
+    fn split_audio_descriptors_preserve_source_phase_and_fades_at_every_frame() {
+        use crate::audio_clip::split_audio_clip;
+        for (native_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100)] {
+            let map = TempoMap::new(120.0, None, 2.0, output_rate).unwrap();
+            let mut project = empty_project(2.0);
+            project.audio_assets.push(AudioAsset {
+                id: 77,
+                name: "Phase reference".into(),
+                path: PathBuf::from("unread.wav"),
+                sample_rate: native_rate,
+                channels: 2,
+                bits_per_sample: 24,
+                frames: 200_000,
+                waveform_peaks: Vec::new(),
+            });
+            let mut original = pattern_clip(5, 0.0, 1.0, 0);
+            original.kind = ClipKind::Audio;
+            original.audio_asset_id = Some(77);
+            original.audio_source_offset_frame = Some(137);
+            original.fade_in = 1.0;
+            original.fade_out = 0.75;
+            project.clips = vec![original.clone()];
+            let unsplit =
+                CompiledTimeline::from_project(&project, &map, TimelineCompileOptions::default())
+                    .unwrap();
+            let root = unsplit.audio_clips()[0];
+            let (left, right) = split_audio_clip(&original, 0.25, 6, Some(&map), 120.0).unwrap();
+            let (middle, last) = split_audio_clip(&right, 0.625, 7, Some(&map), 120.0).unwrap();
+            project.clips = vec![left, middle, last];
+            let split =
+                CompiledTimeline::from_project(&project, &map, TimelineCompileOptions::default())
+                    .unwrap();
+            assert_eq!(split.audio_clips().len(), 3);
+            for descriptor in split.audio_clips() {
+                for frame in descriptor.start_frame..descriptor.stop_frame {
+                    assert_eq!(
+                        descriptor.source_position_at(frame, output_rate).to_bits(),
+                        root.source_position_at(frame, output_rate).to_bits()
+                    );
+                    assert_eq!(
+                        descriptor.fades.gain_at(frame).to_bits(),
+                        root.fades.gain_at(frame).to_bits()
+                    );
+                }
+            }
+            assert_eq!(
+                split.audio_clips()[0].stop_frame,
+                split.audio_clips()[1].start_frame
+            );
+            assert_eq!(
+                split.audio_clips()[1].stop_frame,
+                split.audio_clips()[2].start_frame
+            );
+        }
+    }
+    #[test]
+    fn split_zero_one_two_frame_slices_keep_half_open_ownership() {
+        use crate::audio_clip::split_audio_clip;
+        let rate = 48_000;
+        let map = TempoMap::new(120.0, None, 1.0, rate).unwrap();
+        for frames in [1.0_f32, 2.0] {
+            for cut_frames in [0.2_f32, 0.5, 0.8] {
+                for fades in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                    let mut project = empty_project(1.0);
+                    project.audio_assets.push(AudioAsset {
+                        id: 77,
+                        name: "Short".into(),
+                        path: PathBuf::from("unread.wav"),
+                        sample_rate: 44_100,
+                        channels: 2,
+                        bits_per_sample: 24,
+                        frames: 100,
+                        waveform_peaks: Vec::new(),
+                    });
+                    let mut clip = pattern_clip(5, 0.0, frames / 24_000.0, 0);
+                    clip.kind = ClipKind::Audio;
+                    clip.audio_asset_id = Some(77);
+                    clip.audio_source_offset_frame = Some(1);
+                    clip.fade_in = fades.0;
+                    clip.fade_out = fades.1;
+                    project.clips = vec![clip.clone()];
+                    let original = CompiledTimeline::from_project(
+                        &project,
+                        &map,
+                        TimelineCompileOptions::default(),
+                    )
+                    .unwrap();
+                    let root = original.audio_clips()[0];
+                    let (left, right) = split_audio_clip(
+                        &clip,
+                        frames * cut_frames / 24_000.0,
+                        6,
+                        Some(&map),
+                        120.0,
+                    )
+                    .unwrap();
+                    project.clips = vec![left, right];
+                    let split = CompiledTimeline::from_project(
+                        &project,
+                        &map,
+                        TimelineCompileOptions::default(),
+                    )
+                    .unwrap();
+                    for frame in root.start_frame..root.stop_frame {
+                        let owners = split
+                            .audio_clips()
+                            .iter()
+                            .filter(|child| (child.start_frame..child.stop_frame).contains(&frame))
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            owners.len(),
+                            1,
+                            "frames={frames},cut={cut_frames},frame={frame}"
+                        );
+                        assert_eq!(
+                            owners[0].source_position_at(frame, rate),
+                            root.source_position_at(frame, rate)
+                        );
+                        assert_eq!(owners[0].fades.gain_at(frame), root.fades.gain_at(frame));
+                    }
+                }
+            }
+        }
     }
 }

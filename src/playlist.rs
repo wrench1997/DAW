@@ -1,5 +1,6 @@
 use std::{collections::HashSet, fmt};
 
+use crate::clip_fade::set_clip_fade;
 use crate::model::{
     AudioClipMixerDestination, Clip, ClipKind, Project, ProjectAutomation,
     normalize_playlist_clip_groups,
@@ -493,9 +494,11 @@ pub fn create_audio_crossfade(
     let mut result = clips.to_vec();
     for clip in &mut result {
         if clip.id == left.id {
-            clip.fade_out = (overlap_beats / clip.length).clamp(0.0, 1.0);
+            let fraction = (overlap_beats / clip.length).clamp(0.0, 1.0);
+            set_clip_fade(clip, false, fraction);
         } else if clip.id == right.id {
-            clip.fade_in = (overlap_beats / clip.length).clamp(0.0, 1.0);
+            let fraction = (overlap_beats / clip.length).clamp(0.0, 1.0);
+            set_clip_fade(clip, true, fraction);
         }
     }
     Ok(PlaylistCrossfadeEditResult {
@@ -525,6 +528,10 @@ mod tests {
             audio_asset_id: None,
             source_offset: 0.0,
             audio_source_offset_frame: None,
+            audio_source_reference: None,
+            audio_length_reference: None,
+            fade_in_reference: None,
+            fade_out_reference: None,
             gain: 1.0,
             fade_in: 0.0,
             fade_out: 0.0,
@@ -773,6 +780,151 @@ mod tests {
         assert_eq!(edit.clips[0].fade_out, 0.4);
         assert_eq!(edit.clips[1].fade_in, 0.5);
         assert_eq!(edit.clips[1].fade_out, 0.3);
+    }
+
+    #[test]
+    fn inherited_fade_drag_and_reset_replace_only_the_edited_side() {
+        use crate::{clip_fade::fade_handle_fraction, model::AudioFadeReference};
+
+        let mut inherited = clip(1, 0, 0.0, 2.0, None);
+        inherited.kind = ClipKind::Audio;
+        inherited.fade_in = 0.25;
+        inherited.fade_out = 0.5;
+        inherited.fade_in_reference = Some(AudioFadeReference {
+            offset_beats: -1.0,
+            length_beats: 8.0,
+            end_limit_beats: None,
+            export_length_beats: None,
+        });
+        inherited.fade_out_reference = inherited.fade_in_reference;
+        for (side, is_in) in [(PlaylistFadeSide::In, true), (PlaylistFadeSide::Out, false)] {
+            let mut edited = inherited.clone();
+            let visible_fraction = fade_handle_fraction(&edited, is_in);
+            assert_eq!(visible_fraction, if is_in { 0.5 } else { 0.0 });
+            let fraction = dragged_fade_fraction(
+                &edited,
+                side,
+                visible_fraction,
+                if is_in { 0.25 } else { -0.25 },
+                0.25,
+                true,
+            )
+            .unwrap();
+            assert_eq!(fraction, if is_in { 0.625 } else { 0.125 });
+            set_clip_fade(&mut edited, is_in, fraction);
+            if is_in {
+                assert!(edited.fade_in_reference.is_none());
+                assert_eq!(edited.fade_out_reference, inherited.fade_out_reference);
+                assert_eq!(edited.fade_out, inherited.fade_out);
+            } else {
+                assert!(edited.fade_out_reference.is_none());
+                assert_eq!(edited.fade_in_reference, inherited.fade_in_reference);
+                assert_eq!(edited.fade_in, inherited.fade_in);
+            }
+            let mut reset = inherited.clone();
+            set_clip_fade(&mut reset, is_in, 0.0);
+            if is_in {
+                assert_eq!(reset.fade_in, 0.0);
+                assert!(reset.fade_in_reference.is_none());
+                assert_eq!(reset.fade_out_reference, inherited.fade_out_reference);
+            } else {
+                assert_eq!(reset.fade_out, 0.0);
+                assert!(reset.fade_out_reference.is_none());
+                assert_eq!(reset.fade_in_reference, inherited.fade_in_reference);
+            }
+        }
+    }
+
+    #[test]
+    fn crossfade_replaces_inside_references_and_preserves_inherited_outer_fades() {
+        use crate::model::AudioFadeReference;
+
+        let mut left = clip(1, 3, 2.0, 5.0, None);
+        left.kind = ClipKind::Audio;
+        left.fade_in = 0.2;
+        left.fade_out = 0.8;
+        left.fade_in_reference = Some(AudioFadeReference {
+            offset_beats: -2.0,
+            length_beats: 10.0,
+            end_limit_beats: None,
+            export_length_beats: None,
+        });
+        left.fade_out_reference = left.fade_in_reference;
+        let mut right = clip(2, 3, 5.0, 4.0, None);
+        right.kind = ClipKind::Audio;
+        right.fade_in = 0.8;
+        right.fade_out = 0.3;
+        right.fade_in_reference = Some(AudioFadeReference {
+            offset_beats: -4.0,
+            length_beats: 12.0,
+            end_limit_beats: None,
+            export_length_beats: None,
+        });
+        right.fade_out_reference = right.fade_in_reference;
+        let originals = [left, right];
+        let edit = create_audio_crossfade(&originals, &HashSet::from([1, 2])).unwrap();
+        assert_eq!(edit.clips[0].fade_in, originals[0].fade_in);
+        assert_eq!(
+            edit.clips[0].fade_in_reference,
+            originals[0].fade_in_reference
+        );
+        assert!(edit.clips[0].fade_out_reference.is_none());
+        assert_eq!(edit.clips[0].fade_out, 0.4);
+        assert!(edit.clips[1].fade_in_reference.is_none());
+        assert_eq!(edit.clips[1].fade_in, 0.5);
+        assert_eq!(edit.clips[1].fade_out, originals[1].fade_out);
+        assert_eq!(
+            edit.clips[1].fade_out_reference,
+            originals[1].fade_out_reference
+        );
+    }
+
+    #[test]
+    fn inherited_fades_survive_move_to_zero_and_trim_or_extend_without_rescaling() {
+        use crate::{clip_fade::clip_normalized_gain, model::AudioFadeReference};
+
+        let mut inherited = clip(1, 1, 2.0, 3.0, None);
+        inherited.kind = ClipKind::Audio;
+        inherited.fade_in = 0.75;
+        inherited.fade_out = 0.5;
+        inherited.fade_in_reference = Some(AudioFadeReference {
+            offset_beats: -2.0,
+            length_beats: 8.0,
+            end_limit_beats: None,
+            export_length_beats: None,
+        });
+        inherited.fade_out_reference = inherited.fade_in_reference;
+        let origins = [inherited.clone()];
+        let (time_delta, track_delta) = clamp_group_move_delta(&origins, -9.0, 1, 16.0, 8).unwrap();
+        let mut moved = inherited.clone();
+        moved.start += time_delta;
+        moved.track = (moved.track as isize + track_delta) as usize;
+        assert_eq!(moved.start, 0.0);
+        assert_eq!(moved.fade_in_reference, inherited.fade_in_reference);
+        assert_eq!(moved.fade_out_reference, inherited.fade_out_reference);
+        // The source envelope may start before beat zero. It stays relative to the Clip.
+        for delta in [-2.0, 2.0] {
+            let delta = clamp_group_resize_delta(&origins, delta, 0.25, 16.0).unwrap();
+            let mut resized = moved.clone();
+            resized.length += delta;
+            assert_eq!(resized.fade_in_reference, inherited.fade_in_reference);
+            assert_eq!(resized.fade_out_reference, inherited.fade_out_reference);
+            for relative_beat in [0.0, 0.25, 0.75] {
+                assert_eq!(
+                    clip_normalized_gain(&resized, relative_beat),
+                    clip_normalized_gain(&inherited, relative_beat),
+                );
+            }
+        }
+        let mut duplicate = moved.clone();
+        duplicate.id = 2;
+        duplicate.start = 8.0;
+        assert_eq!(duplicate.fade_in_reference, inherited.fade_in_reference);
+        assert_eq!(duplicate.fade_out_reference, inherited.fade_out_reference);
+        assert_eq!(
+            clip_normalized_gain(&duplicate, 1.5),
+            clip_normalized_gain(&inherited, 1.5)
+        );
     }
 
     #[test]

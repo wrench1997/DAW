@@ -21,7 +21,7 @@ const PROJECT_SAVE_TEMP_ATTEMPTS: usize = 128;
 static PROJECT_SAVE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Current on-disk project schema written by Citrus Studio.
-pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 10;
+pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 11;
 
 const LEGACY_PROJECT_FORMAT_VERSION: u32 = 1;
 
@@ -166,6 +166,113 @@ pub enum ClipKind {
     Automation,
 }
 
+/// The original fade domain, expressed relative to this clip's start.
+/// Splitting may put the domain start before the clip, so offsets can be negative.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioFadeReference {
+    pub offset_beats: f64,
+    pub length_beats: f64,
+    /// A song boundary that already truncated the original domain when split.
+    /// Relative to the child placement; absent domains can extend past song end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_limit_beats: Option<f64>,
+    /// Present for a freshly edited side of an exact-length slice. Such sides
+    /// use exact export endpoint math rather than legacy f32 beat arithmetic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub export_length_beats: Option<f64>,
+}
+
+impl AudioFadeReference {
+    pub fn is_valid(&self) -> bool {
+        if self
+            .export_length_beats
+            .is_some_and(|length| !length.is_finite() || length <= 0.0 || length > 1_000_000.0)
+        {
+            return false;
+        }
+        if self.end_limit_beats.is_some_and(|limit| {
+            !limit.is_finite() || limit.abs() > 1_000_000.0 || limit <= self.offset_beats
+        }) {
+            return false;
+        }
+        self.offset_beats.is_finite()
+            && self.offset_beats.abs() <= 1_000_000.0
+            && self.length_beats.is_finite()
+            && self.length_beats > 0.0
+            && self.length_beats <= 1_000_000.0
+    }
+}
+
+/// Absolute timeline seconds captured when an audio clip's source is trimmed
+/// or split. Reversed endpoints represent revealing earlier source material.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioSourceSpan {
+    pub start_seconds: f64,
+    pub end_seconds: f64,
+}
+
+impl AudioSourceSpan {
+    pub fn is_valid(&self) -> bool {
+        self.start_seconds.is_finite()
+            && (0.0..=1_000_000_000.0).contains(&self.start_seconds)
+            && self.end_seconds.is_finite()
+            && (0.0..=1_000_000_000.0).contains(&self.end_seconds)
+    }
+}
+
+/// Rate-independent source provenance. Compile each span as a difference of
+/// rounded output-frame positions, then add it to the root source in-point.
+/// Moving the clip or changing the tempo must not reinterpret these seconds.
+/// References are bounded to 4096 spans and a cumulative duration within
+/// +/-1 billion seconds, including every intermediate signed sum.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioSourceReference {
+    pub elapsed_spans_seconds: Vec<AudioSourceSpan>,
+}
+
+impl AudioSourceReference {
+    pub fn is_valid(&self) -> bool {
+        if self.elapsed_spans_seconds.len() > 4096 {
+            return false;
+        }
+        let mut elapsed_seconds = 0.0;
+        for span in &self.elapsed_spans_seconds {
+            if !span.is_valid() {
+                return false;
+            }
+            elapsed_seconds += span.end_seconds - span.start_seconds;
+            if !elapsed_seconds.is_finite() || elapsed_seconds.abs() > 1_000_000_000.0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Exact inherited playback extents. The UI keeps its f32 length; this
+/// reference is used only while that displayed length is unchanged. Separate
+/// legacy realtime/export extents preserve both v10 renderers' arithmetic.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AudioLengthReference {
+    pub stored_length_beats: f32,
+    pub length_beats: f64,
+    pub export_length_beats: f64,
+}
+
+impl AudioLengthReference {
+    pub fn is_valid(&self) -> bool {
+        self.stored_length_beats.is_finite()
+            && self.stored_length_beats > 0.0
+            && self.stored_length_beats <= 1_000_000.0
+            && self.length_beats.is_finite()
+            && self.length_beats > 0.0
+            && self.length_beats <= 1_000_000.0
+            && self.export_length_beats.is_finite()
+            && self.export_length_beats > 0.0
+            && self.export_length_beats <= 1_000_000.0
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Clip {
     pub id: u32,
@@ -188,17 +295,27 @@ pub struct Clip {
     #[serde(default)]
     pub source_offset: f32,
     /// Source position for an audio clip, expressed in native asset frames.
+    /// When `audio_source_reference` is present, this is the integer root
+    /// in-point, before applying the captured elapsed source spans.
     ///
     /// `None` is intentionally distinct from frame zero: it means an older or
     /// damaged project could not be migrated without guessing.
     #[serde(default)]
     pub audio_source_offset_frame: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_source_reference: Option<AudioSourceReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_length_reference: Option<AudioLengthReference>,
     #[serde(default = "default_gain")]
     pub gain: f32,
     #[serde(default)]
     pub fade_in: f32,
     #[serde(default)]
     pub fade_out: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fade_in_reference: Option<AudioFadeReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fade_out_reference: Option<AudioFadeReference>,
     #[serde(default)]
     pub muted: bool,
 }
@@ -802,6 +919,37 @@ impl Project {
         Ok(())
     }
 
+    /// Exact split metadata cannot be repaired without changing what is heard.
+    /// Validate it before normalization or any save-side filesystem changes.
+    fn validate_audio_references(&self) -> Result<()> {
+        for clip in &self.clips {
+            anyhow::ensure!(
+                clip.audio_length_reference
+                    .is_none_or(|reference| reference.is_valid()),
+                "Clip {} has invalid exact length metadata",
+                clip.id
+            );
+            for (label, reference) in [
+                ("fade-in", clip.fade_in_reference),
+                ("fade-out", clip.fade_out_reference),
+            ] {
+                anyhow::ensure!(
+                    reference.is_none_or(|reference| reference.is_valid()),
+                    "Invalid {label} reference in clip {}",
+                    clip.id
+                );
+            }
+            anyhow::ensure!(
+                clip.audio_source_reference
+                    .as_ref()
+                    .is_none_or(AudioSourceReference::is_valid),
+                "Invalid audio source reference in clip {}",
+                clip.id
+            );
+        }
+        Ok(())
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
         self.save_with_commit(path, commit_project_save)
     }
@@ -812,6 +960,8 @@ impl Project {
     {
         self.validate_persisted_numbers()
             .context("Refusing to save non-finite project data")?;
+        self.validate_audio_references()
+            .context("Refusing to save invalid audio split metadata")?;
         self.validate_mixer_graph()
             .context("Refusing to save an invalid v8 mixer graph")?;
         if path.file_name().is_none() {
@@ -873,6 +1023,9 @@ impl Project {
             project.format_version,
             CURRENT_PROJECT_FORMAT_VERSION
         );
+        project
+            .validate_audio_references()
+            .context("The project audio split metadata is invalid")?;
         project.normalize();
         project
             .validate_mixer_graph()
@@ -1836,9 +1989,13 @@ fn clip(
         audio_asset_id: None,
         source_offset: 0.0,
         audio_source_offset_frame: (kind == ClipKind::Audio).then_some(0),
+        audio_source_reference: None,
+        audio_length_reference: None,
         gain: default_gain(),
         fade_in: 0.0,
         fade_out: 0.0,
+        fade_in_reference: None,
+        fade_out_reference: None,
         muted: false,
     }
 }
@@ -2166,6 +2323,335 @@ mod tests {
             "unexpected error: {error:#}"
         );
         assert_eq!(std::fs::read(&target).unwrap(), original);
+    }
+
+    #[test]
+    fn audio_split_references_round_trip_without_changing_their_domains() {
+        let directory = TestDirectory::new("audio-split-references");
+        let target = directory.path().join("session.citrus");
+        let mut project = Project::default();
+        let audio_clip = &mut project.clips[0];
+        audio_clip.kind = ClipKind::Audio;
+        audio_clip.audio_source_offset_frame = Some(12_345);
+        audio_clip.fade_in_reference = Some(AudioFadeReference {
+            offset_beats: -2.125,
+            length_beats: 7.75,
+            end_limit_beats: None,
+            export_length_beats: None,
+        });
+        audio_clip.fade_out_reference = Some(AudioFadeReference {
+            offset_beats: -1.0625,
+            length_beats: 4.5,
+            end_limit_beats: None,
+            export_length_beats: None,
+        });
+        audio_clip.audio_source_reference = Some(AudioSourceReference {
+            elapsed_spans_seconds: vec![
+                AudioSourceSpan {
+                    // This value requires serde_json's exact float parser to
+                    // avoid moving by an ULP across a save/load boundary.
+                    start_seconds: 971.3278064597747,
+                    end_seconds: 973.2340564597747,
+                },
+                AudioSourceSpan {
+                    start_seconds: 973.2340564597747,
+                    end_seconds: 972.8278064597747,
+                },
+            ],
+        });
+        let original = audio_clip.clone();
+        project
+            .audio_clip_mixer_destinations
+            .push(AudioClipMixerDestination {
+                clip_id: original.id,
+                mixer_track_id: MASTER_MIXER_TRACK_ID,
+            });
+        project.save(&target).unwrap();
+
+        let restored = Project::load(&target).unwrap();
+        let restored_clip = restored
+            .clips
+            .iter()
+            .find(|clip| clip.id == original.id)
+            .unwrap();
+        assert_eq!(restored.format_version, 11);
+        assert_eq!(
+            restored_clip.audio_source_offset_frame,
+            original.audio_source_offset_frame
+        );
+        assert_eq!(restored_clip.fade_in_reference, original.fade_in_reference);
+        assert_eq!(
+            restored_clip.fade_out_reference,
+            original.fade_out_reference
+        );
+        assert_eq!(
+            restored_clip.audio_source_reference,
+            original.audio_source_reference
+        );
+    }
+
+    #[test]
+    fn v10_project_without_audio_split_references_loads_identically() {
+        let directory = TestDirectory::new("v10-audio-clips");
+        let target = directory.path().join("legacy.citrus");
+        let mut expected = Project::default();
+        expected.normalize();
+        let mut legacy = serde_json::to_value(&expected).unwrap();
+        legacy["format_version"] = serde_json::json!(10);
+        for clip in legacy["clips"].as_array().unwrap() {
+            for field in [
+                "fade_in_reference",
+                "fade_out_reference",
+                "audio_source_reference",
+            ] {
+                assert!(clip.get(field).is_none(), "{field} should be omitted");
+            }
+        }
+        std::fs::write(&target, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let restored = Project::load(&target).unwrap();
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn audio_fade_reference_validation_bounds_exact_domains() {
+        for offset in [-1_000_000.0, -2.5, 0.0, 1_000_000.0] {
+            assert!(
+                AudioFadeReference {
+                    offset_beats: offset,
+                    length_beats: 1_000_000.0,
+                    end_limit_beats: None,
+                    export_length_beats: None,
+                }
+                .is_valid()
+            );
+        }
+        for length in [0.0, -1.0, 1_000_001.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                !AudioFadeReference {
+                    offset_beats: 0.0,
+                    length_beats: length,
+                    end_limit_beats: None,
+                    export_length_beats: None,
+                }
+                .is_valid()
+            );
+        }
+        for offset in [-1_000_001.0, 1_000_001.0, f64::NAN, f64::NEG_INFINITY] {
+            assert!(
+                !AudioFadeReference {
+                    offset_beats: offset,
+                    length_beats: 1.0,
+                    end_limit_beats: None,
+                    export_length_beats: None,
+                }
+                .is_valid()
+            );
+        }
+    }
+
+    #[test]
+    fn audio_source_reference_validation_bounds_spans_and_cumulative_duration() {
+        let span = AudioSourceSpan {
+            start_seconds: 0.0,
+            end_seconds: 1_000_000_000.0,
+        };
+        let reverse = AudioSourceSpan {
+            start_seconds: span.end_seconds,
+            end_seconds: span.start_seconds,
+        };
+        assert!(span.is_valid());
+        assert!(reverse.is_valid());
+        assert!(
+            AudioSourceReference {
+                elapsed_spans_seconds: vec![span, reverse, reverse],
+            }
+            .is_valid()
+        );
+        for spans in [vec![span, span], vec![reverse, reverse], vec![span; 4097]] {
+            assert!(
+                !AudioSourceReference {
+                    elapsed_spans_seconds: spans,
+                }
+                .is_valid()
+            );
+        }
+        let zero = AudioSourceSpan {
+            start_seconds: 0.0,
+            end_seconds: 0.0,
+        };
+        assert!(
+            AudioSourceReference {
+                elapsed_spans_seconds: vec![zero; 4096],
+            }
+            .is_valid()
+        );
+        assert!(
+            !AudioSourceReference {
+                elapsed_spans_seconds: vec![zero; 4097],
+            }
+            .is_valid()
+        );
+        for invalid in [-0.001, 1_000_000_001.0, f64::NAN, f64::INFINITY] {
+            for span in [
+                AudioSourceSpan {
+                    start_seconds: invalid,
+                    end_seconds: 1.0,
+                },
+                AudioSourceSpan {
+                    start_seconds: 1.0,
+                    end_seconds: invalid,
+                },
+            ] {
+                assert!(!span.is_valid());
+                assert!(
+                    !AudioSourceReference {
+                        elapsed_spans_seconds: vec![span],
+                    }
+                    .is_valid()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_audio_split_metadata_cannot_replace_a_saved_project() {
+        let directory = TestDirectory::new("invalid-audio-split-save");
+        let target = directory.path().join("session.citrus");
+        let baseline = Project::default();
+        baseline.save(&target).unwrap();
+        let original = std::fs::read(&target).unwrap();
+
+        let cases: &[fn(&mut Clip)] = &[
+            |clip| {
+                clip.fade_in_reference = Some(AudioFadeReference {
+                    offset_beats: 0.0,
+                    length_beats: 0.0,
+                    end_limit_beats: None,
+                    export_length_beats: None,
+                });
+            },
+            |clip| {
+                clip.fade_out_reference = Some(AudioFadeReference {
+                    offset_beats: f64::NAN,
+                    length_beats: 4.0,
+                    end_limit_beats: None,
+                    export_length_beats: None,
+                });
+            },
+            |clip| {
+                clip.fade_in_reference = Some(AudioFadeReference {
+                    offset_beats: 0.0,
+                    length_beats: f64::NAN,
+                    end_limit_beats: None,
+                    export_length_beats: None,
+                });
+            },
+            |clip| {
+                clip.audio_source_reference = Some(AudioSourceReference {
+                    elapsed_spans_seconds: vec![AudioSourceSpan {
+                        start_seconds: -0.25,
+                        end_seconds: 1.0,
+                    }],
+                });
+            },
+            |clip| {
+                clip.audio_source_reference = Some(AudioSourceReference {
+                    elapsed_spans_seconds: vec![AudioSourceSpan {
+                        start_seconds: 0.0,
+                        end_seconds: f64::NAN,
+                    }],
+                });
+            },
+            |clip| {
+                clip.audio_source_reference = Some(AudioSourceReference {
+                    elapsed_spans_seconds: vec![
+                        AudioSourceSpan {
+                            start_seconds: 0.0,
+                            end_seconds: 1.0,
+                        };
+                        4097
+                    ],
+                });
+            },
+        ];
+        for corrupt in cases {
+            let mut project = baseline.clone();
+            corrupt(&mut project.clips[0]);
+            let error = project.save(&target).unwrap_err();
+            assert!(format!("{error:#}").contains("invalid audio split metadata"));
+            assert_eq!(std::fs::read(&target).unwrap(), original);
+            assert_no_project_save_temps(directory.path());
+            let new_target = directory.path().join("not-created/session.citrus");
+            assert!(project.save(&new_target).is_err());
+            assert!(!new_target.parent().unwrap().exists());
+        }
+    }
+
+    #[test]
+    fn project_load_rejects_malformed_audio_split_metadata() {
+        let directory = TestDirectory::new("invalid-audio-split-load");
+        let target = directory.path().join("session.citrus");
+        let baseline = serde_json::to_value(Project::default()).unwrap();
+        let invalid_metadata = [
+            (
+                "fade_in_reference",
+                serde_json::json!({
+                    "offset_beats": -2.0, "length_beats": 0.0
+                }),
+            ),
+            (
+                "fade_out_reference",
+                serde_json::json!({
+                    "offset_beats": 0.0, "length_beats": -1.0
+                }),
+            ),
+            (
+                "fade_in_reference",
+                serde_json::json!({
+                    "offset_beats": 1_000_001.0, "length_beats": 1.0
+                }),
+            ),
+            (
+                "audio_source_reference",
+                serde_json::json!({
+                    "elapsed_spans_seconds": [{"start_seconds": -0.25, "end_seconds": 1.0}]
+                }),
+            ),
+            (
+                "audio_source_reference",
+                serde_json::json!({
+                    "elapsed_spans_seconds": [{"start_seconds": 0.0, "end_seconds": 1_000_000_001.0}]
+                }),
+            ),
+            (
+                "audio_source_reference",
+                serde_json::json!({
+                    "elapsed_spans_seconds": vec![serde_json::json!({"start_seconds": 0.0, "end_seconds": 0.0}); 4097]
+                }),
+            ),
+            (
+                "audio_source_reference",
+                serde_json::json!({
+                    "elapsed_spans_seconds": vec![serde_json::json!({"start_seconds": 0.0, "end_seconds": 1_000_000_000.0}); 2]
+                }),
+            ),
+        ];
+        for (field, invalid) in invalid_metadata {
+            let mut value = baseline.clone();
+            value["clips"][0][field] = invalid;
+            let original = serde_json::to_vec(&value).unwrap();
+            std::fs::write(&target, &original).unwrap();
+            let error = Project::load(&target).unwrap_err();
+            assert!(
+                format!("{error:#}").contains("audio split metadata is invalid"),
+                "{field}: {error:#}"
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), original);
+        }
     }
 
     #[test]
@@ -3270,5 +3756,48 @@ mod tests {
             opaque_state: Vec::new(),
             runtime_status: PluginRuntimeStatus::Unloaded,
         }
+    }
+    #[test]
+    fn exact_length_and_cropped_fade_metadata_are_bounded_and_persisted() {
+        let mut project = Project::default();
+        project.clips[0].audio_length_reference = Some(AudioLengthReference {
+            stored_length_beats: project.clips[0].length,
+            length_beats: 3.123_456_789_123,
+            export_length_beats: 3.123_456_7,
+        });
+        project.clips[0].fade_in_reference = Some(AudioFadeReference {
+            offset_beats: -1.0,
+            length_beats: 4.0,
+            end_limit_beats: Some(2.0),
+            export_length_beats: Some(4.000_000_001),
+        });
+        let directory = TestDirectory::new("precise-audio-geometry");
+        let target = directory.path().join("session.citrus");
+        project.save(&target).unwrap();
+        let restored = Project::load(&target).unwrap();
+        assert_eq!(
+            restored.clips[0].audio_length_reference,
+            project.clips[0].audio_length_reference
+        );
+        assert_eq!(
+            restored.clips[0].fade_in_reference,
+            project.clips[0].fade_in_reference
+        );
+        let original = std::fs::read(&target).unwrap();
+        project.clips[0]
+            .audio_length_reference
+            .as_mut()
+            .unwrap()
+            .export_length_beats = f64::NAN;
+        assert!(project.save(&target).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), original);
+        let mut invalid: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        invalid["clips"][0]["audio_length_reference"]["length_beats"] = serde_json::json!(-1.0);
+        std::fs::write(&target, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(Project::load(&target).is_err());
+        let mut invalid: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        invalid["clips"][0]["fade_in_reference"]["end_limit_beats"] = serde_json::json!(-2.0);
+        std::fs::write(&target, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        assert!(Project::load(&target).is_err());
     }
 }
