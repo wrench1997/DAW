@@ -93,7 +93,7 @@ native Windows/Linux editor regressions, real-plugin resize-under-audio measurem
 hardware acceptance of a future worker implementation.
 
 
-## Genuine plugin regression outcome
+## Historical ownership-preparation genuine regression outcome
 
 After the source freeze, the exact helper passed native fixture lifecycle/input and
 fresh-instance Surge/Stochas state checks. Unpaced functional PCM/MIDI/reconfiguration
@@ -106,7 +106,7 @@ records positive results, corrected interpretation and failures together. The ol
 resize processing stall remains; no new worker or latency improvement is implied.
 
 
-## Fresh combined-source verification
+## Ownership-preparation combined-source verification
 
 Integrated runtime `3fb549a059916dca7b3af3eff00ff27fba0bddd4` exactly preserves
 reviewed helper/vendor/Cargo/fixture bytes. App/audio/UI and metronome are unchanged
@@ -126,9 +126,11 @@ ETXTBUSY observation is retained; the serial pass does not explain its cause.
 
 Pristine archive plus the pinned patch reproduces all **43 original/added files**;
 original license/manifests remain unchanged. Fresh helper bytes match the genuine
-regression helper `cb1899fd…` exactly. New Windows runtime/package results remain
-separate candidate gates. No app UI source changed or new desktop/performance run
-was performed during integration.
+regression helper `cb1899fd…` exactly. The exact published5befb51 preview passed;
+quality still failed native paint, while independent state/interaction/lifecycle
+checks passed. New guard verification remains separate. No app UI source changed
+or new desktop/performance run was performed during integration.
+
 ## Follow-on Surge state-restore compatibility guard
 
 The ownership-preparation checkpoint did not fix Surge XT 1.3.4 reused-instance restoration.
@@ -159,8 +161,9 @@ cross-platform/build completeness claim.
   changes, queue drains, state mutation or helper-native editor detachment. Linux and Windows
   dispatchers share the local preflight; the in-process implementation repeats it authoritatively.
 - A caller must prepare a fresh candidate, restore its authoritative blob before playback/native
-  interaction, and retain the old instance until candidate success. There is no new helper-side
-  ownership swap or wire command.
+  interaction, and retain the old instance until candidate success. This is a requirement for
+  safe transactional replacement, not a stronger retention handshake established by the current
+  App or this guard. There is no new helper-side ownership swap or wire command.
 - The current App's normal configuration/reopen/restore path already uses fresh candidates. The
   legacy public `PluginChainControl::load_state` path still closes its native editor and faults its
   slot when the backend rejects a load; it is not called by the current App and is not changed here.

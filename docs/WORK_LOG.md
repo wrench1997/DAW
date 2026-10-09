@@ -618,3 +618,11 @@ Windows desktop acceptance. No publication was performed from this worktree.
   archive; package patch/manifest pins are updated. Full source/provenance, raw positive and
   retained negative traces, rejected-experiment receipt and native evidence are indexed by
   `surge-guard-validation-receipt.json` in the development QA artifacts.
+
+
+## 2026-10-09 12:30 UTC — Freeze previous ownership checkpoint and integrate guarded rejection
+
+- Exact published `5befb51301574d129cf33ed84d8908e90b665c0e` completes [preview37926251178](https://github.com/wrench1997/DAW/actions/runs/37926251178) successfully: 195 Python cases (191 passed, four Unix-only skips), 1,132 app +14 helper +5 editor protocol +2 transport protocol tests, optimized/static-CRT build, strict provenance/PE/ZIP/hash and extracted-helper smoke. Upload is skipped; both final runs have zero artifacts. [Quality37926251171](https://github.com/wrench1997/DAW/actions/runs/37926251171) passes source and independent native state/interaction/lifecycle checks, fails known before/after PrintWindow, skips repaint comparison and remains overall FAILURE.
+- Its exact source archive contains269 tracked files and a full original-main patch; patch application reproduces every source byte and ZIP CRC/inventory pass. SHA256 `43a99163e9835d22f36fa13ef4c0222c542424b4df0f4a5bf67176462af0bac9`. Historical first-note/getter/content-size failures remain explicitly unpassed.
+- Integrated only reviewed guard `c056dc5` as `60134a5cd668e90eb0801f6da4afc9aaca5abe1c`. Helper/vendor/Cargo/fixture bytes exactly match reviewed source; app/audio/UI/metronome remain unchanged from5befb51. Additive ownership-guide and work-log conflicts preserve both historical and new evidence. The exact package pins preserve strict provenance and all91 earlier source-only QA files.
+- Updated canonical documents to distinguish newly blocked unsafe helper operations from the pre-existing deferred-state behavior. Fresh candidate restoration remains supported; no hidden settlement or universal restoration/latency improvement is claimed. Legacy public full-chain Admin closes the editor before backend LoadState and faults the slot when that call rejects. Timing changes are excluded. Full combined gates and new CI have not yet run; source/docs/package preparation is held during another candidate's coordinated build/quiet QA.

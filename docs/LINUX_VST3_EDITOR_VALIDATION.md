@@ -111,3 +111,18 @@ rerun from actual vendored source using an external test manifest, leaving origi
 upstream manifests unchanged. The verified registry archive plus pinned patch
 reconstructs all 41 upstream files; original license/manifests remain byte-identical.
 Windows native execution and optimized packaging remain new-candidate CI gates.
+
+
+## Follow-on guarded state rejection
+
+The historical source identities/results above remain unchanged. Reviewed guard
+`c056dc5`, integrated as `60134a5`, was tested with exact helper SHA-256
+`9dd18d74783e2ed13e947008d4dc4d5b2bdc0032948680c1cac678daed9aae60`.
+Independent X11 QA passes fresh Surge1.3.4 restoration and used/editor-opened
+rejection with the same XID/generation/geometry/native value, closed-used rejection
+and normal reopen. Stochas reused native cell restore/re-export/repaint and the
+trusted fixture also pass. The [state report](PLUGIN_STATE_RESTORE_LIMITS.md) records
+exact scope and historical defects. This is a refusal before helper detachment or
+state mutation, not successful used-instance restoration or preservation through
+the legacy full-chain Admin caller. The 346.9ms resize stall remains; no realtime
+continuity or latency improvement is claimed. Fresh combined gates are pending.

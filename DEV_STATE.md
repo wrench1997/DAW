@@ -1,15 +1,17 @@
 # 当前开发状态
 
-最后更新：2026-10-09 11:48 UTC。以当前源码、集成状态和实际执行结果为准。
+最后更新：2026-10-09 12:30 UTC。以当前源码、集成状态和实际执行结果为准。
 
 ## 当前目标与状态
+
+- **新集成、完整门禁待运行：`60134a5cd668e90eb0801f6da4afc9aaca5abe1c`。** 仅加入审查通过的 Surge guard `c056dc5`：精确 factory UID + version 1.3.4、首次 positive Process/native open 尝试后拒绝 LoadState，在 helper editor closure/状态改动前返回错误。旧实例/窗口保持的真实测试与 fresh restore 通过；未实现静默 settle 或通用 restore 修复，legacy full-chain Admin 在 backend LoadState 前关闭 editor，并在拒绝返回后 fault 其 slot。回调 timing 候选未包含。详见 [状态恢复边界](docs/PLUGIN_STATE_RESTORE_LIMITS.md)。
 
 Citrus Studio 0.5.0-alpha.1 是 clean-room Rust DAW 开发版，尚未达到完整 FL-class 商用品质。Linux 优先开发与验证，Windows 持续检查兼容性。当前产品目标仍是「做一首歌 → 无损编辑 → 保存 → 找回缺失媒体 → 导出 → 重新打开」。
 
 - **当前 Linux 已验证源码：`3fb549a059916dca7b3af3eff00ff27fba0bddd4`。** Reviewed 单线程 ownership preparation `81fe8bf` 已集成，helper/vendor/Cargo/fixture 与审查版本完全一致；app/audio/节拍器保持旧版本不变。完整 all-feature/all-target 为 **1137 application +21 helper +5 editor protocol +2 transport protocol**，no-default 为 **1133 application**，零失败/忽略；fmt、两套严格 Clippy、build、实际 helper smoke、两种 MSVC source cross-check 与 **195 Python tests** 通过。额外 **270 available vendor tests** 串行通过（一个缺失 upstream Dexed fixture 测试明确排除），全部 **26 vendor doctests** 通过，含五项新 facade 用例。没有启用新 DSP worker 或宣称延迟改善。
 - **真实 Mixer 电平表已集成：** `21989d0` + `ad565d7`，读取实际 post-fader stereo 图缓冲；Master 在 tanh 保护前测量，显示 dBFS、hold、CLIP/fault。稳定 track ID/graph/epoch 防错位，排队峰值、超时失效、点击 reset 和暂停时 live-MIDI 路径均有回归。已移除 UI 假 sine 动画。详见 [MIXER_METERING](docs/MIXER_METERING.md)。
-- **最新 Windows 源码/包 checkpoint：`578a3ce9578f867c24fef129c1012f8a739d4d5e`。** [Quality 37921482220](https://github.com/wrench1997/DAW/actions/runs/37921482220) 通过 **1132 application +14 helper +5 editor protocol +2 transport protocol Rust tests**、14 helper /61 editor Python tests 与全部源码门禁。Trusted fixture state/interaction/focus/lifecycle/cleanup 通过；native paint 前后失败、repaint comparison 跳过，整个 quality 仍失败。新 ownership 候选须重新执行 Windows CI。
-- **最新完整 Preview 已通过。** 同一 `578a3ce` 的 [Run 37921482180](https://github.com/wrench1997/DAW/actions/runs/37921482180) 完整通过：195 Python cases（191 passed、四项 Unix-only skip）、上述 Rust tests、optimized static-CRT、严格 vendor/license/PE/ZIP/hash 和实际解压 helper smoke。上传跳过、artifacts 为0。Windows synthetic Linux receipt path 曾失败，现以 as_posix 修复并保留严格 backslash rejection；原失败 run 不抹除。固定 Release、干净系统、原生设备验收仍独立。
+- **最新 Windows 源码/包 checkpoint：`5befb51301574d129cf33ed84d8908e90b665c0e`。** [Quality 37926251171](https://github.com/wrench1997/DAW/actions/runs/37926251171) 通过 **1132 application +14 helper +5 editor protocol +2 transport protocol Rust tests**、14 helper /61 editor Python tests 与全部源码门禁。Trusted fixture state/interaction/focus/lifecycle/cleanup 通过；native paint 前后失败、repaint comparison 跳过，整个 quality 仍失败。该 ownership checkpoint 已完成 Windows CI；新 guard 候选须独立复验。
+- **最新完整 Preview 已通过。** 同一 `5befb51` 的 [Run 37926251178](https://github.com/wrench1997/DAW/actions/runs/37926251178) 完整通过：195 Python cases（191 passed、四项 Unix-only skip）、上述 Rust tests、optimized static-CRT、严格 vendor/license/PE/ZIP/hash 和实际解压 helper smoke。上传跳过、artifacts 为0。Windows synthetic Linux receipt path 曾失败，现以 as_posix 修复并保留严格 backslash rejection；原失败 run 不抹除。固定 Release、干净系统、原生设备验收仍独立。
 - 项目格式 **v12**，旧 v10/v11 文件可加载，MIDI ports 默认 Off、source audio monitor 默认启用；新保存需 v12 构建重新打开。评估前保留原项目备份。`main` 未合并，未发布 Release 或二进制 artifact。
 
 ## 已执行的验证与边界
@@ -23,8 +25,8 @@ Citrus Studio 0.5.0-alpha.1 是 clean-room Rust DAW 开发版，尚未达到完�
 
 ## 当前源码已经具备什么
 
-- [Native VST3 editors](docs/NATIVE_VST3_EDITORS.md) 保留 Windows HWND、Linux standalone X11/XWayland-compatible 生命周期和 state/snapshot/automation guards。本轮 exact helper 的真实 fixture、fresh-instance Surge/Stochas paint/input/state 检查通过，但 **reused Surge 首音丢失、controller getter 过期与内容/容器尺寸不一致仍失败**；旧/新 helper 均复现，属于已有缺陷。组件音量在后续正数帧处理后正确应用，不能误报永久 state 丢失。详见 [state limits](docs/PLUGIN_STATE_RESTORE_LIMITS.md)。历史 resize 346.9ms stall 与 Windows paint failure 保留，未宣称 realtime continuity。
-- [Plugin ownership preparation](docs/PLUGIN_PROCESSOR_DOMAINS.md) 将 control owner 与 prepared processor storage 分离，提供不可跨线程移动的 facade 和 exclusive borrowed lease；LoadState/bus/topology 重建及 loader/error-unwind lifetime 已加固。仍为单线程同步执行，legacy bridge 的锁/feedback 保留；真实线程拆分、callback timing 和 Surge 定向兼容修复均不在本 checkpoint。
+- [Native VST3 editors](docs/NATIVE_VST3_EDITORS.md) 保留 Windows HWND、Linux standalone X11/XWayland-compatible 生命周期和 state/snapshot/automation guards。历史 ownership checkpoint exact helper 的真实 fixture、fresh-instance Surge/Stochas paint/input/state 检查通过，但 **reused Surge 首音丢失、controller getter 过期与内容/容器尺寸不一致仍失败**；旧/新 helper 均复现，属于已有缺陷。新 guard 在明确限定的已使用/已打开编辑器 Surge1.3.4 实例上拒绝这个危险操作；拒绝保持原窗口/状态，不能表述为原操作已成功修复。组件音量在后续正数帧处理后正确应用，不能误报永久 state 丢失。详见 [state limits](docs/PLUGIN_STATE_RESTORE_LIMITS.md)。历史 resize 346.9ms stall 与 Windows paint failure 保留，未宣称 realtime continuity。
+- [Plugin ownership preparation](docs/PLUGIN_PROCESSOR_DOMAINS.md) 将 control owner 与 prepared processor storage 分离，提供不可跨线程移动的 facade 和 exclusive borrowed lease；LoadState/bus/topology 重建及 loader/error-unwind lifetime 已加固。仍为单线程同步执行，legacy bridge 的锁/feedback 保留；真实线程拆分和 callback timing 未包含；Surge 定向 guard 已加入，但只是拒绝危险操作，通用成功恢复仍未实现。
 - 新发现并修复旧 Browser 基线中的并发问题：MIDI teardown 后排队的 generator 全 Project 候选可能覆盖刚完成的 WAV 导入。现由 import/native Open 共用 project snapshot-transition predicate；实际 app 回归覆盖成功/失败 replacement 和导入独立 Undo，消费结果后仍保留 generation/session 检查。此问题在本轮集成审查发现，不冒充早先已验证。
 
 - [FL-inspired 视觉](docs/FL_INSPIRED_NATIVE_THEME.md) 与[多窗口工作区](docs/MULTIWINDOW_WORKSPACE.md)：四个真实 editor 同时存在，拖移/缩放、关闭重开、Arrange/Cascade、最大化/还原、layout/focus/stacking 持久化已接线。新 [compact refinement](docs/COMPACT_WORKSPACE.md) 降低 chrome/row 密度、修复 reset geometry 并提供 release-only 边缘对齐；Piano 增加当前 session 的 select-all/Copy/Cut/Paste、typed bounded validation 和单步 Undo，文本框继续独占文字剪贴板。原生 OS clipboard round-trip、跨 DAW/MIDI interchange 和 OS-detached editors 仍未实现或未验收。

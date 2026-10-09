@@ -3,7 +3,11 @@
 The later [ownership preparation](PLUGIN_PROCESSOR_DOMAINS.md) keeps execution
 single-threaded. [Reused Surge restoration](PLUGIN_STATE_RESTORE_LIMITS.md) has
 confirmed pre-existing first-note and controller-consistency failures; fresh-state
-success does not establish unrestricted native save/restore acceptance.
+success does not establish unrestricted native save/restore acceptance. The later
+[Surge guard](PLUGIN_STATE_RESTORE_LIMITS.md#current-guard-and-remaining-limits) rejects
+used/editor-opened exact1.3.4 loads before helper closure/mutation. It does not change
+the legacy full-chain Admin caller: it closes the editor before backend LoadState
+and faults its slot when that call rejects.
 
 ## Implementation stages and current verification boundary
 
