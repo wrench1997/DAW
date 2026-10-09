@@ -57,9 +57,73 @@ jobs:
         timeout-minutes: 2
         run: python -B -m unittest discover -s scripts -p "test_smoke_vst3_helper.py" -v
 
+      - name: Test native editor protocol harness (no GUI claim)
+        timeout-minutes: 2
+        run: python -B -m unittest discover -s scripts -p "test_smoke_vst3_editor.py" -v
+
+      - name: Check source-only native editor fixture
+        run: cargo +stable-x86_64-pc-windows-msvc clippy --locked --manifest-path tests/fixtures/vst3-editor/Cargo.toml --all-features --all-targets -- -D warnings
+
       - name: Smoke test built VST3 helper protocol
         timeout-minutes: 1
         run: python -B scripts/smoke_vst3_helper.py target/debug/vst3-host-helper.exe --timeout 5
 
       - name: Check internal-only feature configuration
         run: cargo +stable-x86_64-pc-windows-msvc check --locked --no-default-features --all-targets
+
+      - name: Build and verify trusted native editor fixtures
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-msvc
+          CARGO_NET_OFFLINE: 'true'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          # The earlier locked fixture Clippy step supplies registry dependencies.
+          # Build only checked-in MIT source, without a download/install fallback.
+          python -B tests/fixtures/vst3-editor/build_fixture.py --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @'
+          import hashlib
+          import json
+          from pathlib import Path
+          import sys
+          sys.path.insert(0, str(Path('scripts').resolve()))
+          from smoke_vst3_editor import FIXTURE_ROOT, require, verify_fixture
+          helper = Path('target/debug/vst3-host-helper.exe').resolve()
+          require(helper.is_file(), f'Built production helper is missing: {helper}')
+          print(f'Production helper SHA256: {hashlib.sha256(helper.read_bytes()).hexdigest()}')
+          owned = (FIXTURE_ROOT / 'target' / 'bundles').resolve()
+          require(owned.is_relative_to(FIXTURE_ROOT.resolve()), 'Fixture build directory escaped checked-in source root')
+          for variant in ('editor', 'no-editor'):
+              bundle = verify_fixture(FIXTURE_ROOT, variant)
+              require(bundle.parent == owned, 'Fixture bundle escaped the owned build directory')
+              receipt = json.loads((bundle / 'source-build.json').read_text(encoding='utf-8'))
+              require(receipt['target'] == 'x86_64-pc-windows-msvc', 'Fixture/helper target mismatch')
+              print(f'Verified {variant}: {bundle}; SHA256 {receipt["binary_sha256"]}')
+          '@ | python -B -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run native fixture editor lifecycle, state and stdout checks
+        timeout-minutes: 6
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          "Native fixture runtime check for $env:GITHUB_SHA started; acceptance is NOT VERIFIED until the harness exits 0." >> $env:GITHUB_STEP_SUMMARY
+          # Four helper sessions each have a 60-second deadline. The harness kills
+          # and reaps failed helpers/capture children and destroys its own HWNDs.
+          python -B scripts/smoke_vst3_editor.py --helper target/debug/vst3-host-helper.exe --timeout 60
+          $code = $LASTEXITCODE
+          if ($code -eq 77) {
+            "UNSUPPORTED / NOT VERIFIED: runner has no usable interactive input desktop. See the harness diagnostic above. No native acceptance pass." >> $env:GITHUB_STEP_SUMMARY
+            Write-Output '::warning::Native editor runtime UNSUPPORTED / NOT VERIFIED on this runner; no acceptance pass.'
+            exit 77
+          }
+          if ($code -ne 0) {
+            "FAILED: native fixture runtime harness exited $code. See the failing assertion above." >> $env:GITHUB_STEP_SUMMARY
+            exit $code
+          }
+          "PASS: source-built MIT fixture through the production MSVC helper; lifecycle/owned HWND cleanup, stopped native-edit state round-trip, native button paint/event and Rust/Win32/CRT stdout isolation." >> $env:GITHUB_STEP_SUMMARY
+          "Scope: fixture-only automated evidence. Human visual review, real vendor plugins, physical input/audio devices, DPI transitions and release acceptance remain NOT VERIFIED." >> $env:GITHUB_STEP_SUMMARY
