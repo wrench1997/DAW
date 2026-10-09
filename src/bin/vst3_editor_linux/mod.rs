@@ -1101,7 +1101,7 @@ mod tests {
     }
     #[test]
     fn closed_query_and_repeated_close_need_no_display() {
-        let mut editor = Editor::new(std::sync::Arc::new(std::sync::Mutex::new(None)));
+        let mut editor = Editor::new(crate::SharedPlugin::new(std::sync::Mutex::new(None)));
         for _ in 0..2 {
             assert!(
                 matches!(editor.command(IsolatedEditorCommand::Close),HostResponse::EditorState { state } if state.supported && !state.open && state.generation==0)

@@ -1,5 +1,6 @@
 //! Internal VST3 plugin implementation
 
+use super::processor_lease::{ProcessorCalls, ProcessorLease};
 use crate::{
     audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
     error::{Error, Result},
@@ -135,8 +136,22 @@ struct BusActivationState {
     event_outputs: Vec<bool>,
 }
 
-/// Internal plugin implementation that handles all VST3 COM interactions
+/// Legacy public-API implementation. The helper's `MainThreadPlugin` keeps this aggregate
+/// on its loading thread; legacy `Plugin` users retain their existing `Send` API.
+///
+/// Runtime drops before control ownership, so host process data cannot outlive the module.
+/// This is an ownership extraction only: the legacy bridge still locks/allocates and all
+/// helper plugin calls still run synchronously on the main thread.
 pub struct PluginImpl {
+    pub(crate) info: PluginInfo,
+    pub(crate) compatibility: Vec<crate::discovery::ClassCompatibility>,
+    runtime: ProcessorRuntime,
+    control: ControlDomain,
+}
+
+/// Plugin-owned COM references, controller/editor calls and lifecycle administration.
+/// No processor worker receives this owner. Module and host-context drop order is deliberate.
+struct ControlDomain {
     // Core VST3 interfaces
     component: ComPtr<IComponent>,
     processor: ComPtr<IAudioProcessor>,
@@ -146,67 +161,18 @@ pub struct PluginImpl {
     /// `setComponentState` on top of it would double-apply and corrupt parameters.
     single_component: bool,
 
-    // Plugin metadata
-    pub(crate) info: PluginInfo,
-    pub(crate) compatibility: Vec<crate::discovery::ClassCompatibility>,
-
     // Processing state
     is_active: bool,
-    is_processing: bool,
-    sample_rate: f64,
-    block_size: usize,
     /// The configuration the plugin's last successful `setupProcessing` carried, so
     /// `start_processing` can tell a re-start (nothing to do) from a configuration change
     /// (which has to be applied while the component is inactive). `None` until the first setup.
     applied_setup: Option<AppliedSetup>,
-    /// Transport tempo (BPM) advertised in the host `ProcessContext`.
-    tempo: f64,
-    /// Time signature numerator advertised in the host `ProcessContext`.
-    time_sig_numerator: i32,
-    /// Time signature denominator advertised in the host `ProcessContext`.
-    time_sig_denominator: i32,
-    /// Whether the transport is playing (the `kPlaying` flag in `ProcessContext.state`).
-    playing: bool,
-    process_transport: Option<crate::plugin::ProcessTransport>,
-    /// Real-time vs offline processing, baked into `ProcessSetup`/`process_data` at setup.
-    process_mode: crate::plugin::ProcessMode,
-    /// Optional VST3 3.7 declaration of exactly which ProcessContext fields the processor reads.
-    /// `None` is the safe legacy path for older processors and advertises the historical context.
-    process_context_requirements: Option<u32>,
     /// Current IPrefetchableSupport value, or `None` for pre-3.6 processors.
     prefetchable_support: Option<u32>,
-    sample_size: ProcessingSampleSize,
-    bus_activation: BusActivationState,
-    /// Monotonic allocator for per-voice note ids (note_on); 0/-1 reserved for "unset".
-    next_note_id: i32,
-    // `(note_id, channel, pitch)` for notes started via `note_on`, so `note_off` can address the
-    // release by pitch as well as by id. Pre-reserved and capped, so tracking never allocates on
-    // the audio thread and a caller that never releases its notes can't grow it without bound.
-    active_notes: Vec<(i32, i16, i16)>,
-    /// Counts ordinary (noteId = -1) note-ons by channel/pitch. Fixed-size so MIDI tracking
-    /// never allocates on the device callback.
-    ordinary_note_counts: [u16; MIDI_CHANNEL_COUNT * 128],
-
-    // Controller-derived routing tables. Both are built outside process() and only read from
-    // the callback; `restartComponent` merely records invalidation flags atomically.
-    midi_mapping_cache: MidiMappingCache,
-    program_change_cache: Vec<ProgramChangeMapping>,
     dirty_caches: DirtyCaches,
     unit_cache: Mutex<Option<Vec<crate::plugin::PluginUnit>>>,
-
-    // Host data structures
-    process_data: Option<Box<HostProcessData>>,
     component_handler: Option<ComWrapper<ComponentHandler>>,
     connection: Option<ConnectionPair>,
-
-    // Parameter changes queued by the host (set_parameter / automation) to be fed into the
-    // processor's input parameter queue at the start of the next process() block. Serialized
-    // with process() by the caller's &mut access, so a plain Vec (no lock) is sufficient.
-    // Pre-reserved to MAX_PENDING_PARAM_CHANGES and capped there — see the constant.
-    pending_param_changes: Vec<ParameterChange>,
-    // How many parameter changes have been dropped because the queue was full. Reported in the
-    // warning so a host sees a running total rather than one line per lost change.
-    dropped_param_changes: u64,
 
     // Parameter edits the plugin's *own editor* reported via `IComponentHandler::performEdit`,
     // after `process()` has routed them into the processor's input queue. Drained by the host
@@ -214,29 +180,11 @@ pub struct PluginImpl {
     // (`component_handler.parameter_changes`) so feeding the DSP and updating the display are
     // not two consumers racing to drain the same buffer.
     gui_param_changes_for_host: Arc<Mutex<Vec<(u32, f64)>>>,
-    // Processor-originated output parameter points. Bounded and lock-free: process() pushes,
-    // the host/UI drains through get_parameter_changes().
-    output_param_feedback: Arc<ArrayQueue<(u32, f64)>>,
     // Parameter values that reached the processor queue from a thread that must not call
     // `IEditController` (the audio callback, via the playback handles). Bounded, lock-free and
     // drop-oldest; the control-thread service paths drain it into setParamNormalized so the
     // plugin's own editor, get_parameter/format_parameter and saved state track the DSP.
     deferred_controller_sync: ArrayQueue<(u32, f64)>,
-
-    // Event handling
-    input_events: ComWrapper<HostEventList>,
-    output_events: ComWrapper<HostEventList>,
-    // Holds a block's queued input events while `process` distributes them over the block's
-    // chunks: each chunk is staged into `input_events` with only the events that fall inside it.
-    // Pre-reserved to MAX_QUEUED_EVENTS (the input list's own cap), so splitting a block never
-    // allocates on the audio thread.
-    chunk_events: Vec<Option<PluginEvent>>,
-    // MIDI the plugin has emitted (captured from output_events after each process block,
-    // converted to MidiEvent), buffered for the host to poll. A lock-free bounded queue so the
-    // audio thread can push without locking and a UI thread can drain concurrently; when full
-    // the oldest event is dropped (bounded memory if the host never polls).
-    output_events_owned: Arc<ArrayQueue<PluginEvent>>,
-    output_events_lost: std::sync::atomic::AtomicBool,
 
     // Plugin view
     plugin_view: Option<ComPtr<IPlugView>>,
@@ -253,7 +201,6 @@ pub struct PluginImpl {
 
     // VST3 module handle (kept alive). Declared after every plugin-side COM reference above so
     // those are released while the module's vtables still exist, and before `_host_app` below.
-    #[cfg(target_os = "linux")]
     _factory: ComPtr<IPluginFactory>,
     _module: Box<dyn VstModule>,
 
@@ -267,6 +214,148 @@ pub struct PluginImpl {
     // Thread which initialized the component/controller. Lifecycle-sensitive restart handling
     // and controller cache refresh must return to this thread.
     control_thread: ThreadId,
+}
+
+/// Exclusive per-processor mutable state. Caches are prepared in the control domain;
+/// processing reads them without querying component/controller metadata.
+///
+/// This preparatory type is NOT a promise of real-time safety or cross-thread access:
+/// ParameterChanges/EventList and the legacy callback bridge still need bounded replacement.
+struct ProcessorRuntime {
+    is_processing: bool,
+    sample_rate: f64,
+    block_size: usize,
+    /// Transport tempo (BPM) advertised in the host `ProcessContext`.
+    tempo: f64,
+    /// Time signature numerator advertised in the host `ProcessContext`.
+    time_sig_numerator: i32,
+    /// Time signature denominator advertised in the host `ProcessContext`.
+    time_sig_denominator: i32,
+    /// Whether the transport is playing (the `kPlaying` flag in `ProcessContext.state`).
+    playing: bool,
+    process_transport: Option<crate::plugin::ProcessTransport>,
+    /// Real-time vs offline processing, baked into `ProcessSetup`/`process_data` at setup.
+    process_mode: crate::plugin::ProcessMode,
+    /// Optional VST3 3.7 declaration of exactly which ProcessContext fields the processor reads.
+    /// `None` is the safe legacy path for older processors and advertises the historical context.
+    process_context_requirements: Option<u32>,
+    sample_size: ProcessingSampleSize,
+    bus_activation: BusActivationState,
+    /// Monotonic allocator for per-voice note ids (note_on); 0/-1 reserved for "unset".
+    next_note_id: i32,
+    // `(note_id, channel, pitch)` for notes started via `note_on`, so `note_off` can address the
+    // release by pitch as well as by id. Pre-reserved and capped, so tracking never allocates on
+    // the audio thread and a caller that never releases its notes can't grow it without bound.
+    active_notes: Vec<(i32, i16, i16)>,
+    /// Counts ordinary (noteId = -1) note-ons by channel/pitch. Fixed-size so MIDI tracking
+    /// never allocates on the device callback.
+    ordinary_note_counts: [u16; MIDI_CHANNEL_COUNT * 128],
+
+    // Controller-derived routing tables. Both are built outside process() and only read from
+    // the callback; `restartComponent` merely records invalidation flags atomically.
+    midi_mapping_cache: MidiMappingCache,
+    program_change_cache: Vec<ProgramChangeMapping>,
+
+    // Host data structures
+    process_data: Option<Box<HostProcessData>>,
+
+    // Parameter changes queued by the host (set_parameter / automation) to be fed into the
+    // processor's input parameter queue at the start of the next process() block. Serialized
+    // with process() by the caller's &mut access, so a plain Vec (no lock) is sufficient.
+    // Pre-reserved to MAX_PENDING_PARAM_CHANGES and capped there — see the constant.
+    pending_param_changes: Vec<ParameterChange>,
+    // How many parameter changes have been dropped because the queue was full. Reported in the
+    // warning so a host sees a running total rather than one line per lost change.
+    dropped_param_changes: u64,
+    // Processor-originated output parameter points. Bounded and lock-free: process() pushes,
+    // the host/UI drains through get_parameter_changes().
+    output_param_feedback: Arc<ArrayQueue<(u32, f64)>>,
+
+    // Event handling
+    input_events: ComWrapper<HostEventList>,
+    output_events: ComWrapper<HostEventList>,
+    // Holds a block's queued input events while `process` distributes them over the block's
+    // chunks: each chunk is staged into `input_events` with only the events that fall inside it.
+    // Pre-reserved to MAX_QUEUED_EVENTS (the input list's own cap), so splitting a block never
+    // allocates on the audio thread.
+    chunk_events: Vec<Option<PluginEvent>>,
+    // MIDI the plugin has emitted (captured from output_events after each process block,
+    // converted to MidiEvent), buffered for the host to poll. A lock-free bounded queue so the
+    // audio thread can push without locking and a UI thread can drain concurrently; when full
+    // the oldest event is dropped (bounded memory if the host never polls).
+    output_events_owned: Arc<ArrayQueue<PluginEvent>>,
+    output_events_lost: std::sync::atomic::AtomicBool,
+}
+
+/// Temporary adapter for the unchanged synchronous path. This still takes GUI queue locks
+/// and feeds growable host COM containers; replace it before enabling a processor thread.
+struct LegacyProcessBridge<'a> {
+    handler: Option<&'a ComponentHandler>,
+    gui_feedback: &'a Mutex<Vec<(u32, f64)>>,
+    host_app: &'a HostApplication,
+}
+
+impl LegacyProcessBridge<'_> {
+    fn stage_native_edits(&self, changes: &ParameterChanges) -> bool {
+        let mut native_edits_staged = false;
+        if let Some(ref handler) = self.handler {
+            if let Ok(mut gui_changes) = handler.parameter_changes.lock() {
+                if !gui_changes.is_empty() {
+                    native_edits_staged = true;
+                    for &(id, value) in gui_changes.iter() {
+                        changes.enqueue(id, 0, value);
+                    }
+                    if let Ok(mut stash) = self.gui_feedback.lock() {
+                        // Bounded: nothing drains the stash unless the host polls
+                        // `get_parameter_changes`, and the realtime runner never does, so
+                        // an unbounded append here would grow forever and reallocate on
+                        // the audio thread. Both buffers are pre-reserved to the cap, so
+                        // the steady-state append allocates nothing.
+                        let room = MAX_EDITOR_FEEDBACK.saturating_sub(stash.len());
+                        if room >= gui_changes.len() {
+                            stash.append(&mut gui_changes);
+                        } else {
+                            stash.extend(gui_changes.drain(..room));
+                            gui_changes.clear();
+                        }
+                    } else {
+                        gui_changes.clear();
+                    }
+                }
+            }
+        }
+        native_edits_staged
+    }
+
+    fn mark_native_feedback_lost(&self) {
+        if let Some(handler) = self.handler {
+            handler.mark_native_parameter_feedback_lost();
+        }
+    }
+
+    fn enter_process(&self) {
+        self.host_app.enter_data_exchange_process();
+    }
+    fn leave_process(&self) {
+        self.host_app.leave_data_exchange_process();
+    }
+}
+
+impl ControlDomain {
+    fn processor_lease(&mut self) -> ProcessorLease<'_> {
+        ProcessorLease::new(&mut self.processor, self._module.as_ref())
+    }
+
+    fn processing_parts(&mut self) -> (ProcessorLease<'_>, LegacyProcessBridge<'_>) {
+        (
+            ProcessorLease::new(&mut self.processor, self._module.as_ref()),
+            LegacyProcessBridge {
+                handler: self.component_handler.as_deref(),
+                gui_feedback: &self.gui_param_changes_for_host,
+                host_app: &self._host_app,
+            },
+        )
+    }
 }
 
 // Processing data structure
@@ -288,6 +377,32 @@ struct HostProcessData {
 enum CallerAudioBuffers<'a> {
     Flat(&'a mut AudioBuffers),
     Buses(&'a mut BusAudioBuffers),
+}
+
+fn start_processor_notification(
+    state: &mut bool,
+    processor: &mut impl ProcessorCalls,
+) -> Result<()> {
+    let result = processor.set_processing(1);
+    // Notification is optional. Preserve the legacy accepted result-code policy.
+    if result != kResultOk && result != kNotImplemented {
+        return Err(Error::Other(format!(
+            "Failed to start processing: {result:#x}"
+        )));
+    }
+    *state = true;
+    Ok(())
+}
+
+fn stop_processor_notification(
+    state: &mut bool,
+    processor: &mut impl ProcessorCalls,
+) -> Result<()> {
+    if *state {
+        let result = processor.set_processing(0);
+        finish_stop_transition(state, result, true, "stop processing")?;
+    }
+    Ok(())
 }
 
 fn finish_stop_transition(
@@ -355,9 +470,9 @@ struct AppliedSetup {
 
 /// Per-bus channel pointers into the (audio-thread-owned) audio buffers.
 ///
-/// `Send` because the pointers are only ever dereferenced on the one thread that owns the
-/// `HostProcessData` (and thus the buffers they point into); the `Plugin` is moved to that
-/// thread as a unit. The raw pointers never escape to another thread.
+/// Existing legacy `Send` support: the pointers are only dereferenced by the exclusive
+/// owner of `HostProcessData` (and the stable buffers they point into). This does not grant
+/// permission to send the helper's MainThreadPlugin, COM owner or processor lease anywhere.
 struct SendChannelPtrs<T>(Vec<Vec<*mut T>>);
 unsafe impl<T: Send> Send for SendChannelPtrs<T> {}
 
@@ -925,7 +1040,7 @@ fn write_note_off_event(event: &mut Event, channel: MidiChannel, note: u8, veloc
 
 impl PluginImpl {
     fn ensure_control_thread(&self, operation: &str) -> Result<()> {
-        if thread::current().id() == self.control_thread {
+        if thread::current().id() == self.control.control_thread {
             Ok(())
         } else {
             Err(Error::Other(format!(
@@ -965,9 +1080,9 @@ impl PluginImpl {
         time_sig_numerator: i32,
         time_sig_denominator: i32,
     ) {
-        self.tempo = tempo;
-        self.time_sig_numerator = time_sig_numerator;
-        self.time_sig_denominator = time_sig_denominator;
+        self.runtime.tempo = tempo;
+        self.runtime.time_sig_numerator = time_sig_numerator;
+        self.runtime.time_sig_denominator = time_sig_denominator;
     }
 
     /// Update the transport tempo for the **next** processed block, even while processing is
@@ -975,11 +1090,11 @@ impl PluginImpl {
     /// `ProcessContext` both move. Existing musical position is preserved.
     #[allow(clippy::unnecessary_cast)]
     fn update_tempo(&mut self, bpm: f64) {
-        self.tempo = bpm;
-        if let Some(transport) = &mut self.process_transport {
+        self.runtime.tempo = bpm;
+        if let Some(transport) = &mut self.runtime.process_transport {
             transport.tempo = bpm;
         }
-        if let Some(ref mut data) = self.process_data {
+        if let Some(ref mut data) = self.runtime.process_data {
             data.transport_tempo = bpm;
             if process_context_needs(
                 data.process_context_requirements,
@@ -994,13 +1109,13 @@ impl PluginImpl {
     /// processing is active (stored fields plus the live `ProcessContext`).
     #[allow(clippy::unnecessary_cast)]
     fn update_time_signature(&mut self, numerator: i32, denominator: i32) {
-        if let Some(transport) = &mut self.process_transport {
+        if let Some(transport) = &mut self.runtime.process_transport {
             transport.time_sig_numerator = numerator;
             transport.time_sig_denominator = denominator;
         }
-        self.time_sig_numerator = numerator;
-        self.time_sig_denominator = denominator;
-        if let Some(ref mut data) = self.process_data {
+        self.runtime.time_sig_numerator = numerator;
+        self.runtime.time_sig_denominator = denominator;
+        if let Some(ref mut data) = self.runtime.process_data {
             if process_context_needs(
                 data.process_context_requirements,
                 IProcessContextRequirements_::Flags_::kNeedTimeSignature as u32,
@@ -1014,11 +1129,11 @@ impl PluginImpl {
     /// Toggle the transport playing state (`kPlaying`) for the **next** processed block, even
     /// while processing is active (stored field plus the live `ProcessContext.state`).
     fn update_playing(&mut self, playing: bool) {
-        self.playing = playing;
-        if let Some(transport) = &mut self.process_transport {
+        self.runtime.playing = playing;
+        if let Some(transport) = &mut self.runtime.process_transport {
             transport.playing = playing;
         }
-        if let Some(ref mut data) = self.process_data {
+        if let Some(ref mut data) = self.runtime.process_data {
             data.process_context.state =
                 process_context_state(data.process_context_requirements, playing);
         }
@@ -1028,8 +1143,8 @@ impl PluginImpl {
     /// load so `setupProcessing` (which runs at `start_processing`) uses the builder's settings
     /// rather than the internal defaults.
     pub fn set_audio_config(&mut self, sample_rate: f64, block_size: usize) {
-        self.sample_rate = sample_rate;
-        self.block_size = block_size;
+        self.runtime.sample_rate = sample_rate;
+        self.runtime.block_size = block_size;
     }
 
     /// Get parameter changes the plugin's editor made (for the host to update its UI).
@@ -1040,21 +1155,21 @@ impl PluginImpl {
     pub fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
         self.drain_deferred_controller_sync();
         let mut changes = Vec::new();
-        while let Some(change) = self.output_param_feedback.pop() {
+        while let Some(change) = self.runtime.output_param_feedback.pop() {
             changes.push(change);
         }
         // Both drains take the elements in place rather than `mem::take`-ing the `Vec`: taking it
         // would leave a zero-capacity buffer behind, so the next block's `append` would
         // reallocate — on the audio thread, for the stash.
-        if let Ok(mut stash) = self.gui_param_changes_for_host.lock() {
+        if let Ok(mut stash) = self.control.gui_param_changes_for_host.lock() {
             if !stash.is_empty() {
                 changes.extend(stash.drain(..));
             }
         }
         // Not processing yet (process() hasn't run to move edits into the stash): drain the raw
         // performEdit sink directly so the host UI still reflects editor changes.
-        if !self.is_processing {
-            if let Some(ref handler) = self.component_handler {
+        if !self.runtime.is_processing {
+            if let Some(ref handler) = self.control.component_handler {
                 if let Ok(mut raw_changes) = handler.parameter_changes.lock() {
                     if !raw_changes.is_empty() {
                         // This legacy display drain bypasses DSP while stopped. Do not later
@@ -1077,7 +1192,7 @@ impl PluginImpl {
     /// automation on real plugins. Log it and carry on; `log` skips the formatting entirely when
     /// the level is disabled.
     fn apply_controller_parameter(&self, id: u32, value: f64) {
-        let Some(controller) = self.controller.as_ref() else {
+        let Some(controller) = self.control.controller.as_ref() else {
             return;
         };
         let result = unsafe { controller.setParamNormalized(id, value) };
@@ -1096,20 +1211,22 @@ impl PluginImpl {
     /// service call. The queue drops its oldest entry when full: the newest value for a
     /// parameter is the one worth showing.
     fn mirror_parameter_to_controller(&self, id: u32, value: f64) {
-        if thread::current().id() == self.control_thread {
+        if thread::current().id() == self.control.control_thread {
             self.apply_controller_parameter(id, value);
         } else {
-            self.deferred_controller_sync.force_push((id, value));
+            self.control
+                .deferred_controller_sync
+                .force_push((id, value));
         }
     }
 
     /// Apply parameter values that were queued off the control thread to `IEditController`.
     /// A no-op anywhere but the control thread, so the audio path never reaches the controller.
     fn drain_deferred_controller_sync(&self) {
-        if thread::current().id() != self.control_thread {
+        if thread::current().id() != self.control.control_thread {
             return;
         }
-        while let Some((id, value)) = self.deferred_controller_sync.pop() {
+        while let Some((id, value)) = self.control.deferred_controller_sync.pop() {
             self.apply_controller_parameter(id, value);
         }
     }
@@ -1118,32 +1235,37 @@ impl PluginImpl {
     /// and apply parameter values queued for the controller from the same place. A no-op
     /// anywhere but the control thread; both halves are `IEditController` traffic.
     fn service_control_thread_caches(&mut self) {
-        if thread::current().id() != self.control_thread {
+        if thread::current().id() != self.control.control_thread {
             return;
         }
         self.drain_deferred_controller_sync();
-        if std::mem::take(&mut self.dirty_caches.midi_mapping) {
+        if std::mem::take(&mut self.control.dirty_caches.midi_mapping) {
             self.refresh_midi_mapping_cache();
         }
-        if std::mem::take(&mut self.dirty_caches.program_change) {
+        if std::mem::take(&mut self.control.dirty_caches.program_change) {
             self.refresh_program_change_cache();
         }
     }
 
     fn refresh_midi_mapping_cache(&mut self) {
         let buses = unsafe {
-            midi_mapping_bus_count(self.component.getBusCount(kEvent as i32, kInput as i32))
+            midi_mapping_bus_count(
+                self.control
+                    .component
+                    .getBusCount(kEvent as i32, kInput as i32),
+            )
         };
         let mut cache = MidiMappingCache {
             buses,
             assignments: vec![None; buses * MIDI_CHANNEL_COUNT * MIDI_CONTROLLER_COUNT],
         };
         let Some(mapping) = self
+            .control
             .controller
             .as_ref()
             .and_then(|controller| controller.cast::<IMidiMapping>())
         else {
-            self.midi_mapping_cache = cache;
+            self.runtime.midi_mapping_cache = cache;
             return;
         };
         unsafe {
@@ -1167,12 +1289,12 @@ impl PluginImpl {
                 }
             }
         }
-        self.midi_mapping_cache = cache;
+        self.runtime.midi_mapping_cache = cache;
     }
 
     fn refresh_program_change_cache(&mut self) {
-        self.program_change_cache.clear();
-        let Some(controller) = self.controller.as_ref() else {
+        self.runtime.program_change_cache.clear();
+        let Some(controller) = self.control.controller.as_ref() else {
             return;
         };
         let Some(unit_info) = controller.cast::<IUnitInfo>() else {
@@ -1211,18 +1333,21 @@ impl PluginImpl {
                     continue;
                 };
                 if *program_count > 0 {
-                    self.program_change_cache.push(ProgramChangeMapping {
-                        unit_id: parameter.unitId,
-                        param_id: parameter.id,
-                        program_count: *program_count,
-                    });
+                    self.runtime
+                        .program_change_cache
+                        .push(ProgramChangeMapping {
+                            unit_id: parameter.unitId,
+                            param_id: parameter.id,
+                            program_count: *program_count,
+                        });
                 }
             }
         }
     }
 
     fn cached_program_change(&self, unit_id: i32) -> Option<ProgramChangeMapping> {
-        self.program_change_cache
+        self.runtime
+            .program_change_cache
             .iter()
             .copied()
             .find(|mapping| mapping.unit_id == unit_id)
@@ -1262,7 +1387,8 @@ impl PluginImpl {
             // (whether via `InitializedComponent` or `Drop for PluginImpl`) must complete before
             // the module unmaps.
             log::debug!("Step 1: Loading VST3 module...");
-            #[cfg(target_os = "linux")]
+            // Factories may retain a borrowed host context until module teardown on every
+            // platform. Declare it first so all early-error unwinds unload the module first.
             let host_app = create_host_application();
             let module = load_module(path)?;
             log::debug!("VST3 module loaded successfully");
@@ -1285,8 +1411,6 @@ impl PluginImpl {
 
             // Factory3 must receive the host context before any class is instantiated. Keep the
             // same context alive for the complete component/controller lifetime.
-            #[cfg(not(target_os = "linux"))]
-            let host_app = create_host_application();
             #[cfg(target_os = "linux")]
             let mut run_loop_cleanup = host_app.run_loop_cleanup();
             let host_ctx = host_app.to_com_ptr::<IHostApplication>();
@@ -1518,64 +1642,67 @@ impl PluginImpl {
             );
 
             let mut plugin = Self {
-                component,
-                processor,
-                controller,
-                single_component,
                 info: updated_info,
                 compatibility,
-                is_active: false,
-                is_processing: false,
-                sample_rate: 44100.0,
-                block_size: 512,
-                applied_setup: None,
-                tempo: 120.0,
-                time_sig_numerator: 4,
-                time_sig_denominator: 4,
-                playing: true,
-                process_transport: None,
-                process_mode: crate::plugin::ProcessMode::Realtime,
-                process_context_requirements,
-                prefetchable_support,
-                sample_size,
-                bus_activation,
-                next_note_id: 1,
-                active_notes: Vec::with_capacity(MAX_TRACKED_NOTES),
-                ordinary_note_counts: [0; MIDI_CHANNEL_COUNT * 128],
-                midi_mapping_cache: MidiMappingCache::default(),
-                program_change_cache: Vec::new(),
-                dirty_caches: DirtyCaches::default(),
-                unit_cache: Mutex::new(None),
-                process_data: None,
-                component_handler: Some(component_handler),
-                connection: initialized.take_connection(),
-                pending_param_changes: Vec::with_capacity(MAX_PENDING_PARAM_CHANGES),
-                dropped_param_changes: 0,
-                gui_param_changes_for_host: Arc::new(Mutex::new(Vec::with_capacity(
-                    MAX_EDITOR_FEEDBACK,
-                ))),
-                output_param_feedback: Arc::new(ArrayQueue::new(MAX_OUTPUT_PARAMETER_FEEDBACK)),
-                deferred_controller_sync: ArrayQueue::new(MAX_DEFERRED_CONTROLLER_SYNC),
-                input_events,
-                output_events,
-                chunk_events: Vec::with_capacity(MAX_QUEUED_EVENTS),
-                output_events_owned: Arc::new(ArrayQueue::new(MAX_OUTPUT_MIDI)),
-                output_events_lost: std::sync::atomic::AtomicBool::new(false),
-                plugin_view: None,
-                editor_scale_factor: 1.0,
-                plug_frame,
-                editor_resize,
-                #[cfg(target_os = "linux")]
-                run_loop,
-                #[cfg(target_os = "linux")]
-                _factory: factory,
-                _module: module,
-                _host_app: host_app,
-                control_thread: thread::current().id(),
+                runtime: ProcessorRuntime {
+                    is_processing: false,
+                    sample_rate: 44100.0,
+                    block_size: 512,
+                    tempo: 120.0,
+                    time_sig_numerator: 4,
+                    time_sig_denominator: 4,
+                    playing: true,
+                    process_transport: None,
+                    process_mode: crate::plugin::ProcessMode::Realtime,
+                    process_context_requirements,
+                    sample_size,
+                    bus_activation,
+                    next_note_id: 1,
+                    active_notes: Vec::with_capacity(MAX_TRACKED_NOTES),
+                    ordinary_note_counts: [0; MIDI_CHANNEL_COUNT * 128],
+                    midi_mapping_cache: MidiMappingCache::default(),
+                    program_change_cache: Vec::new(),
+                    process_data: None,
+                    pending_param_changes: Vec::with_capacity(MAX_PENDING_PARAM_CHANGES),
+                    dropped_param_changes: 0,
+                    output_param_feedback: Arc::new(ArrayQueue::new(MAX_OUTPUT_PARAMETER_FEEDBACK)),
+                    input_events,
+                    output_events,
+                    chunk_events: Vec::with_capacity(MAX_QUEUED_EVENTS),
+                    output_events_owned: Arc::new(ArrayQueue::new(MAX_OUTPUT_MIDI)),
+                    output_events_lost: std::sync::atomic::AtomicBool::new(false),
+                },
+                control: ControlDomain {
+                    component,
+                    processor,
+                    controller,
+                    single_component,
+                    is_active: false,
+                    applied_setup: None,
+                    prefetchable_support,
+                    dirty_caches: DirtyCaches::default(),
+                    unit_cache: Mutex::new(None),
+                    component_handler: Some(component_handler),
+                    connection: initialized.take_connection(),
+                    gui_param_changes_for_host: Arc::new(Mutex::new(Vec::with_capacity(
+                        MAX_EDITOR_FEEDBACK,
+                    ))),
+                    deferred_controller_sync: ArrayQueue::new(MAX_DEFERRED_CONTROLLER_SYNC),
+                    plugin_view: None,
+                    editor_scale_factor: 1.0,
+                    plug_frame,
+                    editor_resize,
+                    #[cfg(target_os = "linux")]
+                    run_loop,
+                    _factory: factory,
+                    _module: module,
+                    _host_app: host_app,
+                    control_thread: thread::current().id(),
+                },
             };
             // From here on `plugin` owns the teardown: dropping it runs the same ordered
             // sequence the guard would.
-            initialized.disarm();
+            initialized.finish_transfer();
             #[cfg(target_os = "linux")]
             run_loop_cleanup.disarm();
 
@@ -1611,10 +1738,46 @@ impl PluginImpl {
             log::info!(
                 "Has GUI: {}, Active: {}",
                 plugin.info.has_gui,
-                plugin.is_active
+                plugin.control.is_active
             );
             Ok(plugin)
         }
+    }
+
+    /// Control-domain half of start. setupProcessing and setActive never go through a
+    /// processor lease. Legacy callers retain their historical thread behavior; the new
+    /// MainThreadPlugin helper owner enforces same-thread access at the type boundary.
+    fn prepare_processing_on_control_thread(&mut self) -> Result<()> {
+        if self.control.applied_setup != Some(self.current_setup()) {
+            if self.control.is_active {
+                self.deactivate_on_control_thread()?;
+            }
+            self.setup_processing()?;
+        }
+        if !self.control.is_active {
+            self.activate()?;
+        }
+        Ok(())
+    }
+
+    fn deactivate_on_control_thread(&mut self) -> Result<()> {
+        if self.control.is_active {
+            let result = self.set_component_active(false);
+            finish_stop_transition(
+                &mut self.control.is_active,
+                result,
+                false,
+                "deactivate component",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Discard prepared bus/sample storage before a mutation that can change its layout.
+    /// A failed rebuild leaves no stale pointers or successful setup marker to reuse.
+    fn invalidate_processing_setup(&mut self) {
+        self.runtime.process_data = None;
+        self.control.applied_setup = None;
     }
 
     /// Put the component into the active state (`IComponent::setActive(true)`).
@@ -1628,23 +1791,23 @@ impl PluginImpl {
                 "Failed to activate component: {result:#x}"
             )));
         }
-        self.is_active = true;
+        self.control.is_active = true;
         Ok(())
     }
 
     fn set_component_active(&self, active: bool) -> tresult {
         if !active {
-            self._host_app.flush_data_exchange();
+            self.control._host_app.flush_data_exchange();
             // The processor closes queues from its setActive(false) callback. Mark the host-side
             // gate inactive before entering that callback so closeQueue is accepted there.
-            self._host_app.set_data_exchange_active(false);
+            self.control._host_app.set_data_exchange_active(false);
         }
-        let result = unsafe { self.component.setActive(u8::from(active)) };
+        let result = unsafe { self.control.component.setActive(u8::from(active)) };
         if result == kResultOk || result == kResultTrue {
-            self._host_app.set_data_exchange_active(active);
+            self.control._host_app.set_data_exchange_active(active);
         } else if !active {
             // Deactivation was rejected; the processor remains active and its queues stay live.
-            self._host_app.set_data_exchange_active(true);
+            self.control._host_app.set_data_exchange_active(true);
         }
         result
     }
@@ -1790,7 +1953,7 @@ impl PluginImpl {
 
     /// Map the configured [`ProcessMode`](crate::plugin::ProcessMode) to the VST3 enum value.
     fn vst_process_mode(&self) -> i32 {
-        match self.process_mode {
+        match self.runtime.process_mode {
             crate::plugin::ProcessMode::Offline => ProcessModes_::kOffline as i32,
             crate::plugin::ProcessMode::Prefetch => ProcessModes_::kPrefetch as i32,
             crate::plugin::ProcessMode::Realtime => ProcessModes_::kRealtime as i32,
@@ -1825,7 +1988,7 @@ impl PluginImpl {
         let arrangements = self.bus_arrangements()?;
         let mut inputs: Vec<u64> = arrangements.inputs.iter().map(|a| a.raw()).collect();
         let mut outputs: Vec<u64> = arrangements.outputs.iter().map(|a| a.raw()).collect();
-        let result = self.processor.setBusArrangements(
+        let result = self.control.processor.setBusArrangements(
             inputs.as_mut_ptr(),
             inputs.len() as i32,
             outputs.as_mut_ptr(),
@@ -1846,26 +2009,35 @@ impl PluginImpl {
     /// The configuration currently baked into the plugin via `setupProcessing`.
     fn current_setup(&self) -> AppliedSetup {
         AppliedSetup {
-            sample_rate: self.sample_rate,
-            block_size: self.block_size,
+            sample_rate: self.runtime.sample_rate,
+            block_size: self.runtime.block_size,
             process_mode: self.vst_process_mode(),
-            symbolic_sample_size: self.sample_size.symbolic(),
+            symbolic_sample_size: self.runtime.sample_size.symbolic(),
         }
     }
 
     /// Set up processing with the current configuration. VST3 requires the component to be
     /// **inactive**; every caller either runs before the first activation or deactivates first.
     fn setup_processing(&mut self) -> Result<()> {
+        if self.control.is_active || self.runtime.is_processing {
+            return Err(Error::Other(
+                "cannot set up processing before confirmed deactivation".into(),
+            ));
+        }
+        self.invalidate_processing_setup();
         unsafe {
             // Set up processing
             let setup = ProcessSetup {
                 processMode: self.vst_process_mode(),
-                symbolicSampleSize: self.sample_size.symbolic(),
-                maxSamplesPerBlock: self.block_size as i32,
-                sampleRate: self.sample_rate,
+                symbolicSampleSize: self.runtime.sample_size.symbolic(),
+                maxSamplesPerBlock: self.runtime.block_size as i32,
+                sampleRate: self.runtime.sample_rate,
             };
 
-            let result = self.processor.setupProcessing(&setup as *const _ as *mut _);
+            let result = self
+                .control
+                .processor
+                .setupProcessing(&setup as *const _ as *mut _);
             if result != kResultOk {
                 return Err(Error::InterfaceError(format!(
                     "Failed to setup processing: {:#x}",
@@ -1875,7 +2047,7 @@ impl PluginImpl {
 
             // Create process data
             self.create_process_data()?;
-            self.applied_setup = Some(self.current_setup());
+            self.control.applied_setup = Some(self.current_setup());
 
             Ok(())
         }
@@ -1889,7 +2061,7 @@ impl PluginImpl {
         unsafe {
             let mut data = Box::new(HostProcessData {
                 process_data: std::mem::zeroed(),
-                sample_buffers: match self.sample_size {
+                sample_buffers: match self.runtime.sample_size {
                     ProcessingSampleSize::F32 => HostSampleBuffers::F32(TypedSampleBuffers {
                         inputs: Vec::new(),
                         outputs: Vec::new(),
@@ -1906,58 +2078,62 @@ impl PluginImpl {
                 input_bus_buffers: Vec::new(),
                 output_bus_buffers: Vec::new(),
                 process_context: std::mem::zeroed(),
-                process_context_requirements: self.process_context_requirements,
-                transport_tempo: self.tempo,
+                process_context_requirements: self.runtime.process_context_requirements,
+                transport_tempo: self.runtime.tempo,
                 input_param_changes: ComWrapper::new(ParameterChanges::default()),
                 output_param_changes: ComWrapper::new(ParameterChanges::default()),
             });
 
             // Initialize process context
-            data.process_context.sampleRate = self.sample_rate;
+            data.process_context.sampleRate = self.runtime.sample_rate;
             if process_context_needs(
-                self.process_context_requirements,
+                self.runtime.process_context_requirements,
                 IProcessContextRequirements_::Flags_::kNeedSystemTime as u32,
-            ) && self.process_context_requirements.is_some()
+            ) && self.runtime.process_context_requirements.is_some()
             {
                 data.process_context.systemTime = current_system_time_nanos();
             }
             if process_context_needs(
-                self.process_context_requirements,
+                self.runtime.process_context_requirements,
                 IProcessContextRequirements_::Flags_::kNeedTempo as u32,
             ) {
-                data.process_context.tempo = self.tempo;
+                data.process_context.tempo = self.runtime.tempo;
             }
             if process_context_needs(
-                self.process_context_requirements,
+                self.runtime.process_context_requirements,
                 IProcessContextRequirements_::Flags_::kNeedTimeSignature as u32,
             ) {
-                data.process_context.timeSigNumerator = self.time_sig_numerator;
-                data.process_context.timeSigDenominator = self.time_sig_denominator;
+                data.process_context.timeSigNumerator = self.runtime.time_sig_numerator;
+                data.process_context.timeSigDenominator = self.runtime.time_sig_denominator;
             }
-            data.process_context.state =
-                process_context_state(self.process_context_requirements, self.playing);
+            data.process_context.state = process_context_state(
+                self.runtime.process_context_requirements,
+                self.runtime.playing,
+            );
 
-            if let Some(transport) = self.process_transport {
+            if let Some(transport) = self.runtime.process_transport {
                 apply_process_transport(
                     &mut data.process_context,
-                    self.process_context_requirements,
+                    self.runtime.process_context_requirements,
                     transport,
                 );
             }
 
             // Set up process data
             data.process_data.processMode = self.vst_process_mode();
-            data.process_data.numSamples = self.block_size as i32;
-            data.process_data.symbolicSampleSize = self.sample_size.symbolic();
+            data.process_data.numSamples = self.runtime.block_size as i32;
+            data.process_data.symbolicSampleSize = self.runtime.sample_size.symbolic();
             data.process_data.processContext = &mut data.process_context;
 
             // Set up event lists
             data.process_data.inputEvents = self
+                .runtime
                 .input_events
                 .as_com_ref::<IEventList>()
                 .map(|ptr| ptr.as_ptr())
                 .unwrap_or(ptr::null_mut());
             data.process_data.outputEvents = self
+                .runtime
                 .output_events
                 .as_com_ref::<IEventList>()
                 .map(|ptr| ptr.as_ptr())
@@ -1978,21 +2154,28 @@ impl PluginImpl {
             // Prepare buffers
             self.prepare_buffers(&mut data)?;
 
-            self.process_data = Some(data);
+            self.runtime.process_data = Some(data);
             Ok(())
         }
     }
 
     /// Prepare audio buffers based on plugin bus configuration
     unsafe fn prepare_buffers(&mut self, data: &mut HostProcessData) -> Result<()> {
-        let input_bus_count = self.component.getBusCount(kAudio as i32, kInput as i32);
-        let output_bus_count = self.component.getBusCount(kAudio as i32, kOutput as i32);
+        let input_bus_count = self
+            .control
+            .component
+            .getBusCount(kAudio as i32, kInput as i32);
+        let output_bus_count = self
+            .control
+            .component
+            .getBusCount(kAudio as i32, kOutput as i32);
         data.input_bus_buffers.clear();
         data.output_bus_buffers.clear();
 
         let channel_count = |direction: i32, bus_idx: i32| {
             let mut bus_info: BusInfo = std::mem::zeroed();
             if self
+                .control
                 .component
                 .getBusInfo(kAudio as i32, direction, bus_idx, &mut bus_info)
                 == kResultOk
@@ -2003,6 +2186,7 @@ impl PluginImpl {
             // Fall back to the processor's arrangement, whose set bits define its channels.
             let mut arrangement = 0u64;
             if self
+                .control
                 .processor
                 .getBusArrangement(direction, bus_idx, &mut arrangement)
                 == kResultOk
@@ -2030,11 +2214,11 @@ impl PluginImpl {
         match &mut data.sample_buffers {
             HostSampleBuffers::F32(samples) => {
                 *samples = build_typed_sample_buffers(
-                    self.block_size,
+                    self.runtime.block_size,
                     &data.input_bus_buffers,
-                    &self.bus_activation.audio_inputs,
+                    &self.runtime.bus_activation.audio_inputs,
                     &data.output_bus_buffers,
-                    &self.bus_activation.audio_outputs,
+                    &self.runtime.bus_activation.audio_outputs,
                 );
                 for (bus, pointers) in data
                     .input_bus_buffers
@@ -2061,11 +2245,11 @@ impl PluginImpl {
             }
             HostSampleBuffers::F64(samples) => {
                 *samples = build_typed_sample_buffers(
-                    self.block_size,
+                    self.runtime.block_size,
                     &data.input_bus_buffers,
-                    &self.bus_activation.audio_inputs,
+                    &self.runtime.bus_activation.audio_inputs,
                     &data.output_bus_buffers,
-                    &self.bus_activation.audio_outputs,
+                    &self.runtime.bus_activation.audio_outputs,
                 );
                 for (bus, pointers) in data
                     .input_bus_buffers
@@ -2115,7 +2299,15 @@ impl PluginImpl {
     }
 }
 
-impl PluginImpl {
+impl ProcessorRuntime {
+    fn start_processor(&mut self, processor: &mut impl ProcessorCalls) -> Result<()> {
+        start_processor_notification(&mut self.is_processing, processor)
+    }
+
+    fn stop_processor(&mut self, processor: &mut impl ProcessorCalls) -> Result<()> {
+        stop_processor_notification(&mut self.is_processing, processor)
+    }
+
     /// Process exactly `frames` samples starting at `frame_offset` within the caller's
     /// buffers. `frames` is always <= the configured `block_size`, which is what the plugin
     /// was set up to accept; `process` splits a larger caller block into successive chunks.
@@ -2126,6 +2318,8 @@ impl PluginImpl {
     /// past the end of the caller's block.
     fn process_chunk(
         &mut self,
+        processor: &mut ProcessorLease<'_>,
+        bridge: &LegacyProcessBridge<'_>,
         buffers: &mut CallerAudioBuffers<'_>,
         frame_offset: usize,
         frames: usize,
@@ -2170,33 +2364,7 @@ impl PluginImpl {
                 // it unconditionally; a plugin that also self-relays just gets the same value
                 // twice in the same block, which is idempotent.) Drained here at offset 0 and
                 // stashed for the host's display poll (get_parameter_changes).
-                let mut native_edits_staged = false;
-                if let Some(ref handler) = self.component_handler {
-                    if let Ok(mut gui_changes) = handler.parameter_changes.lock() {
-                        if !gui_changes.is_empty() {
-                            native_edits_staged = true;
-                            for &(id, value) in gui_changes.iter() {
-                                data.input_param_changes.enqueue(id, 0, value);
-                            }
-                            if let Ok(mut stash) = self.gui_param_changes_for_host.lock() {
-                                // Bounded: nothing drains the stash unless the host polls
-                                // `get_parameter_changes`, and the realtime runner never does, so
-                                // an unbounded append here would grow forever and reallocate on
-                                // the audio thread. Both buffers are pre-reserved to the cap, so
-                                // the steady-state append allocates nothing.
-                                let room = MAX_EDITOR_FEEDBACK.saturating_sub(stash.len());
-                                if room >= gui_changes.len() {
-                                    stash.append(&mut gui_changes);
-                                } else {
-                                    stash.extend(gui_changes.drain(..room));
-                                    gui_changes.clear();
-                                }
-                            } else {
-                                gui_changes.clear();
-                            }
-                        }
-                    }
-                }
+                let native_edits_staged = bridge.stage_native_edits(&data.input_param_changes);
 
                 match buffers {
                     CallerAudioBuffers::Flat(buffers) => {
@@ -2231,9 +2399,9 @@ impl PluginImpl {
                 // A zero-sample flush carries events/parameter queues only. The VST3 process
                 // contract requires no audio buses or pointers for that call.
                 let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
-                self._host_app.enter_data_exchange_process();
-                let process_result = self.processor.process(&mut data.process_data);
-                self._host_app.leave_data_exchange_process();
+                bridge.enter_process();
+                let process_result = processor.process(&mut data.process_data);
+                bridge.leave_process();
                 restore_process_audio_io(&mut data.process_data, saved_audio_io);
 
                 // Everything from here to the output copy is per-block cleanup and MUST run even
@@ -2293,9 +2461,7 @@ impl PluginImpl {
 
                 if process_result != kResultOk {
                     if native_edits_staged {
-                        if let Some(handler) = self.component_handler.as_ref() {
-                            handler.mark_native_parameter_feedback_lost();
-                        }
+                        bridge.mark_native_feedback_lost();
                     }
                     // Leave the caller's buffers as they were (the playback bridges pre-fill them
                     // with silence) rather than copying out whatever the failed call left behind.
@@ -2339,7 +2505,13 @@ impl PluginImpl {
     /// `total` is the caller's block length, already known non-zero by the caller; the empty
     /// block is handled separately (some plugins use a zero-sample call to flush pending
     /// parameter changes).
-    fn process_chunks(&mut self, buffers: &mut CallerAudioBuffers<'_>, total: usize) -> Result<()> {
+    fn process_chunks(
+        &mut self,
+        processor: &mut ProcessorLease<'_>,
+        bridge: &LegacyProcessBridge<'_>,
+        buffers: &mut CallerAudioBuffers<'_>,
+        total: usize,
+    ) -> Result<()> {
         // `.max(1)`: a zero block size would make every chunk empty and never advance `offset`,
         // spinning forever on the audio thread. `Vst3HostBuilder::build` rejects 0, but
         // `block_size` is plain state and this loop must terminate regardless.
@@ -2355,7 +2527,7 @@ impl PluginImpl {
                 frames,
                 is_last,
             );
-            self.process_chunk(buffers, offset, frames, is_last)?;
+            self.process_chunk(processor, bridge, buffers, offset, frames, is_last)?;
             offset += frames;
         }
         Ok(())
@@ -2431,8 +2603,14 @@ impl PluginImpl {
         )
     }
 
-    fn process_buffer_view(&mut self, buffers: &mut CallerAudioBuffers<'_>) -> Result<()> {
-        if !self.is_active || !self.is_processing {
+    fn process_buffer_view(
+        &mut self,
+        processor: &mut ProcessorLease<'_>,
+        bridge: &LegacyProcessBridge<'_>,
+        is_active: bool,
+        buffers: &mut CallerAudioBuffers<'_>,
+    ) -> Result<()> {
+        if !is_active || !self.is_processing {
             return Err(Error::NotProcessing);
         }
 
@@ -2442,14 +2620,23 @@ impl PluginImpl {
 
         let result = if total == 0 {
             stage_chunk_events(&mut self.chunk_events, &self.input_events, 0, 0, true);
-            self.process_chunk(buffers, 0, 0, true)
+            self.process_chunk(processor, bridge, buffers, 0, 0, true)
         } else {
-            self.process_chunks(buffers, total)
+            self.process_chunks(processor, bridge, buffers, total)
         };
 
         self.chunk_events.clear();
         self.pending_param_changes.clear();
         result
+    }
+}
+
+impl PluginImpl {
+    fn process_buffer_view(&mut self, buffers: &mut CallerAudioBuffers<'_>) -> Result<()> {
+        let is_active = self.control.is_active;
+        let (mut processor, bridge) = self.control.processing_parts();
+        self.runtime
+            .process_buffer_view(&mut processor, &bridge, is_active, buffers)
     }
 }
 
@@ -2459,7 +2646,7 @@ impl PluginInternal for PluginImpl {
     }
 
     fn set_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()> {
-        if self.controller.is_none() {
+        if self.control.controller.is_none() {
             return Err(Error::InterfaceError("No controller available".to_string()));
         }
         // VST3 requires both halves: the controller (for GUI/display/formatting) and the
@@ -2479,21 +2666,21 @@ impl PluginInternal for PluginImpl {
         // plugin's own editor, `get_parameter`, `format_parameter` and saved state — deferred
         // to the control thread when it arrives from the audio callback.
         self.mirror_parameter_to_controller(id, value);
-        if self.pending_param_changes.len() >= MAX_PENDING_PARAM_CHANGES {
+        if self.runtime.pending_param_changes.len() >= MAX_PENDING_PARAM_CHANGES {
             // Only reachable when nothing is draining the queue (the plugin isn't
             // processing), so the dropped change would have arrived as part of a stale flood
             // anyway. The controller half above still ran, so the plugin's own display
             // stays correct.
-            self.dropped_param_changes += 1;
+            self.runtime.dropped_param_changes += 1;
             log::warn!(
                 "dropping parameter change for {id}, queue full at \
                      {MAX_PENDING_PARAM_CHANGES} (is the plugin processing?); \
                      {} dropped so far",
-                self.dropped_param_changes
+                self.runtime.dropped_param_changes
             );
             return Ok(());
         }
-        self.pending_param_changes.push(ParameterChange {
+        self.runtime.pending_param_changes.push(ParameterChange {
             id,
             value,
             sample_offset,
@@ -2506,8 +2693,8 @@ impl PluginInternal for PluginImpl {
         self.update_tempo(transport.tempo);
         self.update_time_signature(transport.time_sig_numerator, transport.time_sig_denominator);
         self.update_playing(transport.playing);
-        self.process_transport = Some(transport);
-        if let Some(data) = &mut self.process_data {
+        self.runtime.process_transport = Some(transport);
+        if let Some(data) = &mut self.runtime.process_data {
             apply_process_transport(
                 &mut data.process_context,
                 data.process_context_requirements,
@@ -2534,7 +2721,7 @@ impl PluginInternal for PluginImpl {
 
     fn get_parameter(&self, id: u32) -> Result<f64> {
         self.drain_deferred_controller_sync();
-        if let Some(ref controller) = self.controller {
+        if let Some(ref controller) = self.control.controller {
             unsafe { Ok(controller.getParamNormalized(id)) }
         } else {
             Err(Error::InterfaceError("No controller available".to_string()))
@@ -2545,7 +2732,7 @@ impl PluginInternal for PluginImpl {
         self.drain_deferred_controller_sync();
         let mut params = Vec::new();
 
-        if let Some(ref controller) = self.controller {
+        if let Some(ref controller) = self.control.controller {
             unsafe {
                 let count = controller.getParameterCount();
 
@@ -2582,7 +2769,7 @@ impl PluginInternal for PluginImpl {
 
     fn format_parameter(&self, id: u32, normalized: f64) -> Result<String> {
         self.drain_deferred_controller_sync();
-        if let Some(ref controller) = self.controller {
+        if let Some(ref controller) = self.control.controller {
             unsafe {
                 let mut buf: String128 = std::mem::zeroed();
                 if controller.getParamStringByValue(id, normalized, &mut buf) == kResultOk {
@@ -2602,38 +2789,37 @@ impl PluginInternal for PluginImpl {
     }
 
     fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
-        self.current_audio_bus_layout()
+        self.runtime.current_audio_bus_layout()
     }
 
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
-        self.validate_bus_buffers(buffers)?;
+        self.runtime.validate_bus_buffers(buffers)?;
         self.process_buffer_view(&mut CallerAudioBuffers::Buses(buffers))
     }
 
     fn reconfigure(&mut self, sample_rate: f64, block_size: usize) -> Result<()> {
-        if self.is_processing {
+        if self.runtime.is_processing {
             return Err(Error::Other(
                 "cannot reconfigure while processing".to_string(),
             ));
         }
         // VST3 requires the component to be inactive when setupProcessing is called.
-        let was_active = self.is_active;
+        let was_active = self.control.is_active;
         if was_active {
-            self.set_component_active(false);
-            self.is_active = false;
+            self.deactivate_on_control_thread()?;
         }
 
-        let (old_sr, old_bs) = (self.sample_rate, self.block_size);
-        self.sample_rate = sample_rate;
-        self.block_size = block_size;
+        let (old_sr, old_bs) = (self.runtime.sample_rate, self.runtime.block_size);
+        self.runtime.sample_rate = sample_rate;
+        self.runtime.block_size = block_size;
 
         // Re-run setupProcessing and rebuild process data / buffers for the new size. On
-        // failure restore the cached config so it stays consistent with the still-current
-        // (previous) process_data — `process_data` is only swapped in on success. The
-        // component is left inactive; `start_processing` reactivates and re-runs setup.
+        // failure restore the requested config, but keep prepared buffers invalidated.
+        // The component stays inactive; start_processing must successfully rebuild before
+        // it can reactivate or render with the previous configuration.
         if let Err(e) = self.setup_processing() {
-            self.sample_rate = old_sr;
-            self.block_size = old_bs;
+            self.runtime.sample_rate = old_sr;
+            self.runtime.block_size = old_bs;
             return Err(e);
         }
 
@@ -2645,20 +2831,20 @@ impl PluginInternal for PluginImpl {
                     result
                 )));
             }
-            self.is_active = true;
+            self.control.is_active = true;
         }
         Ok(())
     }
 
     #[allow(clippy::unnecessary_cast)]
     fn set_process_mode(&mut self, mode: crate::plugin::ProcessMode) -> Result<()> {
-        if self.is_processing {
+        if self.runtime.is_processing {
             return Err(Error::Other(
                 "cannot set process mode while processing".to_string(),
             ));
         }
         if mode == crate::plugin::ProcessMode::Prefetch {
-            match self.prefetchable_support {
+            match self.control.prefetchable_support {
                 Some(value)
                     if value == ePrefetchableSupport_::kIsNeverPrefetchable as u32
                         || value == ePrefetchableSupport_::kIsNotYetPrefetchable as u32 =>
@@ -2674,19 +2860,18 @@ impl PluginInternal for PluginImpl {
             }
         }
         // VST3 requires the component inactive for setupProcessing; mirror reconfigure.
-        let was_active = self.is_active;
+        let was_active = self.control.is_active;
         if was_active {
-            self.set_component_active(false);
-            self.is_active = false;
+            self.deactivate_on_control_thread()?;
         }
 
         // Store the mode first so setup_processing bakes it into BOTH ProcessSetup and
         // the freshly rebuilt process_data; restore it if setup fails so the cached mode
         // always reflects the last successfully-applied configuration.
-        let old_mode = self.process_mode;
-        self.process_mode = mode;
+        let old_mode = self.runtime.process_mode;
+        self.runtime.process_mode = mode;
         if let Err(e) = self.setup_processing() {
-            self.process_mode = old_mode;
+            self.runtime.process_mode = old_mode;
             return Err(e);
         }
 
@@ -2698,7 +2883,7 @@ impl PluginInternal for PluginImpl {
                     result
                 )));
             }
-            self.is_active = true;
+            self.control.is_active = true;
         }
         Ok(())
     }
@@ -2707,11 +2892,11 @@ impl PluginInternal for PluginImpl {
         use crate::audio::SpeakerArrangement;
         unsafe {
             let read = |dir: i32| -> Vec<SpeakerArrangement> {
-                let count = self.component.getBusCount(kAudio as i32, dir);
+                let count = self.control.component.getBusCount(kAudio as i32, dir);
                 (0..count)
                     .map(|idx| {
                         let mut arr: u64 = 0;
-                        self.processor.getBusArrangement(dir, idx, &mut arr);
+                        self.control.processor.getBusArrangement(dir, idx, &mut arr);
                         SpeakerArrangement::from_raw(arr)
                     })
                     .collect()
@@ -2728,7 +2913,7 @@ impl PluginInternal for PluginImpl {
         inputs: &[crate::audio::SpeakerArrangement],
         outputs: &[crate::audio::SpeakerArrangement],
     ) -> Result<()> {
-        if self.is_processing {
+        if self.runtime.is_processing {
             return Err(Error::Other(
                 "cannot set bus arrangements while processing".to_string(),
             ));
@@ -2737,32 +2922,30 @@ impl PluginInternal for PluginImpl {
         let mut out_raw: Vec<u64> = outputs.iter().map(|a| a.raw()).collect();
         unsafe {
             // VST3 requires the component inactive for setBusArrangements + setupProcessing.
-            let was_active = self.is_active;
+            let was_active = self.control.is_active;
             if was_active {
-                self.set_component_active(false);
-                self.is_active = false;
+                self.deactivate_on_control_thread()?;
             }
 
-            let arrangement_result = self.processor.setBusArrangements(
+            self.invalidate_processing_setup();
+            let arrangement_result = self.control.processor.setBusArrangements(
                 in_raw.as_mut_ptr(),
                 in_raw.len() as i32,
                 out_raw.as_mut_ptr(),
                 out_raw.len() as i32,
             );
             if arrangement_result == kResultFalse {
+                // Refusal may still select a different fallback layout. Refresh before reuse.
+                self.setup_processing()?;
                 if was_active {
                     let result = self.set_component_active(true);
-                    self.is_active = result == kResultOk;
+                    self.control.is_active = result == kResultOk;
                 }
                 return Err(Error::Other(
                     "plugin declined the requested bus arrangements".to_string(),
                 ));
             }
             if arrangement_result != kResultOk && arrangement_result != kResultTrue {
-                if was_active {
-                    let result = self.set_component_active(true);
-                    self.is_active = result == kResultOk;
-                }
                 return Err(Error::InterfaceError(format!(
                     "setBusArrangements failed: {arrangement_result:#x}"
                 )));
@@ -2778,7 +2961,7 @@ impl PluginInternal for PluginImpl {
                         result
                     )));
                 }
-                self.is_active = true;
+                self.control.is_active = true;
             }
         }
         Ok(())
@@ -2792,7 +2975,7 @@ impl PluginInternal for PluginImpl {
         active: bool,
     ) -> Result<()> {
         use crate::audio::{BusDirection, MediaType};
-        if self.is_processing {
+        if self.runtime.is_processing {
             return Err(Error::Other(
                 "cannot activate a bus while processing".to_string(),
             ));
@@ -2807,7 +2990,7 @@ impl PluginInternal for PluginImpl {
             BusDirection::Output => kOutput as i32,
         };
         unsafe {
-            let count = self.component.getBusCount(media, dir);
+            let count = self.control.component.getBusCount(media, dir);
             if bus_index < 0 || bus_index >= count {
                 return Err(Error::InvalidParameter(format!(
                     "bus index {bus_index} out of range for {media_type:?} {direction:?} \
@@ -2815,35 +2998,35 @@ impl PluginInternal for PluginImpl {
                 )));
             }
 
-            let was_active = self.is_active;
+            let was_active = self.control.is_active;
             if was_active {
-                self.set_component_active(false);
-                self.is_active = false;
+                self.deactivate_on_control_thread()?;
             }
 
             let result = self
+                .control
                 .component
                 .activateBus(media, dir, bus_index, active as u8);
 
             let update_result = if result == kResultOk {
                 let states = match (media_type, direction) {
                     (MediaType::Audio, BusDirection::Input) => {
-                        &mut self.bus_activation.audio_inputs
+                        &mut self.runtime.bus_activation.audio_inputs
                     }
                     (MediaType::Audio, BusDirection::Output) => {
-                        &mut self.bus_activation.audio_outputs
+                        &mut self.runtime.bus_activation.audio_outputs
                     }
                     (MediaType::Event, BusDirection::Input) => {
-                        &mut self.bus_activation.event_inputs
+                        &mut self.runtime.bus_activation.event_inputs
                     }
                     (MediaType::Event, BusDirection::Output) => {
-                        &mut self.bus_activation.event_outputs
+                        &mut self.runtime.bus_activation.event_outputs
                     }
                 };
                 if let Some(state) = states.get_mut(bus_index as usize) {
                     *state = active;
                 }
-                if media_type == MediaType::Audio && self.applied_setup.is_some() {
+                if media_type == MediaType::Audio && self.control.applied_setup.is_some() {
                     self.create_process_data()
                 } else {
                     Ok(())
@@ -2862,7 +3045,7 @@ impl PluginInternal for PluginImpl {
                         "Failed to reactivate after set_bus_active: {reactivate:#x}"
                     )));
                 }
-                self.is_active = true;
+                self.control.is_active = true;
             }
 
             update_result?;
@@ -2893,10 +3076,10 @@ impl PluginInternal for PluginImpl {
                 } => {
                     let index = channel.as_index() as usize * 128 + note as usize;
                     let released = write_midi_note_on(&mut vst_event, channel, note, velocity);
-                    self.ordinary_note_counts[index] = if released {
-                        self.ordinary_note_counts[index].saturating_sub(1)
+                    self.runtime.ordinary_note_counts[index] = if released {
+                        self.runtime.ordinary_note_counts[index].saturating_sub(1)
                     } else {
-                        self.ordinary_note_counts[index].saturating_add(1)
+                        self.runtime.ordinary_note_counts[index].saturating_add(1)
                     };
                 }
                 MidiEvent::NoteOff {
@@ -2905,8 +3088,8 @@ impl PluginInternal for PluginImpl {
                     velocity,
                 } => {
                     let index = channel.as_index() as usize * 128 + note as usize;
-                    self.ordinary_note_counts[index] =
-                        self.ordinary_note_counts[index].saturating_sub(1);
+                    self.runtime.ordinary_note_counts[index] =
+                        self.runtime.ordinary_note_counts[index].saturating_sub(1);
                     write_note_off_event(&mut vst_event, channel, note, velocity);
                 }
                 MidiEvent::ControlChange {
@@ -2976,74 +3159,36 @@ impl PluginInternal for PluginImpl {
                 }
             }
 
-            self.input_events.add_raw_event(&vst_event);
+            self.runtime.input_events.add_raw_event(&vst_event);
         }
         Ok(())
     }
 
     fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
-        self.input_events.add_event(event);
+        self.runtime.input_events.add_event(event);
         Ok(())
     }
 
     fn start_processing(&mut self) -> Result<()> {
-        unsafe {
-            // The configuration may have moved since the last setup (`set_audio_config` after
-            // load, or a device change), and a plugin sizes its DSP buffers when it goes active,
-            // from the ProcessSetup it was last given. So apply a changed configuration the way
-            // `reconfigure` does — deactivate, set up, reactivate — rather than calling
-            // setupProcessing on a running component, which VST3 forbids. An unchanged
-            // configuration needs no setup at all: the plugin still has it.
-            if self.applied_setup != Some(self.current_setup()) {
-                if self.is_active {
-                    self.set_component_active(false);
-                    self.is_active = false;
-                }
-                self.setup_processing()?;
-            }
-
-            if !self.is_active {
-                self.activate()?;
-            }
-
-            // Start processing. `setProcessing` is an optional notification — a plugin
-            // may return kNotImplemented (e.g. u-he), which is not an error: it simply
-            // doesn't need the start/stop signal and still processes audio normally.
-            let result = self.processor.setProcessing(1);
-            if result != kResultOk && result != kNotImplemented {
-                return Err(Error::Other(format!(
-                    "Failed to start processing: {:#x}",
-                    result
-                )));
-            }
-
-            self.is_processing = true;
-            log::debug!("Plugin processing started successfully");
-            Ok(())
-        }
+        self.prepare_processing_on_control_thread()?;
+        self.runtime
+            .start_processor(&mut self.control.processor_lease())?;
+        log::debug!("Plugin processing started successfully");
+        Ok(())
     }
 
     fn stop_processing(&mut self) -> Result<()> {
-        unsafe {
-            if self.is_processing {
-                let result = self.processor.setProcessing(0);
-                finish_stop_transition(&mut self.is_processing, result, true, "stop processing")?;
-            }
-
-            if self.is_active {
-                let result = self.set_component_active(false);
-                finish_stop_transition(&mut self.is_active, result, false, "deactivate component")?;
-            }
-
-            // Nothing can still be sounding, so no note-on is outstanding.
-            self.active_notes.clear();
-
-            Ok(())
-        }
+        // Ending this exclusive lease is the current synchronous processor fence. Only then
+        // may the control domain deactivate the component or release owning COM references.
+        self.runtime
+            .stop_processor(&mut self.control.processor_lease())?;
+        self.deactivate_on_control_thread()?;
+        self.runtime.active_notes.clear();
+        Ok(())
     }
 
     fn processing_state(&self) -> Option<bool> {
-        Some(self.is_processing)
+        Some(self.runtime.is_processing)
     }
 
     fn has_editor(&self) -> bool {
@@ -3054,12 +3199,12 @@ impl PluginInternal for PluginImpl {
 
         // An open editor is proof enough, and probing for a second view while one is attached
         // upsets plugins that assume a single live view.
-        if self.plugin_view.is_some() {
+        if self.control.plugin_view.is_some() {
             return true;
         }
 
         // Otherwise do a runtime check
-        if let Some(ref controller) = self.controller {
+        if let Some(ref controller) = self.control.controller {
             unsafe {
                 // Check if controller can create an editor view
                 let view_type = c"editor".as_ptr();
@@ -3080,7 +3225,7 @@ impl PluginInternal for PluginImpl {
     }
 
     fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()> {
-        if self.plugin_view.is_some() {
+        if self.control.plugin_view.is_some() {
             return Err(Error::Other("Editor already open".to_string()));
         }
         if parent.is_null() {
@@ -3093,12 +3238,14 @@ impl PluginInternal for PluginImpl {
         // closed forever, so release callbacks cannot resurrect a removed view's handlers.
         #[cfg(target_os = "linux")]
         {
-            self.run_loop = Arc::new(Mutex::new(RunLoopRegistry::new()));
-            self.plug_frame =
-                create_host_plug_frame(self.editor_resize.clone(), self.run_loop.clone());
+            self.control.run_loop = Arc::new(Mutex::new(RunLoopRegistry::new()));
+            self.control.plug_frame = create_host_plug_frame(
+                self.control.editor_resize.clone(),
+                self.control.run_loop.clone(),
+            );
         }
 
-        if let Some(ref controller) = self.controller {
+        if let Some(ref controller) = self.control.controller {
             unsafe {
                 // Create editor view
                 let view_type = c"editor".as_ptr();
@@ -3125,9 +3272,13 @@ impl PluginInternal for PluginImpl {
 
                 // Hand the plugin an IPlugFrame (before attach, per the SDK) so it can
                 // request host-side resizes; requests land in `editor_resize`.
-                let frame = self.plug_frame.to_com_ptr::<IPlugFrame>().ok_or_else(|| {
-                    Error::Other("Failed to create editor plug frame".to_string())
-                })?;
+                let frame = self
+                    .control
+                    .plug_frame
+                    .to_com_ptr::<IPlugFrame>()
+                    .ok_or_else(|| {
+                        Error::Other("Failed to create editor plug frame".to_string())
+                    })?;
                 let frame_result = view.setFrame(frame.as_ptr());
                 if frame_result != kResultOk && frame_result != kResultTrue {
                     return Err(Error::Other(format!(
@@ -3137,7 +3288,7 @@ impl PluginInternal for PluginImpl {
 
                 // Offer the current scale factor, but never let the answer decide whether the
                 // editor opens: a view that declines simply renders at its own scale.
-                let _ = set_view_scale_factor(&view, self.editor_scale_factor);
+                let _ = set_view_scale_factor(&view, self.control.editor_scale_factor);
 
                 // Platform-specific attachment
                 #[cfg(target_os = "macos")]
@@ -3175,7 +3326,7 @@ impl PluginInternal for PluginImpl {
 
                 #[cfg(not(target_os = "android"))]
                 {
-                    self.plugin_view = Some(view);
+                    self.control.plugin_view = Some(view);
                     Ok(())
                 }
             }
@@ -3186,7 +3337,7 @@ impl PluginInternal for PluginImpl {
 
     fn close_editor(&mut self) -> Result<()> {
         let mut close_error = None;
-        if let Some(view) = self.plugin_view.take() {
+        if let Some(view) = self.control.plugin_view.take() {
             unsafe {
                 let removed_result = view.removed();
                 // Break the view -> host-frame reference before releasing the view. The frame
@@ -3212,7 +3363,7 @@ impl PluginInternal for PluginImpl {
         {
             // Only the frame registry belongs to this view. Factory-context registrations
             // remain live until plugin teardown and must continue to be serviced while closed.
-            let retired = self.run_loop.lock().ok().map(|mut reg| {
+            let retired = self.control.run_loop.lock().ok().map(|mut reg| {
                 reg.closed = true;
                 (
                     std::mem::take(&mut reg.handlers),
@@ -3226,12 +3377,12 @@ impl PluginInternal for PluginImpl {
 
     #[cfg(target_os = "linux")]
     fn service_run_loop(&mut self) {
-        self._host_app.service_run_loop();
-        super::com_implementations::service_linux_run_loop(&self.run_loop);
+        self.control._host_app.service_run_loop();
+        super::com_implementations::service_linux_run_loop(&self.control.run_loop);
     }
 
     fn get_editor_size(&self) -> Result<(i32, i32)> {
-        if let Some(view) = self.plugin_view.as_ref() {
+        if let Some(view) = self.control.plugin_view.as_ref() {
             unsafe {
                 let mut view_rect = ViewRect {
                     left: 0,
@@ -3246,7 +3397,7 @@ impl PluginInternal for PluginImpl {
             }
         }
 
-        if let Some(ref controller) = self.controller {
+        if let Some(ref controller) = self.control.controller {
             unsafe {
                 // Create a temporary view to get size
                 let view_type = c"editor".as_ptr();
@@ -3286,11 +3437,11 @@ impl PluginInternal for PluginImpl {
 
     fn editor_can_resize(&self) -> bool {
         unsafe {
-            if let Some(view) = self.plugin_view.as_ref() {
+            if let Some(view) = self.control.plugin_view.as_ref() {
                 return view.canResize() == kResultTrue;
             }
 
-            let Some(controller) = self.controller.as_ref() else {
+            let Some(controller) = self.control.controller.as_ref() else {
                 return false;
             };
             let view_ptr = controller.createView(c"editor".as_ptr());
@@ -3308,6 +3459,7 @@ impl PluginInternal for PluginImpl {
             ));
         }
         let view = self
+            .control
             .plugin_view
             .as_ref()
             .ok_or_else(|| Error::Other("Plugin editor is not open".to_string()))?;
@@ -3380,11 +3532,11 @@ impl PluginInternal for PluginImpl {
                 "editor scale factor must be finite and greater than zero".to_string(),
             ));
         }
-        let supported = match self.plugin_view.as_ref() {
+        let supported = match self.control.plugin_view.as_ref() {
             Some(view) => unsafe { set_view_scale_factor(view, factor)? },
             None => false,
         };
-        self.editor_scale_factor = factor;
+        self.control.editor_scale_factor = factor;
         Ok(supported)
     }
 
@@ -3394,14 +3546,16 @@ impl PluginInternal for PluginImpl {
 
     fn take_parameter_edits(&mut self) -> Vec<crate::plugin::ParameterEdit> {
         self.service_control_thread_caches();
-        self.component_handler
+        self.control
+            .component_handler
             .as_ref()
             .map(|h| h.take_parameter_edits())
             .unwrap_or_default()
     }
 
     fn native_dirty_revision(&mut self) -> Result<u64> {
-        self.component_handler
+        self.control
+            .component_handler
             .as_ref()
             .ok_or_else(|| Error::Other("component handler is unavailable".into()))?
             .native_dirty_revision()
@@ -3409,41 +3563,45 @@ impl PluginInternal for PluginImpl {
 
     fn take_host_notifications(&mut self) -> Vec<crate::plugin::HostNotification> {
         let mut notifications = self
+            .control
             .component_handler
             .as_ref()
             .map(|handler| handler.take_host_notifications())
             .unwrap_or_default();
-        notifications.extend(self._host_app.take_progress_notifications());
+        notifications.extend(self.control._host_app.take_progress_notifications());
         if notifications
             .iter()
             .any(crate::plugin::HostNotification::invalidates_unit_cache)
         {
             *self
+                .control
                 .unit_cache
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner()) = None;
             // Mark the program-change table stale rather than clearing it: an emptied table
             // silently turns every MIDI ProgramChange into a no-op until something else happens
             // to rebuild it, whereas a stale table still routes to the previous parameter.
-            self.dirty_caches.program_change = true;
+            self.control.dirty_caches.program_change = true;
         }
         self.service_control_thread_caches();
         notifications
     }
 
     fn take_data_exchange_blocks(&mut self) -> Vec<crate::plugin::DataExchangeBlock> {
-        self._host_app.take_data_exchange_blocks()
+        self.control._host_app.take_data_exchange_blocks()
     }
 
     fn execute_context_menu_item(&mut self, menu_id: u64, item_id: u32) -> Result<()> {
-        self.component_handler
+        self.control
+            .component_handler
             .as_ref()
             .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?
             .execute_context_menu_item(menu_id, item_id)
     }
 
     fn dismiss_context_menu(&mut self, menu_id: u64) -> Result<()> {
-        self.component_handler
+        self.control
+            .component_handler
             .as_ref()
             .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?
             .dismiss_context_menu(menu_id)
@@ -3451,6 +3609,7 @@ impl PluginInternal for PluginImpl {
 
     fn take_restart_flags(&mut self) -> crate::plugin::RestartFlags {
         let flags = self
+            .control
             .component_handler
             .as_ref()
             .map(|h| h.take_restart_flags())
@@ -3460,19 +3619,19 @@ impl PluginInternal for PluginImpl {
         // main-thread-domain controller calls (the MIDI map alone is buses × 16 × 130 of them).
         // So record what went stale and let the control thread rebuild.
         if bits & RestartFlags_::kMidiCCAssignmentChanged != 0 {
-            self.dirty_caches.midi_mapping = true;
+            self.control.dirty_caches.midi_mapping = true;
         }
         if bits & (RestartFlags_::kParamIDMappingChanged | RestartFlags_::kParamTitlesChanged) != 0
         {
-            self.dirty_caches.midi_mapping = true;
-            self.dirty_caches.program_change = true;
+            self.control.dirty_caches.midi_mapping = true;
+            self.control.dirty_caches.program_change = true;
         }
         self.service_control_thread_caches();
         flags
     }
 
     fn service_host_requests(&mut self) -> Result<crate::plugin::RestartFlags> {
-        if thread::current().id() != self.control_thread {
+        if thread::current().id() != self.control.control_thread {
             return Err(Error::Other(
                 "restart requests must be serviced on the plugin control thread".to_string(),
             ));
@@ -3484,37 +3643,39 @@ impl PluginInternal for PluginImpl {
         }
 
         unsafe {
-            let was_processing = self.is_processing;
-            let was_active = self.is_active;
+            let was_processing = self.runtime.is_processing;
+            let was_active = self.control.is_active;
 
             if was_processing {
-                let result = self.processor.setProcessing(0);
+                let result = self.control.processor_lease().set_processing(0);
                 if result != kResultOk && result != kNotImplemented {
                     return Err(Error::Other(format!(
                         "failed to suspend processing for restartComponent: {result:#x}"
                     )));
                 }
-                self.is_processing = false;
+                self.runtime.is_processing = false;
             }
 
             if was_active {
                 let result = self.set_component_active(false);
                 if result != kResultOk {
                     if was_processing {
-                        let resume = self.processor.setProcessing(1);
-                        self.is_processing = resume == kResultOk || resume == kNotImplemented;
+                        let resume = self.control.processor_lease().set_processing(1);
+                        self.runtime.is_processing =
+                            resume == kResultOk || resume == kNotImplemented;
                     }
                     return Err(Error::Other(format!(
                         "failed to deactivate for restartComponent: {result:#x}"
                     )));
                 }
-                self.is_active = false;
+                self.control.is_active = false;
             }
 
             let apply_result = if flags.io_changed() {
-                match Self::activate_default_buses(&self.component) {
+                self.invalidate_processing_setup();
+                match Self::activate_default_buses(&self.control.component) {
                     Ok(activation) => {
-                        self.bus_activation = activation;
+                        self.runtime.bus_activation = activation;
                         self.negotiate_default_bus_arrangements()
                             .and_then(|()| self.setup_processing())
                     }
@@ -3524,12 +3685,16 @@ impl PluginInternal for PluginImpl {
                 Ok(())
             };
 
+            // A failed I/O rebuild cannot be resumed with the previous process pointers.
+            if apply_result.is_err() && flags.io_changed() {
+                return apply_result.map(|()| flags);
+            }
             let reactivate_result = if was_active { self.activate() } else { Ok(()) };
 
             let resume_result = if was_processing && reactivate_result.is_ok() {
-                let result = self.processor.setProcessing(1);
+                let result = self.control.processor_lease().set_processing(1);
                 if result == kResultOk || result == kNotImplemented {
-                    self.is_processing = true;
+                    self.runtime.is_processing = true;
                     Ok(())
                 } else {
                     Err(Error::Other(format!(
@@ -3550,7 +3715,7 @@ impl PluginInternal for PluginImpl {
 
     fn take_output_events(&self) -> Vec<PluginEvent> {
         let mut out = Vec::new();
-        while let Some(event) = self.output_events_owned.pop() {
+        while let Some(event) = self.runtime.output_events_owned.pop() {
             out.push(event);
         }
         out
@@ -3559,6 +3724,7 @@ impl PluginInternal for PluginImpl {
     fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
         let events = self.take_output_events();
         let lost = self
+            .runtime
             .output_events_lost
             .swap(false, std::sync::atomic::Ordering::AcqRel);
         (events, lost)
@@ -3566,30 +3732,34 @@ impl PluginInternal for PluginImpl {
 
     fn output_midi_handle(&self) -> Option<crate::plugin::OutputMidiConsumer> {
         Some(crate::plugin::OutputMidiConsumer::from_queue(
-            self.output_events_owned.clone(),
+            self.runtime.output_events_owned.clone(),
         ))
     }
 
     fn output_event_handle(&self) -> Option<crate::plugin::OutputEventConsumer> {
         Some(crate::plugin::OutputEventConsumer::from_queue(
-            self.output_events_owned.clone(),
+            self.runtime.output_events_owned.clone(),
         ))
     }
 
     fn take_editor_resize_request(&self) -> Option<(i32, i32)> {
-        self.editor_resize.lock().ok().and_then(|mut s| s.take())
+        self.control
+            .editor_resize
+            .lock()
+            .ok()
+            .and_then(|mut s| s.take())
     }
 
     fn latency_samples(&self) -> u32 {
-        unsafe { self.processor.getLatencySamples() }
+        unsafe { self.control.processor.getLatencySamples() }
     }
 
     fn tail_samples(&self) -> u32 {
-        unsafe { self.processor.getTailSamples() }
+        unsafe { self.control.processor.getTailSamples() }
     }
 
     fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
-        self.midi_mapping_cache.get(bus, channel, cc)
+        self.runtime.midi_mapping_cache.get(bus, channel, cc)
     }
 
     fn note_on(
@@ -3599,18 +3769,19 @@ impl PluginInternal for PluginImpl {
         velocity: u8,
         sample_offset: i32,
     ) -> Result<crate::midi::NoteId> {
-        let id = self.next_note_id;
-        self.next_note_id = self.next_note_id.wrapping_add(1).max(1);
+        let id = self.runtime.next_note_id;
+        self.runtime.next_note_id = self.runtime.next_note_id.wrapping_add(1).max(1);
         // Remember which (channel, pitch) this id stands for. VST3 note-off carries both the
         // noteId *and* the pitch/channel, and plugins that don't track note ids (most non-MPE
         // synths) match the release by pitch — so `note_off` has to reproduce them.
-        if self.active_notes.len() >= MAX_TRACKED_NOTES {
+        if self.runtime.active_notes.len() >= MAX_TRACKED_NOTES {
             // Full only if a caller started notes it never released (a MIDI panic sends CCs, not
             // note-offs, so entries can also be left behind that way). Evict one in O(1) rather
             // than refusing to track, so new notes keep getting correct releases.
-            self.active_notes.swap_remove(0);
+            self.runtime.active_notes.swap_remove(0);
         }
-        self.active_notes
+        self.runtime
+            .active_notes
             .push((id, channel.as_index() as i16, note as i16));
         unsafe {
             let mut ev: Event = std::mem::zeroed();
@@ -3622,7 +3793,7 @@ impl PluginInternal for PluginImpl {
             ev.__field0.noteOn.pitch = note as i16;
             ev.__field0.noteOn.velocity = velocity as f32 / 127.0;
             ev.__field0.noteOn.noteId = id;
-            self.input_events.add_raw_event(&ev);
+            self.runtime.input_events.add_raw_event(&ev);
         }
         Ok(crate::midi::NoteId(id))
     }
@@ -3632,10 +3803,11 @@ impl PluginInternal for PluginImpl {
         // pitch 0 on channel 1, which any synth matching releases by pitch ignores — leaving the
         // real note sounding forever.
         let tracked = self
+            .runtime
             .active_notes
             .iter()
             .position(|&(tracked_id, _, _)| tracked_id == id.0)
-            .map(|i| self.active_notes.swap_remove(i));
+            .map(|i| self.runtime.active_notes.swap_remove(i));
         unsafe {
             let mut ev: Event = std::mem::zeroed();
             ev.busIndex = 0;
@@ -3648,7 +3820,7 @@ impl PluginInternal for PluginImpl {
                 ev.__field0.noteOff.pitch = pitch;
             }
             // A release velocity of 0 is the SDK's own default for "unspecified".
-            self.input_events.add_raw_event(&ev);
+            self.runtime.input_events.add_raw_event(&ev);
         }
         Ok(())
     }
@@ -3669,7 +3841,7 @@ impl PluginInternal for PluginImpl {
             ev.__field0.noteExpressionValue.typeId = kind.type_id();
             ev.__field0.noteExpressionValue.noteId = id.0;
             ev.__field0.noteExpressionValue.value = value.clamp(0.0, 1.0);
-            self.input_events.add_raw_event(&ev);
+            self.runtime.input_events.add_raw_event(&ev);
         }
         Ok(())
     }
@@ -3681,6 +3853,7 @@ impl PluginInternal for PluginImpl {
     ) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
         use crate::midi::{NoteExpressionInfo, NoteExpressionType};
         let Some(ctrl) = self
+            .control
             .controller
             .as_ref()
             .and_then(|c| c.cast::<INoteExpressionController>())
@@ -3716,12 +3889,13 @@ impl PluginInternal for PluginImpl {
 
     fn get_units(&self) -> Result<Vec<crate::plugin::PluginUnit>> {
         use crate::plugin::PluginUnit;
-        if thread::current().id() != self.control_thread {
+        if thread::current().id() != self.control.control_thread {
             return Err(Error::Other(
                 "unit metadata must be queried on the plugin control thread".to_string(),
             ));
         }
         if let Some(units) = self
+            .control
             .unit_cache
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -3730,7 +3904,7 @@ impl PluginInternal for PluginImpl {
         {
             return Ok(units);
         }
-        let Some(ref controller) = self.controller else {
+        let Some(ref controller) = self.control.controller else {
             return Ok(Vec::new());
         };
         // IUnitInfo is optional; plugins without it (no units/program lists) return empty.
@@ -3777,6 +3951,7 @@ impl PluginInternal for PluginImpl {
                 });
             }
             *self
+                .control
                 .unit_cache
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner()) = Some(units.clone());
@@ -3787,7 +3962,7 @@ impl PluginInternal for PluginImpl {
     fn select_program(&mut self, unit_id: i32, program_index: i32) -> Result<()> {
         self.service_control_thread_caches();
         if self.cached_program_change(unit_id).is_none()
-            && thread::current().id() == self.control_thread
+            && thread::current().id() == self.control.control_thread
         {
             self.refresh_program_change_cache();
         }
@@ -3817,12 +3992,13 @@ impl PluginInternal for PluginImpl {
     }
 
     fn selected_unit(&self) -> Result<Option<i32>> {
-        if thread::current().id() != self.control_thread {
+        if thread::current().id() != self.control.control_thread {
             return Err(Error::Other(
                 "selected unit must be queried on the plugin control thread".to_string(),
             ));
         }
         let Some(unit_info) = self
+            .control
             .controller
             .as_ref()
             .and_then(|controller| controller.cast::<IUnitInfo>())
@@ -3834,12 +4010,13 @@ impl PluginInternal for PluginImpl {
     }
 
     fn select_unit(&mut self, unit_id: i32) -> Result<()> {
-        if thread::current().id() != self.control_thread {
+        if thread::current().id() != self.control.control_thread {
             return Err(Error::Other(
                 "unit selection must run on the plugin control thread".to_string(),
             ));
         }
         let unit_info = self
+            .control
             .controller
             .as_ref()
             .and_then(|controller| controller.cast::<IUnitInfo>())
@@ -3864,12 +4041,13 @@ impl PluginInternal for PluginImpl {
                 "program index must be non-negative, got {program_index}"
             )));
         }
-        if thread::current().id() != self.control_thread {
+        if thread::current().id() != self.control.control_thread {
             return Err(Error::Other(
                 "program pitch names must be queried on the plugin control thread".to_string(),
             ));
         }
         let Some(unit_info) = self
+            .control
             .controller
             .as_ref()
             .and_then(|controller| controller.cast::<IUnitInfo>())
@@ -3912,6 +4090,7 @@ impl PluginInternal for PluginImpl {
         }
         self.ensure_control_thread("program data read")?;
         let Some(data_interface) = self
+            .control
             .controller
             .as_ref()
             .and_then(|controller| controller.cast::<IProgramListData>())
@@ -3952,6 +4131,7 @@ impl PluginInternal for PluginImpl {
         self.ensure_stream_size(data)?;
         self.ensure_control_thread("program data restore")?;
         let data_interface = self
+            .control
             .controller
             .as_ref()
             .and_then(|controller| controller.cast::<IProgramListData>())
@@ -3976,6 +4156,7 @@ impl PluginInternal for PluginImpl {
                 data_interface.setProgramData(program_list_id, program_index, stream_ptr.as_ptr());
             if result == kResultOk {
                 *self
+                    .control
                     .unit_cache
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner()) = None;
@@ -3992,6 +4173,7 @@ impl PluginInternal for PluginImpl {
     fn get_unit_data(&self, unit_id: i32) -> Result<Option<Vec<u8>>> {
         self.ensure_control_thread("unit data read")?;
         let Some(data_interface) = self
+            .control
             .controller
             .as_ref()
             .and_then(|controller| controller.cast::<IUnitData>())
@@ -4021,6 +4203,7 @@ impl PluginInternal for PluginImpl {
         self.ensure_stream_size(data)?;
         self.ensure_control_thread("unit data restore")?;
         let data_interface = self
+            .control
             .controller
             .as_ref()
             .and_then(|controller| controller.cast::<IUnitData>())
@@ -4042,6 +4225,7 @@ impl PluginInternal for PluginImpl {
             let result = data_interface.setUnitData(unit_id, stream_ptr.as_ptr());
             if result == kResultOk {
                 *self
+                    .control
                     .unit_cache
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner()) = None;
@@ -4058,6 +4242,7 @@ impl PluginInternal for PluginImpl {
     fn begin_host_edit(&mut self, parameter_id: u32) -> Result<()> {
         self.ensure_control_thread("host edit begin")?;
         let editing = self
+            .control
             .controller
             .as_ref()
             .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
@@ -4073,6 +4258,7 @@ impl PluginInternal for PluginImpl {
     fn end_host_edit(&mut self, parameter_id: u32) -> Result<()> {
         self.ensure_control_thread("host edit end")?;
         let editing = self
+            .control
             .controller
             .as_ref()
             .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
@@ -4093,6 +4279,7 @@ impl PluginInternal for PluginImpl {
         }
         self.ensure_control_thread("MIDI learn notification")?;
         let midi_learn = self
+            .control
             .controller
             .as_ref()
             .and_then(|edit_controller| edit_controller.cast::<IMidiLearn>())
@@ -4107,6 +4294,7 @@ impl PluginInternal for PluginImpl {
         use crate::plugin::AutomationState;
         self.ensure_control_thread("automation state update")?;
         let automation = self
+            .control
             .controller
             .as_ref()
             .and_then(|controller| controller.cast::<IAutomationState>())
@@ -4133,6 +4321,7 @@ impl PluginInternal for PluginImpl {
         })?;
         self.ensure_control_thread("parameter id remapping")?;
         let Some(remapper) = self
+            .control
             .controller
             .as_ref()
             .and_then(|controller| controller.cast::<IRemapParamID>())
@@ -4157,7 +4346,7 @@ impl PluginInternal for PluginImpl {
 
     fn midi_panic(&mut self) -> Result<()> {
         // Release per-voice notes with their exact ids first.
-        for &(note_id, channel, pitch) in self.active_notes.iter() {
+        for &(note_id, channel, pitch) in self.runtime.active_notes.iter() {
             unsafe {
                 let mut event: Event = std::mem::zeroed();
                 event.busIndex = 0;
@@ -4167,14 +4356,14 @@ impl PluginInternal for PluginImpl {
                 event.__field0.noteOff.noteId = note_id;
                 event.__field0.noteOff.channel = channel;
                 event.__field0.noteOff.pitch = pitch;
-                self.input_events.add_raw_event(&event);
+                self.runtime.input_events.add_raw_event(&event);
             }
         }
-        self.active_notes.clear();
+        self.runtime.active_notes.clear();
 
         // Ordinary MIDI events use noteId -1, so release every channel/pitch that is active.
-        for index in 0..self.ordinary_note_counts.len() {
-            if self.ordinary_note_counts[index] == 0 {
+        for index in 0..self.runtime.ordinary_note_counts.len() {
+            if self.runtime.ordinary_note_counts[index] == 0 {
                 continue;
             }
             let channel = (index / 128) as i16;
@@ -4188,9 +4377,9 @@ impl PluginInternal for PluginImpl {
                 event.__field0.noteOff.noteId = -1;
                 event.__field0.noteOff.channel = channel;
                 event.__field0.noteOff.pitch = pitch;
-                self.input_events.add_raw_event(&event);
+                self.runtime.input_events.add_raw_event(&event);
             }
-            self.ordinary_note_counts[index] = 0;
+            self.runtime.ordinary_note_counts[index] = 0;
         }
 
         // Also route the standard panic controllers through IMidiMapping for plugins that
@@ -4207,11 +4396,20 @@ impl PluginInternal for PluginImpl {
     }
 
     fn output_channel_count(&self) -> usize {
+        if let Some(data) = self.runtime.process_data.as_ref() {
+            return data.sample_buffers.output_channel_count();
+        }
+        // Setup may fail during best-effort loading. Metadata fallback is only for that
+        // non-processing inspection path; every successful setup rebuilds the runtime buses.
         unsafe {
-            let bus_count = self.component.getBusCount(kAudio as i32, kOutput as i32);
+            let bus_count = self
+                .control
+                .component
+                .getBusCount(kAudio as i32, kOutput as i32);
             let mut total = 0usize;
             for i in 0..bus_count {
                 if !self
+                    .runtime
                     .bus_activation
                     .audio_outputs
                     .get(i as usize)
@@ -4222,6 +4420,7 @@ impl PluginInternal for PluginImpl {
                 }
                 let mut info: BusInfo = std::mem::zeroed();
                 if self
+                    .control
                     .component
                     .getBusInfo(kAudio as i32, kOutput as i32, i, &mut info)
                     == kResultOk
@@ -4230,6 +4429,7 @@ impl PluginInternal for PluginImpl {
                 } else {
                     let mut arrangement = 0u64;
                     if self
+                        .control
                         .processor
                         .getBusArrangement(kOutput as i32, i, &mut arrangement)
                         == kResultOk
@@ -4245,6 +4445,7 @@ impl PluginInternal for PluginImpl {
     fn save_state(&self) -> Result<Vec<u8>> {
         self.drain_deferred_controller_sync();
         let handler = self
+            .control
             .component_handler
             .as_ref()
             .ok_or_else(|| Error::Other("component handler is unavailable".into()))?;
@@ -4255,7 +4456,7 @@ impl PluginInternal for PluginImpl {
             let component_ptr = component_stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                 Error::InterfaceError("Failed to create component state stream".into())
             })?;
-            let result = self.component.getState(component_ptr.as_ptr());
+            let result = self.control.component.getState(component_ptr.as_ptr());
             if result != kResultOk {
                 return Err(Error::Other(format!(
                     "Plugin does not provide state (getState: {result:#x})"
@@ -4266,8 +4467,11 @@ impl PluginInternal for PluginImpl {
             // its state returns the blob above a second time: the envelope would carry the same
             // bytes twice, the combined size cap would effectively halve, and `load_state` would
             // apply `setState` twice. `load_state` has the matching guard.
-            let controller = if let Some(controller) =
-                self.controller.as_ref().filter(|_| !self.single_component)
+            let controller = if let Some(controller) = self
+                .control
+                .controller
+                .as_ref()
+                .filter(|_| !self.control.single_component)
             {
                 let stream = create_memory_stream_with_metadata(None, StreamStateType::Project);
                 let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
@@ -4300,47 +4504,49 @@ impl PluginInternal for PluginImpl {
 
     fn load_state_with_context(&mut self, data: &[u8], context: &StateContext) -> Result<()> {
         let snapshot = decode_state_snapshot(data)?;
-        let was_processing = self.is_processing;
-        let was_active = self.is_active;
+        let was_processing = self.runtime.is_processing;
+        let was_active = self.control.is_active;
 
         unsafe {
             if was_processing {
-                let result = self.processor.setProcessing(0);
+                let result = self.control.processor_lease().set_processing(0);
                 if result != kResultOk && result != kNotImplemented {
                     return Err(Error::Other(format!(
                         "Failed to stop processing before state restore: {result:#x}"
                     )));
                 }
-                self.is_processing = false;
+                self.runtime.is_processing = false;
             }
             if was_active {
                 let result = self.set_component_active(false);
                 if result != kResultOk {
                     if was_processing {
-                        let resumed = self.processor.setProcessing(1);
-                        self.is_processing = resumed == kResultOk || resumed == kNotImplemented;
+                        let resumed = self.control.processor_lease().set_processing(1);
+                        self.runtime.is_processing =
+                            resumed == kResultOk || resumed == kNotImplemented;
                     }
                     return Err(Error::Other(format!(
                         "Failed to deactivate component before state restore: {result:#x}"
                     )));
                 }
-                self.is_active = false;
+                self.control.is_active = false;
             }
 
+            self.invalidate_processing_setup();
             let apply_result = (|| -> Result<()> {
                 let comp_stream = create_state_restore_stream(snapshot.component.clone(), context);
                 let comp_ptr = comp_stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                     Error::InterfaceError("Failed to create component state stream".into())
                 })?;
-                let result = self.component.setState(comp_ptr.as_ptr());
+                let result = self.control.component.setState(comp_ptr.as_ptr());
                 if result != kResultOk && result != kNotImplemented {
                     return Err(Error::Other(format!(
                         "Failed to restore component state (setState: {result:#x})"
                     )));
                 }
 
-                if !self.single_component {
-                    if let Some(controller) = self.controller.as_ref() {
+                if !self.control.single_component {
+                    if let Some(controller) = self.control.controller.as_ref() {
                         let stream =
                             create_state_restore_stream(snapshot.component.clone(), context);
                         let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
@@ -4358,9 +4564,10 @@ impl PluginInternal for PluginImpl {
                     }
                 }
 
-                if let (Some(controller), Some(controller_state)) =
-                    (self.controller.as_ref(), snapshot.controller.as_ref())
-                {
+                if let (Some(controller), Some(controller_state)) = (
+                    self.control.controller.as_ref(),
+                    snapshot.controller.as_ref(),
+                ) {
                     let stream = create_state_restore_stream(controller_state.clone(), context);
                     let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                         Error::InterfaceError("Failed to create controller state stream".into())
@@ -4373,8 +4580,8 @@ impl PluginInternal for PluginImpl {
                     }
                 }
 
-                self.pending_param_changes.clear();
-                if let Some(handler) = self.component_handler.as_ref() {
+                self.runtime.pending_param_changes.clear();
+                if let Some(handler) = self.control.component_handler.as_ref() {
                     handler
                         .parameter_changes
                         .lock()
@@ -4383,10 +4590,11 @@ impl PluginInternal for PluginImpl {
                         })?
                         .clear();
                 }
-                if let Some(process_data) = self.process_data.as_ref() {
+                if let Some(process_data) = self.runtime.process_data.as_ref() {
                     process_data.input_param_changes.clear_all();
                 }
                 *self
+                    .control
                     .unit_cache
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner()) = None;
@@ -4396,17 +4604,25 @@ impl PluginInternal for PluginImpl {
             })();
 
             let restore_result = (|| -> Result<()> {
+                // setState may change processor buses. Refresh all prepared pointers while
+                // still inactive, even if a later controller-state step failed.
+                self.runtime.bus_activation = Self::refresh_bus_activation(
+                    &self.control.component,
+                    Some(&self.runtime.bus_activation),
+                )?;
+                self.negotiate_default_bus_arrangements()?;
+                self.setup_processing()?;
                 if was_active {
                     self.activate()?;
                 }
                 if was_processing {
-                    let result = self.processor.setProcessing(1);
+                    let result = self.control.processor_lease().set_processing(1);
                     if result != kResultOk && result != kNotImplemented {
                         return Err(Error::Other(format!(
                             "Failed to resume processing after state restore: {result:#x}"
                         )));
                     }
-                    self.is_processing = true;
+                    self.runtime.is_processing = true;
                 }
                 Ok(())
             })();
@@ -4504,43 +4720,72 @@ impl PluginImpl {
         // Rebuild the table here if a restart invalidated it off-thread; a no-op on the audio
         // thread, which must never make controller calls.
         self.service_control_thread_caches();
-        if let Some(id) = self
-            .midi_mapping_cache
-            .get(0, channel.as_index() as i16, controller)
+        if let Some(id) =
+            self.runtime
+                .midi_mapping_cache
+                .get(0, channel.as_index() as i16, controller)
         {
             self.queue_processor_parameter_at(id, normalized, sample_offset)?;
         }
         Ok(())
     }
 
-    #[allow(clippy::unnecessary_cast)]
     unsafe fn activate_default_buses(component: &ComPtr<IComponent>) -> Result<BusActivationState> {
-        let read_and_activate = |media: i32, direction: i32| -> Result<Vec<bool>> {
-            let count = component.getBusCount(media, direction);
-            let mut states = Vec::with_capacity(count.max(0) as usize);
-            for index in 0..count {
-                let mut info: BusInfo = std::mem::zeroed();
-                let active = component.getBusInfo(media, direction, index, &mut info) == kResultOk
-                    && (info.flags & BusInfo_::BusFlags_::kDefaultActive as u32) != 0;
-                if active {
-                    let result = component.activateBus(media, direction, index, 1);
-                    if result != kResultOk {
-                        return Err(Error::InterfaceError(format!(
-                            "activateBus failed for default-active bus \
+        Self::refresh_bus_activation(component, None)
+    }
+
+    #[allow(clippy::unnecessary_cast)]
+    unsafe fn refresh_bus_activation(
+        component: &ComPtr<IComponent>,
+        previous: Option<&BusActivationState>,
+    ) -> Result<BusActivationState> {
+        let read_and_activate =
+            |media: i32, direction: i32, prior: Option<&[bool]>| -> Result<Vec<bool>> {
+                let count = component.getBusCount(media, direction);
+                let mut states = Vec::with_capacity(count.max(0) as usize);
+                for index in 0..count {
+                    let mut info: BusInfo = std::mem::zeroed();
+                    let default_active = component.getBusInfo(media, direction, index, &mut info)
+                        == kResultOk
+                        && (info.flags & BusInfo_::BusFlags_::kDefaultActive as u32) != 0;
+                    let retained = prior.and_then(|states| states.get(index as usize)).copied();
+                    let active = retained.unwrap_or(default_active);
+                    if active || retained.is_some() {
+                        let result =
+                            component.activateBus(media, direction, index, u8::from(active));
+                        if result != kResultOk {
+                            return Err(Error::InterfaceError(format!(
+                                "activateBus failed for default-active bus \
                              ({media}, {direction}, {index}): {result:#x}"
-                        )));
+                            )));
+                        }
                     }
+                    states.push(active);
                 }
-                states.push(active);
-            }
-            Ok(states)
-        };
+                Ok(states)
+            };
 
         Ok(BusActivationState {
-            audio_inputs: read_and_activate(kAudio as i32, kInput as i32)?,
-            audio_outputs: read_and_activate(kAudio as i32, kOutput as i32)?,
-            event_inputs: read_and_activate(kEvent as i32, kInput as i32)?,
-            event_outputs: read_and_activate(kEvent as i32, kOutput as i32)?,
+            audio_inputs: read_and_activate(
+                kAudio as i32,
+                kInput as i32,
+                previous.map(|state| state.audio_inputs.as_slice()),
+            )?,
+            audio_outputs: read_and_activate(
+                kAudio as i32,
+                kOutput as i32,
+                previous.map(|state| state.audio_outputs.as_slice()),
+            )?,
+            event_inputs: read_and_activate(
+                kEvent as i32,
+                kInput as i32,
+                previous.map(|state| state.event_inputs.as_slice()),
+            )?,
+            event_outputs: read_and_activate(
+                kEvent as i32,
+                kOutput as i32,
+                previous.map(|state| state.event_outputs.as_slice()),
+            )?,
         })
     }
 
@@ -4675,7 +4920,7 @@ fn stage_chunk_events(
 /// still fail — and by then the plugin may have spawned threads and registered callbacks.
 /// Releasing its interfaces and unloading the module without `terminate()` leaves that code
 /// running inside memory the unload is about to unmap. This guard runs the same sequence
-/// `Drop for PluginImpl` does, unless [`Self::disarm`] hands the job to the built plugin.
+/// `Drop for PluginImpl` does, unless [`Self::finish_transfer`] hands the job to the built plugin.
 ///
 /// It holds its own references (COM refcounts), so `load` keeps using the originals as it
 /// builds; the extra references are released when the guard drops either way.
@@ -4716,8 +4961,10 @@ impl InitializedComponent {
         self.connection.take()
     }
 
-    /// Cancel the teardown: the finished `PluginImpl` owns the lifecycle from here.
-    fn disarm(&mut self) {
+    /// Transfer lifecycle responsibility and release the guard's owning COM references NOW.
+    /// A disarmed but live guard could otherwise release them after a later load error drops
+    /// the completed PluginImpl and unloads its module. Consuming self closes that window.
+    fn finish_transfer(mut self) {
         self.armed = false;
     }
 }
@@ -4780,23 +5027,23 @@ impl Drop for PluginImpl {
         let _ = PluginInternal::close_editor(self);
 
         let _ = self.stop_processing();
-        self._host_app.shutdown_data_exchange();
+        self.control._host_app.shutdown_data_exchange();
 
         unsafe {
-            if self.is_active {
+            if self.control.is_active {
                 self.set_component_active(false);
-                self.is_active = false;
+                self.control.is_active = false;
             }
 
             terminate_component(
-                &self.component,
-                self.controller.as_ref(),
-                self.single_component,
-                self.connection.as_ref(),
+                &self.control.component,
+                self.control.controller.as_ref(),
+                self.control.single_component,
+                self.control.connection.as_ref(),
             );
         }
         #[cfg(target_os = "linux")]
-        self._host_app.clear_run_loop();
+        self.control._host_app.clear_run_loop();
     }
 }
 
@@ -4946,6 +5193,56 @@ fn advance_process_context(
 #[cfg(test)]
 mod process_buffer_tests {
     use super::*;
+
+    struct MockProcessorCalls {
+        trace: Vec<(u8, ThreadId)>,
+        result: tresult,
+    }
+
+    impl ProcessorCalls for MockProcessorCalls {
+        unsafe fn process(&mut self, _data: &mut ProcessData) -> tresult {
+            panic!("notification transitions must not render audio")
+        }
+        fn set_processing(&mut self, value: u8) -> tresult {
+            self.trace.push((value, thread::current().id()));
+            self.result
+        }
+    }
+
+    #[test]
+    fn processor_notifications_preserve_single_thread_order_without_rendering() {
+        let thread = thread::current().id();
+        let mut calls = MockProcessorCalls {
+            trace: Vec::new(),
+            result: kResultOk,
+        };
+        let mut state = false;
+        start_processor_notification(&mut state, &mut calls).unwrap();
+        assert!(state);
+        stop_processor_notification(&mut state, &mut calls).unwrap();
+        assert!(!state);
+        stop_processor_notification(&mut state, &mut calls).unwrap();
+        assert_eq!(calls.trace, [(1, thread), (0, thread)]);
+    }
+
+    #[test]
+    fn failed_processor_notification_does_not_cross_the_quiescence_fence() {
+        let mut calls = MockProcessorCalls {
+            trace: Vec::new(),
+            result: kResultFalse,
+        };
+        let mut state = false;
+        assert!(start_processor_notification(&mut state, &mut calls).is_err());
+        assert!(!state);
+        calls.result = kNotImplemented;
+        start_processor_notification(&mut state, &mut calls).unwrap();
+        calls.result = kResultFalse;
+        assert!(stop_processor_notification(&mut state, &mut calls).is_err());
+        assert!(state);
+        calls.result = kNotImplemented;
+        stop_processor_notification(&mut state, &mut calls).unwrap();
+        assert!(!state);
+    }
 
     #[test]
     fn failed_stop_transitions_preserve_the_last_confirmed_state() {
@@ -5662,3 +5959,6 @@ mod authoritative_transport_tests {
         assert!(!lost.load(Ordering::Acquire));
     }
 }
+
+#[cfg(test)]
+mod domain_tests;

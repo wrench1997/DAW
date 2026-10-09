@@ -510,3 +510,49 @@ Windows desktop acceptance. No publication was performed from this worktree.
 
 - Published combined checkpoint `21ea7264706ea849bbbb5ba22308145de163b874` started [quality 37921083514](https://github.com/wrench1997/DAW/actions/runs/37921083514) and [preview 37921083583](https://github.com/wrench1997/DAW/actions/runs/37921083583). Preview's full Python discovery exposed a Windows-only fixture defect before the Rust/package stages: the synthetic Linux receipt used host-dependent backslashes. The real fixture builder already emits the required portable slash path; strict production verification was correct and remains unchanged.
 - Changed the test fixture to `Path.as_posix()` and added a positive portable-path assertion plus explicit rejection of backslash receipt paths. No skip, weakened validator, new permission or runtime change. Fresh full Linux discovery passes **195 tests**, including four actual Unix helper descriptor checks. Prior combined Rust/UI/native-helper evidence is byte-unchanged; exact new Windows runs are required. The earlier failure is preserved as evidence rather than erased by a rerun.
+## 2026-10-09 11:21 UTC — Prepare synchronous VST3 control / processor ownership
+
+- Based on `88c498c`, added a deliberately !Send/!Sync `MainThreadPlugin` helper entry point
+  while preserving the legacy movable `Plugin` API. Linux/Windows helpers retain all plugin,
+  GUI, lifecycle and reply work on the main thread. Split `ControlDomain` ownership from
+  `ProcessorRuntime` state and use an exclusive, module-lifetime-bound `ProcessorLease` limited
+  to process/setProcessing. There is no new unsafe Send, processor worker, wire change or
+  performance claim. Existing GUI locks, growable parameter/event containers and metering
+  remain explicit prerequisites for the later real-time split.
+- Corrected behavior discovered by the extraction: prepared bus storage is invalidated and
+  rebuilt after state/topology changes, including legal fallback changes after declined
+  arrangements. Failed rebuilds cannot process old pointers. Reconfiguration checks actual
+  deactivation; in-process public processing flags track state/restart failure. State restore
+  retains surviving bus activation choices. The outer isolated client's separate cached-state
+  recovery limitation remains documented.
+- Independent source review found and closed module-lifetime error-unwind hazards: the
+  initialization guard now consumes/releases its extra COM refs immediately at owner transfer,
+  factory ownership is retained on every platform, and host context is created before module
+  loading everywhere. Review closed without remaining blockers for this preparatory stage.
+- Final source-linked vendor tests with exactly `cpal-backend,process-isolation` and default
+  features disabled pass **270/270 available tests**, including 13 instrumented COM fixtures.
+  Those fixtures verify alias-once lifecycle, no lease refcount churn, same-thread/module-last
+  destruction, state/refused-arrangement/restart layout changes with actual sample writes,
+  failure rejection/retry and transfer failure order. **Five facade doctests pass**, consisting
+  of normal same-thread compilation plus four compile-fail ownership/escape constraints.
+- Upstream development-only dependencies are unavailable offline. The temporary manifest
+  points directly at every unchanged production source path and preserves production dependency
+  entries; it does not remove tests or modify cfgs. The registry package also omits the upstream
+  `test_plugins/Dexed.vst3` metadata fixture: its original full-run failure is retained, and only
+  that test is explicitly filtered in the available-suite result. This is not a full upstream
+  package acceptance result. One parallel rerun separately failed spawning a fake helper with
+  ETXTBUSY; the raw log is retained, its cause remains unconfirmed, and the same available set
+  passes serially without deleting that test or changing its implementation.
+- Final production helper gates pass **21 helper +7 protocol tests**, strict helper/protocol
+  Clippy, helper build, root/changed-vendor formatting and diff checks. Actual copied-helper
+  smoke passes three JSON replies, invalid-command recovery, Shutdown with stdin open and
+  child reap; it loads no plugin. Python helper/editor harness tests pass **78**, and packaging
+  regressions pass **92**. The upstream deprecated atomic-method warning remains unchanged.
+- Exact registry archive SHA-256 and original manifests/license/version remain intact. The
+  cumulative vendor patch was regenerated, applied to a pristine extraction and byte-compared
+  for every original/added file; patch/manifest pins and the new guide's package whitelist are
+  updated. Source-linked manifest, lockfile, dependency-feature tree, per-source hashes, copied
+  helper identity and raw gate logs are retained in the development validation receipt.
+- Design and remaining worker/broker/state-fence requirements: [Processor domains](PLUGIN_PROCESSOR_DOMAINS.md).
+  No native UI, real-plugin resize benchmark, physical-device acceptance, Windows/macOS runtime
+  run, new installation, main merge, push or release is claimed by this commit.

@@ -69,7 +69,7 @@ recording, touch/latch modes, or reliable gesture grouping.
 
 Do not replace this directory with a newer upstream package without porting/reviewing these
 changes and rerunning Citrus helper/editor tests. Compare the directory to the exact registry
-archive above; only the listed code files, this manifest, and the reviewable `CITRUS.patch` should differ.
+archive above; only the listed changed/added code files, this manifest, and the reviewable `CITRUS.patch` should differ.
 
 Focused regressions cover revision persistence after drains/overflow, notification backpressure,
 exhaustion/poison, unloaded-plugin checks, lossless JSON revisions above JavaScript's exact-integer
@@ -121,7 +121,7 @@ For each changed upstream source file, produce a unified diff with paths `a/<rel
 and `b/<relative path>` against that pristine copy. Concatenate those diffs in sorted path
 order into `CITRUS.patch`; exclude `CITRUS.patch` and this manifest themselves. Apply it with
 `patch -p1` to another pristine extraction, then byte-compare every upstream file with this
-vendor directory. Only this manifest and the patch are additional provenance files. Keep the
+vendor directory. The source additions listed below are included in that patch. Only this manifest and the patch are additional provenance files. Keep the
 original LICENSE, `.cargo_vcs_info.json`, package version, and registry checksum unchanged.
 Finally review the changes and update the explicitly pinned manifest/patch SHA-256 values in
 `scripts/package_windows_preview.py` and its packaging regression test. Those pins deliberately
@@ -151,3 +151,41 @@ See `docs/LINUX_VST3_EDITORS.md` for the window, focus, DPI and validation bound
 Focused Linux regressions exercise callback reentry, registration identity, closed-registry
 resurrection, descriptor/timer bounds, factory/frame separation and failed protocol claims.
 They do not establish mixed Wayland/XWayland runtime acceptance or sanitizer coverage.
+
+## Synchronous control / processor ownership preparation
+
+This stage preserves protocol v1 and does not enable a DSP worker or claim a latency/real-time
+improvement. The production Linux/Windows helper uses an additive thread-bound entry point:
+
+- `src/host.rs`, `src/plugin.rs`, `src/lib.rs`: `load_main_thread_plugin[_class]` rejects an
+  isolation-enabled configuration and returns a `MainThreadPlugin` facade owning the existing
+  concrete in-process implementation. Its private `Rc` marker is !Send/!Sync. Explicit
+  forwarded methods expose no Deref, mutable legacy-owner access or extraction. Existing
+  Plugin/PluginInternal Send compatibility is unchanged. Compile-fail examples accompany a
+  positive same-thread compilation example and policy-validation tests.
+- `src/internal/plugin_impl.rs`: `ControlDomain` retains owning COM/module/editor/host and
+  lifecycle administration, while `ProcessorRuntime` owns prepared process data, transport,
+  event/parameter storage, note tracking and cached routing. Runtime processing receives a
+  narrow lease and an explicit legacy callback bridge. Existing queue locks/growable containers
+  remain; this is not an allocation-free or lock-free worker implementation. Teardown order,
+  single-component aliases, data-exchange and run-loop behavior are retained. Loader transfer
+  consumes/disarms the initialization guard and immediately releases its extra COM references;
+  factory ownership and pre-module host-context declaration now apply on all platforms, closing
+  error-unwind windows that could release plugin vtables or context after module teardown.
+- Added `src/internal/processor_lease.rs`, registered by `src/internal/mod.rs`: non-owning,
+  exclusive lifetime-bound IAudioProcessor access limited to process/setProcessing, with no
+  clone, cast, addRef/release or metadata interface. The lease is deliberately !Send/!Sync in
+  this preparation. There is no new unsafe Send implementation.
+- Prepared output channel counts avoid per-block component metadata calls after successful
+  setup. This uncovered and fixes old-state bus-buffer reuse: LoadState, bus reconfiguration
+  and serviced I/O restarts invalidate/rebuild while inactive. Declined arrangements may
+  choose different fallback buses, so refusal refreshes too. Failed rebuild cannot process
+  old buffers; surviving bus activation choices are retained during state restore.
+- Added `src/internal/plugin_impl/domain_tests.rs`: source-only instrumented COM fixtures
+  cover single/separate controller initialization/termination, non-owning lease refcounts,
+  loading-thread teardown and module order, state/fallback topology changes, exact prepared
+  pointer ownership, processing after refresh and failed-rebuild rejection/recovery.
+
+No upstream archive, license, package version, dependency manifest or registry checksum is
+changed. See repository `docs/PLUGIN_PROCESSOR_DOMAINS.md` for the remaining worker/broker,
+bounded lane and state-fence requirements, and `docs/WORK_LOG.md` for executed validation.

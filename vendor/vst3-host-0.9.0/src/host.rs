@@ -224,6 +224,41 @@ impl Vst3Host {
         }
     }
 
+    /// Load an in-process plugin that cannot leave its loading thread in safe Rust.
+    ///
+    /// Call this on the native UI/main thread. Unlike the legacy `Plugin` entry point,
+    /// it cannot be passed to a playback worker or extracted back into a movable owner.
+    /// An isolation-enabled host is rejected instead of silently changing its load policy.
+    pub fn load_main_thread_plugin<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+    ) -> Result<crate::plugin::MainThreadPlugin> {
+        self.ensure_main_thread_load_policy()?;
+        self.load_plugin(path)
+            .map(crate::plugin::MainThreadPlugin::from_in_process)
+    }
+
+    /// Load a selected in-process class with the same thread-bound ownership contract as
+    /// [`Self::load_main_thread_plugin`].
+    pub fn load_main_thread_plugin_class<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        class_id: &str,
+    ) -> Result<crate::plugin::MainThreadPlugin> {
+        self.ensure_main_thread_load_policy()?;
+        self.load_plugin_class(path, class_id)
+            .map(crate::plugin::MainThreadPlugin::from_in_process)
+    }
+
+    fn ensure_main_thread_load_policy(&self) -> Result<()> {
+        if self.use_process_isolation {
+            return Err(Error::Other(
+                "main-thread plugin loading requires an in-process host".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Load a particular audio class from a VST3 bundle.
     ///
     /// `class_id` may be either a current class id exported by the factory or a retired id
@@ -792,6 +827,35 @@ mod tests {
 
     /// The isolated load path sizes an `AudioLevels` allocation from a count the helper reports,
     /// so this boundary clamps it instead of trusting the peer.
+    #[test]
+    fn main_thread_load_rejects_isolation_before_files_or_helper_launch() {
+        let mut host = Vst3HostBuilder::default()
+            .with_process_isolation(true)
+            .build()
+            .unwrap();
+        let error = host
+            .load_main_thread_plugin("/missing/main-thread-policy-test.vst3")
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("requires an in-process host"));
+        let error = host
+            .load_main_thread_plugin_class("/missing/main-thread-policy-test.vst3", "invalid")
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("requires an in-process host"));
+    }
+
+    #[test]
+    fn main_thread_load_preserves_in_process_path_validation() {
+        let mut host = Vst3HostBuilder::default().build().unwrap();
+        assert!(matches!(
+            host.load_main_thread_plugin("/missing/main-thread-path-test.vst3"),
+            Err(Error::PluginNotFound(_))
+        ));
+        fn assert_send<T: Send>() {}
+        assert_send::<Plugin>();
+    }
+
     #[test]
     fn output_channel_count_from_a_peer_is_clamped() {
         assert_eq!(clamp_output_channels(2), 2);

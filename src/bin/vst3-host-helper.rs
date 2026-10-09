@@ -32,13 +32,22 @@
 use std::io::Write;
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
 use std::io::{self, BufRead};
-use std::sync::{Arc, Mutex};
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use std::rc::Rc as PluginOwner;
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+use std::sync::Arc as PluginOwner;
+use std::sync::Mutex;
 
 use vst3_host::{
-    IsolatedEditorState, Plugin, Vst3Host,
+    IsolatedEditorState, Vst3Host,
     audio::AudioBuffers,
     process_isolation::{HostCommand, HostResponse, ProtocolChannel},
 };
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use vst3_host::MainThreadPlugin as Plugin;
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+use vst3_host::Plugin;
 
 #[cfg(target_os = "linux")]
 #[path = "vst3_editor_linux/mod.rs"]
@@ -47,8 +56,10 @@ mod linux;
 #[path = "vst3_editor_windows/mod.rs"]
 mod windows;
 
-/// Loaded plugin shared between the command worker and (on macOS) the UI main thread.
-type SharedPlugin = Arc<Mutex<Option<Plugin>>>;
+/// Linux/Windows keep this container on the main thread: its MainThreadPlugin is !Send.
+/// The mutex is legacy single-thread plumbing, not permission to share COM/GUI ownership.
+/// macOS retains the upstream movable-plugin implementation in this preparatory stage.
+type SharedPlugin = PluginOwner<Mutex<Option<Plugin>>>;
 
 fn main() {
     // Before anything else -- certainly before a plugin binary is loaded and can run its own
@@ -61,7 +72,7 @@ fn main() {
 
     eprintln!("VST3 Host Helper Process Started");
 
-    let plugin: SharedPlugin = Arc::new(Mutex::new(None));
+    let plugin: SharedPlugin = PluginOwner::new(Mutex::new(None));
 
     #[cfg(target_os = "macos")]
     {
@@ -216,6 +227,12 @@ fn handle(
                 Ok(h) => h,
                 Err(e) => return err("Failed to build host", e),
             };
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            let loaded = match class_id.as_deref() {
+                Some(class_id) => host.load_main_thread_plugin_class(&path, class_id),
+                None => host.load_main_thread_plugin(&path),
+            };
+            #[cfg(not(any(target_os = "windows", target_os = "linux")))]
             let loaded = match class_id {
                 Some(class_id) => host.load_plugin_class(&path, &class_id),
                 None => host.load_plugin(&path),
@@ -977,7 +994,7 @@ mod native_state_tests {
 
     #[test]
     fn oversized_process_frame_count_is_rejected_before_loading_or_allocating() {
-        let plugin = Arc::new(Mutex::new(None));
+        let plugin = PluginOwner::new(Mutex::new(None));
         let mut sample_rate = 48_000.0;
         let response = handle(
             HostCommand::Process {
@@ -996,7 +1013,7 @@ mod native_state_tests {
 
     #[test]
     fn native_revision_without_a_loaded_plugin_is_an_error() {
-        let plugin = Arc::new(Mutex::new(None));
+        let plugin = PluginOwner::new(Mutex::new(None));
         let mut sample_rate = 44_100.0;
         assert!(matches!(
             handle(
@@ -1017,7 +1034,7 @@ mod isolated_editor_tests {
 
     #[test]
     fn generic_dispatch_never_claims_a_native_window() {
-        let plugin = Arc::new(Mutex::new(None));
+        let plugin = PluginOwner::new(Mutex::new(None));
         let mut sample_rate = 44_100.0;
         for command in [
             IsolatedEditorCommand::Query,

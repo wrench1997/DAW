@@ -770,6 +770,514 @@ pub struct Plugin {
     pub(crate) internal: Option<Box<dyn PluginInternal>>,
 }
 
+/// An in-process plugin whose controller, editor, lifecycle and destruction stay on the
+/// thread that loaded it. Create it with [`crate::Vst3Host::load_main_thread_plugin`].
+///
+/// This additive helper entry point preserves the legacy [`Plugin`] API. It deliberately
+/// provides no `Deref`, `DerefMut`, mutable `Plugin` reference or owner extraction. Its
+/// private `Rc` marker prevents sending or sharing the owner across threads in safe Rust.
+/// Processing remains synchronous; this is not yet a real-time-safe worker interface.
+/// The caller must load it on its application's native UI/main thread.
+///
+/// Normal same-thread use remains available:
+/// ```no_run
+/// # fn main() -> vst3_host::Result<()> {
+/// let mut host = vst3_host::Vst3Host::builder().build()?;
+/// let mut plugin: vst3_host::MainThreadPlugin = host.load_main_thread_plugin("synth.vst3")?;
+/// plugin.start_processing()?;
+/// let mut audio = vst3_host::AudioBuffers::new(0, plugin.output_channel_count(), 16, plugin.sample_rate());
+/// plugin.process_audio(&mut audio)?;
+/// plugin.stop_processing()?;
+/// drop(plugin);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ```compile_fail
+/// use vst3_host::MainThreadPlugin;
+/// fn requires_send<T: Send>() {}
+/// requires_send::<MainThreadPlugin>();
+/// ```
+/// ```compile_fail
+/// use vst3_host::MainThreadPlugin;
+/// fn requires_sync<T: Sync>() {}
+/// requires_sync::<MainThreadPlugin>();
+/// ```
+/// ```compile_fail
+/// fn extract(plugin: vst3_host::MainThreadPlugin) -> vst3_host::Plugin {
+///     plugin.into_inner()
+/// }
+/// ```
+/// ```compile_fail
+/// fn borrow(plugin: &mut vst3_host::MainThreadPlugin) -> &mut vst3_host::Plugin {
+///     &mut *plugin
+/// }
+/// ```
+pub struct MainThreadPlugin {
+    plugin: Plugin,
+    loading_thread: std::thread::ThreadId,
+    _same_thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl MainThreadPlugin {
+    // Only the in-process host loader calls this; there is no public conversion from a
+    // legacy movable Plugin that may have initialized its controller on another thread.
+    pub(crate) fn from_in_process(plugin: Plugin) -> Self {
+        Self {
+            plugin,
+            loading_thread: std::thread::current().id(),
+            _same_thread: std::marker::PhantomData,
+        }
+    }
+
+    /// Main-thread equivalent of [`Plugin::info`].
+    pub fn info(&self) -> &PluginInfo {
+        self.plugin.info()
+    }
+    /// Main-thread equivalent of [`Plugin::class_compatibility`].
+    pub fn class_compatibility(&self) -> &[crate::discovery::ClassCompatibility] {
+        self.plugin.class_compatibility()
+    }
+    /// Main-thread equivalent of [`Plugin::replaced_class_ids`].
+    pub fn replaced_class_ids(&self) -> &[String] {
+        self.plugin.replaced_class_ids()
+    }
+    /// Main-thread equivalent of [`Plugin::sample_rate`].
+    pub fn sample_rate(&self) -> f64 {
+        self.plugin.sample_rate()
+    }
+    /// Main-thread equivalent of [`Plugin::block_size`].
+    pub fn block_size(&self) -> usize {
+        self.plugin.block_size()
+    }
+    /// Main-thread equivalent of [`Plugin::reconfigure`].
+    pub fn reconfigure(&mut self, sample_rate: f64, block_size: usize) -> Result<()> {
+        self.plugin.reconfigure(sample_rate, block_size)
+    }
+    /// Main-thread equivalent of [`Plugin::set_process_mode`].
+    pub fn set_process_mode(&mut self, mode: ProcessMode) -> Result<()> {
+        self.plugin.set_process_mode(mode)
+    }
+    /// Main-thread equivalent of [`Plugin::bus_arrangements`].
+    pub fn bus_arrangements(&self) -> Result<crate::audio::BusArrangements> {
+        self.plugin.bus_arrangements()
+    }
+    /// Main-thread equivalent of [`Plugin::set_bus_arrangements`].
+    pub fn set_bus_arrangements(
+        &mut self,
+        inputs: &[crate::audio::SpeakerArrangement],
+        outputs: &[crate::audio::SpeakerArrangement],
+    ) -> Result<()> {
+        self.plugin.set_bus_arrangements(inputs, outputs)
+    }
+    /// Main-thread equivalent of [`Plugin::set_bus_active`].
+    pub fn set_bus_active(
+        &mut self,
+        media_type: crate::audio::MediaType,
+        direction: crate::audio::BusDirection,
+        bus_index: i32,
+        active: bool,
+    ) -> Result<()> {
+        self.plugin
+            .set_bus_active(media_type, direction, bus_index, active)
+    }
+    /// Main-thread equivalent of [`Plugin::get_parameters`].
+    pub fn get_parameters(&self) -> Result<Vec<Parameter>> {
+        self.plugin.get_parameters()
+    }
+    /// Main-thread equivalent of [`Plugin::set_parameter`].
+    pub fn set_parameter(&mut self, id: u32, value: f64) -> Result<()> {
+        self.plugin.set_parameter(id, value)
+    }
+    /// Main-thread equivalent of [`Plugin::set_parameter_at`].
+    pub fn set_parameter_at(&mut self, id: u32, value: f64, sample_offset: i32) -> Result<()> {
+        self.plugin.set_parameter_at(id, value, sample_offset)
+    }
+    /// Main-thread equivalent of [`Plugin::set_process_transport`].
+    pub fn set_process_transport(&mut self, transport: ProcessTransport) -> Result<()> {
+        self.plugin.set_process_transport(transport)
+    }
+    /// Main-thread equivalent of [`Plugin::set_tempo`].
+    pub fn set_tempo(&mut self, bpm: f64) -> Result<()> {
+        self.plugin.set_tempo(bpm)
+    }
+    /// Main-thread equivalent of [`Plugin::set_time_signature`].
+    pub fn set_time_signature(&mut self, numerator: i32, denominator: i32) -> Result<()> {
+        self.plugin.set_time_signature(numerator, denominator)
+    }
+    /// Main-thread equivalent of [`Plugin::set_playing`].
+    pub fn set_playing(&mut self, playing: bool) -> Result<()> {
+        self.plugin.set_playing(playing)
+    }
+    /// Main-thread equivalent of [`Plugin::get_units`].
+    pub fn get_units(&self) -> Result<Vec<PluginUnit>> {
+        self.plugin.get_units()
+    }
+    /// Main-thread equivalent of [`Plugin::select_program`].
+    pub fn select_program(&mut self, unit_id: i32, program_index: i32) -> Result<()> {
+        self.plugin.select_program(unit_id, program_index)
+    }
+    /// Main-thread equivalent of [`Plugin::selected_unit`].
+    pub fn selected_unit(&self) -> Result<Option<i32>> {
+        self.plugin.selected_unit()
+    }
+    /// Main-thread equivalent of [`Plugin::select_unit`].
+    pub fn select_unit(&mut self, unit_id: i32) -> Result<()> {
+        self.plugin.select_unit(unit_id)
+    }
+    /// Main-thread equivalent of [`Plugin::program_pitch_names`].
+    pub fn program_pitch_names(
+        &self,
+        program_list_id: i32,
+        program_index: i32,
+    ) -> Result<Vec<ProgramPitchName>> {
+        self.plugin
+            .program_pitch_names(program_list_id, program_index)
+    }
+    /// Main-thread equivalent of [`Plugin::get_program_data`].
+    pub fn get_program_data(
+        &self,
+        program_list_id: i32,
+        program_index: i32,
+    ) -> Result<Option<Vec<u8>>> {
+        self.plugin.get_program_data(program_list_id, program_index)
+    }
+    /// Main-thread equivalent of [`Plugin::set_program_data`].
+    pub fn set_program_data(
+        &mut self,
+        program_list_id: i32,
+        program_index: i32,
+        data: &[u8],
+    ) -> Result<()> {
+        self.plugin
+            .set_program_data(program_list_id, program_index, data)
+    }
+    /// Main-thread equivalent of [`Plugin::get_unit_data`].
+    pub fn get_unit_data(&self, unit_id: i32) -> Result<Option<Vec<u8>>> {
+        self.plugin.get_unit_data(unit_id)
+    }
+    /// Main-thread equivalent of [`Plugin::set_unit_data`].
+    pub fn set_unit_data(&mut self, unit_id: i32, data: &[u8]) -> Result<()> {
+        self.plugin.set_unit_data(unit_id, data)
+    }
+    /// Main-thread equivalent of [`Plugin::begin_host_edit`].
+    pub fn begin_host_edit(&mut self, parameter_id: u32) -> Result<()> {
+        self.plugin.begin_host_edit(parameter_id)
+    }
+    /// Main-thread equivalent of [`Plugin::end_host_edit`].
+    pub fn end_host_edit(&mut self, parameter_id: u32) -> Result<()> {
+        self.plugin.end_host_edit(parameter_id)
+    }
+    /// Main-thread equivalent of [`Plugin::send_midi_learn`].
+    pub fn send_midi_learn(&mut self, bus: i32, channel: i16, controller: u16) -> Result<()> {
+        self.plugin.send_midi_learn(bus, channel, controller)
+    }
+    /// Main-thread equivalent of [`Plugin::set_automation_state`].
+    pub fn set_automation_state(&mut self, state: AutomationState) -> Result<()> {
+        self.plugin.set_automation_state(state)
+    }
+    /// Main-thread equivalent of [`Plugin::remap_parameter_id`].
+    pub fn remap_parameter_id(
+        &self,
+        old_plugin_uid: &str,
+        old_param_id: u32,
+    ) -> Result<Option<u32>> {
+        self.plugin.remap_parameter_id(old_plugin_uid, old_param_id)
+    }
+    /// Main-thread equivalent of [`Plugin::latency_samples`].
+    pub fn latency_samples(&self) -> u32 {
+        self.plugin.latency_samples()
+    }
+    /// Main-thread equivalent of [`Plugin::tail_samples`].
+    pub fn tail_samples(&self) -> u32 {
+        self.plugin.tail_samples()
+    }
+    /// Main-thread equivalent of [`Plugin::midi_cc_to_parameter`].
+    pub fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
+        self.plugin.midi_cc_to_parameter(bus, channel, cc)
+    }
+    /// Main-thread equivalent of [`Plugin::get_parameter`].
+    pub fn get_parameter(&self, id: u32) -> Result<f64> {
+        self.plugin.get_parameter(id)
+    }
+    /// Main-thread equivalent of [`Plugin::format_parameter`].
+    pub fn format_parameter(&self, id: u32, normalized: f64) -> Result<String> {
+        self.plugin.format_parameter(id, normalized)
+    }
+    /// Main-thread equivalent of [`Plugin::set_parameter_by_name`].
+    pub fn set_parameter_by_name(&mut self, name: &str, value: f64) -> Result<()> {
+        self.plugin.set_parameter_by_name(name, value)
+    }
+    /// Main-thread equivalent of [`Plugin::find_parameter`].
+    pub fn find_parameter(&self, name: &str) -> Result<Parameter> {
+        self.plugin.find_parameter(name)
+    }
+    /// Main-thread equivalent of [`Plugin::send_midi_note`].
+    pub fn send_midi_note(&mut self, note: u8, velocity: u8, channel: MidiChannel) -> Result<()> {
+        self.plugin.send_midi_note(note, velocity, channel)
+    }
+    /// Main-thread equivalent of [`Plugin::send_midi_note_off`].
+    pub fn send_midi_note_off(&mut self, note: u8, channel: MidiChannel) -> Result<()> {
+        self.plugin.send_midi_note_off(note, channel)
+    }
+    /// Main-thread equivalent of [`Plugin::send_midi_cc`].
+    pub fn send_midi_cc(&mut self, controller: u8, value: u8, channel: MidiChannel) -> Result<()> {
+        self.plugin.send_midi_cc(controller, value, channel)
+    }
+    /// Main-thread equivalent of [`Plugin::send_midi_event`].
+    pub fn send_midi_event(&mut self, event: MidiEvent) -> Result<()> {
+        self.plugin.send_midi_event(event)
+    }
+    /// Main-thread equivalent of [`Plugin::send_midi_event_at`].
+    pub fn send_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {
+        self.plugin.send_midi_event_at(event, sample_offset)
+    }
+    /// Main-thread equivalent of [`Plugin::send_plugin_event`].
+    pub fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
+        self.plugin.send_plugin_event(event)
+    }
+    /// Main-thread equivalent of [`Plugin::send_sysex`].
+    pub fn send_sysex(&mut self, bytes: Vec<u8>) -> Result<()> {
+        self.plugin.send_sysex(bytes)
+    }
+    /// Main-thread equivalent of [`Plugin::send_sysex_at`].
+    pub fn send_sysex_at(&mut self, bytes: Vec<u8>, sample_offset: i32) -> Result<()> {
+        self.plugin.send_sysex_at(bytes, sample_offset)
+    }
+    /// Main-thread equivalent of [`Plugin::note_on`].
+    pub fn note_on(
+        &mut self,
+        channel: MidiChannel,
+        note: u8,
+        velocity: u8,
+    ) -> Result<crate::midi::NoteId> {
+        self.plugin.note_on(channel, note, velocity)
+    }
+    /// Main-thread equivalent of [`Plugin::note_on_at`].
+    pub fn note_on_at(
+        &mut self,
+        channel: MidiChannel,
+        note: u8,
+        velocity: u8,
+        sample_offset: i32,
+    ) -> Result<crate::midi::NoteId> {
+        self.plugin
+            .note_on_at(channel, note, velocity, sample_offset)
+    }
+    /// Main-thread equivalent of [`Plugin::note_off`].
+    pub fn note_off(&mut self, id: crate::midi::NoteId) -> Result<()> {
+        self.plugin.note_off(id)
+    }
+    /// Main-thread equivalent of [`Plugin::note_off_at`].
+    pub fn note_off_at(&mut self, id: crate::midi::NoteId, sample_offset: i32) -> Result<()> {
+        self.plugin.note_off_at(id, sample_offset)
+    }
+    /// Main-thread equivalent of [`Plugin::send_note_expression`].
+    pub fn send_note_expression(
+        &mut self,
+        id: crate::midi::NoteId,
+        kind: crate::midi::NoteExpressionType,
+        value: f64,
+    ) -> Result<()> {
+        self.plugin.send_note_expression(id, kind, value)
+    }
+    /// Main-thread equivalent of [`Plugin::send_note_expression_at`].
+    pub fn send_note_expression_at(
+        &mut self,
+        id: crate::midi::NoteId,
+        kind: crate::midi::NoteExpressionType,
+        value: f64,
+        sample_offset: i32,
+    ) -> Result<()> {
+        self.plugin
+            .send_note_expression_at(id, kind, value, sample_offset)
+    }
+    /// Main-thread equivalent of [`Plugin::note_expressions`].
+    pub fn note_expressions(&self) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
+        self.plugin.note_expressions()
+    }
+    /// Main-thread equivalent of [`Plugin::start_processing`].
+    pub fn start_processing(&mut self) -> Result<()> {
+        self.plugin.start_processing()
+    }
+    /// Main-thread equivalent of [`Plugin::stop_processing`].
+    pub fn stop_processing(&mut self) -> Result<()> {
+        self.plugin.stop_processing()
+    }
+    /// Main-thread equivalent of [`Plugin::process_audio`].
+    pub fn process_audio(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
+        self.plugin.process_audio(buffers)
+    }
+    /// Main-thread equivalent of [`Plugin::audio_bus_layout`].
+    pub fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
+        self.plugin.audio_bus_layout()
+    }
+    /// Main-thread equivalent of [`Plugin::create_bus_audio_buffers`].
+    pub fn create_bus_audio_buffers(&self, block_size: usize) -> Result<BusAudioBuffers> {
+        self.plugin.create_bus_audio_buffers(block_size)
+    }
+    /// Main-thread equivalent of [`Plugin::process_bus_audio`].
+    pub fn process_bus_audio(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
+        self.plugin.process_bus_audio(buffers)
+    }
+    /// Main-thread equivalent of [`Plugin::get_output_levels`].
+    pub fn get_output_levels(&self) -> AudioLevels {
+        self.plugin.get_output_levels()
+    }
+    /// Main-thread equivalent of [`Plugin::is_processing`].
+    pub fn is_processing(&self) -> bool {
+        self.plugin.is_processing()
+    }
+    /// Main-thread equivalent of [`Plugin::has_editor`].
+    pub fn has_editor(&self) -> bool {
+        self.plugin.has_editor()
+    }
+    /// Main-thread equivalent of [`Plugin::isolated_editor`].
+    pub fn isolated_editor(
+        &mut self,
+        command: IsolatedEditorCommand,
+    ) -> Result<IsolatedEditorState> {
+        self.plugin.isolated_editor(command)
+    }
+    /// Main-thread equivalent of [`Plugin::open_editor`].
+    pub fn open_editor(&mut self, parent: WindowHandle) -> Result<()> {
+        self.plugin.open_editor(parent)
+    }
+    /// Main-thread equivalent of [`Plugin::service_run_loop`].
+    pub fn service_run_loop(&mut self) {
+        self.plugin.service_run_loop()
+    }
+    /// Main-thread equivalent of [`Plugin::close_editor`].
+    pub fn close_editor(&mut self) -> Result<()> {
+        self.plugin.close_editor()
+    }
+    /// Main-thread equivalent of [`Plugin::get_editor_size`].
+    pub fn get_editor_size(&self) -> Result<(i32, i32)> {
+        self.plugin.get_editor_size()
+    }
+    /// Main-thread equivalent of [`Plugin::editor_can_resize`].
+    pub fn editor_can_resize(&self) -> bool {
+        self.plugin.editor_can_resize()
+    }
+    /// Main-thread equivalent of [`Plugin::resize_editor`].
+    pub fn resize_editor(&mut self, width: i32, height: i32) -> Result<(i32, i32)> {
+        self.plugin.resize_editor(width, height)
+    }
+    /// Main-thread equivalent of [`Plugin::set_editor_scale_factor`].
+    pub fn set_editor_scale_factor(&mut self, factor: f32) -> Result<bool> {
+        self.plugin.set_editor_scale_factor(factor)
+    }
+    /// Main-thread equivalent of [`Plugin::midi_panic`].
+    pub fn midi_panic(&mut self) -> Result<()> {
+        self.plugin.midi_panic()
+    }
+    /// Main-thread equivalent of [`Plugin::get_parameter_changes`].
+    pub fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
+        self.plugin.get_parameter_changes()
+    }
+    /// Main-thread equivalent of [`Plugin::take_parameter_edits`].
+    pub fn take_parameter_edits(&mut self) -> Vec<ParameterEdit> {
+        self.plugin.take_parameter_edits()
+    }
+    /// Main-thread equivalent of [`Plugin::try_take_parameter_edits`].
+    pub fn try_take_parameter_edits(&mut self) -> Result<Vec<ParameterEdit>> {
+        self.plugin.try_take_parameter_edits()
+    }
+    /// Main-thread equivalent of [`Plugin::try_take_host_notifications`].
+    pub fn try_take_host_notifications(&mut self) -> Result<Vec<HostNotification>> {
+        self.plugin.try_take_host_notifications()
+    }
+    /// Main-thread equivalent of [`Plugin::native_dirty_revision`].
+    pub fn native_dirty_revision(&mut self) -> Result<u64> {
+        self.plugin.native_dirty_revision()
+    }
+    /// Main-thread equivalent of [`Plugin::take_host_notifications`].
+    pub fn take_host_notifications(&mut self) -> Vec<HostNotification> {
+        self.plugin.take_host_notifications()
+    }
+    /// Main-thread equivalent of [`Plugin::take_data_exchange_blocks`].
+    pub fn take_data_exchange_blocks(&mut self) -> Vec<DataExchangeBlock> {
+        self.plugin.take_data_exchange_blocks()
+    }
+    /// Main-thread equivalent of [`Plugin::execute_context_menu_item`].
+    pub fn execute_context_menu_item(&mut self, menu_id: u64, item_id: u32) -> Result<()> {
+        self.plugin.execute_context_menu_item(menu_id, item_id)
+    }
+    /// Main-thread equivalent of [`Plugin::dismiss_context_menu`].
+    pub fn dismiss_context_menu(&mut self, menu_id: u64) -> Result<()> {
+        self.plugin.dismiss_context_menu(menu_id)
+    }
+    /// Main-thread equivalent of [`Plugin::take_restart_flags`].
+    pub fn take_restart_flags(&mut self) -> RestartFlags {
+        self.plugin.take_restart_flags()
+    }
+    /// Main-thread equivalent of [`Plugin::service_host_requests`].
+    pub fn service_host_requests(&mut self) -> Result<RestartFlags> {
+        self.plugin.service_host_requests()
+    }
+    /// Main-thread equivalent of [`Plugin::take_output_midi`].
+    pub fn take_output_midi(&self) -> Vec<MidiEvent> {
+        self.plugin.take_output_midi()
+    }
+    /// Main-thread equivalent of [`Plugin::take_output_events`].
+    pub fn take_output_events(&self) -> Vec<crate::midi::OutputEvent> {
+        self.plugin.take_output_events()
+    }
+    /// Main-thread equivalent of [`Plugin::take_output_events_with_loss`].
+    pub fn take_output_events_with_loss(&self) -> (Vec<crate::midi::OutputEvent>, bool) {
+        self.plugin.take_output_events_with_loss()
+    }
+    /// Main-thread equivalent of [`Plugin::output_midi_handle`].
+    pub fn output_midi_handle(&self) -> Option<OutputMidiConsumer> {
+        self.plugin.output_midi_handle()
+    }
+    /// Main-thread equivalent of [`Plugin::output_event_handle`].
+    pub fn output_event_handle(&self) -> Option<OutputEventConsumer> {
+        self.plugin.output_event_handle()
+    }
+    /// Main-thread equivalent of [`Plugin::save_state`].
+    pub fn save_state(&self) -> Result<Vec<u8>> {
+        self.plugin.save_state()
+    }
+    /// Main-thread equivalent of [`Plugin::load_state`].
+    pub fn load_state(&mut self, data: &[u8]) -> Result<()> {
+        self.plugin.load_state(data)
+    }
+    /// Main-thread equivalent of [`Plugin::load_state_with_context`].
+    pub fn load_state_with_context(&mut self, data: &[u8], context: &StateContext) -> Result<()> {
+        self.plugin.load_state_with_context(data, context)
+    }
+    /// Main-thread equivalent of [`Plugin::isolation_pid`].
+    pub fn isolation_pid(&self) -> Option<u32> {
+        self.plugin.isolation_pid()
+    }
+    /// Main-thread equivalent of [`Plugin::recovery_count`].
+    pub fn recovery_count(&self) -> u64 {
+        self.plugin.recovery_count()
+    }
+    /// Main-thread equivalent of [`Plugin::output_channel_count`].
+    pub fn output_channel_count(&self) -> usize {
+        self.plugin.output_channel_count()
+    }
+    /// Main-thread equivalent of [`Plugin::take_editor_resize_request`].
+    pub fn take_editor_resize_request(&self) -> Option<(i32, i32)> {
+        self.plugin.take_editor_resize_request()
+    }
+    /// Main-thread equivalent of [`Plugin::recover`].
+    pub fn recover(&mut self) -> Result<()> {
+        self.plugin.recover()
+    }
+}
+
+impl Drop for MainThreadPlugin {
+    fn drop(&mut self) {
+        debug_assert_eq!(self.loading_thread, std::thread::current().id());
+        // The private Plugin drops immediately after this on the same thread. Its existing
+        // teardown detaches, stops, deactivates, disconnects and terminates before releasing
+        // COM references and the module; single-component alias handling is unchanged.
+    }
+}
+
 // Internal trait for hiding implementation details
 pub(crate) trait PluginInternal: Send {
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()>;
@@ -2326,10 +2834,17 @@ impl Plugin {
     /// lifecycle. The returned flags still describe every request; in particular,
     /// [`RestartFlags::reload_component`] means the caller must replace this plugin instance.
     pub fn service_host_requests(&mut self) -> Result<RestartFlags> {
-        self.internal
+        let internal = self
+            .internal
             .as_mut()
-            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-            .service_host_requests()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?;
+        let result = internal.service_host_requests();
+        // A rejected state/I/O rebuild may have stopped processing. Preserve the confirmed
+        // state even on error so a later start cannot falsely succeed from a stale flag.
+        if let Some(processing) = internal.processing_state() {
+            self.is_processing = processing;
+        }
+        result
     }
 
     /// Take the MIDI events the plugin has emitted (e.g. from an arpeggiator or MPE
@@ -2422,10 +2937,17 @@ impl Plugin {
     /// The plugin is told this is a project/session restore ([`StateContext::Project`]). Use
     /// [`Self::load_state_with_context`] when the bytes came from a preset file instead.
     pub fn load_state(&mut self, data: &[u8]) -> Result<()> {
-        self.internal
+        let internal = self
+            .internal
             .as_mut()
-            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-            .load_state(data)
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?;
+        let result = internal.load_state(data);
+        // A rejected state/I/O rebuild may have stopped processing. Preserve the confirmed
+        // state even on error so a later start cannot falsely succeed from a stale flag.
+        if let Some(processing) = internal.processing_state() {
+            self.is_processing = processing;
+        }
+        result
     }
 
     /// Restore plugin state as [`Self::load_state`] does, and tell the plugin where the bytes
@@ -2440,10 +2962,17 @@ impl Plugin {
     /// Works both in-process and across process isolation — an isolated plugin's `setState`
     /// sees the same attributes.
     pub fn load_state_with_context(&mut self, data: &[u8], context: &StateContext) -> Result<()> {
-        self.internal
+        let internal = self
+            .internal
             .as_mut()
-            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
-            .load_state_with_context(data, context)
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?;
+        let result = internal.load_state_with_context(data, context);
+        // A rejected state/I/O rebuild may have stopped processing. Preserve the confirmed
+        // state even on error so a later start cannot falsely succeed from a stale flag.
+        if let Some(processing) = internal.processing_state() {
+            self.is_processing = processing;
+        }
+        result
     }
 
     /// Save this plugin's state to a file as a [`PluginPreset`] (JSON: the plugin's `uid`

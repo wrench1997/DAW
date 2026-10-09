@@ -112,9 +112,9 @@ pub use playback::{
 };
 pub use plugin::{
     AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification, IsolatedEditorCommand,
-    IsolatedEditorOwner, IsolatedEditorState, OutputMidiConsumer, ParameterEdit, ParameterEditKind,
-    Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode, ProcessTransport, ProgramPitchName,
-    ProgressKind, ProgressValue, RestartFlags, StateContext, WindowHandle,
+    IsolatedEditorOwner, IsolatedEditorState, MainThreadPlugin, OutputMidiConsumer, ParameterEdit,
+    ParameterEditKind, Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode, ProcessTransport,
+    ProgramPitchName, ProgressKind, ProgressValue, RestartFlags, StateContext, WindowHandle,
 };
 pub use realtime::{RealtimePluginRunner, RtControl};
 pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
