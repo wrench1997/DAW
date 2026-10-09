@@ -47,9 +47,13 @@ The old b57076a runtime log intentionally retains its incorrect filename-derived
 Effects-as-Instrument label. It is not rewritten to look like the later scanner
 run. See [VST3 scanning](VST3_SCANNING.md) for implementation behavior.
 
-## Not established
+## Not established by this historical bundle
 
-- Downstream DAW MIDI-generator-to-instrument routing, including Harmony Blueprint
+Later [production MIDI-route validation](PLUGIN_MIDI_ROUTE_VALIDATION.md) separately
+records exact e54a6e4 Stochas → Surge → FX evidence, including its limitations.
+The older files here retain their original source identity and measurements.
+
+- Downstream DAW MIDI-generator-to-instrument routing at these historical sources, including Harmony Blueprint
 - Native plugin editor rendering/interaction
 - Physical MIDI/audio hardware, speaker output or real-time-device deadlines
 - Windows runtime/plugin compatibility or real multi-class binary selection

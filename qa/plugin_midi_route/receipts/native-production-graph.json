@@ -1,0 +1,1935 @@
+[
+  {
+    "adapter_provenance": [
+      {
+        "all_stats": "FixedQuantumStats { callbacks: 750, callback_frames: 96000, completed_quanta: 750, submitted_quanta: 750, bridge_gaps: 0, plugin_output_quanta: 734, delayed_dry_quanta: 16, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 16, unaligned_delayed_dry_samples: 2048, startup_silence_frames: 2304, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 48, frame_events_staged: 48, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+        "completed_quanta": 750,
+        "delayed_dry_quanta": 16,
+        "endpoint": "generator-22",
+        "exact_plugin_quanta": 734,
+        "expected_lookahead_quanta": 16,
+        "nonstartup_legacy_fallback_quanta": 0,
+        "submitted_quanta": 750
+      },
+      {
+        "all_stats": "FixedQuantumStats { callbacks: 750, callback_frames: 96000, completed_quanta: 750, submitted_quanta: 750, bridge_gaps: 0, plugin_output_quanta: 734, delayed_dry_quanta: 16, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 16, unaligned_delayed_dry_samples: 2048, startup_silence_frames: 2304, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 16, frame_events_staged: 16, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+        "completed_quanta": 750,
+        "delayed_dry_quanta": 16,
+        "endpoint": "generator-11",
+        "exact_plugin_quanta": 734,
+        "expected_lookahead_quanta": 16,
+        "nonstartup_legacy_fallback_quanta": 0,
+        "submitted_quanta": 750
+      }
+    ],
+    "bpm": 120.0,
+    "callback_frames": 128,
+    "case": "bpm120_cb128_fxfalse_routetrue",
+    "first_nonzero": 4393,
+    "first_note_release": {
+      "audio_note_off_position": 7352,
+      "early_release_rms": 0.05781654782042981,
+      "late_release_rms": 0.000012518271521786382,
+      "next_note_audio_position": 10352
+    },
+    "frames": 96000,
+    "fx": false,
+    "master_peak": 0.2621329128742218,
+    "master_rms": 0.07206784711252265,
+    "max_callback_lateness_us": 611,
+    "max_callback_render_runtime_us": 3116,
+    "off_baseline_scope": "sink silence and full accounting; legacy1Q deadline misses remain explicitly reported",
+    "routed": true,
+    "sink_peak": 0.26839733123779297,
+    "source_events": [
+      [
+        2176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        5176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        8176,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        11176,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        14175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        17175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        20176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        23176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        26175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        29175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        32175,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        35175,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        38175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        41175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        44176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        47176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        50176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        53175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        56176,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        59176,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        62175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        65175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        68175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        71175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        74175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        77175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        80175,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        83175,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        86175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        89175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        92176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        95176,
+        [
+          128,
+          60,
+          0
+        ]
+      ]
+    ],
+    "strict_realtime_provenance_gate": true,
+    "worker_stats": [
+      "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 750, submitted: 750, completed: 750, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }",
+      "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 750, submitted: 750, completed: 750, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 0, detached_workers: 0, shutdown_timeouts: 0, stopped: false }"
+    ]
+  },
+  {
+    "adapter_provenance": [
+      {
+        "all_stats": "FixedQuantumStats { callbacks: 375, callback_frames: 96000, completed_quanta: 750, submitted_quanta: 750, bridge_gaps: 0, plugin_output_quanta: 734, delayed_dry_quanta: 16, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 16, unaligned_delayed_dry_samples: 2048, startup_silence_frames: 2304, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 48, frame_events_staged: 48, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+        "completed_quanta": 750,
+        "delayed_dry_quanta": 16,
+        "endpoint": "generator-22",
+        "exact_plugin_quanta": 734,
+        "expected_lookahead_quanta": 16,
+        "nonstartup_legacy_fallback_quanta": 0,
+        "submitted_quanta": 750
+      },
+      {
+        "all_stats": "FixedQuantumStats { callbacks: 375, callback_frames: 96000, completed_quanta: 750, submitted_quanta: 750, bridge_gaps: 0, plugin_output_quanta: 734, delayed_dry_quanta: 16, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 16, unaligned_delayed_dry_samples: 2048, startup_silence_frames: 2304, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 16, frame_events_staged: 16, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+        "completed_quanta": 750,
+        "delayed_dry_quanta": 16,
+        "endpoint": "generator-11",
+        "exact_plugin_quanta": 734,
+        "expected_lookahead_quanta": 16,
+        "nonstartup_legacy_fallback_quanta": 0,
+        "submitted_quanta": 750
+      }
+    ],
+    "bpm": 120.0,
+    "callback_frames": 256,
+    "case": "bpm120_cb256_fxfalse_routetrue",
+    "first_nonzero": 4358,
+    "first_note_release": {
+      "audio_note_off_position": 7352,
+      "early_release_rms": 0.05658004633459792,
+      "late_release_rms": 0.000015409870727619253,
+      "next_note_audio_position": 10352
+    },
+    "frames": 96000,
+    "fx": false,
+    "master_peak": 0.31112992763519287,
+    "master_rms": 0.07211555385457036,
+    "max_callback_lateness_us": 0,
+    "max_callback_render_runtime_us": 4125,
+    "off_baseline_scope": "sink silence and full accounting; legacy1Q deadline misses remain explicitly reported",
+    "routed": true,
+    "sink_peak": 0.2685335576534271,
+    "source_events": [
+      [
+        2176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        5176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        8176,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        11176,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        14175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        17175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        20176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        23176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        26175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        29175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        32175,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        35175,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        38175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        41175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        44176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        47176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        50176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        53175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        56176,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        59176,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        62176,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        65176,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        68175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        71175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        74175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        77175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        80176,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        83176,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        86175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        89175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        92176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        95176,
+        [
+          128,
+          60,
+          0
+        ]
+      ]
+    ],
+    "strict_realtime_provenance_gate": true,
+    "worker_stats": [
+      "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 750, submitted: 750, completed: 750, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }",
+      "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 750, submitted: 750, completed: 750, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 0, detached_workers: 0, shutdown_timeouts: 0, stopped: false }"
+    ]
+  },
+  {
+    "adapter_provenance": [
+      {
+        "all_stats": "FixedQuantumStats { callbacks: 188, callback_frames: 96000, completed_quanta: 750, submitted_quanta: 750, bridge_gaps: 0, plugin_output_quanta: 734, delayed_dry_quanta: 16, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 16, unaligned_delayed_dry_samples: 2048, startup_silence_frames: 2304, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 48, frame_events_staged: 48, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+        "completed_quanta": 750,
+        "delayed_dry_quanta": 16,
+        "endpoint": "generator-22",
+        "exact_plugin_quanta": 734,
+        "expected_lookahead_quanta": 16,
+        "nonstartup_legacy_fallback_quanta": 0,
+        "submitted_quanta": 750
+      },
+      {
+        "all_stats": "FixedQuantumStats { callbacks: 188, callback_frames: 96000, completed_quanta: 750, submitted_quanta: 750, bridge_gaps: 0, plugin_output_quanta: 734, delayed_dry_quanta: 16, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 16, unaligned_delayed_dry_samples: 2048, startup_silence_frames: 2304, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 16, frame_events_staged: 16, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+        "completed_quanta": 750,
+        "delayed_dry_quanta": 16,
+        "endpoint": "generator-11",
+        "exact_plugin_quanta": 734,
+        "expected_lookahead_quanta": 16,
+        "nonstartup_legacy_fallback_quanta": 0,
+        "submitted_quanta": 750
+      }
+    ],
+    "bpm": 120.0,
+    "callback_frames": 512,
+    "case": "bpm120_cb512_fxfalse_routetrue",
+    "first_nonzero": 4394,
+    "first_note_release": {
+      "audio_note_off_position": 7352,
+      "early_release_rms": 0.057797579510758014,
+      "late_release_rms": 0.000014434980603020724,
+      "next_note_audio_position": 10352
+    },
+    "frames": 96000,
+    "fx": false,
+    "master_peak": 0.26230013370513916,
+    "master_rms": 0.07194685246582593,
+    "max_callback_lateness_us": 0,
+    "max_callback_render_runtime_us": 7144,
+    "off_baseline_scope": "sink silence and full accounting; legacy1Q deadline misses remain explicitly reported",
+    "routed": true,
+    "sink_peak": 0.26857689023017883,
+    "source_events": [
+      [
+        2176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        5176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        8176,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        11176,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        14175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        17175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        20176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        23176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        26175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        29175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        32176,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        35176,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        38175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        41175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        44176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        47176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        50176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        53175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        56175,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        59175,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        62176,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        65176,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        68175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        71175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        74175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        77175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        80176,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        83176,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        86175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        89175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        92176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        95176,
+        [
+          128,
+          60,
+          0
+        ]
+      ]
+    ],
+    "strict_realtime_provenance_gate": true,
+    "worker_stats": [
+      "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 750, submitted: 750, completed: 750, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }",
+      "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 750, submitted: 750, completed: 750, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 0, detached_workers: 0, shutdown_timeouts: 0, stopped: false }"
+    ]
+  },
+  {
+    "case": "production_stop_then_seek_epoch3",
+    "first_audio_after_epoch_samples": 2176,
+    "max_callback_lateness_us": 0,
+    "source_events": [
+      [
+        122176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        125176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        128175,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        131175,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        134176,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        137176,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        140175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        143175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        146175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        149175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        152175,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        155175,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        158175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        161175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        164176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        167176,
+        [
+          128,
+          60,
+          0
+        ]
+      ]
+    ],
+    "target_content_frame": 24000
+  },
+  {
+    "case": "production_resume_blank_source_natural_release",
+    "early_sink_release_peak": 0.00512372050434351,
+    "final_second_sink_peak": 0.0,
+    "master_contains_host_metronome": true,
+    "quarter_second_windows": [
+      {
+        "isolated_sink_track2": {
+          "peak": 0.00512372050434351,
+          "rms": 0.00029924223336357626
+        },
+        "master": {
+          "peak": 0.005123675800859928,
+          "rms": 0.00029924104873010416
+        },
+        "quarter_second": 0
+      },
+      {
+        "isolated_sink_track2": {
+          "peak": 0.0,
+          "rms": 0.0
+        },
+        "master": {
+          "peak": 0.0,
+          "rms": 0.0
+        },
+        "quarter_second": 1
+      },
+      {
+        "isolated_sink_track2": {
+          "peak": 0.0,
+          "rms": 0.0
+        },
+        "master": {
+          "peak": 0.09128104150295258,
+          "rms": 0.005078698509437616
+        },
+        "quarter_second": 2
+      },
+      {
+        "isolated_sink_track2": {
+          "peak": 0.0,
+          "rms": 0.0
+        },
+        "master": {
+          "peak": 0.0,
+          "rms": 0.0
+        },
+        "quarter_second": 3
+      },
+      {
+        "isolated_sink_track2": {
+          "peak": 0.0,
+          "rms": 0.0
+        },
+        "master": {
+          "peak": 0.09128104150295258,
+          "rms": 0.005078698509437616
+        },
+        "quarter_second": 4
+      },
+      {
+        "isolated_sink_track2": {
+          "peak": 0.0,
+          "rms": 0.0
+        },
+        "master": {
+          "peak": 0.09128104150295258,
+          "rms": 0.004877403406864757
+        },
+        "quarter_second": 5
+      },
+      {
+        "isolated_sink_track2": {
+          "peak": 0.0,
+          "rms": 0.0
+        },
+        "master": {
+          "peak": 0.026882609352469444,
+          "rms": 0.0014156675303431557
+        },
+        "quarter_second": 6
+      },
+      {
+        "isolated_sink_track2": {
+          "peak": 0.0,
+          "rms": 0.0
+        },
+        "master": {
+          "peak": 0.09128104150295258,
+          "rms": 0.005078698509437616
+        },
+        "quarter_second": 7
+      }
+    ],
+    "source_event_count": 0
+  },
+  {
+    "adapter_provenance": [
+      {
+        "all_stats": "FixedQuantumStats { callbacks: 47, callback_frames: 96000, completed_quanta: 750, submitted_quanta: 750, bridge_gaps: 0, plugin_output_quanta: 734, delayed_dry_quanta: 16, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 16, unaligned_delayed_dry_samples: 2048, startup_silence_frames: 2304, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 48, frame_events_staged: 48, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+        "completed_quanta": 750,
+        "delayed_dry_quanta": 16,
+        "endpoint": "generator-22",
+        "exact_plugin_quanta": 734,
+        "expected_lookahead_quanta": 16,
+        "nonstartup_legacy_fallback_quanta": 0,
+        "submitted_quanta": 750
+      },
+      {
+        "all_stats": "FixedQuantumStats { callbacks: 47, callback_frames: 96000, completed_quanta: 750, submitted_quanta: 750, bridge_gaps: 0, plugin_output_quanta: 734, delayed_dry_quanta: 16, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 16, unaligned_delayed_dry_samples: 2048, startup_silence_frames: 2304, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 16, frame_events_staged: 16, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+        "completed_quanta": 750,
+        "delayed_dry_quanta": 16,
+        "endpoint": "generator-11",
+        "exact_plugin_quanta": 734,
+        "expected_lookahead_quanta": 16,
+        "nonstartup_legacy_fallback_quanta": 0,
+        "submitted_quanta": 750
+      }
+    ],
+    "bpm": 120.0,
+    "callback_frames": 2048,
+    "case": "bpm120_cb2048_fxfalse_routetrue",
+    "first_nonzero": 4412,
+    "first_note_release": {
+      "audio_note_off_position": 7352,
+      "early_release_rms": 0.05697743957599198,
+      "late_release_rms": 0.00001674300123334962,
+      "next_note_audio_position": 10352
+    },
+    "frames": 96000,
+    "fx": false,
+    "master_peak": 0.33244192600250244,
+    "master_rms": 0.0720142765559791,
+    "max_callback_lateness_us": 0,
+    "max_callback_render_runtime_us": 18947,
+    "off_baseline_scope": "sink silence and full accounting; legacy1Q deadline misses remain explicitly reported",
+    "routed": true,
+    "sink_peak": 0.2685413658618927,
+    "source_events": [
+      [
+        2176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        5176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        8176,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        11176,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        14176,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        17176,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        20176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        23176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        26175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        29175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        32176,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        35176,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        38175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        41175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        44176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        47176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        50176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        53175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        56175,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        59175,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        62176,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        65176,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        68175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        71175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        74175,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        77175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        80175,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        83175,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        86175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        89175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        92176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        95176,
+        [
+          128,
+          60,
+          0
+        ]
+      ]
+    ],
+    "strict_realtime_provenance_gate": true,
+    "worker_stats": [
+      "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 750, submitted: 750, completed: 750, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }",
+      "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 750, submitted: 750, completed: 750, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 0, detached_workers: 0, shutdown_timeouts: 0, stopped: false }"
+    ]
+  },
+  {
+    "adapter_provenance": [
+      {
+        "all_stats": "FixedQuantumStats { callbacks: 188, callback_frames: 96000, completed_quanta: 750, submitted_quanta: 750, bridge_gaps: 0, plugin_output_quanta: 734, delayed_dry_quanta: 16, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 16, unaligned_delayed_dry_samples: 2048, startup_silence_frames: 2304, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 32, frame_events_staged: 32, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+        "completed_quanta": 750,
+        "delayed_dry_quanta": 16,
+        "endpoint": "generator-22",
+        "exact_plugin_quanta": 734,
+        "expected_lookahead_quanta": 16,
+        "nonstartup_legacy_fallback_quanta": 0,
+        "submitted_quanta": 750
+      },
+      {
+        "all_stats": "FixedQuantumStats { callbacks: 188, callback_frames: 96000, completed_quanta: 750, submitted_quanta: 750, bridge_gaps: 0, plugin_output_quanta: 734, delayed_dry_quanta: 16, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 16, unaligned_delayed_dry_samples: 2048, startup_silence_frames: 2304, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 16, frame_events_staged: 16, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+        "completed_quanta": 750,
+        "delayed_dry_quanta": 16,
+        "endpoint": "generator-11",
+        "exact_plugin_quanta": 734,
+        "expected_lookahead_quanta": 16,
+        "nonstartup_legacy_fallback_quanta": 0,
+        "submitted_quanta": 750
+      }
+    ],
+    "bpm": 60.0,
+    "callback_frames": 512,
+    "case": "bpm60_cb512_fxfalse_routetrue",
+    "first_nonzero": 4358,
+    "first_note_release": {
+      "audio_note_off_position": 10352,
+      "early_release_rms": 0.050617155430773726,
+      "late_release_rms": 0.000017640123059321865,
+      "next_note_audio_position": 16352
+    },
+    "frames": 96000,
+    "fx": false,
+    "master_peak": 0.26164188981056213,
+    "master_rms": 0.07226588593773868,
+    "max_callback_lateness_us": 0,
+    "max_callback_render_runtime_us": 9589,
+    "off_baseline_scope": "sink silence and full accounting; legacy1Q deadline misses remain explicitly reported",
+    "routed": true,
+    "sink_peak": 0.267870157957077,
+    "source_events": [
+      [
+        2176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        8176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        14176,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        20176,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        26175,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        32175,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        38176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        44176,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        50176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        56175,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        62175,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        68175,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        74176,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        80176,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        86176,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        92176,
+        [
+          128,
+          60,
+          0
+        ]
+      ]
+    ],
+    "strict_realtime_provenance_gate": true,
+    "worker_stats": [
+      "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 750, submitted: 750, completed: 750, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }",
+      "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 750, submitted: 750, completed: 750, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 0, detached_workers: 0, shutdown_timeouts: 0, stopped: false }"
+    ]
+  },
+  {
+    "adapter_provenance": [
+      {
+        "all_stats": "FixedQuantumStats { callbacks: 750, callback_frames: 96000, completed_quanta: 750, submitted_quanta: 750, bridge_gaps: 0, plugin_output_quanta: 734, delayed_dry_quanta: 16, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 0, unaligned_delayed_dry_samples: 0, startup_silence_frames: 384, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 16, frame_events_staged: 16, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+        "completed_quanta": 750,
+        "delayed_dry_quanta": 16,
+        "endpoint": "generator-22",
+        "exact_plugin_quanta": 734,
+        "expected_lookahead_quanta": 1,
+        "nonstartup_legacy_fallback_quanta": 15,
+        "submitted_quanta": 750
+      },
+      {
+        "all_stats": "FixedQuantumStats { callbacks: 750, callback_frames: 96000, completed_quanta: 750, submitted_quanta: 750, bridge_gaps: 0, plugin_output_quanta: 739, delayed_dry_quanta: 11, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 0, unaligned_delayed_dry_samples: 0, startup_silence_frames: 384, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 16, frame_events_staged: 16, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+        "completed_quanta": 750,
+        "delayed_dry_quanta": 11,
+        "endpoint": "generator-11",
+        "exact_plugin_quanta": 739,
+        "expected_lookahead_quanta": 1,
+        "nonstartup_legacy_fallback_quanta": 10,
+        "submitted_quanta": 750
+      }
+    ],
+    "bpm": 120.0,
+    "callback_frames": 128,
+    "case": "bpm120_cb128_fxfalse_routefalse",
+    "first_nonzero": 22752,
+    "first_note_release": {
+      "audio_note_off_position": 5432,
+      "early_release_rms": 0.0,
+      "late_release_rms": 0.0,
+      "next_note_audio_position": 8432
+    },
+    "frames": 96000,
+    "fx": false,
+    "master_peak": 0.09128104150295258,
+    "master_rms": 0.0035911821556253464,
+    "max_callback_lateness_us": 1517,
+    "max_callback_render_runtime_us": 4083,
+    "off_baseline_scope": "sink silence and full accounting; legacy1Q deadline misses remain explicitly reported",
+    "routed": false,
+    "sink_peak": 0.0,
+    "source_events": [
+      [
+        3256,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        6256,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        9256,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        12255,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        15255,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        18256,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        21256,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        24255,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        27255,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        30255,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        33255,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        36255,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        39255,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        42256,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        45256,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        48256,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        51255,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        54256,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        57256,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        60255,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        63255,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        66255,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        69255,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        72255,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        75255,
+        [
+          128,
+          60,
+          0
+        ]
+      ],
+      [
+        78255,
+        [
+          144,
+          64,
+          100
+        ]
+      ],
+      [
+        81255,
+        [
+          128,
+          64,
+          0
+        ]
+      ],
+      [
+        84255,
+        [
+          144,
+          67,
+          100
+        ]
+      ],
+      [
+        87255,
+        [
+          128,
+          67,
+          0
+        ]
+      ],
+      [
+        90256,
+        [
+          144,
+          60,
+          100
+        ]
+      ],
+      [
+        93256,
+        [
+          128,
+          60,
+          0
+        ]
+      ]
+    ],
+    "strict_realtime_provenance_gate": false,
+    "worker_stats": [
+      "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 750, submitted: 750, completed: 750, input_overflows: 0, input_gaps: 0, deadline_misses: 15, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 15, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 128, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }",
+      "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 750, submitted: 750, completed: 750, input_overflows: 0, input_gaps: 0, deadline_misses: 10, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 10, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 128, tail_samples: 0, detached_workers: 0, shutdown_timeouts: 0, stopped: false }"
+    ]
+  }
+]

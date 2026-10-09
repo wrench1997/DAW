@@ -7,3 +7,7 @@
 # Source-only real-plugin receipts use raw-byte hashes on every platform.
 /qa/real_vst3/** text eol=lf
 /qa/real_vst3/receipts/*.state -text
+# Preserve the separately attributed production MIDI-route receipt hashes.
+/qa/plugin_midi_route/** text eol=lf
+# Raw captured logs retain their original terminal blank line.
+/qa/plugin_midi_route/**/*.log whitespace=-blank-at-eof

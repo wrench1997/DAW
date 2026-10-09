@@ -76,6 +76,59 @@ REAL_VST3_QA_FILES = frozenset((
     "qa/real_vst3/validate.py",
     "qa/real_vst3/verify_receipts.py",
 ))
+MIDI_ROUTE_QA_ROOT = "qa/plugin_midi_route/"
+MIDI_ROUTE_QA_FILES = frozenset((
+    "qa/plugin_midi_route/.gitignore",
+    "qa/plugin_midi_route/CONTENTS-SHA256.txt",
+    "qa/plugin_midi_route/INVENTORY.json",
+    "qa/plugin_midi_route/PUBLICATION.json",
+    "qa/plugin_midi_route/REPRODUCE.md",
+    "qa/plugin_midi_route/build_and_copy.py",
+    "qa/plugin_midi_route/comparison-quiet-same-binary/receipts/executable-attribution.json",
+    "qa/plugin_midi_route/comparison-quiet-same-binary/receipts/native-fx-reactivation.json",
+    "qa/plugin_midi_route/comparison-quiet-same-binary/receipts/native-tests-final.log",
+    "qa/plugin_midi_route/comparison-quiet-same-binary/receipts/native-tests-quiet-same-binary.log",
+    "qa/plugin_midi_route/comparison-quiet-same-binary/receipts/native-tests.log",
+    "qa/plugin_midi_route/comparison-quiet-same-binary/receipts/source-snapshot.json",
+    "qa/plugin_midi_route/diagnostic-attempt-4-master-confounded/receipts/executable-attribution.json",
+    "qa/plugin_midi_route/diagnostic-attempt-4-master-confounded/receipts/native-tests.log",
+    "qa/plugin_midi_route/diagnostic-attempt-4-master-confounded/receipts/source-snapshot.json",
+    "qa/plugin_midi_route/diagnostic-attempt-6-fx-recovery-before-fix/receipts/executable-attribution.json",
+    "qa/plugin_midi_route/diagnostic-attempt-6-fx-recovery-before-fix/receipts/native-fx-reactivation.json",
+    "qa/plugin_midi_route/diagnostic-attempt-6-fx-recovery-before-fix/receipts/native-tests-final.log",
+    "qa/plugin_midi_route/diagnostic-attempt-6-fx-recovery-before-fix/receipts/native-tests.log",
+    "qa/plugin_midi_route/diagnostic-attempt-6-fx-recovery-before-fix/receipts/source-snapshot.json",
+    "qa/plugin_midi_route/diagnostic-attempt-7-off-deadlines/receipts/executable-attribution.json",
+    "qa/plugin_midi_route/diagnostic-attempt-7-off-deadlines/receipts/native-fx-reactivation.json",
+    "qa/plugin_midi_route/diagnostic-attempt-7-off-deadlines/receipts/native-tests-final.log",
+    "qa/plugin_midi_route/diagnostic-attempt-7-off-deadlines/receipts/native-tests.log",
+    "qa/plugin_midi_route/diagnostic-attempt-7-off-deadlines/receipts/source-snapshot.json",
+    "qa/plugin_midi_route/diagnostic-attempt-8-concurrent-load/receipts/executable-attribution.json",
+    "qa/plugin_midi_route/diagnostic-attempt-8-concurrent-load/receipts/native-fx-reactivation.json",
+    "qa/plugin_midi_route/diagnostic-attempt-8-concurrent-load/receipts/native-tests-final.log",
+    "qa/plugin_midi_route/diagnostic-attempt-8-concurrent-load/receipts/native-tests.log",
+    "qa/plugin_midi_route/diagnostic-attempt-8-concurrent-load/receipts/source-snapshot.json",
+    "qa/plugin_midi_route/native_suffix.rs",
+    "qa/plugin_midi_route/prepare_snapshot.py",
+    "qa/plugin_midi_route/receipts/concurrent-load-outcome.json",
+    "qa/plugin_midi_route/receipts/executable-attribution.json",
+    "qa/plugin_midi_route/receipts/final-source-binding.json",
+    "qa/plugin_midi_route/receipts/metronome-confound-verification.json",
+    "qa/plugin_midi_route/receipts/native-fx-reactivation.json",
+    "qa/plugin_midi_route/receipts/native-overload-recovery.json",
+    "qa/plugin_midi_route/receipts/native-production-graph.json",
+    "qa/plugin_midi_route/receipts/native-release-isolation.json",
+    "qa/plugin_midi_route/receipts/native-retrigger-chord-latch.json",
+    "qa/plugin_midi_route/receipts/native-safety-latch.json",
+    "qa/plugin_midi_route/receipts/native-tests-final.log",
+    "qa/plugin_midi_route/receipts/quiet-comparison-condition.json",
+    "qa/plugin_midi_route/receipts/source-snapshot.json",
+    "qa/plugin_midi_route/receipts/summary.json",
+    "qa/plugin_midi_route/run_native.sh",
+    "qa/plugin_midi_route/summarize_receipts.py",
+    "qa/plugin_midi_route/verify_metronome.py",
+    "qa/plugin_midi_route/verify_receipts.py",
+))
 # Explicitly reviewed documentation that may land on an independent branch.
 OPTIONAL_SOURCE_FILES = frozenset((
     "docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md",
@@ -85,7 +138,8 @@ OPTIONAL_SOURCE_FILES = frozenset((
     "docs/PIANO_KEYBOARD_EDITING.md", "docs/PIANO_MOUSE_WORKFLOW.md",
     "docs/PIANO_NOTE_EXPRESSION.md", "docs/PIANO_RANGES_AND_SNAP.md",
     "docs/VST3_SCANNING.md", "docs/REAL_VST3_VALIDATION.md",
-)) | REAL_VST3_QA_FILES
+    "docs/PLUGIN_MIDI_ROUTING.md", "docs/PLUGIN_MIDI_ROUTE_VALIDATION.md",
+)) | REAL_VST3_QA_FILES | MIDI_ROUTE_QA_FILES
 GENERATED_FILES = ("START_HERE_PREVIEW.txt", "BUILD_PROVENANCE.json", "DEPENDENCIES.json")
 PAYLOAD_FILES = frozenset(BINARIES + SOURCE_FILES + GENERATED_FILES)
 PACKAGE_FILES = PAYLOAD_FILES | {"SHA256SUMS.txt"}
@@ -454,6 +508,20 @@ def validate_real_vst3_qa(payload):
     require(payload[inventory] == expected, "Real VST3 QA inventory/hash mismatch")
 
 
+def validate_midi_route_qa(payload):
+    """Keep the separately attributed production-routing receipt set complete."""
+    present = set(payload) & MIDI_ROUTE_QA_FILES
+    if not present:
+        return
+    require(present == MIDI_ROUTE_QA_FILES, "Incomplete MIDI route QA source bundle")
+    inventory = MIDI_ROUTE_QA_ROOT + "CONTENTS-SHA256.txt"
+    expected = "".join(
+        f"{digest(payload[path])}  {path.removeprefix(MIDI_ROUTE_QA_ROOT)}\n"
+        for path in sorted(MIDI_ROUTE_QA_FILES - {inventory})
+    ).encode("utf-8")
+    require(payload[inventory] == expected, "MIDI route QA inventory/hash mismatch")
+
+
 def create_package(repo, binaries, metadata, build_info, output):
     validate_build_info(build_info)
     manifest = tomllib.loads(read_input(repo / "Cargo.toml").decode())
@@ -505,6 +573,7 @@ def create_package(repo, binaries, metadata, build_info, output):
     require(set(payload) == PAYLOAD_FILES | (sources & (OPTIONAL_SOURCE_FILES | VENDOR_FILES)), "Internal payload whitelist mismatch")
     check_document_links(payload)
     validate_real_vst3_qa(payload)
+    validate_midi_route_qa(payload)
     payload["SHA256SUMS.txt"] = "".join(f"{digest(payload[p])}  {p}\n" for p in sorted(payload)).encode("ascii")
     output.mkdir(parents=True, exist_ok=True)
     epoch = max(315532800, min(build_info["source_epoch"], 4354819198))
@@ -558,6 +627,7 @@ def verify_package(path, extract_to=None):
             "Source document manifest mismatch")
     check_document_links(payload)
     validate_real_vst3_qa(payload)
+    validate_midi_route_qa(payload)
     for binary in BINARIES:
         require(inspect_pe(payload[binary]) == info["pe_audit"][binary], "PE audit/provenance mismatch")
     inventory = json.loads(payload["DEPENDENCIES.json"])

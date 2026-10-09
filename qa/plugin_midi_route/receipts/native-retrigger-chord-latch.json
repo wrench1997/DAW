@@ -1,0 +1,14 @@
+{
+  "channel": 1,
+  "held_note_peak": 0.8552359342575073,
+  "last_second_peak": 0.0,
+  "no_explicit_note_off_sent_by_test": true,
+  "note_on_pitches": [
+    60,
+    60,
+    64,
+    67
+  ],
+  "scope": "combined real VST3 worker safety latch then new-epoch no-resurrection, allowing release tail",
+  "silent_wait_without_submissions_ms": 100
+}

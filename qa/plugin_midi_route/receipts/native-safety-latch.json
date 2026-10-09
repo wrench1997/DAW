@@ -1,0 +1,7 @@
+{
+  "held_note_peak": 0.4444498121738434,
+  "last_second_peak": 0.0,
+  "no_explicit_note_off_sent_by_test": true,
+  "scope": "combined real VST3 worker safety latch then new-epoch no-resurrection, allowing release tail",
+  "silent_wait_without_submissions_ms": 100
+}

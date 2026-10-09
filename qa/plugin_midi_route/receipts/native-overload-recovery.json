@@ -1,0 +1,163 @@
+{
+  "base_device_frame": 12288,
+  "max_callback_lateness_us": 0,
+  "overload_adapter_stats": [
+    "FixedQuantumStats { callbacks: 11, callback_frames: 10240, completed_quanta: 80, submitted_quanta: 80, bridge_gaps: 0, plugin_output_quanta: 63, delayed_dry_quanta: 17, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 17, unaligned_delayed_dry_samples: 2176, startup_silence_frames: 2304, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 146, frame_events_staged: 146, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+    "FixedQuantumStats { callbacks: 11, callback_frames: 10240, completed_quanta: 80, submitted_quanta: 80, bridge_gaps: 0, plugin_output_quanta: 64, delayed_dry_quanta: 16, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 16, unaligned_delayed_dry_samples: 2048, startup_silence_frames: 2304, epoch_resets: 1, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 128, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 16, frame_events_staged: 16, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }"
+  ],
+  "overload_worker_stats": [
+    "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 80, submitted: 80, completed: 80, input_overflows: 0, input_gaps: 0, deadline_misses: 1, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 1, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }",
+    "BridgeStats { current_epoch: 2, epoch_resets: 1, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 80, submitted: 80, completed: 80, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 0, detached_workers: 0, shutdown_timeouts: 0, stopped: false }"
+  ],
+  "published_faulted_destinations": 1,
+  "published_faults_after_restart": 0,
+  "recovery_adapter_after": [
+    "FixedQuantumStats { callbacks: 105, callback_frames: 58240, completed_quanta: 455, submitted_quanta: 455, bridge_gaps: 0, plugin_output_quanta: 422, delayed_dry_quanta: 33, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 33, unaligned_delayed_dry_samples: 4224, startup_silence_frames: 4480, epoch_resets: 2, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 256, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 178, frame_events_staged: 178, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+    "FixedQuantumStats { callbacks: 105, callback_frames: 58240, completed_quanta: 455, submitted_quanta: 455, bridge_gaps: 0, plugin_output_quanta: 423, delayed_dry_quanta: 32, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 32, unaligned_delayed_dry_samples: 4096, startup_silence_frames: 4480, epoch_resets: 2, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 256, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 32, frame_events_staged: 32, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }"
+  ],
+  "recovery_adapter_before": [
+    "FixedQuantumStats { callbacks: 11, callback_frames: 10240, completed_quanta: 80, submitted_quanta: 80, bridge_gaps: 0, plugin_output_quanta: 63, delayed_dry_quanta: 17, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 17, unaligned_delayed_dry_samples: 2176, startup_silence_frames: 2432, epoch_resets: 2, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 256, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 146, frame_events_staged: 146, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+    "FixedQuantumStats { callbacks: 11, callback_frames: 10240, completed_quanta: 80, submitted_quanta: 80, bridge_gaps: 0, plugin_output_quanta: 64, delayed_dry_quanta: 16, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 16, unaligned_delayed_dry_samples: 2048, startup_silence_frames: 2432, epoch_resets: 2, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 256, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 16, frame_events_staged: 16, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }"
+  ],
+  "recovery_worker_after": [
+    "BridgeStats { current_epoch: 3, epoch_resets: 2, worker_epoch_resets: 2, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 16, reset_faults: 0, callback_sequences: 455, submitted: 455, completed: 455, input_overflows: 0, input_gaps: 0, deadline_misses: 1, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 1, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }",
+    "BridgeStats { current_epoch: 3, epoch_resets: 2, worker_epoch_resets: 2, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 16, reset_faults: 0, callback_sequences: 455, submitted: 455, completed: 455, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 0, detached_workers: 0, shutdown_timeouts: 0, stopped: false }"
+  ],
+  "recovery_worker_before": [
+    "BridgeStats { current_epoch: 3, epoch_resets: 2, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 16, reset_faults: 0, callback_sequences: 80, submitted: 80, completed: 80, input_overflows: 0, input_gaps: 0, deadline_misses: 1, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 1, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }",
+    "BridgeStats { current_epoch: 3, epoch_resets: 2, worker_epoch_resets: 1, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 16, reset_faults: 0, callback_sequences: 80, submitted: 80, completed: 80, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 2048, tail_samples: 0, detached_workers: 0, shutdown_timeouts: 0, stopped: false }"
+  ],
+  "scope": "intentional unpaced real-plugin overload, failclosed status publication and genuine paced restart",
+  "sink_peak_after_restart": 0.2681370973587036,
+  "source_events": [
+    [
+      14464,
+      [
+        144,
+        60,
+        100
+      ]
+    ],
+    [
+      17464,
+      [
+        128,
+        60,
+        0
+      ]
+    ],
+    [
+      20464,
+      [
+        144,
+        64,
+        100
+      ]
+    ],
+    [
+      23464,
+      [
+        128,
+        64,
+        0
+      ]
+    ],
+    [
+      26463,
+      [
+        144,
+        67,
+        100
+      ]
+    ],
+    [
+      29463,
+      [
+        128,
+        67,
+        0
+      ]
+    ],
+    [
+      32464,
+      [
+        144,
+        60,
+        100
+      ]
+    ],
+    [
+      35464,
+      [
+        128,
+        60,
+        0
+      ]
+    ],
+    [
+      38463,
+      [
+        144,
+        60,
+        100
+      ]
+    ],
+    [
+      41463,
+      [
+        128,
+        60,
+        0
+      ]
+    ],
+    [
+      44464,
+      [
+        144,
+        64,
+        100
+      ]
+    ],
+    [
+      47464,
+      [
+        128,
+        64,
+        0
+      ]
+    ],
+    [
+      50463,
+      [
+        144,
+        67,
+        100
+      ]
+    ],
+    [
+      53463,
+      [
+        128,
+        67,
+        0
+      ]
+    ],
+    [
+      56464,
+      [
+        144,
+        60,
+        100
+      ]
+    ],
+    [
+      59464,
+      [
+        128,
+        60,
+        0
+      ]
+    ]
+  ],
+  "unpaced_callbacks": 3
+}

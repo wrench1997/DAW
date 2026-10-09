@@ -1,0 +1,8 @@
+{
+  "candidate_commit": "e54a6e49fe02b78ff299ce56dddd781925f7fe3c",
+  "source_manifest_sha256": "0693fd6eb5780df5f38fd7fc9a0556151ec8bf7133c87406cf97da8e007ace38",
+  "all_recorded_production_source_files_match_candidate": true,
+  "file_count": 117,
+  "test_only_additions": "External native harness appended to the copied audio_midi_routing_tests.rs; production source unchanged.",
+  "git_status_porcelain": ""
+}

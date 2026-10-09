@@ -317,3 +317,16 @@ notice removal after an empty-folder scan. It uses no actual plugin, native dial
 or device. All previous editor/modal/import/native Inspector flows remain included;
 the populated minimum Piano menu pixels were re-inspected. Separate genuine
 plugin metadata evidence is in [VST3 scanning](VST3_SCANNING.md).
+
+
+## Integrated MIDI port controls
+
+Exact runtime `5e8ff0f622077e6a3817dce122f03ec6e33c1ab1` passes the complete
+**107-entry harness** (106 production-input flows plus the timing-disabled benchmark
+entry), producing **45 genuine Vulkan frames**. Every converted PNG preserves RGB
+bytes exactly. The new flow uses actual scrolling dropdowns to select 255, 0 and
+Off, exercises source audio-monitor mute, undo/history and stopped-only eligibility,
+and inspects the resulting Inspector image. Runtime capability is test-supplied;
+this UI flow does not load a plugin or claim a native plugin window. The separate
+[real production graph receipt](PLUGIN_MIDI_ROUTE_VALIDATION.md) owns plugin DSP/MIDI
+acceptance. All preceding pointer/modal/import/editor regressions run together.

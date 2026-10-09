@@ -1,0 +1,97 @@
+{
+  "case": "production_resume_blank_source_natural_release",
+  "early_sink_release_peak": 0.00512372050434351,
+  "final_second_sink_peak": 0.0,
+  "master_contains_host_metronome": true,
+  "quarter_second_windows": [
+    {
+      "isolated_sink_track2": {
+        "peak": 0.00512372050434351,
+        "rms": 0.00029924223336357626
+      },
+      "master": {
+        "peak": 0.005123675800859928,
+        "rms": 0.00029924104873010416
+      },
+      "quarter_second": 0
+    },
+    {
+      "isolated_sink_track2": {
+        "peak": 0.0,
+        "rms": 0.0
+      },
+      "master": {
+        "peak": 0.0,
+        "rms": 0.0
+      },
+      "quarter_second": 1
+    },
+    {
+      "isolated_sink_track2": {
+        "peak": 0.0,
+        "rms": 0.0
+      },
+      "master": {
+        "peak": 0.09128104150295258,
+        "rms": 0.005078698509437616
+      },
+      "quarter_second": 2
+    },
+    {
+      "isolated_sink_track2": {
+        "peak": 0.0,
+        "rms": 0.0
+      },
+      "master": {
+        "peak": 0.0,
+        "rms": 0.0
+      },
+      "quarter_second": 3
+    },
+    {
+      "isolated_sink_track2": {
+        "peak": 0.0,
+        "rms": 0.0
+      },
+      "master": {
+        "peak": 0.09128104150295258,
+        "rms": 0.005078698509437616
+      },
+      "quarter_second": 4
+    },
+    {
+      "isolated_sink_track2": {
+        "peak": 0.0,
+        "rms": 0.0
+      },
+      "master": {
+        "peak": 0.09128104150295258,
+        "rms": 0.004877403406864757
+      },
+      "quarter_second": 5
+    },
+    {
+      "isolated_sink_track2": {
+        "peak": 0.0,
+        "rms": 0.0
+      },
+      "master": {
+        "peak": 0.026882609352469444,
+        "rms": 0.0014156675303431557
+      },
+      "quarter_second": 6
+    },
+    {
+      "isolated_sink_track2": {
+        "peak": 0.0,
+        "rms": 0.0
+      },
+      "master": {
+        "peak": 0.09128104150295258,
+        "rms": 0.005078698509437616
+      },
+      "quarter_second": 7
+    }
+  ],
+  "source_event_count": 0
+}

@@ -1,13 +1,13 @@
 # Development roadmap
 
-Updated: 2026-10-09 09:53 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-09 10:45 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
 - Development branch: `ci/windows-reliability-20261009`. Last fully validated Windows checkpoint: **`53494d518bfc4bad7304f25c127491a0c67d7cd8`**, including Browser, measured meters, v11 split fidelity, WAV/media/export controls and responsive UI QA. [Quality 37886481852](https://github.com/wrench1997/DAW/actions/runs/37886481852) passed **909 Rust tests**, 14 helper-harness tests and actual helper smoke. [Preview 37886481857](https://github.com/wrench1997/DAW/actions/runs/37886481857) passed optimized static-CRT builds, 57 Python tests, PE/import audit, ZIP/hash checks and extracted-helper smoke; no artifact upload.
-- Application **0.5.0-alpha.1** uses Project **v11**. v10 inputs load, but new saves require a new build. Preserve original projects before evaluation.
-- Current scanner-integrated source **`e6bd216863f6180c2745de05c6701c6300d41cf2`** passes Linux **1,107 app +14 helper +5 protocol all-feature tests**, **1,103 no-default app tests**, fmt, both strict Clippy modes, app/helper build, ordinary helper smoke, Windows source cross-check and **177 Python tests** on default stack. Runtime/Cargo/vendor exactly match the independently reviewed scanner. The complete UI harness passes 106 entries (105 input flows plus the timing-disabled benchmark entry) with 44 genuine Vulkan frames. Exact integrated metadata-only probing of official Surge instrument/Effects also passes. New Windows execution remains required.
-- At **`d9016e5`**, Windows source gates passed 1,091 app +13 helper +5 protocol tests and [preview 37910288992](https://github.com/wrench1997/DAW/actions/runs/37910288992) passed the full optimized/provenance/package/extracted-helper lane with 167 Python tests, upload disabled. [Quality 37910289005](https://github.com/wrench1997/DAW/actions/runs/37910289005) passes trusted native stopped-state restore, interaction/lifecycle/protocol checks, but native paint still FAILS and repaint comparison is SKIP. Overall quality remains failed; wider physical-input/vendor/hardware acceptance remains open.
+- Application **0.5.0-alpha.1** uses Project **v12**. v10/v11 inputs load with ports Off and source audio monitoring enabled; new saves need a v12 build. Preserve original projects before evaluation.
+- Current routing-integrated source **`5e8ff0f622077e6a3817dce122f03ec6e33c1ab1`** passes Linux **1,131 app +15 helper +5 editor protocol +2 transport protocol all-feature tests**, **1,127 no-default app tests**, fmt, both strict Clippy modes, app/helper build, ordinary helper smoke, Windows source cross-check and **187 Python tests** on default stack. Runtime/Cargo/vendor/tests exactly match reviewed `e54a6e4`; the 117-file real-plugin source binding also matches. New Windows execution remains required. Full current UI evidence is in [UI QA](HEADLESS_UI_QA.md).
+- At **`9782e62`**, Windows source gates passed 1,102 app +13 helper +5 protocol tests and [preview 37914387094](https://github.com/wrench1997/DAW/actions/runs/37914387094) passed the full optimized/provenance/package/extracted-helper lane with 177 Python tests, upload disabled. [Quality 37914386973](https://github.com/wrench1997/DAW/actions/runs/37914386973) passes trusted native stopped-state restore, interaction/lifecycle/protocol checks, but native paint still FAILS and repaint comparison is SKIP. Overall quality remains failed; wider physical-input/vendor/hardware acceptance remains open.
 - The integrated [simultaneous workspace](MULTIWINDOW_WORKSPACE.md) is a real shared-project, internal-window implementation. The latest requested [compact refinement](COMPACT_WORKSPACE.md) keeps useful task density, persistent migration, continuous held gestures and bounded release snapping; controlled unoptimized CPU comparisons do not establish a general speedup or displayed FPS. Focused Piano session-local note clipboard now has bounded data, semantic input/text isolation and explicit Undo. Offscreen frames validate app paint/layout rather than cloud X11 presentation, OS-detached editors, device audio or native VST3 editor paint.
 - Evidence levels stay distinct: **implemented/source-inspected**; **executed code tests** at an exact revision; **GUI/device scenario passed** with artifacts; **release candidate accepted** on the intended package; **commercial maturity** from broader workflow, compatibility and sustained-use coverage. None implies the next.
 
@@ -34,6 +34,19 @@ session-owned edit/repeat intervals, exact range-width copying, left-visible-bar
 paste, safe Off/fine/triplet grids and compact narrow-window controls. Ranges do
 not alter playback loops, transport, Project serialization or Playlist snap.
 MIDI interchange, playback-range looping and broader commercial workflow remain open.
+
+## Current plugin routing slice
+
+[Numbered MIDI ports](PLUGIN_MIDI_ROUTING.md) now connect one producer to one or more
+exclusive-input instruments during constant-tempo playback, with stopped-only route
+edits, endpoint/epoch attestation, bounded event quotas and latched failure cleanup.
+The [separate source-pinned real-plugin receipt](PLUGIN_MIDI_ROUTE_VALIDATION.md)
+passes five production-graph tests with Stochas/Surge/Effects, including latency
+reactivation and overload/release safety. This is intentionally conservative:
+4,352 bridge frames /90.667 ms minimum for source plus synth at 48 kHz; no seamless
+loop, stopped live chain or Harmony Blueprint qualification. The retained concurrent
+source-loss negative is unresolved, the old Off path has misses and a measured debug
+callback exceeds its period. Low-latency device acceptance remains a distinct gap.
 
 ## P0 / M1 — Edit a song without changing its meaning
 

@@ -190,3 +190,17 @@ Harmony Blueprint, Windows/macOS execution, physical speakers/devices, native
 plugin UI, seamless loops and stopped live multi-plugin audition remain unverified
 or outside this slice. Full raw receipts, hashes and the source-only native harness
 are preserved with the independent real-VST3 validation deliverable.
+
+
+### Integrated source and portable evidence
+
+Reviewed implementation `e54a6e49fe02b78ff299ce56dddd781925f7fe3c` plus acceptance
+docs `9f4a64b3ea10d4eec4eb451d51a67eea15a36c51` integrate as `5e8ff0f`. All
+production source/Cargo/vendor/test bytes are preserved. Fresh Linux integration
+gates pass 1,131 app +15 helper +5 editor protocol +2 transport protocol tests,
+1,127 no-default app tests, fmt, both strict Clippy profiles, build, ordinary helper
+smoke, Windows source cross-check and 187 Python tests. Exact Windows execution
+remains a separate candidate gate. The [portable real-plugin receipt guide](PLUGIN_MIDI_ROUTE_VALIDATION.md)
+contains five-test results, all negative observations, import provenance and a
+plugin-free integrity/source-byte verifier. Linux native editors and a metronome
+toggle are separate changes and are not part of this checkpoint.

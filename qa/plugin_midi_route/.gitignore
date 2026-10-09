@@ -1,0 +1,11 @@
+# Logs below are intentional historical source receipts.
+!**/*.log
+# Reproduce in a separate disposable copy, never publish generated outputs.
+/bin/
+/source/
+/home/
+/tmp/
+/__pycache__/
+/receipts/*.wav
+/receipts/*.jsonl
+/receipts/*.stderr

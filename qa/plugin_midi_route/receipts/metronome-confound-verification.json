@@ -1,0 +1,38 @@
+{
+  "sink_peak_after_quarter_second": 0.0,
+  "master_click_clusters": [
+    {
+      "first_sample": 26847,
+      "last_nonzero": 27707,
+      "max_error_vs_host_1100Hz_exponential_click": 3.0483107309173252e-05
+    },
+    {
+      "first_sample": 49343,
+      "last_nonzero": 50203,
+      "max_error_vs_host_1100Hz_exponential_click": 3.0483107309173252e-05
+    },
+    {
+      "first_sample": 71838,
+      "last_nonzero": 72698,
+      "max_error_vs_host_1100Hz_exponential_click": 3.0483107309173252e-05
+    },
+    {
+      "first_sample": 94334,
+      "last_nonzero": 95194,
+      "max_error_vs_host_1100Hz_exponential_click": 3.0483107309173252e-05
+    }
+  ],
+  "comparison_tolerance_pcm16": 3.151850947599719e-05,
+  "host_click_parameters": {
+    "frequency_hz": 1100,
+    "initial_amplitude": 0.1,
+    "per_sample_decay": 0.992,
+    "cutoff": 0.0001,
+    "output": "tanh"
+  },
+  "input_sha256": {
+    "blank-source-master.wav": "1b90ece1f59343bee2ee6e6953a303756a4165bb709cb987e9d625b526a0c60b",
+    "blank-source-isolated-sink.wav": "b8bebfa88fb1b372966479d14b067517ce46df72fee19c7621d6d8ce9a368dce"
+  },
+  "explanation": "Every residual click after the isolated Surge track is zero matches the source-defined host metronome within PCM16 quantization tolerance."
+}

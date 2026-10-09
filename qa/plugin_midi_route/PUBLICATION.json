@@ -1,0 +1,16 @@
+{
+  "source_archive_sha256": "d2256e435d1610f2ee7b8a65a3ed116ddf48fa87edbceb1bee0941ab3794433d",
+  "source_archive_bytes": 96739,
+  "original_inventory_sha256": "16d22fa19ff6a12836f040d9d2cb4e48b66a8601e807e0481e3b00c613c8e47e",
+  "measured_candidate_commit": "e54a6e49fe02b78ff299ce56dddd781925f7fe3c",
+  "integrated_runtime_commit": "5e8ff0f622077e6a3817dce122f03ec6e33c1ab1",
+  "preserved_imported_files": "All imported files are byte-identical to the normalized worker archive except the explicitly adapted reproduction guide. Measurement values, event data, failure logs and source bindings are unchanged.",
+  "adaptations": [
+    {
+      "path": "REPRODUCE.md",
+      "imported_sha256": "f402a66f4af477953ad71243b7abd8cb1cf6720d9a2cc93d87c8c044dacd2384",
+      "publication_sha256": "a21825e8c74e764434cb44cd0be111859021cecd4441eafb0db8634656b4bd3c",
+      "reason": "Clarify disposable working layout, required Git checkout and explicit environment variables; distinguish retained executable attribution from an unshipped raw binary."
+    }
+  ]
+}

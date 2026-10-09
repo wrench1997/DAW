@@ -1,0 +1,8 @@
+{
+  "candidate_commit": "e54a6e49fe02b78ff299ce56dddd781925f7fe3c",
+  "changed_files_from_test_snapshot": [
+    "src/app.rs"
+  ],
+  "binary_sha256": "78105828ee0dc461aa70813914d22d37133a8482a698ebaf2b76840dfbb4eb58",
+  "condition": "routing worker confirmed all builds finished and deferred tests/capture; Linux worker holds heavy runs; same binary as failed concurrent-load observation"
+}

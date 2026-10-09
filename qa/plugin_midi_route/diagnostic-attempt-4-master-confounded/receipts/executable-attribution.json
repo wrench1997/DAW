@@ -1,0 +1,83 @@
+{
+  "native-route-tests": {
+    "sha256": "caa048163c5ed551e882b589590d1694120351d9a8ccdd6a67522d8da4f16c99",
+    "compiler_artifact": {
+      "reason": "compiler-artifact",
+      "package_id": "path+file://<VALIDATION_ROOT>/route-acceptance/source#citrus-studio@0.5.0-alpha.1",
+      "manifest_path": "<VALIDATION_ROOT>/route-acceptance/source/Cargo.toml",
+      "target": {
+        "kind": [
+          "bin"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "citrus-studio",
+        "src_path": "<VALIDATION_ROOT>/route-acceptance/source/src/main.rs",
+        "edition": "2024",
+        "doc": true,
+        "doctest": false,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "features": [
+        "default",
+        "vst2",
+        "vst3"
+      ],
+      "filenames": [
+        "<SHARED_TARGET>/debug/deps/citrus_studio-672f5b43b5d356db"
+      ],
+      "executable": "<SHARED_TARGET>/debug/deps/citrus_studio-672f5b43b5d356db",
+      "fresh": false
+    }
+  },
+  "vst3-host-helper": {
+    "sha256": "e9054525908274d54cfac8a1a5591c42efb1d914c59281c2cb2589b2528e51d1",
+    "compiler_artifact": {
+      "reason": "compiler-artifact",
+      "package_id": "path+file://<VALIDATION_ROOT>/route-acceptance/source#citrus-studio@0.5.0-alpha.1",
+      "manifest_path": "<VALIDATION_ROOT>/route-acceptance/source/Cargo.toml",
+      "target": {
+        "kind": [
+          "bin"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "vst3-host-helper",
+        "src_path": "<VALIDATION_ROOT>/route-acceptance/source/src/bin/vst3-host-helper.rs",
+        "edition": "2024",
+        "required-features": [
+          "vst3"
+        ],
+        "doc": true,
+        "doctest": false,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": false
+      },
+      "features": [
+        "default",
+        "vst2",
+        "vst3"
+      ],
+      "filenames": [
+        "<SHARED_TARGET>/debug/vst3-host-helper"
+      ],
+      "executable": "<SHARED_TARGET>/debug/vst3-host-helper",
+      "fresh": false
+    }
+  }
+}
