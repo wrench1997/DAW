@@ -409,7 +409,8 @@ matches the independent native/first-note evidence. New bounded default2048/fres
 state production-graph regression passes all four default2048 cases plus fresh state,
 both exits0, with exact PDC4896/7328 and routed8on/8off. Changing debug cases retain
 13/14 core and15/14 outer interval overruns; no performance upgrade is claimed.
-Exact Windows CI remains a separate gate.
+The exact parameter checkpointb92c394 subsequently passed Windows source/preview;
+known native paint remained failed.
 
 The [exact parameter-helper regression](../qa/parameter_storage_regression/RESULT.md) binds124 production files tofb7b91a and new helpera29e4942. Its separate fresh-instance case uses historical captured input state104bc8ab… (not the newly authored011ded9e… native blob), with onset24/peak0.22329643368721008 and exact controller/component values. Both inputs have independent functional proof; their test identities and13/14 debug core interval overruns remain distinct.
 
@@ -478,3 +479,19 @@ separate follow-up. Existing getEvent/getEventCount and clear/reset diagnostics 
 Public invalid-MIDI validation may still allocate formatted errors.
 Locks, payload allocation/free and arbitrary plugin callbacks remain; the single-thread helper's
 historical 346.9 ms native-resize stall is not resolved by this correctness slice.
+
+
+### Event-source integration and evidence boundary
+
+Reviewed7d8a416 integrates as7d7294b with all124 production hashes equal to the
+independently tested frozen source. The [checked-event correctness receipt](../qa/event_admission_regression/RESULT.md)
+retains original basebf573a4 plus reviewed482031cc diff and a separate committed
+7d8a416 equivalence record; base alone is not the tested source. Helper59b6bcbd and
+testeea1adf8 identities remain exact. Default2048 four delivery cases and separate
+fresh-state first note pass, both exits0, with12/14 changing debug core overruns.
+Current App/reset source remains unchanged; no reset-policy experiment is included.
+Fresh combined gates pass1170app+22helper+5+2protocol,1166core,362availablevendor
+(one explicit missing fixture),26doctests,239Python,fmt/two strictrootClippy modes,
+build/helper smoke and bothMSVCsource profiles. Fresh helper hash equals the
+independently tested59b6bcbd artifact; no post-gate production edit. Exact Windows
+CI remains separate and pending.

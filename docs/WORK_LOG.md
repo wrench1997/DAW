@@ -947,3 +947,23 @@ Receipt: the retained `native-event-admission-receipt.json`,
 SHA256 `835ccf39085011738adf12cd5587ad4cac8d3968a0d0318023b1741a1b0dfc25`.
 The independent review binds the final Rust/helper bytes with no source blocker. GUI results do
 not imply DSP-thread isolation, resize performance, hardware or cross-platform qualification.
+
+
+## 2026-10-09 15:45 UTC — Prepare checked-event checkpoint independently
+
+- Prior publishedb92c394 preview37950671153 completes successfully:231Python cases (227 passed/four Unix skips),1,165app+15helper+5+2protocol,optimized/static-CRT/provenance/PE/ZIP/extracted smoke; upload skipped,both artifact APIs0. Quality37950671033 has only native paint before/after failure and repaint comparison skipped, with independent source/state/control/lifecycle passes. The639-file source ZIP plus unchanged current-cost/historical-optimized appendices verifies SHA341fee9ac3b6f6ffb01014e7d10d0ec931a27c03d71d129fb7ddaafa11c64351.
+- Only event7d8a416 integrates as7d7294b36df8f877c30a16a14afb98cf0f1ac047; additive docs histories retained. src/vendor/Cargo/tests byte-match reviewed feature; all41 source hashes and native835ccf39 receipt verify. App/reset remains unchanged. Existing496-input package links/vendor/QA provenance pass read-only inspection. No new combined build/test run or publication is claimed at this entry.
+- Source-owner final review closes with no blocker. Default2048 source-only archive4e696243f9782fd6a623f89010d1b65e58e5af109891a6183498c334516a7da1 (152229bytes,55text/source files) preserves basebf573a4+exact482031cc diff and separate final7d8a416 equivalence, not a false base-only claim. Four delivery cases plus fresh state exit0;12/14 core overruns remain. Complete combined gates and any separately reviewed reset-policy work remain pending; no hypothetical reset change is included.
+
+
+## 2026-10-09 15:50 UTC — Event-only gates and receipt preparation
+
+- The checkpoint proceeds independently; reset policy remains unchanged. Imported55 original portable files under [qa/event_admission_regression](../qa/event_admission_regression/RESULT.md), with exact path whitelist and pinned inventory9bf3d8af3a911286a766b628f547ee4579e2d40ef582b38b6c36254d0e9b8b88. Every124 tested production hash matches both reviewed7d8a416 and integrated7d7294b. No base-only provenance claim or renewed optimized-performance claim is made.
+- Existing/new551 package inputs close links/vendor/all QA inventory checks; official archive+patch reconstruct44 files, preserving original license/manifests. Fresh all-feature1170app+22helper+5+2protocol already passes; remaining aggregate gates continue. No publication or complete combined acceptance is claimed before those gates finish.
+
+
+## 2026-10-09 15:52 UTC — Final event-only combined source gates pass
+
+- Complete all-feature/all-target1170app+22helper+5editor+2transport and no-default1166core pass, zero failed/ignored on default stack.362 available source-linked vendor cases pass with one explicitly excluded missing upstream Dexed fixture, plus26doctests. fmt,bothstrictrootClippy modes,all-bin build,actual helper smoke,andbothMSVCsource profiles pass. Full239Python cases pass including four actual Unix descriptor tests.
+- Fresh combined helper SHA59b6bcbdb7a90b08fe5c8ebb2da2ba3ffe368c1089d70a6c7d4e7ab28b90d086 is byte-identical to independent native/headless/default2048 evidence. All124 tested source hashes match7d7294b; App/reset/timing/wire remain unchanged. Existing exact-source native results are bound through equivalence, not relabeled as a new measurement.
+- New55-file exact whitelist/pinned inventory and provenance regressions pass; all551 actual source-package inputs have closed links and exact vendor/historical/newQA hashes. Read-only parent review found no blocker. Publication/WindowsCI remain pending at this checkpoint entry; no reset proposal is included.

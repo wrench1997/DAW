@@ -515,6 +515,65 @@ PARAMETER_COST_QA_FILES = frozenset((
     "qa/parameter_storage_cost/validation-receipt.json",
 ))
 PARAMETER_COST_INVENTORY_SHA256 = "da353fbbc050cd18f9855934c73b9969f411a71cfe3249168b827663af285436"
+EVENT_QA_ROOT = "qa/event_admission_regression/"
+EVENT_QA_FILES = frozenset((
+    "qa/event_admission_regression/INVENTORY.json",
+    "qa/event_admission_regression/README.md",
+    "qa/event_admission_regression/REPRODUCE.md",
+    "qa/event_admission_regression/RESULT.md",
+    "qa/event_admission_regression/SHA256SUMS.json",
+    "qa/event_admission_regression/SUMMARY.json",
+    "qa/event_admission_regression/build_and_copy.py",
+    "qa/event_admission_regression/frozen-source-attestation.json",
+    "qa/event_admission_regression/native_timing_tests.rs",
+    "qa/event_admission_regression/prepare_snapshot.py",
+    "qa/event_admission_regression/receipts/build-binding.json",
+    "qa/event_admission_regression/receipts/build-environment.json",
+    "qa/event_admission_regression/receipts/debug-resource-watch.jsonl",
+    "qa/event_admission_regression/receipts/executable-attribution.json",
+    "qa/event_admission_regression/receipts/final-source-equivalence.json",
+    "qa/event_admission_regression/receipts/helper-build.jsonl",
+    "qa/event_admission_regression/receipts/helper-build.stderr",
+    "qa/event_admission_regression/receipts/native-build.jsonl",
+    "qa/event_admission_regression/receipts/native-build.stderr",
+    "qa/event_admission_regression/receipts/plugin-provenance.json",
+    "qa/event_admission_regression/receipts/reviewed-rust-source.diff",
+    "qa/event_admission_regression/receipts/reviewed-source-manifest.json",
+    "qa/event_admission_regression/receipts/source-snapshot.json",
+    "qa/event_admission_regression/run_profiles.sh",
+    "qa/event_admission_regression/runs/run001-default2048/b2048_routedfalse_changingfalse-cold-trace.json",
+    "qa/event_admission_regression/runs/run001-default2048/b2048_routedfalse_changingfalse.json",
+    "qa/event_admission_regression/runs/run001-default2048/b2048_routedfalse_changingtrue-cold-trace.json",
+    "qa/event_admission_regression/runs/run001-default2048/b2048_routedfalse_changingtrue.json",
+    "qa/event_admission_regression/runs/run001-default2048/b2048_routedtrue_changingfalse-cold-trace.json",
+    "qa/event_admission_regression/runs/run001-default2048/b2048_routedtrue_changingfalse.json",
+    "qa/event_admission_regression/runs/run001-default2048/b2048_routedtrue_changingtrue-cold-trace.json",
+    "qa/event_admission_regression/runs/run001-default2048/b2048_routedtrue_changingtrue.json",
+    "qa/event_admission_regression/runs/run001-default2048/build-binding.json",
+    "qa/event_admission_regression/runs/run001-default2048/build_and_copy.py",
+    "qa/event_admission_regression/runs/run001-default2048/executable-attribution.json",
+    "qa/event_admission_regression/runs/run001-default2048/exit-status.txt",
+    "qa/event_admission_regression/runs/run001-default2048/host-resources-after.json",
+    "qa/event_admission_regression/runs/run001-default2048/host-resources-before.json",
+    "qa/event_admission_regression/runs/run001-default2048/native_timing_tests.rs",
+    "qa/event_admission_regression/runs/run001-default2048/prepare_snapshot.py",
+    "qa/event_admission_regression/runs/run001-default2048/raw.log",
+    "qa/event_admission_regression/runs/run001-default2048/run-binding.json",
+    "qa/event_admission_regression/runs/run001-default2048/source-snapshot.json",
+    "qa/event_admission_regression/runs/run002-fresh-restored-state/build-binding.json",
+    "qa/event_admission_regression/runs/run002-fresh-restored-state/build_and_copy.py",
+    "qa/event_admission_regression/runs/run002-fresh-restored-state/executable-attribution.json",
+    "qa/event_admission_regression/runs/run002-fresh-restored-state/exit-status.txt",
+    "qa/event_admission_regression/runs/run002-fresh-restored-state/fresh-restored-surge.json",
+    "qa/event_admission_regression/runs/run002-fresh-restored-state/host-resources-after.json",
+    "qa/event_admission_regression/runs/run002-fresh-restored-state/host-resources-before.json",
+    "qa/event_admission_regression/runs/run002-fresh-restored-state/native_timing_tests.rs",
+    "qa/event_admission_regression/runs/run002-fresh-restored-state/prepare_snapshot.py",
+    "qa/event_admission_regression/runs/run002-fresh-restored-state/raw.log",
+    "qa/event_admission_regression/runs/run002-fresh-restored-state/run-binding.json",
+    "qa/event_admission_regression/runs/run002-fresh-restored-state/source-snapshot.json",
+))
+EVENT_INVENTORY_SHA256 = "9bf3d8af3a911286a766b628f547ee4579e2d40ef582b38b6c36254d0e9b8b88"
 # Explicitly reviewed documentation that may land on an independent branch.
 OPTIONAL_SOURCE_FILES = frozenset((
     "docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md",
@@ -527,7 +586,7 @@ OPTIONAL_SOURCE_FILES = frozenset((
     "docs/PLUGIN_MIDI_ROUTING.md", "docs/PLUGIN_MIDI_ROUTE_VALIDATION.md",
     "docs/PLUGIN_PROCESSOR_DOMAINS.md", "docs/PLUGIN_STATE_RESTORE_LIMITS.md", "docs/PLUGIN_TIMING.md",
     "docs/LINUX_VST3_EDITORS.md", "docs/LINUX_VST3_EDITOR_VALIDATION.md", "docs/METRONOME.md",
-)) | REAL_VST3_QA_FILES | MIDI_ROUTE_QA_FILES | TIMING_DEBUG_QA_FILES | TIMING_COMBINED_QA_FILES | NATIVE_EDIT_QA_FILES | PARAMETER_QA_FILES | PARAMETER_COST_QA_FILES
+)) | REAL_VST3_QA_FILES | MIDI_ROUTE_QA_FILES | TIMING_DEBUG_QA_FILES | TIMING_COMBINED_QA_FILES | NATIVE_EDIT_QA_FILES | PARAMETER_QA_FILES | PARAMETER_COST_QA_FILES | EVENT_QA_FILES
 GENERATED_FILES = ("START_HERE_PREVIEW.txt", "BUILD_PROVENANCE.json", "DEPENDENCIES.json")
 PAYLOAD_FILES = frozenset(BINARIES + SOURCE_FILES + GENERATED_FILES)
 PACKAGE_FILES = PAYLOAD_FILES | {"SHA256SUMS.txt"}
@@ -980,6 +1039,22 @@ def validate_parameter_qa(payload):
     require(json.loads(payload[inventory]) == expected, "Parameter QA inventory/hash mismatch")
 
 
+def validate_event_qa(payload):
+    """Pin exact checked-event correctness evidence, preserving historical runs."""
+    present = set(payload) & EVENT_QA_FILES
+    unexpected = {name for name in payload if name.startswith(EVENT_QA_ROOT)} - EVENT_QA_FILES
+    require(not unexpected, "Unexpected event QA path")
+    if not present:
+        return
+    require(present == EVENT_QA_FILES, "Incomplete event QA source bundle")
+    inventory = EVENT_QA_ROOT + "SHA256SUMS.json"
+    require(digest(payload[inventory]) == EVENT_INVENTORY_SHA256,
+            "Event QA pinned inventory/hash mismatch")
+    expected = {path.removeprefix(EVENT_QA_ROOT): digest(payload[path])
+                for path in EVENT_QA_FILES - {inventory}}
+    require(json.loads(payload[inventory]) == expected, "Event QA inventory/hash mismatch")
+
+
 def validate_parameter_cost_qa(payload):
     """Preserve finite-storage cost tradeoffs and the immutable full-appendix identity."""
     present = set(payload) & PARAMETER_COST_QA_FILES
@@ -1055,6 +1130,7 @@ def create_package(repo, binaries, metadata, build_info, output):
     validate_native_edit_qa(payload)
     validate_parameter_qa(payload)
     validate_parameter_cost_qa(payload)
+    validate_event_qa(payload)
     payload["SHA256SUMS.txt"] = "".join(f"{digest(payload[p])}  {p}\n" for p in sorted(payload)).encode("ascii")
     output.mkdir(parents=True, exist_ok=True)
     epoch = max(315532800, min(build_info["source_epoch"], 4354819198))
@@ -1114,6 +1190,7 @@ def verify_package(path, extract_to=None):
     validate_native_edit_qa(payload)
     validate_parameter_qa(payload)
     validate_parameter_cost_qa(payload)
+    validate_event_qa(payload)
     for binary in BINARIES:
         require(inspect_pe(payload[binary]) == info["pe_audit"][binary], "PE audit/provenance mismatch")
     inventory = json.loads(payload["DEPENDENCIES.json"])

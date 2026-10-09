@@ -1,13 +1,13 @@
 # Development roadmap
 
-Updated: 2026-10-09 15:02 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-09 15:45 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
 - Development branch: `ci/windows-reliability-20261009`. Last fully validated Windows checkpoint: **`53494d518bfc4bad7304f25c127491a0c67d7cd8`**, including Browser, measured meters, v11 split fidelity, WAV/media/export controls and responsive UI QA. [Quality 37886481852](https://github.com/wrench1997/DAW/actions/runs/37886481852) passed **909 Rust tests**, 14 helper-harness tests and actual helper smoke. [Preview 37886481857](https://github.com/wrench1997/DAW/actions/runs/37886481857) passed optimized static-CRT builds, 57 Python tests, PE/import audit, ZIP/hash checks and extracted-helper smoke; no artifact upload.
 - Application **0.5.0-alpha.1** uses Project **v12**. v10/v11 inputs load with ports Off and source audio monitoring enabled; new saves need a v12 build. Preserve original projects before evaluation.
 - Historical ownership-preparation source **`3fb549a059916dca7b3af3eff00ff27fba0bddd4`** passes 1,137 app +21 helper +5 editor protocol +2 transport protocol Linux all-feature tests, 1,133 core tests, both strict Clippy modes, fmt/build/helper smoke, both MSVC source profiles and 195 Python tests. The available vendor suite passes 270 cases serially with one explicit missing upstream fixture exclusion; all 26 doctests pass, including five new facade cases. App/UI/audio are unchanged. Its exact published checkpoint 5befb51 completed its own Windows runs; no worker or latency improvement is claimed.
-- At **`e487a50`**, Windows source gates pass 1,165 app +15 helper +5 editor protocol +2 transport protocol tests. [Preview 37940326948](https://github.com/wrench1997/DAW/actions/runs/37940326948) passes the optimized/provenance/package/extracted-helper lane, with 215 Python cases (211 passed, four Unix-only skips) and upload disabled. [Quality 37940326370](https://github.com/wrench1997/DAW/actions/runs/37940326370) passes independent native state/interaction/lifecycle but still fails before/after paint; repaint is SKIP. Overall quality is failed.
+- At **`b92c394`**, Windows source gates pass 1,165 app +15 helper +5 editor protocol +2 transport protocol tests. [Preview 37950671153](https://github.com/wrench1997/DAW/actions/runs/37950671153) passes the optimized/provenance/package/extracted-helper lane, with 231 Python cases (227 passed, four Unix-only skips) and upload disabled. [Quality 37950671033](https://github.com/wrench1997/DAW/actions/runs/37950671033) passes independent native state/interaction/lifecycle but still fails before/after paint; repaint is SKIP. Overall quality is failed.
 - The integrated [simultaneous workspace](MULTIWINDOW_WORKSPACE.md) is a real shared-project, internal-window implementation. The latest requested [compact refinement](COMPACT_WORKSPACE.md) keeps useful task density, persistent migration, continuous held gestures and bounded release snapping; controlled unoptimized CPU comparisons do not establish a general speedup or displayed FPS. Focused Piano session-local note clipboard now has bounded data, semantic input/text isolation and explicit Undo. Offscreen frames validate app paint/layout rather than cloud X11 presentation, OS-detached editors, device audio or native VST3 editor paint.
 - Evidence levels stay distinct: **implemented/source-inspected**; **executed code tests** at an exact revision; **GUI/device scenario passed** with artifacts; **release candidate accepted** on the intended package; **commercial maturity** from broader workflow, compatibility and sustained-use coverage. None implies the next.
 
@@ -33,7 +33,7 @@ allocation, native resize346.9ms stall, hardware and broader realtime safety rem
 open. Prior optimized12/16 quiet and12/16 loaded results belong to4fdf/244 and its
 older helper; they cannot qualify this changed helper.
 
-## Current bounded parameter-container preparation
+## Historical bounded parameter-container preparation
 
 Reviewedbf573a4 integrates asfb7b91a. Stable prepared COM queues, finite shared
 point storage and checked input admission replace per-operation queue allocation;
@@ -43,7 +43,8 @@ App/timing/wire are unchanged. Source/native/comparative review is clear; combin
 22 helper +5+2 protocol,1166 core,339 available vendor cases/one explicit fixture
 exclusion,26 doctests and231 Python, plus fmt/strict root Clippy/build/cross checks.
 New-helper default2048 four cases plus fresh state pass (both exits0), retaining
-13/14 changing debug core overruns. Exact Windows CI remains required.
+13/14 changing debug core overruns. Exactb92c394 Windows source/preview passed;
+known native paint remained failed.
 
 Constructor requested bytes total1,573,104, excluding outer wrappers and allocator
 metadata. Tested cold/reused container operations allocate/free zero while the host
@@ -53,6 +54,21 @@ suffix movement and some read/small cases remain slower, with aggregate quadrati
 worst cases. Whole-Process no-allocation, mutex/event/metering removal, independent
 GUI/DSP execution and the346.9ms resize stall remain open. See [exact scope and
 comparative costs](PLUGIN_PROCESSOR_DOMAINS.md#prepared-bounded-parameter-com-storage).
+
+## Current checked-event correctness preparation
+
+Reviewed7d8a416 integrates as7d7294b with41 exact source hashes and no App/helper
+wire/timing/reset changes. Event capacity/metadata checks precede payload copy;
+note counts/IDs commit after successful enqueue. Rejected releases retain their
+obligations, and panic commits only its accepted prefix (at most4096 per call).
+Invalid raw pointer memory remains the foreign caller's responsibility.
+
+Source-owner native/headless/default2048 checks pass. New full combined gates pass
+1170app+22helper+5+2protocol,1166core,362availablevendor/one explicitfixture exclusion,
+26doctests,239Python,fmt/two strictrootClippy modes/build/helper smoke/bothMSVCprofiles.
+Fresh helper59b6bcbd matches the independently tested source; exact Windows CI remains pending. No payload no-allocation, worker,
+reset-policy correction, low-latency or hardware qualification is implied. Existing
+legacy ignored-result callers and read/clear/reset diagnostics remain documented.
 
 ## Current product priority — detailed Piano melody composition
 
@@ -124,8 +140,9 @@ Content/container sizing, native resize stalls and general state consistency rem
 open. The follow-on exact-class/version guard refuses used/editor-opened loads
 before helper mutation or detachment. It does not make reused restoration succeed;
 the newly integrated timing configuration path adds tagged live-state capture and
-prevalidated replacement retention. Exact combined verification is pending; helper
-GUI/DSP concurrent processing remains separate work.
+prevalidated replacement retention. That exact combined path has passed source and
+bounded state/delivery gates, most recently published atb92c394; hardware/paint and
+helper GUI/DSP concurrent processing remain separate work.
 
 ## P0 / M1 — Edit a song without changing its meaning
 

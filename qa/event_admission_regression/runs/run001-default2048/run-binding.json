@@ -1,0 +1,15 @@
+{
+  "started_utc": "2026-10-09T15:35:40.337213+00:00",
+  "test_sha256": "eea1adf80330fe8380abeb146024a1197ca6831122a76f2f704480108637f667",
+  "helper_sha256": "59b6bcbdb7a90b08fe5c8ebb2da2ba3ffe368c1089d70a6c7d4e7ab28b90d086",
+  "source_manifest_sha256": "e4897e5b7db0f6d96a71d998fb767e89237db82076440a04da8e8abdf3fb1997",
+  "source_commit": "bf573a45826466db0952eb1f4bd598937c68d1c5",
+  "source_status": "uncommitted_frozen_working_tree",
+  "commit_role": "base_commit_only_not_complete_tested_source",
+  "reviewed_source_diff_sha256": "482031cc4050ca3747db2b276a5b2957b0a55d32f98a07c684eb408683584e23",
+  "build_profile": "debug",
+  "budget_filter": "2048",
+  "profile_filter": null,
+  "cpu_load_threads": "0",
+  "declared_environment": "Bounded default2048 correctness regression; BASE commitbf573a4 plus reviewed frozen Rust diff482031cc and complete per-file source manifest; new helper59b6bcbd; GUI/headless worker quiet; not performance qualification"
+}

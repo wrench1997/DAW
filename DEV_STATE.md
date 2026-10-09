@@ -1,11 +1,15 @@
 # 当前开发状态
 
-最后更新：2026-10-09 15:05 UTC。以当前源码、集成状态和实际执行结果为准。
+最后更新：2026-10-09 15:52 UTC。以当前源码、集成状态和实际执行结果为准。
 
 ## 当前目标与状态
 
-- **新 bounded parameter storage 合并源码：`fb7b91a82d31226485a22e9e5e0b73d1f9a1fe3f`。** 只集成审查通过的bf573a4，41 source hashes一致；App/helper dispatcher/wire/timing不变。Input8192 queues/total points、output4096，检查输入接受与SDK Process结果；输出丢失为Process/SaveState sticky fault，需fresh实例恢复。已通过切片native/首音/cost审查，完整组合源码门禁通过；new-helper2048四项及fresh-state复验通过，两个调用exit0。13/14 changing debug core overruns保留，不代表实时性能提升。
-- **当前完整门禁：** Linux1170 app +22 helper +5+2 protocol、1166 core，零失败/忽略，默认stack；339 available vendor tests（一个明确缺失fixture排除）、26 doctests、231 Python、fmt/两套严格root Clippy/build/实际helper smoke及两种MSVC source checks全部通过。新helper为a29e4942…aee64，与native/首音切片验收helper字节一致。
+- **新 checked-event admission 合并源码：`7d7294b36df8f877c30a16a14afb98cf0f1ac047`。** 只集成审查通过的7d8a416，41 source hashes及native receipt一致。先检查event容量/元数据再copy，明确回传拒绝；普通音符计数、tracked ID和panic release obligation仅在接受后提交，拒绝保留重试责任。App/helper wire/timing/reset保持b92c394不变；完整组合源码门禁通过；新WindowsCI待发布后执行。
+- **当前event完整门禁：** Linux1170app+22helper+5+2protocol、1166core，默认stack/零失败忽略；362available vendor（一个明确缺失fixture排除）、26doctests、239Python、fmt/两套严格rootClippy/build/实际helper smoke/两种MSVCsource checks全部通过。Fresh copied helper59b6bcbd…0d086与独立native/default2048验收一致，124production hashes匹配已测event源码；未重复宣称新性能测量。
+- **已验证切片与边界：** 362 available vendor tests（一个明确缺失fixture排除）、26 doctests、22helper+5+2protocol及source/native功能检查通过。Exact helper59b6bcbd已通过四项default2048/fresh-state，12/14 changing debug overruns保留。Admission只表示入队，不表示SDK已经处理；payload仍分配/释放，mutex及legacy忽略结果的caller仍在。未加入payload arena、DSP线程或性能提升保证。
+
+- **历史 bounded parameter storage 合并源码：`fb7b91a82d31226485a22e9e5e0b73d1f9a1fe3f`。** 只集成审查通过的bf573a4，41 source hashes一致；App/helper dispatcher/wire/timing不变。Input8192 queues/total points、output4096，检查输入接受与SDK Process结果；输出丢失为Process/SaveState sticky fault，需fresh实例恢复。已通过切片native/首音/cost审查，完整组合源码门禁通过；new-helper2048四项及fresh-state复验通过，两个调用exit0。13/14 changing debug core overruns保留，不代表实时性能提升。
+- **上一轮parameter checkpoint完整门禁：** Linux1170 app +22 helper +5+2 protocol、1166 core，零失败/忽略，默认stack；339 available vendor tests（一个明确缺失fixture排除）、26 doctests、231 Python、fmt/两套严格root Clippy/build/实际helper smoke及两种MSVC source checks全部通过。新helper为a29e4942…aee64，与native/首音切片验收helper字节一致。
 - **边界：** 无分配/释放只覆盖host owner仍存活时测试到的parameter-container操作，不覆盖整个Process或owner销毁后的插件final Release。构造器合计请求1,573,104bytes，另加外层wrapper/allocator开销；大量populated suffix与部分小输入/读取仍有成本回退。Mutex/event/metering、GUI单线程及历史346.9ms resize stall仍在。
 
 - **历史 native-edit 合并源码：`87ceb06ce3dc23d817b1623093c8a51fddc2bea3`，完整源码门禁通过，default2048/fresh-state限定复验通过。** 审查通过的48d3f97加入固定容量、generation/sequence标记、明确DSP应用确认的原生编辑通道；display/gesture polling不再消费待交给DSP的编辑。真实停止编辑→20轮polling→zero-sample SaveState→fresh实例数值/组件/首音已通过独立切片验收。helper仍单线程；350ms fixture只证明通道consumer独立，不代表真实resize stall或全进程实时安全改善。新helper已独立通过default2048四项/fresh-state复验；旧优化结果保持历史归属。
@@ -16,8 +20,8 @@ Citrus Studio 0.5.0-alpha.1 是 clean-room Rust DAW 开发版，尚未达到完�
 
 - **上一轮 Linux 已验证源码：`87ceb06ce3dc23d817b1623093c8a51fddc2bea3`。** 全部41 reviewed helper/vendor/Cargo hashes一致；App/audio/timing/wire保持244f622不变。完整all-feature/all-target为 **1170 application +22 helper +5 editor protocol +2 transport protocol**，no-default为 **1166 application**，零失败/忽略；fmt、两套严格root Clippy、build、实际helper smoke、两种MSVC source checks及 **215 Python tests** 通过。**304 available vendor tests** 串行通过（一个缺失upstream Dexed fixture明确排除），全部 **26 vendor doctests** 通过。新helper SHA256为dca08353…8cbe8，与独立native/PCM验收版本字节一致。
 - **真实 Mixer 电平表已集成：** `21989d0` + `ad565d7`，读取实际 post-fader stereo 图缓冲；Master 在 tanh 保护前测量，显示 dBFS、hold、CLIP/fault。稳定 track ID/graph/epoch 防错位，排队峰值、超时失效、点击 reset 和暂停时 live-MIDI 路径均有回归。已移除 UI 假 sine 动画。详见 [MIXER_METERING](docs/MIXER_METERING.md)。
-- **最新 Windows 源码/包 checkpoint：`e487a50c1f249d585b85b950a9ba8865d4588908`。** [Quality 37940326370](https://github.com/wrench1997/DAW/actions/runs/37940326370) 通过 **1165 application +15 helper +5 editor protocol +2 transport protocol Rust tests**、14 helper /61 editor Python tests 与全部源码门禁。Trusted fixture state/interaction/focus/lifecycle/cleanup 通过；native paint 前后失败、repaint comparison 跳过，整个 quality 仍失败。该native-edit checkpoint已完成Windows CI；新parameter-storage候选须独立复验。
-- **最新完整 Preview 已通过。** 同一 `e487a50` 的 [Run 37940326948](https://github.com/wrench1997/DAW/actions/runs/37940326948) 完整通过：215 Python cases（211 passed、四项 Unix-only skip）、上述 Rust tests、optimized static-CRT、严格 vendor/license/PE/ZIP/hash 和实际解压 helper smoke。上传跳过、artifacts 为0。Windows synthetic Linux receipt path 曾失败，现以 as_posix 修复并保留严格 backslash rejection；原失败 run 不抹除。固定 Release、干净系统、原生设备验收仍独立。
+- **最新 Windows 源码/包 checkpoint：`b92c3943db06b14fc6fcdd0e0cd071c5120e98d1`。** [Quality 37950671033](https://github.com/wrench1997/DAW/actions/runs/37950671033) 通过 **1165 application +15 helper +5 editor protocol +2 transport protocol Rust tests**、14 helper /61 editor Python tests 与全部源码门禁。Trusted fixture state/interaction/focus/lifecycle/cleanup 通过；native paint 前后失败、repaint comparison 跳过，整个 quality 仍失败。该parameter-storage checkpoint已完成Windows CI；新checked-event候选须独立复验。
+- **最新完整 Preview 已通过。** 同一 `b92c394` 的 [Run 37950671153](https://github.com/wrench1997/DAW/actions/runs/37950671153) 完整通过：231 Python cases（227 passed、四项 Unix-only skip）、上述 Rust tests、optimized static-CRT、严格 vendor/license/PE/ZIP/hash 和实际解压 helper smoke。上传跳过、artifacts 为0。Windows synthetic Linux receipt path 曾失败，现以 as_posix 修复并保留严格 backslash rejection；原失败 run 不抹除。固定 Release、干净系统、原生设备验收仍独立。
 - 项目格式 **v12**，旧 v10/v11 文件可加载，MIDI ports 默认 Off、source audio monitor 默认启用；新保存需 v12 构建重新打开。评估前保留原项目备份。`main` 未合并，未发布 Release 或二进制 artifact。
 
 ## 已执行的验证与边界

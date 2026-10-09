@@ -1,0 +1,15 @@
+{
+  "started_utc": "2026-10-09T15:35:48.512592+00:00",
+  "test_sha256": "eea1adf80330fe8380abeb146024a1197ca6831122a76f2f704480108637f667",
+  "helper_sha256": "59b6bcbdb7a90b08fe5c8ebb2da2ba3ffe368c1089d70a6c7d4e7ab28b90d086",
+  "source_manifest_sha256": "e4897e5b7db0f6d96a71d998fb767e89237db82076440a04da8e8abdf3fb1997",
+  "source_commit": "bf573a45826466db0952eb1f4bd598937c68d1c5",
+  "source_status": "uncommitted_frozen_working_tree",
+  "commit_role": "base_commit_only_not_complete_tested_source",
+  "reviewed_source_diff_sha256": "482031cc4050ca3747db2b276a5b2957b0a55d32f98a07c684eb408683584e23",
+  "build_profile": "debug",
+  "budget_filter": null,
+  "profile_filter": null,
+  "cpu_load_threads": "0",
+  "declared_environment": "Checked event-admission helper fresh Surge initial-state immediate-note proof; frozen reviewed source diff482031cc, base commit only; old authoritative captured state before firstProcess; no GUI"
+}

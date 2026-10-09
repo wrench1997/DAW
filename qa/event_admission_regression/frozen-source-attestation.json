@@ -1,0 +1,9 @@
+{
+  "source_status": "uncommitted_frozen_working_tree",
+  "commit_role": "base_commit_only_not_complete_tested_source",
+  "base_commit": "bf573a45826466db0952eb1f4bd598937c68d1c5",
+  "reviewed_source_diff_sha256": "482031cc4050ca3747db2b276a5b2957b0a55d32f98a07c684eb408683584e23",
+  "reviewed_manifest_sha256": "0734c3690778edf68942fa44e18754355e1f10e5fa43e71fcd3fadad767e56ed",
+  "reviewed_manifest_files_verified": 41,
+  "scope": "Complete copied source per-file hashes bind this test; final committed equivalence will be checked separately."
+}

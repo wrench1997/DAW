@@ -8,7 +8,7 @@
 
 ## 当前验证状态（2026-10-09）
 
-本页记录固定 gnullvm 发布流程，不能当作当前 prerelease 的发布验收。最新终态 `e487a50` 的 [MSVC preview](https://github.com/wrench1997/DAW/actions/runs/37940326948) 完整通过：215 Python cases（211 passed、四项 Unix-only skip）、1165 app +15 helper +5 editor protocol +2 transport protocol Rust tests、optimized static-CRT、MIT/vendor provenance、PE/ZIP/hash 与解压 helper smoke；上传关闭、artifacts 为0。[Quality](https://github.com/wrench1997/DAW/actions/runs/37940326370) 源码与独立 native state/interaction/lifecycle 通过，paint 前后失败、repaint comparison 跳过，整个 quality 仍失败。
+本页记录固定 gnullvm 发布流程，不能当作当前 prerelease 的发布验收。最新终态 `b92c394` 的 [MSVC preview](https://github.com/wrench1997/DAW/actions/runs/37950671153) 完整通过：231 Python cases（227 passed、四项 Unix-only skip）、1165 app +15 helper +5 editor protocol +2 transport protocol Rust tests、optimized static-CRT、MIT/vendor provenance、PE/ZIP/hash 与解压 helper smoke；上传关闭、artifacts 为0。[Quality](https://github.com/wrench1997/DAW/actions/runs/37950671033) 源码与独立 native state/interaction/lifecycle 通过，paint 前后失败、repaint comparison 跳过，整个 quality 仍失败。
 
 上一轮 native-edit 合并源码 `87ceb06` 已通过Linux1170 app +22 helper +5+2 protocol、1166 core、215 Python、304 available vendor cases（一个明确fixture排除）、26 doctests、fmt/两套严格root Clippy/build/helper smoke和两种MSVC source checks。新helper default2048四项/fresh-state回归已通过，对应e487a50的Windows结果见上，不能沿用更旧helper的优化测量。它只更换原生编辑交付/捕获的内部通道；App/timing/wire 未变，helper 仍单线程。旧4fdf/244优化结果为 quiet12/16、load12/16，512/2048全部delivery组合通过，但loaded2048仍有raw-interval overrun，不能称实时/设备认证。默认2048、128/256/512 Experimental保持不变。0.5.0-alpha.1加载v10/v11、保存v12；旧项目MIDI ports默认Off，先保留备份。
 
@@ -280,7 +280,8 @@ Fresh combined gates pass1170 app +22 helper +5+2 protocol,1166 core,339 availab
 vendor cases/one explicit fixture exclusion,26 doctests,231 Python, fmt/two strict
 root Clippy modes/build/helper smoke and both MSVC source checks. New-helper bounded
 default2048 four-case/fresh-state acceptance passes, both exits0, with13/14 changing
-debug core overruns retained. Exact Windows CI is pending here;
+debug core overruns retained. Its exactb92c394 Windows source/preview passed, with
+the known native paint failure retained;
 prior source and optimized measurements retain their actual helper identities.
 No fixed gnullvm Release, installer or physical-device qualification follows.
 
@@ -290,3 +291,15 @@ appendix, with [concise pinned records](../qa/parameter_storage_cost/README.md) 
 the preview source-document whitelist. The full appendix is not a preview executable
 payload. Source ZIP verification separately counts tracked Git files, original-main
 patch and appendices; every original negative/source/profile identity is retained.
+
+
+## Checked-event admission follow-on
+
+Reviewed7d8a416 integrates at7d7294b. Only bounded event rejection and note bookkeeping
+change; App/reset/timing/wire stay atb92c394. Exact owner/helper/native checks pass
+with helper59b6bcbdb7a90b08fe5c8ebb2da2ba3ffe368c1089d70a6c7d4e7ab28b90d086.
+Fresh combined1170app+22helper+5+2protocol,1166core,362availablevendor/one explicit
+fixture exclusion,26doctests,239Python,fmt/two strict rootClippy modes/build/helper
+smoke andbothMSVCsource checks pass. New exact Windows CI remains pending. Old parameter costs and
+optimized244f622 timing remain historically attributed; event admission carries no
+new payload-allocation, threading, realtime or native-resize qualification.

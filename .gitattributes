@@ -29,3 +29,8 @@
 /qa/parameter_storage_cost/** text eol=lf
 /qa/parameter_storage_cost/final-summary.csv -text -whitespace
 /qa/parameter_storage_cost/final-empty-summary.csv -text -whitespace
+
+/qa/event_admission_regression/** text eol=lf
+/qa/event_admission_regression/**/*.log whitespace=-blank-at-eof
+# Unified-diff context spaces are original pinned evidence bytes.
+/qa/event_admission_regression/receipts/reviewed-rust-source.diff -whitespace

@@ -220,3 +220,12 @@ exists. Construction1,573,104 requested bytes excludes outer wrappers/allocator
 metadata. Small/read/populated-suffix cost regressions remain documented alongside
 corrected drafts. App/timing/wire and single-thread GUI/DSP remain unchanged; this
 is not hardware realtime qualification or native resize latency improvement.
+
+
+## Checked-event admission follow-on
+
+Reviewed7d8a416/integrated7d7294b reports invalid/full event admission and commits
+note bookkeeping only after acceptance. Rejected note-offs/panic suffixes remain
+retryable obligations. Payload allocation/free and mutexes remain; admission is
+not SDK delivery. No reset-policy, App/wire/timing or DSP-thread change is included.
+Exact owner/native/default2048 acceptance is distinct from pending combined/CI gates.

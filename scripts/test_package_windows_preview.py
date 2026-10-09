@@ -561,6 +561,66 @@ class PackageTests(unittest.TestCase):
         self.assertEqual([case["outer_interval_overruns"] for case in summary["cases"]], [0, 15, 0, 14])
         self.assertIn("historical 4fdfbc2/244f622", report)
 
+    def event_qa_payload(self):
+        source = Path(__file__).resolve().parents[1]
+        return {name: (source / name).read_bytes() for name in pkg.EVENT_QA_FILES}
+
+    def test_event_receipts_are_distinct_complete_and_packaged(self):
+        payload = self.event_qa_payload()
+        pkg.validate_event_qa(payload)
+        self.assertFalse(pkg.EVENT_QA_FILES & (pkg.TIMING_COMBINED_QA_FILES | pkg.TIMING_DEBUG_QA_FILES | pkg.NATIVE_EDIT_QA_FILES))
+        for name, data in payload.items():
+            destination = self.repo / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        info = pkg.verify_package(self.create())
+        self.assertTrue(pkg.EVENT_QA_FILES <= set(info["source_documents"]))
+
+    def test_event_receipts_reject_missing_changed_or_extra_payload(self):
+        original = self.event_qa_payload()
+        name = pkg.EVENT_QA_ROOT + "RESULT.md"
+        payload = dict(original); del payload[name]
+        with self.assertRaisesRegex(pkg.PackageError, "Incomplete event"):
+            pkg.validate_event_qa(payload)
+        payload = dict(original); payload[name] += b"changed outcome"
+        with self.assertRaisesRegex(pkg.PackageError, "inventory/hash mismatch"):
+            pkg.validate_event_qa(payload)
+        for extra in ("undeclared.txt", "../escape.txt", "runs\\bad.txt"):
+            with self.subTest(extra=extra):
+                payload = dict(original); payload[pkg.EVENT_QA_ROOT + extra] = b"extra"
+                with self.assertRaisesRegex(pkg.PackageError, "Unexpected event"):
+                    pkg.validate_event_qa(payload)
+
+    def test_event_receipts_reject_rewritten_inventory(self):
+        payload = self.event_qa_payload()
+        name = pkg.EVENT_QA_ROOT + "SHA256SUMS.json"
+        report = pkg.EVENT_QA_ROOT + "RESULT.md"
+        old = pkg.digest(payload[report]).encode()
+        payload[report] += b"changed outcome"
+        payload[name] = payload[name].replace(old, pkg.digest(payload[report]).encode())
+        with self.assertRaisesRegex(pkg.PackageError, "pinned inventory/hash mismatch"):
+            pkg.validate_event_qa(payload)
+
+    def test_event_receipts_pin_scope_and_source_equivalence(self):
+        source = Path(__file__).resolve().parents[1]
+        self.assertIn("/qa/event_admission_regression/** text eol=lf", (source / ".gitattributes").read_text())
+        self.assertIn("/qa/event_admission_regression/receipts/reviewed-rust-source.diff -whitespace", (source / ".gitattributes").read_text())
+        payload = self.event_qa_payload()
+        summary = json.loads(payload[pkg.EVENT_QA_ROOT + "SUMMARY.json"])
+        self.assertEqual(summary["source_base_commit"], "bf573a45826466db0952eb1f4bd598937c68d1c5")
+        self.assertEqual(summary["source_status"], "uncommitted_frozen_working_tree")
+        self.assertEqual(summary["reviewed_source_diff_sha256"], "482031cc4050ca3747db2b276a5b2957b0a55d32f98a07c684eb408683584e23")
+        equivalence = summary["final_source_equivalence"]
+        self.assertEqual(equivalence["final_equivalent_commit"], "7d8a41693be5edf9857a044e9b6e75478b422059")
+        self.assertEqual(equivalence["full_snapshot_file_matches"], 124)
+        self.assertEqual(summary["manifested_production_files"], 124)
+        self.assertEqual(summary["binaries"]["vst3-host-helper"], "59b6bcbdb7a90b08fe5c8ebb2da2ba3ffe368c1089d70a6c7d4e7ab28b90d086")
+        self.assertEqual([run["exit_status"] for run in summary["runs"].values()], [0, 0])
+        self.assertEqual([case["core_interval_overruns"] for case in summary["cases"]], [0, 12, 0, 14])
+        report = payload[pkg.EVENT_QA_ROOT + "RESULT.md"].decode()
+        self.assertIn("Base alone is NOT the tested source", report)
+        self.assertIn("historical4fdfbc2/244f622", report)
+
     def parameter_cost_qa_payload(self):
         source = Path(__file__).resolve().parents[1]
         return {name: (source / name).read_bytes() for name in pkg.PARAMETER_COST_QA_FILES}

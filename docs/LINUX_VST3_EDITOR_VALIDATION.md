@@ -193,3 +193,34 @@ Wayland/DPI/sanitizer/device limitations unchanged. Parameter microbenchmarks an
 allocation fences are separate source tests, not GUI continuity qualification.
 
 The [exact parameter-helper regression](../qa/parameter_storage_regression/RESULT.md) binds124 production files tofb7b91a and new helpera29e4942. Its separate fresh-instance case uses historical captured input state104bc8ab… (not the newly authored011ded9e… native blob), with onset24/peak0.22329643368721008 and exact controller/component values. Both inputs have independent functional proof; their test identities and13/14 debug core interval overruns remain distinct.
+
+
+## Checked-event admission native follow-on
+
+Reviewed7d8a416/integrated7d7294b uses exact helper
+`59b6bcbdb7a90b08fe5c8ebb2da2ba3ffe368c1089d70a6c7d4e7ab28b90d086`.
+Native receipt original SHA256
+`835ccf39085011738adf12cd5587ad4cac8d3968a0d0318023b1741a1b0dfc25`
+binds41 source hashes verified before/after. Trusted fixture mouse/focus/key release,
+callbacks/retirement/state/owner/no-editor/lifecycle/EOF/Shutdown/crash pass.
+
+A newly created stopped Surge edit survives20 poll rounds and zero-sample SaveState;
+normalized0.8691863417625427/native−6.28dB/component−6.27905654907227dB agree after
+fresh restore. New state011ded9e… is separately creation-bound despite matching
+prior deterministic bytes. Separate exact-blob first-note tests at17/47/128/256
+have onsets25/46/24/23 without positive warmup;12 fresh/used-active/used-stopped
+compatibility cases also pass. This is functional evidence, not latency certification.
+
+Used/open Surge rejection preserves same XID31457280/generation2/1178x735/value;
+closed-used rejection and ordinary reopen pass. Native Stochas layer0,row115,step5,
+probability20,velocity127,length/offset0 survives used empty reset then exact restore,
+reexport and repaint. Its deterministic-pattern MIDI proof is separate from that
+single-cell native state. All windows close and Shutdown exits0.
+
+The [separate four-case default2048/fresh-state regression](../qa/event_admission_regression/RESULT.md)
+uses historical input104bc8ab… for its immediate-note case (onset25/peak0.21446438133716583),
+not the new native011ded9e… blob. Both runs exit0 and all124 tested production files
+match the final event source;12/14 changing debug core overruns remain. GUI session
+has no positive Process/device audio, and no wire submitted/applied telemetry was
+added. Payload allocation, helper serialization,346.9ms native-resize stall and
+hardware/Wayland/DPI/sanitizer limitations remain. Reset policy is unchanged.
