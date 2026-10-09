@@ -3664,11 +3664,11 @@ impl Vst2Backend {
                     return Err("invalid VST2 parameter state length".into());
                 }
                 let available = self.info.parameters.max(0) as u32;
-                for (id, bytes) in values.chunks_exact(4).enumerate() {
+                for (id, bytes) in values.as_chunks::<4>().0.iter().enumerate() {
                     if id as u32 >= available {
                         break;
                     }
-                    let value = f32::from_le_bytes(bytes.try_into().expect("four bytes"));
+                    let value = f32::from_le_bytes(*bytes);
                     if value.is_finite() {
                         parameters.set_parameter(id as i32, value.clamp(0.0, 1.0));
                     }

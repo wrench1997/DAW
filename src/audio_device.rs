@@ -1654,10 +1654,17 @@ impl CallbackTelemetry {
 }
 
 fn update_packed_error_state(state: &AtomicU64, kind: AudioStreamFaultKind) {
-    let _ = state.fetch_update(Ordering::Release, Ordering::Relaxed, |state| {
-        let revision = (state >> 8).saturating_add(1).min((1_u64 << 56) - 1);
-        Some((revision << 8) | u64::from(kind as u32))
-    });
+    // Keep the same lock-free update semantics without requiring a newer
+    // atomic API than the pinned release toolchain.
+    let mut current = state.load(Ordering::Relaxed);
+    loop {
+        let revision = (current >> 8).saturating_add(1).min((1_u64 << 56) - 1);
+        let next = (revision << 8) | u64::from(kind as u32);
+        match state.compare_exchange_weak(current, next, Ordering::Release, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 #[cfg(test)]

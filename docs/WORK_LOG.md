@@ -71,3 +71,16 @@ Append-only from 2026-10-08 UTC. Timestamps use UTC. Source inspection, executed
 - Workflow published successfully as `90226a5e01e1f30299fb716fb1dd129006a9fd8d`. [Run 37871126045](https://github.com/wrench1997/DAW/actions/runs/37871126045), Windows Server 2025/MSVC, installed Rust/Cargo 1.99.0. Cargo.lock SHA256: `38d9767b7b618608e2e4ecc91e662b2048a64ea332acaefe338feb0b2189c338`.
 - `cargo +stable-x86_64-pc-windows-msvc fmt --all -- --check` failed with exit 1, reporting six layout-only hunks across app.rs, master_capture.rs and playlist.rs. Applied those exact hunks. Local `git diff --check` passed.
 - Locked tests, Clippy, all-bin build and no-default-features check were skipped after fmt failed. This run establishes no passing Rust tests. The next branch push will run the same complete gates.
+
+## 2026-10-09 01:47 UTC — Local formatter available; Linux dependency check blocked
+
+- Local Rust/Cargo 1.99.0, rustfmt 1.10.0 and Clippy 0.1.99 are now available. `cargo fmt --all -- --check` passed at `bcaf5e68dd8b865b9122ecb25423d010d7f60002` with exit 0.
+- `cargo check --locked --no-default-features` on Linux exited 101 during `alsa-sys 0.4.0` build: pkg-config could not find `alsa.pc` (`libasound2-dev` unavailable). This is a pre-project native dependency failure, not a project compiler/test failure.
+- [Windows run 37871292792](https://github.com/wrench1997/DAW/actions/runs/37871292792) passed formatting and entered the locked all-feature/all-target test command. Test counts and downstream gates remain pending.
+
+## 2026-10-09 01:52 UTC — 775 Windows tests passed; Clippy compatibility fixes
+
+- [Run 37871292792](https://github.com/wrench1997/DAW/actions/runs/37871292792) at `bcaf5e68dd8b865b9122ecb25423d010d7f60002`: fmt **passed**; locked all-feature/all-target tests **passed**, 775 passed / 0 failed / 0 ignored, plus helper target with 0 tests. All 15 new reliability regressions are included.
+- Clippy with `-D warnings` **failed** on nine unique source findings: one deprecated atomic `fetch_update` (audio_device), seven constant-size `chunks_exact` calls (model 1, plugin_runtime 1, wav 4, export tests 1), and one complex test mutator type (model). All-bin build and no-default-features check were skipped.
+- Replaced the atomic operation with the equivalent compare-exchange retry loop, retaining Release success / Relaxed failure ordering and compatibility with the documented Rust 1.97.1 release toolchain. Switched fixed-size slices to `as_chunks` and introduced a local test mutator type alias. No lint suppression, MSRV increase, release-toolchain change or workflow gate weakening.
+- Local formatter and `git diff --check` passed after these changes. Fresh Windows tests, Clippy and remaining gates will run on the new commit. Real GUI/audio/VST/release acceptance is still outstanding.

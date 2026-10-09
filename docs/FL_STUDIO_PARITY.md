@@ -11,7 +11,7 @@ Status terms:
 
 ## 0.4 implementation progress
 
-Evidence note (2026-10-08): “Working” describes connected source scope, not a fresh runtime certification. The inherited module-test claims below are historical; this checkout has not yet executed Rust tests because local tooling is unavailable; Windows GitHub Actions validation is being prepared. Current commands and results are tracked in `WORK_LOG.md` and the repository `DEV_STATE.md`.
+Evidence note (2026-10-09): “Working” describes connected source scope, not real-device or production certification. Windows MSVC CI at `bcaf5e6` passed formatting and 775 tests; subsequent Clippy findings are fixed pending rerun. Inherited module-test claims below remain historical unless matched to current evidence. Current commands and results are tracked in `WORK_LOG.md` and the repository `DEV_STATE.md`.
 
 | Area | Current 0.4 state | Status |
 |---|---|---|

@@ -12,7 +12,7 @@
 
 ## 开发 CI（独立分支验证）
 
-`.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；首次运行已达到 fmt 门禁，格式修正与后续结果记录于 `WORK_LOG.md`。工作流可运行不等于 Rust 构建通过。它不替代下述历史固定 gnullvm 发布流程、helper smoke、干净 Windows 实机验收与打包校验。
+`.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；第二次运行已通过 fmt 和 775 项测试，Clippy 修正与后续完整门禁结果记录于 `WORK_LOG.md`。工作流可运行不等于 Rust 构建通过。它不替代下述历史固定 gnullvm 发布流程、helper smoke、干净 Windows 实机验收与打包校验。
 
 ## 发布契约
 

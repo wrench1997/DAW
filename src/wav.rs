@@ -563,13 +563,13 @@ fn decode_samples(bytes: &[u8], format: ParsedFormat, sample_count: usize) -> Re
 
     match (format.encoding, format.bits_per_sample) {
         (WavSampleEncoding::PcmInteger, 16) => {
-            for sample in bytes.chunks_exact(2) {
+            for sample in bytes.as_chunks::<2>().0 {
                 let value = i16::from_le_bytes([sample[0], sample[1]]) as i64;
                 samples.push(normalize_pcm(value, 16, format.valid_bits_per_sample));
             }
         }
         (WavSampleEncoding::PcmInteger, 24) => {
-            for sample in bytes.chunks_exact(3) {
+            for sample in bytes.as_chunks::<3>().0 {
                 let packed = i32::from(sample[0])
                     | (i32::from(sample[1]) << 8)
                     | (i32::from(sample[2]) << 16);
@@ -578,13 +578,13 @@ fn decode_samples(bytes: &[u8], format: ParsedFormat, sample_count: usize) -> Re
             }
         }
         (WavSampleEncoding::PcmInteger, 32) => {
-            for sample in bytes.chunks_exact(4) {
+            for sample in bytes.as_chunks::<4>().0 {
                 let value = i32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]) as i64;
                 samples.push(normalize_pcm(value, 32, format.valid_bits_per_sample));
             }
         }
         (WavSampleEncoding::IeeeFloat, 32) => {
-            for (index, sample) in bytes.chunks_exact(4).enumerate() {
+            for (index, sample) in bytes.as_chunks::<4>().0.iter().enumerate() {
                 let value = f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]]);
                 if !value.is_finite() {
                     bail!("Non-finite IEEE float sample at interleaved index {index}");

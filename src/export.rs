@@ -1173,7 +1173,9 @@ mod tests {
         assert_eq!(rendered.metadata.channels, 2);
         rendered
             .samples
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|frame| StereoFrame {
                 left: frame[0],
                 right: frame[1],

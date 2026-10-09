@@ -1899,7 +1899,7 @@ mod opaque_state_hex {
             return Err("opaque plug-in state must contain an even number of hex digits");
         }
         let mut bytes = Vec::with_capacity(encoded.len() / 2);
-        for pair in encoded.as_bytes().chunks_exact(2) {
+        for pair in encoded.as_bytes().as_chunks::<2>().0 {
             let high = decode_nibble(pair[0]).ok_or("opaque plug-in state contains invalid hex")?;
             let low = decode_nibble(pair[1]).ok_or("opaque plug-in state contains invalid hex")?;
             bytes.push((high << 4) | low);
@@ -1997,7 +1997,8 @@ mod tests {
         baseline.save(&target).unwrap();
         let original = std::fs::read(&target).unwrap();
 
-        let cases: &[(&str, fn(&mut Project, f32))] = &[
+        type CorruptField = fn(&mut Project, f32);
+        let cases: &[(&str, CorruptField)] = &[
             ("tempo", |p, v| p.tempo = v),
             ("swing", |p, v| p.swing = v),
             ("song length", |p, v| p.song_length_beats = v),
