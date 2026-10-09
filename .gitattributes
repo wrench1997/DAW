@@ -1,4 +1,5 @@
 # Preserve pinned upstream bytes and unified-diff context lines exactly.
+/vendor/vst3-host-0.9.0/** text eol=lf
 /vendor/vst3-host-0.9.0/CITRUS.patch -whitespace
 /vendor/vst3-host-0.9.0/src/internal/module_loader/macos.rs -whitespace
 /vendor/vst3-host-0.9.0/src/internal/module_loader/mod.rs -whitespace

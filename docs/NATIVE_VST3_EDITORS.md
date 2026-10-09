@@ -74,7 +74,7 @@ because it has no editor or an action is unsupported.
 
 ## Acceptance evidence
 
-The source-only [fixture](../tests/fixtures/vst3-editor/README.md) has pinned MIT provenance.
+The source-only [fixture](https://github.com/wrench1997/DAW/blob/37ae191416ce64ee19dd3fba7ca84d97ca744da5/tests/fixtures/vst3-editor/README.md) has pinned MIT provenance.
 It is built locally from Rust, never installed from an arbitrary third-party binary. It stays
 outside the application dependency graph and release/package whitelist.
 
