@@ -10,6 +10,7 @@ mod clip_fade;
 pub mod editor_viewport;
 mod export;
 mod export_job;
+mod export_options;
 pub mod fixed_quantum;
 mod icons;
 pub mod master_capture;

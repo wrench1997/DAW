@@ -50,7 +50,7 @@ impl ExportProgress {
             1500..5000 => "Rendering instruments",
             5000..6500 => "Mixing audio clips",
             6500..7500 => "Checking audio",
-            7500..9800 => "Encoding 24-bit WAV",
+            7500..9800 => "Encoding WAV",
             9800..10000 => "Finalizing WAV",
             _ => "Export complete",
         }
@@ -140,7 +140,10 @@ impl ExportControl {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ExportOutcome {
-    Complete(PathBuf),
+    Complete {
+        path: PathBuf,
+        level_summary: String,
+    },
     Cancelled,
     Failed(String),
 }
@@ -306,18 +309,23 @@ mod tests {
     #[test]
     fn stale_completion_after_new_project_does_not_leak_or_clear_new_job() {
         let mut job = ExportJob::default();
-        job.start(7, "old.wav".into(), |_| {
-            ExportOutcome::Complete("old.wav".into())
+        job.start(7, "old.wav".into(), |_| ExportOutcome::Complete {
+            path: "old.wav".into(),
+            level_summary: String::new(),
         })
         .unwrap();
         assert_eq!(poll_until_finished(&mut job, 8), None);
-        job.start(8, "new.wav".into(), |_| {
-            ExportOutcome::Complete("new.wav".into())
+        job.start(8, "new.wav".into(), |_| ExportOutcome::Complete {
+            path: "new.wav".into(),
+            level_summary: String::new(),
         })
         .unwrap();
         assert_eq!(
             poll_until_finished(&mut job, 8),
-            Some(ExportOutcome::Complete("new.wav".into()))
+            Some(ExportOutcome::Complete {
+                path: "new.wav".into(),
+                level_summary: String::new()
+            })
         );
     }
 
@@ -343,14 +351,18 @@ mod tests {
         ));
         assert!(!job.is_running());
         assert!(
-            job.start(1, "retry.wav".into(), |_| ExportOutcome::Complete(
-                "retry.wav".into()
-            ))
+            job.start(1, "retry.wav".into(), |_| ExportOutcome::Complete {
+                path: "retry.wav".into(),
+                level_summary: String::new()
+            })
             .unwrap()
         );
         assert_eq!(
             poll_until_finished(&mut job, 1),
-            Some(ExportOutcome::Complete("retry.wav".into()))
+            Some(ExportOutcome::Complete {
+                path: "retry.wav".into(),
+                level_summary: String::new()
+            })
         );
     }
 

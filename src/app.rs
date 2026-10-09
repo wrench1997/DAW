@@ -1717,6 +1717,7 @@ enum ShortcutModal {
     Settings,
     MidiImport,
     MidiExport,
+    WavExport,
     Recovery,
 }
 
@@ -4712,6 +4713,7 @@ pub struct CitrusApp {
     scan_receiver: Option<Receiver<Vec<PluginDescriptor>>>,
     export_job: ExportJob,
     export_error: Option<String>,
+    export_dialog: export_ui::ExportDialog,
     audio_import_receiver: Option<Receiver<AudioImportResult>>,
     project_media: ProjectMediaManager,
     audio_asset_sender: Sender<AudioAssetLoadResult>,
@@ -5007,6 +5009,7 @@ impl CitrusApp {
                 scan_receiver: None,
                 export_job: ExportJob::default(),
                 export_error: None,
+                export_dialog: export_ui::ExportDialog::default(),
                 audio_import_receiver: None,
                 project_media: ProjectMediaManager::default(),
                 audio_asset_sender,
@@ -11452,6 +11455,7 @@ impl CitrusApp {
             || self.queued_save_request.is_some()
             || self.pending_recording.is_some()
             || self.pending_master_capture.is_some()
+            || self.export_dialog.is_open()
     }
 
     fn top_shortcut_modal(&self) -> Option<ShortcutModal> {
@@ -11461,6 +11465,8 @@ impl CitrusApp {
             Some(ShortcutModal::Recovery)
         } else if self.project_media.open {
             Some(ShortcutModal::ProjectMedia)
+        } else if self.export_dialog.is_open() {
+            Some(ShortcutModal::WavExport)
         } else if self.piano_roll_transform.is_some() {
             Some(ShortcutModal::PianoTransform)
         } else if self.pending_midi_export.is_some() {
@@ -11556,6 +11562,10 @@ impl CitrusApp {
             ShortcutModal::Settings => self.show_settings = false,
             ShortcutModal::MidiImport => self.pending_midi_import = None,
             ShortcutModal::MidiExport => self.pending_midi_export = None,
+            ShortcutModal::WavExport => {
+                self.export_dialog.close();
+                self.export_error = None;
+            }
             // Recovery owns the startup surface until the user explicitly restores or discards.
             ShortcutModal::Recovery => {}
         }
@@ -11568,9 +11578,12 @@ impl CitrusApp {
             ShortcutModal::Settings => self.show_settings = false,
             ShortcutModal::MidiImport => self.confirm_midi_import(),
             ShortcutModal::MidiExport => self.confirm_midi_export(),
+            // WAV review requires the explicit destination button; Enter must
+            // never skip review or reuse an overwrite choice.
             ShortcutModal::ProjectMedia
             | ShortcutModal::PluginManager
-            | ShortcutModal::Recovery => {}
+            | ShortcutModal::Recovery
+            | ShortcutModal::WavExport => {}
         }
     }
 
@@ -13463,6 +13476,7 @@ impl CitrusApp {
         self.clear_pending_midi_routing();
         self.export_job.cancel();
         self.export_error = None;
+        self.export_dialog.close();
         self.plugin_parameter_edits.fail_all();
         self.plugin_parameter_edit_draft_desired.clear();
         self.project_media.close();
@@ -13993,7 +14007,7 @@ impl CitrusApp {
                                 egui::Button::new(if self.export_job.is_running() {
                                     "Rendering WAV…"
                                 } else {
-                                    "Export 24-bit WAV…"
+                                    "Export WAV…"
                                 }),
                             )
                             .clicked()
@@ -17163,61 +17177,92 @@ impl CitrusApp {
     }
 
     fn export_wav(&mut self) {
-        if self.export_job.is_running() {
-            return;
+        if !self.export_dialog.is_open() && !self.export_job.is_running() {
+            self.export_error = None;
         }
-        if project_has_active_vst_placements(&self.project) {
-            self.export_error = Some(
-                "Offline WAV export cannot render active VST plug-ins. Bypass/remove them, or use Realtime Master Capture to preserve the live result.".into(),
-            );
-            return;
-        }
-        if let Err(error) = export::ensure_supported_automation(&self.project) {
-            self.export_error = Some(error.to_string());
-            return;
-        }
-        self.export_error = None;
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("24-bit WAV audio", &["wav"])
-            .set_file_name(format!("{}.wav", self.project.name))
-            .save_file()
-        else {
-            return;
-        };
-        let project = self.project.clone();
         let sample_rate = self
             .audio
             .as_ref()
             .map(|audio| audio.snapshot().sample_rate)
             .unwrap_or(48_000);
+        self.export_dialog.open(
+            self.project_session,
+            sample_rate,
+            self.export_job.is_running(),
+        );
+    }
+
+    fn confirm_wav_export(&mut self) {
+        let Some(options) = self
+            .export_dialog
+            .begin_destination(self.project_session, self.export_job.is_running())
+        else {
+            return;
+        };
+        if project_has_active_vst_placements(&self.project) {
+            self.export_dialog.finish_destination(false);
+            self.export_error = Some(
+                "Offline WAV export cannot render active VST plug-ins. Bypass/remove them, or use Realtime Master Capture to preserve the live result.".into(),
+            );
+            return;
+        }
+        if let Err(error) = export::ensure_supported_project(&self.project) {
+            self.export_dialog.finish_destination(false);
+            self.export_error = Some(format!("{error:#}"));
+            return;
+        }
+        self.export_error = None;
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("WAV audio", &["wav"])
+            .set_file_name(format!("{}.wav", self.project.name))
+            .save_file()
+        else {
+            self.export_dialog.finish_destination(false);
+            return;
+        };
+        let project = self.project.clone();
         let worker_path = path.clone();
         match self
             .export_job
             .start(self.project_session, path, move |control| {
-                match export::render_project_wav_controlled(
+                match export::render_project_wav_with_options(
                     &project,
                     &worker_path,
-                    sample_rate,
+                    options,
                     &control,
                 ) {
-                    Ok(()) => ExportOutcome::Complete(worker_path),
+                    Ok(report) => ExportOutcome::Complete {
+                        path: worker_path,
+                        level_summary: report.level_summary(),
+                    },
                     Err(error) if error.downcast_ref::<ExportCancelled>().is_some() => {
                         ExportOutcome::Cancelled
                     }
                     Err(error) => ExportOutcome::Failed(format!("{error:#}")),
                 }
             }) {
-            Ok(true) => self.notify("Rendering a 24-bit WAV snapshot in the background…".into()),
-            Ok(false) => {}
-            Err(error) => self.export_error = Some(format!("Unable to start WAV export: {error}")),
+            Ok(true) => {
+                self.export_dialog.finish_destination(true);
+                self.notify(format!(
+                    "Rendering {} Hz / {} WAV snapshot in the background…",
+                    options.sample_rate,
+                    options.sample_format.label()
+                ));
+            }
+            Ok(false) => self.export_dialog.finish_destination(false),
+            Err(error) => {
+                self.export_dialog.finish_destination(false);
+                self.export_error = Some(format!("Unable to start WAV export: {error}"));
+            }
         }
     }
 
     fn poll_export(&mut self) {
         match self.export_job.poll(self.project_session) {
-            Some(ExportOutcome::Complete(path)) => {
-                self.notify(format!("Exported {}", path.display()))
-            }
+            Some(ExportOutcome::Complete {
+                path,
+                level_summary,
+            }) => self.notify(format!("Exported {}. {level_summary}", path.display())),
             Some(ExportOutcome::Cancelled) => {
                 self.notify("WAV export cancelled; the destination was not changed".into())
             }
@@ -17411,6 +17456,7 @@ impl eframe::App for CitrusApp {
             || self.audio_restart_state.locks_session_actions()
             || self.piano_roll_transform.is_some()
             || self.project_media.open
+            || self.export_dialog.is_open()
         {
             // egui publishes a newly-created modal layer at end-of-pass. Disable the root surface
             // as well so the first modal frame cannot pass the same pointer event through.
@@ -17421,8 +17467,8 @@ impl eframe::App for CitrusApp {
             self.dispatch_armed_window_close(&ctx, close_canceled_this_frame);
             return;
         }
-        if self.project_media.open {
-            // A File-menu click can open the modal in this very pass.
+        if self.project_media.open || self.export_dialog.is_open() {
+            // A File-menu click can open either modal in this very pass.
             ui.disable();
         }
         self.toolbar(ui);
@@ -17451,7 +17497,23 @@ impl eframe::App for CitrusApp {
             self.project_media_dialog(&ctx);
         }
         if !exclusive_project_modal {
-            export_ui::error_window(&ctx, &mut self.export_error);
+            let export_dialog_was_open = self.export_dialog.is_open();
+            if export_ui::settings_window(
+                &ctx,
+                &mut self.export_dialog,
+                self.project_session,
+                &self.project.name,
+                self.export_job.is_running(),
+                self.export_error.as_deref(),
+            ) {
+                self.confirm_wav_export();
+            }
+            if export_dialog_was_open && !self.export_dialog.is_open() {
+                self.export_error = None;
+            }
+            if !self.export_dialog.is_open() {
+                export_ui::error_window(&ctx, &mut self.export_error);
+            }
             if self.piano_roll_transform.is_some() {
                 self.piano_roll_transform_dialog(&ctx);
             }
@@ -28312,6 +28374,7 @@ mod playback_tests {
             ShortcutModal::Settings,
             ShortcutModal::MidiImport,
             ShortcutModal::MidiExport,
+            ShortcutModal::WavExport,
             ShortcutModal::Recovery,
         ] {
             let policy = ShortcutPolicy::new(ShortcutContext {
@@ -28336,6 +28399,27 @@ mod playback_tests {
                 Some(ShortcutAction::DismissModal(modal))
             );
         }
+    }
+
+    #[test]
+    fn wav_export_modal_does_not_turn_enter_into_export_or_confirm_an_underlying_dialog() {
+        let policy = ShortcutPolicy::new(ShortcutContext {
+            blocking_layer: true,
+            top_modal: Some(ShortcutModal::WavExport),
+            ..ShortcutContext::default()
+        });
+        assert_eq!(
+            policy.resolve(shortcut_chord(ShortcutKey::Enter, false, false, false)),
+            None
+        );
+        assert_eq!(
+            policy.resolve(shortcut_chord(ShortcutKey::F10, false, false, false)),
+            None
+        );
+        assert_eq!(
+            policy.resolve(shortcut_chord(ShortcutKey::Escape, false, false, false)),
+            Some(ShortcutAction::DismissModal(ShortcutModal::WavExport))
+        );
     }
 
     #[test]

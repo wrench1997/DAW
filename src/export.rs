@@ -14,6 +14,7 @@ use crate::{
     automation::AutomationTarget,
     clip_fade::{CompiledClipFades, compile_clip_fades},
     export_job::ExportControl,
+    export_options::{WavExportOptions, WavExportReport, WavSampleFormat},
     mixer_graph::{
         CompiledMixerGraph, MIXER_GRAPH_MAX_NODES, MixerRouteTap, MixerTrackId, compile_mixer_graph,
     },
@@ -238,6 +239,13 @@ fn ensure_no_active_plugins(project: &Project) -> Result<()> {
     Ok(())
 }
 
+/// Validate unsupported processing before the UI asks for a destination. The
+/// renderer independently repeats these guards against its cloned snapshot.
+pub fn ensure_supported_project(project: &Project) -> Result<()> {
+    ensure_supported_automation(project)?;
+    OfflineMixerPlan::build(project).map(|_| ())
+}
+
 /// Pure preflight shared by the UI and renderer. Legacy lanes without any
 /// Playlist placement are globally active, matching live automation/TempoMap.
 /// Once a lane has placements, only their unmuted half-open windows enable it.
@@ -336,25 +344,40 @@ pub fn render_project_wav(project: &Project, path: &Path, sample_rate: u32) -> R
     render_project_wav_controlled(project, path, sample_rate, &ExportControl::default())
 }
 
+#[allow(dead_code)]
 pub fn render_project_wav_controlled(
     project: &Project,
     path: &Path,
     sample_rate: u32,
     control: &ExportControl,
 ) -> Result<()> {
+    render_project_wav_with_options(
+        project,
+        path,
+        WavExportOptions::legacy(sample_rate),
+        control,
+    )
+    .map(|_| ())
+}
+
+/// The same renderer and atomic output path as the compatibility API, with an
+/// explicit file format and level policy. A report is returned only after commit.
+pub fn render_project_wav_with_options(
+    project: &Project,
+    path: &Path,
+    options: WavExportOptions,
+    control: &ExportControl,
+) -> Result<WavExportReport> {
     control.checkpoint(0)?;
-    validate_export_sample_rate(sample_rate)?;
+    options.validate()?;
+    let sample_rate = options.sample_rate;
     ensure_supported_automation(project)?;
     let mixer_plan = OfflineMixerPlan::build(project)?;
     let tempo_map = TempoMap::from_project(project, sample_rate)
         .context("Unable to build the project tempo map for WAV export")?;
     let frame_count = usize::try_from(tempo_map.duration_frames())
         .context("Project is too long for this platform")?;
-    let max_wav_frames = (u32::MAX as usize - 36) / 6;
-    ensure!(
-        frame_count <= max_wav_frames,
-        "Project is too long for a standard PCM WAV file"
-    );
+    options.sample_format.data_size_for_frames(frame_count)?;
     let (audio_assets, audio_clips) = prepare_audio_clips(
         project,
         &mixer_plan,
@@ -440,11 +463,20 @@ pub fn render_project_wav_controlled(
         if index % PROGRESS_FRAME_INTERVAL == 0 {
             control.work_progress(index, stereo.len(), 6500, 7000)?;
         }
+        ensure!(
+            frame.left.is_finite() && frame.right.is_finite(),
+            "WAV export contains non-finite audio at frame {index}"
+        );
         peak = peak.max(frame.left.abs()).max(frame.right.abs());
     }
-    let gain = if peak > 0.95 { 0.95 / peak } else { 1.0 };
-    write_stereo_pcm24_controlled(path, sample_rate, &stereo, gain, control)
-        .with_context(|| format!("Unable to export WAV to {}", path.display()))
+    let gain = options.gain_for_peak(peak)?;
+    write_stereo_wav_controlled(path, options, &stereo, gain, control)
+        .with_context(|| format!("Unable to export WAV to {}", path.display()))?;
+    Ok(WavExportReport {
+        frames: frame_count,
+        sample_peak: peak,
+        applied_gain: gain,
+    })
 }
 
 #[cfg(test)]
@@ -922,14 +954,6 @@ fn midi_frequency(note: u8) -> f32 {
     440.0 * 2.0_f32.powf((note as f32 - 69.0) / 12.0)
 }
 
-fn validate_export_sample_rate(sample_rate: u32) -> Result<()> {
-    ensure!(
-        (8_000..=192_000).contains(&sample_rate),
-        "WAV export sample rate {sample_rate} Hz is outside the supported range 8000..=192000 Hz"
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 fn write_stereo_pcm24(
     path: &Path,
@@ -940,6 +964,7 @@ fn write_stereo_pcm24(
     write_stereo_pcm24_controlled(path, sample_rate, stereo, gain, &ExportControl::default())
 }
 
+#[cfg(test)]
 fn write_stereo_pcm24_controlled(
     path: &Path,
     sample_rate: u32,
@@ -947,8 +972,26 @@ fn write_stereo_pcm24_controlled(
     gain: f32,
     control: &ExportControl,
 ) -> Result<()> {
+    write_stereo_wav_controlled(
+        path,
+        WavExportOptions::legacy(sample_rate),
+        stereo,
+        gain,
+        control,
+    )
+}
+
+fn write_stereo_wav_controlled(
+    path: &Path,
+    options: WavExportOptions,
+    stereo: &[StereoFrame],
+    gain: f32,
+    control: &ExportControl,
+) -> Result<()> {
     control.checkpoint(7000)?;
-    validate_export_sample_rate(sample_rate)?;
+    options.validate()?;
+    let sample_rate = options.sample_rate;
+    let format = options.sample_format;
     ensure!(gain.is_finite(), "WAV export gain must be finite");
     for (index, frame) in stereo.iter().enumerate() {
         if index % PROGRESS_FRAME_INTERVAL == 0 {
@@ -961,28 +1004,30 @@ fn write_stereo_pcm24_controlled(
                 && (frame.right * gain).is_finite(),
             "WAV export contains non-finite audio at frame {index}"
         );
+        ensure!(
+            format == WavSampleFormat::Float32
+                || ((frame.left * gain).abs() <= 1.0 && (frame.right * gain).abs() <= 1.0),
+            "WAV export would clip integer PCM at frame {index}; the destination was not changed"
+        );
     }
     let channels = 2_u16;
-    let bits_per_sample = 24_u16;
-    let bytes_per_sample = 3_u32;
-    let data_size = stereo
-        .len()
-        .checked_mul(channels as usize * bytes_per_sample as usize)
-        .and_then(|size| u32::try_from(size).ok())
-        .context("Rendered audio is too large for a standard PCM WAV file")?;
-    ensure!(
-        data_size <= u32::MAX - 36,
-        "Rendered audio is too large for a standard PCM WAV file"
-    );
+    let bits_per_sample = format.bits();
+    let bytes_per_sample = u32::from(bits_per_sample / 8);
+    let data_size = format.data_size_for_frames(stereo.len())?;
 
     control.checkpoint(7500)?;
     let (mut staged, file) = create_staged_output(path)?;
     let mut writer = BufWriter::with_capacity(WAV_WRITE_BUFFER_BYTES, file);
     writer.write_all(b"RIFF")?;
-    writer.write_all(&(36 + data_size).to_le_bytes())?;
+    writer.write_all(&(format.riff_overhead() + data_size).to_le_bytes())?;
     writer.write_all(b"WAVEfmt ")?;
-    writer.write_all(&16_u32.to_le_bytes())?;
-    writer.write_all(&1_u16.to_le_bytes())?;
+    let fmt_size = if format == WavSampleFormat::Float32 {
+        18_u32
+    } else {
+        16_u32
+    };
+    writer.write_all(&fmt_size.to_le_bytes())?;
+    writer.write_all(&format.format_tag().to_le_bytes())?;
     writer.write_all(&channels.to_le_bytes())?;
     writer.write_all(&sample_rate.to_le_bytes())?;
     let byte_rate = sample_rate * channels as u32 * bytes_per_sample;
@@ -990,21 +1035,41 @@ fn write_stereo_pcm24_controlled(
     let block_align = channels * bytes_per_sample as u16;
     writer.write_all(&block_align.to_le_bytes())?;
     writer.write_all(&bits_per_sample.to_le_bytes())?;
+    if format == WavSampleFormat::Float32 {
+        writer.write_all(&0_u16.to_le_bytes())?; // cbSize, no extension
+        writer.write_all(b"fact")?;
+        writer.write_all(&4_u32.to_le_bytes())?;
+        writer.write_all(&(stereo.len() as u32).to_le_bytes())?;
+    }
     writer.write_all(b"data")?;
     writer.write_all(&data_size.to_le_bytes())?;
     for (index, frame) in stereo.iter().enumerate() {
         if index % PROGRESS_FRAME_INTERVAL == 0 {
             control.work_progress(index, stereo.len(), 7500, 9800)?;
         }
-        let mut encoded_frame = [0_u8; 6];
+        let mut encoded_frame = [0_u8; 8];
         for (channel, sample) in [frame.left, frame.right].into_iter().enumerate() {
-            let value = (sample * gain).clamp(-1.0, 1.0);
-            let integer = (value * 8_388_607.0).round() as i32;
-            let encoded = integer.to_le_bytes();
-            let offset = channel * 3;
-            encoded_frame[offset..offset + 3].copy_from_slice(&encoded[..3]);
+            let value = sample * gain;
+            let width = bytes_per_sample as usize;
+            let offset = channel * width;
+            match format {
+                WavSampleFormat::Pcm16 => {
+                    let integer = (value * 32_767.0).round() as i16;
+                    encoded_frame[offset..offset + width].copy_from_slice(&integer.to_le_bytes());
+                }
+                WavSampleFormat::Pcm24 => {
+                    // Keep the legacy quantizer byte-for-byte, without adding dither.
+                    let integer = (value * 8_388_607.0).round() as i32;
+                    encoded_frame[offset..offset + width]
+                        .copy_from_slice(&integer.to_le_bytes()[..3]);
+                }
+                WavSampleFormat::Float32 => {
+                    // Floating point preserves finite headroom; never clamp to unity.
+                    encoded_frame[offset..offset + width].copy_from_slice(&value.to_le_bytes());
+                }
+            }
         }
-        writer.write_all(&encoded_frame)?;
+        writer.write_all(&encoded_frame[..usize::from(block_align)])?;
     }
     control.checkpoint(9800)?;
     writer
@@ -3121,5 +3186,462 @@ mod tests {
         assert_eq!(std::fs::read(&output).unwrap(), before);
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
+    }
+
+    #[test]
+    fn each_wav_format_has_exact_headers_frames_and_production_reader_round_trip() {
+        let directory = workflow_test_directory("formats");
+        let path = directory.join("format.wav");
+        let frames = [
+            StereoFrame {
+                left: -1.0,
+                right: 1.0,
+            },
+            StereoFrame {
+                left: -0.5,
+                right: 0.25,
+            },
+            StereoFrame::default(),
+        ];
+        for sample_format in WavSampleFormat::ALL {
+            for sample_rate in [8000, 44100, 48000, 88200, 96000, 176400, 192000] {
+                let options = WavExportOptions {
+                    sample_rate,
+                    sample_format,
+                    ..WavExportOptions::default()
+                };
+                write_stereo_wav_controlled(
+                    &path,
+                    options,
+                    &frames,
+                    1.0,
+                    &ExportControl::default(),
+                )
+                .unwrap();
+                let bytes = std::fs::read(&path).unwrap();
+                let data_offset = sample_format.riff_overhead() as usize + 8;
+                let data_len = frames.len() * usize::from(sample_format.block_align());
+                assert_eq!(&bytes[..4], b"RIFF");
+                assert_eq!(
+                    u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize,
+                    bytes.len() - 8
+                );
+                assert_eq!(&bytes[8..16], b"WAVEfmt ");
+                assert_eq!(
+                    u16::from_le_bytes(bytes[20..22].try_into().unwrap()),
+                    sample_format.format_tag()
+                );
+                assert_eq!(u16::from_le_bytes(bytes[22..24].try_into().unwrap()), 2);
+                assert_eq!(
+                    u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+                    sample_rate
+                );
+                assert_eq!(
+                    u32::from_le_bytes(bytes[28..32].try_into().unwrap()),
+                    sample_rate * u32::from(sample_format.block_align())
+                );
+                assert_eq!(
+                    u16::from_le_bytes(bytes[32..34].try_into().unwrap()),
+                    sample_format.block_align()
+                );
+                assert_eq!(
+                    u16::from_le_bytes(bytes[34..36].try_into().unwrap()),
+                    sample_format.bits()
+                );
+                assert_eq!(&bytes[data_offset - 8..data_offset - 4], b"data");
+                assert_eq!(
+                    u32::from_le_bytes(bytes[data_offset - 4..data_offset].try_into().unwrap())
+                        as usize,
+                    data_len
+                );
+                assert_eq!(bytes.len(), data_offset + data_len);
+                if sample_format == WavSampleFormat::Float32 {
+                    assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 18);
+                    assert_eq!(&bytes[36..38], &[0, 0]);
+                    assert_eq!(&bytes[38..42], b"fact");
+                    assert_eq!(u32::from_le_bytes(bytes[42..46].try_into().unwrap()), 4);
+                    assert_eq!(u32::from_le_bytes(bytes[46..50].try_into().unwrap()), 3);
+                } else {
+                    assert_eq!(u32::from_le_bytes(bytes[16..20].try_into().unwrap()), 16);
+                }
+                let decoded = wav::read_wav(&path).unwrap();
+                assert_eq!(decoded.metadata.frames, 3);
+                assert_eq!(decoded.metadata.bits_per_sample, sample_format.bits());
+                assert_eq!(decoded.metadata.block_align, sample_format.block_align());
+                assert_eq!(decoded.metadata.sample_rate, sample_rate);
+                assert_eq!(
+                    decoded.metadata.encoding,
+                    if sample_format == WavSampleFormat::Float32 {
+                        wav::WavSampleEncoding::IeeeFloat
+                    } else {
+                        wav::WavSampleEncoding::PcmInteger
+                    }
+                );
+                let tolerance = if sample_format == WavSampleFormat::Pcm16 {
+                    1.0 / 32767.0
+                } else {
+                    1.0e-6
+                };
+                for (actual, expected) in decoded
+                    .samples
+                    .iter()
+                    .zip(frames.iter().flat_map(|f| [f.left, f.right]))
+                {
+                    assert!(
+                        (actual - expected).abs() <= tolerance,
+                        "{sample_format:?}: {actual} != {expected}"
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn explicit_formats_render_exact_tempo_map_duration_at_each_rate() {
+        let directory = workflow_test_directory("format-duration");
+        let path = directory.join("render.wav");
+        let mut project = arrangement_project();
+        project.tempo = 123.0;
+        project.song_length_beats = 0.25;
+        project.clips[0].muted = true;
+        for sample_format in WavSampleFormat::ALL {
+            for sample_rate in WavExportOptions::STANDARD_SAMPLE_RATES {
+                let options = WavExportOptions {
+                    sample_rate,
+                    sample_format,
+                    ..WavExportOptions::default()
+                };
+                let report = render_project_wav_with_options(
+                    &project,
+                    &path,
+                    options,
+                    &ExportControl::default(),
+                )
+                .unwrap();
+                let expected = TempoMap::from_project(&project, sample_rate)
+                    .unwrap()
+                    .duration_frames();
+                let decoded = wav::read_wav(&path).unwrap();
+                assert_eq!(report.frames as u64, expected);
+                assert_eq!(decoded.metadata.frames, expected);
+                assert_eq!(decoded.metadata.sample_rate, sample_rate);
+                assert!(decoded.samples.iter().all(|sample| *sample == 0.0));
+                assert_eq!(report.applied_gain, 1.0);
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn level_policy_is_explicit_and_preserve_pcm_overload_keeps_original() {
+        use crate::export_options::WavLevelPolicy;
+        let directory = workflow_test_directory("level-policy");
+        let source = directory.join("source.wav");
+        let path = directory.join("result.wav");
+        write_pcm16_wav(&source, 8000, 1, &[16384; 8]);
+        let mut project = audio_project(&source, 8000, 1, 8);
+        project.clips[0].gain = 4.0;
+        for sample_format in WavSampleFormat::ALL {
+            let mut options = WavExportOptions {
+                sample_rate: 8000,
+                sample_format,
+                level_policy: WavLevelPolicy::PreserveLevel,
+            };
+            std::fs::write(&path, b"original").unwrap();
+            let result = render_project_wav_with_options(
+                &project,
+                &path,
+                options,
+                &ExportControl::default(),
+            );
+            if sample_format == WavSampleFormat::Float32 {
+                let report = result.unwrap();
+                assert_eq!(report.applied_gain, 1.0);
+                assert_eq!(report.sample_peak, 2.0);
+                let bytes = std::fs::read(&path).unwrap();
+                assert_eq!(f32::from_le_bytes(bytes[58..62].try_into().unwrap()), 2.0);
+                // Existing import contract deliberately clamps float headroom.
+                assert_eq!(wav::read_wav(&path).unwrap().samples[0], 1.0);
+            } else {
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("Preserve level would clip"));
+                assert!(error.contains("32-bit IEEE float"));
+                assert!(error.contains("peak attenuation"));
+                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+            }
+            options.level_policy = WavLevelPolicy::AttenuatePeaks;
+            let report = render_project_wav_with_options(
+                &project,
+                &path,
+                options,
+                &ExportControl::default(),
+            )
+            .unwrap();
+            assert_eq!(report.sample_peak, 2.0);
+            assert_eq!(report.applied_gain, 0.475);
+            assert!(report.level_summary().contains("Peak attenuation applied"));
+            let decoded = wav::read_wav(&path).unwrap();
+            assert!((decoded.samples[0] - 0.95).abs() < 4.0e-5);
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 2);
+        }
+        project.clips[0].gain = 1.0;
+        let report = render_project_wav_with_options(
+            &project,
+            &path,
+            WavExportOptions::legacy(8000),
+            &ExportControl::default(),
+        )
+        .unwrap();
+        assert_eq!(report.sample_peak, 0.5);
+        assert_eq!(report.applied_gain, 1.0);
+        assert!(report.level_summary().contains("Unity export gain"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn float_writer_preserves_finite_negative_and_positive_headroom_without_clamping() {
+        let directory = workflow_test_directory("float-headroom");
+        let path = directory.join("float.wav");
+        let options = WavExportOptions {
+            sample_format: WavSampleFormat::Float32,
+            ..WavExportOptions::default()
+        };
+        let frames = [
+            StereoFrame {
+                left: -2.25,
+                right: 3.5,
+            },
+            StereoFrame {
+                left: f32::MAX,
+                right: -f32::MAX,
+            },
+        ];
+        write_stereo_wav_controlled(&path, options, &frames, 1.0, &ExportControl::default())
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let samples = bytes[58..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|sample| f32::from_le_bytes(*sample))
+            .collect::<Vec<_>>();
+        assert_eq!(samples, vec![-2.25, 3.5, f32::MAX, -f32::MAX]);
+        assert_eq!(
+            wav::read_wav(&path).unwrap().samples,
+            vec![-1.0, 1.0, 1.0, -1.0]
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn all_formats_reject_non_finite_samples_gain_and_invalid_rates_before_staging() {
+        let directory = workflow_test_directory("formats-invalid");
+        let path = directory.join("original.wav");
+        std::fs::write(&path, b"original").unwrap();
+        for sample_format in WavSampleFormat::ALL {
+            let options = WavExportOptions {
+                sample_format,
+                ..WavExportOptions::default()
+            };
+            for (left, right, gain) in [
+                (f32::NAN, 0.0, 1.0),
+                (0.0, f32::INFINITY, 1.0),
+                (f32::NEG_INFINITY, 0.0, 1.0),
+                (0.25, 0.0, f32::NAN),
+                (f32::MAX, 0.0, 2.0),
+            ] {
+                assert!(
+                    write_stereo_wav_controlled(
+                        &path,
+                        options,
+                        &[StereoFrame { left, right }],
+                        gain,
+                        &ExportControl::default()
+                    )
+                    .is_err()
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+            }
+            for sample_rate in [0, 7999, 192001, u32::MAX] {
+                assert!(
+                    render_project_wav_with_options(
+                        &arrangement_project(),
+                        &path,
+                        WavExportOptions {
+                            sample_rate,
+                            ..options
+                        },
+                        &ExportControl::default()
+                    )
+                    .is_err()
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn all_format_cancellation_phases_preserve_original_and_clean_staging() {
+        let directory = workflow_test_directory("formats-cancel");
+        let source = directory.join("source.wav");
+        let path = directory.join("result.wav");
+        write_pcm16_wav(&source, 8000, 1, &vec![8192; 16000]);
+        let mut project = audio_project(&source, 8000, 1, 16000);
+        project.song_length_beats = 2.0;
+        project.clips[0].length = 2.0;
+        for sample_format in WavSampleFormat::ALL {
+            for level_policy in [
+                crate::export_options::WavLevelPolicy::AttenuatePeaks,
+                crate::export_options::WavLevelPolicy::PreserveLevel,
+            ] {
+                for threshold in [
+                    1, 1000, 1500, 2000, 5000, 6000, 6800, 7200, 8000, 9800, 9900,
+                ] {
+                    std::fs::write(&path, b"original").unwrap();
+                    let options = WavExportOptions {
+                        sample_rate: 8000,
+                        sample_format,
+                        level_policy,
+                    };
+                    let control = ExportControl::default();
+                    control.cancel_at(threshold);
+                    let error = render_project_wav_with_options(&project, &path, options, &control)
+                        .unwrap_err();
+                    assert!(
+                        error
+                            .downcast_ref::<crate::export_job::ExportCancelled>()
+                            .is_some(),
+                        "{sample_format:?}/{threshold}: {error:#}"
+                    );
+                    assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 2);
+                    assert!(control.progress().basis_points < 10000);
+                }
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn every_format_failed_commit_keeps_destination_and_cleans_stage() {
+        let directory = workflow_test_directory("formats-commit");
+        let path = directory.join("directory-not-a-file.wav");
+        std::fs::create_dir(&path).unwrap();
+        let marker = path.join("keep");
+        std::fs::write(&marker, b"original").unwrap();
+        for sample_format in WavSampleFormat::ALL {
+            let options = WavExportOptions {
+                sample_format,
+                ..WavExportOptions::default()
+            };
+            let control = ExportControl::default();
+            let error = write_stereo_wav_controlled(
+                &path,
+                options,
+                &[StereoFrame::default()],
+                1.0,
+                &control,
+            )
+            .unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<crate::export_job::ExportCancelled>()
+                    .is_none()
+            );
+            assert!(error.to_string().contains("Unable to commit"));
+            assert_eq!(std::fs::read(&marker).unwrap(), b"original");
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn default_pcm24_output_matches_pre_options_golden_file_exactly() {
+        // Generated by the unmodified bcf0c7d renderer using the same source,
+        // project and rate below; includes legacy peak attenuation and silence.
+        let directory = workflow_test_directory("legacy-golden");
+        let source = directory.join("source.wav");
+        let path = directory.join("render.wav");
+        write_pcm16_wav(&source, 8000, 1, &[-16384, 8192, 24576, -32768, 32767]);
+        let mut project = audio_project(&source, 8000, 1, 5);
+        project.clips[0].gain = 1.5;
+        let expected = include_bytes!("../tests/fixtures/export-legacy-pcm24.wav");
+        render_project_wav(&project, &path, 8000).unwrap();
+        assert_eq!(&std::fs::read(&path).unwrap(), expected);
+        render_project_wav_with_options(
+            &project,
+            &path,
+            WavExportOptions::legacy(8000),
+            &ExportControl::default(),
+        )
+        .unwrap();
+        assert_eq!(&std::fs::read(&path).unwrap(), expected);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn options_keep_plugin_sidechain_and_automation_guards_for_every_encoding() {
+        let directory = workflow_test_directory("format-guards");
+        let path = directory.join("original.wav");
+        std::fs::write(&path, b"original").unwrap();
+        let mut instrument = mixer_test_project();
+        instrument.plugin_instances.push(test_plugin(700));
+        instrument.channels[0].instrument_plugin_instance_id = Some(700);
+        let mut insert = mixer_test_project();
+        insert.plugin_instances.push(test_plugin(700));
+        insert.mixer_insert_slots.push(MixerInsertSlotRef {
+            track: 1,
+            slot: 0,
+            plugin_instance_id: 700,
+        });
+        let mut sidechain = mixer_test_project();
+        sidechain.mixer_routes.push(ProjectMixerRoute {
+            id: 1,
+            runtime_slot: 0,
+            source_mixer_track_id: 1,
+            destination: MixerRouteDestination::PluginSidechain {
+                mixer_track_id: MASTER_MIXER_TRACK_ID,
+                slot: 0,
+                input_bus: 1,
+            },
+            tap: MixerRouteTap::PostFader,
+            gain: 1.0,
+            enabled: true,
+        });
+        let mut automation = arrangement_project();
+        automation
+            .automation_lanes
+            .push(unsupported_lane(AutomationTarget::MasterVolume));
+        for (project, reason) in [
+            (instrument, "active instrument"),
+            (insert, "active mixer"),
+            (sidechain, "sidechain"),
+            (automation, "Only Tempo"),
+        ] {
+            assert!(
+                format!("{:#}", ensure_supported_project(&project).unwrap_err()).contains(reason)
+            );
+            for sample_format in WavSampleFormat::ALL {
+                let options = WavExportOptions {
+                    sample_rate: 8000,
+                    sample_format,
+                    ..WavExportOptions::default()
+                };
+                let error = render_project_wav_with_options(
+                    &project,
+                    &path,
+                    options,
+                    &ExportControl::default(),
+                )
+                .unwrap_err();
+                assert!(format!("{error:#}").contains(reason));
+                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }
