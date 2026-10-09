@@ -324,6 +324,10 @@ impl CitrusApp {
         }
     }
 
+    pub(super) fn editor_pointer_gesture_active(&self) -> bool {
+        self.workspace.pointer_dragging || self.workspace.cancel_pointer_gesture
+    }
+
     fn editor_drag_in_progress(&self, ctx: &egui::Context) -> bool {
         ctx.dragged_id()
             .and_then(|id| ctx.read_response(id))

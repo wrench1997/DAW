@@ -1157,7 +1157,11 @@ fn floating_workspace_focus_routes_supported_edits_and_shared_undo_once() {
         "Undo is one shared project history even when Mixer owns focus"
     );
 
-    for view in [StudioView::Playlist, StudioView::PianoRoll] {
+    for view in [
+        StudioView::Playlist,
+        StudioView::ChannelRack,
+        StudioView::Mixer,
+    ] {
         ui.app.focus_editor(view);
         ui.settle();
         let before = project_fingerprint(&ui.app.project);
@@ -1561,4 +1565,577 @@ fn floating_workspace_hide_separates_rack_and_mixer_undo_transactions() {
     );
     ui.key(egui::Key::Z, command);
     assert_eq!(project_fingerprint(&ui.app.project), original);
+}
+
+fn piano_clipboard_command() -> egui::Modifiers {
+    egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..Default::default()
+    }
+}
+
+fn clipboard_key(key: egui::Key, pressed: bool, repeat: bool) -> egui::Event {
+    egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed,
+        repeat,
+        modifiers: piano_clipboard_command(),
+    }
+}
+
+fn copied_note_text(output: &egui::FullOutput) -> String {
+    let commands: Vec<_> = output
+        .platform_output
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            egui::OutputCommand::CopyText(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        commands.len(),
+        1,
+        "an explicit note copy/cut must emit exactly one clipboard write"
+    );
+    assert!(commands[0].starts_with("CITRUS-NOTES/1\n"));
+    commands[0].clone()
+}
+
+fn piano_clipboard_fixture(ui: &mut UiHarness) -> u32 {
+    ui.key(egui::Key::F7, egui::Modifiers::NONE);
+    let channel = ui.app.project.channels[ui.app.selected_channel].id;
+    let ghost = ui
+        .app
+        .project
+        .channels
+        .iter()
+        .find(|c| c.id != channel)
+        .unwrap()
+        .id;
+    ui.app.project.active_pattern_mut().notes = vec![
+        PianoNote {
+            id: 90_001,
+            channel_id: Some(channel),
+            group_id: Some(123),
+            note: 60,
+            start: 0.375,
+            length: 0.75,
+            velocity: 0.625,
+            muted: false,
+            selected: false,
+        },
+        PianoNote {
+            id: 90_002,
+            channel_id: Some(channel),
+            group_id: Some(123),
+            note: 64,
+            start: 0.75,
+            length: 0.25,
+            velocity: 0.25,
+            muted: true,
+            selected: false,
+        },
+        PianoNote {
+            id: 90_003,
+            channel_id: Some(ghost),
+            group_id: None,
+            note: 67,
+            start: 0.0,
+            length: 0.25,
+            velocity: 0.5,
+            muted: false,
+            selected: false,
+        },
+    ];
+    ui.app.piano_roll_state.selection_ids.clear();
+    ui.app.transport_mode = TransportMode::Pattern;
+    ui.app.beat_position = 1.49;
+    ui.app.piano_roll_state.local_snap = 0.25;
+    ui.app.sync_history_observer();
+    ui.app.undo_stack.clear();
+    ui.app.redo_stack.clear();
+    ui.app.project_fingerprint = project_fingerprint(&ui.app.project);
+    ui.app.dirty = false;
+    ui.settle();
+    ui.app.piano_viewport.y.reveal(63.0, 68.0, 0.0).unwrap();
+    ui.settle();
+    channel
+}
+
+#[test]
+fn piano_clipboard_real_semantic_keys_preserve_notes_and_one_step_history() {
+    let mut ui = UiHarness::floating();
+    let channel = piano_clipboard_fixture(&mut ui);
+    let before = project_fingerprint(&ui.app.project);
+    ui.key(egui::Key::A, piano_clipboard_command());
+    assert_eq!(
+        ui.app.piano_roll_state.selection_ids,
+        HashSet::from([90_001, 90_002])
+    );
+    let output = ui.run(vec![
+        clipboard_key(egui::Key::C, true, false),
+        egui::Event::Copy,
+    ]);
+    let text = copied_note_text(&output);
+    ui.run(vec![clipboard_key(egui::Key::C, false, false)]);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert!(ui.app.undo_stack.is_empty());
+    assert!(!ui.app.dirty);
+    let output = ui.run(vec![
+        clipboard_key(egui::Key::V, true, false),
+        egui::Event::Paste(text.clone()),
+    ]);
+    assert!(output.platform_output.commands.is_empty());
+    ui.run(vec![clipboard_key(egui::Key::V, false, false)]);
+    assert_eq!(ui.app.undo_stack.len(), 1);
+    let pasted = ui.app.project.active_pattern().notes[3..].to_vec();
+    assert_eq!(pasted.len(), 2, "semantic + raw paste must dispatch once");
+    assert_eq!((pasted[0].start, pasted[1].start), (1.25, 1.625));
+    assert_eq!((pasted[0].length, pasted[1].length), (0.75, 0.25));
+    assert_eq!((pasted[0].velocity, pasted[1].velocity), (0.625, 0.25));
+    assert_eq!((pasted[0].note, pasted[1].note), (60, 64));
+    assert!(!pasted[0].muted && pasted[1].muted);
+    assert!(pasted.iter().all(|n| n.channel_id == Some(channel)));
+    assert_eq!(pasted[0].group_id, pasted[1].group_id);
+    assert_ne!(pasted[0].group_id, Some(123));
+    assert_eq!(
+        ui.app.piano_roll_state.selection_ids,
+        pasted.iter().map(|n| n.id).collect()
+    );
+    let after = project_fingerprint(&ui.app.project);
+    ui.capture("piano-clipboard-pattern-paste");
+    ui.key(egui::Key::Z, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    ui.key(egui::Key::Y, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), after);
+    ui.run(vec![egui::Event::Paste(text)]);
+    assert_eq!(ui.app.project.active_pattern().notes.len(), 7);
+    assert_eq!(ui.app.undo_stack.len(), 2);
+    let again = &ui.app.project.active_pattern().notes[5..];
+    assert_eq!(again[0].start, pasted[0].start);
+    assert_ne!(again[0].id, pasted[0].id);
+    assert_ne!(again[0].group_id, pasted[0].group_id);
+    ui.run(vec![clipboard_key(egui::Key::V, true, false)]);
+    let repeated = project_fingerprint(&ui.app.project);
+    ui.run(vec![clipboard_key(egui::Key::V, true, true)]);
+    ui.run(vec![clipboard_key(egui::Key::V, false, false)]);
+    assert_eq!(
+        project_fingerprint(&ui.app.project),
+        repeated,
+        "raw key autorepeat is ignored"
+    );
+}
+
+#[test]
+fn piano_clipboard_buttons_cut_empty_invalid_text_and_local_paste_are_deliberate() {
+    let mut ui = UiHarness::floating();
+    piano_clipboard_fixture(&mut ui);
+    let before = project_fingerprint(&ui.app.project);
+    ui.run(vec![egui::Event::Paste("unrelated external text".into())]);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert!(ui.app.undo_stack.is_empty());
+    ui.click("Select all notes");
+    assert_eq!(ui.app.piano_roll_state.selection_ids.len(), 2);
+    let text = copied_note_text(&ui.run(vec![
+        clipboard_key(egui::Key::X, true, false),
+        egui::Event::Cut,
+    ]));
+    ui.run(vec![clipboard_key(egui::Key::X, false, false)]);
+    assert_eq!(ui.app.project.active_pattern().notes.len(), 1);
+    assert!(ui.app.piano_roll_state.selection_ids.is_empty());
+    assert_eq!(ui.app.undo_stack.len(), 1);
+    let cut = project_fingerprint(&ui.app.project);
+    for event in [
+        egui::Event::Cut,
+        egui::Event::Copy,
+        egui::Event::Paste("plain text".into()),
+        egui::Event::Paste("CITRUS-NOTES/1\n{}".into()),
+    ] {
+        let output = ui.run(vec![event]);
+        assert!(output.platform_output.commands.is_empty());
+        assert_eq!(project_fingerprint(&ui.app.project), cut);
+        assert_eq!(ui.app.undo_stack.len(), 1);
+    }
+    ui.key(egui::Key::Z, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    ui.key(egui::Key::Y, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), cut);
+    ui.click("Paste notes");
+    assert_eq!(
+        ui.app.project.active_pattern().notes.len(),
+        3,
+        "local Paste works even after unrelated OS paste"
+    );
+    assert_eq!(ui.app.undo_stack.len(), 2);
+    ui.key(egui::Key::Z, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), cut);
+    ui.run(vec![egui::Event::Paste(text)]);
+    assert_eq!(ui.app.project.active_pattern().notes.len(), 3);
+}
+
+#[test]
+fn piano_clipboard_cross_pattern_retains_channels_and_song_anchor_is_zero() {
+    let mut ui = UiHarness::floating();
+    let channel = piano_clipboard_fixture(&mut ui);
+    ui.key(egui::Key::A, piano_clipboard_command());
+    let text = copied_note_text(&ui.run(vec![egui::Event::Copy]));
+    let source_notes = serde_json::to_string(&ui.app.project.active_pattern().notes).unwrap();
+    let target = ui.app.project.patterns.len();
+    ui.app.project.patterns.push(Pattern {
+        id: 987,
+        name: "Clipboard destination".into(),
+        length_steps: 16,
+        channel_steps: vec![[false; 16]; ui.app.project.channels.len()],
+        notes: Vec::new(),
+    });
+    ui.app.project.active_pattern = target;
+    ui.app.selected_channel = ui
+        .app
+        .project
+        .channels
+        .iter()
+        .position(|c| c.id != channel)
+        .unwrap();
+    ui.app.piano_roll_state.selection_ids.clear();
+    ui.app.transport_mode = TransportMode::Song;
+    ui.app.beat_position = 3072.875;
+    ui.app.sync_history_observer();
+    ui.app.undo_stack.clear();
+    ui.settle();
+    let before = project_fingerprint(&ui.app.project);
+    ui.run(vec![egui::Event::Paste(text)]);
+    let notes = &ui.app.project.active_pattern().notes;
+    assert_eq!(notes.len(), 2);
+    assert_eq!((notes[0].start, notes[1].start), (0.0, 0.375));
+    assert!(
+        notes.iter().all(|note| note.channel_id == Some(channel)),
+        "TARGET must never silently remap channels"
+    );
+    assert_eq!(
+        serde_json::to_string(&ui.app.project.patterns[0].notes).unwrap(),
+        source_notes
+    );
+    assert_eq!(ui.app.undo_stack.len(), 1);
+    ui.capture("piano-clipboard-song-pattern-start");
+    ui.key(egui::Key::Z, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    ui.key(egui::Key::Y, piano_clipboard_command());
+    assert_eq!(ui.app.project.active_pattern().notes.len(), 2);
+}
+
+#[test]
+fn piano_clipboard_focus_text_modal_and_hidden_editors_do_not_leak_actions() {
+    let mut ui = UiHarness::floating();
+    piano_clipboard_fixture(&mut ui);
+    ui.key(egui::Key::A, piano_clipboard_command());
+    let text = copied_note_text(&ui.run(vec![egui::Event::Copy]));
+    let before = project_fingerprint(&ui.app.project);
+    let selected = ui.app.piano_roll_state.selection_ids.clone();
+    for key in [egui::Key::F5, egui::Key::F6, egui::Key::F9] {
+        ui.key(key, egui::Modifiers::NONE);
+        for event in [
+            egui::Event::Copy,
+            egui::Event::Cut,
+            egui::Event::Paste(text.clone()),
+        ] {
+            assert!(ui.run(vec![event]).platform_output.commands.is_empty());
+            assert_eq!(project_fingerprint(&ui.app.project), before);
+            assert_eq!(ui.app.piano_roll_state.selection_ids, selected);
+        }
+    }
+    ui.key(egui::Key::F7, egui::Modifiers::NONE);
+    ui.key(egui::Key::F10, egui::Modifiers::NONE);
+    for event in [
+        egui::Event::Copy,
+        egui::Event::Cut,
+        egui::Event::Paste(text.clone()),
+    ] {
+        assert!(ui.run(vec![event]).platform_output.commands.is_empty());
+    }
+    ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    let field = ui
+        .nodes
+        .iter()
+        .find(|node| node.role() == Role::TextInput && node.bounds().is_some_and(|b| b.x0 < 220.0))
+        .unwrap()
+        .bounds()
+        .unwrap();
+    ui.click_pos(Pos2::new(
+        ((field.x0 + field.x1) / 2.0) as f32,
+        ((field.y0 + field.y1) / 2.0) as f32,
+    ));
+    ui.run(vec![egui::Event::Text("browser text".into())]);
+    ui.key(egui::Key::A, piano_clipboard_command());
+    let output = ui.run(vec![egui::Event::Copy]);
+    assert!(
+        output
+            .platform_output
+            .commands
+            .iter()
+            .any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t == "browser text"))
+    );
+    ui.run(vec![egui::Event::Cut]);
+    assert!(ui.app.browser_search.is_empty());
+    ui.run(vec![egui::Event::Paste("another filter".into())]);
+    assert_eq!(ui.app.browser_search, "another filter");
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert_eq!(ui.app.piano_roll_state.selection_ids, selected);
+    ui.click_pos(ui.editor_rect(StudioView::PianoRoll).left_top() + Vec2::new(100.0, 13.0));
+    for _ in 0..4 {
+        ui.click("Hide editor");
+    }
+    ui.run(vec![egui::Event::Paste(text)]);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert!(ui.app.undo_stack.is_empty());
+}
+
+#[test]
+fn piano_clipboard_reset_invalid_channel_and_snapshot_barriers_preserve_history() {
+    let mut ui = UiHarness::floating();
+    let channel = piano_clipboard_fixture(&mut ui);
+    ui.key(egui::Key::A, piano_clipboard_command());
+    let text = copied_note_text(&ui.run(vec![egui::Event::Copy]));
+    let before = project_fingerprint(&ui.app.project);
+    // Exercise each action-time guard directly so no pending file or replacement operation
+    // can execute during the guard test. The clipboard itself came from actual UI input.
+    for barrier in 0..4 {
+        match barrier {
+            0 => {
+                ui.app.queued_save_request = Some(ProjectSaveRequest::Manual {
+                    path: PathBuf::from("unused-clipboard-test.citrus"),
+                    lifecycle: None,
+                })
+            }
+            1 => {
+                ui.app.deferred_generator_candidate_after_midi =
+                    Some(DeferredMidiGeneratorCandidate {
+                        channel_id: channel,
+                        candidate: ui.app.project.clone(),
+                        previous_state: None,
+                    })
+            }
+            2 => ui.app.piano_roll_gesture_before = Some(ui.app.project.clone()),
+            _ => ui.app.playlist_gesture_before = Some(ui.app.project.clone()),
+        }
+        for action in [
+            ShortcutAction::SelectAllNotes,
+            ShortcutAction::CopyNotes,
+            ShortcutAction::CutNotes,
+            ShortcutAction::PasteNotes,
+        ] {
+            ui.app.apply_shortcut_action(&ui.ctx, action);
+            assert_eq!(project_fingerprint(&ui.app.project), before);
+            assert!(ui.app.undo_stack.is_empty());
+        }
+        ui.app.queued_save_request = None;
+        ui.app.deferred_generator_candidate_after_midi = None;
+        ui.app.piano_roll_gesture_before = None;
+        ui.app.playlist_gesture_before = None;
+    }
+    ui.app.project.channels.retain(|c| c.id != channel);
+    ui.app.sync_history_observer();
+    let missing_channel = project_fingerprint(&ui.app.project);
+    ui.run(vec![egui::Event::Paste(text.clone())]);
+    assert_eq!(project_fingerprint(&ui.app.project), missing_channel);
+    assert!(ui.app.undo_stack.is_empty());
+    ui.app.install_project(Project::default(), None, false);
+    ui.key(egui::Key::F7, egui::Modifiers::NONE);
+    let new_project = project_fingerprint(&ui.app.project);
+    ui.run(vec![egui::Event::Paste(text)]);
+    ui.key(egui::Key::V, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), new_project);
+    assert!(ui.app.undo_stack.is_empty());
+    assert!(ui.button("Paste notes").is_disabled());
+}
+
+#[test]
+fn piano_clipboard_real_note_drag_and_interrupted_pointer_block_clipboard() {
+    let mut ui = UiHarness::floating();
+    piano_clipboard_fixture(&mut ui);
+    ui.key(egui::Key::A, piano_clipboard_command());
+    let text = copied_note_text(&ui.run(vec![egui::Event::Copy]));
+    let response = ui
+        .ctx
+        .read_response(Id::new(("piano-note", 90_001_u64)))
+        .unwrap();
+    let origin = response.rect.center();
+    assert_eq!(
+        ui.ctx.layer_id_at(origin).unwrap().id,
+        workspace::window_id(StudioView::PianoRoll)
+    );
+    ui.run(mixer_pointer_button(origin, true));
+    ui.run(vec![egui::Event::PointerMoved(
+        origin + Vec2::new(40.0, 0.0),
+    )]);
+    assert!(ui.app.piano_roll_gesture_before.is_some());
+    let dragged = project_fingerprint(&ui.app.project);
+    for event in [
+        egui::Event::Copy,
+        egui::Event::Cut,
+        egui::Event::Paste(text.clone()),
+    ] {
+        assert!(ui.run(vec![event]).platform_output.commands.is_empty());
+        assert_eq!(project_fingerprint(&ui.app.project), dragged);
+    }
+    ui.key(egui::Key::F10, egui::Modifiers::NONE);
+    ui.key(egui::Key::F10, egui::Modifiers::NONE);
+    assert!(ui.app.piano_roll_gesture_before.is_none());
+    ui.run(vec![egui::Event::Paste(text.clone())]);
+    assert_eq!(
+        project_fingerprint(&ui.app.project),
+        dragged,
+        "dismissal must not resume a held pointer edit"
+    );
+    ui.run(mixer_pointer_button(origin + Vec2::new(40.0, 0.0), false));
+    ui.settle();
+    let history = ui.app.undo_stack.len();
+    ui.run(vec![egui::Event::Paste(text)]);
+    assert_eq!(ui.app.project.active_pattern().notes.len(), 5);
+    assert_eq!(ui.app.undo_stack.len(), history + 1);
+    ui.key(egui::Key::Z, piano_clipboard_command());
+    assert_eq!(
+        project_fingerprint(&ui.app.project),
+        dragged,
+        "paste undo must preserve preceding drag"
+    );
+}
+
+#[test]
+fn piano_clipboard_numeric_text_focus_keeps_normal_text_clipboard_ownership() {
+    let mut ui = UiHarness::floating();
+    piano_clipboard_fixture(&mut ui);
+    ui.key(egui::Key::A, piano_clipboard_command());
+    let text = copied_note_text(&ui.run(vec![egui::Event::Copy]));
+    let notes = serde_json::to_string(&ui.app.project.active_pattern().notes).unwrap();
+    let selected = ui.app.piano_roll_state.selection_ids.clone();
+    let bounds = ui
+        .nodes
+        .iter()
+        .find(|n| n.role() == Role::SpinButton && n.bounds().is_some_and(|b| b.y1 < 100.0))
+        .expect("toolbar Tempo is a real numeric editor")
+        .bounds()
+        .unwrap();
+    let pos = Pos2::new(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    );
+    for _ in 0..2 {
+        ui.run(mixer_pointer_button(pos, true));
+        ui.run(mixer_pointer_button(pos, false));
+    }
+    assert!(
+        ui.ctx.text_edit_focused(),
+        "double-click Tempo must enter numeric text editing"
+    );
+    ui.key(egui::Key::A, piano_clipboard_command());
+    let output = ui.run(vec![egui::Event::Copy]);
+    assert!(
+        output.platform_output.commands.iter().any(
+            |c| matches!(c, egui::OutputCommand::CopyText(t) if !t.starts_with("CITRUS-NOTES/"))
+        )
+    );
+    ui.run(vec![egui::Event::Cut]);
+    ui.run(vec![egui::Event::Paste(text)]);
+    assert_eq!(
+        serde_json::to_string(&ui.app.project.active_pattern().notes).unwrap(),
+        notes
+    );
+    assert_eq!(ui.app.piano_roll_state.selection_ids, selected);
+}
+
+#[test]
+fn piano_clipboard_copy_cut_buttons_emit_one_payload_and_cut_is_one_undo() {
+    let mut ui = UiHarness::floating();
+    piano_clipboard_fixture(&mut ui);
+    ui.click("Select all notes");
+    let before = project_fingerprint(&ui.app.project);
+    let mut payloads = Vec::new();
+    for label in ["Copy notes", "Cut notes"] {
+        ui.settle();
+        let bounds = ui.button(label).bounds().unwrap();
+        let pos = Pos2::new(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        );
+        let press = ui.run(mixer_pointer_button(pos, true));
+        assert!(press.platform_output.commands.is_empty());
+        payloads.push(copied_note_text(&ui.run(mixer_pointer_button(pos, false))));
+        for _ in 0..3 {
+            assert!(ui.run(Vec::new()).platform_output.commands.is_empty());
+        }
+    }
+    assert_eq!(payloads[0], payloads[1]);
+    assert_eq!(ui.app.project.active_pattern().notes.len(), 1);
+    assert_eq!(ui.app.undo_stack.len(), 1);
+    ui.key(egui::Key::Z, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+}
+
+#[test]
+fn piano_clipboard_minimum_floating_toolbar_buttons_remain_reachable() {
+    let mut ui = UiHarness::floating();
+    piano_clipboard_fixture(&mut ui);
+    ui.key(egui::Key::A, piano_clipboard_command());
+    copied_note_text(&ui.run(vec![egui::Event::Copy]));
+    ui.size = Vec2::new(1080.0, 680.0);
+    ui.settle();
+    let editor = ui.editor_rect(StudioView::PianoRoll);
+    for label in ["Select all notes", "Copy notes", "Cut notes", "Paste notes"] {
+        let b = ui.button(label).bounds().unwrap();
+        let rect = Rect::from_min_max(
+            Pos2::new(b.x0 as f32, b.y0 as f32),
+            Pos2::new(b.x1 as f32, b.y1 as f32),
+        );
+        assert!(
+            editor.contains_rect(rect),
+            "{label} must stay inside the small Piano window"
+        );
+    }
+    ui.click("Paste notes");
+    assert_eq!(ui.app.project.active_pattern().notes.len(), 5);
+    assert_eq!(ui.app.undo_stack.len(), 1);
+    ui.capture("piano-clipboard-minimum-floating");
+}
+
+#[test]
+fn piano_clipboard_partial_group_cut_keeps_preceding_edit_separate_in_history() {
+    let mut ui = UiHarness::floating();
+    piano_clipboard_fixture(&mut ui);
+    ui.app.piano_roll_state.grouping_enabled = false;
+    ui.app.piano_roll_state.selection_ids = HashSet::from([90_001]);
+    let before = project_fingerprint(&ui.app.project);
+    // A preceding Rack edit has not yet reached the timed observer.
+    ui.app.project.active_pattern_mut().channel_steps[0][0] ^= true;
+    let preceding = project_fingerprint(&ui.app.project);
+    let text = copied_note_text(&ui.run(vec![egui::Event::Cut]));
+    let cut = project_fingerprint(&ui.app.project);
+    assert_eq!(ui.app.project.active_pattern().notes.len(), 2);
+    assert!(
+        ui.app
+            .project
+            .active_pattern()
+            .notes
+            .iter()
+            .all(|note| note.group_id.is_none())
+    );
+    assert_eq!(ui.app.undo_stack.len(), 2);
+    ui.key(egui::Key::Z, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), preceding);
+    assert_eq!(ui.app.project.active_pattern().notes[0].group_id, Some(123));
+    assert_eq!(ui.app.project.active_pattern().notes[1].group_id, Some(123));
+    ui.key(egui::Key::Z, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    ui.key(egui::Key::Y, piano_clipboard_command());
+    ui.key(egui::Key::Y, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), cut);
+    ui.run(vec![egui::Event::Paste(text)]);
+    let pasted = ui.app.project.active_pattern().notes.last().unwrap();
+    assert!(
+        pasted.group_id.is_none(),
+        "a one-member copied group must not join the source group"
+    );
 }

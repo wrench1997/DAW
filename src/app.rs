@@ -3,6 +3,7 @@ mod audio_import;
 mod headless_ui_capture;
 #[cfg(test)]
 mod headless_ui_tests;
+mod piano_clipboard;
 mod project_media_ui;
 mod sample_browser_ui;
 mod workspace;
@@ -1786,6 +1787,8 @@ enum ShortcutKey {
     B,
     T,
     C,
+    X,
+    V,
     E,
     A,
     L,
@@ -1806,7 +1809,7 @@ enum ShortcutKey {
 }
 
 impl ShortcutKey {
-    const PRIORITY: [Self; 30] = [
+    const PRIORITY: [Self; 32] = [
         Self::S,
         Self::O,
         Self::N,
@@ -1823,6 +1826,8 @@ impl ShortcutKey {
         Self::B,
         Self::T,
         Self::C,
+        Self::X,
+        Self::V,
         Self::E,
         Self::Delete,
         Self::Escape,
@@ -1871,6 +1876,8 @@ impl ShortcutKey {
             Self::Num3 => 27,
             Self::Num4 => 28,
             Self::G => 29,
+            Self::X => 30,
+            Self::V => 31,
         }
     }
 
@@ -1889,6 +1896,8 @@ impl ShortcutKey {
             egui::Key::B => Some(Self::B),
             egui::Key::T => Some(Self::T),
             egui::Key::C => Some(Self::C),
+            egui::Key::X => Some(Self::X),
+            egui::Key::V => Some(Self::V),
             egui::Key::E => Some(Self::E),
             egui::Key::A => Some(Self::A),
             egui::Key::L => Some(Self::L),
@@ -1919,13 +1928,31 @@ struct ShortcutChord {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ShortcutPresses {
-    chords: [Option<ShortcutChord>; 30],
+    chords: [Option<ShortcutChord>; 32],
 }
 
 impl ShortcutPresses {
     fn from_events(events: &[egui::Event]) -> Self {
         let mut presses = Self::default();
         for event in events {
+            // winit emits semantic clipboard events instead of the corresponding keys.
+            // Store them in the same slot to dispatch semantic + raw input only once.
+            let clipboard_key = match event {
+                egui::Event::Copy => Some(ShortcutKey::C),
+                egui::Event::Cut => Some(ShortcutKey::X),
+                egui::Event::Paste(_) => Some(ShortcutKey::V),
+                _ => None,
+            };
+            if let Some(key) = clipboard_key {
+                presses.insert(ShortcutChord {
+                    key,
+                    modifiers: ShortcutModifiers {
+                        command: true,
+                        ..Default::default()
+                    },
+                });
+                continue;
+            }
             let egui::Event::Key {
                 key,
                 pressed: true,
@@ -1972,6 +1999,10 @@ enum ShortcutAction {
     Redo,
     Duplicate,
     Delete,
+    SelectAllNotes,
+    CopyNotes,
+    CutNotes,
+    PasteNotes,
     ToggleSettings,
     View(StudioView),
     Tool(ToolMode),
@@ -2048,6 +2079,10 @@ fn resolve_global_shortcut(chord: ShortcutChord) -> Option<ShortcutAction> {
         ShortcutKey::Z if modifiers.is_command_only() => Some(ShortcutAction::Undo),
         ShortcutKey::Y if modifiers.is_command_only() => Some(ShortcutAction::Redo),
         ShortcutKey::Z if modifiers.is_command_shift() => Some(ShortcutAction::Redo),
+        ShortcutKey::A if modifiers.is_command_only() => Some(ShortcutAction::SelectAllNotes),
+        ShortcutKey::C if modifiers.is_command_only() => Some(ShortcutAction::CopyNotes),
+        ShortcutKey::X if modifiers.is_command_only() => Some(ShortcutAction::CutNotes),
+        ShortcutKey::V if modifiers.is_command_only() => Some(ShortcutAction::PasteNotes),
         ShortcutKey::D if modifiers.is_command_only() => Some(ShortcutAction::Duplicate),
         ShortcutKey::L if modifiers.is_command_only() => Some(ShortcutAction::QuickLegato),
         ShortcutKey::L if modifiers.is_alt_only() => Some(ShortcutAction::PianoTransform(
@@ -4706,6 +4741,7 @@ pub struct CitrusApp {
     show_playlist_fades: bool,
     piano_viewport: Viewport2D,
     piano_roll_state: PianoRollState,
+    piano_clipboard: piano_clipboard::PianoClipboard,
     piano_roll_preferences_dirty: bool,
     piano_roll_gesture_before: Option<Project>,
     piano_roll_transform: Option<PianoRollTransformSession>,
@@ -5028,6 +5064,7 @@ impl CitrusApp {
                 show_playlist_fades: true,
                 piano_viewport,
                 piano_roll_state: PianoRollState::from_preferences(piano_roll_preferences),
+                piano_clipboard: piano_clipboard::PianoClipboard::default(),
                 piano_roll_preferences_dirty: false,
                 piano_roll_gesture_before: None,
                 piano_roll_transform: None,
@@ -11813,7 +11850,7 @@ impl CitrusApp {
         let policy = ShortcutPolicy::new(context);
         let presses = ctx.input(|input| ShortcutPresses::from_events(&input.events));
         if let Some(action) = policy.resolve_presses(presses) {
-            self.apply_shortcut_action(action);
+            self.apply_shortcut_action(ctx, action);
         }
     }
 
@@ -11870,13 +11907,17 @@ impl CitrusApp {
         }
     }
 
-    fn apply_shortcut_action(&mut self, action: ShortcutAction) {
+    fn apply_shortcut_action(&mut self, ctx: &egui::Context, action: ShortcutAction) {
         if !self.workspace.windows[workspace::index(self.workspace.focused)].visible
             && matches!(
                 action,
                 ShortcutAction::TogglePlaylistFades
                     | ShortcutAction::Duplicate
                     | ShortcutAction::Delete
+                    | ShortcutAction::SelectAllNotes
+                    | ShortcutAction::CopyNotes
+                    | ShortcutAction::CutNotes
+                    | ShortcutAction::PasteNotes
                     | ShortcutAction::Tool(_)
                     | ShortcutAction::PianoTool(_)
                     | ShortcutAction::PianoTransform(_)
@@ -11903,6 +11944,12 @@ impl CitrusApp {
             ShortcutAction::Redo => self.redo(),
             ShortcutAction::Duplicate => self.duplicate_selection(),
             ShortcutAction::Delete => self.delete_selection(),
+            ShortcutAction::SelectAllNotes
+            | ShortcutAction::CopyNotes
+            | ShortcutAction::CutNotes
+            | ShortcutAction::PasteNotes => {
+                self.piano_clipboard_action(ctx, action);
+            }
             ShortcutAction::ToggleSettings => self.show_settings = !self.show_settings,
             ShortcutAction::View(view) => self.focus_editor(view),
             ShortcutAction::Tool(tool) => {
@@ -13916,6 +13963,7 @@ impl CitrusApp {
         self.plugin_parameter_edit_draft_desired.clear();
         self.project_media.close();
         self.project_session = next_project_session(self.project_session);
+        self.piano_clipboard.clear();
         self.cached_audio_assets.clear();
         self.pending_generator_routes.clear();
         self.generator_audibility.clear();
@@ -14528,11 +14576,11 @@ impl CitrusApp {
                             ] {
                                 let selected = if piano { self.piano_roll_state.tool == piano_tool } else { self.tool_mode == tool };
                                 if ui.selectable_label(selected, label).clicked() {
-                                    self.apply_shortcut_action(ShortcutAction::PianoTool(piano_tool));
+                                    self.apply_shortcut_action(ui.ctx(), ShortcutAction::PianoTool(piano_tool));
                                 }
                             }
                             if !piano && ui.selectable_label(self.tool_mode == ToolMode::Slip, "Slip edit tool    S").clicked() {
-                                self.apply_shortcut_action(ShortcutAction::Tool(ToolMode::Slip));
+                                self.apply_shortcut_action(ui.ctx(), ShortcutAction::Tool(ToolMode::Slip));
                             }
                         });
                         if self.workspace.focused == StudioView::Playlist
@@ -20293,6 +20341,7 @@ impl CitrusApp {
             normalize_piano_note_groups(&mut self.project.active_pattern_mut().notes);
             self.piano_roll_state.selection_ids = selected;
         }
+        self.piano_clipboard_toolbar(ui);
         let piano_preferences_before = self.piano_roll_state.preferences();
         let mut activate_stamp = false;
         ui.horizontal_wrapped(|ui| {

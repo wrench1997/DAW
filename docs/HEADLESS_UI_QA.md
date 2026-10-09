@@ -205,3 +205,33 @@ history, persistence and small-window coverage. Optional Vulkan capture includes
 `multiwindow-workspace`, `multiwindow-moved-resized`, `multiwindow-shared-pattern-edit`
 and `multiwindow-minimum-window`. These are genuine offscreen application renders,
 not native desktop screenshots or detached OS-window evidence.
+
+
+## Bounded Piano clipboard regression
+
+The session-local [Piano clipboard](MULTIWINDOW_WORKSPACE.md#piano-note-clipboard)
+adds ten production-app flows: semantic and raw shortcut deduplication; exact
+platform CopyText output; actual Copy/Cut/Paste buttons; target-channel select-all;
+source channel/group/time/velocity/mute preservation; PAT snap-down and SONG-zero
+anchors; deterministic repeated paste; empty/malformed clipboard; shared one-step
+Undo/Redo and preceding-edit boundaries; floating focus, hidden windows, modal,
+Browser text and actual Tempo numeric-text isolation; real note drag interruption;
+project reset, missing channels and snapshot barriers; minimum-size button bounds.
+Four data regressions also cover payload/schema/size bounds, invalid numeric/channel
+values, global note identity collisions, isolated group allocation and linear
+selection expansion at the full 65,536-note limit.
+
+The final isolated source passed 966 no-default application tests and 968 application
++ 14 helper + 5 protocol all-feature tests, both strict all-target Clippy modes,
+formatting, all-feature app/helper build and Windows MSVC no-default/all-target
+cross-check. Python discovery passed 167 tests. A fresh final Vulkan run passed all
+30 production-app UI flows and generated 30 genuine offscreen frames, converted to
+RGB-identical PNGs. New checkpoints are `piano-clipboard-pattern-paste`,
+`piano-clipboard-song-pattern-start` (1997×1123) and
+`piano-clipboard-minimum-floating` (1123×707). Inspection confirms the clipboard
+controls and visible anchor stay within their Piano window at both sizes.
+
+These tests inspect actual egui platform clipboard commands and inject semantic
+clipboard events; they do not perform an OS clipboard round trip. Windows runtime,
+native desktop focus/window presentation, external MIDI clipboard exchange and
+physical audio/MIDI acceptance are not established by these checks.

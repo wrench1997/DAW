@@ -303,3 +303,29 @@ Windows desktop acceptance. No publication was performed from this worktree.
 - Earlier exact **`2e4988348270c39a037ba042f753380fefc73ba3`** is now terminal on Windows. [Preview 37891374470](https://github.com/wrench1997/DAW/actions/runs/37891374470) passed **163 Python tests**, **940 app + 13 helper + 5 protocol Rust tests**, strict source gates, optimized static-CRT build, exact vendor/license/PE/ZIP/hash verification and extracted-helper smoke; upload skipped and artifacts API 0. [Quality 37891374461](https://github.com/wrench1997/DAW/actions/runs/37891374461) passed source gates, 14 helper /57 editor Python tests and fixture build/receipts. Actual native interaction/ordered gesture/dirty, repeat focus/owner rejection and Shutdown/EOF/crash cleanup passed. Paint before/after failed and repaint comparison was SKIP. SaveState/detach succeeded, but the old feedback-count assertion stopped the state stage; restore and later lifecycle were SKIP. Overall quality remains failed, not silently accepted.
 - Source analysis establishes the trusted fixture's exact two legacy feedback records: DSP output echo first, then the GUI performEdit stash retained across zero-sample flush. `dd73939` integrates as `c5c1d43`, requiring precisely two typed identical Cutoff=0.25 records and exactly one revision increment per value/dirty callback. Regressions reject wrong counts, wrong IDs, divergent values in either position, malformed types, missing/reordered/extra gesture bounds, revision drift and changed restored state bytes. No host/vendor/fixture code changes or generic duplicate normalization; this contract is fixture-specific. Actual corrected Windows state restore remains pending, and paint remains separately failed.
 - Current complete Python discovery passes **167 tests**. The workspace guide is explicitly allowlisted with a joint packaging-link regression; all **24 packaged source-document/provenance inputs** have closed relative links. Canonical docs now describe implemented internal windows and retain detached-OS/native/device limitations. Current source publication triggers new exact Windows checks; after terminal results, the user-facing source snapshot will be refreshed with an exact revision and validation receipt. No main merge, Release, binary artifact upload or commercial-ready claim.
+
+
+### 2026-10-09 — Isolated Piano note clipboard
+
+- Added focused Piano target-channel select-all and session-local Copy/Cut/Paste.
+  Explicit Copy/Cut writes bounded, versioned Citrus note JSON through egui's
+  platform output; semantic Paste validates that payload. The Paste notes button
+  uses the typed local copy. Other editor canvas clipboard operations stay
+  unsupported, and normal text/numeric editing retains its clipboard ownership.
+- Preserves source channel, pitch, relative time, length, velocity and mute values;
+  regenerates global note IDs and independent pattern-local groups; commits each
+  Cut/Paste as one history transaction. PAT uses the snap-down local transport
+  cursor, SONG uses Pattern beat zero, with the anchor visibly labeled. Project
+  replacement invalidates both old text payloads and the local copy. No assets,
+  source paths or MIDI interchange format is copied.
+- Fourteen added tests cover bounded data, full-limit linear selection expansion
+  and ten actual-app pointer/key flows. Exact final Linux gates pass 966 no-default
+  app tests and 968 app +14 helper +5 protocol all-feature tests, fmt, both strict
+  Clippy modes and app/helper build. Windows MSVC no-default/all-target cross-check
+  and 167 Python tests pass. The inherited vendor deprecation warning is unchanged.
+- Fresh final SwiftShader/Vulkan capture passes 30 production UI flows and emits
+  30 genuine frames. Three new clipboard checkpoints were visually inspected at
+  normal/minimum size; every PNG is RGB-identical to PPM readback. These checks do
+  not claim a native OS clipboard round trip, native desktop/Windows execution,
+  cross-DAW MIDI paste or physical device acceptance. Main and remote CI checkpoint
+  are unchanged by this isolated worktree.
