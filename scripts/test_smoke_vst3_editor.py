@@ -415,6 +415,86 @@ class ValidationTests(unittest.TestCase):
                 smoke.verify_fixture(Path(temp), "editor")
 
 
+class PaintDiagnosticTests(unittest.TestCase):
+    """Failure diagnostics do not turn a rejected capture into an acceptance pass."""
+
+    def test_print_result_not_advisory_last_error_controls_success(self):
+        desktop = smoke.WindowsDesktop.__new__(smoke.WindowsDesktop)
+        desktop.user = mock.Mock()
+        for returned, last_error in ((0, 0), (0, 5), (1, 5)):
+            with self.subTest(returned=returned, last_error=last_error), \
+                 mock.patch.object(smoke.ctypes, "set_last_error", create=True) as reset, \
+                 mock.patch.object(smoke.ctypes, "get_last_error", return_value=last_error, create=True) as read:
+                desktop.user.PrintWindow.return_value = returned
+                calls = mock.Mock()
+                calls.attach_mock(reset, "reset")
+                calls.attach_mock(desktop.user.PrintWindow, "print_window")
+                calls.attach_mock(read, "read_error")
+                self.assertEqual(desktop._print_window_probe(10, 20, 1),
+                                 {"flags": 1, "succeeded": bool(returned),
+                                  "last_error_advisory": last_error})
+                self.assertEqual(calls.mock_calls, [mock.call.reset(0),
+                                                   mock.call.print_window(10, 20, 1),
+                                                   mock.call.read_error()])
+
+    def test_successful_diagnostic_cannot_replace_failed_acceptance_and_cleanup_runs(self):
+        desktop = smoke.WindowsDesktop.__new__(smoke.WindowsDesktop)
+        desktop.size = lambda hwnd: (256, 48)
+        desktop.user = mock.Mock()
+        desktop.user.GetDC.return_value = 11
+        desktop.gdi = mock.Mock()
+        desktop.gdi.CreateCompatibleDC.return_value = 22
+        desktop.gdi.CreateCompatibleBitmap.return_value = 33
+        desktop.gdi.SelectObject.return_value = 44
+        desktop._print_window_probe = mock.Mock(return_value={
+            "flags": 1, "succeeded": False, "last_error_advisory": 0})
+        desktop._diagnose_print_failure = mock.Mock(return_value=True)
+        with redirect_stderr(io.StringIO()) as stderr, \
+             self.assertRaisesRegex(smoke.SmokeError, "PrintWindow failed; diagnostic probes cannot"):
+            desktop._paint_in_capture_process(123)
+        desktop._print_window_probe.assert_called_once_with(123, 22, 1)
+        desktop._diagnose_print_failure.assert_called_once_with(123, 22)
+        self.assertIn("PRINTWINDOW_ACCEPTANCE_FAILURE", stderr.getvalue())
+        desktop.gdi.GetDIBits.assert_not_called()
+        desktop.gdi.SelectObject.assert_has_calls([mock.call(22, 33), mock.call(22, 44)])
+        desktop.gdi.DeleteObject.assert_called_once_with(33)
+        desktop.gdi.DeleteDC.assert_called_once_with(22)
+        desktop.user.ReleaseDC.assert_called_once_with(None, 11)
+
+    def test_diagnostic_scope_is_own_button_and_verified_target_only(self):
+        desktop = smoke.WindowsDesktop.__new__(smoke.WindowsDesktop)
+        desktop.user = mock.Mock()
+        desktop.user.GetParent.return_value = 456
+        desktop.user.CreateWindowExW.return_value = 701
+        desktop.kernel = mock.Mock()
+        desktop.pid = mock.Mock(return_value=321)
+        desktop.class_name = mock.Mock(side_effect=["Button", smoke.PANEL_CLASS])
+        desktop.size = mock.Mock(return_value=(256, 48))
+        desktop.owner = mock.Mock(return_value={"window": 700, "process_id": 999})
+        desktop.pump = mock.Mock()
+        desktop._print_window_probe = mock.Mock(side_effect=lambda hwnd, memory, flags: {
+            "flags": flags, "succeeded": True, "last_error_advisory": 0})
+        with redirect_stderr(io.StringIO()) as stderr:
+            desktop._diagnose_print_failure(123, 22)
+        self.assertEqual(desktop._print_window_probe.call_args_list,
+                         [mock.call(701, 22, 1), mock.call(701, 22, 0), mock.call(123, 22, 0)])
+        self.assertEqual(desktop.user.CreateWindowExW.call_args.args[8], 700)
+        self.assertIn('"probe": "target"', stderr.getvalue())
+        self.assertIn('"probe": "same-process-button"', stderr.getvalue())
+        self.assertIn('"probe": "target-whole-window"', stderr.getvalue())
+        self.assertNotIn("PASS", stderr.getvalue())
+
+    def test_timeout_retains_bounded_failure_diagnostics_from_capture_child(self):
+        desktop = smoke.WindowsDesktop.__new__(smoke.WindowsDesktop)
+        desktop.pid = lambda hwnd: 123
+        diagnostic = b"PRINTWINDOW_ACCEPTANCE_FAILURE false\n"
+        timeout = subprocess.TimeoutExpired("capture", 5, stderr=b"x" * 5000 + diagnostic)
+        with mock.patch.object(smoke.subprocess, "run", side_effect=timeout), \
+             self.assertRaisesRegex(smoke.SmokeError, "(?s)capture timed out.*PRINTWINDOW_ACCEPTANCE_FAILURE") as caught:
+            desktop.painted_pixels(456)
+        self.assertLess(len(str(caught.exception)), 4100)
+
+
 class StateRoundTripTests(unittest.TestCase):
     """Check orchestration/failure gates only, without claiming native execution."""
 

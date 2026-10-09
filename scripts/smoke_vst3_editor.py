@@ -461,12 +461,52 @@ class WindowsDesktop:
                                     capture_output=True, text=True, timeout=5.0,
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except subprocess.TimeoutExpired as error:
-            raise SmokeError("Native paint capture timed out; capture child terminated") from error
-        require(result.returncode == 0, f"Native paint capture failed: {result.stderr[-2000:]}")
+            diagnostics = error.stderr or ""
+            if isinstance(diagnostics, bytes):
+                diagnostics = diagnostics.decode("utf-8", errors="replace")
+            raise SmokeError("Native paint capture timed out; capture child terminated\n"
+                             + diagnostics[-4000:]) from error
+        require(result.returncode == 0, f"Native paint capture failed: {result.stderr[-4000:]}")
         digest = result.stdout.strip()
         require(len(digest) == 64 and all(c in "0123456789abcdef" for c in digest),
                 f"Invalid native paint capture result: {digest!r}")
         return digest
+
+    def _print_window_probe(self, hwnd, memory, flags):
+        # PrintWindow does not document a GetLastError contract. Clear stale error
+        # state and record it only as advisory evidence, never as success/failure.
+        ctypes.set_last_error(0)
+        succeeded = bool(self.user.PrintWindow(hwnd, memory, flags))
+        error = ctypes.get_last_error()
+        return {"flags": flags, "succeeded": succeeded, "last_error_advisory": error}
+
+    def _diagnose_print_failure(self, hwnd, memory):
+        """Failure-only probes; none can satisfy the original paint assertion.
+
+        They share the capture child's existing five-second kill/reap deadline.
+        No unrelated HWND, screen pixels, permissions or desktop settings are used.
+        """
+        def record(probe, **details):
+            print("PRINTWINDOW_DIAGNOSTIC " + json.dumps({"probe": probe, **details}),
+                  file=sys.stderr, flush=True)
+
+        parent = self.user.GetParent(hwnd)
+        record("target", capture_pid=os.getpid(), target_pid=self.pid(hwnd),
+               valid=bool(self.user.IsWindow(hwnd)), visible=bool(self.user.IsWindowVisible(hwnd)),
+               window_class=self.class_name(hwnd), parent_pid=self.pid(parent),
+               parent_class=self.class_name(parent), client_size=self.size(hwnd))
+        # The temporary parent is registered for cleanup; destroying it also
+        # destroys its same-process standard button, including on probe failure.
+        owner = self.owner()
+        button = self.user.CreateWindowExW(
+            0, "BUTTON", "Citrus diagnostic button", 0x50010000,  # CHILD|VISIBLE|TABSTOP
+            0, 0, 256, 48, owner["window"], None, self.kernel.GetModuleHandleW(None), None)
+        record("same-process-button-created", succeeded=bool(button))
+        if button:
+            self.pump()
+            for flags in (1, 0):  # PW_CLIENTONLY and documented default whole-window mode.
+                record("same-process-button", **self._print_window_probe(button, memory, flags))
+        record("target-whole-window", **self._print_window_probe(hwnd, memory, 0))
 
     def _paint_in_capture_process(self, hwnd):
         width, height = self.size(hwnd)
@@ -480,7 +520,15 @@ class WindowsDesktop:
             require(bool(self.gdi.PatBlt(memory, 0, 0, width, height, 0x00000042)), "Cannot clear paint probe")
             # PrintWindow performs the OS-supported interprocess rendering request.
             # The caller owns a bounded child-process timeout around this entire method.
-            require(bool(self.user.PrintWindow(hwnd, memory, 1)), "PrintWindow failed")
+            printed = self._print_window_probe(hwnd, memory, 1)
+            if not printed["succeeded"]:
+                print("PRINTWINDOW_ACCEPTANCE_FAILURE " + json.dumps(printed),
+                      file=sys.stderr, flush=True)
+                try:
+                    self._diagnose_print_failure(hwnd, memory)
+                except Exception as error:
+                    print(f"PRINTWINDOW_DIAGNOSTIC failed: {error}", file=sys.stderr, flush=True)
+            require(printed["succeeded"], "PrintWindow failed; diagnostic probes cannot satisfy acceptance")
             self.gdi.SelectObject(memory, previous)
             previous = None
             header = struct.pack("<IiiHHIIiiII", 40, width, -height, 1, 32, 0, width * height * 4, 0, 0, 0, 0)
