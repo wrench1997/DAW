@@ -5,6 +5,8 @@ on:
     branches: [ci/windows-reliability-20261009]
     paths:
       - 'src/**'
+      - 'vendor/**'
+      - 'tests/fixtures/vst3-editor/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'build.rs'
