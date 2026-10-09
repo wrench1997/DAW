@@ -2978,7 +2978,14 @@ mod tests {
         duplicate.runtime_status = PluginRuntimeStatus::Crashed;
         duplicate.wet = -1.0;
 
-        let mut zero = test_plugin(0, PluginFormat::Vst3, r"C:\VST3\Orchard Synth.vst3");
+        // Basename fallback follows native Path semantics. Keep the Windows
+        // backslash fixture on Windows and use an absolute POSIX path elsewhere.
+        let zero_path = if cfg!(windows) {
+            r"C:\VST3\Orchard Synth.vst3"
+        } else {
+            "/VST3/Orchard Synth.vst3"
+        };
+        let mut zero = test_plugin(0, PluginFormat::Vst3, zero_path);
         zero.wet = f32::INFINITY;
 
         project.plugin_instances = vec![first, duplicate, zero];

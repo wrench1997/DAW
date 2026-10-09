@@ -31,7 +31,10 @@ SOURCE_FILES = (
     "docs/HISTORICAL_DEV_STATE.md",
 )
 # Explicitly reviewed documentation that may land on an independent branch.
-OPTIONAL_SOURCE_FILES = frozenset(("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md"))
+OPTIONAL_SOURCE_FILES = frozenset((
+    "docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md",
+    "docs/WAV_EXPORT_OPTIONS.md",
+))
 GENERATED_FILES = ("START_HERE_PREVIEW.txt", "BUILD_PROVENANCE.json", "DEPENDENCIES.json")
 PAYLOAD_FILES = frozenset(BINARIES + SOURCE_FILES + GENERATED_FILES)
 PACKAGE_FILES = PAYLOAD_FILES | {"SHA256SUMS.txt"}

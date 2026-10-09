@@ -626,7 +626,7 @@ dependencies = [
 
 [[package]]
 name = "citrus-studio"
-version = "0.4.0"
+version = "0.5.0-alpha.1"
 dependencies = [
  "anyhow",
  "cpal",

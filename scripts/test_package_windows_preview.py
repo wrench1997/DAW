@@ -183,16 +183,30 @@ class PackageTests(unittest.TestCase):
         info = pkg.verify_package(archive)
         self.assertIn("docs/PROJECT_MEDIA.md", info["source_documents"])
 
-    def test_optional_export_and_media_guides_are_packaged_together(self):
-        for path in ("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md"):
+    def test_optional_feature_guides_are_packaged_together(self):
+        for path in ("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md", "docs/WAV_EXPORT_OPTIONS.md"):
             (self.repo / path).write_text("[README](../README.md)\n")
         (self.repo / "README.md").write_text(
-            "[Media](docs/PROJECT_MEDIA.md) [Export](docs/OFFLINE_EXPORT_WORKFLOW.md)\n"
+            "[Media](docs/PROJECT_MEDIA.md) [Export](docs/OFFLINE_EXPORT_WORKFLOW.md) "
+            "[Split](docs/AUDIO_SPLIT_FIDELITY.md) [Options](docs/WAV_EXPORT_OPTIONS.md)\n"
         )
         archive = self.create()
         info = pkg.verify_package(archive)
         self.assertIn("docs/PROJECT_MEDIA.md", info["source_documents"])
         self.assertIn("docs/OFFLINE_EXPORT_WORKFLOW.md", info["source_documents"])
+        self.assertIn("docs/AUDIO_SPLIT_FIDELITY.md", info["source_documents"])
+        self.assertIn("docs/WAV_EXPORT_OPTIONS.md", info["source_documents"])
+
+    def test_prerelease_package_version_is_preserved(self):
+        for name in ("Cargo.toml", "Cargo.lock"):
+            path = self.repo / name
+            path.write_text(path.read_text().replace('version="0.4.0"', 'version="0.5.0-alpha.1"'))
+        self.metadata["packages"][0]["version"] = "0.5.0-alpha.1"
+        self.info["cargo_lock_sha256"] = pkg.digest((self.repo / "Cargo.lock").read_bytes())
+        archive = self.create()
+        info = pkg.verify_package(archive)
+        self.assertEqual(info["version"], "0.5.0-alpha.1")
+        self.assertIn("0.5.0-alpha.1", archive.name)
 
     def test_missing_link_target_fails_before_package_write(self):
         (self.repo / "README.md").write_text("[Missing](docs/MISSING.md)\n")

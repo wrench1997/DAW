@@ -98,7 +98,9 @@ Its required files are:
 - `docs/HISTORICAL_DEV_STATE.md`, `docs/WINDOWS_PREVIEW.md`
 
 The explicitly reviewed optional `docs/PROJECT_MEDIA.md` and
-`docs/OFFLINE_EXPORT_WORKFLOW.md` are included when present in the source checkout.
+`docs/OFFLINE_EXPORT_WORKFLOW.md`, `docs/AUDIO_SPLIT_FIDELITY.md` and
+`docs/WAV_EXPORT_OPTIONS.md` are included
+when present in the source checkout.
 This supports their independent implementation branches without requiring an
 unrelated code merge to test the packager. Any new
 package document must be added explicitly to `SOURCE_FILES` or

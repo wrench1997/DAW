@@ -28904,8 +28904,10 @@ mod playback_tests {
 
     #[test]
     fn actual_audio_split_history_restores_complete_clock_domains_and_routes() {
-        let mut project = Project::default();
-        project.clips = vec![audio_clip()];
+        let mut project = Project {
+            clips: vec![audio_clip()],
+            ..Project::default()
+        };
         project.clips[0].start = 0.071;
         project.clips[0].length = 4.223;
         project.tempo = 127.0;
@@ -29988,8 +29990,10 @@ mod playback_tests {
     fn inherited_clip_references_invalidate_the_timeline_fingerprint() {
         use crate::model::{AudioFadeReference, AudioSourceReference, AudioSourceSpan};
 
-        let mut project = Project::default();
-        project.clips = vec![audio_clip()];
+        let mut project = Project {
+            clips: vec![audio_clip()],
+            ..Project::default()
+        };
         let baseline = timeline_compile_fingerprint(&project, 48_000);
         for is_in in [true, false] {
             let mut changed = project.clone();
