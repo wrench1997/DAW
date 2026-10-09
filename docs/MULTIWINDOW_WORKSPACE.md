@@ -203,3 +203,10 @@ Playlist behavior and ordinary text ownership. Production Undo/Redo waits for an
 active or interrupted held gesture, then remains available through keyboard and
 menus after release. Combined source/input/render results are recorded in those
 guides; the same shared project/history and native/import barriers remain in force.
+
+
+The focused Piano editor additionally supports [relative velocity wheel and note
+properties](PIANO_NOTE_EXPRESSION.md). Inspector and double-click share one modal
+draft; background workspace controls, note input, native Open and queued import
+honor its ownership. Opening/canceling a draft does not mutate musical history;
+valid Apply commits one transaction without replacing unrelated newer Project data.

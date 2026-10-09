@@ -269,3 +269,20 @@ were visually inspected. These are real application input/render tests, not nati
 OS clipboard/keyboard/plugin focus, Windows desktop or hardware acceptance. See
 [Piano keyboard editing](PIANO_KEYBOARD_EDITING.md) and
 [Piano mouse composition](PIANO_MOUSE_WORKFLOW.md) for exact implemented semantics.
+
+
+## Combined note-expression validation
+
+Exact integrated source `9a4d37b0f30f7aff568aa4b66f7b7e2227cfd91e` passes **79 full
+harness entries** (78 production-input flows plus the opt-in benchmark entry,
+timing disabled) and produces **40 genuine Vulkan frames**. All PNG conversions
+are RGB-identical; single/group/minimum properties pixels were inspected. The 15
+new expression input flows run with the preceding keyboard/mouse/clipboard/window
+and modal/import tests. Three additional pure candidate tests are part of the full
+Rust suite rather than counted as UI input flows.
+
+Relative bounds, raw wheel phases/tail reversal, frozen/stale properties targets,
+small imported notes, press-event modifiers, numeric keyboard ownership, one-step
+Apply, Cancel/Reset, save/reopen and import barriers are covered. See
+[Note expression](PIANO_NOTE_EXPRESSION.md). This remains production app input and
+offscreen evidence, not native OS/Windows/hardware or native plug-in paint acceptance.

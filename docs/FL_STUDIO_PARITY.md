@@ -11,7 +11,7 @@ Status terms:
 
 ## 0.4 implementation progress
 
-Evidence note (2026-10-09): combined Piano keyboard/mouse source `43fc5a3` passes 1028 app +14 helper +5 protocol Linux all-feature tests, 1026 no-default tests, strict gates, Windows source cross-check and 167 Python tests. The preceding `42393c6` passes Windows source gates and the complete preview lane, while native paint remains failed despite independently passed fixture state/interaction/lifecycle. New exact Windows execution is required. The fresh UI suite passes 64 entries (63 input/flow checks plus an opt-in benchmark entry) and 37 genuine Vulkan frames. Actual app-input/offscreen results remain distinct from native OS/hardware acceptance.
+Evidence note (2026-10-09): current expression-integrated source `9a4d37b` passes 1,046 app +14 helper +5 protocol Linux all-feature tests, 1,044 no-default tests, strict gates, Windows source cross-check and 167 Python tests. Exact runtime/Cargo/vendor input matches the reviewed feature. Prior `e6f117e` passes Windows source gates and the complete preview lane; native paint remains failed despite independently passed fixture state/interaction/lifecycle. Fresh combined UI evidence is 79 harness entries (78 input flows plus opt-in benchmark entry) and 40 genuine Vulkan frames; native OS/hardware acceptance remains separate.
 
 | Area | Current 0.4 state | Status |
 |---|---|---|

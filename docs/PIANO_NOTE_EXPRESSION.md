@@ -106,3 +106,25 @@ The complete core/all-feature suites include the preceding keyboard and mouse
 flows; these are aggregate executed results, not summed isolated counts. The
 new branch has not established fresh Windows runtime or native plug-in paint
 acceptance. Existing platform/hardware limits remain unchanged.
+
+
+## Verified integrated source checkpoint
+
+Reviewed `a26a7d7e798ed0aa3752e2c56eaae5abfd78ad5e` integrates as
+`9a4d37b0f30f7aff568aa4b66f7b7e2227cfd91e`. The entire runtime source, Cargo inputs
+and vendored library match the reviewed feature; only additive documentation
+reconciliation was needed. Fresh complete Linux gates pass **1,046 application
++14 helper +5 protocol all-feature tests** and **1,044 no-default application tests**,
+with zero failed/ignored on default stack. Formatting, both strict Clippy profiles,
+all-bin build, actual ordinary helper smoke, Windows source cross-check and all
+**167 Python tests** pass.
+
+The fresh complete UI run passes **79 entries**: 78 production-input flows plus the
+opt-in benchmark entry (timing disabled). The three pure expression candidate
+regressions are included in the full Rust gates, not misreported as UI flows.
+It produces **40 genuine Vulkan frames**; every PNG is RGB-identical. All three
+single/group/minimum properties captures were inspected, including readable fields
+and Apply/Cancel/Reset. This combines preceding keyboard/mouse/clipboard/workspace
+flows with the 15 new expression input flows. Native desktop, OS input/clipboard,
+hardware and real-vendor acceptance remain separate; current Windows execution
+must be established for the published checkpoint.

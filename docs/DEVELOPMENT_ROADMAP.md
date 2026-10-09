@@ -1,13 +1,13 @@
 # Development roadmap
 
-Updated: 2026-10-09 07:59 UTC. The current product priority is detailed Piano melody composition, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-09 08:29 UTC. The current product priority is detailed Piano melody composition, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
 - Development branch: `ci/windows-reliability-20261009`. Last fully validated Windows checkpoint: **`53494d518bfc4bad7304f25c127491a0c67d7cd8`**, including Browser, measured meters, v11 split fidelity, WAV/media/export controls and responsive UI QA. [Quality 37886481852](https://github.com/wrench1997/DAW/actions/runs/37886481852) passed **909 Rust tests**, 14 helper-harness tests and actual helper smoke. [Preview 37886481857](https://github.com/wrench1997/DAW/actions/runs/37886481857) passed optimized static-CRT builds, 57 Python tests, PE/import audit, ZIP/hash checks and extracted-helper smoke; no artifact upload.
 - Application **0.5.0-alpha.1** uses Project **v11**. v10 inputs load, but new saves require a new build. Preserve original projects before evaluation.
-- Current Piano keyboard/mouse-integrated source **`43fc5a388a292cd15503cc3759c24ba420fcb7f4`** passes Linux **1028 app +14 helper +5 protocol all-feature tests**, **1026 no-default app tests**, fmt, both strict Clippy modes, app/helper build, ordinary helper smoke, Windows source cross-check and 167 Python tests on default stack. Fresh combined UI evidence is 64 harness entries (63 input/flow checks plus the opt-in benchmark entry) and 37 genuine Vulkan frames; new Windows execution is required for this exact source.
-- At **`42393c6`**, Windows source gates passed 988 app +13 helper +5 protocol tests and [preview 37897795252](https://github.com/wrench1997/DAW/actions/runs/37897795252) passed the full optimized/provenance/package/extracted-helper lane with 167 Python tests, upload disabled. [Quality 37897795277](https://github.com/wrench1997/DAW/actions/runs/37897795277) passes trusted native stopped-state restore, interaction/lifecycle/protocol checks, but native paint still FAILS and repaint comparison is SKIP. Overall quality remains failed; wider physical-input/vendor/hardware acceptance remains open.
+- Current expression-integrated source **`9a4d37b0f30f7aff568aa4b66f7b7e2227cfd91e`** passes Linux **1,046 app +14 helper +5 protocol all-feature tests**, **1,044 no-default app tests**, fmt, both strict Clippy modes, app/helper build, ordinary helper smoke, Windows source cross-check and 167 Python tests on default stack. Runtime source exactly matches the independently reviewed feature; the fresh combined suite passes 79 harness entries (78 input flows plus opt-in benchmark entry) and 40 genuine Vulkan frames. New Windows execution is required for this source.
+- At **`e6f117e`**, Windows source gates passed 1,025 app +13 helper +5 protocol tests and [preview 37902412320](https://github.com/wrench1997/DAW/actions/runs/37902412320) passed the full optimized/provenance/package/extracted-helper lane with 167 Python tests, upload disabled. [Quality 37902412259](https://github.com/wrench1997/DAW/actions/runs/37902412259) passes trusted native stopped-state restore, interaction/lifecycle/protocol checks, but native paint still FAILS and repaint comparison is SKIP. Overall quality remains failed; wider physical-input/vendor/hardware acceptance remains open.
 - The integrated [simultaneous workspace](MULTIWINDOW_WORKSPACE.md) is a real shared-project, internal-window implementation. The latest requested [compact refinement](COMPACT_WORKSPACE.md) keeps useful task density, persistent migration, continuous held gestures and bounded release snapping; controlled unoptimized CPU comparisons do not establish a general speedup or displayed FPS. Focused Piano session-local note clipboard now has bounded data, semantic input/text isolation and explicit Undo. Offscreen frames validate app paint/layout rather than cloud X11 presentation, OS-detached editors, device audio or native VST3 editor paint.
 - Evidence levels stay distinct: **implemented/source-inspected**; **executed code tests** at an exact revision; **GUI/device scenario passed** with artifacts; **release candidate accepted** on the intended package; **commercial maturity** from broader workflow, compatibility and sustained-use coverage. None implies the next.
 
@@ -25,9 +25,13 @@ Citrus-specific selected-extent repeat, independent local snap, per-note scale l
 Alt Stamp and generic-Shift policies are documented rather than claimed as exact FL
 parity. Actual app input/render regressions execute both slices together. Native OS
 focus/clipboard and physical-device behavior remain separate acceptance work.
-Next bounded work is velocity-wheel/fine adjustment and supported-field note
-properties; that implementation is not included in this checkpoint. MIDI interchange,
-independent Piano time ranges and broader commercial workflow remain open.
+[Velocity-wheel/fine adjustment and supported-field note properties](PIANO_NOTE_EXPRESSION.md)
+are now integrated: relative dynamics with common bounds, single/multiple target drafts,
+Reset/Cancel and one-step Apply, preserving imported timing and newer unrelated data.
+Wheel residue, stale/frozen targets, numeric ownership and modal/import barriers have
+actual input regressions. Independent Piano time-range/snapping work is the next
+bounded slice and is not included here. MIDI interchange and broader commercial
+workflow remain open.
 
 ## P0 / M1 — Edit a song without changing its meaning
 
