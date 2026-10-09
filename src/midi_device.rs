@@ -7,14 +7,22 @@
 //! This module stops at device ownership and mailbox delivery. Output packets are sent promptly
 //! by the worker; sample-clock deadlines and audio-frame scheduling are intentionally not claimed.
 
-use crate::midi_runtime::{LiveMidiEvent, MidiEventPriority, classify_event_priority};
-use rtrb::{Consumer, Producer, PushError, RingBuffer};
-use std::collections::{BTreeMap, BTreeSet};
+use crate::midi_runtime::LiveMidiEvent;
+#[cfg(any(windows, test))]
+use crate::midi_runtime::{MidiEventPriority, classify_event_priority};
+#[cfg(any(windows, test))]
+use rtrb::RingBuffer;
+use rtrb::{Consumer, Producer, PushError};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::thread::{self, JoinHandle, Thread};
+use std::thread::Thread;
+#[cfg(any(windows, test))]
+use std::thread::{self, JoinHandle};
+#[cfg(any(windows, test))]
 use std::time::{Duration, Instant};
 
+#[cfg(any(windows, test))]
 const OUTPUT_WORKER_IDLE: Duration = Duration::from_millis(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -123,6 +131,7 @@ impl MidiInputReceiver {
     }
 }
 
+#[cfg(any(windows, test))]
 struct MidiInputCallbackWriter {
     connection_epoch: u64,
     next_sequence: u64,
@@ -131,6 +140,7 @@ struct MidiInputCallbackWriter {
     overload: Arc<MidiInputOverload>,
 }
 
+#[cfg(any(windows, test))]
 impl MidiInputCallbackWriter {
     fn receive(&mut self, timestamp_us: u64, message: &[u8]) {
         let sequence = self.next_sequence;
@@ -160,6 +170,7 @@ impl MidiInputCallbackWriter {
     }
 }
 
+#[cfg(any(windows, test))]
 fn input_mailbox(
     capacity: usize,
     connection_epoch: u64,
@@ -372,15 +383,18 @@ impl MidiOutputSender {
     }
 }
 
+#[cfg(any(windows, test))]
 trait MidiOutputSink: Send + 'static {
     fn send(&mut self, message: &[u8]) -> Result<(), ()>;
 }
 
+#[cfg(any(windows, test))]
 struct MidiOutputWorker {
     stop: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
 
+#[cfg(any(windows, test))]
 impl MidiOutputWorker {
     fn stop_and_join(&mut self) {
         self.stop.store(true, Ordering::Release);
@@ -391,12 +405,14 @@ impl MidiOutputWorker {
     }
 }
 
+#[cfg(any(windows, test))]
 impl Drop for MidiOutputWorker {
     fn drop(&mut self) {
         self.stop_and_join();
     }
 }
 
+#[cfg(any(windows, test))]
 fn start_output_worker<S: MidiOutputSink>(
     mut sink: S,
     ordinary_capacity: usize,
@@ -507,15 +523,18 @@ pub enum MidiDeviceError {
     Backend(String),
 }
 
+#[cfg(any(windows, test))]
 #[derive(Clone, Copy, Debug)]
 struct NonZeroCounter(u64);
 
+#[cfg(any(windows, test))]
 impl Default for NonZeroCounter {
     fn default() -> Self {
         Self(1)
     }
 }
 
+#[cfg(any(windows, test))]
 impl NonZeroCounter {
     fn take(&mut self) -> u64 {
         let value = self.0;
@@ -528,6 +547,7 @@ impl NonZeroCounter {
 mod windows_backend {
     use super::*;
     use midir::{Ignore, MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
+    use std::collections::BTreeMap;
 
     struct MidirOutputSink(MidiOutputConnection);
 

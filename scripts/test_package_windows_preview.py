@@ -60,6 +60,14 @@ class PeTests(unittest.TestCase):
     def test_api_set_import(self):
         pkg.inspect_pe(pe_image(("api-ms-win-core-synch-l1-2-0.dll",)))
 
+    def test_windows_combase_system_import(self):
+        # Windows Runtime/COM OS component, not the MSVC redistributable CRT.
+        for delayed in (False, True):
+            with self.subTest(delayed=delayed):
+                image = pe_image(delayed=("ComBase.dll",)) if delayed else pe_image(("ComBase.dll",))
+                result = pkg.inspect_pe(image)
+                self.assertIn("combase.dll", result["delay_imports" if delayed else "imports"])
+
     def test_reject_dynamic_crt_and_unknown_libraries(self):
         for name in ("vcruntime140.dll", "msvcp140.dll", "libunwind.dll", "plugin.dll"):
             with self.subTest(name=name), self.assertRaises(pkg.PackageError):
@@ -184,11 +192,12 @@ class PackageTests(unittest.TestCase):
         self.assertIn("docs/PROJECT_MEDIA.md", info["source_documents"])
 
     def test_optional_feature_guides_are_packaged_together(self):
-        for path in ("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md", "docs/WAV_EXPORT_OPTIONS.md"):
+        for path in ("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md", "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md"):
             (self.repo / path).write_text("[README](../README.md)\n")
         (self.repo / "README.md").write_text(
             "[Media](docs/PROJECT_MEDIA.md) [Export](docs/OFFLINE_EXPORT_WORKFLOW.md) "
-            "[Split](docs/AUDIO_SPLIT_FIDELITY.md) [Options](docs/WAV_EXPORT_OPTIONS.md)\n"
+            "[Split](docs/AUDIO_SPLIT_FIDELITY.md) [Options](docs/WAV_EXPORT_OPTIONS.md) "
+            "[Meters](docs/MIXER_METERING.md)\n"
         )
         archive = self.create()
         info = pkg.verify_package(archive)
@@ -196,6 +205,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn("docs/OFFLINE_EXPORT_WORKFLOW.md", info["source_documents"])
         self.assertIn("docs/AUDIO_SPLIT_FIDELITY.md", info["source_documents"])
         self.assertIn("docs/WAV_EXPORT_OPTIONS.md", info["source_documents"])
+        self.assertIn("docs/MIXER_METERING.md", info["source_documents"])
 
     def test_prerelease_package_version_is_preserved(self):
         for name in ("Cargo.toml", "Cargo.lock"):
