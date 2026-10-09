@@ -1,5 +1,11 @@
 # Linux native-editor functional preview validation
 
+Current ownership-preparation regression is **partial**: fixture and fresh-instance
+vendor paths pass, while reused Surge first-note/getter consistency and native
+content/container sizing fail on old and new helpers. See the [current state limits](PLUGIN_STATE_RESTORE_LIMITS.md).
+The measurements below retain their original source/helper identity; they are not
+silently reattributed to the newer ownership implementation.
+
 2026-10-09 UTC. This records the integrated production helper on the frozen MIDI-routing
 runtime (`e54a6e4`), not the earlier staging helper. The tested standalone desktop was
 Xfce/X11, `DISPLAY=:0`. No DAW renderer was launched or changed; no display server,

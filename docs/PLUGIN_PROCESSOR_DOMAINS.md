@@ -91,3 +91,41 @@ Validation receipts and exact executed commands are recorded in `WORK_LOG.md`. H
 compile-fail checks and protocol tests establish their own limited properties. They do not replace
 native Windows/Linux editor regressions, real-plugin resize-under-audio measurements, or physical
 hardware acceptance of a future worker implementation.
+
+
+## Genuine plugin regression outcome
+
+After the source freeze, the exact helper passed native fixture lifecycle/input and
+fresh-instance Surge/Stochas state checks. Unpaced functional PCM/MIDI/reconfiguration
+checks are also scoped separately. **Full restoration acceptance is not passed:**
+reused Surge XT 1.3.4 state loses the first immediate note and leaves the host getter
+stale even after the component volume has applied. Old/new helper comparisons prove
+this defect predates the ownership preparation. Native content/container sizing can
+also disagree until detach/reopen. The [state-restore limit report](PLUGIN_STATE_RESTORE_LIMITS.md)
+records positive results, corrected interpretation and failures together. The old
+resize processing stall remains; no new worker or latency improvement is implied.
+
+
+## Fresh combined-source verification
+
+Integrated runtime `3fb549a059916dca7b3af3eff00ff27fba0bddd4` exactly preserves
+reviewed helper/vendor/Cargo/fixture bytes. App/audio/UI and metronome are unchanged
+from the preceding source. Fresh root gates pass 1,137 app +21 helper +5 editor
+protocol +2 transport protocol all-feature tests, 1,133 core tests, fmt, both strict
+Clippy modes, app/helper build, ordinary protocol smoke and both Windows MSVC source
+profiles. All 195 Python tests pass, including four live Unix descriptor checks.
+
+The external source-linked vendor test manifest preserves production dependencies
+and enables exactly `cpal-backend,process-isolation`, with default features off.
+All **270 available unit cases** pass serially; the named
+`internal::module_info::tests::reads_sdk_generated_bundle_metadata` is filtered
+because the registry package omits its upstream Dexed bundle. That is not a full
+upstream-fixture pass. All **26 doctests** pass, including the five new facade cases
+(one positive and four compile-fail contracts). The original parallel fake-helper
+ETXTBUSY observation is retained; the serial pass does not explain its cause.
+
+Pristine archive plus the pinned patch reproduces all **43 original/added files**;
+original license/manifests remain unchanged. Fresh helper bytes match the genuine
+regression helper `cb1899fd…` exactly. New Windows runtime/package results remain
+separate candidate gates. No app UI source changed or new desktop/performance run
+was performed during integration.

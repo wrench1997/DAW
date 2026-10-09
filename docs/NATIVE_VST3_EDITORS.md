@@ -1,5 +1,10 @@
 # Native VST3 editors
 
+The later [ownership preparation](PLUGIN_PROCESSOR_DOMAINS.md) keeps execution
+single-threaded. [Reused Surge restoration](PLUGIN_STATE_RESTORE_LIMITS.md) has
+confirmed pre-existing first-note and controller-consistency failures; fresh-state
+success does not establish unrestricted native save/restore acceptance.
+
 ## Implementation stages and current verification boundary
 
 This work adds a real helper-owned native VST3 editor lifecycle in stages. It is not a claim of
