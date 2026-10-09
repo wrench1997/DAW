@@ -46,6 +46,7 @@ Useful shortcuts:
 - `Ctrl+O`, `Ctrl+S`: open and save
 - `Ctrl+Z`, `Ctrl+Y`: undo and redo
 - Playlist `Ctrl+D`: duplicate the selection; `Delete`: delete selected Playlist Clips or Piano notes
+- Piano `Alt+wheel`: relative note/selection velocity; `Ctrl+Alt+wheel`: finer control. Double-click a note for transactional properties; see [velocity and note properties](docs/PIANO_NOTE_EXPRESSION.md) for bounds, Undo and supported fields.
 - Piano `Ctrl/Cmd+D`: deselect; `Ctrl/Cmd+B`: repeat the selected phrase to its right (all active-Channel notes when none selected)
 - Piano `Shift+Left/Right`: move one Piano snap step; `Shift+Up/Down`: transpose one semitone; `Ctrl/Cmd+Up/Down`: transpose one octave
 - Piano `Shift+D`: discard lengths to Piano snap; `Ctrl+Q` (macOS `Opt+Cmd+Q`): quantize starts and durations; `Shift+Q`: quantize starts only; `Alt+V`: toggle ghost notes

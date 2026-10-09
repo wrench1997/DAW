@@ -4,6 +4,7 @@ mod headless_ui_capture;
 #[cfg(test)]
 mod headless_ui_tests;
 mod piano_clipboard;
+mod piano_expression;
 mod piano_mouse;
 mod piano_shortcuts;
 mod project_media_ui;
@@ -1720,6 +1721,7 @@ enum ShortcutModal {
     ProjectMedia,
     ProjectLifecycle,
     PianoTransform,
+    NoteProperties,
     PluginManager,
     Settings,
     MidiImport,
@@ -2086,6 +2088,7 @@ impl ShortcutPolicy {
                         modal,
                         ShortcutModal::ProjectLifecycle
                             | ShortcutModal::PianoTransform
+                            | ShortcutModal::NoteProperties
                             | ShortcutModal::Settings
                             | ShortcutModal::MidiImport
                             | ShortcutModal::MidiExport
@@ -4766,6 +4769,8 @@ impl AppMidiRecordingState {
 
 #[derive(Clone, Debug)]
 struct PianoNoteResizeGesture {
+    modifiers: egui::Modifiers,
+    moved: bool,
     note_id: u64,
     pointer_origin_x: f32,
     origins: Vec<PianoNote>,
@@ -4832,6 +4837,7 @@ pub struct CitrusApp {
     piano_roll_preferences_dirty: bool,
     piano_roll_gesture_before: Option<Project>,
     piano_roll_transform: Option<PianoRollTransformSession>,
+    piano_note_properties: Option<piano_expression::NoteProperties>,
     tool_mode: ToolMode,
     show_browser: bool,
     show_inspector: bool,
@@ -5155,6 +5161,7 @@ impl CitrusApp {
                 piano_roll_preferences_dirty: false,
                 piano_roll_gesture_before: None,
                 piano_roll_transform: None,
+                piano_note_properties: None,
                 tool_mode: ToolMode::Select,
                 show_browser: true,
                 show_inspector: workspace::Workspace::load(cc.storage).inspector_visible,
@@ -8397,7 +8404,7 @@ impl CitrusApp {
         }
         if !close
             && native_open_snapshot_barrier(
-                self.piano_roll_transform.is_some(),
+                self.piano_roll_transform.is_some() || self.piano_note_properties.is_some(),
                 self.piano_roll_gesture_before.is_some() || self.playlist_gesture_before.is_some(),
                 self.project_snapshot_transition_pending(),
                 self.queued_save_request.is_some(),
@@ -10166,7 +10173,8 @@ impl CitrusApp {
     fn undo(&mut self) {
         // A pointer preview owns a pre-press snapshot. Never replace its project
         // from a prior history entry while its origins can still be replayed.
-        if self.editor_pointer_gesture_active()
+        if self.piano_note_properties.is_some()
+            || self.editor_pointer_gesture_active()
             || self.piano_roll_gesture_before.is_some()
             || self.playlist_gesture_before.is_some()
         {
@@ -10208,7 +10216,8 @@ impl CitrusApp {
     fn redo(&mut self) {
         // A pointer preview owns a pre-press snapshot. Never replace its project
         // from a prior history entry while its origins can still be replayed.
-        if self.editor_pointer_gesture_active()
+        if self.piano_note_properties.is_some()
+            || self.editor_pointer_gesture_active()
             || self.piano_roll_gesture_before.is_some()
             || self.playlist_gesture_before.is_some()
         {
@@ -11981,6 +11990,8 @@ impl CitrusApp {
             Some(ShortcutModal::ProjectMedia)
         } else if self.export_dialog.is_open() {
             Some(ShortcutModal::WavExport)
+        } else if self.piano_note_properties.is_some() {
+            Some(ShortcutModal::NoteProperties)
         } else if self.piano_roll_transform.is_some() {
             Some(ShortcutModal::PianoTransform)
         } else if self.pending_midi_export.is_some() {
@@ -12107,6 +12118,7 @@ impl CitrusApp {
             ShortcutModal::ProjectLifecycle => self.cancel_project_lifecycle(),
             ShortcutModal::ProjectMedia => self.project_media.close(),
             ShortcutModal::PianoTransform => self.cancel_piano_roll_transform(),
+            ShortcutModal::NoteProperties => self.piano_note_properties = None,
             ShortcutModal::PluginManager => {
                 self.show_plugins = false;
                 self.plugin_picker_target = None;
@@ -12127,6 +12139,7 @@ impl CitrusApp {
         match modal {
             ShortcutModal::ProjectLifecycle => self.save_project_for_lifecycle(),
             ShortcutModal::PianoTransform => self.accept_piano_roll_transform(),
+            ShortcutModal::NoteProperties => self.accept_note_properties(),
             ShortcutModal::Settings => self.show_settings = false,
             ShortcutModal::MidiImport => self.confirm_midi_import(),
             ShortcutModal::MidiExport => self.confirm_midi_export(),
@@ -13834,6 +13847,7 @@ impl CitrusApp {
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         self.project_media.close();
+        self.piano_note_properties = None;
         if self.piano_roll_transform.is_some() {
             // Preview candidates are never eligible for save, recovery, or quit handling.
             self.cancel_piano_roll_transform();
@@ -14085,6 +14099,7 @@ impl CitrusApp {
         self.piano_roll_state.clear_selection();
         self.piano_roll_gesture_before = None;
         self.piano_roll_transform = None;
+        self.piano_note_properties = None;
         self.runtime_channel_volumes = self
             .project
             .channels
@@ -16299,163 +16314,81 @@ impl CitrusApp {
     fn note_inspector(&mut self, ui: &mut egui::Ui) {
         self.piano_roll_state
             .retain_existing(&self.project.active_pattern().notes);
-        self.piano_roll_state.selection_ids = expand_note_group_selection(
-            &self.project.active_pattern().notes,
-            &self.piano_roll_state.selection_ids,
-            self.piano_roll_state.grouping_enabled,
-        );
-        let selected_count = self.piano_roll_state.selection_ids.len();
-        if selected_count == 0 {
+        let channel = self
+            .project
+            .channels
+            .get(self.selected_channel)
+            .map(|c| c.id);
+        let notes = &self.project.active_pattern().notes;
+        let selected = if let Some(channel) = channel.filter(|id| {
+            notes.iter().any(|n| {
+                n.channel_id == Some(*id) && self.piano_roll_state.selection_ids.contains(&n.id)
+            })
+        }) {
+            crate::piano_roll::piano_keyboard_targets(
+                notes,
+                &self.piano_roll_state.selection_ids,
+                channel,
+                self.piano_roll_state.grouping_enabled,
+            )
+        } else {
+            HashSet::new()
+        };
+        let origins: Vec<_> = self
+            .project
+            .active_pattern()
+            .notes
+            .iter()
+            .filter(|n| n.channel_id == channel && selected.contains(&n.id))
+            .cloned()
+            .collect();
+        let Some(first) = origins.first() else {
             empty_inspector(
                 ui,
                 "No note selected",
-                "Select a note in the Piano Roll to edit its expression.",
+                "Select a note in the active Piano Channel to edit its properties.",
             );
             return;
-        }
-        let channels = self
-            .project
-            .channels
-            .iter()
-            .map(|channel| (channel.id, channel.name.clone()))
-            .collect::<Vec<_>>();
-        let first = self
-            .project
-            .active_pattern()
-            .notes
-            .iter()
-            .find(|note| self.piano_roll_state.selection_ids.contains(&note.id))
-            .cloned()
-            .expect("selected note count was nonzero");
-        let group_label = first
-            .group_id
-            .map(|group_id| format!("Group {group_id}"))
-            .unwrap_or_else(|| "None".to_owned());
-        let grouping_behavior = if self.piano_roll_state.grouping_enabled {
-            "Enabled"
-        } else {
-            "Suspended"
         };
         inspector_identity(ui, &midi_note_name(first.note), "MIDI NOTE", theme::GREEN);
-        let selected_origins = self
-            .project
-            .active_pattern()
-            .notes
-            .iter()
-            .filter(|note| self.piano_roll_state.selection_ids.contains(&note.id))
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut edited = first.clone();
-        inspector_section(ui, "NOTE", |ui| {
-            property_line(ui, "Stable ID", &edited.id.to_string());
-            property_line(ui, "Group", &group_label);
-            property_line(ui, "Group behavior", grouping_behavior);
-            property_drag(ui, "Pitch", &mut edited.note, 0..=127, "");
-            property_drag_f32(ui, "Start", &mut edited.start, 0.0..=4096.0, " beats");
-            property_drag_f32(ui, "Length", &mut edited.length, 0.05..=4096.0, " beats");
-            property_slider(ui, "Velocity", &mut edited.velocity, 0.0..=1.0, "");
-            ui.toggle_value(&mut edited.muted, "MUTED");
-        });
-        let scale_snap_move = self.piano_roll_state.snap_to_scale
-            && (edited.start != first.start || edited.note != first.note);
-        if scale_snap_move {
-            edited.note = snap_pitch_to_scale(
-                edited.note,
-                self.piano_roll_state.scale_root,
-                self.piano_roll_state.scale,
+        inspector_section(ui, "NOTE PROPERTIES", |ui| {
+            property_line(
+                ui,
+                "Selection",
+                &format!("{} active-Channel note(s)", origins.len()),
             );
-        }
-        let move_delta = clamp_group_move_delta(
-            &selected_origins,
-            edited.start - first.start,
-            i16::from(edited.note) - i16::from(first.note),
-        )
-        .ok();
-        let length_delta =
-            clamp_group_resize_delta(&selected_origins, edited.length - first.length).ok();
-        let velocity_delta =
-            clamp_group_velocity_delta(&selected_origins, edited.velocity - first.velocity).ok();
-        let mute_changed = edited.muted != first.muted;
-        if edited.start != first.start
-            || edited.note != first.note
-            || edited.length != first.length
-            || edited.velocity != first.velocity
-            || mute_changed
-        {
-            for origin in &selected_origins {
-                let Some(note) = self
-                    .project
-                    .active_pattern_mut()
-                    .notes
-                    .iter_mut()
-                    .find(|note| note.id == origin.id)
-                else {
-                    continue;
-                };
-                if let Some((time_delta, pitch_delta)) = move_delta {
-                    note.start = origin.start + time_delta;
-                    let moved_pitch = (i16::from(origin.note) + pitch_delta) as u8;
-                    note.note = if scale_snap_move {
-                        snap_pitch_to_scale(
-                            moved_pitch,
-                            self.piano_roll_state.scale_root,
-                            self.piano_roll_state.scale,
-                        )
-                    } else {
-                        moved_pitch
-                    };
-                }
-                if let Some(delta) = length_delta {
-                    note.length = origin.length + delta;
-                }
-                if let Some(delta) = velocity_delta {
-                    note.velocity = origin.velocity + delta;
-                }
-                if mute_changed {
-                    note.muted = edited.muted;
-                }
+            if origins.len() == 1 {
+                property_line(
+                    ui,
+                    "Pitch",
+                    &format!("{} · MIDI {}", midi_note_name(first.note), first.note),
+                );
+                property_line(ui, "Start", &format!("{:.3} beats", first.start));
+                property_line(ui, "Length", &format!("{:.3} beats", first.length));
+                property_line(ui, "Velocity", &format!("{:.1}%", first.velocity * 100.0));
+                property_line(ui, "Muted", if first.muted { "Yes" } else { "No" });
+            } else {
+                property_line(
+                    ui,
+                    "Pitch / velocity",
+                    "Relative edits preserve differences",
+                );
             }
-        }
-        let mut assignment = first.channel_id;
-        let mut changed = false;
-        inspector_section(ui, "CHANNEL ASSIGNMENT", |ui| {
-            property_line(ui, "Selection", &format!("{selected_count} note(s)"));
-            egui::ComboBox::from_id_salt("note-inspector-channel")
-                .selected_text(
-                    assignment
-                        .and_then(|id| {
-                            channels
-                                .iter()
-                                .find(|(channel_id, _)| *channel_id == id)
-                                .map(|(_, name)| name.as_str())
-                        })
-                        .unwrap_or("Unassigned"),
-                )
-                .width(ui.available_width())
-                .show_ui(ui, |ui| {
-                    changed |= ui
-                        .selectable_value(&mut assignment, None, "Unassigned")
-                        .changed();
-                    for (channel_id, name) in &channels {
-                        changed |= ui
-                            .selectable_value(&mut assignment, Some(*channel_id), name)
-                            .changed();
-                    }
-                });
-        });
-        if changed {
-            let selected = &self.piano_roll_state.selection_ids;
-            for note in &mut self.project.active_pattern_mut().notes {
-                if selected.contains(&note.id) {
-                    note.channel_id = assignment;
-                }
+            property_line(
+                ui,
+                "Group",
+                &first
+                    .group_id
+                    .map_or_else(|| "None".to_owned(), |id| id.to_string()),
+            );
+            let enabled = self.piano_editor_command_ready(ui.ctx(), false);
+            if ui
+                .add_enabled(enabled, egui::Button::new("Edit note properties"))
+                .clicked()
+            {
+                self.begin_note_properties(ui.ctx(), first.id);
             }
-            normalize_piano_note_groups(&mut self.project.active_pattern_mut().notes);
-        }
-        inspector_section(ui, "EXPRESSION", |ui| {
-            property_line(ui, "Channel pressure", "—");
-            property_line(ui, "Timbre", "Center");
-            property_line(ui, "Probability", "100%");
+            ui.label(RichText::new("Double-click a note to edit. Alt + wheel adjusts velocity; Ctrl + Alt + wheel is finer.").small().color(theme::MUTED));
         });
     }
 
@@ -17055,7 +16988,8 @@ impl CitrusApp {
         let barriers = audio_import::AudioImportCommitBarriers {
             project_transition: self.project_snapshot_transition_pending(),
             save_or_recording: self.project_lifecycle_barriers_active(),
-            piano_transform: self.piano_roll_transform.is_some(),
+            piano_transform: self.piano_roll_transform.is_some()
+                || self.piano_note_properties.is_some(),
             playlist_gesture: self.playlist_gesture_before.is_some(),
             piano_gesture: self.piano_roll_gesture_before.is_some(),
             other_project_dialog: self.project_media.open
@@ -17952,6 +17886,7 @@ impl CitrusApp {
 
 impl eframe::App for CitrusApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        piano_expression::suppress_owned_wheel_tail(ui.ctx());
         let ctx = ui.ctx().clone();
         #[cfg(target_os = "windows")]
         {
@@ -18045,6 +17980,7 @@ impl eframe::App for CitrusApp {
             || self.recovery_available
             || self.audio_restart_state.locks_session_actions()
             || self.piano_roll_transform.is_some()
+            || self.piano_note_properties.is_some()
             || self.project_media.open
             || self.export_dialog.is_open()
         {
@@ -18102,6 +18038,7 @@ impl eframe::App for CitrusApp {
             if self.piano_roll_transform.is_some() {
                 self.piano_roll_transform_dialog(&ctx);
             }
+            self.note_properties_dialog(&ctx);
             self.plugin_parameter_editor_window(&ctx);
             if self.show_plugins {
                 self.plugin_manager(&ctx);
@@ -20627,13 +20564,19 @@ impl CitrusApp {
         );
         let piano_surface_response =
             ui.interact(piano_surface, Id::new("piano-viewport"), Sense::hover());
-        if piano_surface_response.hovered() {
+        let expression_wheel = self.piano_velocity_wheel(ui, grid);
+        if ui.is_enabled()
+            && piano_surface_response.contains_pointer()
+            && !expression_wheel
+            && !ui.input(|input| input.pointer.any_down())
+            && !self.editor_pointer_gesture_active()
+        {
             let (scroll, modifiers) =
                 ui.input(|input| (input.smooth_scroll_delta, input.modifiers));
             apply_editor_wheel(
                 &mut self.piano_viewport,
                 grid,
-                piano_surface_response.hover_pos(),
+                ui.ctx().pointer_hover_pos(),
                 scroll,
                 modifiers,
             );
@@ -20799,6 +20742,7 @@ impl CitrusApp {
         let mut mouse_press = None;
         let mut group_resize_request = None;
         let mut group_velocity_request = None;
+        let mut properties_request = None;
         let mut piano_edit_notice = None;
         let mut project_gesture_started = false;
         let mut project_gesture_stopped = false;
@@ -21005,6 +20949,19 @@ impl CitrusApp {
                 // The edge grip owns the press even in a complete batched drag.
                 mouse_press = None;
             }
+            if (response.double_clicked_by(egui::PointerButton::Primary)
+                || resize_response.double_clicked_by(egui::PointerButton::Primary))
+                && piano_mouse::unmodified_properties_press(ui.ctx())
+                && matches!(
+                    self.piano_roll_state.tool,
+                    PianoRollTool::Draw
+                        | PianoRollTool::Paint
+                        | PianoRollTool::Select
+                        | PianoRollTool::Stamp
+                )
+            {
+                properties_request = Some(note.id);
+            }
             if response.clicked() {
                 note_clicked = true;
                 if !selecting {
@@ -21098,12 +21055,14 @@ impl CitrusApp {
                     })
                     .cloned()
                     .collect::<Vec<_>>();
-                if let Some((pointer, _)) = press_input {
+                if let Some((pointer, press_modifiers)) = press_input {
                     self.piano_roll_state.last_note_length = note.length;
                     ui.ctx().data_mut(|data| {
                         data.insert_temp(
                             resize_gesture_key,
                             PianoNoteResizeGesture {
+                                modifiers: press_modifiers,
+                                moved: false,
                                 note_id: note.id,
                                 pointer_origin_x: pointer.x,
                                 origins,
@@ -21112,16 +21071,25 @@ impl CitrusApp {
                     });
                 }
             }
-            let active_resize = ui
+            let mut active_resize = ui
                 .ctx()
                 .data(|data| data.get_temp::<PianoNoteResizeGesture>(resize_gesture_key));
+            if let (Some(drag), Some(pointer)) = (active_resize.as_mut(), pointer_position)
+                && drag.note_id == note.id
+                && (pointer.x - drag.pointer_origin_x).abs()
+                    > ui.ctx().options(|o| o.input_options.max_click_dist)
+            {
+                drag.moved = true;
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(resize_gesture_key, drag.clone()));
+            }
             if active_resize
                 .as_ref()
                 .is_some_and(|drag| drag.note_id == note.id)
                 && ui.is_enabled()
                 && (primary_down || primary_released)
                 && let Some(pointer) = pointer_position
-                && let Some(drag) = active_resize.as_ref()
+                && let Some(drag) = active_resize.as_ref().filter(|drag| drag.moved)
                 && let Some(anchor) = drag.origins.iter().find(|origin| origin.id == note.id)
                 && let Ok(length) = resized_note_length(
                     anchor.length,
@@ -21476,6 +21444,10 @@ impl CitrusApp {
         }
         if project_gesture_stopped {
             self.finish_piano_roll_gesture();
+        }
+        if let Some(id) = properties_request {
+            self.finish_piano_roll_gesture();
+            self.begin_note_properties(ui.ctx(), id);
         }
         if let Some(message) = piano_edit_notice {
             self.notify(message);
@@ -29324,6 +29296,7 @@ mod playback_tests {
             ShortcutModal::ProjectMedia,
             ShortcutModal::ProjectLifecycle,
             ShortcutModal::PianoTransform,
+            ShortcutModal::NoteProperties,
             ShortcutModal::PluginManager,
             ShortcutModal::Settings,
             ShortcutModal::MidiImport,

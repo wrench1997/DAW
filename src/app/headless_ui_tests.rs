@@ -2525,5 +2525,7 @@ fn compact_rack_retains_accessible_controls_and_scrolls_at_minimum_width() {
 }
 
 include!("piano_keyboard_tests.rs");
+#[path = "piano_expression_tests.rs"]
+mod piano_expression_tests;
 #[path = "piano_mouse_tests.rs"]
 mod piano_mouse_tests;

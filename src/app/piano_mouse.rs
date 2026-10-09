@@ -154,6 +154,23 @@ pub(super) fn active(ctx: &egui::Context) -> bool {
     ctx.data(|data| data.get_temp::<Gesture>(key()).is_some())
 }
 
+pub(super) fn unmodified_properties_press(ctx: &egui::Context) -> bool {
+    let modifiers = primary_press(ctx)
+        .map(|(_, modifiers)| modifiers)
+        .or_else(|| {
+            ctx.data(|data| data.get_temp::<Gesture>(key()))
+                .map(|g| g.modifiers)
+        })
+        .or_else(|| {
+            ctx.data(|data| {
+                data.get_temp::<PianoNoteResizeGesture>(Id::new("piano-note-resize-gesture"))
+            })
+            .map(|g| g.modifiers)
+        })
+        .unwrap_or_else(|| ctx.input(|input| input.modifiers));
+    modifiers == egui::Modifiers::NONE
+}
+
 pub(super) fn selecting(ctx: &egui::Context) -> bool {
     ctx.data(|data| data.get_temp::<Gesture>(key()))
         .is_some_and(|g| matches!(g.kind, GestureKind::Selection | GestureKind::Marquee { .. }))
