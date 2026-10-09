@@ -39,19 +39,22 @@ pub enum StudioIcon {
 pub fn icon_button(ui: &mut Ui, icon: StudioIcon, active: bool, size: f32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
     let fill = if active {
-        theme::ORANGE_DIM.gamma_multiply(0.8)
+        theme::ORANGE_DIM
     } else if response.hovered() {
-        Color32::from_rgb(51, 58, 61)
+        theme::HIGHLIGHT
     } else {
-        theme::RAISED
+        theme::PANEL_ALT
     };
-    ui.painter().rect_filled(rect, 5.0, fill);
-    ui.painter().rect_stroke(
-        rect,
-        5.0,
-        Stroke::new(1.0, if active { theme::ORANGE } else { theme::GRID }),
-        StrokeKind::Inside,
-    );
+    ui.painter().rect_filled(rect, 3.0, fill);
+    if active || response.has_focus() {
+        ui.painter().line_segment(
+            [
+                rect.left_bottom() + Vec2::new(4.0, -1.0),
+                rect.right_bottom() + Vec2::new(-4.0, -1.0),
+            ],
+            Stroke::new(2.0, theme::ORANGE),
+        );
+    }
     paint_icon(
         ui.painter(),
         rect.shrink(size * 0.24),
@@ -62,21 +65,23 @@ pub fn icon_button(ui: &mut Ui, icon: StudioIcon, active: bool, size: f32) -> Re
 }
 
 pub fn transport_button(ui: &mut Ui, icon: StudioIcon, active: bool, color: Color32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(42.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
     let fill = if active {
-        color.gamma_multiply(0.2)
+        theme::ORANGE_DIM
     } else if response.hovered() {
-        Color32::from_rgb(48, 54, 57)
+        theme::HIGHLIGHT
     } else {
         theme::RAISED
     };
-    ui.painter().circle_filled(rect.center(), 19.0, fill);
+    ui.painter()
+        .circle_filled(rect.center() + Vec2::new(0.0, 1.0), 17.0, theme::WELL);
+    ui.painter().circle_filled(rect.center(), 16.0, fill);
     ui.painter().circle_stroke(
         rect.center(),
-        19.0,
-        Stroke::new(1.0, if active { color } else { theme::GRID }),
+        16.0,
+        Stroke::new(1.0, if active { color } else { theme::HIGHLIGHT }),
     );
-    paint_icon(ui.painter(), rect.shrink(13.0), icon, color);
+    paint_icon(ui.painter(), rect.shrink(11.0), icon, color);
     response
 }
 

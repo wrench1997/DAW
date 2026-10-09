@@ -319,9 +319,9 @@ fn transport_timeline_compile_options(
 fn default_playlist_viewport(song_length_beats: f32) -> Viewport2D {
     let content_end = finite_content_end(song_length_beats, 4.0);
     Viewport2D::new(
-        AxisViewport::new(0.0, content_end, 1_120.0, 70.0, 0.25, 512.0)
+        AxisViewport::new(0.0, content_end, 1_120.0, 24.0, 0.25, 512.0)
             .expect("playlist time viewport constants are valid"),
-        AxisViewport::new(0.0, PLAYLIST_TRACK_COUNT as f64, 640.0, 56.0, 18.0, 112.0)
+        AxisViewport::new(0.0, PLAYLIST_TRACK_COUNT as f64, 640.0, 62.0, 18.0, 112.0)
             .expect("playlist track viewport constants are valid"),
     )
 }
@@ -14326,7 +14326,7 @@ impl CitrusApp {
 
     fn top_menu(&mut self, root: &mut egui::Ui) {
         egui::Panel::top("menu")
-            .exact_size(38.0)
+            .exact_size(32.0)
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BG)
@@ -14334,7 +14334,8 @@ impl CitrusApp {
             )
             .show(root, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.spacing_mut().item_spacing.x = 7.0;
+                    ui.visuals_mut().widgets.inactive.weak_bg_fill = theme::BG;
                     draw_brand_mark(ui);
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 3.0;
@@ -14583,17 +14584,18 @@ impl CitrusApp {
     fn toolbar(&mut self, root: &mut egui::Ui) {
         // Keep every transport and navigation action visible at the supported minimum size.
         // A second explicit row is preferable to right-aligned controls painting over siblings.
-        let compact = root.available_width() < 1240.0;
+        let compact = root.available_width() < 1320.0;
         egui::Panel::top("toolbar")
-            .exact_size(if compact { 153.0 } else { 89.0 })
+            .exact_size(if compact { 96.0 } else { 58.0 })
             .frame(
                 egui::Frame::NONE
                     .fill(theme::PANEL)
-                    .inner_margin(egui::Margin::symmetric(12, 9)),
+                    .inner_margin(egui::Margin::symmetric(10, 5)),
             )
             .show(root, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 5.0;
+                    ui.set_height(42.0);
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     for (icon, hint) in [
                         (StudioIcon::Menu, "Main menu"),
                         (StudioIcon::Undo, "Undo — history will appear here"),
@@ -14601,7 +14603,7 @@ impl CitrusApp {
                         (StudioIcon::Folder, "Open project — Ctrl+O"),
                         (StudioIcon::Save, "Save project — Ctrl+S"),
                     ] {
-                        if icons::icon_button(ui, icon, false, 32.0)
+                        if icons::icon_button(ui, icon, false, 28.0)
                             .on_hover_text(hint)
                             .clicked()
                         {
@@ -14620,6 +14622,7 @@ impl CitrusApp {
                     let mut requested_transport_view = None;
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.spacing_mut().interact_size.y = 18.0;
                         let pat = ui
                             .selectable_label(
                                 self.transport_mode == TransportMode::Pattern,
@@ -14715,21 +14718,20 @@ impl CitrusApp {
                     let beat = (self.beat_position % 4.0).floor() as u32 + 1;
                     let tick = ((self.beat_position % 1.0) * 96.0) as u32;
                     ui.allocate_ui_with_layout(
-                        Vec2::new(112.0, 58.0),
+                        Vec2::new(132.0, 40.0),
                         Layout::top_down(Align::Center),
                         |ui| {
                             ui.label(
-                                RichText::new("POSITION  BAR : BEAT : TICK")
-                                    .size(7.5)
+                                RichText::new("BAR   :   BEAT   :   TICK")
+                                    .size(8.0)
                                     .color(theme::MUTED),
                             );
                             ui.label(
                                 RichText::new(format!("{bar:03}:{beat:02}:{tick:02}"))
                                     .monospace()
-                                    .size(18.0)
-                                    .color(theme::ORANGE),
+                                    .size(22.0)
+                                    .color(theme::TEXT),
                             );
-                            draw_mini_wave(ui);
                         },
                     );
                     ui.separator();
@@ -14739,6 +14741,7 @@ impl CitrusApp {
                     }
                 });
                 if compact {
+                    ui.add_space(3.0);
                     ui.horizontal(|ui| self.toolbar_navigation(ui));
                 }
             });
@@ -14758,7 +14761,7 @@ impl CitrusApp {
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if icon_label_button(ui, StudioIcon::Plugin, "PLUGINS", theme::ORANGE).clicked() {
+            if icon_label_button(ui, StudioIcon::Plugin, "PLUGINS", theme::TEXT).clicked() {
                 self.show_plugins = true;
             }
         });
@@ -14766,7 +14769,7 @@ impl CitrusApp {
 
     fn bottom_status(&mut self, root: &mut egui::Ui) {
         egui::Panel::bottom("status")
-            .exact_size(30.0)
+            .exact_size(24.0)
             .frame(
                 egui::Frame::NONE
                     .fill(theme::BG)
@@ -15007,8 +15010,8 @@ impl CitrusApp {
 
     fn browser(&mut self, root: &mut egui::Ui) {
         egui::Panel::left("browser")
-            .default_size(248.0)
-            .size_range(224.0..=360.0)
+            .default_size(224.0)
+            .size_range(216.0..=360.0)
             .resizable(true)
             .frame(
                 egui::Frame::NONE
@@ -15018,7 +15021,7 @@ impl CitrusApp {
             .show(root, |ui| {
                 ui.horizontal(|ui| {
                     let icon_rect = ui.allocate_exact_size(Vec2::splat(17.0), Sense::hover()).0;
-                    icons::paint_icon(ui.painter(), icon_rect, StudioIcon::Browser, theme::ORANGE);
+                    icons::paint_icon(ui.painter(), icon_rect, StudioIcon::Browser, theme::MUTED);
                     ui.label(RichText::new("BROWSER").strong().size(11.5));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let _ = icons::icon_button(ui, StudioIcon::More, false, 25.0);
@@ -15027,6 +15030,7 @@ impl CitrusApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
+                    let tab_width = (ui.available_width() - 4.0) / 3.0;
                     for (tab, label) in [
                         (BrowserTab::Sounds, "SOUNDS"),
                         (BrowserTab::Plugins, "PLUGINS"),
@@ -15034,9 +15038,21 @@ impl CitrusApp {
                     ] {
                         if ui
                             .add_sized(
-                                [70.0, 26.0],
-                                egui::Button::new(RichText::new(label).size(8.5))
-                                    .selected(self.browser_tab == tab),
+                                [tab_width, 25.0],
+                                egui::Button::new(RichText::new(label).size(9.0).color(
+                                    if self.browser_tab == tab {
+                                        theme::ORANGE
+                                    } else {
+                                        theme::MUTED
+                                    },
+                                ))
+                                .fill(
+                                    if self.browser_tab == tab {
+                                        theme::WELL
+                                    } else {
+                                        theme::PANEL
+                                    },
+                                ),
                             )
                             .clicked()
                         {
@@ -15061,7 +15077,7 @@ impl CitrusApp {
                 ui.add_space(6.0);
 
                 let footer_height = if self.browser_tab == BrowserTab::Sounds {
-                    174.0
+                    145.0
                 } else {
                     64.0
                 };
@@ -15081,10 +15097,9 @@ impl CitrusApp {
                 );
                 ui.add_space(7.0);
                 egui::Frame::NONE
-                    .fill(theme::BG)
-                    .stroke(Stroke::new(1.0, theme::GRID))
-                    .corner_radius(6)
-                    .inner_margin(egui::Margin::same(9))
+                    .fill(theme::WELL)
+                    .corner_radius(3)
+                    .inner_margin(egui::Margin::same(10))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         self.browser_selection(ui);
@@ -16279,7 +16294,7 @@ impl CitrusApp {
                 if ui
                     .add_enabled(
                         display_index + 1 < self.project.mixer_tracks.len(),
-                        egui::Button::new("DISPLAY ↓"),
+                        egui::Button::new("ORDER +"),
                     )
                     .on_hover_text("Move later in display order; runtime routing stays fixed")
                     .clicked()
@@ -16290,7 +16305,7 @@ impl CitrusApp {
                     });
                 }
                 if ui
-                    .add_enabled(display_index > 0, egui::Button::new("DISPLAY ↑"))
+                    .add_enabled(display_index > 0, egui::Button::new("ORDER -"))
                     .on_hover_text("Move earlier in display order; runtime routing stays fixed")
                     .clicked()
                 {
@@ -18067,81 +18082,78 @@ fn navigation_button(
     key: &str,
     active: bool,
 ) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(66.0, 58.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(78.0, 34.0), Sense::click());
     let fill = if active {
-        theme::ORANGE_DIM.gamma_multiply(0.55)
+        theme::WELL
     } else if response.hovered() {
-        Color32::from_rgb(48, 55, 58)
+        theme::RAISED
     } else {
-        theme::PANEL_ALT
+        theme::PANEL
     };
-    ui.painter().rect_filled(rect, 5.0, fill);
-    ui.painter().rect_stroke(
-        rect,
-        5.0,
-        Stroke::new(1.0, if active { theme::ORANGE } else { theme::GRID }),
-        StrokeKind::Inside,
-    );
+    ui.painter().rect_filled(rect, 3.0, fill);
+    if active || response.has_focus() {
+        ui.painter().line_segment(
+            [
+                rect.left_bottom() + Vec2::new(6.0, -1.0),
+                rect.right_bottom() + Vec2::new(-6.0, -1.0),
+            ],
+            Stroke::new(2.0, theme::ORANGE),
+        );
+    }
     icons::paint_icon(
         ui.painter(),
         Rect::from_center_size(
-            Pos2::new(rect.center().x, rect.top() + 19.0),
+            Pos2::new(rect.left() + 16.0, rect.center().y),
             Vec2::splat(16.0),
         ),
         icon,
-        if active { theme::ORANGE } else { theme::TEXT },
+        if active { theme::ORANGE } else { theme::MUTED },
     );
     ui.painter().text(
-        Pos2::new(rect.center().x, rect.bottom() - 17.0),
-        Align2::CENTER_CENTER,
+        Pos2::new(rect.left() + 30.0, rect.center().y - 4.0),
+        Align2::LEFT_CENTER,
         label,
-        FontId::proportional(8.2),
-        if active { theme::ORANGE } else { theme::TEXT },
+        FontId::proportional(9.0),
+        if active { theme::TEXT } else { theme::MUTED },
     );
     ui.painter().text(
-        Pos2::new(rect.center().x, rect.bottom() - 6.0),
-        Align2::CENTER_CENTER,
+        Pos2::new(rect.left() + 30.0, rect.center().y + 8.0),
+        Align2::LEFT_CENTER,
         key,
-        FontId::monospace(7.0),
+        FontId::monospace(8.0),
         theme::MUTED,
     );
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, label)
     });
-    response
+    response.on_hover_text(format!("{label} · {key}"))
 }
 
 fn icon_label_button(ui: &mut egui::Ui, icon: StudioIcon, label: &str, color: Color32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(94.0, 38.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(87.0, 32.0), Sense::click());
     ui.painter().rect_filled(
         rect,
-        5.0,
+        3.0,
         if response.hovered() {
-            theme::ORANGE_DIM.gamma_multiply(0.65)
+            theme::HIGHLIGHT
         } else {
-            theme::RAISED
+            theme::PANEL_ALT
         },
-    );
-    ui.painter().rect_stroke(
-        rect,
-        5.0,
-        Stroke::new(1.0, theme::ORANGE_DIM),
-        StrokeKind::Inside,
     );
     icons::paint_icon(
         ui.painter(),
         Rect::from_center_size(
-            Pos2::new(rect.left() + 20.0, rect.center().y),
-            Vec2::splat(17.0),
+            Pos2::new(rect.left() + 16.0, rect.center().y),
+            Vec2::splat(16.0),
         ),
         icon,
-        color,
+        theme::MUTED,
     );
     ui.painter().text(
-        Pos2::new(rect.left() + 36.0, rect.center().y),
+        Pos2::new(rect.left() + 31.0, rect.center().y),
         Align2::LEFT_CENTER,
         label,
-        FontId::proportional(9.5),
+        FontId::proportional(9.0),
         color,
     );
     response.widget_info(|| {
@@ -18156,40 +18168,29 @@ fn icon_label_button(ui: &mut egui::Ui, icon: StudioIcon, label: &str, color: Co
 
 fn lcd(ui: &mut egui::Ui, label: &str, value: &mut f32, unit: &str, width: f32) {
     egui::Frame::NONE
-        .fill(theme::BG)
-        .corner_radius(4)
-        .inner_margin(egui::Margin::symmetric(7, 3))
+        .fill(theme::WELL)
+        .corner_radius(3)
+        .inner_margin(egui::Margin::symmetric(7, 4))
         .show(ui, |ui| {
             ui.set_width(width);
-            ui.label(RichText::new(label).size(8.0).color(theme::MUTED));
-            let response = ui.add(
-                egui::DragValue::new(value)
-                    .range(20.0..=400.0)
-                    .speed(0.2)
-                    .fixed_decimals(1),
-            );
             ui.horizontal(|ui| {
-                ui.label(RichText::new(unit).size(8.0).color(theme::MUTED));
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.label(RichText::new(label).size(8.0).color(theme::MUTED));
+                    ui.label(RichText::new(unit).size(8.0).color(theme::MUTED));
+                });
+                let response = ui.add(
+                    egui::DragValue::new(value)
+                        .range(20.0..=400.0)
+                        .speed(0.2)
+                        .fixed_decimals(1),
+                );
+                if response.dragged() {
+                    ui.ctx().request_repaint();
+                }
             });
-            if response.dragged() {
-                ui.ctx().request_repaint();
-            }
         });
-}
-
-fn draw_mini_wave(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(105.0, 13.0), Sense::hover());
-    for i in 0..24 {
-        let x = egui::lerp(rect.x_range(), i as f32 / 23.0);
-        let h = 2.0 + ((i * 17) % 11) as f32;
-        ui.painter().line_segment(
-            [
-                Pos2::new(x, rect.center().y - h / 2.0),
-                Pos2::new(x, rect.center().y + h / 2.0),
-            ],
-            Stroke::new(1.0, theme::GREEN),
-        );
-    }
 }
 
 fn piano_transform_grid_choices() -> [(f32, &'static str); 7] {
@@ -18220,15 +18221,15 @@ impl CitrusApp {
         let mut piano_quick_legato_request = false;
         egui::Frame::NONE
             .fill(theme::PANEL_ALT)
-            .inner_margin(egui::Margin::symmetric(10, 6))
+            .inner_margin(egui::Margin::symmetric(9, 4))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
                     ui.label(
                         RichText::new(title)
                             .strong()
-                            .size(12.0)
-                            .color(theme::ORANGE),
+                            .size(11.0)
+                            .color(theme::TEXT),
                     );
                     ui.label(RichText::new(subtitle).size(9.0).color(theme::MUTED));
                     ui.separator();
@@ -18281,7 +18282,7 @@ impl CitrusApp {
                                 !self.piano_roll_state.grouping_enabled;
                         }
                         ui.menu_button(
-                            RichText::new("TOOLS ▾").size(9.0).color(theme::TEXT),
+                            RichText::new("TOOLS v").size(9.0).color(theme::TEXT),
                             |ui| {
                                 ui.set_min_width(190.0);
                                 if ui.button("Quick legato       Ctrl+L").clicked() {
@@ -18379,7 +18380,7 @@ impl CitrusApp {
                                     !self.piano_roll_state.grouping_enabled;
                             }
                             ui.menu_button(
-                                RichText::new("GROUP ▾").size(9.0).color(theme::TEXT),
+                                RichText::new("GROUP v").size(9.0).color(theme::TEXT),
                                 |ui| {
                                     ui.set_min_width(190.0);
                                     if ui.button("Group selected       Shift+G").clicked() {
@@ -18559,8 +18560,8 @@ impl CitrusApp {
         self.workspace_header(ui, "PLAYLIST", &playlist_subtitle);
         self.playlist_navigation(ui);
         let available = ui.available_rect_before_wrap();
-        let track_header = 148.0;
-        let timeline_h = 28.0;
+        let track_header = 132.0;
+        let timeline_h = 26.0;
         let canvas = Rect::from_min_max(
             Pos2::new(
                 available.left() + track_header,
@@ -18639,53 +18640,66 @@ impl CitrusApp {
                 Pos2::new(available.left(), y),
                 Vec2::new(available.width(), row_h),
             );
-            if track % 2 == 0 {
-                body_painter.rect_filled(row_rect, 0.0, Color32::from_rgb(18, 22, 24));
-            }
+            let lane_color = self
+                .project
+                .clips
+                .iter()
+                .find(|clip| clip.track == track)
+                .map(|clip| theme::color(clip.color))
+                .unwrap_or(theme::MUTED);
+            body_painter.rect_filled(
+                row_rect,
+                0.0,
+                if track % 2 == 0 {
+                    Color32::from_rgb(43, 52, 60)
+                } else {
+                    Color32::from_rgb(46, 55, 63)
+                },
+            );
+            let header_rect = Rect::from_min_size(row_rect.min, Vec2::new(track_header, row_h));
+            body_painter.rect_filled(header_rect, 0.0, theme::mix(theme::PANEL, lane_color, 0.10));
+            body_painter.rect_filled(
+                Rect::from_min_size(header_rect.min, Vec2::new(3.0, row_h - 1.0)),
+                0.0,
+                theme::mix(theme::PANEL, lane_color, 0.75),
+            );
             body_painter.line_segment(
                 [
                     Pos2::new(available.left(), y),
                     Pos2::new(available.right(), y),
                 ],
-                Stroke::new(1.0, theme::GRID),
+                Stroke::new(1.0, theme::WELL),
+            );
+            let names = [
+                "Drums",
+                "Chords",
+                "Lead",
+                "Bass",
+                "Audio",
+                "Automation",
+                "FX",
+                "Vocal",
+            ];
+            let fallback = format!("Track {:02}", track + 1);
+            let name = names.get(track).copied().unwrap_or(&fallback);
+            body_painter.text(
+                Pos2::new(available.left() + 13.0, y + 18.0),
+                Align2::LEFT_CENTER,
+                name,
+                FontId::proportional(11.5),
+                theme::TEXT,
             );
             body_painter.text(
-                Pos2::new(available.left() + 12.0, y + 17.0),
+                Pos2::new(available.left() + 13.0, y + 39.0),
                 Align2::LEFT_CENTER,
                 format!("{:02}", track + 1),
                 FontId::monospace(9.0),
                 theme::MUTED,
             );
-            let names = [
-                "DRUMS",
-                "CHORDS",
-                "LEAD",
-                "BASS",
-                "AUDIO",
-                "AUTOMATION",
-                "FX",
-                "VOCAL",
-            ];
-            let fallback = format!("TRACK {:02}", track + 1);
-            let name = names.get(track).copied().unwrap_or(&fallback);
-            body_painter.text(
-                Pos2::new(available.left() + 38.0, y + 17.0),
-                Align2::LEFT_CENTER,
-                name,
-                FontId::proportional(10.0),
-                theme::TEXT,
-            );
-            body_painter.line_segment(
-                [
-                    Pos2::new(available.left() + 18.0, y + 35.0),
-                    Pos2::new(available.left() + 128.0, y + 35.0),
-                ],
-                Stroke::new(2.0, theme::RAISED),
-            );
             body_painter.circle_filled(
-                Pos2::new(available.left() + 127.0, y + 35.0),
+                Pos2::new(available.left() + track_header - 15.0, y + 39.0),
                 3.0,
-                theme::ORANGE_DIM,
+                theme::mix(theme::PANEL, lane_color, 0.7),
             );
         }
 
@@ -18698,12 +18712,15 @@ impl CitrusApp {
             let major = unit.rem_euclid(16) == 0;
             let medium = unit.rem_euclid(4) == 0;
             let color = if major {
-                Color32::from_rgb(78, 84, 86)
+                Color32::from_rgb(29, 37, 43)
             } else if medium {
-                theme::GRID
+                Color32::from_rgb(38, 46, 53)
             } else {
-                Color32::from_rgb(30, 35, 37)
+                Color32::from_rgb(48, 57, 65)
             };
+            if !medium && beat_w < 40.0 {
+                continue;
+            }
             canvas_painter.line_segment(
                 [Pos2::new(x, canvas.top()), Pos2::new(x, canvas.bottom())],
                 Stroke::new(if major { 1.2 } else { 0.7 }, color),
@@ -18886,31 +18903,32 @@ impl CitrusApp {
                 });
             let selected = self.playlist_selection_ids.contains(&clip.id);
             let base = theme::color(clip.color);
+            let clip_color = if clip.muted { theme::MUTED } else { base };
             canvas_painter.rect_filled(
                 clip_rect,
-                4.0,
-                base.gamma_multiply(if clip.muted {
-                    0.16
-                } else if selected {
-                    0.66
-                } else {
-                    0.43
-                }),
-            );
-            canvas_painter.rect_stroke(
-                clip_rect,
-                4.0,
-                Stroke::new(
-                    if selected { 1.6 } else { 1.0 },
-                    if selected { Color32::WHITE } else { base },
-                ),
-                StrokeKind::Inside,
-            );
-            canvas_painter.rect_filled(
-                Rect::from_min_size(clip_rect.min, Vec2::new(3.0, clip_rect.height())),
                 2.0,
-                base,
+                theme::mix(theme::WELL, clip_color, if selected { 0.38 } else { 0.23 }),
             );
+            let cap = Rect::from_min_size(
+                clip_rect.min,
+                Vec2::new(clip_rect.width(), 17.0_f32.min(clip_rect.height())),
+            );
+            canvas_painter.rect_filled(cap, 2.0, theme::clip_header(clip_color, clip.muted));
+            canvas_painter.line_segment(
+                [
+                    cap.left_top() + Vec2::new(1.0, 0.5),
+                    cap.right_top() + Vec2::new(-1.0, 0.5),
+                ],
+                Stroke::new(1.0, theme::mix(clip_color, Color32::WHITE, 0.24)),
+            );
+            if selected || response.hovered() {
+                canvas_painter.rect_stroke(
+                    clip_rect,
+                    2.0,
+                    Stroke::new(1.0, if selected { theme::ORANGE } else { clip_color }),
+                    StrokeKind::Inside,
+                );
+            }
             if clip.group_id.is_some() && clip_rect.width() >= 15.0 {
                 let left = Pos2::new(clip_rect.left() + 7.0, clip_rect.bottom() - 7.0);
                 let right = Pos2::new(clip_rect.left() + 12.0, clip_rect.bottom() - 7.0);
@@ -18921,8 +18939,8 @@ impl CitrusApp {
                 canvas_painter.circle_stroke(left, 1.8, Stroke::new(1.0, Color32::WHITE));
                 canvas_painter.circle_stroke(right, 1.8, Stroke::new(1.0, Color32::WHITE));
             }
-            canvas_painter.text(
-                clip_rect.min + Vec2::new(8.0, 12.0),
+            canvas_painter.with_clip_rect(clip_rect.shrink(2.0)).text(
+                clip_rect.min + Vec2::new(6.0, 8.5),
                 Align2::LEFT_CENTER,
                 &clip.name,
                 FontId::proportional(9.5),
@@ -19101,12 +19119,17 @@ impl CitrusApp {
                         }
                     }
                 }
-                ClipKind::Pattern => draw_pattern_ticks(
+                ClipKind::Pattern => draw_pattern_preview(
                     &canvas_painter,
                     clip_rect,
                     base,
                     clip.source_offset + visible_start - clip.start,
                     beat_w,
+                    self.project
+                        .patterns
+                        .iter()
+                        .find(|pattern| pattern.id == clip.pattern_id),
+                    clip.source_offset,
                 ),
             }
             if show_fade_controls {
@@ -21876,10 +21899,10 @@ impl CitrusApp {
             .project
             .mixer_track_id_at_runtime_slot(active)
             .unwrap_or(MASTER_MIXER_TRACK_ID);
-        let mixer_height = ui.available_height().max(430.0);
+        let mixer_height = ui.available_height().max(340.0);
         let mixer_track_width =
-            ((ui.available_width() - 210.0) / self.project.mixer_tracks.len().max(1) as f32 - 14.0)
-                .clamp(70.0, 106.0);
+            ((ui.available_width() - 196.0) / self.project.mixer_tracks.len().max(1) as f32 - 14.0)
+                .clamp(62.0, 88.0);
         let mut clicked_runtime_slot = None;
         let mut reset_meter = None;
         let mut audio_commands = Vec::new();
@@ -21899,17 +21922,24 @@ impl CitrusApp {
             })
             .count();
         ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = 5.0;
             ui.allocate_ui_with_layout(
-                Vec2::new(190.0, mixer_height),
+                Vec2::new(180.0, mixer_height),
                 Layout::top_down(Align::Min),
                 |ui| {
                     egui::Frame::NONE
                         .fill(theme::PANEL)
-                        .inner_margin(egui::Margin::same(10))
+                        .stroke(Stroke::new(1.0, theme::BG))
+                        .inner_margin(egui::Margin::same(8))
                         .show(ui, |ui| {
-                            ui.set_min_size(Vec2::new(170.0, mixer_height - 20.0));
-                            ui.label(RichText::new("EFFECT RACK").strong().size(10.0));
-                            ui.add_space(3.0);
+                            ui.set_min_size(Vec2::new(162.0, mixer_height - 18.0));
+                            ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                            ui.label(
+                                RichText::new("EFFECT RACK")
+                                    .strong()
+                                    .size(9.0)
+                                    .color(theme::MUTED),
+                            );
                             let track_name = self
                                 .project
                                 .mixer_track_id_at_runtime_slot(active)
@@ -21920,17 +21950,17 @@ impl CitrusApp {
                                 RichText::new(track_name)
                                     .strong()
                                     .color(theme::ORANGE)
-                                    .size(15.0),
+                                    .size(13.0),
                             );
                             ui.label(
                                 RichText::new("INSERT EFFECTS")
                                     .size(8.0)
                                     .color(theme::MUTED),
                             );
-                            ui.add_space(5.0);
+                            ui.add_space(3.0);
                             egui::ScrollArea::vertical()
                                 .id_salt("mixer-effect-rack")
-                                .max_height((mixer_height - 160.0).max(240.0))
+                                .max_height((mixer_height - 160.0).max(140.0))
                                 .show(ui, |ui| {
                                     for slot in 0..MIXER_INSERT_SLOT_COUNT {
                                         let target = PluginPickerTarget::MixerSlot {
@@ -21942,15 +21972,18 @@ impl CitrusApp {
                                         else {
                                             if ui
                                                 .add_sized(
-                                                    [165.0, 29.0],
+                                                    [160.0, 24.0],
                                                     egui::Button::new(
                                                         RichText::new(format!(
                                                             "{:02}    + Empty slot",
                                                             slot + 1
                                                         ))
-                                                        .size(8.5)
+                                                        .size(10.0)
                                                         .color(theme::MUTED),
-                                                    ),
+                                                    )
+                                                    .fill(theme::PANEL_ALT)
+                                                    .stroke(Stroke::new(1.0, theme::BG))
+                                                    .corner_radius(2),
                                                 )
                                                 .on_hover_text("Choose a VST2 or VST3 plug-in")
                                                 .clicked()
@@ -21969,7 +22002,7 @@ impl CitrusApp {
                                         };
                                         let response = ui
                                             .add_sized(
-                                                [165.0, 36.0],
+                                                [160.0, 34.0],
                                                 egui::Button::new(
                                                     RichText::new(format!(
                                                         "{:02}  {}\n     {} · {} · {} · {:.0}%{}",
@@ -21983,8 +22016,10 @@ impl CitrusApp {
                                                         plugin.wet * 100.0,
                                                         state_suffix,
                                                     ))
-                                                    .size(8.0),
+                                                    .size(10.0),
                                                 )
+                                                .fill(theme::PANEL_ALT)
+                                                .corner_radius(2)
                                                 .selected(plugin.enabled && !plugin.bypass),
                                             )
                                             .on_hover_text(
@@ -22049,7 +22084,7 @@ impl CitrusApp {
                                         });
                                     }
                                 });
-                            ui.add_space(10.0);
+                            ui.add_space(6.0);
                             ui.separator();
                             ui.label(RichText::new("ROUTING").size(8.0).color(theme::MUTED));
                             for name in [
@@ -22063,11 +22098,15 @@ impl CitrusApp {
                 },
             );
 
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+            ui.spacing_mut().scroll.bar_width = 8.0;
             egui::ScrollArea::horizontal()
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                 .auto_shrink([false, false])
                 .max_height(mixer_height)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
                         for (display_index, track) in
                             self.project.mixer_tracks.iter_mut().enumerate()
                         {
@@ -22075,7 +22114,7 @@ impl CitrusApp {
                             let selected = runtime_slot == active;
                             egui::Frame::NONE
                                 .fill(if selected {
-                                    Color32::from_rgb(39, 45, 47)
+                                    theme::RAISED
                                 } else if display_index % 2 == 0 {
                                     theme::PANEL_ALT
                                 } else {
@@ -22086,20 +22125,44 @@ impl CitrusApp {
                                     if selected {
                                         theme::ORANGE_DIM
                                     } else {
-                                        theme::GRID
+                                        theme::BG
                                     },
                                 ))
-                                .inner_margin(egui::Margin::symmetric(7, 8))
+                                .inner_margin(egui::Margin::symmetric(6, 6))
                                 .show(ui, |ui| {
                                     ui.set_width(mixer_track_width);
-                                    ui.set_height(mixer_height - 22.0);
+                                    ui.set_height(mixer_height - 30.0);
+                                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
                                     ui.vertical_centered(|ui| {
-                                        ui.label(
-                                            RichText::new(format!("{:02}", runtime_slot))
-                                                .monospace()
-                                                .size(8.0)
-                                                .color(theme::MUTED),
+                                        let header = ui
+                                            .add_sized(
+                                                [mixer_track_width, 22.0],
+                                                egui::Button::new(
+                                                    RichText::new(format!("{:02}", runtime_slot))
+                                                        .monospace()
+                                                        .size(9.0)
+                                                        .color(if selected {
+                                                            theme::ORANGE
+                                                        } else {
+                                                            theme::MUTED
+                                                        }),
+                                                )
+                                                .fill(theme::BG)
+                                                .stroke(Stroke::NONE)
+                                                .corner_radius(2),
+                                            )
+                                            .on_hover_text(&track.name);
+                                        ui.painter().rect_filled(
+                                            Rect::from_min_size(
+                                                header.rect.min,
+                                                Vec2::new(header.rect.width(), 3.0),
+                                            ),
+                                            1.0,
+                                            theme::color(track.color),
                                         );
+                                        if header.clicked() {
+                                            clicked_runtime_slot = Some(runtime_slot);
+                                        }
                                         let reading =
                                             self.mixer_meters.track(track.runtime_slot, track.id);
                                         if crate::mixer_meter_ui::draw_meter(
@@ -22110,12 +22173,9 @@ impl CitrusApp {
                                         ) {
                                             reset_meter = Some((track.runtime_slot, track.id));
                                         }
-                                        ui.add_space(4.0);
-                                        let pan = knob(
+                                        let pan = mixer_pan_knob(
                                             ui,
                                             &mut track.pan,
-                                            -1.0..=1.0,
-                                            34.0,
                                             theme::color(track.color),
                                         );
                                         if pan.dragged() || pan.clicked() {
@@ -22127,13 +22187,24 @@ impl CitrusApp {
                                         ui.label(
                                             RichText::new("PAN").size(7.0).color(theme::MUTED),
                                         );
-                                        ui.add_space(4.0);
                                         ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 4.0;
                                             if ui
                                                 .add_sized(
-                                                    [27.0, 20.0],
-                                                    egui::Button::new("M").selected(track.muted),
+                                                    [29.0, 22.0],
+                                                    egui::Button::new(
+                                                        RichText::new("M").size(10.0),
+                                                    )
+                                                    .corner_radius(2)
+                                                    .fill(if track.muted {
+                                                        theme::ORANGE_DIM
+                                                    } else {
+                                                        theme::WELL
+                                                    })
+                                                    .stroke(Stroke::new(1.0, theme::GRID))
+                                                    .selected(track.muted),
                                                 )
+                                                .on_hover_text("Mute this mixer track")
                                                 .clicked()
                                             {
                                                 track.muted = !track.muted;
@@ -22144,9 +22215,20 @@ impl CitrusApp {
                                             }
                                             if ui
                                                 .add_sized(
-                                                    [27.0, 20.0],
-                                                    egui::Button::new("S").selected(track.solo),
+                                                    [29.0, 22.0],
+                                                    egui::Button::new(
+                                                        RichText::new("S").size(10.0),
+                                                    )
+                                                    .corner_radius(2)
+                                                    .fill(if track.solo {
+                                                        theme::ORANGE_DIM
+                                                    } else {
+                                                        theme::WELL
+                                                    })
+                                                    .stroke(Stroke::new(1.0, theme::GRID))
+                                                    .selected(track.solo),
                                                 )
+                                                .on_hover_text("Solo this mixer track")
                                                 .clicked()
                                             {
                                                 track.solo = !track.solo;
@@ -22156,11 +22238,10 @@ impl CitrusApp {
                                                 });
                                             }
                                         });
-                                        ui.add_space(7.0);
                                         let fader = vertical_fader(
                                             ui,
                                             &mut track.volume,
-                                            (mixer_height - 340.0).max(145.0),
+                                            (mixer_height - 280.0).max(70.0),
                                         );
                                         if fader.dragged() || fader.clicked() {
                                             audio_commands.push(AudioCommand::SetTrackGain {
@@ -22169,16 +22250,13 @@ impl CitrusApp {
                                             });
                                         }
                                         ui.label(
-                                            RichText::new(format!(
-                                                "{:+.1}",
-                                                20.0 * track.volume.max(0.001).log10()
-                                            ))
-                                            .monospace()
-                                            .size(8.0)
-                                            .color(theme::MUTED),
+                                            RichText::new(mixer_gain_label(track.volume))
+                                                .monospace()
+                                                .size(9.0)
+                                                .color(theme::MUTED),
                                         );
                                         let (bar, response) = ui.allocate_exact_size(
-                                            Vec2::new(mixer_track_width, 5.0),
+                                            Vec2::new(mixer_track_width, 3.0),
                                             Sense::click(),
                                         );
                                         ui.painter().rect_filled(
@@ -22189,11 +22267,29 @@ impl CitrusApp {
                                         if response.clicked() {
                                             clicked_runtime_slot = Some(runtime_slot);
                                         }
-                                        ui.label(
-                                            RichText::new(&track.name).size(9.0).strong().color(
-                                                if selected { theme::ORANGE } else { theme::TEXT },
-                                            ),
-                                        );
+                                        if ui
+                                            .add_sized(
+                                                [mixer_track_width, 22.0],
+                                                egui::Button::new(
+                                                    RichText::new(&track.name)
+                                                        .size(10.0)
+                                                        .strong()
+                                                        .color(if selected {
+                                                            theme::ORANGE
+                                                        } else {
+                                                            theme::TEXT
+                                                        }),
+                                                )
+                                                .fill(theme::PANEL)
+                                                .stroke(Stroke::NONE)
+                                                .corner_radius(2)
+                                                .truncate(),
+                                            )
+                                            .on_hover_text(&track.name)
+                                            .clicked()
+                                        {
+                                            clicked_runtime_slot = Some(runtime_slot);
+                                        }
                                     });
                                 });
                         }
@@ -26812,20 +26908,14 @@ fn app_data_paths() -> (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) {
     )
 }
 
-fn draw_clip_wave(painter: &egui::Painter, rect: Rect, color: Color32) {
-    if rect.width() < 5.0 || rect.height() < 3.0 {
-        return;
-    }
-    let bars = (rect.width() / 4.0).floor() as usize;
-    for i in 0..bars {
-        let x = rect.left() + i as f32 * 4.0;
-        let h = 2.0 + ((i * 23) % (rect.height().max(4.0) as usize - 2).max(1)) as f32;
-        painter.line_segment(
-            [
-                Pos2::new(x, rect.center().y - h / 2.0),
-                Pos2::new(x, rect.center().y + h / 2.0),
-            ],
-            Stroke::new(1.0, color),
+fn draw_clip_wave(painter: &egui::Painter, rect: Rect, _color: Color32) {
+    if rect.width() >= 85.0 && rect.height() >= 3.0 {
+        painter.with_clip_rect(rect).text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "Waveform unavailable",
+            FontId::proportional(9.0),
+            theme::MUTED,
         );
     }
 }
@@ -26993,42 +27083,146 @@ fn draw_automation_curve(
     }
 }
 
-fn draw_pattern_ticks(
+/// Musical previews are derived from the stored pattern, never decorative events.
+fn draw_pattern_preview(
     painter: &egui::Painter,
     rect: Rect,
     color: Color32,
     source_start_beat: f32,
     beat_width: f32,
+    pattern: Option<&Pattern>,
+    clip_source_offset: f32,
 ) {
     if !source_start_beat.is_finite() || !beat_width.is_finite() || beat_width <= 0.0 {
         return;
     }
-    let step_beats = 0.25_f32;
-    let source_end_beat = source_start_beat + rect.width() / beat_width;
-    let first_step = (source_start_beat / step_beats).floor() as i64;
-    let last_step = (source_end_beat / step_beats).ceil() as i64;
-    for step in first_step..=last_step {
-        let source_beat = step as f32 * step_beats;
-        let x = rect.left() + (source_beat - source_start_beat) * beat_width;
-        if x < rect.left() + 4.0 || x >= rect.right() - 3.0 {
-            continue;
-        }
-        let phase = step.rem_euclid(16) as f32;
-        let offset = ((step.rem_euclid(7) * 5 + step.rem_euclid(11) * 3).rem_euclid(13)) as f32;
-        painter.rect_filled(
-            Rect::from_min_size(
-                Pos2::new(
-                    x,
-                    rect.bottom() - 7.0 - offset * 0.25 - usize::from(phase == 0.0) as f32 * 2.0,
-                ),
-                Vec2::new(if phase == 0.0 { 2.5 } else { 1.8 }, 3.5 + offset * 0.25),
-            ),
-            1.0,
-            color,
+    let body = Rect::from_min_max(
+        rect.min + Vec2::new(3.0, 21.0),
+        rect.max - Vec2::new(3.0, 4.0),
+    );
+    if body.width() < 2.0 || body.height() < 2.0 {
+        return;
+    }
+    let painter = painter.with_clip_rect(body);
+    let Some(pattern) = pattern else {
+        painter.text(
+            body.left_center(),
+            Align2::LEFT_CENTER,
+            "Pattern unavailable",
+            FontId::proportional(9.0),
+            theme::MUTED,
         );
+        return;
+    };
+    let step_count = pattern.length_steps.clamp(1, 16);
+    let has_steps = pattern
+        .channel_steps
+        .iter()
+        .any(|steps| steps[..step_count].iter().any(|step| *step));
+    if pattern.notes.is_empty() && !has_steps {
+        painter.text(
+            body.left_center(),
+            Align2::LEFT_CENTER,
+            "Empty pattern",
+            FontId::proportional(9.0),
+            theme::MUTED,
+        );
+        return;
+    }
+    // Playlist is a Song-mode view. Match the compiler's independent repeat
+    // periods: the step row loops at its stored length, while legacy Piano
+    // notes retain a sixteen-beat minimum and extend to whole bars.
+    let content_end = pattern
+        .notes
+        .iter()
+        .filter_map(|note| {
+            let end = f64::from(note.start) + f64::from(note.length.max(0.0));
+            (note.start.is_finite() && note.length.is_finite() && end.is_finite() && end > 0.0)
+                .then_some(end)
+        })
+        .fold(0.0_f64, f64::max);
+    let minimum_period = TimelineCompileOptions::default().legacy_piano_period_beats;
+    let note_period = if content_end > minimum_period {
+        (content_end / 4.0).ceil() * 4.0
+    } else {
+        minimum_period
+    } as f32;
+    let step_period = step_count as f32 / 4.0;
+    let end = source_start_beat + rect.width() / beat_width;
+    let first_cycle = (source_start_beat / note_period).floor() as i64;
+    let last_cycle = (end / note_period).ceil() as i64;
+    let low = pattern
+        .notes
+        .iter()
+        .map(|note| note.note)
+        .min()
+        .unwrap_or(48);
+    let high = pattern
+        .notes
+        .iter()
+        .map(|note| note.note)
+        .max()
+        .unwrap_or(72)
+        .max(low.saturating_add(12));
+    let note_color = theme::mix(color, Color32::WHITE, 0.54);
+    for cycle in first_cycle..=last_cycle {
+        let offset = cycle as f32 * note_period;
+        for note in &pattern.notes {
+            if note.muted {
+                continue;
+            }
+            let start = offset + note.start;
+            if start < clip_source_offset
+                || start + note.length <= source_start_beat
+                || start >= end
+            {
+                continue;
+            }
+            let x = rect.left() + (start - source_start_beat) * beat_width;
+            let y = body.bottom()
+                - 2.0
+                - f32::from(note.note.saturating_sub(low)) / f32::from(high - low)
+                    * (body.height() - 4.0);
+            painter.rect_filled(
+                Rect::from_min_size(
+                    Pos2::new(x, y),
+                    Vec2::new((note.length * beat_width - 1.0).max(2.0), 2.5),
+                ),
+                0.5,
+                note_color,
+            );
+        }
+    }
+    if has_steps {
+        let first_step_cycle = (source_start_beat / step_period).floor() as i64;
+        let last_step_cycle = (end / step_period).ceil() as i64;
+        let rows = pattern.channel_steps.len().max(1);
+        for cycle in first_step_cycle..=last_step_cycle {
+            let offset = cycle as f32 * step_period;
+            for (row, steps) in pattern.channel_steps.iter().enumerate() {
+                for (step, enabled) in steps.iter().take(step_count).enumerate() {
+                    if !enabled {
+                        continue;
+                    }
+                    let start = offset + step as f32 * 0.25;
+                    if start < source_start_beat || start < clip_source_offset || start >= end {
+                        continue;
+                    }
+                    let x = rect.left() + (start - source_start_beat) * beat_width;
+                    let y = body.top() + (row as f32 + 0.5) * body.height() / rows as f32;
+                    painter.rect_filled(
+                        Rect::from_min_size(
+                            Pos2::new(x, y),
+                            Vec2::new((beat_width * 0.12).clamp(2.0, 5.0), 2.5),
+                        ),
+                        0.5,
+                        note_color,
+                    );
+                }
+            }
+        }
     }
 }
-
 fn knob(
     ui: &mut egui::Ui,
     value: &mut f32,
@@ -27055,28 +27249,86 @@ fn knob(
     response
 }
 
+fn mixer_pan_knob(ui: &mut egui::Ui, value: &mut f32, accent: Color32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::click_and_drag());
+    if response.dragged() {
+        let delta = ui.input(|input| input.pointer.delta());
+        *value = (*value - delta.y * 2.0 / 180.0).clamp(-1.0, 1.0);
+    }
+    response.widget_info(|| egui::WidgetInfo::slider(ui.is_enabled(), f64::from(*value), "Pan"));
+    let painter = ui.painter();
+    let center = rect.center();
+    let radius = 12.0;
+    // A recessed collar and a raised cap keep the control legible on the
+    // blue-gray strip. Center pan points straight up, like a console knob.
+    painter.circle_filled(center + Vec2::new(0.0, 1.0), 15.0, theme::BG);
+    painter.circle_stroke(center, 14.0, Stroke::new(1.0, theme::GRID));
+    painter.circle_filled(center, radius, theme::RAISED);
+    painter.circle_stroke(
+        center - Vec2::new(0.0, 0.5),
+        radius - 0.5,
+        Stroke::new(1.0, Color32::from_rgb(108, 121, 131)),
+    );
+    painter.circle_filled(center + Vec2::new(0.0, 1.0), radius - 3.0, theme::PANEL_ALT);
+    let quarter_turn = std::f32::consts::FRAC_PI_4;
+    let angle = egui::lerp((-5.0 * quarter_turn)..=quarter_turn, (*value + 1.0) * 0.5);
+    painter.line_segment(
+        [
+            center + Vec2::angled(angle) * 4.0,
+            center + Vec2::angled(angle) * (radius - 2.0),
+        ],
+        Stroke::new(2.0, accent),
+    );
+    painter.line_segment(
+        [
+            Pos2::new(center.x, rect.top()),
+            Pos2::new(center.x, rect.top() + 2.0),
+        ],
+        Stroke::new(1.0, theme::MUTED),
+    );
+    if response.hovered() || response.dragged() {
+        painter.circle_stroke(center, 14.0, Stroke::new(1.0, theme::MUTED));
+    }
+    response.on_hover_text(format!("Pan {:+.0}% · drag vertically", *value * 100.0))
+}
+
+fn mixer_gain_label(value: f32) -> String {
+    if value > 0.0 {
+        format!("{:+.1}", 20.0 * value.log10())
+    } else {
+        "−inf".into()
+    }
+}
+
 fn vertical_fader(ui: &mut egui::Ui, value: &mut f32, height: f32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(48.0, height), Sense::click_and_drag());
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(48.0, height.max(24.0)), Sense::click_and_drag());
+    // Reserve the full 16 px thumb and its 2 px shadow at both endpoints.
+    // Paint and pointer inversion share exactly the same center travel range.
+    let travel = (rect.bottom() - 10.0)..=(rect.top() + 8.0);
     if (response.dragged() || response.clicked())
         && let Some(pointer) = response.interact_pointer_pos()
     {
-        *value = ((rect.bottom() - pointer.y) / rect.height()).clamp(0.0, 1.0);
+        *value = egui::remap_clamp(pointer.y, travel.clone(), 0.0..=1.0);
     }
+    response.widget_info(|| egui::WidgetInfo::slider(ui.is_enabled(), f64::from(*value), "Gain"));
     let painter = ui.painter();
-    let track = Rect::from_center_size(rect.center(), Vec2::new(5.0, rect.height() - 8.0));
-    painter.rect_filled(track, 2.0, Color32::from_rgb(16, 19, 20));
+    let well = Rect::from_center_size(rect.center(), Vec2::new(15.0, rect.height()));
+    painter.rect_filled(well, 5.0, theme::PANEL);
+    let track = Rect::from_min_max(
+        Pos2::new(rect.center().x - 2.5, *travel.end()),
+        Pos2::new(rect.center().x + 2.5, *travel.start()),
+    );
+    painter.rect_filled(track, 2.0, Color32::from_rgb(27, 33, 39));
     painter.rect_stroke(
         track,
         2.0,
-        Stroke::new(1.0, theme::GRID),
-        StrokeKind::Inside,
+        Stroke::new(1.0, theme::RAISED),
+        StrokeKind::Outside,
     );
     for tick in 0..=10 {
-        let y = egui::lerp(
-            (rect.bottom() - 5.0)..=(rect.top() + 5.0),
-            tick as f32 / 10.0,
-        );
-        let width = if tick == 8 {
+        let y = egui::lerp(travel.clone(), tick as f32 / 10.0);
+        let width = if tick == 10 {
             11.0
         } else if tick % 5 == 0 {
             8.0
@@ -27090,7 +27342,7 @@ fn vertical_fader(ui: &mut egui::Ui, value: &mut f32, height: f32) -> Response {
             ],
             Stroke::new(
                 1.0,
-                if tick == 8 {
+                if tick == 10 {
                     theme::ORANGE_DIM
                 } else {
                     theme::GRID
@@ -27104,7 +27356,7 @@ fn vertical_fader(ui: &mut egui::Ui, value: &mut f32, height: f32) -> Response {
             ],
             Stroke::new(
                 1.0,
-                if tick == 8 {
+                if tick == 10 {
                     theme::ORANGE_DIM
                 } else {
                     theme::GRID
@@ -27112,28 +27364,130 @@ fn vertical_fader(ui: &mut egui::Ui, value: &mut f32, height: f32) -> Response {
             ),
         );
     }
-    let y = egui::lerp((rect.bottom() - 6.0)..=(rect.top() + 6.0), *value);
-    let handle = Rect::from_center_size(Pos2::new(rect.center().x, y), Vec2::new(31.0, 12.0));
-    painter.rect_filled(handle, 3.0, Color32::from_rgb(91, 98, 99));
+    let y = egui::lerp(travel, *value);
+    let handle = Rect::from_center_size(Pos2::new(rect.center().x, y), Vec2::new(28.0, 16.0));
+    painter.rect_filled(handle.translate(Vec2::new(0.0, 2.0)), 3.0, theme::BG);
+    painter.rect_filled(handle, 3.0, Color32::from_rgb(123, 137, 147));
     painter.rect_stroke(
         handle,
         3.0,
-        Stroke::new(1.0, Color32::from_rgb(140, 148, 148)),
+        Stroke::new(
+            1.0,
+            if response.hovered() || response.dragged() {
+                theme::TEXT
+            } else {
+                Color32::from_rgb(162, 174, 183)
+            },
+        ),
         StrokeKind::Inside,
+    );
+    painter.rect_filled(
+        Rect::from_min_max(
+            handle.min + Vec2::new(2.0, 2.0),
+            Pos2::new(handle.right() - 2.0, handle.center().y - 1.0),
+        ),
+        1.0,
+        Color32::from_rgb(155, 167, 176),
     );
     painter.line_segment(
         [
             Pos2::new(handle.left() + 5.0, handle.center().y),
             Pos2::new(handle.right() - 5.0, handle.center().y),
         ],
-        Stroke::new(1.0, Color32::WHITE),
+        Stroke::new(1.5, Color32::from_rgb(45, 56, 65)),
     );
-    response
+    response.on_hover_text(format!(
+        "Gain {} dB · drag vertically",
+        mixer_gain_label(*value)
+    ))
 }
 
 #[cfg(test)]
 mod playback_tests {
     use super::*;
+
+    #[test]
+    fn playlist_preview_paints_only_stored_events_in_the_visible_source_range() {
+        let color = theme::BLUE;
+        let event_color = theme::mix(color, Color32::WHITE, 0.54);
+        let rectangles = |pattern: Option<&Pattern>, start: f32, width: f32| {
+            let ctx = egui::Context::default();
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                draw_pattern_preview(
+                    ui.painter(),
+                    Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 60.0)),
+                    color,
+                    start,
+                    20.0,
+                    pattern,
+                    start,
+                );
+            });
+            output.shapes.iter().filter(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == event_color)).count()
+        };
+        let mut pattern = Pattern {
+            id: 1,
+            name: "QA preview".into(),
+            length_steps: 16,
+            channel_steps: vec![[false; 16]],
+            notes: Vec::new(),
+        };
+        assert_eq!(rectangles(None, 0.0, 70.0), 0);
+        assert_eq!(rectangles(Some(&pattern), 0.0, 70.0), 0);
+        pattern.notes.push(PianoNote {
+            id: 1,
+            channel_id: None,
+            group_id: None,
+            note: 60,
+            start: 1.0,
+            length: 0.5,
+            velocity: 0.8,
+            selected: false,
+            muted: false,
+        });
+        assert_eq!(rectangles(Some(&pattern), 0.0, 70.0), 1);
+        assert_eq!(rectangles(Some(&pattern), 2.0, 20.0), 0);
+        assert_eq!(
+            rectangles(Some(&pattern), 4.0, 70.0),
+            0,
+            "short Piano notes do not repeat every step loop"
+        );
+        assert_eq!(
+            rectangles(Some(&pattern), 16.0, 70.0),
+            1,
+            "Song Piano notes retain the sixteen-beat minimum"
+        );
+        pattern.channel_steps[0][4] = true;
+        assert_eq!(
+            rectangles(Some(&pattern), 0.0, 310.0),
+            5,
+            "four step cycles and one Piano event over sixteen beats"
+        );
+        assert_eq!(
+            rectangles(Some(&pattern), 4.0, 70.0),
+            1,
+            "step events repeat independently of Piano events"
+        );
+        assert_eq!(
+            rectangles(Some(&pattern), 16.0, 70.0),
+            2,
+            "source offset applies to both independent periods"
+        );
+        pattern.channel_steps[0][4] = false;
+        pattern.notes[0].muted = true;
+        assert_eq!(rectangles(Some(&pattern), 0.0, 70.0), 0);
+        pattern.channel_steps[0][4] = true;
+        assert_eq!(rectangles(Some(&pattern), 0.0, 70.0), 1);
+        assert_eq!(rectangles(Some(&pattern), 2.0, 20.0), 0);
+    }
+
+    #[test]
+    fn mixer_gain_labels_preserve_unity_silence_and_quiet_values() {
+        assert_eq!(mixer_gain_label(1.0), "+0.0");
+        assert_eq!(mixer_gain_label(0.0), "−inf");
+        assert_eq!(mixer_gain_label(0.5), "-6.0");
+        assert_eq!(mixer_gain_label(0.0001), "-80.0");
+    }
 
     #[test]
     fn audio_restart_gate_is_total_and_deterministic() {

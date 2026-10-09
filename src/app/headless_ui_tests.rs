@@ -306,6 +306,52 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn full_app_decoded_waveform_preview_is_real_audio_at_both_window_sizes() {
+    let fixture = Fixture::new();
+    // A deterministic four-second PCM fixture, clearly named as QA audio.
+    // The normal worker must decode it and derive every displayed peak.
+    let frames = 48_000_u32 * 4;
+    let data_bytes = frames * 2;
+    let mut wav = Vec::with_capacity(data_bytes as usize + 44);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16_u32.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&48_000_u32.to_le_bytes());
+    wav.extend_from_slice(&96_000_u32.to_le_bytes());
+    wav.extend_from_slice(&2_u16.to_le_bytes());
+    wav.extend_from_slice(&16_u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_bytes.to_le_bytes());
+    for frame in 0..frames {
+        let seconds = frame as f32 / 48_000.0;
+        let pulse = (1.0 - (seconds * 2.0).fract()).powi(3);
+        let sample = ((seconds * 220.0 * std::f32::consts::TAU).sin() * pulse * 24_000.0) as i16;
+        wav.extend_from_slice(&sample.to_le_bytes());
+    }
+    let path = fixture.0.join("QA - decoded pulse.wav");
+    std::fs::write(&path, &wav).unwrap();
+    let mut ui = UiHarness::new();
+    ui.app.sample_browser.navigate(fixture.0.clone());
+    ui.wait_until(|app| !app.sample_browser.busy());
+    ui.click("QA - decoded pulse.wav");
+    ui.click("Import to Playlist");
+    ui.wait_until(|app| app.audio_import_receiver.is_none());
+    assert!(ui.app.audio_import_error.is_none());
+    let asset = ui.app.project.audio_assets.last().unwrap();
+    assert_eq!(asset.frames, u64::from(frames));
+    assert!(asset.waveform_peaks.len() > 100);
+    assert!(asset.waveform_peaks.iter().any(|peak| *peak > 0.5));
+    ui.capture("decoded-waveform");
+    ui.size = egui::vec2(1080.0, 680.0);
+    ui.settle();
+    ui.capture("decoded-waveform-minimum-window");
+    assert_eq!(std::fs::read(path).unwrap(), wav);
+}
+
+#[test]
 fn full_app_browser_import_failure_recovery_undo_redo_and_dirty_cancel() {
     let fixture = Fixture::new();
     let mut ui = UiHarness::new();
@@ -484,11 +530,11 @@ fn full_app_responsive_toolbars_keep_navigation_plugins_group_and_snap_separate(
             .expect("actual Playlist snap control");
         let snap_rect = node_rect(snap);
         assert!(ui.ctx.content_rect().contains_rect(snap_rect));
-        assert_disjoint(node_rect(ui.button("GROUP ▾")), snap_rect);
+        assert_disjoint(node_rect(ui.button("GROUP v")), snap_rect);
         assert_disjoint(node_rect(ui.button("XFADE")), snap_rect);
         if width == 1440.0 {
             assert!(
-                (node_rect(ui.button("GROUP ▾")).center().y - snap_rect.center().y).abs() < 2.0,
+                (node_rect(ui.button("GROUP v")).center().y - snap_rect.center().y).abs() < 2.0,
                 "wide workspace should keep the tools and snap on one row"
             );
         }
@@ -506,7 +552,7 @@ fn full_app_responsive_toolbars_keep_navigation_plugins_group_and_snap_separate(
         assert!(!ui.app.show_plugins);
         ui.click("PLAYLIST");
         assert_eq!(ui.app.view, StudioView::Playlist);
-        ui.click("GROUP ▾");
+        ui.click("GROUP v");
         assert!(egui::Popup::is_any_open(&ui.ctx));
         ui.key(egui::Key::Escape, egui::Modifiers::NONE);
         assert!(!egui::Popup::is_any_open(&ui.ctx));
@@ -536,4 +582,177 @@ fn full_app_about_reports_platform_and_offline_state_without_an_assumed_backend(
     #[cfg(target_os = "linux")]
     assert!(!text.iter().any(|label| label.contains("WASAPI")));
     ui.capture("settings-about-platform");
+}
+
+struct MixerControlFrame {
+    gain: Rect,
+    pan: Rect,
+    thumb: Rect,
+}
+
+fn run_mixer_controls(
+    ctx: &egui::Context,
+    gain: &mut f32,
+    pan: &mut f32,
+    height: f32,
+    events: Vec<egui::Event>,
+    time: &mut f64,
+) -> MixerControlFrame {
+    *time += 0.1;
+    let mut gain_rect = Rect::NOTHING;
+    let mut pan_rect = Rect::NOTHING;
+    let output = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(320.0, 260.0))),
+            time: Some(*time),
+            events,
+            ..Default::default()
+        },
+        |ui| {
+            ui.add_space(24.0);
+            ui.horizontal_top(|ui| {
+                gain_rect = vertical_fader(ui, gain, height).rect;
+                pan_rect = mixer_pan_knob(ui, pan, theme::ORANGE).rect;
+            });
+        },
+    );
+    let thumb = output
+        .shapes
+        .iter()
+        .find_map(|shape| match &shape.shape {
+            egui::Shape::Rect(rect) if rect.fill == Color32::from_rgb(123, 137, 147) => {
+                Some(rect.rect)
+            }
+            _ => None,
+        })
+        .expect("the production fader must paint its actual thumb");
+    assert!(gain_rect.contains_rect(thumb));
+    assert!(gain_rect.contains_rect(thumb.translate(Vec2::new(0.0, 2.0))));
+    MixerControlFrame {
+        gain: gain_rect,
+        pan: pan_rect,
+        thumb,
+    }
+}
+
+fn mixer_pointer_button(pos: Pos2, pressed: bool) -> Vec<egui::Event> {
+    vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]
+}
+
+#[test]
+fn mixer_fader_pointer_uses_painted_thumb_range_at_endpoints_and_midpoint() {
+    for height in [70.0, 180.0] {
+        for initial_gain in [0.0, 0.5, 1.0] {
+            let ctx = egui::Context::default();
+            let mut gain = initial_gain;
+            let mut pan = 0.0;
+            let mut time = 0.0;
+            let mut frame =
+                run_mixer_controls(&ctx, &mut gain, &mut pan, height, Vec::new(), &mut time);
+            for _ in 0..2 {
+                frame =
+                    run_mixer_controls(&ctx, &mut gain, &mut pan, height, Vec::new(), &mut time);
+            }
+            let center = frame.thumb.center();
+            for pressed in [true, false] {
+                run_mixer_controls(
+                    &ctx,
+                    &mut gain,
+                    &mut pan,
+                    height,
+                    mixer_pointer_button(center, pressed),
+                    &mut time,
+                );
+            }
+            assert!(
+                (gain - initial_gain).abs() < 1e-6,
+                "clicking the painted thumb changed gain {initial_gain} to {gain} at height {height}"
+            );
+
+            let target = if initial_gain < 0.75 {
+                Pos2::new(center.x, frame.gain.top() + 8.0)
+            } else {
+                Pos2::new(center.x, frame.gain.bottom() - 10.0)
+            };
+            run_mixer_controls(
+                &ctx,
+                &mut gain,
+                &mut pan,
+                height,
+                mixer_pointer_button(center, true),
+                &mut time,
+            );
+            for _ in 0..2 {
+                run_mixer_controls(
+                    &ctx,
+                    &mut gain,
+                    &mut pan,
+                    height,
+                    vec![egui::Event::PointerMoved(target)],
+                    &mut time,
+                );
+            }
+            run_mixer_controls(
+                &ctx,
+                &mut gain,
+                &mut pan,
+                height,
+                mixer_pointer_button(target, false),
+                &mut time,
+            );
+            assert_eq!(gain, if initial_gain < 0.75 { 1.0 } else { 0.0 });
+        }
+    }
+}
+
+#[test]
+fn mixer_pan_knob_pointer_drag_changes_pan_without_changing_gain() {
+    let ctx = egui::Context::default();
+    let mut gain = 0.5;
+    let mut pan = 0.0;
+    let mut time = 0.0;
+    let mut frame = run_mixer_controls(&ctx, &mut gain, &mut pan, 100.0, Vec::new(), &mut time);
+    for _ in 0..2 {
+        frame = run_mixer_controls(&ctx, &mut gain, &mut pan, 100.0, Vec::new(), &mut time);
+    }
+    let origin = frame.pan.center();
+    run_mixer_controls(
+        &ctx,
+        &mut gain,
+        &mut pan,
+        100.0,
+        mixer_pointer_button(origin, true),
+        &mut time,
+    );
+    for delta in [10.0, 20.0, 30.0] {
+        run_mixer_controls(
+            &ctx,
+            &mut gain,
+            &mut pan,
+            100.0,
+            vec![egui::Event::PointerMoved(origin - Vec2::new(0.0, delta))],
+            &mut time,
+        );
+    }
+    run_mixer_controls(
+        &ctx,
+        &mut gain,
+        &mut pan,
+        100.0,
+        mixer_pointer_button(origin - Vec2::new(0.0, 30.0), false),
+        &mut time,
+    );
+    assert!(
+        pan > 0.0,
+        "vertical dragging must update the real pan control"
+    );
+    assert_eq!(gain, 0.5);
 }

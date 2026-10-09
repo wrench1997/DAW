@@ -141,3 +141,14 @@ All earlier desktop/dialog/device acceptance boundaries still apply.
 ## Integrated checkpoint, 2026-10-09 04:58 UTC
 
 Reviewed commits `cb49961` and `493cc89` integrated cleanly as `1663f8f` and `dda0ccadbb5e7351889f9d085727c9e344ff6119`. The complete combined Linux no-default/all-target suite was rerun: **910 passed, 0 failed, 0 ignored**, default test stack; formatting, strict Clippy and app build also pass. No source conflict or extra executable change was introduced. The 17-image Vulkan capture evidence above belongs to the reviewed feature source; integration preserves it but does not assert a new native desktop capture. Fresh Windows execution for the integrated candidate remains pending.
+
+## FL-inspired visual refresh
+
+The native workstation design and its additional paint/pointer regressions are
+summarized in [FL_INSPIRED_NATIVE_THEME.md](FL_INSPIRED_NATIVE_THEME.md). The capture
+suite now also includes `decoded-waveform` and `decoded-waveform-minimum-window`:
+these import and decode a deterministic four-second PCM fixture through the normal
+worker, rather than drawing an invented wave. The small two-frame fixture remains
+in the import-recovery tests for its original purpose. Fader/pan pointer tests call
+the production controls and compare actual painted geometry with interaction state.
+All existing native-desktop and hardware acceptance boundaries still apply.

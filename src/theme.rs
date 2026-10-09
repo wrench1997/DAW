@@ -4,15 +4,19 @@ use egui::{
     Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke, Style, TextStyle, Visuals,
 };
 
-pub const BG: Color32 = Color32::from_rgb(15, 18, 20);
-pub const PANEL: Color32 = Color32::from_rgb(24, 28, 31);
-pub const PANEL_ALT: Color32 = Color32::from_rgb(29, 34, 37);
-pub const RAISED: Color32 = Color32::from_rgb(38, 44, 47);
-pub const GRID: Color32 = Color32::from_rgb(46, 52, 55);
-pub const TEXT: Color32 = Color32::from_rgb(218, 224, 224);
-pub const MUTED: Color32 = Color32::from_rgb(126, 137, 139);
-pub const ORANGE: Color32 = Color32::from_rgb(255, 139, 76);
-pub const ORANGE_DIM: Color32 = Color32::from_rgb(125, 69, 42);
+// A cool, layered workstation palette. Color belongs to musical content;
+// orange is reserved for selection, transport, and the Citrus identity.
+pub const BG: Color32 = Color32::from_rgb(37, 43, 49);
+pub const PANEL: Color32 = Color32::from_rgb(53, 62, 71);
+pub const PANEL_ALT: Color32 = Color32::from_rgb(62, 72, 82);
+pub const RAISED: Color32 = Color32::from_rgb(76, 88, 99);
+pub const GRID: Color32 = Color32::from_rgb(80, 91, 101);
+pub const TEXT: Color32 = Color32::from_rgb(227, 232, 236);
+pub const MUTED: Color32 = Color32::from_rgb(181, 192, 201);
+pub const ORANGE: Color32 = Color32::from_rgb(240, 164, 82);
+pub const ORANGE_DIM: Color32 = Color32::from_rgb(107, 82, 57);
+pub const WELL: Color32 = Color32::from_rgb(31, 38, 44);
+pub const HIGHLIGHT: Color32 = Color32::from_rgb(93, 106, 117);
 pub const GREEN: Color32 = Color32::from_rgb(96, 211, 177);
 pub const RED: Color32 = Color32::from_rgb(244, 92, 106);
 pub const BLUE: Color32 = Color32::from_rgb(103, 161, 255);
@@ -38,6 +42,40 @@ pub fn color(rgb: [u8; 3]) -> Color32 {
     Color32::from_rgb(rgb[0], rgb[1], rgb[2])
 }
 
+pub fn mix(background: Color32, foreground: Color32, amount: f32) -> Color32 {
+    let channel = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * amount) as u8;
+    Color32::from_rgb(
+        channel(background.r(), foreground.r()),
+        channel(background.g(), foreground.g()),
+        channel(background.b(), foreground.b()),
+    )
+}
+
+/// Keep small white clip titles readable for arbitrary user-assigned colors.
+/// This affects paint only; the project retains its exact chosen track color.
+pub fn clip_header(color: Color32, muted: bool) -> Color32 {
+    let mut amount = if muted { 0.2 } else { 0.48 };
+    loop {
+        let fill = mix(WELL, color, amount);
+        if relative_luminance(fill) <= 0.18 || amount <= 0.2 {
+            return fill;
+        }
+        amount -= 0.02;
+    }
+}
+
+fn relative_luminance(color: Color32) -> f32 {
+    let linear = |channel: u8| {
+        let value = f32::from(channel) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(color.r()) + 0.7152 * linear(color.g()) + 0.0722 * linear(color.b())
+}
+
 pub fn install(ctx: &egui::Context) {
     install_system_fonts(ctx);
     ctx.set_theme(egui::Theme::Dark);
@@ -48,16 +86,16 @@ pub fn install(ctx: &egui::Context) {
     visuals.extreme_bg_color = BG;
     visuals.faint_bg_color = PANEL_ALT;
     visuals.override_text_color = Some(TEXT);
-    visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(53, 59, 61));
+    visuals.window_stroke = Stroke::new(1.0, HIGHLIGHT);
     visuals.widgets.noninteractive.bg_fill = PANEL_ALT;
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, GRID);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, PANEL_ALT);
     visuals.widgets.inactive.bg_fill = RAISED;
     visuals.widgets.inactive.weak_bg_fill = PANEL_ALT;
-    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(50, 57, 60));
-    visuals.widgets.hovered.bg_fill = Color32::from_rgb(51, 58, 61);
-    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, Color32::from_rgb(75, 83, 85));
+    visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+    visuals.widgets.hovered.bg_fill = HIGHLIGHT;
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, HIGHLIGHT);
     visuals.widgets.active.bg_fill = ORANGE_DIM;
-    visuals.widgets.active.bg_stroke = Stroke::new(1.0, ORANGE);
+    visuals.widgets.active.bg_stroke = Stroke::NONE;
     visuals.selection.bg_fill = ORANGE_DIM;
     visuals.selection.stroke = Stroke::new(1.0, ORANGE);
 
@@ -65,16 +103,16 @@ pub fn install(ctx: &egui::Context) {
         visuals,
         ..Default::default()
     };
-    style.spacing.item_spacing = egui::vec2(7.0, 6.0);
-    style.spacing.button_padding = egui::vec2(9.0, 6.0);
+    style.spacing.item_spacing = egui::vec2(6.0, 5.0);
+    style.spacing.button_padding = egui::vec2(8.0, 4.0);
     style.spacing.slider_width = 104.0;
-    style.spacing.interact_size.y = 28.0;
+    style.spacing.interact_size.y = 25.0;
     style.text_styles = [
         (
             TextStyle::Heading,
             FontId::new(21.0, FontFamily::Proportional),
         ),
-        (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(12.5, FontFamily::Proportional)),
         (
             TextStyle::Monospace,
             FontId::new(12.5, FontFamily::Monospace),
@@ -117,4 +155,23 @@ fn install_system_fonts(ctx: &egui::Context) {
         }
     }
     ctx.set_fonts(fonts);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clip_title_contrast_survives_bright_custom_colors() {
+        for r in [0, 64, 128, 192, 255] {
+            for g in [0, 64, 128, 192, 255] {
+                for b in [0, 64, 128, 192, 255] {
+                    for muted in [false, true] {
+                        let fill = clip_header(Color32::from_rgb(r, g, b), muted);
+                        assert!(1.05 / (relative_luminance(fill) + 0.05) >= 4.5);
+                    }
+                }
+            }
+        }
+    }
 }
