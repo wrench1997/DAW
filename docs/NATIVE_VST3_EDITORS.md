@@ -211,3 +211,16 @@ replacement could overwrite completed WAV import. The shared project snapshot-tr
 now protects both import completion and native Open. The actual-app regression covers successful
 and failed replacement plus independent import Undo; MIDI teardown is injected at its completion
 seam. This finding was not covered by the earlier feature-branch review.
+
+## First Windows runtime evidence (2026-10-09)
+
+[Quality run 37888700443](https://github.com/wrench1997/DAW/actions/runs/37888700443) at
+`b76ba3228053c5c5af63e5621df999553543a69d` passed 933 application + 13 helper + 5 protocol
+Rust tests, 14 helper and 47 editor Python tests, strict source gates, fixture Clippy/build/receipts
+and the ordinary helper smoke. Actual native execution passed the strict visible/input-desktop
+prerequisites, Rust/Win32/CRT stdout isolation, helper-owned attach, 560×400 resize and content-scale
+request. It then **failed** at the native button's `PrintWindow(..., PW_CLIENTONLY)` capture.
+This is exit 1, not an unsupported-desktop exit 77. The later button event, native state round-trip
+and remaining lifecycle cases were not reached; no full native GUI or state acceptance is claimed.
+A diagnostic rerun retains the failing paint assertion rather than substituting synthetic pixels or
+turning an API error into a pass. Real vendor, physical input/audio, and DPI-transition testing remain open.

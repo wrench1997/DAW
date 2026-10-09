@@ -7,6 +7,7 @@ from pathlib import Path
 import stat
 import struct
 import tempfile
+import tomllib
 import unittest
 import warnings
 import zipfile
@@ -565,13 +566,17 @@ class VendorTests(PackageTests):
         path = self.repo / "Cargo.toml"
         original = path.read_text()
         invalid = [original.split("[patch.crates-io]")[0]]
-        invalid += [original.replace(pkg.VENDOR_PATH, replacement) for replacement in (
-            str(self.vendor), "../outside", "vendor/../vendor/vst3-host-0.9.0", "other/vendor",
-            "C:/private/vendor", "vendor\\\\vst3-host-0.9.0")]
+        # Quote the entire TOML string so Windows backslashes reach the policy
+        # validator as path data instead of becoming invalid TOML escape sequences.
+        invalid += [original.replace(json.dumps(pkg.VENDOR_PATH), json.dumps(replacement, ensure_ascii=False))
+                    for replacement in (
+                        str(self.vendor), "../outside", "vendor/../vendor/vst3-host-0.9.0", "other/vendor",
+                        "C:/private/vendor", r"C:\Users\runner\vendor", r"vendor\vst3-host-0.9.0")]
         invalid += [original + '\nother = { path = "vendor/other" }\n',
                     original.replace('{ path =', '{ package = "other", path =')]
         for index, value in enumerate(invalid):
             with self.subTest(index=index):
+                tomllib.loads(value)  # Every case must exercise policy, not parser failure.
                 path.write_text(value)
                 with self.assertRaises(pkg.PackageError):
                     self.create()
