@@ -698,7 +698,10 @@ def assert_interaction(session, desktop, hwnd, stages):
     # Draining the legacy display queue here would deliberately invalidate capture.
     notifications = response_payload(session.request("TakeHostNotifications"), "HostNotifications").get("notifications")
     require(notifications == [{"DirtyChanged": True}], f"Missing native DirtyChanged(true): {notifications!r}")
-    require(session.native_revision() > revision, "Native dirty revision did not survive feedback draining")
+    # This trusted button emits exactly one performEdit and one setDirty(true),
+    # each of which advances the host's durable native revision once.
+    require(session.native_revision() == revision + 2,
+            "Native dirty revision did not advance exactly once per value/dirty callback")
     verified_fixture_button(session, desktop, hwnd, expected=handles)
     after_ok, after = stages.attempt("native paint after edit", lambda: desktop.painted_pixels(button))
     if before_ok and after_ok:
@@ -715,8 +718,20 @@ def assert_state_roundtrip(session, desktop, fixture, handles):
     session.editor("Query", supported=True, has_editor=True, open=False)
     desktop.gone(handles, session.deadline)
     require(session.parameter(1000) == 0.0, "SaveState did not detach the native view")
-    changes = response_payload(session.request("TakeParameterChanges"), "ParameterChanges").get("changes")
-    require(changes == [[0, bits(0.25)]], f"Native parameter-change feedback mismatch: {changes!r}")
+    payload = response_payload(session.request("TakeParameterChanges"), "ParameterChanges")
+    changes = payload.get("changes")
+    # The trusted fixture's process_synth_block deliberately echoes its applied
+    # input through outputParameterChanges, even for the zero-sample flush.
+    # PluginImpl.get_parameter_changes drains that DSP output FIRST, then the
+    # separately stashed controller performEdit. Require exactly both records;
+    # never deduplicate/sort, accept arbitrary repeats, or hide a divergent echo.
+    # This count is specific to this fixture/host, not a universal VST3 contract.
+    expected = [0, bits(0.25)]
+    require(set(payload) == {"changes"} and type(changes) is list and len(changes) == 2
+            and all(type(change) is list and len(change) == 2
+                    and all(type(value) is int for value in change) and change == expected
+                    for change in changes),
+            f"Native parameter-change feedback mismatch: {changes!r}")
     require(session.native_revision() == revision, "Native dirty revision changed during state capture")
     response_payload(session.request("UnloadPlugin"), "Success")
     session.load(fixture)

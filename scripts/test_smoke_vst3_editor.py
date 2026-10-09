@@ -473,6 +473,31 @@ class NativeStageAggregationTests(unittest.TestCase):
             smoke.assert_interaction(session, desktop, 10, stages)
         desktop.post.assert_not_called()
 
+    def test_missing_or_duplicate_native_revision_advances_are_rejected(self):
+        for after in (0, 1, 3, 4):
+            with self.subTest(after=after):
+                session, desktop = self.interaction_setup()
+                session.native_revision.side_effect = [0, after]
+                with self.assertRaisesRegex(smoke.SmokeError, "exactly once per value/dirty callback"):
+                    smoke.assert_interaction(session, desktop, 10, smoke.AcceptanceStages(lambda message: None))
+
+    def test_echo_allowance_does_not_relax_gesture_order_or_bounds(self):
+        gesture = [
+            {"id": 0, "kind": "BeginGesture", "value": None},
+            {"id": 0, "kind": "ValueChange", "value": 0.25},
+            {"id": 0, "kind": "EndGesture", "value": None},
+        ]
+        for edits in (gesture[1:], gesture[:-1], list(reversed(gesture)), gesture + [gesture[1]]):
+            with self.subTest(edits=edits):
+                session, desktop = self.interaction_setup()
+                session.request.side_effect = [
+                    {"ParameterEdits": {"edits": []}},
+                    {"HostNotifications": {"notifications": []}},
+                    {"ParameterEdits": {"edits": edits}},
+                ]
+                with self.assertRaisesRegex(smoke.SmokeError, "Native edit callback sequence mismatch"):
+                    smoke.assert_interaction(session, desktop, 10, smoke.AcceptanceStages(lambda message: None))
+
     def test_wrong_button_parent_or_geometry_is_never_clicked(self):
         for wrong in ("parent", "geometry", "control_id"):
             with self.subTest(wrong=wrong):
@@ -662,7 +687,7 @@ class StateRoundTripTests(unittest.TestCase):
         self.session.save_state.side_effect = ["c3RhdGU=", "c3RhdGU="]
         self.session.parameter.side_effect = [0.0, 1.0, 0.25, 0.5]
         self.session.request.side_effect = [
-            {"ParameterChanges": {"changes": [[0, smoke.bits(0.25)]]}},
+            {"ParameterChanges": {"changes": [[0, smoke.bits(0.25)], [0, smoke.bits(0.25)]]}},
             {"Success": {"message": "unloaded"}},
             {"Success": {"message": "restored"}},
         ]
@@ -700,6 +725,30 @@ class StateRoundTripTests(unittest.TestCase):
         self.session.request.side_effect = [{"ParameterChanges": {"changes": []}}]
         with self.assertRaisesRegex(smoke.SmokeError, "feedback mismatch"):
             self.run_roundtrip()
+
+    def test_exact_processor_echo_and_controller_feedback_complete_state_roundtrip(self):
+        self.run_roundtrip()
+        self.assertEqual(self.session.save_state.call_count, 2)
+        self.session.request.assert_any_call({"LoadState": {"data": "c3RhdGU=", "context": "Project"}})
+
+    def test_missing_extra_malformed_or_divergent_feedback_is_not_a_pass(self):
+        expected = [0, smoke.bits(0.25)]
+        wrong_value = [0, smoke.bits(0.5)]
+        wrong_id = [1, smoke.bits(0.25)]
+        for changes in (
+                [], [expected], [expected, expected, expected],
+                [expected, wrong_value], [wrong_value, expected],
+                [expected, wrong_id], [wrong_id, expected],
+                [[False, smoke.bits(0.25)], expected],
+                [[0.0, smoke.bits(0.25)], expected],
+                [[0, str(smoke.bits(0.25))], expected],
+                [[0, 0.25], expected], [[], expected], [expected, None], None, {}):
+            with self.subTest(changes=changes):
+                self.setUp()
+                self.session.request.side_effect = [{"ParameterChanges": {"changes": changes}}]
+                with self.assertRaisesRegex(smoke.SmokeError, "feedback mismatch"):
+                    self.run_roundtrip()
+                self.session.load.assert_not_called()
 
     def test_changed_native_revision_is_not_a_pass(self):
         self.session.native_revision.side_effect = [2, 3]
