@@ -147,3 +147,23 @@ execution, OS focus/input, physical MIDI/audio or plug-in acceptance.
 This is Linux source, production-input and display-independent rendering evidence.
 It is not Windows execution, a native desktop or physical input/audio/MIDI test,
 a performance benchmark, or proof of native third-party plug-in acceptance.
+
+
+## Integrated-source verification
+
+Exact integrated runtime `37b0d0f65e0d7fe52139289b410cfea2eb8a3087`
+was rerun independently after integration. Runtime, Cargo, vendor and packaging
+inputs are identical to the reviewed feature; additive documentation conflicts
+preserve both expression and range history. Fresh Linux gates pass **1,092 core
+application tests** and **1,094 app +14 helper +5 protocol all-feature tests**,
+with zero failed or ignored tests, both strict Clippy profiles, fmt, all-bin build,
+ordinary helper smoke, Windows MSVC source cross-check and **167 Python tests**.
+
+The complete actual-app harness passes **105 entries** (104 input/flow checks
+plus the timing-disabled benchmark entry), producing **44 genuine Vulkan frames**.
+The copied final test binary is byte-identical to the tested binary. All PNGs are
+RGB-identical to readback; wide triplet, populated floating 480×420 and NOTE EDIT
+popup pixels were inspected. The narrow menu retains the editable note/velocity
+canvas and established ownership/history guards. New Windows execution remains
+a separate checkpoint; the prior native paint failure is not waived by these
+source or offscreen results.

@@ -1,13 +1,13 @@
 # Development roadmap
 
-Updated: 2026-10-09 08:29 UTC. The current product priority is detailed Piano melody composition, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-09 09:11 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
 - Development branch: `ci/windows-reliability-20261009`. Last fully validated Windows checkpoint: **`53494d518bfc4bad7304f25c127491a0c67d7cd8`**, including Browser, measured meters, v11 split fidelity, WAV/media/export controls and responsive UI QA. [Quality 37886481852](https://github.com/wrench1997/DAW/actions/runs/37886481852) passed **909 Rust tests**, 14 helper-harness tests and actual helper smoke. [Preview 37886481857](https://github.com/wrench1997/DAW/actions/runs/37886481857) passed optimized static-CRT builds, 57 Python tests, PE/import audit, ZIP/hash checks and extracted-helper smoke; no artifact upload.
 - Application **0.5.0-alpha.1** uses Project **v11**. v10 inputs load, but new saves require a new build. Preserve original projects before evaluation.
-- Current expression-integrated source **`9a4d37b0f30f7aff568aa4b66f7b7e2227cfd91e`** passes Linux **1,046 app +14 helper +5 protocol all-feature tests**, **1,044 no-default app tests**, fmt, both strict Clippy modes, app/helper build, ordinary helper smoke, Windows source cross-check and 167 Python tests on default stack. Runtime source exactly matches the independently reviewed feature; the fresh combined suite passes 79 harness entries (78 input flows plus opt-in benchmark entry) and 40 genuine Vulkan frames. New Windows execution is required for this source.
-- At **`e6f117e`**, Windows source gates passed 1,025 app +13 helper +5 protocol tests and [preview 37902412320](https://github.com/wrench1997/DAW/actions/runs/37902412320) passed the full optimized/provenance/package/extracted-helper lane with 167 Python tests, upload disabled. [Quality 37902412259](https://github.com/wrench1997/DAW/actions/runs/37902412259) passes trusted native stopped-state restore, interaction/lifecycle/protocol checks, but native paint still FAILS and repaint comparison is SKIP. Overall quality remains failed; wider physical-input/vendor/hardware acceptance remains open.
+- Current range/snap-integrated source **`37b0d0f65e0d7fe52139289b410cfea2eb8a3087`** passes Linux **1,094 app +14 helper +5 protocol all-feature tests**, **1,092 no-default app tests**, fmt, both strict Clippy modes, app/helper build, ordinary helper smoke, Windows source cross-check and 167 Python tests on default stack. Runtime and packaging inputs exactly match the independently reviewed feature. New exact Windows execution remains required.
+- At **`b57076a`**, Windows source gates passed 1,043 app +13 helper +5 protocol tests and [preview 37905510775](https://github.com/wrench1997/DAW/actions/runs/37905510775) passed the full optimized/provenance/package/extracted-helper lane with 167 Python tests, upload disabled. [Quality 37905510854](https://github.com/wrench1997/DAW/actions/runs/37905510854) passes trusted native stopped-state restore, interaction/lifecycle/protocol checks, but native paint still FAILS and repaint comparison is SKIP. Overall quality remains failed; wider physical-input/vendor/hardware acceptance remains open.
 - The integrated [simultaneous workspace](MULTIWINDOW_WORKSPACE.md) is a real shared-project, internal-window implementation. The latest requested [compact refinement](COMPACT_WORKSPACE.md) keeps useful task density, persistent migration, continuous held gestures and bounded release snapping; controlled unoptimized CPU comparisons do not establish a general speedup or displayed FPS. Focused Piano session-local note clipboard now has bounded data, semantic input/text isolation and explicit Undo. Offscreen frames validate app paint/layout rather than cloud X11 presentation, OS-detached editors, device audio or native VST3 editor paint.
 - Evidence levels stay distinct: **implemented/source-inspected**; **executed code tests** at an exact revision; **GUI/device scenario passed** with artifacts; **release candidate accepted** on the intended package; **commercial maturity** from broader workflow, compatibility and sustained-use coverage. None implies the next.
 
@@ -29,9 +29,11 @@ focus/clipboard and physical-device behavior remain separate acceptance work.
 are now integrated: relative dynamics with common bounds, single/multiple target drafts,
 Reset/Cancel and one-step Apply, preserving imported timing and newer unrelated data.
 Wheel residue, stale/frozen targets, numeric ownership and modal/import barriers have
-actual input regressions. Independent Piano time-range/snapping work is the next
-bounded slice and is not included here. MIDI interchange and broader commercial
-workflow remain open.
+actual input regressions. [Independent Piano time-range/snapping](PIANO_RANGES_AND_SNAP.md) is now integrated:
+session-owned edit/repeat intervals, exact range-width copying, left-visible-bar
+paste, safe Off/fine/triplet grids and compact narrow-window controls. Ranges do
+not alter playback loops, transport, Project serialization or Playlist snap.
+MIDI interchange, playback-range looping and broader commercial workflow remain open.
 
 ## P0 / M1 — Edit a song without changing its meaning
 
@@ -111,6 +113,17 @@ The [local WAV Browser](LOCAL_SAMPLE_BROWSER.md) is integrated from reviewed sou
 ## P1 — Restricted Windows VST3 native-editor workflow
 
 [Native editor controls](NATIVE_VST3_EDITORS.md), helper-owned lifecycle and exact dirty/state/base capture are integrated. Automated instances are deliberately excluded; generic parameter/automation workflows remain available. Shared project-snapshot barriers prevent native Open and queued import from crossing replacement snapshots. Windows source-built MIT fixture execution now validates attach/resize/events/close/reopen, exact stopped-state round-trip and protocol stdout isolation on the production helper. Native paint remains failed, so complete native acceptance is still open. Fixtures are bounded test inputs, not broad vendor compatibility evidence. Linux native editors, physical input/DPI/audio/vendor testing and native gesture automation remain open.
+
+## Independent real-plugin usability and routing work
+
+Controlled offline QA at `b57076a` exercised genuine Surge XT instrument, Effects
+and their ordered audio chain through exact production scanner/runtime source,
+waiting for each worker block. It does not certify real-time device performance,
+native GUI, Windows or onward VST3 MIDI/event routing. A filename-hint scanner
+misclassification is confirmed; the actual helper identifies the effect correctly.
+The full reproducible receipt and scanner correction belong to a separate checkpoint.
+Plugin MIDI-output routing also proceeds as an isolated, reviewed feature; it is not
+part of this range candidate and must not be inferred from the passing audio chain.
 
 ## After the first reliable song workflow
 

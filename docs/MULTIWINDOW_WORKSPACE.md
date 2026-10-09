@@ -130,13 +130,13 @@ text fields can still copy/paste text normally, including viewing the JSON.
 Paste inserts into the active Pattern and preserves source channel assignment,
 absolute pitches, relative time offsets, lengths, velocities and mute state.
 Changing TARGET does not remap the copied channel. Notes retain their original
-scale/quantization details: only the earliest-note anchor is snapped. In PAT mode,
-that anchor is the current Pattern transport cursor snapped down to the Piano
-snap grid. In SONG mode it is Pattern beat 0, since this editor has no independent
-local ruler cursor and an absolute song beat would be ambiguous. The toolbar shows
-the zero-based paste beat. Repeated paste at an unchanged cursor uses the same
-anchor, deliberately overlapping; it neither advances the cursor nor transposes.
-During playback, later paste uses the then-current PAT cursor.
+scale/quantization details. With the range/snap update, the earliest note anchors
+to the four-beat bar containing the left edge of the Piano viewport, identically
+in PAT and SONG modes. The toolbar/menu shows the zero-based paste beat. Repeated
+paste at an unchanged viewport uses that same anchor and may overlap; neither
+the playhead nor the edit/repeat range changes it. This explicitly supersedes the
+earlier PAT-cursor/SONG-zero policy. See [Piano ranges and snap](PIANO_RANGES_AND_SNAP.md)
+for the containing-bar interpretation and unchanged clipboard identity/history guards.
 
 Every paste allocates fresh project-wide note IDs and independent pattern-local
 group IDs. Groups with fewer than two copied members become ungrouped. Cut/Paste

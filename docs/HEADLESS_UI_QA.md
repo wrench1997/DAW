@@ -294,3 +294,14 @@ independent repeat interval and viewport-bar paste. `src/piano_snap.rs` tests
 finite rational snapping, triplet boundaries and bounded visible-grid generation.
 See [Piano ranges and snap](PIANO_RANGES_AND_SNAP.md) for the explicit edit-only
 scope, selection boundary rules, settings migration and Off behavior.
+
+
+Integrated runtime `37b0d0f65e0d7fe52139289b410cfea2eb8a3087` passes the complete
+**105-entry** harness (104 production-input checks plus the opt-in benchmark entry,
+timing disabled) and produces **44 genuine Vulkan frames**, with RGB-identical PNG
+conversion. Ruler interrupted/repeated gestures, owner changes, range-width repeat,
+viewport paste, rational triplets, Off behavior, narrow menus and all preceding
+expression/clipboard/workspace flows run together. Wide triplet, populated actual
+480×420 floating editor and its NOTE EDIT popup were visually inspected. This is
+source/input/offscreen evidence; native desktop, physical-device and plug-in paint
+acceptance remain independently reported.
