@@ -401,6 +401,11 @@ pub trait PluginBackend: 'static {
     }
     fn save_state(&mut self) -> Result<Vec<u8>, String>;
     fn load_state(&mut self, state: &[u8]) -> Result<(), String>;
+    /// Pure worker-side validation before any epoch-reset safety MIDI or lifecycle mutation.
+    /// Default preserves custom/legacy backends; format adapters may require a reset contract.
+    fn preflight_reset_processing(&self) -> Result<(), String> {
+        Ok(())
+    }
     /// Reset transport-sensitive processing state after a seek, stop or loop discontinuity.
     ///
     /// This is always called on the plug-in worker, never on the device callback. Backends that
@@ -3066,6 +3071,13 @@ fn reset_worker_epoch(
             continue;
         };
 
+        if let Err(message) = catch_backend(|| backend.preflight_reset_processing()) {
+            let message = format!("transport epoch {epoch} reset preflight failed: {message}");
+            slot.fault = Some(message.clone());
+            metrics.reset_faults.fetch_add(1, Ordering::Relaxed);
+            register_fault(slot_index, message, events, metrics);
+            continue;
+        }
         let mut first_error = None;
         for channel in 0_u8..16 {
             for controller in [64, 123, 120] {
@@ -4780,6 +4792,17 @@ impl Drop for Vst2Backend {
 }
 
 #[cfg(feature = "vst3")]
+fn validate_vst3_reset_maximum(max_block_frames: usize) -> Result<(), String> {
+    let quantum = crate::plugin_timing::PLUGIN_QUANTUM_FRAMES as usize;
+    if !(quantum..=MAX_PLUGIN_BLOCK_FRAMES).contains(&max_block_frames) {
+        return Err(format!(
+            "DAW VST3 backend requires a prepared maximum of at least {quantum} frames for reset-origin processing"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "vst3")]
 struct Vst3Backend {
     last_transport: PluginTransport,
     native_revision_base: u64,
@@ -4795,7 +4818,19 @@ struct Vst3Backend {
 
 #[cfg(feature = "vst3")]
 impl Vst3Backend {
+    fn stopped_reset_transport(&self) -> vst3_host::ProcessTransport {
+        vst3_host::ProcessTransport {
+            sample_position: self.last_transport.sample_position,
+            quarter_note_position: self.last_transport.quarter_note_position,
+            tempo: self.last_transport.tempo,
+            playing: false,
+            time_sig_numerator: self.last_transport.time_sig_numerator,
+            time_sig_denominator: self.last_transport.time_sig_denominator,
+        }
+    }
+
     fn load(spec: PluginLoadSpec, config: PluginPrepareConfig) -> Result<Self, String> {
+        validate_vst3_reset_maximum(config.max_block_frames)?;
         let helper_path = match spec.vst3_helper_path {
             Some(path) if path.is_file() => path,
             Some(path) => {
@@ -4882,6 +4917,16 @@ impl PluginBackend for Vst3Backend {
     }
 
     fn prepare(&mut self, config: PluginPrepareConfig) -> Result<(), String> {
+        validate_vst3_reset_maximum(config.max_block_frames)?;
+        // Negotiate before reset-specific lifecycle/state changes. A loaded old helper may
+        // have initialized the plugin, but it cannot receive panic or a fallback Process.
+        let support = self
+            .plugin
+            .reset_origin_support()
+            .map_err(|error| error.to_string())?;
+        if support.contract_version != 1 {
+            return Err("VST3 helper does not support reset-origin contract version 1".into());
+        }
         if self.prepared {
             self.plugin
                 .stop_processing()
@@ -4907,6 +4952,7 @@ impl PluginBackend for Vst3Backend {
             .plugin
             .native_dirty_revision()
             .map_err(|error| error.to_string())?;
+        self.max_block_frames = config.max_block_frames;
         self.prepared = true;
         Ok(())
     }
@@ -5256,22 +5302,42 @@ impl PluginBackend for Vst3Backend {
             .map_err(|error| error.to_string())
     }
 
-    fn reset_processing(&mut self) -> Result<(), String> {
+    fn preflight_reset_processing(&self) -> Result<(), String> {
         if !self.prepared {
-            return Ok(());
+            return Err("VST3 reset requested before preparation".into());
         }
-        // CC mapping is optional in VST3. Queue native NoteOff for tracked ordinary notes
-        // and consume it on this worker even when no more callback blocks will arrive.
-        let stopped = PluginTransport {
-            playing: false,
-            ..self.last_transport
-        };
-        self.set_transport(stopped)?;
+        validate_vst3_reset_maximum(self.max_block_frames)?;
+        self.plugin
+            .reset_origin_support()
+            .and_then(|support| {
+                support.validate(
+                    crate::plugin_timing::PLUGIN_QUANTUM_FRAMES as usize,
+                    self.stopped_reset_transport(),
+                )
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    fn reset_processing(&mut self) -> Result<(), String> {
+        self.preflight_reset_processing()?;
+        // Native releases are necessary when CC mapping is absent. The origin-only reset
+        // preserves old one-frame input ordering, but uses the normal worker quantum so
+        // processors never receive an exceptional positive one-sample cleanup block.
         self.plugin
             .midi_panic()
             .map_err(|error| error.to_string())?;
-        self.process(&mut [0.0], &mut [0.0], 1)?;
-        let _ = self.plugin.take_output_events_with_loss();
+        let transport = self.stopped_reset_transport();
+        let report = self
+            .plugin
+            .process_reset_origin(
+                crate::plugin_timing::PLUGIN_QUANTUM_FRAMES as usize,
+                transport,
+            )
+            .map_err(|error| error.to_string())?;
+        self.last_transport.playing = false;
+        report
+            .ensure_success()
+            .map_err(|error| format!("{error}; reset report: {report:?}"))?;
         self.plugin
             .stop_processing()
             .map_err(|error| error.to_string())?;
@@ -5832,6 +5898,8 @@ mod tests {
         note_on_count: Option<Arc<AtomicU64>>,
         reset_count: Option<Arc<AtomicU64>>,
         reset_fails: bool,
+        reset_preflight_fails: bool,
+        reset_order: Option<Arc<Mutex<Vec<&'static str>>>>,
         tail_left: f32,
         tail_right: f32,
         parameter_catalog: Vec<PluginParameterDescriptor>,
@@ -5854,6 +5922,8 @@ mod tests {
                 note_on_count: None,
                 reset_count: None,
                 reset_fails: false,
+                reset_preflight_fails: false,
+                reset_order: None,
                 tail_left: 0.0,
                 tail_right: 0.0,
                 parameter_catalog: Vec::new(),
@@ -5930,6 +6000,9 @@ mod tests {
         }
 
         fn send_midi(&mut self, message: MidiMessage) -> Result<(), String> {
+            if let Some(order) = &self.reset_order {
+                order.lock().unwrap().push("midi");
+            }
             if message.data[0] & 0xf0 == 0x90
                 && message.data[2] != 0
                 && let Some(note_on_count) = &self.note_on_count
@@ -6016,7 +6089,21 @@ mod tests {
             Ok(())
         }
 
+        fn preflight_reset_processing(&self) -> Result<(), String> {
+            if let Some(order) = &self.reset_order {
+                order.lock().unwrap().push("preflight");
+            }
+            if self.reset_preflight_fails {
+                Err("mock reset capability rejected".into())
+            } else {
+                Ok(())
+            }
+        }
+
         fn reset_processing(&mut self) -> Result<(), String> {
+            if let Some(order) = &self.reset_order {
+                order.lock().unwrap().push("reset");
+            }
             if let Some(reset_count) = &self.reset_count {
                 reset_count.fetch_add(1, Ordering::Relaxed);
             }
@@ -8013,6 +8100,86 @@ mod tests {
     }
 
     #[test]
+    fn epoch_reset_preflight_precedes_all_safety_mutation_even_for_bypassed_disabled_slots() {
+        for (enabled, bypassed) in [(true, false), (true, true), (false, false)] {
+            for reject in [false, true] {
+                let order = Arc::new(Mutex::new(Vec::new()));
+                let mut backend = MockBackend::new("reset order", MockProcess::Gain(1.0));
+                backend.reset_preflight_fails = reject;
+                backend.reset_order = Some(order.clone());
+                let mut slots = vec![WorkerSlot {
+                    backend: Some(Box::new(backend)),
+                    config: SlotConfig {
+                        enabled,
+                        bypassed,
+                        wet: 1.0,
+                    },
+                    fault: None,
+                    parameter_catalog_cache: None,
+                    native_base_ids: Vec::new(),
+                }];
+                let metrics = BridgeMetrics::default();
+                let (mut events, mut received) = RingBuffer::new(8);
+                let (mut receipts, _) = RingBuffer::new(8);
+                // Production RT handling admits input on bypassed/disabled healthy slots too.
+                assert!(!handle_rt(
+                    RtCommand::Midi {
+                        target: RtTarget::Slot(0),
+                        message: MidiMessage::new([0x90, 60, 100], 64)
+                    },
+                    &mut slots,
+                    &mut events,
+                    &mut receipts,
+                    &metrics
+                ));
+                order.lock().unwrap().clear();
+                reset_worker_epoch(71, &mut slots, &mut events, &metrics);
+                let observed = order.lock().unwrap().clone();
+                if reject {
+                    assert_eq!(observed, ["preflight"]);
+                    assert_eq!(metrics.reset_faults.load(Ordering::Acquire), 1);
+                    assert!(
+                        slots[0]
+                            .fault
+                            .as_ref()
+                            .unwrap()
+                            .contains("epoch 71 reset preflight failed")
+                    );
+                    assert!(matches!(received.pop(), Ok(RuntimeEvent::SlotFault { .. })));
+                    reset_worker_epoch(72, &mut slots, &mut events, &metrics);
+                    assert_eq!(*order.lock().unwrap(), observed); // Faulted slots never auto-resume.
+                } else {
+                    assert_eq!(observed.len(), 50);
+                    assert_eq!(observed[0], "preflight");
+                    assert!(observed[1..49].iter().all(|item| *item == "midi"));
+                    assert_eq!(observed[49], "reset");
+                    assert!(slots[0].fault.is_none());
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "vst3")]
+    #[test]
+    fn only_daw_vst3_backend_requires_normal_quantum_reset_capacity() {
+        for frames in [1, 17, 47, 64, 127] {
+            assert!(validate_vst3_reset_maximum(frames).is_err());
+            assert!(
+                PluginPrepareConfig {
+                    max_block_frames: frames,
+                    ..config()
+                }
+                .validate()
+                .is_ok()
+            );
+        }
+        for frames in [128, 256, 2048] {
+            assert!(validate_vst3_reset_maximum(frames).is_ok());
+        }
+        assert!(validate_vst3_reset_maximum(2049).is_err());
+    }
+
+    #[test]
     fn reset_failure_faults_only_the_slot_and_reports_it() {
         let mut chain = PluginChain::spawn_with_backend_factory(
             || {
@@ -8804,3 +8971,7 @@ mod tests {
         chain.guard.shutdown();
     }
 }
+
+#[cfg(all(test, unix, feature = "vst3"))]
+#[path = "plugin_reset_origin_tests.rs"]
+mod reset_origin_backend_tests;

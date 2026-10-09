@@ -11,8 +11,8 @@ use crate::{
     midi::{MidiChannel, MidiEvent, PluginEvent},
     parameters::{Parameter, ParameterChange},
     plugin::{
-        decode_state_snapshot, encode_state_snapshot, PluginInfo, PluginInternal, StateContext,
-        StateSnapshot,
+        decode_state_snapshot, encode_state_snapshot, PluginInfo, PluginInternal,
+        ResetOriginReport, ResetOriginSupport, StateContext, StateSnapshot,
     },
 };
 use crossbeam_queue::ArrayQueue;
@@ -2218,6 +2218,7 @@ impl ProcessorRuntime {
     /// [`stage_chunk_events`]); queued parameter changes are selected the same way here, by the
     /// chunk their offset falls in. `is_last` marks the chunk that absorbs anything scheduled
     /// past the end of the caller's block.
+    #[allow(clippy::too_many_arguments)]
     fn process_chunk(
         &mut self,
         processor: &mut ProcessorLease<'_>,
@@ -2226,6 +2227,7 @@ impl ProcessorRuntime {
         frame_offset: usize,
         frames: usize,
         is_last: bool,
+        mut reset_report: Option<&mut ResetOriginReport>,
     ) -> Result<()> {
         if let Some(ref mut data) = self.process_data {
             unsafe {
@@ -2260,8 +2262,12 @@ impl ProcessorRuntime {
                 // got in `stage_chunk_events`, so automation and MIDI stay aligned across a
                 // split block.
                 for pc in &self.pending_param_changes {
-                    if let Some(off) = chunk_offset(pc.sample_offset, frame_offset, frames, is_last)
-                    {
+                    if let Some(off) = chunk_offset(
+                        pc.sample_offset,
+                        frame_offset,
+                        if reset_report.is_some() { 1 } else { frames },
+                        is_last,
+                    ) {
                         if data
                             .input_param_changes
                             .try_enqueue(pc.id, off, pc.value)
@@ -2374,7 +2380,11 @@ impl ProcessorRuntime {
                 let output_visit_failed = data
                     .output_param_changes
                     .for_each_active_point(|id, _offset, value| {
-                        feedback.force_push((id, value));
+                        if let Some(report) = reset_report.as_deref_mut() {
+                            report.discarded_parameter_points += 1;
+                        } else {
+                            feedback.force_push((id, value));
+                        }
                     })
                     .is_err();
                 if output_visit_failed || data.output_param_changes.failure().is_some() {
@@ -2391,7 +2401,11 @@ impl ProcessorRuntime {
                 if !self.output_events.is_empty() {
                     let out = &self.output_events_owned;
                     self.output_events.drain_each(|event| {
-                        push_output_event(out, &self.output_events_lost, event);
+                        if let Some(report) = reset_report.as_deref_mut() {
+                            report.discarded_midi_events += 1;
+                        } else {
+                            push_output_event(out, &self.output_events_lost, event);
+                        }
                     });
                 }
 
@@ -2467,10 +2481,90 @@ impl ProcessorRuntime {
                 frames,
                 is_last,
             );
-            self.process_chunk(processor, gate, buffers, offset, frames, is_last)?;
+            self.process_chunk(processor, gate, buffers, offset, frames, is_last, None)?;
             offset += frames;
         }
         Ok(())
+    }
+
+    /// Private reset-only sink. It never reads controller/native display feedback and never
+    /// acknowledges a sticky loss flag by clearing it. The epoch owns no previous output.
+    fn discard_prior_reset_output(&mut self, report: &mut ResetOriginReport) {
+        while self.output_events_owned.pop().is_some() {
+            report.discarded_prior_midi_events += 1;
+        }
+        self.output_events
+            .drain_each(|_| report.discarded_prior_midi_events += 1);
+        if self.output_events.take_loss() {
+            self.output_events_lost.store(true, Ordering::Release);
+        }
+        while self.output_param_feedback.pop().is_some() {
+            report.discarded_prior_parameter_points += 1;
+        }
+        if let Some(data) = &mut self.process_data {
+            if data
+                .output_param_changes
+                .for_each_active_point(|_, _, _| {
+                    report.discarded_prior_parameter_points += 1;
+                })
+                .is_err()
+                || data.output_param_changes.failure().is_some()
+            {
+                self.parameter_output_fault.store(true, Ordering::Release);
+            }
+            if data.output_param_changes.clear_all().is_err() {
+                self.parameter_output_fault.store(true, Ordering::Release);
+            }
+        }
+        report.output_events_lost = self.output_events_lost.load(Ordering::Acquire);
+        report.parameter_output_fault = self.observe_parameter_output_fault();
+    }
+
+    fn process_reset_origin(
+        &mut self,
+        processor: &mut ProcessorLease<'_>,
+        gate: &mut DataExchangeProcessGate<'_>,
+        buffers: &mut CallerAudioBuffers<'_>,
+        frames: usize,
+    ) -> ResetOriginReport {
+        let mut report = ResetOriginReport {
+            frames: frames as u32,
+            ..ResetOriginReport::default()
+        };
+        self.discard_prior_reset_output(&mut report);
+        // Existing poison cannot become a clean reset acknowledgment. Do not consume input
+        // or manufacture native acknowledgments when no SDK call can take place.
+        if report.parameter_output_fault {
+            report.process_error = Some(Error::ParameterOutputRejected.to_string());
+            return report;
+        }
+        let _denormal = crate::internal::denormal::DenormalGuard::new();
+        // One complete origin-only block needs no chunk transfer. Rebase under one checked
+        // guard, preserving FIFO, owned payloads and the admission budget. A poison race after
+        // the public preflight must still fail before native staging or any SDK call.
+        let staging_failed = match self.input_events.events.lock() {
+            Ok(mut events) => {
+                for event in events.iter_mut() {
+                    event.sample_offset = 0;
+                }
+                false
+            }
+            Err(_) => true,
+        };
+        if staging_failed {
+            report.process_error = Some(Error::EventInputRejected.to_string());
+            return report;
+        }
+        let result =
+            self.process_chunk(processor, gate, buffers, 0, frames, true, Some(&mut report));
+        self.chunk_events.clear();
+        self.pending_param_changes.clear();
+        // process_chunk performs output validation/cleanup even after a failed SDK call.
+        // Early admission errors emit no output; retain all previously observed loss too.
+        report.output_events_lost |= self.output_events_lost.load(Ordering::Acquire);
+        report.parameter_output_fault |= self.observe_parameter_output_fault();
+        report.process_error = result.err().map(|error| error.to_string());
+        report
     }
 
     fn current_audio_bus_layout(&self) -> Result<AudioBusLayout> {
@@ -2578,7 +2672,7 @@ impl ProcessorRuntime {
 
         let result = if total == 0 {
             stage_chunk_events(&mut self.chunk_events, &self.input_events, 0, 0, true);
-            self.process_chunk(processor, gate, buffers, 0, 0, true)
+            self.process_chunk(processor, gate, buffers, 0, 0, true, None)
         } else {
             self.process_chunks(processor, gate, buffers, total)
         };
@@ -2723,6 +2817,63 @@ impl PluginInternal for PluginImpl {
 
     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
         self.process_buffer_view(&mut CallerAudioBuffers::Flat(buffers))
+    }
+
+    fn reset_origin_support(&self) -> Result<ResetOriginSupport> {
+        // No note tracker is required for a queued owned event. A poisoned input list must
+        // fail before panic even when panic itself would enqueue no native note releases.
+        if self.runtime.input_events.events.is_poisoned() {
+            return Err(Error::EventInputRejected);
+        }
+        // Pure refusal before panic can consume note obligations. Observe, but do not clear
+        // or promote, even poison that has not yet reached the runtime's sticky flag.
+        if self.runtime.parameter_output_fault.load(Ordering::Acquire)
+            || self
+                .runtime
+                .process_data
+                .as_ref()
+                .is_some_and(|data| data.output_param_changes.failure().is_some())
+        {
+            return Err(Error::ParameterOutputRejected);
+        }
+        Ok(ResetOriginSupport {
+            contract_version: 1,
+            max_block_frames: u32::try_from(self.runtime.block_size).unwrap_or(u32::MAX),
+            processing: self.control.is_active
+                && self.runtime.is_processing
+                && self.runtime.process_data.is_some(),
+        })
+    }
+
+    fn process_reset_origin(
+        &mut self,
+        frames: usize,
+        transport: crate::plugin::ProcessTransport,
+    ) -> Result<ResetOriginReport> {
+        self.reset_origin_support()?.validate(frames, transport)?;
+        // Allocate silent worker-owned scratch only after pure validation, before mutation.
+        // Use already-prepared bus storage, with no metadata/controller query on this path.
+        let data = self
+            .runtime
+            .process_data
+            .as_ref()
+            .ok_or(Error::NotProcessing)?;
+        let mut buffers = AudioBuffers::new(
+            data.sample_buffers.input_channel_count(),
+            data.sample_buffers.output_channel_count(),
+            frames,
+            self.runtime.sample_rate,
+        );
+        self.set_process_transport(transport)?;
+        let mut processor =
+            ProcessorLease::new(&mut self.control.processor, self.control._module.as_ref());
+        let mut gate = self.control._host_app.data_exchange_process_gate();
+        Ok(self.runtime.process_reset_origin(
+            &mut processor,
+            &mut gate,
+            &mut CallerAudioBuffers::Flat(&mut buffers),
+            frames,
+        ))
     }
 
     fn audio_bus_layout(&self) -> Result<AudioBusLayout> {

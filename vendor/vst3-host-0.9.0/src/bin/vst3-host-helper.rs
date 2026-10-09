@@ -454,6 +454,26 @@ fn handle(
                 id: p.midi_cc_to_parameter(bus, channel, cc),
             })
         }
+        HostCommand::ResetOriginSupport => with(plugin, |p| match p.reset_origin_support() {
+            Ok(support) => HostResponse::ResetOriginSupport { support },
+            Err(e) => err("ResetOriginSupport", e),
+        }),
+        HostCommand::ProcessResetOrigin { frames, transport } => {
+            // Reject untrusted frame sizes before touching the plugin or allocating buffers.
+            // The owner-affine API performs all remaining preflight and captures attempted
+            // processing failures in its report, without exposing any feedback values.
+            if frames as usize > (1 << 20) {
+                return HostResponse::Error {
+                    message: "ProcessResetOrigin: frame count exceeds wire limit".into(),
+                };
+            }
+            with(plugin, |p| {
+                match p.process_reset_origin(frames as usize, transport) {
+                    Ok(report) => HostResponse::ResetOriginReport { report },
+                    Err(e) => err("ProcessResetOrigin", e),
+                }
+            })
+        }
         HostCommand::Process {
             inputs,
             frames,

@@ -544,6 +544,26 @@ fn handle(
                 id: p.midi_cc_to_parameter(bus, channel, cc),
             })
         }
+        HostCommand::ResetOriginSupport => with(plugin, |p| match p.reset_origin_support() {
+            Ok(support) => HostResponse::ResetOriginSupport { support },
+            Err(e) => err("ResetOriginSupport", e),
+        }),
+        HostCommand::ProcessResetOrigin { frames, transport } => {
+            // Reject untrusted frame sizes before touching the plugin or allocating buffers.
+            // The owner-affine API performs all remaining preflight and captures attempted
+            // processing failures in its report, without exposing any feedback values.
+            if frames as usize > (1 << 20) {
+                return HostResponse::Error {
+                    message: "ProcessResetOrigin: frame count exceeds wire limit".into(),
+                };
+            }
+            with(plugin, |p| {
+                match p.process_reset_origin(frames as usize, transport) {
+                    Ok(report) => HostResponse::ResetOriginReport { report },
+                    Err(e) => err("ProcessResetOrigin", e),
+                }
+            })
+        }
         HostCommand::Process {
             inputs,
             frames,
@@ -994,6 +1014,86 @@ mod macos {
         if let Some(w) = window {
             w.close();
         }
+    }
+}
+
+#[cfg(test)]
+mod reset_origin_tests {
+    use super::*;
+    use vst3_host::ProcessTransport;
+
+    fn transport() -> ProcessTransport {
+        ProcessTransport {
+            sample_position: -48_000,
+            quarter_note_position: 3.25,
+            tempo: 93.5,
+            playing: false,
+            time_sig_numerator: 7,
+            time_sig_denominator: 8,
+        }
+    }
+
+    #[test]
+    fn oversized_reset_frames_are_rejected_before_plugin_lock_or_allocation() {
+        let plugin = PluginOwner::new(Mutex::new(None));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = plugin.lock().unwrap();
+            panic!("controlled poison for reset-origin fixture");
+        }));
+        let mut sample_rate = 48_000.0;
+        for frames in [(1 << 20) + 1, u32::MAX] {
+            let response = handle(
+                HostCommand::ProcessResetOrigin {
+                    frames,
+                    transport: transport(),
+                },
+                &plugin,
+                &mut sample_rate,
+                None,
+            );
+            assert!(matches!(response, HostResponse::Error { message }
+                if message == "ProcessResetOrigin: frame count exceeds wire limit"));
+            assert_eq!(sample_rate, 48_000.0);
+        }
+    }
+
+    #[test]
+    fn reset_dispatch_leaves_configured_frame_validation_to_the_owner_api() {
+        let plugin = PluginOwner::new(Mutex::new(None));
+        let mut sample_rate = 48_000.0;
+        // Standalone helpers can be configured below the DAW's 128-frame quantum. The
+        // helper applies only its wire ceiling; zero/configuration bounds are API preflight.
+        for frames in [0, 17, 47, 128, 1 << 20] {
+            let response = handle(
+                HostCommand::ProcessResetOrigin {
+                    frames,
+                    transport: transport(),
+                },
+                &plugin,
+                &mut sample_rate,
+                None,
+            );
+            assert!(matches!(response, HostResponse::Error { message }
+                if message == "No plugin loaded"));
+            assert!(plugin.lock().unwrap().is_none());
+            assert_eq!(sample_rate, 48_000.0);
+        }
+    }
+
+    #[test]
+    fn reset_support_without_a_plugin_is_an_error_and_does_not_create_one() {
+        let plugin = PluginOwner::new(Mutex::new(None));
+        let mut sample_rate = 48_000.0;
+        let response = handle(
+            HostCommand::ResetOriginSupport,
+            &plugin,
+            &mut sample_rate,
+            None,
+        );
+        assert!(matches!(response, HostResponse::Error { message }
+            if message == "No plugin loaded"));
+        assert!(plugin.lock().unwrap().is_none());
+        assert_eq!(sample_rate, 48_000.0);
     }
 }
 

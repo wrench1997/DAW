@@ -1,10 +1,30 @@
 --- a/src/bin/vst3-host-helper.rs
 +++ b/src/bin/vst3-host-helper.rs
-@@ -454,7 +454,16 @@
+@@ -454,7 +454,36 @@
                  id: p.midi_cc_to_parameter(bus, channel, cc),
              })
          }
 -        HostCommand::Process { inputs, frames } => {
++        HostCommand::ResetOriginSupport => with(plugin, |p| match p.reset_origin_support() {
++            Ok(support) => HostResponse::ResetOriginSupport { support },
++            Err(e) => err("ResetOriginSupport", e),
++        }),
++        HostCommand::ProcessResetOrigin { frames, transport } => {
++            // Reject untrusted frame sizes before touching the plugin or allocating buffers.
++            // The owner-affine API performs all remaining preflight and captures attempted
++            // processing failures in its report, without exposing any feedback values.
++            if frames as usize > (1 << 20) {
++                return HostResponse::Error {
++                    message: "ProcessResetOrigin: frame count exceeds wire limit".into(),
++                };
++            }
++            with(plugin, |p| {
++                match p.process_reset_origin(frames as usize, transport) {
++                    Ok(report) => HostResponse::ResetOriginReport { report },
++                    Err(e) => err("ProcessResetOrigin", e),
++                }
++            })
++        }
 +        HostCommand::Process {
 +            inputs,
 +            frames,
@@ -18,7 +38,7 @@
              let sr = *sample_rate;
              with(plugin, |p| {
                  // Live channel count (sums getBusInfo across output buses), so a negotiated
-@@ -466,11 +475,19 @@
+@@ -466,11 +495,19 @@
                      sample_rate: sr,
                      block_size: frames as usize,
                  };
@@ -42,7 +62,7 @@
                      Err(e) => err("Process", e),
                  }
              })
-@@ -479,6 +496,7 @@
+@@ -479,6 +516,7 @@
              inputs,
              outputs,
              frames,
@@ -50,7 +70,7 @@
          } => {
              if inputs.len() > 256
                  || outputs.len() > 256
-@@ -506,11 +524,19 @@
+@@ -506,11 +544,19 @@
                      sample_rate: sr,
                      block_size: frames as usize,
                  };
@@ -74,7 +94,7 @@
                      Err(e) => err("ProcessBuses", e),
                  }
              })
-@@ -603,6 +629,10 @@
+@@ -603,6 +649,10 @@
          HostCommand::TakeHostNotifications => with(plugin, |p| HostResponse::HostNotifications {
              notifications: p.take_host_notifications(),
          }),
@@ -85,7 +105,7 @@
          HostCommand::TakeDataExchangeBlocks => with(plugin, |p| HostResponse::DataExchangeBlocks {
              blocks: p.take_data_exchange_blocks(),
          }),
-@@ -629,6 +659,10 @@
+@@ -629,6 +679,10 @@
              Ok(flags) => HostResponse::RestartFlags { bits: flags.bits() },
              Err(error) => err("ServiceHostRequests", error),
          }),
@@ -5000,7 +5020,109 @@
          Ok(())
      }
  
-@@ -351,13 +499,21 @@
+@@ -338,6 +486,101 @@
+                 "FormatParameter: unexpected response".to_string(),
+             )),
+         }
++    }
++
++    fn reset_origin_support(&self) -> Result<crate::plugin::ResetOriginSupport> {
++        // Capability negotiation must never respawn/reload or fall back to ordinary Process.
++        match self.send_command_once(HostCommand::ResetOriginSupport)? {
++            HostResponse::ResetOriginSupport { support } if support.contract_version == 1 => {
++                Ok(support)
++            }
++            HostResponse::Error { message } => {
++                Err(Error::Other(format!("ResetOriginSupport: {message}")))
++            }
++            _ => Err(Error::Other(
++                "helper does not support reset-origin contract version 1".into(),
++            )),
++        }
++    }
++
++    fn process_reset_origin(
++        &mut self,
++        frames: usize,
++        transport: crate::plugin::ProcessTransport,
++    ) -> Result<crate::plugin::ResetOriginReport> {
++        if frames > crate::process_isolation::MAX_WIRE_FRAMES {
++            return Err(Error::InvalidParameter(
++                "reset-origin frame count exceeds wire limit".into(),
++            ));
++        }
++        self.reset_origin_support()?.validate(frames, transport)?;
++        let frames = frames as u32;
++        let uncertain = |message: String| crate::plugin::ResetOriginReport {
++            frames,
++            // No exact acknowledgment means remote discard counts are unknown. Mark loss
++            // rather than presenting these synthetic zero counts as a successful cleanup.
++            output_events_lost: true,
++            process_error: Some(message),
++            ..Default::default()
++        };
++        let response =
++            self.send_command_once(HostCommand::ProcessResetOrigin { frames, transport });
++        let (mut report, acknowledged) = match response {
++            Ok(HostResponse::ResetOriginReport { report }) if report.frames == frames => (report, true),
++            Ok(HostResponse::ResetOriginReport { report }) => {
++                let mut failure = uncertain(format!(
++                    "helper acknowledged reset-origin frame count {} instead of {frames}; result uncertain and request not retried",
++                    report.frames,
++                ));
++                failure.parameter_output_fault = report.parameter_output_fault;
++                (failure, false)
++            }
++            // The protocol reserves ordinary Error for pure helper preflight rejection.
++            Ok(HostResponse::Error { message }) => {
++                return Err(Error::ProcessError(format!("ProcessResetOrigin: {message}")));
++            }
++            Ok(_) => (
++                uncertain(
++                    "helper did not acknowledge reset-origin processing; result uncertain and request not retried".into(),
++                ),
++                false,
++            ),
++            Err(error) => (
++                uncertain(format!(
++                    "reset-origin exchange failed: {error}; result uncertain and request not retried"
++                )),
++                false,
++            ),
++        };
++        // After dispatch, an absent/malformed acknowledgment cannot prove that the helper
++        // did not process. Invalidate the old local epoch even on uncertainty, without retry.
++        // Exclusive access also lets us discard a poisoned queue while preserving its loss.
++        let events = match self.output_events.get_mut() {
++            Ok(events) => events,
++            Err(poisoned) => {
++                report.output_events_lost = true;
++                poisoned.into_inner()
++            }
++        };
++        report.discarded_prior_midi_events = report
++            .discarded_prior_midi_events
++            .saturating_add(events.len() as u64);
++        events.clear();
++        report.output_events_lost |= self
++            .output_events_lost
++            .load(std::sync::atomic::Ordering::Acquire);
++        if report.output_events_lost {
++            self.output_events_lost
++                .store(true, std::sync::atomic::Ordering::Release);
++        }
++        if acknowledged {
++            self.process_transport = Some(transport);
++            self.is_playing = false;
++            self.tempo = transport.tempo;
++            self.time_sig_numerator = transport.time_sig_numerator;
++            self.time_sig_denominator = transport.time_sig_denominator;
++        }
++        Ok(report)
+     }
+ 
+     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
+@@ -351,13 +594,21 @@
          let response = self.send_command_once(HostCommand::Process {
              inputs: buffers.inputs.clone(),
              frames: frames as u32,
@@ -5022,7 +5144,7 @@
                  for (ch_idx, output_channel) in buffers.outputs.iter_mut().enumerate() {
                      if let Some(src) = outputs.get(ch_idx) {
                          let n = output_channel.len().min(src.len());
-@@ -369,15 +525,9 @@
+@@ -369,15 +620,9 @@
                          output_channel.fill(0.0);
                      }
                  }
@@ -5041,7 +5163,7 @@
                  }
                  Ok(())
              }
-@@ -423,12 +573,20 @@
+@@ -423,12 +668,20 @@
              inputs: buffers.inputs.clone(),
              outputs,
              frames: frames as u32,
@@ -5062,7 +5184,7 @@
                  for (destination_bus, source_bus) in buffers.outputs.iter_mut().zip(&outputs) {
                      for (destination, source) in destination_bus
                          .channels
-@@ -445,14 +603,9 @@
+@@ -445,14 +698,9 @@
                          destination.fill(0.0);
                      }
                  }
@@ -5080,7 +5202,7 @@
                  }
                  Ok(())
              }
-@@ -832,6 +985,26 @@
+@@ -832,6 +1080,26 @@
          self.info.has_gui
      }
  
@@ -5107,7 +5229,7 @@
      fn open_editor(&mut self, _parent: *mut std::ffi::c_void) -> Result<()> {
          let response = self.send_command(HostCommand::CreateGui)?;
  
-@@ -920,6 +1093,30 @@
+@@ -920,6 +1188,30 @@
          .unwrap_or_default()
      }
  
@@ -5138,7 +5260,7 @@
      fn take_data_exchange_blocks(&mut self) -> Vec<crate::plugin::DataExchangeBlock> {
          self.poll(
              HostCommand::TakeDataExchangeBlocks,
-@@ -930,6 +1127,23 @@
+@@ -930,6 +1222,23 @@
              },
          )
          .unwrap_or_default()
@@ -5162,7 +5284,7 @@
      }
  
      fn execute_context_menu_item(&mut self, menu_id: u64, item_id: u32) -> Result<()> {
-@@ -971,7 +1185,7 @@
+@@ -971,7 +1280,7 @@
      }
  
      fn service_host_requests(&mut self) -> Result<crate::plugin::RestartFlags> {
@@ -5171,7 +5293,7 @@
              HostResponse::RestartFlags { bits } => Ok(crate::plugin::RestartFlags::from_bits(bits)),
              HostResponse::Error { message } => {
                  Err(Error::Other(format!("ServiceHostRequests: {message}")))
-@@ -983,7 +1197,7 @@
+@@ -983,7 +1292,7 @@
      }
  
      fn save_state(&self) -> Result<Vec<u8>> {
@@ -5180,7 +5302,7 @@
              HostResponse::State { data } => Ok(data),
              HostResponse::Error { message } => Err(Error::Other(format!("SaveState: {message}"))),
              _ => Err(Error::Other("SaveState: unexpected response".to_string())),
-@@ -1005,6 +1219,17 @@
+@@ -1005,6 +1314,17 @@
              .lock()
              .map(|mut o| std::mem::take(&mut *o))
              .unwrap_or_default()
@@ -5198,7 +5320,7 @@
      }
  
      fn output_channel_count(&self) -> usize {
-@@ -1146,6 +1371,26 @@
+@@ -1146,6 +1466,54 @@
              Self { dir, script, log }
          }
  
@@ -5222,13 +5344,515 @@
 +            helper
 +        }
 +
++        fn reset_actions(name: &str, support_action: &str, process_action: &str) -> Self {
++            let helper = Self::new(name);
++            let script = std::fs::read_to_string(&helper.script).unwrap();
++            let actions = format!(
++                "    *ResetOriginSupport*) {support_action} ;;\n    *ProcessResetOrigin*) {process_action} ;;\n"
++            );
++            std::fs::write(
++                &helper.script,
++                script.replace("    *)", &(actions + "    *)")),
++            )
++            .unwrap();
++            helper
++        }
++
++        fn reset_replies(name: &str, support: &HostResponse, process: &HostResponse) -> Self {
++            Self::reset_actions(
++                name,
++                &format!(
++                    "printf '%s\\n' '{}'",
++                    serde_json::to_string(support).unwrap()
++                ),
++                &format!(
++                    "printf '%s\\n' '{}'",
++                    serde_json::to_string(process).unwrap()
++                ),
++            )
++        }
++
          fn requests(&self) -> Vec<String> {
              std::fs::read_to_string(&self.log)
                  .unwrap_or_default()
-@@ -1194,6 +1439,187 @@
+@@ -1193,6 +1561,660 @@
+         )
      }
  
-     #[test]
++    fn reset_transport() -> crate::ProcessTransport {
++        crate::ProcessTransport {
++            sample_position: -96_000,
++            quarter_note_position: 23.125,
++            tempo: 85.0,
++            playing: false,
++            time_sig_numerator: 3,
++            time_sig_denominator: 4,
++        }
++    }
++
++    fn reset_support(max_block_frames: u32, processing: bool) -> HostResponse {
++        HostResponse::ResetOriginSupport {
++            support: crate::ResetOriginSupport {
++                contract_version: 1,
++                max_block_frames,
++                processing,
++            },
++        }
++    }
++
++    fn reset_report(frames: u32) -> HostResponse {
++        HostResponse::ResetOriginReport {
++            report: crate::ResetOriginReport {
++                frames,
++                ..Default::default()
++            },
++        }
++    }
++
++    fn seed_reset_prior_state(plugin: &mut IsolatedPluginImpl, lost: bool) -> Vec<PluginEvent> {
++        let events = vec![
++            MidiEvent::NoteOff {
++                channel: crate::MidiChannel::Ch1,
++                note: 60,
++                velocity: 0,
++            }
++            .into(),
++            PluginEvent::sysex(vec![0xf0, 0x7d, 0xf7]),
++        ];
++        plugin.buffer_output_events(events.clone(), lost);
++        plugin.process_transport = Some(crate::ProcessTransport {
++            sample_position: 12_345,
++            quarter_note_position: 9.5,
++            tempo: 120.0,
++            playing: true,
++            time_sig_numerator: 4,
++            time_sig_denominator: 4,
++        });
++        plugin.auto_recover = true;
++        plugin.auto_recover_max_retries = 2;
++        events
++    }
++
++    fn assert_reset_prior_state(plugin: &IsolatedPluginImpl, events: &[PluginEvent], lost: bool) {
++        assert_eq!(plugin.output_events.lock().unwrap().as_slice(), events);
++        assert_eq!(
++            plugin
++                .output_events_lost
++                .load(std::sync::atomic::Ordering::Acquire),
++            lost
++        );
++        assert_eq!(plugin.process_transport.unwrap().sample_position, 12_345);
++        assert!(plugin.process_transport.unwrap().playing);
++        assert_eq!(plugin.tempo, 120.0);
++        assert_eq!(plugin.time_sig_numerator, 4);
++        assert_eq!(plugin.time_sig_denominator, 4);
++        assert!(plugin.is_playing);
++        assert_eq!(plugin.recovery_count(), 0);
++    }
++
++    fn assert_reset_requests(fake: &FakeHelper, process_frames: Option<u32>) {
++        let requests = fake.requests();
++        assert_eq!(requests.len(), if process_frames.is_some() { 2 } else { 1 });
++        assert!(matches!(
++            serde_json::from_str::<HostCommand>(&requests[0]).unwrap(),
++            HostCommand::ResetOriginSupport
++        ));
++        if let Some(expected_frames) = process_frames {
++            match serde_json::from_str::<HostCommand>(&requests[1]).unwrap() {
++                HostCommand::ProcessResetOrigin { frames, transport } => {
++                    assert_eq!(frames, expected_frames);
++                    assert_eq!(transport, reset_transport());
++                }
++                other => panic!("unexpected reset-origin dispatch: {other:?}"),
++            }
++        }
++    }
++
++    #[test]
++    fn reset_origin_support_is_pure_and_rejects_old_or_unknown_helpers_without_fallback() {
++        let responses = [
++            HostResponse::Error {
++                message: "unknown command ResetOriginSupport".into(),
++            },
++            HostResponse::Success {
++                message: "old helper ignored command".into(),
++            },
++            HostResponse::ResetOriginSupport {
++                support: crate::ResetOriginSupport {
++                    contract_version: 0,
++                    max_block_frames: 47,
++                    processing: true,
++                },
++            },
++            HostResponse::ResetOriginSupport {
++                support: crate::ResetOriginSupport {
++                    contract_version: 2,
++                    max_block_frames: 47,
++                    processing: true,
++                },
++            },
++            reset_support(47, true),
++            reset_support(17, false),
++        ];
++        for (index, response) in responses.iter().enumerate() {
++            let fake = FakeHelper::reset_replies(
++                &format!("reset_support_{index}"),
++                response,
++                &reset_report(47),
++            );
++            let mut plugin = isolated(&fake);
++            let events = seed_reset_prior_state(&mut plugin, true);
++            let result = plugin.reset_origin_support();
++            if let HostResponse::ResetOriginSupport { support } = response {
++                if support.contract_version == 1 {
++                    assert_eq!(result.unwrap(), *support);
++                } else {
++                    assert!(result.is_err());
++                }
++            } else {
++                assert!(result.is_err());
++            }
++            assert_reset_prior_state(&plugin, &events, true);
++            assert_reset_requests(&fake, None);
++        }
++    }
++
++    #[test]
++    fn reset_origin_preflight_failures_preserve_local_queues_and_transport() {
++        let transport = reset_transport();
++        let cases = [
++            (0, true, transport),
++            (48, true, transport),
++            (47, false, transport),
++            (
++                47,
++                true,
++                crate::ProcessTransport {
++                    playing: true,
++                    ..transport
++                },
++            ),
++            (
++                47,
++                true,
++                crate::ProcessTransport {
++                    tempo: 0.0,
++                    ..transport
++                },
++            ),
++            (
++                47,
++                true,
++                crate::ProcessTransport {
++                    tempo: f64::NAN,
++                    ..transport
++                },
++            ),
++            (
++                47,
++                true,
++                crate::ProcessTransport {
++                    quarter_note_position: f64::INFINITY,
++                    ..transport
++                },
++            ),
++            (
++                47,
++                true,
++                crate::ProcessTransport {
++                    time_sig_numerator: 0,
++                    ..transport
++                },
++            ),
++            (
++                47,
++                true,
++                crate::ProcessTransport {
++                    time_sig_denominator: 3,
++                    ..transport
++                },
++            ),
++        ];
++        for (index, (frames, processing, transport)) in cases.into_iter().enumerate() {
++            let fake = FakeHelper::reset_replies(
++                &format!("reset_preflight_{index}"),
++                &reset_support(47, processing),
++                &reset_report(47),
++            );
++            let mut plugin = isolated(&fake);
++            let events = seed_reset_prior_state(&mut plugin, index % 2 == 0);
++            assert!(plugin.process_reset_origin(frames, transport).is_err());
++            assert_reset_prior_state(&plugin, &events, index % 2 == 0);
++            assert_reset_requests(&fake, None);
++        }
++    }
++
++    #[test]
++    fn reset_origin_wire_ceiling_is_rejected_before_any_request_or_local_mutation() {
++        for frames in [(1 << 20) + 1, usize::MAX] {
++            let fake = FakeHelper::reset_replies(
++                "reset_wire_ceiling",
++                &reset_support(u32::MAX, true),
++                &reset_report(47),
++            );
++            let mut plugin = isolated(&fake);
++            let events = seed_reset_prior_state(&mut plugin, true);
++            assert!(plugin
++                .process_reset_origin(frames, reset_transport())
++                .unwrap_err()
++                .to_string()
++                .contains("wire limit"));
++            assert!(fake.requests().is_empty());
++            assert_reset_prior_state(&plugin, &events, true);
++        }
++    }
++
++    #[test]
++    fn reset_origin_exact_reports_preserve_counts_loss_and_attempt_errors_without_extra_commands() {
++        for (index, (frames, prior_loss, helper_loss, parameter_fault, process_error)) in [
++            (17, false, false, false, None),
++            (47, true, false, false, None),
++            (47, false, true, false, None),
++            (17, false, false, true, None),
++            (
++                47,
++                false,
++                false,
++                false,
++                Some("controlled processor rejection".to_owned()),
++            ),
++        ]
++        .into_iter()
++        .enumerate()
++        {
++            let helper_report = crate::ResetOriginReport {
++                frames,
++                discarded_prior_midi_events: 3,
++                discarded_midi_events: 4,
++                discarded_prior_parameter_points: 5,
++                discarded_parameter_points: 6,
++                output_events_lost: helper_loss,
++                parameter_output_fault: parameter_fault,
++                process_error: process_error.clone(),
++            };
++            let fake = FakeHelper::reset_replies(
++                &format!("reset_exact_{index}"),
++                &reset_support(frames, true),
++                &HostResponse::ResetOriginReport {
++                    report: helper_report.clone(),
++                },
++            );
++            let mut plugin = isolated(&fake);
++            seed_reset_prior_state(&mut plugin, prior_loss);
++            let report = plugin
++                .process_reset_origin(frames as usize, reset_transport())
++                .unwrap();
++            assert_eq!(
++                report,
++                crate::ResetOriginReport {
++                    discarded_prior_midi_events: 5,
++                    output_events_lost: prior_loss || helper_loss,
++                    ..helper_report
++                }
++            );
++            assert_eq!(
++                report.ensure_success().is_ok(),
++                !(prior_loss || helper_loss || parameter_fault || process_error.is_some())
++            );
++            assert!(plugin.take_output_events().is_empty());
++            assert_eq!(
++                plugin.take_output_events_with_loss(),
++                (vec![], prior_loss || helper_loss)
++            );
++            assert_eq!(plugin.process_transport, Some(reset_transport()));
++            assert!(!plugin.is_playing);
++            assert_eq!(plugin.tempo, reset_transport().tempo);
++            assert_eq!(
++                plugin.time_sig_numerator,
++                reset_transport().time_sig_numerator
++            );
++            assert_eq!(
++                plugin.time_sig_denominator,
++                reset_transport().time_sig_denominator
++            );
++            assert_eq!(plugin.recovery_count(), 0);
++            assert_reset_requests(&fake, Some(frames));
++        }
++    }
++
++    #[test]
++    fn reset_origin_explicit_helper_preflight_error_retains_the_old_local_epoch() {
++        let fake = FakeHelper::reset_replies(
++            "reset_helper_preflight",
++            &reset_support(47, true),
++            &HostResponse::Error {
++                message: "configuration changed before reset preflight".into(),
++            },
++        );
++        let mut plugin = isolated(&fake);
++        let events = seed_reset_prior_state(&mut plugin, true);
++        assert!(plugin.process_reset_origin(47, reset_transport()).is_err());
++        assert_reset_prior_state(&plugin, &events, true);
++        assert_reset_requests(&fake, Some(47));
++    }
++
++    #[test]
++    fn reset_origin_helper_death_never_recovers_and_only_dispatch_invalidates_local_midi() {
++        let support = format!(
++            "printf '%s\\n' '{}'",
++            serde_json::to_string(&reset_support(47, true)).unwrap()
++        );
++        for die_on_support in [true, false] {
++            let fake = FakeHelper::reset_actions(
++                "reset_helper_death",
++                if die_on_support { "exit 0" } else { &support },
++                "exit 0",
++            );
++            let mut plugin = isolated(&fake);
++            let events = seed_reset_prior_state(&mut plugin, false);
++            let result = plugin.process_reset_origin(47, reset_transport());
++            if die_on_support {
++                assert!(result.is_err());
++                assert_reset_prior_state(&plugin, &events, false);
++                assert_reset_requests(&fake, None);
++            } else {
++                let report = result.unwrap();
++                assert_eq!(report.frames, 47);
++                assert_eq!(report.discarded_prior_midi_events, 2);
++                assert!(report.output_events_lost);
++                assert!(report
++                    .process_error
++                    .as_deref()
++                    .unwrap()
++                    .contains("exchange failed"));
++                assert!(report.ensure_success().is_err());
++                assert!(plugin.take_output_events().is_empty());
++                assert_eq!(plugin.take_output_events_with_loss(), (vec![], true));
++                assert_eq!(plugin.recovery_count(), 0);
++                assert_reset_requests(&fake, Some(47));
++            }
++        }
++    }
++
++    #[test]
++    fn reset_origin_uncertain_responses_discard_stale_midi_and_never_claim_success() {
++        let support = format!(
++            "printf '%s\\n' '{}'",
++            serde_json::to_string(&reset_support(47, true)).unwrap()
++        );
++        let wrong_frames = HostResponse::ResetOriginReport {
++            report: crate::ResetOriginReport {
++                frames: 17,
++                discarded_midi_events: 99,
++                parameter_output_fault: true,
++                ..Default::default()
++            },
++        };
++        let wrong_frames = format!(
++            "printf '%s\\n' '{}'",
++            serde_json::to_string(&wrong_frames).unwrap()
++        );
++        for (index, process_action) in [
++            wrong_frames.as_str(),
++            "printf '%s\\n' '{\"Success\":{\"message\":\"unrelated reply\"}}'",
++            "printf '%s\\n' '{\"AudioOutput\":{\"outputs\":[],\"output_events\":[]}}'",
++            "printf '%s\\n' '{\"ResetOriginReport\":{\"report\":'; exit 0",
++        ]
++        .into_iter()
++        .enumerate()
++        {
++            let fake = FakeHelper::reset_actions(
++                &format!("reset_uncertain_{index}"),
++                &support,
++                process_action,
++            );
++            let mut plugin = isolated(&fake);
++            seed_reset_prior_state(&mut plugin, index % 2 == 0);
++            let report = plugin.process_reset_origin(47, reset_transport()).unwrap();
++            assert_eq!(report.frames, 47);
++            assert_eq!(report.discarded_prior_midi_events, 2);
++            assert_eq!(
++                report.discarded_midi_events, 0,
++                "unacknowledged remote counts must not claim this request"
++            );
++            assert_eq!(report.parameter_output_fault, index == 0);
++            assert!(report.output_events_lost);
++            assert!(report
++                .process_error
++                .as_deref()
++                .unwrap()
++                .contains("uncertain"));
++            assert!(report.ensure_success().is_err());
++            assert!(plugin.take_output_events().is_empty());
++            assert_eq!(plugin.take_output_events_with_loss(), (vec![], true));
++            assert_eq!(
++                plugin.process_transport.unwrap().sample_position,
++                12_345,
++                "uncertainty must not claim transport acknowledgment"
++            );
++            assert_eq!(plugin.recovery_count(), 0);
++            assert_reset_requests(&fake, Some(47));
++        }
++    }
++
++    #[test]
++    fn reset_origin_timeout_is_a_loss_marked_report_without_retry() {
++        let support = format!(
++            "printf '%s\\n' '{}'",
++            serde_json::to_string(&reset_support(47, true)).unwrap()
++        );
++        let fake = FakeHelper::reset_actions("reset_timeout", &support, "exec sleep 60");
++        let mut plugin = isolated(&fake);
++        seed_reset_prior_state(&mut plugin, false);
++        plugin
++            .process
++            .lock()
++            .unwrap()
++            .set_timeout(Duration::from_secs(2));
++        let report = plugin.process_reset_origin(47, reset_transport()).unwrap();
++        assert_eq!(report.frames, 47);
++        assert_eq!(report.discarded_prior_midi_events, 2);
++        assert!(report.output_events_lost);
++        assert!(report
++            .process_error
++            .as_deref()
++            .unwrap()
++            .contains("exchange failed"));
++        assert!(report.ensure_success().is_err());
++        assert!(plugin.take_output_events().is_empty());
++        assert_eq!(plugin.take_output_events_with_loss(), (vec![], true));
++        assert_eq!(plugin.recovery_count(), 0);
++        assert_reset_requests(&fake, Some(47));
++    }
++
++    #[test]
++    fn reset_origin_discards_poisoned_local_midi_with_loss_evidence() {
++        let fake = FakeHelper::reset_replies(
++            "reset_poisoned_output",
++            &reset_support(47, true),
++            &reset_report(47),
++        );
++        let mut plugin = isolated(&fake);
++        seed_reset_prior_state(&mut plugin, false);
++        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let _guard = plugin.output_events.lock().unwrap();
++            panic!("controlled poison for reset-origin output fixture");
++        }));
++        let report = plugin.process_reset_origin(47, reset_transport()).unwrap();
++        assert_eq!(report.discarded_prior_midi_events, 2);
++        assert!(report.output_events_lost);
++        assert!(report.ensure_success().is_err());
++        assert!(plugin
++            .output_events
++            .get_mut()
++            .unwrap_err()
++            .into_inner()
++            .is_empty());
++        assert_eq!(plugin.take_output_events_with_loss(), (vec![], true));
++        assert_reset_requests(&fake, Some(47));
++    }
++
++    #[test]
 +    fn checked_native_revision_retains_the_full_integer_and_rejects_bad_replies() {
 +        let fake = FakeHelper::native_reply(
 +            "native_revision",
@@ -5409,10 +6033,9 @@
 +        );
 +    }
 +
-+    #[test]
+     #[test]
      fn recovery_replays_the_current_transport_state_not_the_load_time_one() {
          let fake = FakeHelper::new("transport");
-         let mut plugin = isolated(&fake);
 --- a/src/internal/mod.rs
 +++ b/src/internal/mod.rs
 @@ -9,3 +9,7 @@
@@ -6651,7 +7274,7 @@
 +}
 --- a/src/internal/plugin_impl.rs
 +++ b/src/internal/plugin_impl.rs
-@@ -1,5 +1,10 @@
+@@ -1,18 +1,26 @@
  //! Internal VST3 plugin implementation
  
 +use super::data_exchange::DataExchangeProcessGate;
@@ -6662,7 +7285,14 @@
  use crate::{
      audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
      error::{Error, Result},
-@@ -12,7 +17,10 @@
+     midi::{MidiChannel, MidiEvent, PluginEvent},
+     parameters::{Parameter, ParameterChange},
+     plugin::{
+-        decode_state_snapshot, encode_state_snapshot, PluginInfo, PluginInternal, StateContext,
+-        StateSnapshot,
++        decode_state_snapshot, encode_state_snapshot, PluginInfo, PluginInternal,
++        ResetOriginReport, ResetOriginSupport, StateContext, StateSnapshot,
+     },
  };
  use crossbeam_queue::ArrayQueue;
  use std::ptr;
@@ -7667,8 +8297,11 @@
      /// Process exactly `frames` samples starting at `frame_offset` within the caller's
      /// buffers. `frames` is always <= the configured `block_size`, which is what the plugin
      /// was set up to accept; `process` splits a larger caller block into successive chunks.
-@@ -2072,12 +2220,14 @@
+@@ -2070,14 +2218,18 @@
+     /// [`stage_chunk_events`]); queued parameter changes are selected the same way here, by the
+     /// chunk their offset falls in. `is_last` marks the chunk that absorbs anything scheduled
      /// past the end of the caller's block.
++    #[allow(clippy::too_many_arguments)]
      fn process_chunk(
          &mut self,
 +        processor: &mut ProcessorLease<'_>,
@@ -7677,13 +8310,14 @@
          frame_offset: usize,
          frames: usize,
          is_last: bool,
++        mut reset_report: Option<&mut ResetOriginReport>,
      ) -> Result<()> {
 -        let result = if let Some(ref mut data) = self.process_data {
 +        if let Some(ref mut data) = self.process_data {
              unsafe {
                  // Clear output events only - input events should be preserved for processing
                  self.output_events.clear();
-@@ -2089,7 +2239,14 @@
+@@ -2089,7 +2241,14 @@
                  // Without this, addParameterData()/addPoint() would keep appending to queues
                  // from prior blocks, mixing stale points into new ones, growing point storage
                  // unbounded, and risking a reallocation on the audio thread long after warm-up.
@@ -7699,10 +8333,12 @@
  
                  // VST3 allows numSamples to vary up to the maximum given to setupProcessing; the
                  // caller's block may be shorter (BufferSize::Default gives variable sizes) or, if
-@@ -2105,41 +2262,37 @@
+@@ -2103,43 +2262,43 @@
+                 // got in `stage_chunk_events`, so automation and MIDI stay aligned across a
+                 // split block.
                  for pc in &self.pending_param_changes {
-                     if let Some(off) = chunk_offset(pc.sample_offset, frame_offset, frames, is_last)
-                     {
+-                    if let Some(off) = chunk_offset(pc.sample_offset, frame_offset, frames, is_last)
+-                    {
 -                        data.input_param_changes.enqueue(pc.id, off, pc.value);
 -                    }
 -                }
@@ -7736,6 +8372,12 @@
 -                            } else {
 -                                gui_changes.clear();
 -                            }
++                    if let Some(off) = chunk_offset(
++                        pc.sample_offset,
++                        frame_offset,
++                        if reset_report.is_some() { 1 } else { frames },
++                        is_last,
++                    ) {
 +                        if data
 +                            .input_param_changes
 +                            .try_enqueue(pc.id, off, pc.value)
@@ -7770,7 +8412,7 @@
                  }
  
                  match buffers {
-@@ -2175,10 +2328,15 @@
+@@ -2175,10 +2334,15 @@
                  // A zero-sample flush carries events/parameter queues only. The VST3 process
                  // contract requires no audio buses or pointers for that call.
                  let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
@@ -7789,7 +8431,7 @@
  
                  // Everything from here to the output copy is per-block cleanup and MUST run even
                  // when the plugin reported failure. Returning early instead would leave this
-@@ -2194,25 +2352,37 @@
+@@ -2194,25 +2358,41 @@
                      &mut data.process_context,
                      data.process_context_requirements,
                      data.transport_tempo,
@@ -7817,9 +8459,14 @@
 +                let output_visit_failed = data
 +                    .output_param_changes
                      .for_each_active_point(|id, _offset, value| {
-                         feedback.force_push((id, value));
+-                        feedback.force_push((id, value));
 -                    });
 -                data.output_param_changes.clear_all();
++                        if let Some(report) = reset_report.as_deref_mut() {
++                            report.discarded_parameter_points += 1;
++                        } else {
++                            feedback.force_push((id, value));
++                        }
 +                    })
 +                    .is_err();
 +                if output_visit_failed || data.output_param_changes.failure().is_some() {
@@ -7831,12 +8478,16 @@
  
                  // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
                  // Drain the event list in place (no `mem::take`) and push each converted event
-@@ -2221,11 +2391,20 @@
+@@ -2221,11 +2401,24 @@
                  if !self.output_events.is_empty() {
                      let out = &self.output_events_owned;
                      self.output_events.drain_each(|event| {
 -                        out.force_push(event);
-+                        push_output_event(out, &self.output_events_lost, event);
++                        if let Some(report) = reset_report.as_deref_mut() {
++                            report.discarded_midi_events += 1;
++                        } else {
++                            push_output_event(out, &self.output_events_lost, event);
++                        }
                      });
                  }
  
@@ -7854,7 +8505,7 @@
                      // Leave the caller's buffers as they were (the playback bridges pre-fill them
                      // with silence) rather than copying out whatever the failed call left behind.
                      Err(Error::ProcessFailed(process_result))
-@@ -2258,9 +2437,7 @@
+@@ -2258,9 +2451,7 @@
              }
          } else {
              Err(Error::Other("Process data not initialized".to_string()))
@@ -7865,7 +8516,7 @@
      }
  
      /// Distribute the block's queued input events over its chunks and process each one.
-@@ -2268,7 +2445,13 @@
+@@ -2268,7 +2459,13 @@
      /// `total` is the caller's block length, already known non-zero by the caller; the empty
      /// block is handled separately (some plugins use a zero-sample call to flush pending
      /// parameter changes).
@@ -7880,16 +8531,99 @@
          // `.max(1)`: a zero block size would make every chunk empty and never advance `offset`,
          // spinning forever on the audio thread. `Vst3HostBuilder::build` rejects 0, but
          // `block_size` is plain state and this loop must terminate regardless.
-@@ -2284,7 +2467,7 @@
+@@ -2284,10 +2481,90 @@
                  frames,
                  is_last,
              );
 -            self.process_chunk(buffers, offset, frames, is_last)?;
-+            self.process_chunk(processor, gate, buffers, offset, frames, is_last)?;
++            self.process_chunk(processor, gate, buffers, offset, frames, is_last, None)?;
              offset += frames;
          }
          Ok(())
-@@ -2360,8 +2543,32 @@
++    }
++
++    /// Private reset-only sink. It never reads controller/native display feedback and never
++    /// acknowledges a sticky loss flag by clearing it. The epoch owns no previous output.
++    fn discard_prior_reset_output(&mut self, report: &mut ResetOriginReport) {
++        while self.output_events_owned.pop().is_some() {
++            report.discarded_prior_midi_events += 1;
++        }
++        self.output_events
++            .drain_each(|_| report.discarded_prior_midi_events += 1);
++        if self.output_events.take_loss() {
++            self.output_events_lost.store(true, Ordering::Release);
++        }
++        while self.output_param_feedback.pop().is_some() {
++            report.discarded_prior_parameter_points += 1;
++        }
++        if let Some(data) = &mut self.process_data {
++            if data
++                .output_param_changes
++                .for_each_active_point(|_, _, _| {
++                    report.discarded_prior_parameter_points += 1;
++                })
++                .is_err()
++                || data.output_param_changes.failure().is_some()
++            {
++                self.parameter_output_fault.store(true, Ordering::Release);
++            }
++            if data.output_param_changes.clear_all().is_err() {
++                self.parameter_output_fault.store(true, Ordering::Release);
++            }
++        }
++        report.output_events_lost = self.output_events_lost.load(Ordering::Acquire);
++        report.parameter_output_fault = self.observe_parameter_output_fault();
++    }
++
++    fn process_reset_origin(
++        &mut self,
++        processor: &mut ProcessorLease<'_>,
++        gate: &mut DataExchangeProcessGate<'_>,
++        buffers: &mut CallerAudioBuffers<'_>,
++        frames: usize,
++    ) -> ResetOriginReport {
++        let mut report = ResetOriginReport {
++            frames: frames as u32,
++            ..ResetOriginReport::default()
++        };
++        self.discard_prior_reset_output(&mut report);
++        // Existing poison cannot become a clean reset acknowledgment. Do not consume input
++        // or manufacture native acknowledgments when no SDK call can take place.
++        if report.parameter_output_fault {
++            report.process_error = Some(Error::ParameterOutputRejected.to_string());
++            return report;
++        }
++        let _denormal = crate::internal::denormal::DenormalGuard::new();
++        // One complete origin-only block needs no chunk transfer. Rebase under one checked
++        // guard, preserving FIFO, owned payloads and the admission budget. A poison race after
++        // the public preflight must still fail before native staging or any SDK call.
++        let staging_failed = match self.input_events.events.lock() {
++            Ok(mut events) => {
++                for event in events.iter_mut() {
++                    event.sample_offset = 0;
++                }
++                false
++            }
++            Err(_) => true,
++        };
++        if staging_failed {
++            report.process_error = Some(Error::EventInputRejected.to_string());
++            return report;
++        }
++        let result =
++            self.process_chunk(processor, gate, buffers, 0, frames, true, Some(&mut report));
++        self.chunk_events.clear();
++        self.pending_param_changes.clear();
++        // process_chunk performs output validation/cleanup even after a failed SDK call.
++        // Early admission errors emit no output; retain all previously observed loss too.
++        report.output_events_lost |= self.output_events_lost.load(Ordering::Acquire);
++        report.parameter_output_fault |= self.observe_parameter_output_fault();
++        report.process_error = result.err().map(|error| error.to_string());
++        report
+     }
+ 
+     fn current_audio_bus_layout(&self) -> Result<AudioBusLayout> {
+@@ -2360,8 +2637,32 @@
          )
      }
  
@@ -7924,19 +8658,19 @@
              return Err(Error::NotProcessing);
          }
  
-@@ -2371,9 +2578,9 @@
+@@ -2371,9 +2672,9 @@
  
          let result = if total == 0 {
              stage_chunk_events(&mut self.chunk_events, &self.input_events, 0, 0, true);
 -            self.process_chunk(buffers, 0, 0, true)
-+            self.process_chunk(processor, gate, buffers, 0, 0, true)
++            self.process_chunk(processor, gate, buffers, 0, 0, true, None)
          } else {
 -            self.process_chunks(buffers, total)
 +            self.process_chunks(processor, gate, buffers, total)
          };
  
          self.chunk_events.clear();
-@@ -2382,13 +2589,27 @@
+@@ -2382,13 +2683,27 @@
      }
  }
  
@@ -7965,7 +8699,7 @@
              return Err(Error::InterfaceError("No controller available".to_string()));
          }
          // VST3 requires both halves: the controller (for GUI/display/formatting) and the
-@@ -2403,26 +2624,12 @@
+@@ -2403,26 +2718,12 @@
          value: f64,
          sample_offset: i32,
      ) -> Result<()> {
@@ -7997,7 +8731,7 @@
              id,
              value,
              sample_offset,
-@@ -2430,6 +2637,10 @@
+@@ -2430,6 +2731,10 @@
          Ok(())
      }
  
@@ -8008,7 +8742,7 @@
      fn set_tempo(&mut self, bpm: f64) -> Result<()> {
          self.update_tempo(bpm);
          Ok(())
-@@ -2447,7 +2658,7 @@
+@@ -2447,7 +2752,7 @@
  
      fn get_parameter(&self, id: u32) -> Result<f64> {
          self.drain_deferred_controller_sync();
@@ -8017,7 +8751,7 @@
              unsafe { Ok(controller.getParamNormalized(id)) }
          } else {
              Err(Error::InterfaceError("No controller available".to_string()))
-@@ -2458,7 +2669,7 @@
+@@ -2458,7 +2763,7 @@
          self.drain_deferred_controller_sync();
          let mut params = Vec::new();
  
@@ -8026,7 +8760,7 @@
              unsafe {
                  let count = controller.getParameterCount();
  
-@@ -2495,7 +2706,7 @@
+@@ -2495,7 +2800,7 @@
  
      fn format_parameter(&self, id: u32, normalized: f64) -> Result<String> {
          self.drain_deferred_controller_sync();
@@ -8035,9 +8769,67 @@
              unsafe {
                  let mut buf: String128 = std::mem::zeroed();
                  if controller.getParamStringByValue(id, normalized, &mut buf) == kResultOk {
-@@ -2515,38 +2726,37 @@
+@@ -2514,39 +2819,95 @@
+         self.process_buffer_view(&mut CallerAudioBuffers::Flat(buffers))
      }
  
++    fn reset_origin_support(&self) -> Result<ResetOriginSupport> {
++        // No note tracker is required for a queued owned event. A poisoned input list must
++        // fail before panic even when panic itself would enqueue no native note releases.
++        if self.runtime.input_events.events.is_poisoned() {
++            return Err(Error::EventInputRejected);
++        }
++        // Pure refusal before panic can consume note obligations. Observe, but do not clear
++        // or promote, even poison that has not yet reached the runtime's sticky flag.
++        if self.runtime.parameter_output_fault.load(Ordering::Acquire)
++            || self
++                .runtime
++                .process_data
++                .as_ref()
++                .is_some_and(|data| data.output_param_changes.failure().is_some())
++        {
++            return Err(Error::ParameterOutputRejected);
++        }
++        Ok(ResetOriginSupport {
++            contract_version: 1,
++            max_block_frames: u32::try_from(self.runtime.block_size).unwrap_or(u32::MAX),
++            processing: self.control.is_active
++                && self.runtime.is_processing
++                && self.runtime.process_data.is_some(),
++        })
++    }
++
++    fn process_reset_origin(
++        &mut self,
++        frames: usize,
++        transport: crate::plugin::ProcessTransport,
++    ) -> Result<ResetOriginReport> {
++        self.reset_origin_support()?.validate(frames, transport)?;
++        // Allocate silent worker-owned scratch only after pure validation, before mutation.
++        // Use already-prepared bus storage, with no metadata/controller query on this path.
++        let data = self
++            .runtime
++            .process_data
++            .as_ref()
++            .ok_or(Error::NotProcessing)?;
++        let mut buffers = AudioBuffers::new(
++            data.sample_buffers.input_channel_count(),
++            data.sample_buffers.output_channel_count(),
++            frames,
++            self.runtime.sample_rate,
++        );
++        self.set_process_transport(transport)?;
++        let mut processor =
++            ProcessorLease::new(&mut self.control.processor, self.control._module.as_ref());
++        let mut gate = self.control._host_app.data_exchange_process_gate();
++        Ok(self.runtime.process_reset_origin(
++            &mut processor,
++            &mut gate,
++            &mut CallerAudioBuffers::Flat(&mut buffers),
++            frames,
++        ))
++    }
++
      fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
 -        self.current_audio_bus_layout()
 +        self.runtime.current_audio_bus_layout()
@@ -8089,7 +8881,7 @@
              return Err(e);
          }
  
-@@ -2558,20 +2768,20 @@
+@@ -2558,20 +2919,20 @@
                      result
                  )));
              }
@@ -8113,7 +8905,7 @@
                  Some(value)
                      if value == ePrefetchableSupport_::kIsNeverPrefetchable as u32
                          || value == ePrefetchableSupport_::kIsNotYetPrefetchable as u32 =>
-@@ -2587,19 +2797,18 @@
+@@ -2587,19 +2948,18 @@
              }
          }
          // VST3 requires the component inactive for setupProcessing; mirror reconfigure.
@@ -8138,7 +8930,7 @@
              return Err(e);
          }
  
-@@ -2611,7 +2820,7 @@
+@@ -2611,7 +2971,7 @@
                      result
                  )));
              }
@@ -8147,7 +8939,7 @@
          }
          Ok(())
      }
-@@ -2620,11 +2829,11 @@
+@@ -2620,11 +2980,11 @@
          use crate::audio::SpeakerArrangement;
          unsafe {
              let read = |dir: i32| -> Vec<SpeakerArrangement> {
@@ -8161,7 +8953,7 @@
                          SpeakerArrangement::from_raw(arr)
                      })
                      .collect()
-@@ -2641,7 +2850,7 @@
+@@ -2641,7 +3001,7 @@
          inputs: &[crate::audio::SpeakerArrangement],
          outputs: &[crate::audio::SpeakerArrangement],
      ) -> Result<()> {
@@ -8170,7 +8962,7 @@
              return Err(Error::Other(
                  "cannot set bus arrangements while processing".to_string(),
              ));
-@@ -2650,32 +2859,30 @@
+@@ -2650,32 +3010,30 @@
          let mut out_raw: Vec<u64> = outputs.iter().map(|a| a.raw()).collect();
          unsafe {
              // VST3 requires the component inactive for setBusArrangements + setupProcessing.
@@ -8212,7 +9004,7 @@
                  return Err(Error::InterfaceError(format!(
                      "setBusArrangements failed: {arrangement_result:#x}"
                  )));
-@@ -2691,7 +2898,7 @@
+@@ -2691,7 +3049,7 @@
                          result
                      )));
                  }
@@ -8221,7 +9013,7 @@
              }
          }
          Ok(())
-@@ -2705,7 +2912,7 @@
+@@ -2705,7 +3063,7 @@
          active: bool,
      ) -> Result<()> {
          use crate::audio::{BusDirection, MediaType};
@@ -8230,7 +9022,7 @@
              return Err(Error::Other(
                  "cannot activate a bus while processing".to_string(),
              ));
-@@ -2720,7 +2927,7 @@
+@@ -2720,7 +3078,7 @@
              BusDirection::Output => kOutput as i32,
          };
          unsafe {
@@ -8239,7 +9031,7 @@
              if bus_index < 0 || bus_index >= count {
                  return Err(Error::InvalidParameter(format!(
                      "bus index {bus_index} out of range for {media_type:?} {direction:?} \
-@@ -2728,35 +2935,35 @@
+@@ -2728,35 +3086,35 @@
                  )));
              }
  
@@ -8283,7 +9075,7 @@
                      self.create_process_data()
                  } else {
                      Ok(())
-@@ -2775,7 +2982,7 @@
+@@ -2775,7 +3133,7 @@
                          "Failed to reactivate after set_bus_active: {reactivate:#x}"
                      )));
                  }
@@ -8292,7 +9084,7 @@
              }
  
              update_result?;
-@@ -2791,6 +2998,7 @@
+@@ -2791,6 +3149,7 @@
          // Floor to non-negative (the VST3 SDK treats a negative sampleOffset as undefined);
          // `process()` additionally clamps queued offsets to the actual block length.
          let sample_offset = sample_offset.max(0);
@@ -8300,7 +9092,7 @@
          unsafe {
              let mut vst_event: Event = std::mem::zeroed();
              vst_event.busIndex = 0;
-@@ -2806,11 +3014,14 @@
+@@ -2806,11 +3165,14 @@
                  } => {
                      let index = channel.as_index() as usize * 128 + note as usize;
                      let released = write_midi_note_on(&mut vst_event, channel, note, velocity);
@@ -8318,7 +9110,7 @@
                  }
                  MidiEvent::NoteOff {
                      channel,
-@@ -2818,8 +3029,10 @@
+@@ -2818,8 +3180,10 @@
                      velocity,
                  } => {
                      let index = channel.as_index() as usize * 128 + note as usize;
@@ -8331,7 +9123,7 @@
                      write_note_off_event(&mut vst_event, channel, note, velocity);
                  }
                  MidiEvent::ControlChange {
-@@ -2889,70 +3102,41 @@
+@@ -2889,70 +3253,41 @@
                  }
              }
  
@@ -8428,7 +9220,7 @@
      }
  
      fn has_editor(&self) -> bool {
-@@ -2963,12 +3147,12 @@
+@@ -2963,12 +3298,12 @@
  
          // An open editor is proof enough, and probing for a second view while one is attached
          // upsets plugins that assume a single live view.
@@ -8443,7 +9235,7 @@
              unsafe {
                  // Check if controller can create an editor view
                  let view_type = c"editor".as_ptr();
-@@ -2989,7 +3173,7 @@
+@@ -2989,7 +3324,7 @@
      }
  
      fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()> {
@@ -8452,7 +9244,7 @@
              return Err(Error::Other("Editor already open".to_string()));
          }
          if parent.is_null() {
-@@ -2998,7 +3182,22 @@
+@@ -2998,7 +3333,22 @@
              ));
          }
  
@@ -8476,7 +9268,7 @@
              unsafe {
                  // Create editor view
                  let view_type = c"editor".as_ptr();
-@@ -3025,9 +3224,13 @@
+@@ -3025,9 +3375,13 @@
  
                  // Hand the plugin an IPlugFrame (before attach, per the SDK) so it can
                  // request host-side resizes; requests land in `editor_resize`.
@@ -8493,7 +9285,7 @@
                  let frame_result = view.setFrame(frame.as_ptr());
                  if frame_result != kResultOk && frame_result != kResultTrue {
                      return Err(Error::Other(format!(
-@@ -3037,7 +3240,7 @@
+@@ -3037,7 +3391,7 @@
  
                  // Offer the current scale factor, but never let the answer decide whether the
                  // editor opens: a view that declines simply renders at its own scale.
@@ -8502,7 +9294,7 @@
  
                  // Platform-specific attachment
                  #[cfg(target_os = "macos")]
-@@ -3075,7 +3278,7 @@
+@@ -3075,7 +3429,7 @@
  
                  #[cfg(not(target_os = "android"))]
                  {
@@ -8511,7 +9303,7 @@
                      Ok(())
                  }
              }
-@@ -3086,7 +3289,7 @@
+@@ -3086,7 +3440,7 @@
  
      fn close_editor(&mut self) -> Result<()> {
          let mut close_error = None;
@@ -8520,7 +9312,7 @@
              unsafe {
                  let removed_result = view.removed();
                  // Break the view -> host-frame reference before releasing the view. The frame
-@@ -3109,63 +3312,29 @@
+@@ -3109,63 +3463,29 @@
          // `Plugin::service_run_loop` is public with no editor-open guard, a host driving it from
          // its frame loop would then dispatch straight into the removed view.
          #[cfg(target_os = "linux")]
@@ -8598,7 +9390,7 @@
              unsafe {
                  let mut view_rect = ViewRect {
                      left: 0,
-@@ -3180,7 +3349,7 @@
+@@ -3180,7 +3500,7 @@
              }
          }
  
@@ -8607,7 +9399,7 @@
              unsafe {
                  // Create a temporary view to get size
                  let view_type = c"editor".as_ptr();
-@@ -3220,11 +3389,11 @@
+@@ -3220,11 +3540,11 @@
  
      fn editor_can_resize(&self) -> bool {
          unsafe {
@@ -8621,7 +9413,7 @@
                  return false;
              };
              let view_ptr = controller.createView(c"editor".as_ptr());
-@@ -3236,76 +3405,7 @@
+@@ -3236,76 +3556,7 @@
      }
  
      fn resize_editor(&mut self, width: i32, height: i32) -> Result<(i32, i32)> {
@@ -8699,7 +9491,7 @@
      }
  
      fn set_editor_scale_factor(&mut self, factor: f32) -> Result<bool> {
-@@ -3314,11 +3414,11 @@
+@@ -3314,11 +3565,11 @@
                  "editor scale factor must be finite and greater than zero".to_string(),
              ));
          }
@@ -8713,7 +9505,7 @@
          Ok(supported)
      }
  
-@@ -3328,49 +3428,62 @@
+@@ -3328,49 +3579,62 @@
  
      fn take_parameter_edits(&mut self) -> Vec<crate::plugin::ParameterEdit> {
          self.service_control_thread_caches();
@@ -8782,7 +9574,7 @@
              .as_ref()
              .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?
              .dismiss_context_menu(menu_id)
-@@ -3378,6 +3491,7 @@
+@@ -3378,6 +3642,7 @@
  
      fn take_restart_flags(&mut self) -> crate::plugin::RestartFlags {
          let flags = self
@@ -8790,7 +9582,7 @@
              .component_handler
              .as_ref()
              .map(|h| h.take_restart_flags())
-@@ -3387,19 +3501,19 @@
+@@ -3387,19 +3652,19 @@
          // main-thread-domain controller calls (the MIDI map alone is buses × 16 × 130 of them).
          // So record what went stale and let the control thread rebuild.
          if bits & RestartFlags_::kMidiCCAssignmentChanged != 0 {
@@ -8814,7 +9606,7 @@
              return Err(Error::Other(
                  "restart requests must be serviced on the plugin control thread".to_string(),
              ));
-@@ -3411,37 +3525,39 @@
+@@ -3411,37 +3676,39 @@
          }
  
          unsafe {
@@ -8863,7 +9655,7 @@
                          self.negotiate_default_bus_arrangements()
                              .and_then(|()| self.setup_processing())
                      }
-@@ -3451,12 +3567,16 @@
+@@ -3451,12 +3718,16 @@
                  Ok(())
              };
  
@@ -8882,7 +9674,7 @@
                      Ok(())
                  } else {
                      Err(Error::Other(format!(
-@@ -3476,39 +3596,43 @@
+@@ -3476,39 +3747,43 @@
      }
  
      fn take_output_events(&self) -> Vec<PluginEvent> {
@@ -8937,7 +9729,7 @@
      }
  
      fn note_on(
-@@ -3518,58 +3642,11 @@
+@@ -3518,58 +3793,11 @@
          velocity: u8,
          sample_offset: i32,
      ) -> Result<crate::midi::NoteId> {
@@ -8998,7 +9790,7 @@
      }
  
      fn send_note_expression(
-@@ -3579,18 +3656,8 @@
+@@ -3579,18 +3807,8 @@
          value: f64,
          sample_offset: i32,
      ) -> Result<()> {
@@ -9019,7 +9811,7 @@
      }
  
      fn note_expressions(
-@@ -3600,6 +3667,7 @@
+@@ -3600,6 +3818,7 @@
      ) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
          use crate::midi::{NoteExpressionInfo, NoteExpressionType};
          let Some(ctrl) = self
@@ -9027,7 +9819,7 @@
              .controller
              .as_ref()
              .and_then(|c| c.cast::<INoteExpressionController>())
-@@ -3635,12 +3703,13 @@
+@@ -3635,12 +3854,13 @@
  
      fn get_units(&self) -> Result<Vec<crate::plugin::PluginUnit>> {
          use crate::plugin::PluginUnit;
@@ -9042,7 +9834,7 @@
              .unit_cache
              .lock()
              .unwrap_or_else(|poison| poison.into_inner())
-@@ -3649,7 +3718,7 @@
+@@ -3649,7 +3869,7 @@
          {
              return Ok(units);
          }
@@ -9051,7 +9843,7 @@
              return Ok(Vec::new());
          };
          // IUnitInfo is optional; plugins without it (no units/program lists) return empty.
-@@ -3696,6 +3765,7 @@
+@@ -3696,6 +3916,7 @@
                  });
              }
              *self
@@ -9059,7 +9851,7 @@
                  .unit_cache
                  .lock()
                  .unwrap_or_else(|poison| poison.into_inner()) = Some(units.clone());
-@@ -3706,7 +3776,7 @@
+@@ -3706,7 +3927,7 @@
      fn select_program(&mut self, unit_id: i32, program_index: i32) -> Result<()> {
          self.service_control_thread_caches();
          if self.cached_program_change(unit_id).is_none()
@@ -9068,7 +9860,7 @@
          {
              self.refresh_program_change_cache();
          }
-@@ -3736,12 +3806,13 @@
+@@ -3736,12 +3957,13 @@
      }
  
      fn selected_unit(&self) -> Result<Option<i32>> {
@@ -9083,7 +9875,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3753,12 +3824,13 @@
+@@ -3753,12 +3975,13 @@
      }
  
      fn select_unit(&mut self, unit_id: i32) -> Result<()> {
@@ -9098,7 +9890,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3783,12 +3855,13 @@
+@@ -3783,12 +4006,13 @@
                  "program index must be non-negative, got {program_index}"
              )));
          }
@@ -9113,7 +9905,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3831,6 +3904,7 @@
+@@ -3831,6 +4055,7 @@
          }
          self.ensure_control_thread("program data read")?;
          let Some(data_interface) = self
@@ -9121,7 +9913,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IProgramListData>())
-@@ -3871,6 +3945,7 @@
+@@ -3871,6 +4096,7 @@
          self.ensure_stream_size(data)?;
          self.ensure_control_thread("program data restore")?;
          let data_interface = self
@@ -9129,7 +9921,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IProgramListData>())
-@@ -3895,6 +3970,7 @@
+@@ -3895,6 +4121,7 @@
                  data_interface.setProgramData(program_list_id, program_index, stream_ptr.as_ptr());
              if result == kResultOk {
                  *self
@@ -9137,7 +9929,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -3911,6 +3987,7 @@
+@@ -3911,6 +4138,7 @@
      fn get_unit_data(&self, unit_id: i32) -> Result<Option<Vec<u8>>> {
          self.ensure_control_thread("unit data read")?;
          let Some(data_interface) = self
@@ -9145,7 +9937,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitData>())
-@@ -3940,6 +4017,7 @@
+@@ -3940,6 +4168,7 @@
          self.ensure_stream_size(data)?;
          self.ensure_control_thread("unit data restore")?;
          let data_interface = self
@@ -9153,7 +9945,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitData>())
-@@ -3961,6 +4039,7 @@
+@@ -3961,6 +4190,7 @@
              let result = data_interface.setUnitData(unit_id, stream_ptr.as_ptr());
              if result == kResultOk {
                  *self
@@ -9161,7 +9953,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -3977,6 +4056,7 @@
+@@ -3977,6 +4207,7 @@
      fn begin_host_edit(&mut self, parameter_id: u32) -> Result<()> {
          self.ensure_control_thread("host edit begin")?;
          let editing = self
@@ -9169,7 +9961,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
-@@ -3992,6 +4072,7 @@
+@@ -3992,6 +4223,7 @@
      fn end_host_edit(&mut self, parameter_id: u32) -> Result<()> {
          self.ensure_control_thread("host edit end")?;
          let editing = self
@@ -9177,7 +9969,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
-@@ -4012,6 +4093,7 @@
+@@ -4012,6 +4244,7 @@
          }
          self.ensure_control_thread("MIDI learn notification")?;
          let midi_learn = self
@@ -9185,7 +9977,7 @@
              .controller
              .as_ref()
              .and_then(|edit_controller| edit_controller.cast::<IMidiLearn>())
-@@ -4026,6 +4108,7 @@
+@@ -4026,6 +4259,7 @@
          use crate::plugin::AutomationState;
          self.ensure_control_thread("automation state update")?;
          let automation = self
@@ -9193,7 +9985,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IAutomationState>())
-@@ -4052,6 +4135,7 @@
+@@ -4052,6 +4286,7 @@
          })?;
          self.ensure_control_thread("parameter id remapping")?;
          let Some(remapper) = self
@@ -9201,7 +9993,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IRemapParamID>())
-@@ -4075,8 +4159,11 @@
+@@ -4075,8 +4310,11 @@
      }
  
      fn midi_panic(&mut self) -> Result<()> {
@@ -9215,7 +10007,7 @@
              unsafe {
                  let mut event: Event = std::mem::zeroed();
                  event.busIndex = 0;
-@@ -4086,30 +4173,46 @@
+@@ -4086,30 +4324,46 @@
                  event.__field0.noteOff.noteId = note_id;
                  event.__field0.noteOff.channel = channel;
                  event.__field0.noteOff.pitch = pitch;
@@ -9286,7 +10078,7 @@
          }
  
          // Also route the standard panic controllers through IMidiMapping for plugins that
-@@ -4126,11 +4229,20 @@
+@@ -4126,11 +4380,20 @@
      }
  
      fn output_channel_count(&self) -> usize {
@@ -9308,7 +10100,7 @@
                      .bus_activation
                      .audio_outputs
                      .get(i as usize)
-@@ -4141,6 +4253,7 @@
+@@ -4141,6 +4404,7 @@
                  }
                  let mut info: BusInfo = std::mem::zeroed();
                  if self
@@ -9316,7 +10108,7 @@
                      .component
                      .getBusInfo(kAudio as i32, kOutput as i32, i, &mut info)
                      == kResultOk
-@@ -4149,6 +4262,7 @@
+@@ -4149,6 +4413,7 @@
                  } else {
                      let mut arrangement = 0u64;
                      if self
@@ -9324,7 +10116,7 @@
                          .processor
                          .getBusArrangement(kOutput as i32, i, &mut arrangement)
                          == kResultOk
-@@ -4162,14 +4276,23 @@
+@@ -4162,14 +4427,23 @@
      }
  
      fn save_state(&self) -> Result<Vec<u8>> {
@@ -9349,7 +10141,7 @@
              if result != kResultOk {
                  return Err(Error::Other(format!(
                      "Plugin does not provide state (getState: {result:#x})"
-@@ -4180,8 +4303,11 @@
+@@ -4180,8 +4454,11 @@
              // its state returns the blob above a second time: the envelope would carry the same
              // bytes twice, the combined size cap would effectively halve, and `load_state` would
              // apply `setState` twice. `load_state` has the matching guard.
@@ -9363,7 +10155,7 @@
              {
                  let stream = create_memory_stream_with_metadata(None, StreamStateType::Project);
                  let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
-@@ -4201,56 +4327,82 @@
+@@ -4201,56 +4478,82 @@
                  None
              };
  
@@ -9461,7 +10253,7 @@
                          let stream =
                              create_state_restore_stream(snapshot.component.clone(), context);
                          let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
-@@ -4268,9 +4420,13 @@
+@@ -4268,9 +4571,13 @@
                      }
                  }
  
@@ -9478,7 +10270,7 @@
                      let stream = create_state_restore_stream(controller_state.clone(), context);
                      let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                          Error::InterfaceError("Failed to create controller state stream".into())
-@@ -4283,11 +4439,27 @@
+@@ -4283,11 +4590,27 @@
                      }
                  }
  
@@ -9509,7 +10301,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -4297,17 +4469,25 @@
+@@ -4297,17 +4620,25 @@
              })();
  
              let restore_result = (|| -> Result<()> {
@@ -9537,7 +10329,7 @@
                  }
                  Ok(())
              })();
-@@ -4405,43 +4585,72 @@
+@@ -4405,43 +4736,72 @@
          // Rebuild the table here if a restart invalidated it off-thread; a no-op on the audio
          // thread, which must never make controller calls.
          self.service_control_thread_caches();
@@ -9636,7 +10428,7 @@
          })
      }
  
-@@ -4576,7 +4785,7 @@
+@@ -4576,7 +4936,7 @@
  /// still fail — and by then the plugin may have spawned threads and registered callbacks.
  /// Releasing its interfaces and unloading the module without `terminate()` leaves that code
  /// running inside memory the unload is about to unmap. This guard runs the same sequence
@@ -9645,7 +10437,7 @@
  ///
  /// It holds its own references (COM refcounts), so `load` keeps using the originals as it
  /// builds; the extra references are released when the guard drops either way.
-@@ -4617,8 +4826,10 @@
+@@ -4617,8 +4977,10 @@
          self.connection.take()
      }
  
@@ -9658,7 +10450,7 @@
          self.armed = false;
      }
  }
-@@ -4681,21 +4892,23 @@
+@@ -4681,21 +5043,23 @@
          let _ = PluginInternal::close_editor(self);
  
          let _ = self.stop_processing();
@@ -9689,7 +10481,7 @@
      }
  }
  
-@@ -4776,18 +4989,53 @@
+@@ -4776,18 +5140,53 @@
          .unwrap_or_default()
  }
  
@@ -9746,7 +10538,7 @@
      if process_context_needs(requirements, R::kNeedContinousTimeSamples as u32) {
          ctx.continousTimeSamples = ctx.continousTimeSamples.wrapping_add(frames);
      }
-@@ -4798,17 +5046,82 @@
+@@ -4798,17 +5197,82 @@
          let nanos = (frames as f64 * 1_000_000_000.0 / ctx.sampleRate).round() as i64;
          ctx.systemTime = ctx.systemTime.saturating_add(nanos);
      }
@@ -9833,7 +10625,7 @@
  
      fn buses(channels: &[i32]) -> Vec<AudioBusBuffers> {
          channels
-@@ -5053,7 +5366,7 @@
+@@ -5053,7 +5517,7 @@
          // One second of audio at 48 kHz in 512-sample blocks.
          let blocks = 48_000 / 512;
          for _ in 0..blocks {
@@ -9842,7 +10634,7 @@
          }
          let advanced = (blocks * 512) as i64;
          assert_eq!(ctx.projectTimeSamples, advanced);
-@@ -5448,3 +5761,256 @@
+@@ -5448,3 +5912,256 @@
          assert_eq!(calls.load(Ordering::SeqCst), 0);
      }
  }
@@ -10422,7 +11214,7 @@
 +}
 --- /dev/null
 +++ b/src/internal/plugin_impl/domain_tests.rs
-@@ -0,0 +1,2612 @@
+@@ -0,0 +1,3242 @@
 +//! Synchronous ownership/lifecycle regression tests using real VST3 COM interfaces.
 +//! These mocks intentionally allocate and lock; these are not real-time-safety tests.
 +
@@ -10565,7 +11357,17 @@
 +    }
 +}
 +
++#[derive(Debug, Clone, PartialEq)]
++struct OriginCall {
++    frames: i32,
++    events: Vec<(u16, i32, i16)>,
++    transport: Option<(u32, i64, f64, i64, i64)>,
++    silent_input: bool,
++}
++
 +struct MockState {
++    capture_origin: AtomicBool,
++    origin_calls: Mutex<Vec<OriginCall>>,
 +    output_buses: AtomicI32,
 +    channels: AtomicI32,
 +    expand_on_state: AtomicBool,
@@ -10578,6 +11380,7 @@
 +    processed_parameters: Mutex<Vec<Vec<(u32, i32, f64)>>>,
 +    capture_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 +    process_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
++    process_entry_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 +    fail_state: AtomicBool,
 +    no_alloc_process: AtomicBool,
 +    realtime_calls: AtomicUsize,
@@ -10592,6 +11395,8 @@
 +impl Default for MockState {
 +    fn default() -> Self {
 +        Self {
++            capture_origin: AtomicBool::new(false),
++            origin_calls: Mutex::new(Vec::new()),
 +            output_buses: AtomicI32::new(1),
 +            channels: AtomicI32::new(1),
 +            expand_on_state: AtomicBool::new(false),
@@ -10604,6 +11409,7 @@
 +            processed_parameters: Mutex::new(Vec::new()),
 +            capture_callback: Mutex::new(None),
 +            process_callback: Mutex::new(None),
++            process_entry_callback: Mutex::new(None),
 +            fail_state: AtomicBool::new(false),
 +            no_alloc_process: AtomicBool::new(false),
 +            realtime_calls: AtomicUsize::new(0),
@@ -10880,10 +11686,62 @@
 +            };
 +        }
 +        self.probe.record("process");
++        if let Some(callback) = self.state.process_entry_callback.lock().unwrap().as_ref() {
++            callback();
++        }
 +        if self.state.fail_process.load(Ordering::Acquire) {
 +            return kResultFalse;
 +        }
 +        let data = &mut *data;
++        if self.state.capture_origin.load(Ordering::Acquire) {
++            let mut events = Vec::new();
++            if let Some(list) = vst3::ComRef::from_raw(data.inputEvents) {
++                for index in 0..list.getEventCount() {
++                    let mut event: Event = std::mem::zeroed();
++                    assert_eq!(list.getEvent(index, &mut event), kResultOk);
++                    let pitch = if event.r#type == kNoteOnEvent as u16 {
++                        event.__field0.noteOn.pitch
++                    } else if event.r#type == kNoteOffEvent as u16 {
++                        event.__field0.noteOff.pitch
++                    } else {
++                        -1
++                    };
++                    events.push((event.r#type, event.sampleOffset, pitch));
++                }
++            }
++            let context = data.processContext.as_ref().map(|c| {
++                (
++                    c.state,
++                    c.projectTimeSamples,
++                    c.projectTimeMusic,
++                    c.continousTimeSamples,
++                    c.systemTime,
++                )
++            });
++            let mut silent_input = true;
++            let input_buses = if data.numInputs > 0 {
++                std::slice::from_raw_parts(data.inputs, data.numInputs as usize)
++            } else {
++                &[]
++            };
++            for bus in input_buses {
++                for channel in 0..bus.numChannels.max(0) as usize {
++                    let samples = *bus.__field0.channelBuffers32.add(channel);
++                    if !samples.is_null() {
++                        silent_input &=
++                            std::slice::from_raw_parts(samples, data.numSamples.max(0) as usize)
++                                .iter()
++                                .all(|sample| *sample == 0.0);
++                    }
++                }
++            }
++            self.state.origin_calls.lock().unwrap().push(OriginCall {
++                frames: data.numSamples,
++                events,
++                transport: context,
++                silent_input,
++            });
++        }
 +        let mut parameters = Vec::new();
 +        if let Some(changes) = vst3::ComRef::from_raw(data.inputParameterChanges) {
 +            for index in 0..changes.getParameterCount() {
@@ -13035,6 +13893,570 @@
 +}
 +
 +mod session_tests;
++
++fn reset_transport() -> crate::plugin::ProcessTransport {
++    crate::plugin::ProcessTransport {
++        sample_position: 12_345,
++        quarter_note_position: 9.25,
++        tempo: 123.0,
++        playing: false,
++        time_sig_numerator: 7,
++        time_sig_denominator: 8,
++    }
++}
++
++fn reset_fixture(maximum: usize) -> (PluginImpl, Arc<MockState>, Trace) {
++    let trace = Trace::default();
++    let state = Arc::new(MockState::default());
++    state.capture_origin.store(true, Ordering::Release);
++    let mut plugin = plugin_fixture(&trace, &state);
++    plugin.set_audio_config(48_000.0, maximum);
++    use IProcessContextRequirements_::Flags_ as R;
++    plugin.runtime.process_context_requirements = Some(
++        (R::kNeedSystemTime
++            | R::kNeedContinousTimeSamples
++            | R::kNeedProjectTimeMusic
++            | R::kNeedTempo
++            | R::kNeedTimeSignature) as u32,
++    );
++    plugin.start_processing().unwrap();
++    (plugin, state, trace)
++}
++
++fn queue_future_reset_inputs(plugin: &mut PluginImpl) {
++    let channel = MidiChannel::from_index(0).unwrap();
++    plugin.runtime.midi_mapping_cache = MidiMappingCache {
++        buses: 1,
++        assignments: vec![None; MIDI_CHANNEL_COUNT * MIDI_CONTROLLER_COUNT],
++    };
++    plugin.runtime.midi_mapping_cache.assignments[64] = Some(77);
++    for (index, offset) in [0, 1, 64, 127, 2048].into_iter().enumerate() {
++        plugin
++            .send_midi_event_at(
++                MidiEvent::NoteOn {
++                    channel,
++                    note: 60 + index as u8,
++                    velocity: 100,
++                },
++                offset,
++            )
++            .unwrap();
++        plugin
++            .send_midi_event_at(
++                MidiEvent::ControlChange {
++                    channel,
++                    controller: 64,
++                    value: 127,
++                },
++                offset,
++            )
++            .unwrap();
++    }
++    // Same mapping/sustain ordering as an already queued CC followed by the worker's safety CC.
++    plugin
++        .send_midi_event_at(
++            MidiEvent::ControlChange {
++                channel,
++                controller: 64,
++                value: 0,
++            },
++            0,
++        )
++        .unwrap();
++    plugin.midi_panic().unwrap();
++}
++
++#[test]
++fn reset_origin_matches_old_one_frame_event_and_parameter_order_without_changing_normal_process() {
++    let (mut old, old_state, _) = reset_fixture(128);
++    let (mut reset, reset_state, _) = reset_fixture(128);
++    let (mut ordinary, ordinary_state, _) = reset_fixture(128);
++    for plugin in [&mut old, &mut reset, &mut ordinary] {
++        queue_future_reset_inputs(plugin);
++    }
++    old.set_process_transport(reset_transport()).unwrap();
++    old.process(&mut AudioBuffers::new(1, 1, 1, 48_000.0))
++        .unwrap();
++    let report = reset.process_reset_origin(128, reset_transport()).unwrap();
++    report.ensure_success().unwrap();
++    ordinary
++        .process(&mut AudioBuffers::new(1, 1, 128, 48_000.0))
++        .unwrap();
++    let old_calls = old_state.origin_calls.lock().unwrap();
++    let reset_calls = reset_state.origin_calls.lock().unwrap();
++    assert_eq!(old_calls[0].events, reset_calls[0].events);
++    assert_eq!(old_calls[0].frames, 1);
++    assert_eq!(reset_calls[0].frames, 128);
++    assert!(reset_calls[0].silent_input);
++    assert!(reset_calls[0].events.iter().all(|event| event.1 == 0));
++    assert_eq!(reset_calls[0].events.len(), 10);
++    assert!(reset_calls[0].events[..5]
++        .iter()
++        .all(|event| event.0 == kNoteOnEvent as u16));
++    assert!(reset_calls[0].events[5..]
++        .iter()
++        .all(|event| event.0 == kNoteOffEvent as u16));
++    assert_eq!(
++        *old_state.processed_parameters.lock().unwrap(),
++        *reset_state.processed_parameters.lock().unwrap()
++    );
++    assert_eq!(
++        reset_state.processed_parameters.lock().unwrap()[0].last(),
++        Some(&(77, 0, 0.0))
++    );
++    assert!(ordinary_state.origin_calls.lock().unwrap()[0]
++        .events
++        .iter()
++        .any(|event| event.1 == 64));
++    assert!(ordinary_state.processed_parameters.lock().unwrap()[0]
++        .iter()
++        .any(|point| point.1 == 64));
++    assert!(reset.runtime.input_events.is_empty());
++    assert!(reset.runtime.pending_param_changes.is_empty());
++    assert!(reset
++        .runtime
++        .ordinary_note_counts
++        .iter()
++        .all(|count| *count == 0));
++}
++
++#[test]
++fn reset_origin_stops_project_time_but_advances_continuous_time_and_next_transport_is_authoritative(
++) {
++    let (mut plugin, state, _) = reset_fixture(128);
++    plugin
++        .process_reset_origin(128, reset_transport())
++        .unwrap()
++        .ensure_success()
++        .unwrap();
++    let context = state.origin_calls.lock().unwrap()[0].transport.unwrap();
++    assert_eq!(
++        context.0 & ProcessContext_::StatesAndFlags_::kPlaying as u32,
++        0
++    );
++    assert_eq!((context.1, context.2), (12_345, 9.25));
++    let after = &plugin
++        .runtime
++        .process_data
++        .as_ref()
++        .unwrap()
++        .process_context;
++    assert_eq!(
++        (after.projectTimeSamples, after.projectTimeMusic),
++        (12_345, 9.25)
++    );
++    assert_eq!(after.continousTimeSamples, context.3 + 128);
++    assert_eq!(
++        after.systemTime,
++        context.4 + (128.0_f64 / 48_000.0 * 1_000_000_000.0).round() as i64
++    );
++    assert_eq!(plugin.runtime.process_transport, Some(reset_transport()));
++    let next = crate::plugin::ProcessTransport {
++        sample_position: 48_000,
++        quarter_note_position: 64.0,
++        playing: true,
++        ..reset_transport()
++    };
++    plugin.set_process_transport(next).unwrap();
++    plugin
++        .process(&mut AudioBuffers::new(1, 1, 128, 48_000.0))
++        .unwrap();
++    let calls = state.origin_calls.lock().unwrap();
++    assert_eq!(
++        (calls[1].transport.unwrap().1, calls[1].transport.unwrap().2),
++        (48_000, 64.0)
++    );
++}
++
++#[test]
++fn reset_origin_preflight_rejects_without_mutation_and_standalone_small_blocks_remain_supported() {
++    for maximum in [17, 47, 127, 128, 2048] {
++        let (mut plugin, state, trace) = reset_fixture(maximum);
++        plugin.set_process_transport(reset_transport()).unwrap();
++        plugin.queue_processor_parameter_at(7, 0.75, 64).unwrap();
++        plugin
++            .send_midi_event_at(
++                MidiEvent::NoteOn {
++                    channel: MidiChannel::from_index(0).unwrap(),
++                    note: 60,
++                    velocity: 100,
++                },
++                64,
++            )
++            .unwrap();
++        trace.clear();
++        let before = plugin.runtime.process_transport;
++        for (frames, transport) in [
++            (0, reset_transport()),
++            (maximum + 1, reset_transport()),
++            (
++                1,
++                crate::plugin::ProcessTransport {
++                    playing: true,
++                    ..reset_transport()
++                },
++            ),
++            (
++                1,
++                crate::plugin::ProcessTransport {
++                    tempo: f64::NAN,
++                    ..reset_transport()
++                },
++            ),
++        ] {
++            assert!(plugin.process_reset_origin(frames, transport).is_err());
++            assert!(trace.calls().is_empty());
++            assert_eq!(plugin.runtime.process_transport, before);
++            assert_eq!(plugin.runtime.pending_param_changes.len(), 1);
++            assert_eq!(plugin.runtime.ordinary_note_counts[60], 1);
++            assert_eq!(
++                plugin.runtime.input_events.events.lock().unwrap()[0].sample_offset,
++                64
++            );
++        }
++        // No vendor-wide minimum: ordinary processing and an in-range explicit reset work.
++        plugin
++            .process(&mut AudioBuffers::new(1, 1, maximum, 48_000.0))
++            .unwrap();
++        plugin
++            .process_reset_origin(maximum, reset_transport())
++            .unwrap()
++            .ensure_success()
++            .unwrap();
++        assert_eq!(state.origin_calls.lock().unwrap().len(), 2);
++    }
++}
++
++#[test]
++fn reset_origin_discards_only_processor_outputs_and_retains_native_display_feedback() {
++    let (mut plugin, state, _) = reset_fixture(128);
++    state.no_alloc_process.store(true, Ordering::Release);
++    state.output_points.store(2, Ordering::Release);
++    state.output_event_attempts.store(3, Ordering::Release);
++    plugin
++        .runtime
++        .output_param_feedback
++        .push((99, 0.125))
++        .unwrap();
++    plugin
++        .runtime
++        .output_events_owned
++        .push(admission_scalar_event())
++        .unwrap();
++    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
++    assert_eq!(unsafe { handler.performEdit(42, 0.25) }, kResultOk);
++    let report = plugin.process_reset_origin(128, reset_transport()).unwrap();
++    report.ensure_success().unwrap();
++    assert_eq!(
++        (
++            report.discarded_prior_midi_events,
++            report.discarded_midi_events
++        ),
++        (1, 3)
++    );
++    assert_eq!(
++        (
++            report.discarded_prior_parameter_points,
++            report.discarded_parameter_points
++        ),
++        (1, 2)
++    );
++    assert!(plugin.runtime.output_events_owned.is_empty());
++    assert!(plugin.runtime.output_param_feedback.is_empty());
++    assert_eq!(plugin.take_output_events_with_loss(), (Vec::new(), false));
++    assert_eq!(plugin.get_parameter_changes(), vec![(42, 0.25)]);
++    let native = handler.native_edits.snapshot();
++    assert_eq!((native.submitted, native.applied), (1, 1));
++}
++
++#[test]
++fn reset_origin_preserves_output_loss_and_parameter_poison_without_falsifying_native_ack() {
++    for (events, parameters, fail_sdk) in [(4097, 0, false), (0, 8193, false), (3, 2, true)] {
++        let (mut plugin, state, _) = reset_fixture(128);
++        state.no_alloc_process.store(true, Ordering::Release);
++        state.output_points.store(parameters, Ordering::Release);
++        state.output_event_attempts.store(events, Ordering::Release);
++        state.fail_process.store(fail_sdk, Ordering::Release);
++        let handler = plugin.control.component_handler.as_ref().unwrap().clone();
++        assert_eq!(unsafe { handler.performEdit(42, 0.25) }, kResultOk);
++        let report = plugin.process_reset_origin(128, reset_transport()).unwrap();
++        assert!(report.ensure_success().is_err());
++        let native = handler.native_edits.snapshot();
++        assert_eq!(native.submitted, 1);
++        assert_eq!(native.applied, u64::from(!fail_sdk));
++        assert!(plugin.runtime.output_events_owned.is_empty());
++        assert!(plugin.runtime.output_param_feedback.is_empty());
++        if events > 4096 {
++            assert!(report.output_events_lost);
++            assert!(plugin.runtime.output_events_lost.load(Ordering::Acquire));
++            state.output_event_attempts.store(0, Ordering::Release);
++            let again = plugin.process_reset_origin(128, reset_transport()).unwrap();
++            assert!(again.output_events_lost);
++            assert!(again.ensure_success().is_err());
++        }
++        if parameters > 8192 {
++            assert!(report.parameter_output_fault);
++            assert!(plugin
++                .runtime
++                .parameter_output_fault
++                .load(Ordering::Acquire));
++            let calls = state.realtime_calls.load(Ordering::Acquire);
++            assert!(matches!(
++                plugin.process_reset_origin(128, reset_transport()),
++                Err(Error::ParameterOutputRejected)
++            ));
++            assert_eq!(state.realtime_calls.load(Ordering::Acquire), calls);
++        }
++        if fail_sdk {
++            assert!(report.process_error.is_some());
++        }
++    }
++}
++
++#[test]
++fn reset_origin_prior_loss_cannot_be_consumed_into_success() {
++    let (mut plugin, _, _) = reset_fixture(128);
++    plugin
++        .runtime
++        .output_events_lost
++        .store(true, Ordering::Release);
++    let report = plugin.process_reset_origin(128, reset_transport()).unwrap();
++    assert!(report.output_events_lost);
++    assert!(report.ensure_success().is_err());
++    assert!(plugin.runtime.output_events_lost.load(Ordering::Acquire));
++}
++
++#[test]
++fn reset_origin_partial_panic_rejection_never_processes_or_forges_cleanup() {
++    let (mut plugin, state, trace) = reset_fixture(128);
++    plugin.runtime.active_notes = vec![(11, 0, 60), (12, 0, 61), (13, 0, 62)];
++    fill_admission_queue(&mut plugin, MAX_QUEUED_EVENTS - 2);
++    trace.clear();
++    plugin
++        .reset_origin_support()
++        .unwrap()
++        .validate(128, reset_transport())
++        .unwrap();
++    let result = plugin
++        .midi_panic()
++        .and_then(|_| plugin.process_reset_origin(128, reset_transport()));
++    assert!(matches!(result, Err(Error::EventInputRejected)));
++    assert!(state.origin_calls.lock().unwrap().is_empty());
++    assert!(trace.calls().is_empty());
++    assert_eq!(plugin.runtime.active_notes, [(13, 0, 62)]);
++    assert_eq!(queued_note_releases(&plugin), [(11, 0, 60), (12, 0, 61)]);
++}
++
++#[test]
++fn reset_origin_known_parameter_poison_refuses_before_transport_queue_or_panic_mutation() {
++    for runtime_poison in [true, false] {
++        let (mut plugin, state, trace) = reset_fixture(128);
++        queue_future_reset_inputs(&mut plugin);
++        let before_params = plugin.runtime.pending_param_changes.clone();
++        let before_events = plugin.runtime.input_events.events.lock().unwrap().len();
++        if runtime_poison {
++            plugin
++                .runtime
++                .parameter_output_fault
++                .store(true, Ordering::Release);
++        } else {
++            let points = &plugin
++                .runtime
++                .process_data
++                .as_ref()
++                .unwrap()
++                .output_param_changes;
++            for point in 0..4096 {
++                points.try_enqueue(1, point, 0.5).unwrap();
++            }
++            assert!(points.try_enqueue(1, 4096, 0.5).is_err());
++        }
++        trace.clear();
++        assert!(matches!(
++            plugin.reset_origin_support(),
++            Err(Error::ParameterOutputRejected)
++        ));
++        assert!(matches!(
++            plugin.process_reset_origin(128, reset_transport()),
++            Err(Error::ParameterOutputRejected)
++        ));
++        assert!(trace.calls().is_empty());
++        assert!(state.origin_calls.lock().unwrap().is_empty());
++        assert!(plugin.runtime.process_transport.is_none());
++        assert_eq!(
++            plugin.runtime.input_events.events.lock().unwrap().len(),
++            before_events
++        );
++        assert_eq!(
++            plugin.runtime.pending_param_changes.len(),
++            before_params.len()
++        );
++    }
++}
++
++#[test]
++fn reset_origin_counts_prior_raw_processor_points_before_clearing_them() {
++    let (mut plugin, _, _) = reset_fixture(128);
++    plugin
++        .runtime
++        .process_data
++        .as_ref()
++        .unwrap()
++        .output_param_changes
++        .try_enqueue(77, 64, 0.5)
++        .unwrap();
++    let report = plugin.process_reset_origin(128, reset_transport()).unwrap();
++    report.ensure_success().unwrap();
++    assert_eq!(report.discarded_prior_parameter_points, 1);
++    assert!(plugin.get_parameter_changes().is_empty());
++}
++
++#[test]
++fn reset_origin_poisoned_owned_input_with_no_notes_refuses_without_false_native_ack() {
++    let (mut plugin, state, trace) = reset_fixture(128);
++    let event = PluginEvent::sysex(vec![0xf0, 1, 2, 0xf7]);
++    plugin.send_plugin_event(event.clone()).unwrap();
++    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
++    assert_eq!(unsafe { handler.performEdit(42, 0.25) }, kResultOk);
++    let native_before = handler.native_edits.snapshot();
++    assert!(plugin.runtime.active_notes.is_empty());
++    assert!(plugin
++        .runtime
++        .ordinary_note_counts
++        .iter()
++        .all(|count| *count == 0));
++    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++        let _guard = plugin.runtime.input_events.events.lock().unwrap();
++        panic!("deliberately poison pending owned reset input");
++    }));
++    trace.clear();
++    assert!(matches!(
++        plugin.reset_origin_support(),
++        Err(Error::EventInputRejected)
++    ));
++    assert!(matches!(
++        plugin.process_reset_origin(128, reset_transport()),
++        Err(Error::EventInputRejected)
++    ));
++    assert!(trace.calls().is_empty());
++    assert!(state.origin_calls.lock().unwrap().is_empty());
++    assert_eq!(handler.native_edits.snapshot(), native_before);
++    assert!(plugin.runtime.process_transport.is_none());
++    assert_eq!(
++        *plugin
++            .runtime
++            .input_events
++            .events
++            .lock()
++            .unwrap_err()
++            .into_inner(),
++        vec![event]
++    );
++    assert_eq!(plugin.get_parameter_changes(), vec![(42, 0.25)]);
++}
++
++#[test]
++fn reset_origin_defensive_staging_poison_fails_after_preflight_without_sdk_or_native_ack() {
++    let (mut plugin, state, trace) = reset_fixture(128);
++    plugin
++        .send_plugin_event(PluginEvent::sysex(vec![0xf0, 3, 0xf7]))
++        .unwrap();
++    plugin.queue_processor_parameter_at(77, 0.75, 64).unwrap();
++    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
++    assert_eq!(unsafe { handler.performEdit(42, 0.25) }, kResultOk);
++    let before = handler.native_edits.snapshot();
++    plugin
++        .reset_origin_support()
++        .unwrap()
++        .validate(128, reset_transport())
++        .unwrap();
++    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++        let _guard = plugin.runtime.input_events.events.lock().unwrap();
++        panic!("poison after reset preflight");
++    }));
++    trace.clear();
++    // Exercise the actual defensive private stage, after the successful public preflight.
++    let mut processor = ProcessorLease::new(
++        &mut plugin.control.processor,
++        plugin.control._module.as_ref(),
++    );
++    let mut gate = plugin.control._host_app.data_exchange_process_gate();
++    let mut audio = AudioBuffers::new(0, 1, 128, 48_000.0);
++    let report = plugin.runtime.process_reset_origin(
++        &mut processor,
++        &mut gate,
++        &mut CallerAudioBuffers::Flat(&mut audio),
++        128,
++    );
++    assert!(report.ensure_success().is_err());
++    assert!(report.process_error.unwrap().contains("event"));
++    assert!(state.origin_calls.lock().unwrap().is_empty());
++    assert!(trace.calls().is_empty());
++    assert_eq!(handler.native_edits.snapshot(), before);
++    assert_eq!(plugin.runtime.pending_param_changes[0].sample_offset, 64);
++    assert_eq!(
++        plugin
++            .runtime
++            .input_events
++            .events
++            .lock()
++            .unwrap_err()
++            .into_inner()
++            .len(),
++        1
++    );
++}
++
++#[test]
++fn combined_reset_gate_is_sdk_scoped_on_success_sdk_error_and_staging_failure() {
++    for mode in 0..3 {
++        let (mut plugin, state, _) = reset_fixture(128);
++        let host = plugin.control._host_app.clone();
++        let callback_host = host.clone();
++        let calls = Arc::new(AtomicUsize::new(0));
++        let callback_calls = calls.clone();
++        let observed_active = Arc::new(AtomicBool::new(false));
++        let callback_active = observed_active.clone();
++        *state.process_entry_callback.lock().unwrap() = Some(Box::new(move || {
++            callback_calls.fetch_add(1, Ordering::Relaxed);
++            callback_active.store(
++                callback_host.is_data_exchange_in_process_for_test(),
++                Ordering::Release,
++            );
++        }));
++        assert!(!host.is_data_exchange_in_process_for_test());
++        state.fail_process.store(mode == 1, Ordering::Release);
++        let report = if mode == 2 {
++            plugin
++                .reset_origin_support()
++                .unwrap()
++                .validate(128, reset_transport())
++                .unwrap();
++            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++                let _guard = plugin.runtime.input_events.events.lock().unwrap();
++                panic!("combined reset staging poison after pure preflight");
++            }));
++            let mut processor = ProcessorLease::new(
++                &mut plugin.control.processor,
++                plugin.control._module.as_ref(),
++            );
++            let mut gate = plugin.control._host_app.data_exchange_process_gate();
++            let mut audio = AudioBuffers::new(0, 1, 128, 48_000.0);
++            plugin.runtime.process_reset_origin(
++                &mut processor,
++                &mut gate,
++                &mut CallerAudioBuffers::Flat(&mut audio),
++                128,
++            )
++        } else {
++            plugin.process_reset_origin(128, reset_transport()).unwrap()
++        };
++        assert_eq!(report.ensure_success().is_ok(), mode == 0);
++        assert_eq!(calls.load(Ordering::Acquire), usize::from(mode != 2));
++        assert_eq!(observed_active.load(Ordering::Acquire), mode != 2);
++        assert!(!host.is_data_exchange_in_process_for_test());
++    }
++}
 --- /dev/null
 +++ b/src/internal/plugin_impl/domain_tests/session_tests.rs
 @@ -0,0 +1,377 @@
@@ -13481,19 +14903,22 @@
 +}
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -111,8 +111,9 @@
+@@ -111,9 +111,11 @@
      RtAudioHandle,
  };
  pub use plugin::{
 -    AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification, OutputMidiConsumer,
 -    ParameterEdit, ParameterEditKind, Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode,
+-    ProgramPitchName, ProgressKind, ProgressValue, RestartFlags, StateContext, WindowHandle,
 +    AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification, IsolatedEditorCommand,
 +    IsolatedEditorOwner, IsolatedEditorState, MainThreadPlugin, OutputMidiConsumer, ParameterEdit,
 +    ParameterEditKind, Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode, ProcessTransport,
-     ProgramPitchName, ProgressKind, ProgressValue, RestartFlags, StateContext, WindowHandle,
++    ProgramPitchName, ProgressKind, ProgressValue, ResetOriginReport, ResetOriginSupport,
++    RestartFlags, StateContext, WindowHandle,
  };
  pub use realtime::{RealtimePluginRunner, RtControl};
-@@ -142,8 +143,8 @@
+ pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
+@@ -142,8 +144,8 @@
          plugin::{
              AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification,
              OutputEventConsumer, OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin,
@@ -13506,7 +14931,7 @@
          window::PluginWindow,
 --- a/src/plugin.rs
 +++ b/src/plugin.rs
-@@ -704,6 +704,53 @@
+@@ -704,6 +704,126 @@
      Offline,
  }
  
@@ -13557,10 +14982,83 @@
 +    }
 +}
 +
++/// Versioned, read-only support for owner-only stopped reset-origin processing.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++pub struct ResetOriginSupport {
++    /// Exact contract version; callers must reject unknown versions.
++    pub contract_version: u32,
++    /// Current configured processing maximum, not a required minimum block size.
++    pub max_block_frames: u32,
++    /// Whether prepared, active processing is currently available.
++    pub processing: bool,
++}
++
++impl ResetOriginSupport {
++    /// Pure validation. Call before panic, transport mutation or lifecycle operations.
++    pub fn validate(self, frames: usize, transport: ProcessTransport) -> Result<()> {
++        transport.validate()?;
++        if self.contract_version != 1 || frames == 0 || frames > self.max_block_frames as usize {
++            return Err(Error::InvalidParameter(
++                "unsupported reset-origin contract or frame count".into(),
++            ));
++        }
++        if transport.playing {
++            return Err(Error::InvalidParameter(
++                "reset-origin transport must be stopped".into(),
++            ));
++        }
++        if !self.processing {
++            return Err(Error::NotProcessing);
++        }
++        Ok(())
++    }
++}
++
++/// Value-free acknowledgment of one stopped reset-origin processing attempt.
++///
++/// Prior undrained processor output is invalidated as old-epoch data. Native editor/display
++/// feedback is never drained by this operation. Loss remains sticky in the instance, and is
++/// reported here even when it predates this attempt. A report is not success until checked.
++#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++pub struct ResetOriginReport {
++    /// Requested positive silent frame count.
++    pub frames: u32,
++    /// Old-epoch processor MIDI discarded before processing.
++    pub discarded_prior_midi_events: u64,
++    /// Processor MIDI discarded from this attempt.
++    pub discarded_midi_events: u64,
++    /// Old-epoch processor parameter feedback discarded before processing.
++    pub discarded_prior_parameter_points: u64,
++    /// Processor parameter feedback discarded from this attempt.
++    pub discarded_parameter_points: u64,
++    /// Sticky MIDI output loss, including earlier undrained loss.
++    pub output_events_lost: bool,
++    /// Sticky processor output-parameter failure.
++    pub parameter_output_fault: bool,
++    /// Processing/admission error after validation, if any. No automatic retry is safe.
++    pub process_error: Option<String>,
++}
++
++impl ResetOriginReport {
++    /// Refuse to treat a discarded/lost output or failed SDK call as successful cleanup.
++    pub fn ensure_success(&self) -> Result<()> {
++        if self.parameter_output_fault {
++            return Err(Error::ParameterOutputRejected);
++        }
++        if self.output_events_lost {
++            return Err(Error::ProcessError("reset-origin MIDI output loss".into()));
++        }
++        if let Some(message) = &self.process_error {
++            return Err(Error::ProcessError(format!("reset-origin: {message}")));
++        }
++        Ok(())
++    }
++}
++
  /// VST3 plugin instance
  #[allow(clippy::type_complexity)] // callback fields are Box<dyn Fn...>; intrinsic to the API
  pub struct Plugin {
-@@ -723,8 +770,550 @@
+@@ -723,8 +843,562 @@
      pub(crate) internal: Option<Box<dyn PluginInternal>>,
  }
  
@@ -13922,6 +15420,18 @@
 +    pub fn process_audio(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
 +        self.plugin.process_audio(buffers)
 +    }
++    /// Main-thread equivalent of [`Plugin::reset_origin_support`].
++    pub fn reset_origin_support(&self) -> Result<ResetOriginSupport> {
++        self.plugin.reset_origin_support()
++    }
++    /// Main-thread equivalent of [`Plugin::process_reset_origin`].
++    pub fn process_reset_origin(
++        &mut self,
++        frames: usize,
++        transport: ProcessTransport,
++    ) -> Result<ResetOriginReport> {
++        self.plugin.process_reset_origin(frames, transport)
++    }
 +    /// Main-thread equivalent of [`Plugin::audio_bus_layout`].
 +    pub fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
 +        self.plugin.audio_bus_layout()
@@ -14111,7 +15621,29 @@
      fn set_parameter(&mut self, id: u32, value: f64) -> Result<()>;
      /// Schedule a parameter change at a sample offset within the next process block.
      /// Defaults to a block-start change (ignores the offset) for implementations that don't
-@@ -805,9 +1394,13 @@
+@@ -749,6 +1423,21 @@
+     fn get_all_parameters(&self) -> Result<Vec<Parameter>>;
+     fn format_parameter(&self, id: u32, normalized: f64) -> Result<String>;
+     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()>;
++    fn reset_origin_support(&self) -> Result<ResetOriginSupport> {
++        Err(Error::Other(
++            "owner-only reset-origin processing is unsupported".into(),
++        ))
++    }
++    fn process_reset_origin(
++        &mut self,
++        _frames: usize,
++        _transport: ProcessTransport,
++    ) -> Result<ResetOriginReport> {
++        Err(Error::Other(
++            "owner-only reset-origin processing is unsupported".into(),
++        ))
++    }
++
+     /// Query the current per-bus channel counts and activation state.
+     fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
+         Err(Error::Other(
+@@ -805,9 +1494,13 @@
              "bus activation is not supported for this plugin".to_string(),
          ))
      }
@@ -14128,7 +15660,7 @@
      fn set_tempo(&mut self, _bpm: f64) -> Result<()> {
          Err(Error::Other(
              "runtime transport mutation is not supported for this plugin".to_string(),
-@@ -898,10 +1491,21 @@
+@@ -898,10 +1591,21 @@
      }
      fn start_processing(&mut self) -> Result<()>;
      fn stop_processing(&mut self) -> Result<()>;
@@ -14150,7 +15682,7 @@
      /// Whether the editor accepts host-driven size changes.
      fn editor_can_resize(&self) -> bool {
          false
-@@ -931,6 +1535,19 @@
+@@ -931,6 +1635,19 @@
      fn take_host_notifications(&mut self) -> Vec<HostNotification> {
          Vec::new()
      }
@@ -14170,7 +15702,7 @@
      /// Dispatch any main-thread data-exchange blocks to the controller and drain owned host
      /// snapshots. Background-dispatched queues are copied into the same bounded snapshot sink.
      fn take_data_exchange_blocks(&mut self) -> Vec<DataExchangeBlock> {
-@@ -962,8 +1579,11 @@
+@@ -962,8 +1679,11 @@
      fn take_output_events(&self) -> Vec<PluginEvent> {
          Vec::new()
      }
@@ -14184,7 +15716,7 @@
      fn output_midi_handle(&self) -> Option<OutputMidiConsumer> {
          None
      }
-@@ -1066,6 +1686,11 @@
+@@ -1066,6 +1786,11 @@
              "state save/restore is not supported".to_string(),
          ))
      }
@@ -14196,7 +15728,7 @@
      /// Restore the plugin's state from a blob previously returned by [`Self::save_state`],
      /// telling the plugin what kind of restore this is via the stream's attributes.
      ///
-@@ -1341,6 +1966,19 @@
+@@ -1341,6 +2066,19 @@
              .queue_processor_parameter_at(id, value, sample_offset)
      }
  
@@ -14216,7 +15748,7 @@
      /// Change the transport tempo (beats per minute) advertised to the plugin in the host
      /// `ProcessContext`, taking effect on the **next** processed block — even while the plugin
      /// is actively processing. Drives tempo-synced DSP (LFOs, synced delays, arpeggiators).
-@@ -1387,10 +2025,8 @@
+@@ -1387,10 +2125,8 @@
      /// `ProcessContext` (the `kPlaying` flag), taking effect on the **next** processed block —
      /// even while the plugin is actively processing.
      ///
@@ -14229,7 +15761,7 @@
      pub fn set_playing(&mut self, playing: bool) -> Result<()> {
          self.internal
              .as_mut()
-@@ -1846,10 +2482,15 @@
+@@ -1846,10 +2582,15 @@
              return Ok(());
          }
  
@@ -14249,7 +15781,45 @@
  
          self.is_processing = false;
          Ok(())
-@@ -1986,6 +2627,29 @@
+@@ -1882,6 +2623,37 @@
+         }
+ 
+         Ok(())
++    }
++
++    /// Query reset-origin support without mutating queues, transport or lifecycle.
++    /// Unknown/old isolated helpers reject this query; there is no ordinary-process fallback.
++    pub fn reset_origin_support(&self) -> Result<ResetOriginSupport> {
++        self.internal
++            .as_ref()
++            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
++            .reset_origin_support()
++    }
++
++    /// Consume pending input at origin in one positive, silent, stopped processing call.
++    ///
++    /// This owner-only administrative operation is unavailable during a scoped domain session.
++    /// Call after its rejoin, and preflight support before queueing panic. All pending event and
++    /// host parameter offsets become zero for this call only, preserving arrival order. Project
++    /// sample/PPQ positions remain fixed; continuous time and free-running DSP may advance by
++    /// `frames`. Audio, processor MIDI and processor parameter output are discarded, with loss
++    /// retained in the report. Native UI feedback and SDK input acknowledgments are preserved.
++    /// No panic, stop/start, metadata override or implicit state-settle processing is performed.
++    pub fn process_reset_origin(
++        &mut self,
++        frames: usize,
++        transport: ProcessTransport,
++    ) -> Result<ResetOriginReport> {
++        // Each implementation authoritatively preflights before mutation. Avoid a duplicate
++        // isolated capability round-trip here; unsupported implementations reject by default.
++        self.internal
++            .as_mut()
++            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
++            .process_reset_origin(frames, transport)
+     }
+ 
+     /// Return every audio bus's current channel count and activation state.
+@@ -1986,6 +2758,29 @@
              .as_ref()
              .map(|i| i.has_editor())
              .unwrap_or(false)
@@ -14279,7 +15849,7 @@
      }
  
      /// Open the plugin editor window
-@@ -2115,6 +2779,39 @@
+@@ -2115,6 +2910,39 @@
              .unwrap_or_default()
      }
  
@@ -14319,7 +15889,7 @@
      /// Drain ordered requests the plugin reported through `IComponentHandler2`.
      pub fn take_host_notifications(&mut self) -> Vec<HostNotification> {
          self.internal
-@@ -2176,10 +2873,17 @@
+@@ -2176,10 +3004,17 @@
      /// lifecycle. The returned flags still describe every request; in particular,
      /// [`RestartFlags::reload_component`] means the caller must replace this plugin instance.
      pub fn service_host_requests(&mut self) -> Result<RestartFlags> {
@@ -14341,7 +15911,7 @@
      }
  
      /// Take the MIDI events the plugin has emitted (e.g. from an arpeggiator or MPE
-@@ -2191,7 +2895,8 @@
+@@ -2191,7 +3026,8 @@
      /// marshalled back alongside each processed block.
      ///
      /// The buffer is capped at 4096 events: if you never poll while a chatty plugin keeps
@@ -14351,7 +15921,7 @@
      pub fn take_output_midi(&self) -> Vec<MidiEvent> {
          self.internal
              .as_ref()
-@@ -2209,6 +2914,19 @@
+@@ -2209,6 +3045,19 @@
          self.internal
              .as_ref()
              .map(|i| i.take_output_events())
@@ -14371,7 +15941,7 @@
              .unwrap_or_default()
      }
  
-@@ -2248,6 +2966,15 @@
+@@ -2248,6 +3097,15 @@
              .save_state()
      }
  
@@ -14387,7 +15957,7 @@
      /// Restore plugin state from a blob produced by [`Self::save_state`] on the *same*
      /// plugin. Applies to both the processor and the controller, so parameter values and
      /// the editor reflect the restored state.
-@@ -2258,10 +2985,17 @@
+@@ -2258,10 +3116,17 @@
      /// The plugin is told this is a project/session restore ([`StateContext::Project`]). Use
      /// [`Self::load_state_with_context`] when the bytes came from a preset file instead.
      pub fn load_state(&mut self, data: &[u8]) -> Result<()> {
@@ -14409,7 +15979,7 @@
      }
  
      /// Restore plugin state as [`Self::load_state`] does, and tell the plugin where the bytes
-@@ -2276,10 +3010,17 @@
+@@ -2276,10 +3141,17 @@
      /// Works both in-process and across process isolation — an isolated plugin's `setState`
      /// sees the same attributes.
      pub fn load_state_with_context(&mut self, data: &[u8], context: &StateContext) -> Result<()> {
@@ -14431,7 +16001,7 @@
      }
  
      /// Save this plugin's state to a file as a [`PluginPreset`] (JSON: the plugin's `uid`
-@@ -2454,14 +3195,14 @@
+@@ -2454,14 +3326,14 @@
  /// Highest value a 14-bit MIDI pitch-bend can carry.
  const MIDI_PITCH_BEND_MAX: u16 = 16383;
  
@@ -14448,7 +16018,7 @@
      if velocity > MIDI_DATA_MAX {
          return Err(Error::MidiError(format!("Invalid velocity: {}", velocity)));
      }
-@@ -2543,7 +3284,7 @@
+@@ -2543,7 +3415,7 @@
      }
  }
  
@@ -14457,7 +16027,7 @@
      if event.bus_index < 0 {
          return Err(Error::MidiError(format!(
              "Invalid event bus index: {}",
-@@ -2669,6 +3410,59 @@
+@@ -2669,6 +3541,59 @@
              "Legacy MIDI CC events are plugin output only".to_string(),
          )),
      }
@@ -14517,7 +16087,7 @@
  }
  
  /// Platform-specific window handle
-@@ -2950,6 +3744,14 @@
+@@ -2950,6 +3875,14 @@
  #[cfg(test)]
  mod public_surface_tests {
      use super::*;
@@ -14532,7 +16102,7 @@
  
      /// A `Plugin` with no backing implementation. Enough to exercise the checks the public
      /// surface performs *before* it reaches into `internal`.
-@@ -3327,3 +4129,68 @@
+@@ -3327,3 +4260,68 @@
          assert!(decode_state_snapshot(&bytes).is_err());
      }
  }
@@ -14603,6 +16173,15 @@
 +}
 --- a/src/process_isolation.rs
 +++ b/src/process_isolation.rs
+@@ -37,7 +37,7 @@
+ const MAX_WIRE_CHANNELS: usize = 256;
+ 
+ /// Upper bound on frames-per-channel taken from the wire.
+-const MAX_WIRE_FRAMES: usize = 1 << 20;
++pub(crate) const MAX_WIRE_FRAMES: usize = 1 << 20;
+ 
+ /// Upper bound on a bus count taken from the wire.
+ const MAX_WIRE_BUSES: i32 = 256;
 @@ -46,6 +46,56 @@
  /// parameters and controller/editor changes. One response drains both, so its wire cap is the
  /// sum of their 4096-entry limits.
@@ -14674,7 +16253,27 @@
      CreateGui,
      /// Close plugin GUI
      CloseGui,
-@@ -556,6 +611,9 @@
+@@ -549,6 +604,19 @@
+     },
+     /// Release all notes currently tracked by the plugin.
+     MidiPanic,
++    /// Query reset-origin support without processing, draining feedback, or changing state.
++    /// Older helpers reject this additive command; callers must not emulate it with ordinary
++    /// processing or state capture.
++    ResetOriginSupport,
++    /// Attempt a silent, owner-affine reset-origin block and discard its process feedback.
++    /// Preflight failures return `Error`; after an attempt, failures and loss belong to the
++    /// count-only `ResetOriginReport` response. No audio, MIDI, or parameter values are returned.
++    ProcessResetOrigin {
++        /// Number of frames in this block, within the configured maximum and wire limit.
++        frames: u32,
++        /// Required authoritative transport for the reset-origin block.
++        transport: crate::plugin::ProcessTransport,
++    },
+     /// Process one block of audio. `inputs` is per-channel; `frames` is the block length.
+     Process {
+         /// Per-channel input samples (`[channel][frame]`), carried as base64 bit patterns.
+@@ -556,6 +624,9 @@
          inputs: Vec<Vec<f32>>,
          /// Number of frames in this block.
          frames: u32,
@@ -14684,7 +16283,7 @@
      },
      /// Process one block while preserving every VST3 audio bus.
      ProcessBuses {
-@@ -565,6 +623,9 @@
+@@ -565,6 +636,9 @@
          outputs: Vec<crate::audio::AudioBusConfig>,
          /// Number of frames in this block.
          frames: u32,
@@ -14694,7 +16293,7 @@
      },
      /// Query per-bus channel counts and activation state.
      AudioBusLayout,
-@@ -748,6 +809,8 @@
+@@ -748,6 +822,8 @@
      TakeParameterChanges,
      /// Drain ordered `IComponentHandler2` requests from the helper.
      TakeHostNotifications,
@@ -14703,7 +16302,24 @@
      /// Dispatch and drain owned VST3 data-exchange blocks from the helper.
      TakeDataExchangeBlocks,
      /// Execute an item from a pending plugin-provided context menu.
-@@ -795,14 +858,30 @@
+@@ -788,6 +864,16 @@
+         /// Crash detail.
+         message: String,
+     },
++    /// Pure reset-origin capability and current processing status.
++    ResetOriginSupport {
++        /// Contract version, configured frame limit, and processing status.
++        support: crate::plugin::ResetOriginSupport,
++    },
++    /// Count-only result after a reset-origin block was attempted, including process failure.
++    ResetOriginReport {
++        /// Discard counts and loss/error diagnostics, without process output values.
++        report: crate::plugin::ResetOriginReport,
++    },
+     /// Per-channel audio output data (`[channel][frame]`), plus any MIDI the plugin
+     /// emitted during the block (arpeggiators, MPE, etc.).
+     AudioOutput {
+@@ -795,14 +881,30 @@
          #[serde(with = "audio_codec")]
          outputs: Vec<Vec<f32>>,
          /// Owned VST3 events the plugin emitted this block, in order.
@@ -14734,7 +16350,7 @@
      },
      /// Current audio-bus layout and activation state.
      AudioBusLayout {
-@@ -838,6 +917,11 @@
+@@ -838,6 +940,11 @@
          width: i32,
          /// Editor height in pixels.
          height: i32,
@@ -14746,7 +16362,7 @@
      },
      /// Plugin information
      PluginInfo {
-@@ -898,6 +982,11 @@
+@@ -898,6 +1005,11 @@
          /// The queued host requests.
          notifications: Vec<crate::plugin::HostNotification>,
      },
@@ -14758,7 +16374,7 @@
      /// Owned VST3 data-exchange blocks drained from the helper.
      DataExchangeBlocks {
          /// Block snapshots, in delivery order.
-@@ -969,58 +1058,209 @@
+@@ -969,58 +1081,209 @@
  /// descriptor 1 at stderr, so plugin output is merged into the helper's stderr instead. Call
  /// it once, before any plugin code can run.
  ///
@@ -15008,7 +16624,7 @@
      pub fn claim() -> Self {
          Self {
              inner: std::io::stdout(),
-@@ -1660,6 +1900,8 @@
+@@ -1660,6 +1923,8 @@
          // The Process response carries emitted MIDI alongside audio; check the variant
          // round-trips through the JSON transport host and helper share.
          let resp = HostResponse::AudioOutput {
@@ -15017,7 +16633,7 @@
              outputs: vec![vec![0.0, 0.5], vec![-0.5, 0.0]],
              output_events: vec![
                  MidiEvent::NoteOn {
-@@ -1682,6 +1924,7 @@
+@@ -1682,6 +1947,7 @@
              HostResponse::AudioOutput {
                  outputs,
                  output_events,
@@ -15025,7 +16641,7 @@
              } => {
                  assert_eq!(outputs, vec![vec![0.0, 0.5], vec![-0.5, 0.0]]);
                  assert_eq!(output_events.len(), 2);
-@@ -1809,6 +2052,8 @@
+@@ -1809,6 +2075,8 @@
          }
  
          let response = HostResponse::AudioOutput {
@@ -15034,7 +16650,7 @@
              outputs: Vec::new(),
              output_events: vec![event.clone()],
          };
-@@ -2108,6 +2353,32 @@
+@@ -2108,6 +2376,32 @@
          {
              HostResponse::ParameterEdits { edits: back } => assert_eq!(back, edits),
              other => panic!("ParameterEdits round-trip changed the variant: {other:?}"),
@@ -15067,7 +16683,7 @@
          }
      }
  
-@@ -2339,6 +2610,8 @@
+@@ -2339,6 +2633,8 @@
              f32::MIN_POSITIVE,
          ];
          let resp = HostResponse::AudioOutput {
@@ -15076,7 +16692,7 @@
              outputs: vec![channel.clone(), vec![]],
              output_events: Vec::new(),
          };
-@@ -2360,12 +2633,13 @@
+@@ -2360,12 +2656,13 @@
  
          // The same for the host -> helper direction.
          let cmd = HostCommand::Process {
@@ -15091,7 +16707,7 @@
                  assert_eq!(frames, 2);
                  assert!(inputs[0][0].is_nan());
                  assert_eq!(inputs[0][1], 1.0);
-@@ -2377,6 +2651,7 @@
+@@ -2377,6 +2674,7 @@
      #[test]
      fn bus_audio_wire_preserves_bus_boundaries_activation_and_sample_bits() {
          let command = HostCommand::ProcessBuses {
@@ -15099,7 +16715,7 @@
              inputs: vec![
                  crate::audio::AudioBusBuffer {
                      active: true,
-@@ -2405,6 +2680,7 @@
+@@ -2405,6 +2703,7 @@
                  inputs,
                  outputs,
                  frames,
@@ -15107,7 +16723,7 @@
              } => {
                  assert_eq!(frames, 2);
                  assert_eq!(inputs.len(), 2);
-@@ -2484,6 +2760,8 @@
+@@ -2484,6 +2783,8 @@
              .collect();
          let plain = serde_json::to_string(&block).expect("plain json").len();
          let encoded = serde_json::to_string(&HostResponse::AudioOutput {
@@ -15116,15 +16732,29 @@
              outputs: block,
              output_events: Vec::new(),
          })
-@@ -2568,6 +2846,7 @@
+@@ -2568,8 +2869,21 @@
              class_id: None,
          }));
          assert!(!is_slow_command(&HostCommand::Process {
 +            transport: None,
              inputs: vec![],
              frames: 64
++        }));
++        assert!(!is_slow_command(&HostCommand::ResetOriginSupport));
++        assert!(!is_slow_command(&HostCommand::ProcessResetOrigin {
++            frames: 47,
++            transport: crate::plugin::ProcessTransport {
++                sample_position: 0,
++                quarter_note_position: 0.0,
++                tempo: 120.0,
++                playing: false,
++                time_sig_numerator: 4,
++                time_sig_denominator: 4,
++            },
          }));
-@@ -2803,3 +3082,122 @@
+         assert!(!is_slow_command(&HostCommand::GetAllParameters));
+     }
+@@ -2803,3 +3117,122 @@
          })
      }
  }

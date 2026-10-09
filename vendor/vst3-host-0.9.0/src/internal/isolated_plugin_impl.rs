@@ -488,6 +488,101 @@ impl PluginInternal for IsolatedPluginImpl {
         }
     }
 
+    fn reset_origin_support(&self) -> Result<crate::plugin::ResetOriginSupport> {
+        // Capability negotiation must never respawn/reload or fall back to ordinary Process.
+        match self.send_command_once(HostCommand::ResetOriginSupport)? {
+            HostResponse::ResetOriginSupport { support } if support.contract_version == 1 => {
+                Ok(support)
+            }
+            HostResponse::Error { message } => {
+                Err(Error::Other(format!("ResetOriginSupport: {message}")))
+            }
+            _ => Err(Error::Other(
+                "helper does not support reset-origin contract version 1".into(),
+            )),
+        }
+    }
+
+    fn process_reset_origin(
+        &mut self,
+        frames: usize,
+        transport: crate::plugin::ProcessTransport,
+    ) -> Result<crate::plugin::ResetOriginReport> {
+        if frames > crate::process_isolation::MAX_WIRE_FRAMES {
+            return Err(Error::InvalidParameter(
+                "reset-origin frame count exceeds wire limit".into(),
+            ));
+        }
+        self.reset_origin_support()?.validate(frames, transport)?;
+        let frames = frames as u32;
+        let uncertain = |message: String| crate::plugin::ResetOriginReport {
+            frames,
+            // No exact acknowledgment means remote discard counts are unknown. Mark loss
+            // rather than presenting these synthetic zero counts as a successful cleanup.
+            output_events_lost: true,
+            process_error: Some(message),
+            ..Default::default()
+        };
+        let response =
+            self.send_command_once(HostCommand::ProcessResetOrigin { frames, transport });
+        let (mut report, acknowledged) = match response {
+            Ok(HostResponse::ResetOriginReport { report }) if report.frames == frames => (report, true),
+            Ok(HostResponse::ResetOriginReport { report }) => {
+                let mut failure = uncertain(format!(
+                    "helper acknowledged reset-origin frame count {} instead of {frames}; result uncertain and request not retried",
+                    report.frames,
+                ));
+                failure.parameter_output_fault = report.parameter_output_fault;
+                (failure, false)
+            }
+            // The protocol reserves ordinary Error for pure helper preflight rejection.
+            Ok(HostResponse::Error { message }) => {
+                return Err(Error::ProcessError(format!("ProcessResetOrigin: {message}")));
+            }
+            Ok(_) => (
+                uncertain(
+                    "helper did not acknowledge reset-origin processing; result uncertain and request not retried".into(),
+                ),
+                false,
+            ),
+            Err(error) => (
+                uncertain(format!(
+                    "reset-origin exchange failed: {error}; result uncertain and request not retried"
+                )),
+                false,
+            ),
+        };
+        // After dispatch, an absent/malformed acknowledgment cannot prove that the helper
+        // did not process. Invalidate the old local epoch even on uncertainty, without retry.
+        // Exclusive access also lets us discard a poisoned queue while preserving its loss.
+        let events = match self.output_events.get_mut() {
+            Ok(events) => events,
+            Err(poisoned) => {
+                report.output_events_lost = true;
+                poisoned.into_inner()
+            }
+        };
+        report.discarded_prior_midi_events = report
+            .discarded_prior_midi_events
+            .saturating_add(events.len() as u64);
+        events.clear();
+        report.output_events_lost |= self
+            .output_events_lost
+            .load(std::sync::atomic::Ordering::Acquire);
+        if report.output_events_lost {
+            self.output_events_lost
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        if acknowledged {
+            self.process_transport = Some(transport);
+            self.is_playing = false;
+            self.tempo = transport.tempo;
+            self.time_sig_numerator = transport.time_sig_numerator;
+            self.time_sig_denominator = transport.time_sig_denominator;
+        }
+        Ok(report)
+    }
+
     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
         let frames = buffers
             .outputs
@@ -1391,6 +1486,34 @@ mod tests {
             helper
         }
 
+        fn reset_actions(name: &str, support_action: &str, process_action: &str) -> Self {
+            let helper = Self::new(name);
+            let script = std::fs::read_to_string(&helper.script).unwrap();
+            let actions = format!(
+                "    *ResetOriginSupport*) {support_action} ;;\n    *ProcessResetOrigin*) {process_action} ;;\n"
+            );
+            std::fs::write(
+                &helper.script,
+                script.replace("    *)", &(actions + "    *)")),
+            )
+            .unwrap();
+            helper
+        }
+
+        fn reset_replies(name: &str, support: &HostResponse, process: &HostResponse) -> Self {
+            Self::reset_actions(
+                name,
+                &format!(
+                    "printf '%s\\n' '{}'",
+                    serde_json::to_string(support).unwrap()
+                ),
+                &format!(
+                    "printf '%s\\n' '{}'",
+                    serde_json::to_string(process).unwrap()
+                ),
+            )
+        }
+
         fn requests(&self) -> Vec<String> {
             std::fs::read_to_string(&self.log)
                 .unwrap_or_default()
@@ -1436,6 +1559,479 @@ mod tests {
             false,
             0,
         )
+    }
+
+    fn reset_transport() -> crate::ProcessTransport {
+        crate::ProcessTransport {
+            sample_position: -96_000,
+            quarter_note_position: 23.125,
+            tempo: 85.0,
+            playing: false,
+            time_sig_numerator: 3,
+            time_sig_denominator: 4,
+        }
+    }
+
+    fn reset_support(max_block_frames: u32, processing: bool) -> HostResponse {
+        HostResponse::ResetOriginSupport {
+            support: crate::ResetOriginSupport {
+                contract_version: 1,
+                max_block_frames,
+                processing,
+            },
+        }
+    }
+
+    fn reset_report(frames: u32) -> HostResponse {
+        HostResponse::ResetOriginReport {
+            report: crate::ResetOriginReport {
+                frames,
+                ..Default::default()
+            },
+        }
+    }
+
+    fn seed_reset_prior_state(plugin: &mut IsolatedPluginImpl, lost: bool) -> Vec<PluginEvent> {
+        let events = vec![
+            MidiEvent::NoteOff {
+                channel: crate::MidiChannel::Ch1,
+                note: 60,
+                velocity: 0,
+            }
+            .into(),
+            PluginEvent::sysex(vec![0xf0, 0x7d, 0xf7]),
+        ];
+        plugin.buffer_output_events(events.clone(), lost);
+        plugin.process_transport = Some(crate::ProcessTransport {
+            sample_position: 12_345,
+            quarter_note_position: 9.5,
+            tempo: 120.0,
+            playing: true,
+            time_sig_numerator: 4,
+            time_sig_denominator: 4,
+        });
+        plugin.auto_recover = true;
+        plugin.auto_recover_max_retries = 2;
+        events
+    }
+
+    fn assert_reset_prior_state(plugin: &IsolatedPluginImpl, events: &[PluginEvent], lost: bool) {
+        assert_eq!(plugin.output_events.lock().unwrap().as_slice(), events);
+        assert_eq!(
+            plugin
+                .output_events_lost
+                .load(std::sync::atomic::Ordering::Acquire),
+            lost
+        );
+        assert_eq!(plugin.process_transport.unwrap().sample_position, 12_345);
+        assert!(plugin.process_transport.unwrap().playing);
+        assert_eq!(plugin.tempo, 120.0);
+        assert_eq!(plugin.time_sig_numerator, 4);
+        assert_eq!(plugin.time_sig_denominator, 4);
+        assert!(plugin.is_playing);
+        assert_eq!(plugin.recovery_count(), 0);
+    }
+
+    fn assert_reset_requests(fake: &FakeHelper, process_frames: Option<u32>) {
+        let requests = fake.requests();
+        assert_eq!(requests.len(), if process_frames.is_some() { 2 } else { 1 });
+        assert!(matches!(
+            serde_json::from_str::<HostCommand>(&requests[0]).unwrap(),
+            HostCommand::ResetOriginSupport
+        ));
+        if let Some(expected_frames) = process_frames {
+            match serde_json::from_str::<HostCommand>(&requests[1]).unwrap() {
+                HostCommand::ProcessResetOrigin { frames, transport } => {
+                    assert_eq!(frames, expected_frames);
+                    assert_eq!(transport, reset_transport());
+                }
+                other => panic!("unexpected reset-origin dispatch: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn reset_origin_support_is_pure_and_rejects_old_or_unknown_helpers_without_fallback() {
+        let responses = [
+            HostResponse::Error {
+                message: "unknown command ResetOriginSupport".into(),
+            },
+            HostResponse::Success {
+                message: "old helper ignored command".into(),
+            },
+            HostResponse::ResetOriginSupport {
+                support: crate::ResetOriginSupport {
+                    contract_version: 0,
+                    max_block_frames: 47,
+                    processing: true,
+                },
+            },
+            HostResponse::ResetOriginSupport {
+                support: crate::ResetOriginSupport {
+                    contract_version: 2,
+                    max_block_frames: 47,
+                    processing: true,
+                },
+            },
+            reset_support(47, true),
+            reset_support(17, false),
+        ];
+        for (index, response) in responses.iter().enumerate() {
+            let fake = FakeHelper::reset_replies(
+                &format!("reset_support_{index}"),
+                response,
+                &reset_report(47),
+            );
+            let mut plugin = isolated(&fake);
+            let events = seed_reset_prior_state(&mut plugin, true);
+            let result = plugin.reset_origin_support();
+            if let HostResponse::ResetOriginSupport { support } = response {
+                if support.contract_version == 1 {
+                    assert_eq!(result.unwrap(), *support);
+                } else {
+                    assert!(result.is_err());
+                }
+            } else {
+                assert!(result.is_err());
+            }
+            assert_reset_prior_state(&plugin, &events, true);
+            assert_reset_requests(&fake, None);
+        }
+    }
+
+    #[test]
+    fn reset_origin_preflight_failures_preserve_local_queues_and_transport() {
+        let transport = reset_transport();
+        let cases = [
+            (0, true, transport),
+            (48, true, transport),
+            (47, false, transport),
+            (
+                47,
+                true,
+                crate::ProcessTransport {
+                    playing: true,
+                    ..transport
+                },
+            ),
+            (
+                47,
+                true,
+                crate::ProcessTransport {
+                    tempo: 0.0,
+                    ..transport
+                },
+            ),
+            (
+                47,
+                true,
+                crate::ProcessTransport {
+                    tempo: f64::NAN,
+                    ..transport
+                },
+            ),
+            (
+                47,
+                true,
+                crate::ProcessTransport {
+                    quarter_note_position: f64::INFINITY,
+                    ..transport
+                },
+            ),
+            (
+                47,
+                true,
+                crate::ProcessTransport {
+                    time_sig_numerator: 0,
+                    ..transport
+                },
+            ),
+            (
+                47,
+                true,
+                crate::ProcessTransport {
+                    time_sig_denominator: 3,
+                    ..transport
+                },
+            ),
+        ];
+        for (index, (frames, processing, transport)) in cases.into_iter().enumerate() {
+            let fake = FakeHelper::reset_replies(
+                &format!("reset_preflight_{index}"),
+                &reset_support(47, processing),
+                &reset_report(47),
+            );
+            let mut plugin = isolated(&fake);
+            let events = seed_reset_prior_state(&mut plugin, index % 2 == 0);
+            assert!(plugin.process_reset_origin(frames, transport).is_err());
+            assert_reset_prior_state(&plugin, &events, index % 2 == 0);
+            assert_reset_requests(&fake, None);
+        }
+    }
+
+    #[test]
+    fn reset_origin_wire_ceiling_is_rejected_before_any_request_or_local_mutation() {
+        for frames in [(1 << 20) + 1, usize::MAX] {
+            let fake = FakeHelper::reset_replies(
+                "reset_wire_ceiling",
+                &reset_support(u32::MAX, true),
+                &reset_report(47),
+            );
+            let mut plugin = isolated(&fake);
+            let events = seed_reset_prior_state(&mut plugin, true);
+            assert!(plugin
+                .process_reset_origin(frames, reset_transport())
+                .unwrap_err()
+                .to_string()
+                .contains("wire limit"));
+            assert!(fake.requests().is_empty());
+            assert_reset_prior_state(&plugin, &events, true);
+        }
+    }
+
+    #[test]
+    fn reset_origin_exact_reports_preserve_counts_loss_and_attempt_errors_without_extra_commands() {
+        for (index, (frames, prior_loss, helper_loss, parameter_fault, process_error)) in [
+            (17, false, false, false, None),
+            (47, true, false, false, None),
+            (47, false, true, false, None),
+            (17, false, false, true, None),
+            (
+                47,
+                false,
+                false,
+                false,
+                Some("controlled processor rejection".to_owned()),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let helper_report = crate::ResetOriginReport {
+                frames,
+                discarded_prior_midi_events: 3,
+                discarded_midi_events: 4,
+                discarded_prior_parameter_points: 5,
+                discarded_parameter_points: 6,
+                output_events_lost: helper_loss,
+                parameter_output_fault: parameter_fault,
+                process_error: process_error.clone(),
+            };
+            let fake = FakeHelper::reset_replies(
+                &format!("reset_exact_{index}"),
+                &reset_support(frames, true),
+                &HostResponse::ResetOriginReport {
+                    report: helper_report.clone(),
+                },
+            );
+            let mut plugin = isolated(&fake);
+            seed_reset_prior_state(&mut plugin, prior_loss);
+            let report = plugin
+                .process_reset_origin(frames as usize, reset_transport())
+                .unwrap();
+            assert_eq!(
+                report,
+                crate::ResetOriginReport {
+                    discarded_prior_midi_events: 5,
+                    output_events_lost: prior_loss || helper_loss,
+                    ..helper_report
+                }
+            );
+            assert_eq!(
+                report.ensure_success().is_ok(),
+                !(prior_loss || helper_loss || parameter_fault || process_error.is_some())
+            );
+            assert!(plugin.take_output_events().is_empty());
+            assert_eq!(
+                plugin.take_output_events_with_loss(),
+                (vec![], prior_loss || helper_loss)
+            );
+            assert_eq!(plugin.process_transport, Some(reset_transport()));
+            assert!(!plugin.is_playing);
+            assert_eq!(plugin.tempo, reset_transport().tempo);
+            assert_eq!(
+                plugin.time_sig_numerator,
+                reset_transport().time_sig_numerator
+            );
+            assert_eq!(
+                plugin.time_sig_denominator,
+                reset_transport().time_sig_denominator
+            );
+            assert_eq!(plugin.recovery_count(), 0);
+            assert_reset_requests(&fake, Some(frames));
+        }
+    }
+
+    #[test]
+    fn reset_origin_explicit_helper_preflight_error_retains_the_old_local_epoch() {
+        let fake = FakeHelper::reset_replies(
+            "reset_helper_preflight",
+            &reset_support(47, true),
+            &HostResponse::Error {
+                message: "configuration changed before reset preflight".into(),
+            },
+        );
+        let mut plugin = isolated(&fake);
+        let events = seed_reset_prior_state(&mut plugin, true);
+        assert!(plugin.process_reset_origin(47, reset_transport()).is_err());
+        assert_reset_prior_state(&plugin, &events, true);
+        assert_reset_requests(&fake, Some(47));
+    }
+
+    #[test]
+    fn reset_origin_helper_death_never_recovers_and_only_dispatch_invalidates_local_midi() {
+        let support = format!(
+            "printf '%s\\n' '{}'",
+            serde_json::to_string(&reset_support(47, true)).unwrap()
+        );
+        for die_on_support in [true, false] {
+            let fake = FakeHelper::reset_actions(
+                "reset_helper_death",
+                if die_on_support { "exit 0" } else { &support },
+                "exit 0",
+            );
+            let mut plugin = isolated(&fake);
+            let events = seed_reset_prior_state(&mut plugin, false);
+            let result = plugin.process_reset_origin(47, reset_transport());
+            if die_on_support {
+                assert!(result.is_err());
+                assert_reset_prior_state(&plugin, &events, false);
+                assert_reset_requests(&fake, None);
+            } else {
+                let report = result.unwrap();
+                assert_eq!(report.frames, 47);
+                assert_eq!(report.discarded_prior_midi_events, 2);
+                assert!(report.output_events_lost);
+                assert!(report
+                    .process_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("exchange failed"));
+                assert!(report.ensure_success().is_err());
+                assert!(plugin.take_output_events().is_empty());
+                assert_eq!(plugin.take_output_events_with_loss(), (vec![], true));
+                assert_eq!(plugin.recovery_count(), 0);
+                assert_reset_requests(&fake, Some(47));
+            }
+        }
+    }
+
+    #[test]
+    fn reset_origin_uncertain_responses_discard_stale_midi_and_never_claim_success() {
+        let support = format!(
+            "printf '%s\\n' '{}'",
+            serde_json::to_string(&reset_support(47, true)).unwrap()
+        );
+        let wrong_frames = HostResponse::ResetOriginReport {
+            report: crate::ResetOriginReport {
+                frames: 17,
+                discarded_midi_events: 99,
+                parameter_output_fault: true,
+                ..Default::default()
+            },
+        };
+        let wrong_frames = format!(
+            "printf '%s\\n' '{}'",
+            serde_json::to_string(&wrong_frames).unwrap()
+        );
+        for (index, process_action) in [
+            wrong_frames.as_str(),
+            "printf '%s\\n' '{\"Success\":{\"message\":\"unrelated reply\"}}'",
+            "printf '%s\\n' '{\"AudioOutput\":{\"outputs\":[],\"output_events\":[]}}'",
+            "printf '%s\\n' '{\"ResetOriginReport\":{\"report\":'; exit 0",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fake = FakeHelper::reset_actions(
+                &format!("reset_uncertain_{index}"),
+                &support,
+                process_action,
+            );
+            let mut plugin = isolated(&fake);
+            seed_reset_prior_state(&mut plugin, index % 2 == 0);
+            let report = plugin.process_reset_origin(47, reset_transport()).unwrap();
+            assert_eq!(report.frames, 47);
+            assert_eq!(report.discarded_prior_midi_events, 2);
+            assert_eq!(
+                report.discarded_midi_events, 0,
+                "unacknowledged remote counts must not claim this request"
+            );
+            assert_eq!(report.parameter_output_fault, index == 0);
+            assert!(report.output_events_lost);
+            assert!(report
+                .process_error
+                .as_deref()
+                .unwrap()
+                .contains("uncertain"));
+            assert!(report.ensure_success().is_err());
+            assert!(plugin.take_output_events().is_empty());
+            assert_eq!(plugin.take_output_events_with_loss(), (vec![], true));
+            assert_eq!(
+                plugin.process_transport.unwrap().sample_position,
+                12_345,
+                "uncertainty must not claim transport acknowledgment"
+            );
+            assert_eq!(plugin.recovery_count(), 0);
+            assert_reset_requests(&fake, Some(47));
+        }
+    }
+
+    #[test]
+    fn reset_origin_timeout_is_a_loss_marked_report_without_retry() {
+        let support = format!(
+            "printf '%s\\n' '{}'",
+            serde_json::to_string(&reset_support(47, true)).unwrap()
+        );
+        let fake = FakeHelper::reset_actions("reset_timeout", &support, "exec sleep 60");
+        let mut plugin = isolated(&fake);
+        seed_reset_prior_state(&mut plugin, false);
+        plugin
+            .process
+            .lock()
+            .unwrap()
+            .set_timeout(Duration::from_secs(2));
+        let report = plugin.process_reset_origin(47, reset_transport()).unwrap();
+        assert_eq!(report.frames, 47);
+        assert_eq!(report.discarded_prior_midi_events, 2);
+        assert!(report.output_events_lost);
+        assert!(report
+            .process_error
+            .as_deref()
+            .unwrap()
+            .contains("exchange failed"));
+        assert!(report.ensure_success().is_err());
+        assert!(plugin.take_output_events().is_empty());
+        assert_eq!(plugin.take_output_events_with_loss(), (vec![], true));
+        assert_eq!(plugin.recovery_count(), 0);
+        assert_reset_requests(&fake, Some(47));
+    }
+
+    #[test]
+    fn reset_origin_discards_poisoned_local_midi_with_loss_evidence() {
+        let fake = FakeHelper::reset_replies(
+            "reset_poisoned_output",
+            &reset_support(47, true),
+            &reset_report(47),
+        );
+        let mut plugin = isolated(&fake);
+        seed_reset_prior_state(&mut plugin, false);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = plugin.output_events.lock().unwrap();
+            panic!("controlled poison for reset-origin output fixture");
+        }));
+        let report = plugin.process_reset_origin(47, reset_transport()).unwrap();
+        assert_eq!(report.discarded_prior_midi_events, 2);
+        assert!(report.output_events_lost);
+        assert!(report.ensure_success().is_err());
+        assert!(plugin
+            .output_events
+            .get_mut()
+            .unwrap_err()
+            .into_inner()
+            .is_empty());
+        assert_eq!(plugin.take_output_events_with_loss(), (vec![], true));
+        assert_reset_requests(&fake, Some(47));
     }
 
     #[test]

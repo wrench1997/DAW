@@ -114,7 +114,8 @@ pub use plugin::{
     AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification, IsolatedEditorCommand,
     IsolatedEditorOwner, IsolatedEditorState, MainThreadPlugin, OutputMidiConsumer, ParameterEdit,
     ParameterEditKind, Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode, ProcessTransport,
-    ProgramPitchName, ProgressKind, ProgressValue, RestartFlags, StateContext, WindowHandle,
+    ProgramPitchName, ProgressKind, ProgressValue, ResetOriginReport, ResetOriginSupport,
+    RestartFlags, StateContext, WindowHandle,
 };
 pub use realtime::{RealtimePluginRunner, RtControl};
 pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};

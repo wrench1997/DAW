@@ -551,11 +551,14 @@ locks remain, and the historical 346.9 ms native-resize process stall remains un
 
 `scripts/check_vst3_domain_contracts.py` checks the real crate-private scoped API
 without adding production exports, test hooks, feature flags, or dependencies.
-It generates one shared positive body and 46 negative cases in an external QA
+It generates one shared positive body and 52 negative cases in an external QA
 directory. The positive fixture reaches both actual entry points and all allowed
 facade methods before any negative can count. Negative diagnostics must match
 the stated error codes/text and originate in the fixture; unavailable imports
 and inaccessible entry points are explicitly rejected.
+
+Run these commands from the full source checkout; the binary preview guide alone
+does not include the compiler runner or full vendored source.
 
 Requires Python 3.11+, the same approved runtime-only source-linked vendor
 manifest/lockfile used by the vendor source gates, and a coordinated exclusive
@@ -584,10 +587,16 @@ the repository. `report.json` and per-run logs preserve exact fixture sources,
 compiler identity, all diagnostics, input-lock/shim/runner hashes, and before/after
 production source hashes. Source or manifest/lock drift fails the run. Repeated
 `--case NAME` options support diagnosis, always preceded by the positive case;
-a selected-case run is not the complete 47-case gate.
+a selected-case run is not the complete 53-case gate.
 
 Coverage includes both facades' Send/Sync exclusions, scoped-reference escape,
 move/borrow restrictions, owner SaveState/LoadState/reconfigure/drop and nested
 session exclusion, and missing admin/metadata/raw pointer/into_inner/Deref APIs.
 These static guarantees complement the runtime session/COM lifetime tests; they
 do not establish real-time safety or authorize an audio worker thread.
+
+The combined reset-origin checkpoint adds explicit negative compiler cases for
+both reset APIs on each facade and for owner reset during a live session. The
+positive baseline calls owner reset after rejoin. The same restricted RAII gate
+surrounds only SDK Process in ordinary and reset calls; combined COM regression
+checks entry/exit on success, SDK failure and pre-SDK staging failure.

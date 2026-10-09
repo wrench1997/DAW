@@ -1024,3 +1024,28 @@ SHA256 `3b69b430879369a14ed6f589a752be60d0b57c753c910403ac8549b1f3669653`.
 These source-bound Linux results complete this same-thread ownership checkpoint's functional
 regression gates; hardware, cross-platform native runtime and processing-deadline acceptance
 remain separate.
+
+## 2026-10-09 — Explicit stopped reset-origin quantum (isolated implementation)
+
+The reviewed reset design replaces the DAW's exceptional one-frame cleanup with owner-only
+Q128 origin processing, preserving the old event/parameter ordering rather than changing only
+the block length. Capability/preflight precedes safety input; partial admission, output loss,
+poison and uncertain IPC remain visible failures. Native UI feedback and actual SDK input
+acknowledgments are preserved. Standalone vendor/helper small blocks remain supported; the
+minimum128 is specific to the DAW backend. See [reset-origin contract](PLUGIN_RESET_ORIGIN.md).
+Historical cold-start/latency traces and timing-profile failures remain immutable. Source gates
+and genuine acceptance are recorded separately; no GUI threading or hardware qualification is
+implied by this reset correction.
+
+Reset source gates: copied, Cargo-identified all-feature artifacts pass **1,175 app +25 helper
++6 reset protocol +5 editor protocol +2 transport protocol** tests. Core-only passes **1,167**.
+The source-linked vendor suite passes **382 available cases**, with the same named upstream
+Dexed metadata-fixture exclusion, plus **26 doctests**. Both root strict Clippy profiles and
+vendor Clippy with the pre-existing deprecation/drain-collect allowances pass; formatting and
+**124 packaging tests** pass. A source-linked initial test used truncation instead of the
+existing rounded system-clock increment; its 1ns assertion failure and corrected passing run
+are retained. Verbose forced compilation proves the reset worktree supplied the linked vendor
+rlib, and source hashes stayed unchanged across link; copied executable hashes and logs are in
+the retained reset-origin QA record. Genuine reset/profile acceptance remains separate.
+Both Windows MSVC feature profiles pass source-only checks, and the exact copied production
+helper passes ordinary no-plug-in protocol smoke. These checks are not native Windows execution.

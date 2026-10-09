@@ -43,6 +43,11 @@ def prepare(here, repo, manifest_input, lock_input):
     use crate::midi::{MidiChannel, NoteExpressionType, PluginEvent};
     use crate::Result;
 
+    fn stopped_reset_transport() -> ProcessTransport {
+        ProcessTransport { sample_position: 0, quarter_note_position: 0.0, tempo: 120.0,
+            playing: false, time_sig_numerator: 4, time_sig_denominator: 4 }
+    }
+
     // Every case resolves the exact production types and exercises the real private entry points.
     // This body is type-checked, never run and never substitutes a mock implementation.
     fn positive_same_private_api(owner: &mut MainThreadPlugin, backend: &mut dyn PluginInternal,
@@ -73,6 +78,9 @@ def prepare(here, repo, manifest_input, lock_input):
         owner.load_state(&state)?;
         owner.reconfigure(48_000.0, 128)?;
         let _ = owner.info();
+        // Reset is administrative: available only after the scoped borrow has rejoined.
+        let _ = owner.reset_origin_support()?;
+        let _ = owner.process_reset_origin(128, stopped_reset_transport())?;
         owner.with_domain_session(&mut |control, processor| {
             processor.queue_parameter_at(0, control.get_parameter(0)?, 0)
         })?;
@@ -126,6 +134,8 @@ def prepare(here, repo, manifest_input, lock_input):
             ('save_state', f'{label}.save_state()', 'state save'),
             ('load_state', f'{label}.load_state(&[])', 'state restore'),
             ('reconfigure', f'{label}.reconfigure(48_000.0, 128)', 'runtime reconfiguration'),
+            ('reset_origin_support', f'{label}.reset_origin_support()', 'reset preflight'),
+            ('process_reset_origin', f'{label}.process_reset_origin(128, stopped_reset_transport())', 'reset transaction'),
             ('start_processing', f'{label}.start_processing()', 'activation'),
             ('stop_processing', f'{label}.stop_processing()', 'deactivation'),
             ('set_bus_arrangements', f'{label}.set_bus_arrangements(&[], &[])', 'bus reconfiguration'),
@@ -152,6 +162,8 @@ def prepare(here, repo, manifest_input, lock_input):
         ('load_state', 'owner.load_state(&[])?;', ['E0500', 'E0501'], ['closure', 'borrow']),
         ('reconfigure', 'owner.reconfigure(48_000.0, 128)?;', ['E0500', 'E0501'], ['closure', 'borrow']),
         ('metadata', 'let _ = owner.info();', ['E0502'], ['immutable', 'mutable']),
+        ('reset_origin_support', 'let _ = owner.reset_origin_support()?;', ['E0502'], ['immutable', 'mutable']),
+        ('process_reset_origin', 'let _ = owner.process_reset_origin(128, stopped_reset_transport())?;', ['E0500', 'E0501'], ['closure', 'borrow']),
         ('nested_session', 'owner.with_domain_session(&mut |_, _| Ok(()))?;', ['E0500', 'E0501'], ['closure', 'borrow']),
     ]:
         case(f'owner_cannot_{name}_during_session', f'''fn contract(owner: &mut MainThreadPlugin) -> Result<()> {{

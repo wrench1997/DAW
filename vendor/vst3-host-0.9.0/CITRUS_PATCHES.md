@@ -324,3 +324,20 @@ Surge/state/zero-sample behavior. Private compile-only fixtures use the real cra
 positive same-import baseline before checking owner-borrow/capability exclusions. See the scoped
 session guide in `docs/PLUGIN_PROCESSOR_DOMAINS.md` for scope and reproduction. This checkpoint
 retains all previous finite-storage, lifetime, legacy-caller and native-resize limitations.
+
+## Explicit stopped reset-origin processing
+
+Additive owner-only `ResetOriginSupport`/`process_reset_origin` and typed isolation commands
+consume pending events and host/mapped parameter points at origin in one positive silent block.
+The private reset input/output policy leaves ordinary processing and zero-sample state capture
+unchanged. Processor output is discarded with separate old-epoch/current counts; loss/poison
+remains visible, native UI feedback is retained, and native delivery acknowledgment follows the
+actual SDK result. Unknown helpers fail without fallback; uncertain post-send replies quarantine
+local stale MIDI. Standalone small blocks remain supported. The DAW alone requests Q128 and
+requires a prepared maximum of at least128. See `docs/PLUGIN_RESET_ORIGIN.md` in the parent repo.
+
+The combined scoped-session/reset integration retains the restricted AtomicBool
+RAII gate in ordinary and reset SDK calls. Owner reset obtains disjoint borrowed
+processor/module and gate capabilities only after session rejoin. Neither facade
+exposes reset. A combined COM fixture observes the marker inside SDK entry and
+its cleared state after success, SDK error and pre-SDK staging failure.

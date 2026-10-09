@@ -751,6 +751,79 @@ impl ProcessTransport {
     }
 }
 
+/// Versioned, read-only support for owner-only stopped reset-origin processing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResetOriginSupport {
+    /// Exact contract version; callers must reject unknown versions.
+    pub contract_version: u32,
+    /// Current configured processing maximum, not a required minimum block size.
+    pub max_block_frames: u32,
+    /// Whether prepared, active processing is currently available.
+    pub processing: bool,
+}
+
+impl ResetOriginSupport {
+    /// Pure validation. Call before panic, transport mutation or lifecycle operations.
+    pub fn validate(self, frames: usize, transport: ProcessTransport) -> Result<()> {
+        transport.validate()?;
+        if self.contract_version != 1 || frames == 0 || frames > self.max_block_frames as usize {
+            return Err(Error::InvalidParameter(
+                "unsupported reset-origin contract or frame count".into(),
+            ));
+        }
+        if transport.playing {
+            return Err(Error::InvalidParameter(
+                "reset-origin transport must be stopped".into(),
+            ));
+        }
+        if !self.processing {
+            return Err(Error::NotProcessing);
+        }
+        Ok(())
+    }
+}
+
+/// Value-free acknowledgment of one stopped reset-origin processing attempt.
+///
+/// Prior undrained processor output is invalidated as old-epoch data. Native editor/display
+/// feedback is never drained by this operation. Loss remains sticky in the instance, and is
+/// reported here even when it predates this attempt. A report is not success until checked.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResetOriginReport {
+    /// Requested positive silent frame count.
+    pub frames: u32,
+    /// Old-epoch processor MIDI discarded before processing.
+    pub discarded_prior_midi_events: u64,
+    /// Processor MIDI discarded from this attempt.
+    pub discarded_midi_events: u64,
+    /// Old-epoch processor parameter feedback discarded before processing.
+    pub discarded_prior_parameter_points: u64,
+    /// Processor parameter feedback discarded from this attempt.
+    pub discarded_parameter_points: u64,
+    /// Sticky MIDI output loss, including earlier undrained loss.
+    pub output_events_lost: bool,
+    /// Sticky processor output-parameter failure.
+    pub parameter_output_fault: bool,
+    /// Processing/admission error after validation, if any. No automatic retry is safe.
+    pub process_error: Option<String>,
+}
+
+impl ResetOriginReport {
+    /// Refuse to treat a discarded/lost output or failed SDK call as successful cleanup.
+    pub fn ensure_success(&self) -> Result<()> {
+        if self.parameter_output_fault {
+            return Err(Error::ParameterOutputRejected);
+        }
+        if self.output_events_lost {
+            return Err(Error::ProcessError("reset-origin MIDI output loss".into()));
+        }
+        if let Some(message) = &self.process_error {
+            return Err(Error::ProcessError(format!("reset-origin: {message}")));
+        }
+        Ok(())
+    }
+}
+
 /// VST3 plugin instance
 #[allow(clippy::type_complexity)] // callback fields are Box<dyn Fn...>; intrinsic to the API
 pub struct Plugin {
@@ -1128,6 +1201,18 @@ impl MainThreadPlugin {
     pub fn process_audio(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
         self.plugin.process_audio(buffers)
     }
+    /// Main-thread equivalent of [`Plugin::reset_origin_support`].
+    pub fn reset_origin_support(&self) -> Result<ResetOriginSupport> {
+        self.plugin.reset_origin_support()
+    }
+    /// Main-thread equivalent of [`Plugin::process_reset_origin`].
+    pub fn process_reset_origin(
+        &mut self,
+        frames: usize,
+        transport: ProcessTransport,
+    ) -> Result<ResetOriginReport> {
+        self.plugin.process_reset_origin(frames, transport)
+    }
     /// Main-thread equivalent of [`Plugin::audio_bus_layout`].
     pub fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
         self.plugin.audio_bus_layout()
@@ -1338,6 +1423,21 @@ pub(crate) trait PluginInternal: Send {
     fn get_all_parameters(&self) -> Result<Vec<Parameter>>;
     fn format_parameter(&self, id: u32, normalized: f64) -> Result<String>;
     fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()>;
+    fn reset_origin_support(&self) -> Result<ResetOriginSupport> {
+        Err(Error::Other(
+            "owner-only reset-origin processing is unsupported".into(),
+        ))
+    }
+    fn process_reset_origin(
+        &mut self,
+        _frames: usize,
+        _transport: ProcessTransport,
+    ) -> Result<ResetOriginReport> {
+        Err(Error::Other(
+            "owner-only reset-origin processing is unsupported".into(),
+        ))
+    }
+
     /// Query the current per-bus channel counts and activation state.
     fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
         Err(Error::Other(
@@ -2523,6 +2623,37 @@ impl Plugin {
         }
 
         Ok(())
+    }
+
+    /// Query reset-origin support without mutating queues, transport or lifecycle.
+    /// Unknown/old isolated helpers reject this query; there is no ordinary-process fallback.
+    pub fn reset_origin_support(&self) -> Result<ResetOriginSupport> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .reset_origin_support()
+    }
+
+    /// Consume pending input at origin in one positive, silent, stopped processing call.
+    ///
+    /// This owner-only administrative operation is unavailable during a scoped domain session.
+    /// Call after its rejoin, and preflight support before queueing panic. All pending event and
+    /// host parameter offsets become zero for this call only, preserving arrival order. Project
+    /// sample/PPQ positions remain fixed; continuous time and free-running DSP may advance by
+    /// `frames`. Audio, processor MIDI and processor parameter output are discarded, with loss
+    /// retained in the report. Native UI feedback and SDK input acknowledgments are preserved.
+    /// No panic, stop/start, metadata override or implicit state-settle processing is performed.
+    pub fn process_reset_origin(
+        &mut self,
+        frames: usize,
+        transport: ProcessTransport,
+    ) -> Result<ResetOriginReport> {
+        // Each implementation authoritatively preflights before mutation. Avoid a duplicate
+        // isolated capability round-trip here; unsupported implementations reject by default.
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .process_reset_origin(frames, transport)
     }
 
     /// Return every audio bus's current channel count and activation state.

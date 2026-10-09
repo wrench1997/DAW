@@ -140,7 +140,17 @@ where
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct OriginCall {
+    frames: i32,
+    events: Vec<(u16, i32, i16)>,
+    transport: Option<(u32, i64, f64, i64, i64)>,
+    silent_input: bool,
+}
+
 struct MockState {
+    capture_origin: AtomicBool,
+    origin_calls: Mutex<Vec<OriginCall>>,
     output_buses: AtomicI32,
     channels: AtomicI32,
     expand_on_state: AtomicBool,
@@ -153,6 +163,7 @@ struct MockState {
     processed_parameters: Mutex<Vec<Vec<(u32, i32, f64)>>>,
     capture_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     process_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    process_entry_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     fail_state: AtomicBool,
     no_alloc_process: AtomicBool,
     realtime_calls: AtomicUsize,
@@ -167,6 +178,8 @@ struct MockState {
 impl Default for MockState {
     fn default() -> Self {
         Self {
+            capture_origin: AtomicBool::new(false),
+            origin_calls: Mutex::new(Vec::new()),
             output_buses: AtomicI32::new(1),
             channels: AtomicI32::new(1),
             expand_on_state: AtomicBool::new(false),
@@ -179,6 +192,7 @@ impl Default for MockState {
             processed_parameters: Mutex::new(Vec::new()),
             capture_callback: Mutex::new(None),
             process_callback: Mutex::new(None),
+            process_entry_callback: Mutex::new(None),
             fail_state: AtomicBool::new(false),
             no_alloc_process: AtomicBool::new(false),
             realtime_calls: AtomicUsize::new(0),
@@ -455,10 +469,62 @@ impl<const S: bool, const C: bool> IAudioProcessorTrait for MockPlugin<S, C> {
             };
         }
         self.probe.record("process");
+        if let Some(callback) = self.state.process_entry_callback.lock().unwrap().as_ref() {
+            callback();
+        }
         if self.state.fail_process.load(Ordering::Acquire) {
             return kResultFalse;
         }
         let data = &mut *data;
+        if self.state.capture_origin.load(Ordering::Acquire) {
+            let mut events = Vec::new();
+            if let Some(list) = vst3::ComRef::from_raw(data.inputEvents) {
+                for index in 0..list.getEventCount() {
+                    let mut event: Event = std::mem::zeroed();
+                    assert_eq!(list.getEvent(index, &mut event), kResultOk);
+                    let pitch = if event.r#type == kNoteOnEvent as u16 {
+                        event.__field0.noteOn.pitch
+                    } else if event.r#type == kNoteOffEvent as u16 {
+                        event.__field0.noteOff.pitch
+                    } else {
+                        -1
+                    };
+                    events.push((event.r#type, event.sampleOffset, pitch));
+                }
+            }
+            let context = data.processContext.as_ref().map(|c| {
+                (
+                    c.state,
+                    c.projectTimeSamples,
+                    c.projectTimeMusic,
+                    c.continousTimeSamples,
+                    c.systemTime,
+                )
+            });
+            let mut silent_input = true;
+            let input_buses = if data.numInputs > 0 {
+                std::slice::from_raw_parts(data.inputs, data.numInputs as usize)
+            } else {
+                &[]
+            };
+            for bus in input_buses {
+                for channel in 0..bus.numChannels.max(0) as usize {
+                    let samples = *bus.__field0.channelBuffers32.add(channel);
+                    if !samples.is_null() {
+                        silent_input &=
+                            std::slice::from_raw_parts(samples, data.numSamples.max(0) as usize)
+                                .iter()
+                                .all(|sample| *sample == 0.0);
+                    }
+                }
+            }
+            self.state.origin_calls.lock().unwrap().push(OriginCall {
+                frames: data.numSamples,
+                events,
+                transport: context,
+                silent_input,
+            });
+        }
         let mut parameters = Vec::new();
         if let Some(changes) = vst3::ComRef::from_raw(data.inputParameterChanges) {
             for index in 0..changes.getParameterCount() {
@@ -2610,3 +2676,567 @@ fn output_event_overflow_reports_drain_loss_without_falsifying_successful_native
 }
 
 mod session_tests;
+
+fn reset_transport() -> crate::plugin::ProcessTransport {
+    crate::plugin::ProcessTransport {
+        sample_position: 12_345,
+        quarter_note_position: 9.25,
+        tempo: 123.0,
+        playing: false,
+        time_sig_numerator: 7,
+        time_sig_denominator: 8,
+    }
+}
+
+fn reset_fixture(maximum: usize) -> (PluginImpl, Arc<MockState>, Trace) {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    state.capture_origin.store(true, Ordering::Release);
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.set_audio_config(48_000.0, maximum);
+    use IProcessContextRequirements_::Flags_ as R;
+    plugin.runtime.process_context_requirements = Some(
+        (R::kNeedSystemTime
+            | R::kNeedContinousTimeSamples
+            | R::kNeedProjectTimeMusic
+            | R::kNeedTempo
+            | R::kNeedTimeSignature) as u32,
+    );
+    plugin.start_processing().unwrap();
+    (plugin, state, trace)
+}
+
+fn queue_future_reset_inputs(plugin: &mut PluginImpl) {
+    let channel = MidiChannel::from_index(0).unwrap();
+    plugin.runtime.midi_mapping_cache = MidiMappingCache {
+        buses: 1,
+        assignments: vec![None; MIDI_CHANNEL_COUNT * MIDI_CONTROLLER_COUNT],
+    };
+    plugin.runtime.midi_mapping_cache.assignments[64] = Some(77);
+    for (index, offset) in [0, 1, 64, 127, 2048].into_iter().enumerate() {
+        plugin
+            .send_midi_event_at(
+                MidiEvent::NoteOn {
+                    channel,
+                    note: 60 + index as u8,
+                    velocity: 100,
+                },
+                offset,
+            )
+            .unwrap();
+        plugin
+            .send_midi_event_at(
+                MidiEvent::ControlChange {
+                    channel,
+                    controller: 64,
+                    value: 127,
+                },
+                offset,
+            )
+            .unwrap();
+    }
+    // Same mapping/sustain ordering as an already queued CC followed by the worker's safety CC.
+    plugin
+        .send_midi_event_at(
+            MidiEvent::ControlChange {
+                channel,
+                controller: 64,
+                value: 0,
+            },
+            0,
+        )
+        .unwrap();
+    plugin.midi_panic().unwrap();
+}
+
+#[test]
+fn reset_origin_matches_old_one_frame_event_and_parameter_order_without_changing_normal_process() {
+    let (mut old, old_state, _) = reset_fixture(128);
+    let (mut reset, reset_state, _) = reset_fixture(128);
+    let (mut ordinary, ordinary_state, _) = reset_fixture(128);
+    for plugin in [&mut old, &mut reset, &mut ordinary] {
+        queue_future_reset_inputs(plugin);
+    }
+    old.set_process_transport(reset_transport()).unwrap();
+    old.process(&mut AudioBuffers::new(1, 1, 1, 48_000.0))
+        .unwrap();
+    let report = reset.process_reset_origin(128, reset_transport()).unwrap();
+    report.ensure_success().unwrap();
+    ordinary
+        .process(&mut AudioBuffers::new(1, 1, 128, 48_000.0))
+        .unwrap();
+    let old_calls = old_state.origin_calls.lock().unwrap();
+    let reset_calls = reset_state.origin_calls.lock().unwrap();
+    assert_eq!(old_calls[0].events, reset_calls[0].events);
+    assert_eq!(old_calls[0].frames, 1);
+    assert_eq!(reset_calls[0].frames, 128);
+    assert!(reset_calls[0].silent_input);
+    assert!(reset_calls[0].events.iter().all(|event| event.1 == 0));
+    assert_eq!(reset_calls[0].events.len(), 10);
+    assert!(reset_calls[0].events[..5]
+        .iter()
+        .all(|event| event.0 == kNoteOnEvent as u16));
+    assert!(reset_calls[0].events[5..]
+        .iter()
+        .all(|event| event.0 == kNoteOffEvent as u16));
+    assert_eq!(
+        *old_state.processed_parameters.lock().unwrap(),
+        *reset_state.processed_parameters.lock().unwrap()
+    );
+    assert_eq!(
+        reset_state.processed_parameters.lock().unwrap()[0].last(),
+        Some(&(77, 0, 0.0))
+    );
+    assert!(ordinary_state.origin_calls.lock().unwrap()[0]
+        .events
+        .iter()
+        .any(|event| event.1 == 64));
+    assert!(ordinary_state.processed_parameters.lock().unwrap()[0]
+        .iter()
+        .any(|point| point.1 == 64));
+    assert!(reset.runtime.input_events.is_empty());
+    assert!(reset.runtime.pending_param_changes.is_empty());
+    assert!(reset
+        .runtime
+        .ordinary_note_counts
+        .iter()
+        .all(|count| *count == 0));
+}
+
+#[test]
+fn reset_origin_stops_project_time_but_advances_continuous_time_and_next_transport_is_authoritative(
+) {
+    let (mut plugin, state, _) = reset_fixture(128);
+    plugin
+        .process_reset_origin(128, reset_transport())
+        .unwrap()
+        .ensure_success()
+        .unwrap();
+    let context = state.origin_calls.lock().unwrap()[0].transport.unwrap();
+    assert_eq!(
+        context.0 & ProcessContext_::StatesAndFlags_::kPlaying as u32,
+        0
+    );
+    assert_eq!((context.1, context.2), (12_345, 9.25));
+    let after = &plugin
+        .runtime
+        .process_data
+        .as_ref()
+        .unwrap()
+        .process_context;
+    assert_eq!(
+        (after.projectTimeSamples, after.projectTimeMusic),
+        (12_345, 9.25)
+    );
+    assert_eq!(after.continousTimeSamples, context.3 + 128);
+    assert_eq!(
+        after.systemTime,
+        context.4 + (128.0_f64 / 48_000.0 * 1_000_000_000.0).round() as i64
+    );
+    assert_eq!(plugin.runtime.process_transport, Some(reset_transport()));
+    let next = crate::plugin::ProcessTransport {
+        sample_position: 48_000,
+        quarter_note_position: 64.0,
+        playing: true,
+        ..reset_transport()
+    };
+    plugin.set_process_transport(next).unwrap();
+    plugin
+        .process(&mut AudioBuffers::new(1, 1, 128, 48_000.0))
+        .unwrap();
+    let calls = state.origin_calls.lock().unwrap();
+    assert_eq!(
+        (calls[1].transport.unwrap().1, calls[1].transport.unwrap().2),
+        (48_000, 64.0)
+    );
+}
+
+#[test]
+fn reset_origin_preflight_rejects_without_mutation_and_standalone_small_blocks_remain_supported() {
+    for maximum in [17, 47, 127, 128, 2048] {
+        let (mut plugin, state, trace) = reset_fixture(maximum);
+        plugin.set_process_transport(reset_transport()).unwrap();
+        plugin.queue_processor_parameter_at(7, 0.75, 64).unwrap();
+        plugin
+            .send_midi_event_at(
+                MidiEvent::NoteOn {
+                    channel: MidiChannel::from_index(0).unwrap(),
+                    note: 60,
+                    velocity: 100,
+                },
+                64,
+            )
+            .unwrap();
+        trace.clear();
+        let before = plugin.runtime.process_transport;
+        for (frames, transport) in [
+            (0, reset_transport()),
+            (maximum + 1, reset_transport()),
+            (
+                1,
+                crate::plugin::ProcessTransport {
+                    playing: true,
+                    ..reset_transport()
+                },
+            ),
+            (
+                1,
+                crate::plugin::ProcessTransport {
+                    tempo: f64::NAN,
+                    ..reset_transport()
+                },
+            ),
+        ] {
+            assert!(plugin.process_reset_origin(frames, transport).is_err());
+            assert!(trace.calls().is_empty());
+            assert_eq!(plugin.runtime.process_transport, before);
+            assert_eq!(plugin.runtime.pending_param_changes.len(), 1);
+            assert_eq!(plugin.runtime.ordinary_note_counts[60], 1);
+            assert_eq!(
+                plugin.runtime.input_events.events.lock().unwrap()[0].sample_offset,
+                64
+            );
+        }
+        // No vendor-wide minimum: ordinary processing and an in-range explicit reset work.
+        plugin
+            .process(&mut AudioBuffers::new(1, 1, maximum, 48_000.0))
+            .unwrap();
+        plugin
+            .process_reset_origin(maximum, reset_transport())
+            .unwrap()
+            .ensure_success()
+            .unwrap();
+        assert_eq!(state.origin_calls.lock().unwrap().len(), 2);
+    }
+}
+
+#[test]
+fn reset_origin_discards_only_processor_outputs_and_retains_native_display_feedback() {
+    let (mut plugin, state, _) = reset_fixture(128);
+    state.no_alloc_process.store(true, Ordering::Release);
+    state.output_points.store(2, Ordering::Release);
+    state.output_event_attempts.store(3, Ordering::Release);
+    plugin
+        .runtime
+        .output_param_feedback
+        .push((99, 0.125))
+        .unwrap();
+    plugin
+        .runtime
+        .output_events_owned
+        .push(admission_scalar_event())
+        .unwrap();
+    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
+    assert_eq!(unsafe { handler.performEdit(42, 0.25) }, kResultOk);
+    let report = plugin.process_reset_origin(128, reset_transport()).unwrap();
+    report.ensure_success().unwrap();
+    assert_eq!(
+        (
+            report.discarded_prior_midi_events,
+            report.discarded_midi_events
+        ),
+        (1, 3)
+    );
+    assert_eq!(
+        (
+            report.discarded_prior_parameter_points,
+            report.discarded_parameter_points
+        ),
+        (1, 2)
+    );
+    assert!(plugin.runtime.output_events_owned.is_empty());
+    assert!(plugin.runtime.output_param_feedback.is_empty());
+    assert_eq!(plugin.take_output_events_with_loss(), (Vec::new(), false));
+    assert_eq!(plugin.get_parameter_changes(), vec![(42, 0.25)]);
+    let native = handler.native_edits.snapshot();
+    assert_eq!((native.submitted, native.applied), (1, 1));
+}
+
+#[test]
+fn reset_origin_preserves_output_loss_and_parameter_poison_without_falsifying_native_ack() {
+    for (events, parameters, fail_sdk) in [(4097, 0, false), (0, 8193, false), (3, 2, true)] {
+        let (mut plugin, state, _) = reset_fixture(128);
+        state.no_alloc_process.store(true, Ordering::Release);
+        state.output_points.store(parameters, Ordering::Release);
+        state.output_event_attempts.store(events, Ordering::Release);
+        state.fail_process.store(fail_sdk, Ordering::Release);
+        let handler = plugin.control.component_handler.as_ref().unwrap().clone();
+        assert_eq!(unsafe { handler.performEdit(42, 0.25) }, kResultOk);
+        let report = plugin.process_reset_origin(128, reset_transport()).unwrap();
+        assert!(report.ensure_success().is_err());
+        let native = handler.native_edits.snapshot();
+        assert_eq!(native.submitted, 1);
+        assert_eq!(native.applied, u64::from(!fail_sdk));
+        assert!(plugin.runtime.output_events_owned.is_empty());
+        assert!(plugin.runtime.output_param_feedback.is_empty());
+        if events > 4096 {
+            assert!(report.output_events_lost);
+            assert!(plugin.runtime.output_events_lost.load(Ordering::Acquire));
+            state.output_event_attempts.store(0, Ordering::Release);
+            let again = plugin.process_reset_origin(128, reset_transport()).unwrap();
+            assert!(again.output_events_lost);
+            assert!(again.ensure_success().is_err());
+        }
+        if parameters > 8192 {
+            assert!(report.parameter_output_fault);
+            assert!(plugin
+                .runtime
+                .parameter_output_fault
+                .load(Ordering::Acquire));
+            let calls = state.realtime_calls.load(Ordering::Acquire);
+            assert!(matches!(
+                plugin.process_reset_origin(128, reset_transport()),
+                Err(Error::ParameterOutputRejected)
+            ));
+            assert_eq!(state.realtime_calls.load(Ordering::Acquire), calls);
+        }
+        if fail_sdk {
+            assert!(report.process_error.is_some());
+        }
+    }
+}
+
+#[test]
+fn reset_origin_prior_loss_cannot_be_consumed_into_success() {
+    let (mut plugin, _, _) = reset_fixture(128);
+    plugin
+        .runtime
+        .output_events_lost
+        .store(true, Ordering::Release);
+    let report = plugin.process_reset_origin(128, reset_transport()).unwrap();
+    assert!(report.output_events_lost);
+    assert!(report.ensure_success().is_err());
+    assert!(plugin.runtime.output_events_lost.load(Ordering::Acquire));
+}
+
+#[test]
+fn reset_origin_partial_panic_rejection_never_processes_or_forges_cleanup() {
+    let (mut plugin, state, trace) = reset_fixture(128);
+    plugin.runtime.active_notes = vec![(11, 0, 60), (12, 0, 61), (13, 0, 62)];
+    fill_admission_queue(&mut plugin, MAX_QUEUED_EVENTS - 2);
+    trace.clear();
+    plugin
+        .reset_origin_support()
+        .unwrap()
+        .validate(128, reset_transport())
+        .unwrap();
+    let result = plugin
+        .midi_panic()
+        .and_then(|_| plugin.process_reset_origin(128, reset_transport()));
+    assert!(matches!(result, Err(Error::EventInputRejected)));
+    assert!(state.origin_calls.lock().unwrap().is_empty());
+    assert!(trace.calls().is_empty());
+    assert_eq!(plugin.runtime.active_notes, [(13, 0, 62)]);
+    assert_eq!(queued_note_releases(&plugin), [(11, 0, 60), (12, 0, 61)]);
+}
+
+#[test]
+fn reset_origin_known_parameter_poison_refuses_before_transport_queue_or_panic_mutation() {
+    for runtime_poison in [true, false] {
+        let (mut plugin, state, trace) = reset_fixture(128);
+        queue_future_reset_inputs(&mut plugin);
+        let before_params = plugin.runtime.pending_param_changes.clone();
+        let before_events = plugin.runtime.input_events.events.lock().unwrap().len();
+        if runtime_poison {
+            plugin
+                .runtime
+                .parameter_output_fault
+                .store(true, Ordering::Release);
+        } else {
+            let points = &plugin
+                .runtime
+                .process_data
+                .as_ref()
+                .unwrap()
+                .output_param_changes;
+            for point in 0..4096 {
+                points.try_enqueue(1, point, 0.5).unwrap();
+            }
+            assert!(points.try_enqueue(1, 4096, 0.5).is_err());
+        }
+        trace.clear();
+        assert!(matches!(
+            plugin.reset_origin_support(),
+            Err(Error::ParameterOutputRejected)
+        ));
+        assert!(matches!(
+            plugin.process_reset_origin(128, reset_transport()),
+            Err(Error::ParameterOutputRejected)
+        ));
+        assert!(trace.calls().is_empty());
+        assert!(state.origin_calls.lock().unwrap().is_empty());
+        assert!(plugin.runtime.process_transport.is_none());
+        assert_eq!(
+            plugin.runtime.input_events.events.lock().unwrap().len(),
+            before_events
+        );
+        assert_eq!(
+            plugin.runtime.pending_param_changes.len(),
+            before_params.len()
+        );
+    }
+}
+
+#[test]
+fn reset_origin_counts_prior_raw_processor_points_before_clearing_them() {
+    let (mut plugin, _, _) = reset_fixture(128);
+    plugin
+        .runtime
+        .process_data
+        .as_ref()
+        .unwrap()
+        .output_param_changes
+        .try_enqueue(77, 64, 0.5)
+        .unwrap();
+    let report = plugin.process_reset_origin(128, reset_transport()).unwrap();
+    report.ensure_success().unwrap();
+    assert_eq!(report.discarded_prior_parameter_points, 1);
+    assert!(plugin.get_parameter_changes().is_empty());
+}
+
+#[test]
+fn reset_origin_poisoned_owned_input_with_no_notes_refuses_without_false_native_ack() {
+    let (mut plugin, state, trace) = reset_fixture(128);
+    let event = PluginEvent::sysex(vec![0xf0, 1, 2, 0xf7]);
+    plugin.send_plugin_event(event.clone()).unwrap();
+    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
+    assert_eq!(unsafe { handler.performEdit(42, 0.25) }, kResultOk);
+    let native_before = handler.native_edits.snapshot();
+    assert!(plugin.runtime.active_notes.is_empty());
+    assert!(plugin
+        .runtime
+        .ordinary_note_counts
+        .iter()
+        .all(|count| *count == 0));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = plugin.runtime.input_events.events.lock().unwrap();
+        panic!("deliberately poison pending owned reset input");
+    }));
+    trace.clear();
+    assert!(matches!(
+        plugin.reset_origin_support(),
+        Err(Error::EventInputRejected)
+    ));
+    assert!(matches!(
+        plugin.process_reset_origin(128, reset_transport()),
+        Err(Error::EventInputRejected)
+    ));
+    assert!(trace.calls().is_empty());
+    assert!(state.origin_calls.lock().unwrap().is_empty());
+    assert_eq!(handler.native_edits.snapshot(), native_before);
+    assert!(plugin.runtime.process_transport.is_none());
+    assert_eq!(
+        *plugin
+            .runtime
+            .input_events
+            .events
+            .lock()
+            .unwrap_err()
+            .into_inner(),
+        vec![event]
+    );
+    assert_eq!(plugin.get_parameter_changes(), vec![(42, 0.25)]);
+}
+
+#[test]
+fn reset_origin_defensive_staging_poison_fails_after_preflight_without_sdk_or_native_ack() {
+    let (mut plugin, state, trace) = reset_fixture(128);
+    plugin
+        .send_plugin_event(PluginEvent::sysex(vec![0xf0, 3, 0xf7]))
+        .unwrap();
+    plugin.queue_processor_parameter_at(77, 0.75, 64).unwrap();
+    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
+    assert_eq!(unsafe { handler.performEdit(42, 0.25) }, kResultOk);
+    let before = handler.native_edits.snapshot();
+    plugin
+        .reset_origin_support()
+        .unwrap()
+        .validate(128, reset_transport())
+        .unwrap();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = plugin.runtime.input_events.events.lock().unwrap();
+        panic!("poison after reset preflight");
+    }));
+    trace.clear();
+    // Exercise the actual defensive private stage, after the successful public preflight.
+    let mut processor = ProcessorLease::new(
+        &mut plugin.control.processor,
+        plugin.control._module.as_ref(),
+    );
+    let mut gate = plugin.control._host_app.data_exchange_process_gate();
+    let mut audio = AudioBuffers::new(0, 1, 128, 48_000.0);
+    let report = plugin.runtime.process_reset_origin(
+        &mut processor,
+        &mut gate,
+        &mut CallerAudioBuffers::Flat(&mut audio),
+        128,
+    );
+    assert!(report.ensure_success().is_err());
+    assert!(report.process_error.unwrap().contains("event"));
+    assert!(state.origin_calls.lock().unwrap().is_empty());
+    assert!(trace.calls().is_empty());
+    assert_eq!(handler.native_edits.snapshot(), before);
+    assert_eq!(plugin.runtime.pending_param_changes[0].sample_offset, 64);
+    assert_eq!(
+        plugin
+            .runtime
+            .input_events
+            .events
+            .lock()
+            .unwrap_err()
+            .into_inner()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn combined_reset_gate_is_sdk_scoped_on_success_sdk_error_and_staging_failure() {
+    for mode in 0..3 {
+        let (mut plugin, state, _) = reset_fixture(128);
+        let host = plugin.control._host_app.clone();
+        let callback_host = host.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = calls.clone();
+        let observed_active = Arc::new(AtomicBool::new(false));
+        let callback_active = observed_active.clone();
+        *state.process_entry_callback.lock().unwrap() = Some(Box::new(move || {
+            callback_calls.fetch_add(1, Ordering::Relaxed);
+            callback_active.store(
+                callback_host.is_data_exchange_in_process_for_test(),
+                Ordering::Release,
+            );
+        }));
+        assert!(!host.is_data_exchange_in_process_for_test());
+        state.fail_process.store(mode == 1, Ordering::Release);
+        let report = if mode == 2 {
+            plugin
+                .reset_origin_support()
+                .unwrap()
+                .validate(128, reset_transport())
+                .unwrap();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = plugin.runtime.input_events.events.lock().unwrap();
+                panic!("combined reset staging poison after pure preflight");
+            }));
+            let mut processor = ProcessorLease::new(
+                &mut plugin.control.processor,
+                plugin.control._module.as_ref(),
+            );
+            let mut gate = plugin.control._host_app.data_exchange_process_gate();
+            let mut audio = AudioBuffers::new(0, 1, 128, 48_000.0);
+            plugin.runtime.process_reset_origin(
+                &mut processor,
+                &mut gate,
+                &mut CallerAudioBuffers::Flat(&mut audio),
+                128,
+            )
+        } else {
+            plugin.process_reset_origin(128, reset_transport()).unwrap()
+        };
+        assert_eq!(report.ensure_success().is_ok(), mode == 0);
+        assert_eq!(calls.load(Ordering::Acquire), usize::from(mode != 2));
+        assert_eq!(observed_active.load(Ordering::Acquire), mode != 2);
+        assert!(!host.is_data_exchange_in_process_for_test());
+    }
+}

@@ -37,7 +37,7 @@ const MAX_QUEUED_RESPONSES: usize = 64;
 const MAX_WIRE_CHANNELS: usize = 256;
 
 /// Upper bound on frames-per-channel taken from the wire.
-const MAX_WIRE_FRAMES: usize = 1 << 20;
+pub(crate) const MAX_WIRE_FRAMES: usize = 1 << 20;
 
 /// Upper bound on a bus count taken from the wire.
 const MAX_WIRE_BUSES: i32 = 256;
@@ -604,6 +604,19 @@ pub enum HostCommand {
     },
     /// Release all notes currently tracked by the plugin.
     MidiPanic,
+    /// Query reset-origin support without processing, draining feedback, or changing state.
+    /// Older helpers reject this additive command; callers must not emulate it with ordinary
+    /// processing or state capture.
+    ResetOriginSupport,
+    /// Attempt a silent, owner-affine reset-origin block and discard its process feedback.
+    /// Preflight failures return `Error`; after an attempt, failures and loss belong to the
+    /// count-only `ResetOriginReport` response. No audio, MIDI, or parameter values are returned.
+    ProcessResetOrigin {
+        /// Number of frames in this block, within the configured maximum and wire limit.
+        frames: u32,
+        /// Required authoritative transport for the reset-origin block.
+        transport: crate::plugin::ProcessTransport,
+    },
     /// Process one block of audio. `inputs` is per-channel; `frames` is the block length.
     Process {
         /// Per-channel input samples (`[channel][frame]`), carried as base64 bit patterns.
@@ -850,6 +863,16 @@ pub enum HostResponse {
     Crashed {
         /// Crash detail.
         message: String,
+    },
+    /// Pure reset-origin capability and current processing status.
+    ResetOriginSupport {
+        /// Contract version, configured frame limit, and processing status.
+        support: crate::plugin::ResetOriginSupport,
+    },
+    /// Count-only result after a reset-origin block was attempted, including process failure.
+    ResetOriginReport {
+        /// Discard counts and loss/error diagnostics, without process output values.
+        report: crate::plugin::ResetOriginReport,
     },
     /// Per-channel audio output data (`[channel][frame]`), plus any MIDI the plugin
     /// emitted during the block (arpeggiators, MPE, etc.).
@@ -2849,6 +2872,18 @@ mod wire_tests {
             transport: None,
             inputs: vec![],
             frames: 64
+        }));
+        assert!(!is_slow_command(&HostCommand::ResetOriginSupport));
+        assert!(!is_slow_command(&HostCommand::ProcessResetOrigin {
+            frames: 47,
+            transport: crate::plugin::ProcessTransport {
+                sample_position: 0,
+                quarter_note_position: 0.0,
+                tempo: 120.0,
+                playing: false,
+                time_sig_numerator: 4,
+                time_sig_denominator: 4,
+            },
         }));
         assert!(!is_slow_command(&HostCommand::GetAllParameters));
     }
