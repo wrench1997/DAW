@@ -441,3 +441,99 @@ fn full_app_export_footer_remains_clickable_at_minimum_window_size() {
     ui.click("Close");
     assert!(!ui.app.export_dialog.is_open());
 }
+
+fn node_rect(node: &Node) -> Rect {
+    let bounds = node.bounds().expect("interactive widget must have bounds");
+    Rect::from_min_max(
+        Pos2::new(bounds.x0 as f32, bounds.y0 as f32),
+        Pos2::new(bounds.x1 as f32, bounds.y1 as f32),
+    )
+}
+
+fn assert_disjoint(first: Rect, second: Rect) {
+    let overlap = first.intersect(second);
+    assert!(
+        overlap.width() <= 0.0 || overlap.height() <= 0.0,
+        "interactive controls overlap: {first:?} and {second:?}"
+    );
+}
+
+#[test]
+fn full_app_responsive_toolbars_keep_navigation_plugins_group_and_snap_separate() {
+    for width in [1080.0, 1240.0, 1280.0, 1440.0] {
+        let mut ui = UiHarness::new();
+        ui.size = egui::vec2(width, 680.0);
+        ui.settle();
+        let navigation: Vec<_> = ["PLAYLIST", "RACK", "PIANO", "MIXER", "PLUGINS manager"]
+            .into_iter()
+            .map(|name| node_rect(ui.button(name)))
+            .collect();
+        for (index, rect) in navigation.iter().enumerate() {
+            assert!(
+                ui.ctx.content_rect().contains_rect(*rect),
+                "navigation escaped at width {width}: {rect:?}"
+            );
+            for sibling in &navigation[index + 1..] {
+                assert_disjoint(*rect, *sibling);
+            }
+        }
+        let snap = ui
+            .nodes
+            .iter()
+            .find(|node| node.role() == Role::ComboBox && node.value() == Some("Step (1/4 beat)"))
+            .expect("actual Playlist snap control");
+        let snap_rect = node_rect(snap);
+        assert!(ui.ctx.content_rect().contains_rect(snap_rect));
+        assert_disjoint(node_rect(ui.button("GROUP ▾")), snap_rect);
+        assert_disjoint(node_rect(ui.button("XFADE")), snap_rect);
+        if width == 1440.0 {
+            assert!(
+                (node_rect(ui.button("GROUP ▾")).center().y - snap_rect.center().y).abs() < 2.0,
+                "wide workspace should keep the tools and snap on one row"
+            );
+        }
+        if width == 1080.0 {
+            ui.capture("playlist-minimum-window");
+        }
+        ui.click("MIXER");
+        assert_eq!(ui.app.view, StudioView::Mixer);
+        if width == 1080.0 {
+            ui.capture("mixer-minimum-window");
+        }
+        ui.click("PLUGINS manager");
+        assert!(ui.app.show_plugins);
+        ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!ui.app.show_plugins);
+        ui.click("PLAYLIST");
+        assert_eq!(ui.app.view, StudioView::Playlist);
+        ui.click("GROUP ▾");
+        assert!(egui::Popup::is_any_open(&ui.ctx));
+        ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!egui::Popup::is_any_open(&ui.ctx));
+        let snap = ui
+            .nodes
+            .iter()
+            .find(|node| node.role() == Role::ComboBox && node.value() == Some("Step (1/4 beat)"))
+            .unwrap();
+        ui.click_pos(node_rect(snap).center());
+        ui.click("1 beat");
+        assert_eq!(ui.app.snap, 1.0);
+    }
+}
+
+#[test]
+fn full_app_about_reports_platform_and_offline_state_without_an_assumed_backend() {
+    let mut ui = UiHarness::new();
+    ui.key(egui::Key::F10, egui::Modifiers::NONE);
+    ui.click("About");
+    let text: Vec<_> = ui
+        .nodes
+        .iter()
+        .filter_map(|node| node.value().or_else(|| node.label()))
+        .collect();
+    assert!(text.contains(&std::env::consts::OS));
+    assert!(text.contains(&"CPAL / offline (no active stream)"));
+    #[cfg(target_os = "linux")]
+    assert!(!text.iter().any(|label| label.contains("WASAPI")));
+    ui.capture("settings-about-platform");
+}

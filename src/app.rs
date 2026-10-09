@@ -14234,8 +14234,11 @@ impl CitrusApp {
     }
 
     fn toolbar(&mut self, root: &mut egui::Ui) {
+        // Keep every transport and navigation action visible at the supported minimum size.
+        // A second explicit row is preferable to right-aligned controls painting over siblings.
+        let compact = root.available_width() < 1240.0;
         egui::Panel::top("toolbar")
-            .exact_size(89.0)
+            .exact_size(if compact { 153.0 } else { 89.0 })
             .frame(
                 egui::Frame::NONE
                     .fill(theme::PANEL)
@@ -14384,27 +14387,34 @@ impl CitrusApp {
                     );
                     ui.separator();
 
-                    for (label, view, key, icon) in [
-                        ("PLAYLIST", StudioView::Playlist, "F5", StudioIcon::Playlist),
-                        ("RACK", StudioView::ChannelRack, "F6", StudioIcon::Rack),
-                        ("PIANO", StudioView::PianoRoll, "F7", StudioIcon::Piano),
-                        ("MIXER", StudioView::Mixer, "F9", StudioIcon::Mixer),
-                    ] {
-                        let selected = self.view == view;
-                        if navigation_button(ui, icon, label, key, selected).clicked() {
-                            self.view = view;
-                        }
+                    if !compact {
+                        self.toolbar_navigation(ui);
                     }
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icon_label_button(ui, StudioIcon::Plugin, "PLUGINS", theme::ORANGE)
-                            .clicked()
-                        {
-                            self.show_plugins = true;
-                        }
-                    });
                 });
+                if compact {
+                    ui.horizontal(|ui| self.toolbar_navigation(ui));
+                }
             });
+    }
+
+    fn toolbar_navigation(&mut self, ui: &mut egui::Ui) {
+        for (label, view, key, icon) in [
+            ("PLAYLIST", StudioView::Playlist, "F5", StudioIcon::Playlist),
+            ("RACK", StudioView::ChannelRack, "F6", StudioIcon::Rack),
+            ("PIANO", StudioView::PianoRoll, "F7", StudioIcon::Piano),
+            ("MIXER", StudioView::Mixer, "F9", StudioIcon::Mixer),
+        ] {
+            let selected = self.view == view;
+            if navigation_button(ui, icon, label, key, selected).clicked() {
+                self.view = view;
+            }
+        }
+
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if icon_label_button(ui, StudioIcon::Plugin, "PLUGINS", theme::ORANGE).clicked() {
+                self.show_plugins = true;
+            }
+        });
     }
 
     fn bottom_status(&mut self, root: &mut egui::Ui) {
@@ -17673,6 +17683,9 @@ fn navigation_button(
         FontId::monospace(7.0),
         theme::MUTED,
     );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, label)
+    });
     response
 }
 
@@ -17709,6 +17722,13 @@ fn icon_label_button(ui: &mut egui::Ui, icon: StudioIcon, label: &str, color: Co
         FontId::proportional(9.5),
         color,
     );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            format!("{label} manager"),
+        )
+    });
     response
 }
 
@@ -17781,7 +17801,7 @@ impl CitrusApp {
             .inner_margin(egui::Margin::symmetric(10, 6))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(
                         RichText::new(title)
                             .strong()
@@ -17957,7 +17977,11 @@ impl CitrusApp {
                             );
                         }
                     }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // Reserve the entire snap group before laying it out. In a wrapped
+                    // row this moves the group intact instead of overlapping previous tools.
+                    ui.allocate_ui_with_layout(
+                        Vec2::new((ui.available_size_before_wrap().x - ui.spacing().item_spacing.x).max(196.0), 28.0),
+                        Layout::right_to_left(Align::Center), |ui| {
                         let snap = if self.view == StudioView::PianoRoll {
                             &mut self.piano_roll_state.local_snap
                         } else {
@@ -18036,7 +18060,7 @@ impl CitrusApp {
             .inner_margin(egui::Margin::symmetric(10, 4))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("VIEW").size(8.0).color(theme::MUTED));
                     scroll_changed |= ui
                         .add_sized(
@@ -18068,15 +18092,23 @@ impl CitrusApp {
                     {
                         self.add_automation_clip();
                     }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.add(
-                            egui::DragValue::new(&mut self.project.song_length_beats)
-                                .range(minimum_length..=4096.0)
-                                .speed(4.0)
-                                .suffix(" beats"),
-                        );
-                        ui.label(RichText::new("SONG LENGTH").size(8.0).color(theme::MUTED));
-                    });
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(
+                            (ui.available_size_before_wrap().x - ui.spacing().item_spacing.x)
+                                .max(172.0),
+                            28.0,
+                        ),
+                        Layout::right_to_left(Align::Center),
+                        |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut self.project.song_length_beats)
+                                    .range(minimum_length..=4096.0)
+                                    .speed(4.0)
+                                    .suffix(" beats"),
+                            );
+                            ui.label(RichText::new("SONG LENGTH").size(8.0).color(theme::MUTED));
+                        },
+                    );
                 });
             });
         let content_end = finite_content_end(self.project.song_length_beats, 4.0);
@@ -22732,7 +22764,16 @@ impl CitrusApp {
         );
         settings_card(ui, "BUILD", |ui| {
             property_line(ui, "Version", env!("CARGO_PKG_VERSION"));
-            property_line(ui, "Audio backend", "CPAL / Windows WASAPI");
+            property_line(ui, "Platform", std::env::consts::OS);
+            property_line(
+                ui,
+                "Audio backend",
+                &crate::settings_ui::format_audio_backend(
+                    self.audio
+                        .as_ref()
+                        .map(AudioEngine::effective_device_profile),
+                ),
+            );
             property_line(ui, "Realtime quantum", "128 samples");
         });
         settings_card(ui, "KEYBOARD", |ui| {

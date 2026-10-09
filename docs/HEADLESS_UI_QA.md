@@ -89,15 +89,51 @@ identical RGB pixels.
 
 Visual inspection confirmed legible normal-size Settings, browser import
 success/error, media and unsaved-project dialogs, and fully visible export review
-footer controls at the minimum size. It also identified unresolved pre-existing
-issues; these are **not** a blanket visual acceptance pass:
+footer controls at the minimum size. It also identified pre-existing issues at checkpoint `cb49961`, corrected in the
+follow-up described below. This is **not** a blanket visual acceptance pass:
 
 - At minimum width, the main toolbar's Plugins button overlaps Mixer navigation,
   and Playlist group/snap controls crowd each other behind the export modal.
-  Responsive toolbar layout needs a separate correction and recapture.
+  This was recorded before the responsive-toolbar correction.
 - The About page hardcodes “CPAL / Windows WASAPI” even on this Linux run.
-  Its platform label needs correction; the harness opens no audio device.
+  This was recorded before the runtime/platform-label correction; the harness
+  opens no audio device.
 
 The default demo arrangement is shown in overview renders. Import evidence uses
 a deliberately tiny, known two-frame PCM16 fixture. Neither is evidence of
 real-world playback, recorded audio, or hardware meter acceptance.
+
+
+## Responsive-layout correction and recapture
+
+The follow-up keeps all transport/navigation actions visible. Below 1240 logical
+points the top toolbar uses two rows. Workspace tools and the Playlist navigation
+row wrap their bounded trailing control groups instead of allowing right-aligned
+children to paint over earlier siblings. A wide workspace still keeps tools and
+Snap together on one row. Custom navigation and plugin-manager buttons now expose
+real accessibility labels, also used by the pointer-event regression tests.
+
+The About page displays the build platform and formats its backend from the
+observed running profile's host. Without an engine it explicitly says
+`CPAL / offline (no active stream)`; it no longer assumes Windows WASAPI on Linux.
+The presentation helper performs no device enumeration.
+
+Verified against the final follow-up source:
+
+- Linux no-default-features / all-target Rust: **910 passed, 0 failed, 0 ignored**
+- `cargo fmt --all -- --check`: passed
+- Linux no-default-features / all-target Clippy with `-D warnings`: passed
+- Windows MSVC no-default-features / all-target **cross-check**: passed; not a
+  Windows execution, binary, native UI, or hardware result
+- Explicit Vulkan capture run: **8 app UI tests passed**, 17 genuine offscreen
+  render checkpoints; no mock pixels or display surface
+- At 1080, 1240, 1280, and 1440 logical-point widths: actual navigation/Plugins
+  bounds are inside the viewport and pairwise non-overlapping; Group/Snap bounds
+  are separate; clicks open Mixer/Plugins/Group and select a different Snap value
+- Linux About UI explicitly shows `linux`, the offline state, and no WASAPI claim
+
+Before/after pixel inspection confirms the minimum-width Plugins/Mixer overlap
+and Group/Snap crowding are gone; normal-width layout remains compact. The
+minimum-size export review footer remains fully visible. Minimum-size Playlist
+and Mixer captures are 1123 × 707 physical pixels at the existing 1.04 zoom.
+All earlier desktop/dialog/device acceptance boundaries still apply.

@@ -5,10 +5,20 @@
 //! testable without constructing an application or opening an audio device.
 
 use crate::audio_device::{
-    AudioBufferSizeRequest, AudioChannelRequest, AudioDeviceProfile, AudioSampleFormat,
-    AudioSampleFormatRequest, AudioSampleRateRequest, AudioStreamFaultKind,
+    AudioBufferSizeRequest, AudioChannelRequest, AudioDeviceProfile, AudioDeviceSelection,
+    AudioSampleFormat, AudioSampleFormatRequest, AudioSampleRateRequest, AudioStreamFaultKind,
     AudioStreamTelemetrySnapshot,
 };
+
+/// Describe the observed stream's host rather than assuming the build platform's default.
+/// No device enumeration or stream startup is performed to render this label.
+pub fn format_audio_backend(running_profile: Option<&AudioDeviceProfile>) -> String {
+    match running_profile.map(|profile| &profile.selection) {
+        None => "CPAL / offline (no active stream)".into(),
+        Some(AudioDeviceSelection::Stable(identity)) => format!("CPAL / {}", identity.host_id),
+        Some(AudioDeviceSelection::SystemDefault) => "CPAL / host not reported".into(),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum SettingsPage {
@@ -527,5 +537,28 @@ mod tests {
         assert_eq!(view.state, AudioSettingsState::Switching);
         assert!(view.draft_changed);
         assert!(!view.can_apply);
+    }
+    #[test]
+    fn backend_label_reports_only_observed_host_and_distinguishes_offline() {
+        assert_eq!(
+            format_audio_backend(None),
+            "CPAL / offline (no active stream)"
+        );
+        let mut profile = AudioDeviceProfile::system_default_output();
+        assert_eq!(
+            format_audio_backend(Some(&profile)),
+            "CPAL / host not reported"
+        );
+        for host in ["ALSA", "WASAPI", "CoreAudio"] {
+            profile.selection =
+                AudioDeviceSelection::Stable(crate::audio_device::AudioDeviceIdentity {
+                    host_id: host.into(),
+                    device_id: "presentation-only-fixture".into(),
+                });
+            assert_eq!(
+                format_audio_backend(Some(&profile)),
+                format!("CPAL / {host}")
+            );
+        }
     }
 }
