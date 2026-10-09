@@ -3134,3 +3134,1087 @@ fn full_app_plugin_settings_retry_and_device_footer_remain_clickable_at_small_si
         assert!(!ui.app.playing);
     }
 }
+
+struct ConfigCaptureBackend {
+    value: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    dirty: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    open: bool,
+    note_on: bool,
+}
+
+impl plugins::plugin_runtime::PluginBackend for ConfigCaptureBackend {
+    fn name(&self) -> &str {
+        "configuration capture test"
+    }
+    fn prepare(&mut self, _: plugins::plugin_runtime::PluginPrepareConfig) -> Result<(), String> {
+        if self.get_parameter(0)?.is_nan() {
+            return Err("synthetic prepare failure".into());
+        }
+        Ok(())
+    }
+    fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+    ) -> Result<(), String> {
+        let sample = if self.note_on {
+            self.get_parameter(0)?
+        } else {
+            0.0
+        };
+        left[..frames].fill(sample);
+        right[..frames].fill(sample);
+        Ok(())
+    }
+    fn send_midi(&mut self, message: plugins::plugin_runtime::MidiMessage) -> Result<(), String> {
+        self.note_on = message.data[0] & 0xf0 == 0x90 && message.data[2] != 0;
+        Ok(())
+    }
+    fn set_parameter(&mut self, id: u32, value: f32) -> Result<(), String> {
+        if id == u32::MAX {
+            return Err("synthetic replay rejection".into());
+        }
+        self.value
+            .store(value.to_bits(), std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    fn get_parameter(&mut self, _: u32) -> Result<f32, String> {
+        Ok(f32::from_bits(
+            self.value.load(std::sync::atomic::Ordering::SeqCst),
+        ))
+    }
+    fn parameter_catalog_snapshot(
+        &mut self,
+    ) -> Result<plugins::plugin_runtime::PluginParameterCatalogPage, String> {
+        Ok(plugins::plugin_runtime::PluginParameterCatalogPage {
+            catalog_revision: 1,
+            total_items: 1,
+            items: vec![plugins::plugin_runtime::PluginParameterDescriptor {
+                id: 0,
+                name: "Value".into(),
+                unit: String::new(),
+                current_normalized: self.get_parameter(0)?,
+                default_normalized: Some(0.2),
+                step_count: Some(0),
+                automatable: true,
+                read_only: false,
+                bypass: false,
+            }],
+        })
+    }
+    fn save_state(&mut self) -> Result<Vec<u8>, String> {
+        Ok(self.get_parameter(0)?.to_le_bytes().to_vec())
+    }
+    fn load_state(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let bytes: [u8; 4] = bytes
+            .try_into()
+            .map_err(|_| "invalid test state".to_owned())?;
+        self.set_parameter(0, f32::from_le_bytes(bytes))
+    }
+    fn native_editor(
+        &mut self,
+        command: NativeEditorCommand,
+    ) -> Result<plugins::plugin_runtime::NativeEditorState, String> {
+        self.open = command != NativeEditorCommand::Close;
+        Ok(plugins::plugin_runtime::NativeEditorState {
+            supported: true,
+            has_editor: true,
+            open: self.open,
+            ..Default::default()
+        })
+    }
+    fn native_editor_feedback(
+        &mut self,
+    ) -> Result<plugins::plugin_runtime::NativeEditorFeedback, String> {
+        Ok(plugins::plugin_runtime::NativeEditorFeedback {
+            state: plugins::plugin_runtime::NativeEditorState {
+                supported: true,
+                has_editor: true,
+                open: self.open,
+                ..Default::default()
+            },
+            dirty_revision: self.dirty.load(std::sync::atomic::Ordering::SeqCst),
+            catalog_invalidated: false,
+        })
+    }
+    fn latency_samples(&self) -> u32 {
+        0
+    }
+    fn tail_samples(&self) -> u32 {
+        0
+    }
+}
+
+fn config_capture_plugin(project: &mut Project, target: PluginPickerTarget, index: usize) -> u64 {
+    commit_loaded_plugin(
+        project,
+        target,
+        &PluginDescriptor {
+            id: format!("config-state-{index}"),
+            name: format!("State {index}"),
+            vendor: "TEST".into(),
+            path: PathBuf::from(format!("/not-a-real-plugin/state-{index}.so")),
+            format: ScannedPluginFormat::Vst2,
+            category: "Effect".into(),
+            is_instrument: matches!(target, PluginPickerTarget::ChannelDevice { .. }),
+            verified: false,
+            vst3_metadata: None,
+            scan_error: None,
+        },
+    )
+    .unwrap()
+}
+
+fn wait_config_condition(mut predicate: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !predicate() {
+        assert!(
+            Instant::now() < deadline,
+            "synthetic state worker did not answer"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn plugin_config_native_capture_all_slots_survives_bypass_enable_and_save_reopen() {
+    use plugins::plugin_runtime::{BackendSlot, PluginBackend, PluginChain, PluginPrepareConfig};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    let mut ui = UiHarness::new();
+    let ids = (0..2)
+        .map(|slot| {
+            config_capture_plugin(
+                &mut ui.app.project,
+                PluginPickerTarget::MixerSlot { track: 1, slot },
+                slot,
+            )
+        })
+        .collect::<Vec<_>>();
+    for instance in &mut ui.app.project.plugin_instances {
+        instance.parameters.insert(0, 0.2);
+        instance.opaque_state = 0.2_f32.to_le_bytes().to_vec();
+    }
+    let values = [
+        Arc::new(AtomicU32::new(0.2_f32.to_bits())),
+        Arc::new(AtomicU32::new(0.2_f32.to_bits())),
+    ];
+    let dirty = [Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0))];
+    let backend_values = values.clone();
+    let backend_dirty = dirty.clone();
+    let PluginChain {
+        audio: _endpoint,
+        control,
+        guard,
+    } = PluginChain::spawn_identified_with_backend_factory(
+        &ids,
+        move || {
+            backend_values
+                .into_iter()
+                .zip(backend_dirty)
+                .map(|(value, dirty)| {
+                    BackendSlot::new(Box::new(ConfigCaptureBackend {
+                        value,
+                        dirty,
+                        open: false,
+                        note_on: false,
+                    }))
+                })
+                .collect()
+        },
+        PluginPrepareConfig {
+            sample_rate: 48_000.0,
+            max_block_frames: 128,
+        },
+    )
+    .unwrap();
+    ui.app.running_insert_chains.insert(
+        1,
+        RunningInsertChain {
+            project_session: ui.app.project_session,
+            endpoint_id: 77,
+            instance_ids: ids.clone(),
+            control,
+            guard,
+        },
+    );
+    ui.app.audio = Some(AudioEngine::test_engine());
+    wait_config_condition(|| {
+        ui.app.poll_plugin_runtime_events();
+        ui.app
+            .project
+            .plugin_instances
+            .iter()
+            .all(|instance| instance.runtime_status == PluginRuntimeStatus::Loaded)
+    });
+    // Exercise the actual synthetic worker's native open/edit/close state-capture
+    // protocol. This is not a real plug-in window or a DSP callback proof.
+    for slot in 0..2 {
+        let control = &ui.app.running_insert_chains[&1].control;
+        assert!(control.request_native_editor(
+            slot,
+            100 + slot as u64,
+            NativeEditorCommand::Open { owner: None },
+            &[0]
+        ));
+        wait_config_condition(|| {
+            control
+                .native_editor_snapshot(slot)
+                .is_some_and(|snapshot| snapshot.pending_request.is_none() && snapshot.state.open)
+        });
+        values[slot].store([0.73_f32, 0.91][slot].to_bits(), Ordering::SeqCst);
+        dirty[slot].store(1, Ordering::SeqCst);
+        assert!(control.request_native_editor(
+            slot,
+            200 + slot as u64,
+            NativeEditorCommand::Close,
+            &[0]
+        ));
+        wait_config_condition(|| {
+            control
+                .native_editor_snapshot(slot)
+                .is_some_and(|snapshot| {
+                    assert!(
+                        snapshot.error.is_none(),
+                        "native fixture capture failed: {:?}",
+                        snapshot.error
+                    );
+                    snapshot.pending_request.is_none()
+                        && snapshot.captured_state.is_some()
+                        && !snapshot.state.open
+                })
+        });
+    }
+    ui.app.poll_native_editor_snapshots();
+    for (instance, expected) in ui.app.project.plugin_instances.iter().zip([0.73_f32, 0.91]) {
+        assert_eq!(
+            instance.parameters[&0], expected,
+            "fresh native bases must replace stale generic replay values"
+        );
+    }
+    ui.app.persist_plugin_slot_config(ids[0], true, true, 1.0);
+    let mut pending = ui
+        .app
+        .pending_plugin_slot_config
+        .take()
+        .expect("live config uses a state barrier");
+    assert_eq!(
+        pending.probes.len(),
+        2,
+        "replacement captures every serial FX slot"
+    );
+    assert!(!pending.matches_receipt(ui.app.project_session + 1, 77, ids[0]));
+    assert!(!pending.matches_receipt(ui.app.project_session, 78, ids[0]));
+    // The exact stopped-epoch fence is covered by the callback integration tests.
+    // Here drive real tagged worker receipts through the production App event path.
+    pending.snapshot.requests_initialized = true;
+    pending.snapshot.parameter_edits_drained = true;
+    let capture_epoch = ui.app.running_insert_chains[&1]
+        .control
+        .stats()
+        .current_epoch;
+    pending.captured_identity = Some((1, capture_epoch));
+    for probe in &pending.probes {
+        assert_eq!(
+            ui.app.request_plugin_state_probe_for_epoch(
+                *probe,
+                pending.snapshot.request_id,
+                Some(capture_epoch)
+            ),
+            Some(true)
+        );
+        ui.app.suppress_plugin_config_native_capture(*probe);
+        pending.snapshot.waiting.insert(probe.instance_id());
+    }
+    ui.app.pending_plugin_slot_config = Some(pending);
+    wait_config_condition(|| {
+        ui.app.poll_plugin_runtime_events();
+        ui.app
+            .pending_plugin_slot_config
+            .as_ref()
+            .unwrap()
+            .snapshot
+            .ready()
+    });
+    let pending = ui.app.pending_plugin_slot_config.take().unwrap();
+    assert_eq!(pending.snapshot.states.len(), 2);
+    // A late config-owned receipt and its native snapshot side channel must not
+    // mutate the old model after the intent has been removed or rejected.
+    let before_late = project_fingerprint(&ui.app.project);
+    let previous_serial = ui.app.running_insert_chains[&1]
+        .control
+        .native_editor_snapshot(0)
+        .unwrap()
+        .capture_serial;
+    values[0].store(0.55f32.to_bits(), Ordering::SeqCst);
+    assert!(
+        ui.app.running_insert_chains[&1]
+            .control
+            .request_state_tagged_for_epoch(0, pending.snapshot.request_id, capture_epoch)
+    );
+    wait_config_condition(|| {
+        ui.app.poll_plugin_runtime_events();
+        ui.app.running_insert_chains[&1]
+            .control
+            .native_editor_snapshot(0)
+            .unwrap()
+            .capture_serial
+            > previous_serial
+    });
+    ui.app.poll_plugin_runtime_events();
+    assert_eq!(project_fingerprint(&ui.app.project), before_late);
+    values[0].store(0.73f32.to_bits(), Ordering::SeqCst);
+    let before = ui.app.project.clone();
+    let mut candidate =
+        plugin_slot_config_candidate(&before, ids[0], pending.config, &pending.snapshot.states)
+            .unwrap();
+    assert!(!before.plugin_instances[0].bypass);
+    assert!(candidate.plugin_instances[0].bypass);
+    for (instance, expected) in candidate.plugin_instances.iter().zip([0.73_f32, 0.91]) {
+        let spec = plugin_instance_runtime_spec(instance);
+        let restored_value = Arc::new(AtomicU32::new(0));
+        let mut restored = ConfigCaptureBackend {
+            value: Arc::clone(&restored_value),
+            dirty: Arc::new(AtomicU64::new(0)),
+            open: false,
+            note_on: false,
+        };
+        restored
+            .prepare(PluginPrepareConfig {
+                sample_rate: 48_000.0,
+                max_block_frames: 128,
+            })
+            .unwrap();
+        restored.load_state(&spec.initial_state).unwrap();
+        for (&parameter, &value) in &instance.parameters {
+            restored.set_parameter(parameter, value).unwrap();
+        }
+        assert_eq!(
+            restored.get_parameter(0).unwrap(),
+            expected,
+            "opaque restoration followed by generic base replay must retain the native edit"
+        );
+        restored
+            .send_midi(plugins::plugin_runtime::MidiMessage::new(
+                [0x90, 60, 100],
+                0,
+            ))
+            .unwrap();
+        let mut left = [0.0; 128];
+        let mut right = [0.0; 128];
+        restored.process(&mut left, &mut right, 128).unwrap();
+        assert_eq!(
+            restored.get_parameter(0).unwrap(),
+            expected,
+            "state must survive the first actual Process call"
+        );
+        assert!(
+            left.iter().chain(&right).all(|sample| *sample == expected),
+            "the first note after fresh restoration must sound with its retained parameter"
+        );
+    }
+    for config in [
+        SlotConfig {
+            enabled: false,
+            bypassed: false,
+            wet: 0.5,
+        },
+        SlotConfig::default(),
+    ] {
+        candidate =
+            plugin_slot_config_candidate(&candidate, ids[0], config, &pending.snapshot.states)
+                .unwrap();
+    }
+    let fixture = Fixture::new();
+    let path = fixture.0.join("captured-config.citrus");
+    candidate.save(&path).unwrap();
+    let reopened = Project::load(&path).unwrap();
+    for (instance, expected) in reopened.plugin_instances.iter().zip([0.73_f32, 0.91]) {
+        assert_eq!(instance.parameters[&0], expected);
+        assert_eq!(instance.opaque_state, expected.to_le_bytes());
+    }
+    assert_eq!(
+        ui.app.running_insert_chains[&1].endpoint_id, 77,
+        "capture/candidate preparation never mutates the old endpoint"
+    );
+    for failure in ["capture", "session", "epoch", "project"] {
+        let mut before = project_fingerprint(&ui.app.project);
+        ui.app.persist_plugin_slot_config(ids[0], true, true, 1.0);
+        let pending = ui.app.pending_plugin_slot_config.as_mut().unwrap();
+        if failure == "session" {
+            if let PluginStateProbe::Insert {
+                project_session, ..
+            } = &mut pending.probes[0]
+            {
+                *project_session += 1;
+            }
+        } else if failure == "project" {
+            pending.captured_project_fingerprint = Some(before);
+            ui.app.project.name = "new user title during capture".into();
+            before = project_fingerprint(&ui.app.project);
+        } else if failure == "epoch" {
+            pending.snapshot.requests_initialized = true;
+            pending.snapshot.parameter_edits_drained = true;
+            pending.captured_identity = Some((1, capture_epoch + 1));
+            pending.snapshot.states = reopened
+                .plugin_instances
+                .iter()
+                .map(|i| (i.id, i.opaque_state.clone()))
+                .collect();
+        } else {
+            pending.snapshot.failure = Some("state capture failed".into());
+        }
+        ui.app.drive_plugin_slot_config_capture();
+        assert!(ui.app.pending_plugin_slot_config.is_none());
+        assert_eq!(project_fingerprint(&ui.app.project), before);
+        assert_eq!(ui.app.running_insert_chains[&1].endpoint_id, 77);
+        assert_eq!(f32::from_bits(values[0].load(Ordering::SeqCst)), 0.73);
+        assert!(!ui.app.playing);
+        assert!(!ui.app.plugin_processing_retry_required);
+    }
+}
+
+#[test]
+fn plugin_config_failed_capture_and_stale_generation_leave_project_and_chain_unchanged() {
+    for stale in [false, true] {
+        let mut ui = UiHarness::new();
+        let id = config_capture_plugin(
+            &mut ui.app.project,
+            PluginPickerTarget::MixerSlot { track: 1, slot: 0 },
+            0,
+        );
+        let before = ui.app.project.clone();
+        let mut snapshot = RestartPluginStateSnapshot::new(42);
+        snapshot.failure = (!stale).then(|| "synthetic state capture failed".into());
+        snapshot.waiting.insert(id);
+        assert!(
+            !snapshot.observe_state(id, 41, &[9]),
+            "stale request cannot complete capture"
+        );
+        ui.app.pending_plugin_slot_config = Some(PendingPluginSlotConfig {
+            instance_id: id,
+            config: SlotConfig {
+                bypassed: true,
+                ..Default::default()
+            },
+            probes: vec![PluginStateProbe::Insert {
+                project_session: ui.app.project_session + u64::from(stale),
+                track: 1,
+                endpoint_id: 77,
+                slot: 0,
+                instance_id: id,
+            }],
+            snapshot,
+            resume_playback: true,
+            stopped_epoch: None,
+            captured_identity: None,
+            captured_project_fingerprint: None,
+            prepared: None,
+        });
+        ui.app.drive_plugin_slot_config_capture();
+        assert!(ui.app.pending_plugin_slot_config.is_none());
+        assert_eq!(
+            project_fingerprint(&ui.app.project),
+            project_fingerprint(&before)
+        );
+        assert_eq!(
+            ui.app.project.plugin_instances[0].opaque_state,
+            before.plugin_instances[0].opaque_state
+        );
+        assert!(ui.app.running_insert_chains.is_empty());
+        assert!(ui.app.pending_insert_chains.is_empty());
+        assert!(!ui.app.playing);
+        assert!(!ui.app.plugin_processing_retry_required);
+    }
+}
+
+#[test]
+fn plugin_config_routed_generator_bypass_is_rejected_but_offline_fx_remains_editable() {
+    let mut ui = UiHarness::new();
+    let first = config_capture_plugin(
+        &mut ui.app.project,
+        PluginPickerTarget::ChannelDevice { channel: 0 },
+        0,
+    );
+    let second = config_capture_plugin(
+        &mut ui.app.project,
+        PluginPickerTarget::ChannelDevice { channel: 1 },
+        1,
+    );
+    ui.app
+        .project
+        .plugin_instances
+        .iter_mut()
+        .find(|instance| instance.id == first)
+        .unwrap()
+        .midi_ports
+        .output = Some(0);
+    ui.app
+        .project
+        .plugin_instances
+        .iter_mut()
+        .find(|instance| instance.id == second)
+        .unwrap()
+        .midi_ports
+        .input = Some(0);
+    let fx = config_capture_plugin(
+        &mut ui.app.project,
+        PluginPickerTarget::MixerSlot { track: 1, slot: 0 },
+        2,
+    );
+    for instance in [first, second] {
+        ui.app.persist_plugin_slot_config(instance, true, true, 1.0);
+        ui.app
+            .persist_plugin_slot_config(instance, false, false, 1.0);
+        let unchanged = ui
+            .app
+            .project
+            .plugin_instances
+            .iter()
+            .find(|plugin| plugin.id == instance)
+            .unwrap();
+        assert!(unchanged.enabled);
+        assert!(!unchanged.bypass);
+        assert!(ui.app.pending_plugin_slot_config.is_none());
+    }
+    ui.app.persist_plugin_slot_config(fx, true, true, 0.25);
+    let changed = ui
+        .app
+        .project
+        .plugin_instances
+        .iter()
+        .find(|plugin| plugin.id == fx)
+        .unwrap();
+    assert!(changed.bypass);
+    assert_eq!(changed.wet, 0.25);
+    assert!(!ui.app.audio_preferences.metronome_enabled);
+}
+
+#[test]
+fn plugin_config_capture_rejects_seek_or_new_activation_after_state_requests() {
+    assert!(plugin_config_capture_identity_matches(
+        (5, 9),
+        Some((5, 9)),
+        9,
+        true
+    ));
+    assert!(!plugin_config_capture_identity_matches(
+        (5, 9),
+        Some((5, 10)),
+        10,
+        true
+    ));
+    assert!(!plugin_config_capture_identity_matches(
+        (5, 9),
+        Some((6, 9)),
+        9,
+        true
+    ));
+    assert!(!plugin_config_capture_identity_matches(
+        (5, 9),
+        Some((5, 9)),
+        10,
+        true
+    ));
+    assert!(!plugin_config_capture_identity_matches(
+        (5, 9),
+        Some((5, 9)),
+        9,
+        false
+    ));
+}
+
+fn spawn_config_candidate_fixture(
+    candidate: &Project,
+    ids: &[u64],
+    fail_prepare: bool,
+    fail_restore: bool,
+) -> plugins::plugin_runtime::PluginChain {
+    use plugins::plugin_runtime::{BackendSlot, PluginBackend, PluginChain, PluginPrepareConfig};
+    use std::sync::atomic::{AtomicU32, AtomicU64};
+    let instances = ids
+        .iter()
+        .map(|id| {
+            candidate
+                .plugin_instances
+                .iter()
+                .find(|i| i.id == *id)
+                .unwrap()
+                .clone()
+        })
+        .collect::<Vec<_>>();
+    PluginChain::spawn_identified_with_backend_factory(
+        ids,
+        move || {
+            instances
+                .into_iter()
+                .map(|instance| {
+                    let mut backend = ConfigCaptureBackend {
+                        value: Arc::new(AtomicU32::new(0)),
+                        dirty: Arc::new(AtomicU64::new(0)),
+                        open: false,
+                        note_on: false,
+                    };
+                    if fail_restore {
+                        backend
+                            .load_state(&[])
+                            .expect("synthetic loader restore failure");
+                    }
+                    backend.load_state(&instance.opaque_state).unwrap();
+                    if fail_prepare {
+                        backend
+                            .value
+                            .store(f32::NAN.to_bits(), std::sync::atomic::Ordering::SeqCst);
+                    }
+                    let mut slot = BackendSlot::new(Box::new(backend));
+                    slot.config = SlotConfig {
+                        enabled: instance.enabled,
+                        bypassed: instance.bypass,
+                        wet: instance.wet,
+                    };
+                    slot
+                })
+                .collect()
+        },
+        PluginPrepareConfig {
+            sample_rate: 48_000.0,
+            max_block_frames: 128,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn plugin_config_prepared_candidate_waits_for_all_slots_and_replay_before_install() {
+    let mut ui = UiHarness::new();
+    let ids = (0..2)
+        .map(|slot| {
+            config_capture_plugin(
+                &mut ui.app.project,
+                PluginPickerTarget::MixerSlot { track: 1, slot },
+                slot,
+            )
+        })
+        .collect::<Vec<_>>();
+    for (instance, value) in ui
+        .app
+        .project
+        .plugin_instances
+        .iter_mut()
+        .zip([0.73f32, 0.91])
+    {
+        instance.opaque_state = 0.2f32.to_le_bytes().to_vec();
+        instance.parameters.insert(0, value);
+        instance.runtime_status = PluginRuntimeStatus::Loaded;
+    }
+    let old = spawn_config_candidate_fixture(&ui.app.project, &ids, false, false);
+    let plugins::plugin_runtime::PluginChain {
+        audio: _old_endpoint,
+        control,
+        guard,
+    } = old;
+    ui.app.running_insert_chains.insert(
+        1,
+        RunningInsertChain {
+            project_session: ui.app.project_session,
+            endpoint_id: 77,
+            instance_ids: ids.clone(),
+            control,
+            guard,
+        },
+    );
+    ui.app.audio = Some(AudioEngine::test_engine());
+    let before = project_fingerprint(&ui.app.project);
+    let mut candidate = ui.app.project.clone();
+    candidate.plugin_instances[0].bypass = true;
+    let chain = spawn_config_candidate_fixture(&candidate, &ids, false, false);
+    let mut prepared = PreparedPluginSlotConfig::new(candidate, chain, ids.clone(), 701);
+    wait_config_condition(|| prepared.poll().unwrap());
+    assert_eq!(prepared.ready.len(), 2);
+    assert!(prepared.parameter_waiting.is_empty());
+    assert_eq!(
+        prepared
+            .chain
+            .control
+            .plugin_latency_snapshot()
+            .unwrap()
+            .active_mask,
+        2
+    );
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert_eq!(ui.app.running_insert_chains[&1].endpoint_id, 77);
+    for (instance, expected) in prepared
+        .candidate
+        .plugin_instances
+        .iter()
+        .zip([0.73f32, 0.91])
+    {
+        assert_eq!(
+            instance.opaque_state,
+            0.2f32.to_le_bytes(),
+            "replacement readiness must preserve the authoritative captured blob"
+        );
+        assert_eq!(instance.parameters[&0], expected);
+    }
+    assert!(ui.app.install_plugin_slot_config_candidate(
+        ids[0],
+        prepared.candidate,
+        prepared.chain
+    ));
+    assert!(ui.app.pending_insert_chains.contains_key(&1));
+    assert_eq!(
+        ui.app.running_insert_chains[&1].endpoint_id, 77,
+        "old guard stays owned until callback admission"
+    );
+    let phase = TimelineAudioSyncPhase::AwaitingActivation {
+        generation: 5,
+        seek_serial: 1,
+        epoch: 2,
+        frame: 0,
+        activation_request_id: 0,
+    };
+    ui.app.timeline_audio_sync.phase = phase;
+    ui.app.drive_timeline_transport_activation();
+    assert_eq!(
+        ui.app.timeline_audio_sync.phase, phase,
+        "queued but unacknowledged Mixer install cannot activate against same-instance old FX"
+    );
+    assert!(!ui.app.timeline_insert_replacements_ready());
+    // Simulate only the control-side ownership transfer after exact callback
+    // admission. Callback admission itself is covered by audio integration tests.
+    let pending = ui.app.pending_insert_chains.remove(&1).unwrap();
+    ui.app.running_insert_chains.insert(
+        1,
+        RunningInsertChain {
+            project_session: pending.project_session,
+            endpoint_id: pending.endpoint_id,
+            instance_ids: pending.instance_ids,
+            control: pending.control,
+            guard: pending.guard,
+        },
+    );
+    ui.app.poll_native_editor_snapshots();
+    assert!(
+        ui.app
+            .project
+            .plugin_instances
+            .iter()
+            .all(|instance| instance.opaque_state == 0.2f32.to_le_bytes()),
+        "first App poll must preserve the authoritative captured blob"
+    );
+}
+
+#[test]
+fn plugin_config_candidate_prepare_restore_and_replay_failures_preserve_old_model() {
+    for failure in ["prepare", "restore", "replay"] {
+        let mut ui = UiHarness::new();
+        let id = config_capture_plugin(
+            &mut ui.app.project,
+            PluginPickerTarget::MixerSlot { track: 1, slot: 0 },
+            0,
+        );
+        ui.app.project.plugin_instances[0].opaque_state = 0.73f32.to_le_bytes().to_vec();
+        let old = spawn_config_candidate_fixture(&ui.app.project, &[id], false, false);
+        let plugins::plugin_runtime::PluginChain {
+            audio: _old_endpoint,
+            control,
+            guard,
+        } = old;
+        ui.app.running_insert_chains.insert(
+            1,
+            RunningInsertChain {
+                project_session: ui.app.project_session,
+                endpoint_id: 77,
+                instance_ids: vec![id],
+                control,
+                guard,
+            },
+        );
+        let before = project_fingerprint(&ui.app.project);
+        let mut candidate = ui.app.project.clone();
+        candidate.plugin_instances[0].bypass = true;
+        if failure == "replay" {
+            candidate.plugin_instances[0]
+                .parameters
+                .insert(u32::MAX, 0.9);
+        }
+        let chain = spawn_config_candidate_fixture(
+            &candidate,
+            &[id],
+            failure == "prepare",
+            failure == "restore",
+        );
+        let mut prepared = PreparedPluginSlotConfig::new(candidate, chain, vec![id], 701);
+        wait_config_condition(|| match prepared.poll() {
+            Err(_) => true,
+            Ok(false) => false,
+            Ok(true) => panic!("{failure} must reject candidate"),
+        });
+        drop(prepared);
+        assert_eq!(project_fingerprint(&ui.app.project), before);
+        assert_eq!(ui.app.running_insert_chains[&1].endpoint_id, 77);
+        assert!(ui.app.pending_insert_chains.is_empty());
+        assert!(!ui.app.playing);
+    }
+}
+
+#[test]
+fn plugin_config_prepared_candidate_timeout_drops_only_candidate_and_preserves_old_chain() {
+    let mut ui = UiHarness::new();
+    let id = config_capture_plugin(
+        &mut ui.app.project,
+        PluginPickerTarget::MixerSlot { track: 1, slot: 0 },
+        0,
+    );
+    ui.app.project.plugin_instances[0].opaque_state = 0.73f32.to_le_bytes().to_vec();
+    let old = spawn_config_candidate_fixture(&ui.app.project, &[id], false, false);
+    let plugins::plugin_runtime::PluginChain {
+        audio: _old_endpoint,
+        control,
+        guard,
+    } = old;
+    ui.app.running_insert_chains.insert(
+        1,
+        RunningInsertChain {
+            project_session: ui.app.project_session,
+            endpoint_id: 77,
+            instance_ids: vec![id],
+            control,
+            guard,
+        },
+    );
+    ui.app.audio = Some(AudioEngine::test_engine());
+    let before = project_fingerprint(&ui.app.project);
+    let mut candidate = ui.app.project.clone();
+    candidate.plugin_instances[0].bypass = true;
+    let chain = spawn_config_candidate_fixture(&candidate, &[id], false, false);
+    let prepared = PreparedPluginSlotConfig::new(candidate, chain, vec![id], 701);
+    let mut snapshot = RestartPluginStateSnapshot::new(700);
+    snapshot.started_at =
+        Instant::now() - AUDIO_RESTART_PLUGIN_SNAPSHOT_TIMEOUT - Duration::from_millis(1);
+    snapshot.parameter_edits_drained = true;
+    snapshot.requests_initialized = true;
+    ui.app.pending_plugin_slot_config = Some(PendingPluginSlotConfig {
+        instance_id: id,
+        config: SlotConfig {
+            bypassed: true,
+            ..Default::default()
+        },
+        probes: ui.app.current_plugin_state_probes(),
+        snapshot,
+        resume_playback: true,
+        stopped_epoch: Some(0),
+        captured_identity: None,
+        captured_project_fingerprint: None,
+        prepared: Some(prepared),
+    });
+    ui.app.drive_plugin_slot_config_capture();
+    assert!(ui.app.pending_plugin_slot_config.is_none());
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert_eq!(ui.app.running_insert_chains[&1].endpoint_id, 77);
+    assert!(ui.app.pending_insert_chains.is_empty());
+    assert!(!ui.app.playing);
+    assert!(!ui.app.plugin_processing_retry_required);
+}
+
+#[test]
+fn plugin_config_pending_shortcuts_preserve_project_and_escape_cancels() {
+    let mut ui = UiHarness::new();
+    ui.app.pending_plugin_slot_config = Some(PendingPluginSlotConfig {
+        instance_id: 1,
+        config: SlotConfig::default(),
+        probes: Vec::new(),
+        snapshot: RestartPluginStateSnapshot::new(42),
+        resume_playback: true,
+        stopped_epoch: None,
+        captured_identity: None,
+        captured_project_fingerprint: None,
+        prepared: None,
+    });
+    let before = project_fingerprint(&ui.app.project);
+    let mode = ui.app.transport_mode;
+    assert!(ui.app.shortcut_blocking_layer_active());
+    let ctx = ui.ctx.clone();
+    for (key, modifiers) in [
+        (egui::Key::Delete, egui::Modifiers::NONE),
+        (egui::Key::D, egui::Modifiers::COMMAND),
+        (egui::Key::L, egui::Modifiers::NONE),
+        (egui::Key::Space, egui::Modifiers::NONE),
+    ] {
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
+                ..Default::default()
+            },
+            |_| {
+                ui.app.handle_shortcuts(&ctx, None, false);
+            },
+        );
+        assert_eq!(project_fingerprint(&ui.app.project), before);
+        assert_eq!(ui.app.transport_mode, mode);
+        assert!(ui.app.pending_plugin_slot_config.is_some());
+        assert!(!ui.app.playing);
+    }
+    let _ = ctx.run_ui(
+        egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        },
+        |_| {
+            ui.app.handle_shortcuts(&ctx, None, false);
+        },
+    );
+    assert!(ui.app.pending_plugin_slot_config.is_none());
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert!(!ui.app.playing);
+}
+
+struct DeferredConfigBackend {
+    inner: ConfigCaptureBackend,
+    deferred: Option<f32>,
+    saves: Arc<std::sync::atomic::AtomicU64>,
+    processes: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl plugins::plugin_runtime::PluginBackend for DeferredConfigBackend {
+    fn name(&self) -> &str {
+        "deferred configuration fixture"
+    }
+    fn prepare(
+        &mut self,
+        config: plugins::plugin_runtime::PluginPrepareConfig,
+    ) -> Result<(), String> {
+        self.inner.prepare(config)
+    }
+    fn process(
+        &mut self,
+        left: &mut [f32],
+        right: &mut [f32],
+        frames: usize,
+    ) -> Result<(), String> {
+        self.processes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some(value) = self.deferred.take() {
+            self.inner.set_parameter(0, value)?;
+            self.inner.note_on = false;
+        }
+        self.inner.process(left, right, frames)
+    }
+    fn send_midi(&mut self, message: plugins::plugin_runtime::MidiMessage) -> Result<(), String> {
+        self.inner.send_midi(message)
+    }
+    fn set_parameter(&mut self, id: u32, value: f32) -> Result<(), String> {
+        self.inner.set_parameter(id, value)
+    }
+    fn get_parameter(&mut self, id: u32) -> Result<f32, String> {
+        self.inner.get_parameter(id)
+    }
+    fn save_state(&mut self) -> Result<Vec<u8>, String> {
+        self.saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.save_state()
+    }
+    fn load_state(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.deferred = Some(f32::from_le_bytes(
+            bytes.try_into().map_err(|_| "invalid state")?,
+        ));
+        Ok(())
+    }
+    fn latency_samples(&self) -> u32 {
+        0
+    }
+    fn tail_samples(&self) -> u32 {
+        0
+    }
+}
+
+#[test]
+fn plugin_config_deferred_restore_preserves_blob_without_resave_or_hidden_process() {
+    use plugins::plugin_runtime::{
+        BackendSlot, PluginBackend, PluginChain, PluginPrepareConfig, SubmitStatus,
+    };
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    let mut project = Project::default();
+    let id = config_capture_plugin(
+        &mut project,
+        PluginPickerTarget::MixerSlot { track: 1, slot: 0 },
+        0,
+    );
+    project.plugin_instances[0].opaque_state = 0.73f32.to_le_bytes().to_vec();
+    let saves = Arc::new(AtomicU64::new(0));
+    let processes = Arc::new(AtomicU64::new(0));
+    let value = Arc::new(AtomicU32::new(1f32.to_bits()));
+    let (worker_saves, worker_processes, worker_value) = (
+        Arc::clone(&saves),
+        Arc::clone(&processes),
+        Arc::clone(&value),
+    );
+    let chain = PluginChain::spawn_identified_with_backend_factory(
+        &[id],
+        move || {
+            let mut backend = DeferredConfigBackend {
+                inner: ConfigCaptureBackend {
+                    value: worker_value,
+                    dirty: Arc::new(AtomicU64::new(0)),
+                    open: false,
+                    note_on: false,
+                },
+                deferred: None,
+                saves: worker_saves,
+                processes: worker_processes,
+            };
+            backend.load_state(&0.73f32.to_le_bytes()).unwrap();
+            assert_eq!(
+                backend.save_state().unwrap(),
+                1f32.to_le_bytes(),
+                "fixture really exposes stale pre-Process state"
+            );
+            vec![BackendSlot::new(Box::new(backend))]
+        },
+        PluginPrepareConfig {
+            sample_rate: 48_000.0,
+            max_block_frames: 128,
+        },
+    )
+    .unwrap();
+    let mut prepared = PreparedPluginSlotConfig::new(project, chain, vec![id], 41);
+    wait_config_condition(|| prepared.poll().unwrap());
+    assert_eq!(
+        prepared.candidate.plugin_instances[0].opaque_state,
+        0.73f32.to_le_bytes()
+    );
+    assert_eq!(
+        saves.load(Ordering::SeqCst),
+        1,
+        "readiness adds no replacement SaveState"
+    );
+    assert_eq!(
+        processes.load(Ordering::SeqCst),
+        0,
+        "readiness adds no hidden Process"
+    );
+    assert_eq!(f32::from_bits(value.load(Ordering::SeqCst)), 1.0);
+    // An explicit test-driven real worker Process, separate from preparation,
+    // demonstrates why the pre-Process readback was not authoritative.
+    assert!(matches!(
+        prepared.chain.audio.try_submit(&[0.0; 128], &[0.0; 128]),
+        SubmitStatus::Submitted { .. }
+    ));
+    wait_config_condition(|| prepared.chain.control.stats().completed != 0);
+    assert_eq!(f32::from_bits(value.load(Ordering::SeqCst)), 0.73);
+    assert_eq!(
+        prepared.candidate.plugin_instances[0].opaque_state,
+        0.73f32.to_le_bytes()
+    );
+}

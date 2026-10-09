@@ -3306,6 +3306,188 @@ impl RestartPluginStateSnapshot {
     }
 }
 
+struct PendingPluginSlotConfig {
+    instance_id: u64,
+    config: SlotConfig,
+    probes: Vec<PluginStateProbe>,
+    snapshot: RestartPluginStateSnapshot,
+    resume_playback: bool,
+    stopped_epoch: Option<u64>,
+    captured_identity: Option<(u64, u64)>,
+    captured_project_fingerprint: Option<u64>,
+    prepared: Option<PreparedPluginSlotConfig>,
+}
+
+/// A fresh worker stays entirely off-callback until loading, state restoration,
+/// parameter replay acknowledgments have succeeded. Dropping this
+/// owner requests nonblocking worker shutdown; the old endpoint remains installed.
+struct PreparedPluginSlotConfig {
+    candidate: Project,
+    chain: plugins::plugin_runtime::PluginChain,
+    instance_ids: Vec<u64>,
+    ready: HashSet<usize>,
+    parameters: Vec<(usize, u32, f32)>,
+    parameter_waiting: HashSet<(usize, u32)>,
+    replay_started: bool,
+    request_id: u64,
+    epoch: u64,
+}
+
+impl PreparedPluginSlotConfig {
+    fn new(
+        candidate: Project,
+        chain: plugins::plugin_runtime::PluginChain,
+        instance_ids: Vec<u64>,
+        request_id: u64,
+    ) -> Self {
+        let epoch = chain.control.stats().current_epoch;
+        Self {
+            candidate,
+            chain,
+            instance_ids,
+            ready: HashSet::new(),
+            parameters: Vec::new(),
+            parameter_waiting: HashSet::new(),
+            replay_started: false,
+            request_id,
+            epoch,
+        }
+    }
+
+    fn poll(&mut self) -> Result<bool, String> {
+        let stats = self.chain.control.stats();
+        if stats.faults != 0
+            || stats.event_overflows != 0
+            || stats.stopped
+            || stats.current_epoch != self.epoch
+        {
+            return Err("replacement worker failed or changed epoch before admission".into());
+        }
+        while let Some(event) = self.chain.control.try_next_event() {
+            match event {
+                RuntimeEvent::SlotReady { slot, .. } if slot < self.instance_ids.len() => {
+                    self.ready.insert(slot);
+                }
+                RuntimeEvent::SlotFault { message, .. }
+                | RuntimeEvent::ParameterCommandFailed { message, .. } => return Err(message),
+                RuntimeEvent::ParameterSetAck {
+                    slot,
+                    id,
+                    request_id,
+                    ..
+                } if request_id == self.request_id => {
+                    self.parameter_waiting.remove(&(slot, id));
+                }
+                RuntimeEvent::StateRejected { .. } | RuntimeEvent::ShutdownComplete => {
+                    return Err("replacement state capture was rejected".into());
+                }
+                _ => {}
+            }
+        }
+        if self.ready.len() != self.instance_ids.len() {
+            return Ok(false);
+        }
+        let manifest = self.chain.control.plugin_endpoint_manifest();
+        if manifest.slot_count != self.instance_ids.len()
+            || self
+                .instance_ids
+                .iter()
+                .enumerate()
+                .any(|(slot, id)| manifest.instance_ids[slot] != Some(*id))
+        {
+            return Err("replacement worker manifest differs from the captured chain".into());
+        }
+        if !self.replay_started {
+            for (slot, &id) in self.instance_ids.iter().enumerate() {
+                self.parameters.extend(
+                    plugin_parameter_replay_values(&self.candidate, id)
+                        .into_iter()
+                        .map(|(parameter, value)| (slot, parameter, value)),
+                );
+            }
+            self.parameters.reverse();
+            self.replay_started = true;
+        }
+        while let Some(&(slot, id, value)) = self.parameters.last() {
+            if !self
+                .chain
+                .control
+                .set_parameter_tagged(slot, id, value, self.request_id)
+            {
+                break;
+            }
+            self.parameters.pop();
+            self.parameter_waiting.insert((slot, id));
+        }
+        if !self.parameters.is_empty() || !self.parameter_waiting.is_empty() {
+            return Ok(false);
+        }
+        // Never re-save a just-loaded replacement. Deferred-restore plug-ins
+        // can still expose pre-Process state; retain the authoritative old-worker
+        // capture verbatim, with tagged base replay acknowledgments as the fence.
+        let Some(latency) = self
+            .chain
+            .control
+            .plugin_latency_snapshot()
+            .filter(|s| s.revision != 0)
+        else {
+            return Ok(false);
+        };
+        let expected_mask = self
+            .instance_ids
+            .iter()
+            .enumerate()
+            .fold(0u16, |mask, (slot, id)| {
+                let active = self
+                    .candidate
+                    .plugin_instances
+                    .iter()
+                    .find(|i| i.id == *id)
+                    .is_some_and(|i| i.enabled && !i.bypass);
+                mask | if active { 1 << slot } else { 0 }
+            });
+        if latency.active_mask != expected_mask || self.chain.control.stats().faults != 0 {
+            return Err(
+                "replacement latency publication does not match the requested slot configuration"
+                    .into(),
+            );
+        }
+        for id in &self.instance_ids {
+            if let Some(instance) = self
+                .candidate
+                .plugin_instances
+                .iter_mut()
+                .find(|i| i.id == *id)
+            {
+                instance.runtime_status = PluginRuntimeStatus::Loaded;
+            }
+        }
+        Ok(true)
+    }
+}
+
+fn plugin_config_capture_identity_matches(
+    captured: (u64, u64),
+    current: Option<(u64, u64)>,
+    transport_epoch: u64,
+    exact_timeline: bool,
+) -> bool {
+    current == Some(captured) && transport_epoch == captured.1 && exact_timeline
+}
+
+impl PendingPluginSlotConfig {
+    fn matches_receipt(&self, session: u64, endpoint: u64, instance: u64) -> bool {
+        self.probes.iter().any(|probe| {
+            probe.project_session() == session
+                && probe.instance_id() == instance
+                && match probe {
+                    PluginStateProbe::Insert { endpoint_id, .. }
+                    | PluginStateProbe::Generator { endpoint_id, .. } => *endpoint_id == endpoint,
+                }
+        })
+    }
+}
+
 struct AudioRestartCandidate {
     engine: AudioEngine,
     context: AudioRestartContext,
@@ -5004,6 +5186,10 @@ pub struct CitrusApp {
     generator_audibility: HashMap<u32, bool>,
     next_generator_endpoint_id: u64,
     save_barrier: Option<PluginStateSaveBarrier>,
+    pending_plugin_slot_config: Option<PendingPluginSlotConfig>,
+    /// RequestState can also publish a native snapshot. Consume its serial without
+    /// partially committing a canceled configuration capture into the Project.
+    plugin_config_native_capture_suppressed: HashSet<(u64, u64, usize)>,
     queued_save_request: Option<ProjectSaveRequest>,
     next_save_state_request_id: u64,
     project_lifecycle: ProjectLifecycle,
@@ -5340,6 +5526,8 @@ impl CitrusApp {
                 generator_audibility: HashMap::new(),
                 next_generator_endpoint_id: 1,
                 save_barrier: None,
+                pending_plugin_slot_config: None,
+                plugin_config_native_capture_suppressed: HashSet::new(),
                 queued_save_request: None,
                 next_save_state_request_id: 1,
                 project_lifecycle: ProjectLifecycle::Idle,
@@ -5569,6 +5757,7 @@ impl CitrusApp {
         (self.audio_restart_state.allows_realtime_session_actions()
             || (self.audio_restart_state.is_restoring() && self.plugin_processing_retry_required))
             && self.plugin_processing_retry_pending.is_none()
+            && self.pending_plugin_slot_config.is_none()
             && self.input_recorder.is_none()
             && self.pending_recording.is_none()
             && self.midi_recording.is_idle()
@@ -5946,8 +6135,18 @@ impl CitrusApp {
     fn queue_channel_generator_candidate(
         &mut self,
         channel_id: u32,
+        candidate: Project,
+        previous_state: Option<ChannelGeneratorState>,
+    ) -> Result<(), String> {
+        self.queue_channel_generator_candidate_prepared(channel_id, candidate, previous_state, None)
+    }
+
+    fn queue_channel_generator_candidate_prepared(
+        &mut self,
+        channel_id: u32,
         mut candidate: Project,
         previous_state: Option<ChannelGeneratorState>,
+        prepared: Option<plugins::plugin_runtime::PluginChain>,
     ) -> Result<(), String> {
         crate::plugin_midi_routing::compile_midi_port_routes(&candidate)?;
         if !self.audio_restart_state.allows_realtime_session_actions()
@@ -6024,7 +6223,7 @@ impl CitrusApp {
             return Ok(());
         }
 
-        if !restoring_audio_session {
+        if !restoring_audio_session && prepared.is_none() {
             mark_channel_generator_runtime_pending(&mut candidate, channel_id);
         }
         let runtime = channel_generator_runtime_spec(&candidate, channel_id)?;
@@ -6082,11 +6281,14 @@ impl CitrusApp {
             .as_ref()
             .map(|audio| audio.snapshot().sample_rate as f32)
             .ok_or_else(|| "the audio engine is unavailable".to_owned())?;
-        let chain = self.plugin_host.spawn_identified_chain(
-            vec![(instance_id, spec)],
-            sample_rate,
-            MAX_MIXER_BLOCK_FRAMES as u32,
-        )?;
+        let chain = match prepared {
+            Some(chain) => chain,
+            None => self.plugin_host.spawn_identified_chain(
+                vec![(instance_id, spec)],
+                sample_rate,
+                MAX_MIXER_BLOCK_FRAMES as u32,
+            )?,
+        };
         let endpoint_id = self.allocate_generator_endpoint_id();
         let plugins::plugin_runtime::PluginChain {
             audio: endpoint,
@@ -6195,8 +6397,18 @@ impl CitrusApp {
     fn queue_mixer_track_candidate(
         &mut self,
         track: usize,
+        candidate: Project,
+        previous_state: Option<MixerPluginTrackState>,
+    ) -> Result<(), String> {
+        self.queue_mixer_track_candidate_prepared(track, candidate, previous_state, None)
+    }
+
+    fn queue_mixer_track_candidate_prepared(
+        &mut self,
+        track: usize,
         mut candidate: Project,
         previous_state: Option<MixerPluginTrackState>,
+        prepared: Option<plugins::plugin_runtime::PluginChain>,
     ) -> Result<(), String> {
         if !self.audio_restart_state.allows_realtime_session_actions()
             && !self.audio_restart_state.is_restoring()
@@ -6218,7 +6430,7 @@ impl CitrusApp {
             ));
         }
 
-        if !restoring_audio_session {
+        if !restoring_audio_session && prepared.is_none() {
             mark_mixer_track_runtime_pending(&mut candidate, track);
         }
         let candidate_state = snapshot_mixer_plugin_track(&candidate, track);
@@ -6273,11 +6485,14 @@ impl CitrusApp {
             .map(|audio| audio.snapshot().sample_rate as f32)
             .ok_or_else(|| "the audio engine is unavailable".to_owned())?;
         let identified_specs = instance_ids.iter().copied().zip(specs).collect();
-        let chain = self.plugin_host.spawn_identified_chain(
-            identified_specs,
-            sample_rate,
-            MAX_MIXER_BLOCK_FRAMES as u32,
-        )?;
+        let chain = match prepared {
+            Some(chain) => chain,
+            None => self.plugin_host.spawn_identified_chain(
+                identified_specs,
+                sample_rate,
+                MAX_MIXER_BLOCK_FRAMES as u32,
+            )?,
+        };
         let endpoint_id = self.allocate_insert_endpoint_id();
         let plugins::plugin_runtime::PluginChain {
             audio: endpoint,
@@ -6509,6 +6724,12 @@ impl CitrusApp {
     }
 
     fn begin_midi_recording(&mut self) {
+        if self.pending_plugin_slot_config.is_some() {
+            self.notify(
+                "Wait for plug-in configuration state capture before recording MIDI".into(),
+            );
+            return;
+        }
         if self.plugin_processing_blocks_playback() {
             self.notify(
                 "MIDI recording is paused until plug-in processing is explicitly retried".into(),
@@ -7273,6 +7494,12 @@ impl CitrusApp {
     }
 
     fn connect_selected_midi_input(&mut self) {
+        if self.pending_plugin_slot_config.is_some() {
+            self.notify(
+                "Wait for plug-in configuration state capture before connecting MIDI".into(),
+            );
+            return;
+        }
         if !self.audio_restart_state.allows_realtime_session_actions() {
             self.midi_input.route_error =
                 Some("MIDI input cannot be installed while audio is degraded or restarting".into());
@@ -7643,6 +7870,12 @@ impl CitrusApp {
     }
 
     fn request_audio_restart(&mut self) {
+        if self.pending_plugin_slot_config.is_some() {
+            self.notify(
+                "Wait for plug-in configuration state capture before changing audio devices".into(),
+            );
+            return;
+        }
         if self.plugin_processing_retry_pending.is_some() {
             self.notify(
                 "Wait for the stopped plug-in processing replan before changing audio devices"
@@ -8855,6 +9088,7 @@ impl CitrusApp {
 
     fn request_native_editor(&mut self, instance_id: u64, close: bool) {
         if self.save_barrier.is_some()
+            || self.pending_plugin_slot_config.is_some()
             || self.plugin_topology_is_settling()
             || !self.audio_restart_state.allows_realtime_session_actions()
         {
@@ -8918,6 +9152,8 @@ impl CitrusApp {
             });
         match result {
             Ok(true) => {
+                self.plugin_config_native_capture_suppressed
+                    .retain(|(_, instance, _)| *instance != instance_id);
                 // Conservative intent protection: a user may edit and immediately close the DAW
                 // before the next 100 ms feedback poll. Never silently discard that interval.
                 if !close {
@@ -8973,6 +9209,11 @@ impl CitrusApp {
     }
 
     fn native_editor_topology_guard(&self) -> Result<(), String> {
+        if self.pending_plugin_slot_config.is_some() {
+            return Err(
+                "Wait for the plug-in configuration state capture before changing topology".into(),
+            );
+        }
         for chain in self
             .running_insert_chains
             .values()
@@ -9037,6 +9278,8 @@ impl CitrusApp {
         }
         let live: HashSet<_> = updates.iter().map(|(key, _)| *key).collect();
         self.native_editor_seen.retain(|key, _| live.contains(key));
+        self.plugin_config_native_capture_suppressed
+            .retain(|key| live.contains(key));
         let mut messages = Vec::new();
         let mut refresh_catalog = false;
         for (key, snapshot) in updates {
@@ -9059,7 +9302,8 @@ impl CitrusApp {
                 previous.dirty_revision = snapshot.dirty_revision;
             }
             if snapshot.capture_serial != previous.capture_serial {
-                if let Some(bytes) = &snapshot.captured_state
+                if !self.plugin_config_native_capture_suppressed.contains(&key)
+                    && let Some(bytes) = &snapshot.captured_state
                     && let Some(instance) = self
                         .project
                         .plugin_instances
@@ -9302,6 +9546,13 @@ impl CitrusApp {
     }
 
     fn request_plugin_parameter_edit(&mut self, route: ParameterEditRoute, normalized: f32) {
+        if self.pending_plugin_slot_config.is_some() {
+            self.set_plugin_parameter_edit_error(
+                route,
+                "Wait for the plug-in configuration state capture".into(),
+            );
+            return;
+        }
         if !self.audio_restart_state.allows_realtime_session_actions() {
             self.set_plugin_parameter_edit_error(
                 route,
@@ -9757,6 +10008,42 @@ impl CitrusApp {
                     &event,
                 );
             }
+            if let Some(pending) = &mut self.pending_plugin_slot_config
+                && let Some(instance_id) = event_instance_id
+                && pending.matches_receipt(event_session, endpoint_id, instance_id)
+            {
+                match &event {
+                    RuntimeEvent::State {
+                        request_id,
+                        epoch,
+                        bytes,
+                        ..
+                    } if *request_id == pending.snapshot.request_id => {
+                        if *epoch == pending.captured_identity.map(|(_, epoch)| epoch)
+                            && epoch.is_some()
+                        {
+                            pending
+                                .snapshot
+                                .observe_state(instance_id, *request_id, bytes);
+                        } else {
+                            pending.snapshot.failure =
+                                Some("plug-in state receipt has a stale capture epoch".into());
+                        }
+                    }
+                    RuntimeEvent::StateRejected { request_id, .. }
+                        if *request_id == pending.snapshot.request_id =>
+                    {
+                        pending.snapshot.failure =
+                            Some("plug-in worker rejected the exact capture epoch".into());
+                    }
+                    RuntimeEvent::SlotFault { .. } => {
+                        pending.snapshot.failure = Some(format!(
+                            "Plug-in {instance_id} faulted during configuration state capture"
+                        ));
+                    }
+                    _ => {}
+                }
+            }
             let restart_state_captured = if event_is_current
                 && let Some(instance_id) = event_instance_id
                 && let RuntimeEvent::State {
@@ -9837,6 +10124,7 @@ impl CitrusApp {
                     | RuntimeEvent::ParameterCatalogPage { .. }
                     | RuntimeEvent::ParameterSetAck { .. }
                     | RuntimeEvent::ParameterCommandFailed { .. }
+                    | RuntimeEvent::StateRejected { .. }
                     | RuntimeEvent::ShutdownComplete => {}
                 }
             }
@@ -10082,46 +10370,6 @@ impl CitrusApp {
                 }
             }
         }
-    }
-
-    fn dispatch_plugin_slot_config(
-        &self,
-        instance_id: u64,
-        config: SlotConfig,
-    ) -> Result<(), String> {
-        for chain in self.running_insert_chains.values() {
-            if plugin_runtime_session_is_current(chain.project_session, self.project_session)
-                && let Some(slot) = runtime_slot_for_instance(&chain.instance_ids, instance_id)
-                && !chain.control.set_slot_config(slot, config)
-            {
-                return Err("the running plug-in control queue is full".into());
-            }
-        }
-        for chain in self.pending_insert_chains.values() {
-            if plugin_runtime_session_is_current(chain.project_session, self.project_session)
-                && let Some(slot) = runtime_slot_for_instance(&chain.instance_ids, instance_id)
-                && !chain.control.set_slot_config(slot, config)
-            {
-                return Err("the pending plug-in control queue is full".into());
-            }
-        }
-        for chain in self.running_generator_chains.values() {
-            if plugin_runtime_session_is_current(chain.project_session, self.project_session)
-                && chain.instance_id == instance_id
-                && !chain.control.set_slot_config(0, config)
-            {
-                return Err("the running generator control queue is full".into());
-            }
-        }
-        for chain in self.pending_generator_chains.values() {
-            if plugin_runtime_session_is_current(chain.project_session, self.project_session)
-                && chain.instance_id == instance_id
-                && !chain.control.set_slot_config(0, config)
-            {
-                return Err("the pending generator control queue is full".into());
-            }
-        }
-        Ok(())
     }
 
     fn mixer_insert_latency_label(&self, track: usize, short: bool) -> String {
@@ -10989,6 +11237,13 @@ impl CitrusApp {
     }
 
     fn set_transport_mode(&mut self, mode: TransportMode) {
+        if self.pending_plugin_slot_config.is_some() {
+            self.notify(
+                "Wait for plug-in configuration state capture before changing transport mode"
+                    .into(),
+            );
+            return;
+        }
         if self.transport_mode == mode {
             return;
         }
@@ -11069,6 +11324,9 @@ impl CitrusApp {
     }
 
     fn publish_current_transport_loop(&mut self) {
+        if self.pending_plugin_slot_config.is_some() {
+            return;
+        }
         if self.plugin_processing_blocks_playback() {
             self.transport_loop_dirty = true;
             return;
@@ -11103,6 +11361,9 @@ impl CitrusApp {
     }
 
     fn publish_transport_seek(&mut self, beat: f64) {
+        if self.pending_plugin_slot_config.is_some() {
+            return;
+        }
         if self.plugin_processing_retry_required {
             return;
         }
@@ -11907,6 +12168,10 @@ impl CitrusApp {
     }
 
     fn toggle_play(&mut self) {
+        if self.pending_plugin_slot_config.is_some() {
+            self.notify("Wait for plug-in configuration state capture; Stop can cancel it".into());
+            return;
+        }
         self.poll_plugin_processing_health();
         if self.plugin_processing_blocks_playback() {
             self.notify("Plug-in processing is paused. Use RETRY AUDIO PROCESSING in Audio settings, then press Play when ready".into());
@@ -11949,6 +12214,11 @@ impl CitrusApp {
     }
 
     fn stop(&mut self) {
+        if self.pending_plugin_slot_config.take().is_some() {
+            self.notify(
+                "Plug-in configuration change canceled; previous configuration retained".into(),
+            );
+        }
         if self.input_recorder.is_some() {
             self.finish_input_recording();
         }
@@ -11972,6 +12242,10 @@ impl CitrusApp {
     }
 
     fn toggle_record(&mut self) {
+        if self.pending_plugin_slot_config.is_some() {
+            self.notify("Wait for plug-in configuration state capture before recording".into());
+            return;
+        }
         self.poll_plugin_processing_health();
         if self.plugin_processing_blocks_playback() {
             self.notify("Recording is paused until plug-in processing is explicitly retried in Audio settings".into());
@@ -12117,6 +12391,12 @@ impl CitrusApp {
     }
 
     fn start_realtime_master_capture(&mut self) {
+        if self.pending_plugin_slot_config.is_some() {
+            self.notify(
+                "Wait for plug-in configuration state capture before recording the master".into(),
+            );
+            return;
+        }
         if !self.audio_restart_state.allows_realtime_session_actions() {
             self.notify(
                 "Realtime Master Capture is unavailable during an audio device transaction".into(),
@@ -12482,6 +12762,17 @@ impl CitrusApp {
         modal_at_frame_start: Option<ShortcutModal>,
         blocker_at_frame_start: bool,
     ) {
+        if self.pending_plugin_slot_config.is_some() {
+            let presses = ctx.input(|input| ShortcutPresses::from_events(&input.events));
+            if presses
+                .chord(ShortcutKey::Escape)
+                .and_then(resolve_global_shortcut)
+                == Some(ShortcutAction::Stop)
+            {
+                self.stop();
+            }
+            return;
+        }
         let context = self.shortcut_context(ctx, modal_at_frame_start, blocker_at_frame_start);
         let policy = ShortcutPolicy::new(context);
         let presses = ctx.input(|input| ShortcutPresses::from_events(&input.events));
@@ -12511,7 +12802,8 @@ impl CitrusApp {
     }
 
     fn shortcut_blocking_layer_active(&self) -> bool {
-        !self.project_lifecycle.is_idle()
+        self.pending_plugin_slot_config.is_some()
+            || !self.project_lifecycle.is_idle()
             || self.project_media.open
             || self.audio_restart_state.locks_session_actions()
             || self.recovery_available
@@ -12549,6 +12841,9 @@ impl CitrusApp {
     }
 
     fn apply_shortcut_action(&mut self, ctx: &egui::Context, action: ShortcutAction) {
+        if self.pending_plugin_slot_config.is_some() && action != ShortcutAction::Stop {
+            return;
+        }
         self.sync_piano_range_owner();
         if matches!(action, ShortcutAction::Undo | ShortcutAction::Redo) && piano_range::active(ctx)
         {
@@ -13420,7 +13715,20 @@ impl CitrusApp {
         required_generator_route_state(&requirements, &confirmed, &pending_channels)
     }
 
+    fn timeline_insert_replacements_ready(&mut self) -> bool {
+        if self.pending_insert_chains.is_empty() && self.pending_insert_removals.is_empty() {
+            return true;
+        }
+        self.timeline_audio_sync.last_error = Some(
+            "Waiting for exact callback-confirmed Mixer endpoints before Timeline planning".into(),
+        );
+        false
+    }
+
     fn ensure_timeline_generator_routes_ready(&mut self, timeline: &CompiledTimeline) -> bool {
+        if !self.timeline_insert_replacements_ready() {
+            return false;
+        }
         match self.timeline_generator_routes_state(timeline) {
             RequiredGeneratorRouteState::Ready => true,
             RequiredGeneratorRouteState::Pending {
@@ -13999,6 +14307,9 @@ impl CitrusApp {
     }
 
     fn drive_timeline_transport_activation(&mut self) {
+        if !self.timeline_insert_replacements_ready() {
+            return;
+        }
         if self.plugin_processing_retry_required {
             return;
         }
@@ -14260,14 +14571,16 @@ impl CitrusApp {
     /// These operations retain a whole Project that can replace the current one later.
     /// Keep import completion and native editor opening on the same snapshot boundary.
     fn project_snapshot_transition_pending(&self) -> bool {
-        !self.project_lifecycle.is_idle()
+        self.pending_plugin_slot_config.is_some()
+            || !self.project_lifecycle.is_idle()
             || self.deferred_project_intent_after_midi.is_some()
             || self.deferred_recovery_project_after_midi.is_some()
             || self.deferred_generator_candidate_after_midi.is_some()
     }
 
     fn project_lifecycle_barriers_active(&self) -> bool {
-        self.audio_restart_state.locks_session_actions()
+        self.pending_plugin_slot_config.is_some()
+            || self.audio_restart_state.locks_session_actions()
             || self.save_barrier.is_some()
             || self.queued_save_request.is_some()
             || !self.midi_recording.is_idle()
@@ -14278,6 +14591,13 @@ impl CitrusApp {
     }
 
     fn request_project_intent(&mut self, intent: ProjectIntent) {
+        if self.pending_plugin_slot_config.is_some() {
+            self.notify(
+                "Wait for plug-in configuration state capture before changing projects or closing"
+                    .into(),
+            );
+            return;
+        }
         if self.audio_restart_state.locks_session_actions() {
             self.notify(
                 "Finish or retry the audio device transaction before changing projects".into(),
@@ -14771,6 +15091,10 @@ impl CitrusApp {
     }
 
     fn begin_project_save(&mut self, request: ProjectSaveRequest) {
+        if self.pending_plugin_slot_config.is_some() {
+            self.notify("Wait for plug-in configuration state capture before saving".into());
+            return;
+        }
         if self.audio_restart_state.locks_session_actions() {
             if request.is_manual() {
                 self.notify("Save is unavailable during an audio device transaction".into());
@@ -14815,6 +15139,9 @@ impl CitrusApp {
             return;
         }
 
+        // This new save owns a fresh all-slot capture after any canceled config
+        // operation; its native state publications are authoritative again.
+        self.plugin_config_native_capture_suppressed.clear();
         self.save_barrier = Some(PluginStateSaveBarrier {
             request,
             request_id: self.allocate_save_state_request_id(),
@@ -14924,6 +15251,15 @@ impl CitrusApp {
     }
 
     fn request_plugin_state_probe(&self, probe: PluginStateProbe, request_id: u64) -> Option<bool> {
+        self.request_plugin_state_probe_for_epoch(probe, request_id, None)
+    }
+
+    fn request_plugin_state_probe_for_epoch(
+        &self,
+        probe: PluginStateProbe,
+        request_id: u64,
+        epoch: Option<u64>,
+    ) -> Option<bool> {
         if !plugin_runtime_session_is_current(probe.project_session(), self.project_session) {
             return None;
         }
@@ -14939,7 +15275,16 @@ impl CitrusApp {
                     && chain.project_session == project_session
                     && chain.endpoint_id == endpoint_id
                     && chain.instance_ids.get(slot) == Some(&instance_id))
-                .then(|| chain.control.request_state_tagged(slot, request_id))
+                .then(|| {
+                    epoch.map_or_else(
+                        || chain.control.request_state_tagged(slot, request_id),
+                        |epoch| {
+                            chain
+                                .control
+                                .request_state_tagged_for_epoch(slot, request_id, epoch)
+                        },
+                    )
+                })
             }),
             PluginStateProbe::Generator {
                 project_session,
@@ -14954,7 +15299,16 @@ impl CitrusApp {
                         && chain.project_session == project_session
                         && chain.endpoint_id == endpoint_id
                         && chain.instance_id == instance_id)
-                        .then(|| chain.control.request_state_tagged(0, request_id))
+                        .then(|| {
+                            epoch.map_or_else(
+                                || chain.control.request_state_tagged(0, request_id),
+                                |epoch| {
+                                    chain
+                                        .control
+                                        .request_state_tagged_for_epoch(0, request_id, epoch)
+                                },
+                            )
+                        })
                 }),
         }
     }
@@ -16023,36 +16377,415 @@ impl CitrusApp {
             self.notify("Plug-in controls are locked while audio is degraded or restarting".into());
             return;
         }
+        if self.save_barrier.is_some() {
+            self.notify("Plug-in changes are unavailable while state is being saved".into());
+            return;
+        }
+        if !wet.is_finite() {
+            self.notify("Plug-in wet level must be finite".into());
+            return;
+        }
         let config = SlotConfig {
             enabled,
             bypassed: bypass,
             wet: wet.clamp(0.0, 1.0),
         };
-        let generator_channel = if !enabled || bypass {
-            self.project
-                .channels
-                .iter()
-                .find(|channel| channel.instrument_plugin_instance_id == Some(instance_id))
-                .map(|channel| channel.id)
-        } else {
-            None
-        };
-        if let Some(channel_id) = generator_channel {
-            self.silence_generator_channel(channel_id);
-        }
-        if let Err(error) = self.dispatch_plugin_slot_config(instance_id, config) {
-            self.notify(format!("Plug-in control failed: {error}"));
+        if (!config.enabled || config.bypassed)
+            && crate::plugin_midi_routing::compile_midi_port_routes(&self.project).is_ok_and(
+                |routes| {
+                    routes.iter().any(|route| {
+                        route.source_instance == instance_id
+                            || route.destination_instance == instance_id
+                    })
+                },
+            )
+        {
+            self.notify("Bypass/disable of a connected MIDI-port source or instrument is not supported yet. Disconnect its MIDI-port route first; the previous configuration is unchanged.".into());
             return;
         }
-        if let Some(instance) = self
+        if self.pending_plugin_slot_config.is_some() {
+            self.notify("A plug-in configuration change is already capturing state".into());
+            return;
+        }
+        self.poll_native_editor_snapshots();
+        if let Err(error) = self.native_editor_topology_guard() {
+            self.notify(error);
+            return;
+        }
+        if self
             .project
             .plugin_instances
-            .iter_mut()
+            .iter()
             .find(|instance| instance.id == instance_id)
+            .is_none_or(|instance| {
+                instance.enabled == config.enabled
+                    && instance.bypass == config.bypassed
+                    && instance.wet.to_bits() == config.wet.to_bits()
+            })
         {
-            instance.enabled = config.enabled;
-            instance.bypass = config.bypassed;
-            instance.wet = config.wet;
+            return;
+        }
+        if self.audio.is_none()
+            && self.running_generator_chains.is_empty()
+            && self.pending_generator_chains.is_empty()
+            && self.running_insert_chains.is_empty()
+            && self.pending_insert_chains.is_empty()
+        {
+            self.commit_plugin_slot_config(instance_id, config, &HashMap::new());
+            return;
+        }
+        if self.plugin_topology_is_settling()
+            || self.project_snapshot_transition_pending()
+            || !self.midi_input.state.is_disconnected()
+            || !self.midi_recording.is_idle()
+            || self.input_recorder.is_some()
+            || self.pending_recording.is_some()
+            || self.master_capture.is_some()
+            || self.pending_master_capture.is_some()
+            || self.plugin_processing_blocks_playback()
+        {
+            self.notify("Finish MIDI, recording, project and plug-in transitions before changing plug-in configuration".into());
+            return;
+        }
+        let all_probes = self.current_plugin_state_probes();
+        let Some(target_probe) = all_probes
+            .iter()
+            .find(|probe| probe.instance_id() == instance_id)
+            .copied()
+        else {
+            self.notify("Plug-in configuration is waiting for a confirmed running endpoint".into());
+            return;
+        };
+        let probes: Vec<PluginStateProbe> = all_probes
+            .into_iter()
+            .filter(|probe| match (target_probe, probe) {
+                (
+                    PluginStateProbe::Insert { track, .. },
+                    PluginStateProbe::Insert { track: other, .. },
+                ) => track == *other,
+                (
+                    PluginStateProbe::Generator { channel_id, .. },
+                    PluginStateProbe::Generator {
+                        channel_id: other, ..
+                    },
+                ) => channel_id == *other,
+                _ => false,
+            })
+            .collect();
+        if probes.iter().any(|probe| {
+            self.project
+                .plugin_instances
+                .iter()
+                .find(|instance| instance.id == probe.instance_id())
+                .is_none_or(|instance| instance.runtime_status != PluginRuntimeStatus::Loaded)
+        }) {
+            self.notify("Wait for every plug-in in this chain to finish loading before changing its configuration".into());
+            return;
+        }
+        let request_id = self.allocate_save_state_request_id();
+        self.restart_state_request_ids_to_ignore.insert(request_id);
+        self.pending_plugin_slot_config = Some(PendingPluginSlotConfig {
+            instance_id,
+            config,
+            probes,
+            snapshot: RestartPluginStateSnapshot::new(request_id),
+            resume_playback: self.playing,
+            stopped_epoch: None,
+            captured_identity: None,
+            captured_project_fingerprint: None,
+            prepared: None,
+        });
+        self.notify(
+            "Capturing current plug-in state before preparing the configuration change".into(),
+        );
+    }
+
+    fn suppress_plugin_config_native_capture(&mut self, probe: PluginStateProbe) {
+        let key = match probe {
+            PluginStateProbe::Insert {
+                endpoint_id,
+                instance_id,
+                slot,
+                ..
+            } => (endpoint_id, instance_id, slot),
+            PluginStateProbe::Generator {
+                endpoint_id,
+                instance_id,
+                ..
+            } => (endpoint_id, instance_id, 0),
+        };
+        self.plugin_config_native_capture_suppressed.insert(key);
+    }
+
+    fn drive_plugin_slot_config_capture(&mut self) {
+        let Some(mut pending) = self.pending_plugin_slot_config.take() else {
+            return;
+        };
+        let current = self.current_plugin_state_probes();
+        let failure = pending.snapshot.failure.take().or_else(|| {
+            if pending.probes.iter().any(|probe| !current.contains(probe)) {
+                Some("the exact plug-in endpoint changed during state capture".to_owned())
+            } else if !self.audio_restart_state.allows_realtime_session_actions()
+                || self.plugin_processing_blocks_playback()
+                || self.audio.is_none()
+            {
+                Some("audio became unavailable during state capture".to_owned())
+            } else if pending.captured_project_fingerprint.is_some_and(|captured| captured != project_fingerprint(&self.project)) {
+                Some("the project changed while its plug-in configuration was being prepared".to_owned())
+            } else if pending.captured_identity.is_some_and(|identity| {
+                !plugin_config_capture_identity_matches(identity,
+                    self.audio.as_ref().and_then(AudioEngine::confirmed_timeline_identity),
+                    self.audio.as_ref().map_or(0, |audio| audio.snapshot().transport_epoch),
+                    self.timeline_audio_matches_desired())
+            }) {
+                Some("the exact captured Timeline generation or epoch changed".to_owned())
+            } else if let Err(error) = self.native_editor_topology_guard() {
+                Some(error)
+            } else if pending.snapshot.timed_out(Instant::now()) {
+                Some("timed out waiting for a stopped epoch, parameter edits, or exact state receipts".to_owned())
+            } else { None }
+        });
+        if let Some(failure) = failure {
+            self.playing = false;
+            if let Some(audio) = &self.audio {
+                audio.set_playing(false);
+            }
+            self.notify(format!("Plug-in configuration was not changed: {failure}. Previous model and endpoint retained; playback remains paused."));
+            return;
+        }
+        if !pending.snapshot.parameter_edits_drained {
+            if self.plugin_parameter_edits.reserved_len() != 0 {
+                self.pending_plugin_slot_config = Some(pending);
+                return;
+            }
+            pending.snapshot.parameter_edits_drained = true;
+            pending.captured_project_fingerprint = Some(project_fingerprint(&self.project));
+            pending.snapshot.started_at = Instant::now();
+            pending.stopped_epoch = self
+                .audio
+                .as_ref()
+                .map(|audio| audio.snapshot().transport_epoch);
+            self.playing = false;
+            self.transport_clock_playing = false;
+            if let Some(audio) = &self.audio {
+                audio.set_playing(false);
+            }
+            if !self.request_timeline_resume_chase() {
+                self.notify("Plug-in configuration was not changed: no exact Timeline chase is available for stopped state capture".into());
+                return;
+            }
+            self.pending_plugin_slot_config = Some(pending);
+            return;
+        }
+        let snapshot = self
+            .audio
+            .as_ref()
+            .expect("audio availability checked above")
+            .snapshot();
+        if snapshot.transport_playing
+            || pending.stopped_epoch == Some(snapshot.transport_epoch)
+            || !self.timeline_audio_matches_desired()
+        {
+            self.pending_plugin_slot_config = Some(pending);
+            return;
+        }
+        if !pending.snapshot.requests_initialized {
+            let Some(identity) = self
+                .audio
+                .as_ref()
+                .and_then(AudioEngine::confirmed_timeline_identity)
+                .filter(|identity| {
+                    plugin_config_capture_identity_matches(
+                        *identity,
+                        self.audio
+                            .as_ref()
+                            .and_then(AudioEngine::confirmed_timeline_identity),
+                        snapshot.transport_epoch,
+                        self.timeline_audio_matches_desired(),
+                    )
+                })
+            else {
+                self.notify("Plug-in configuration was not changed: the exact stopped Timeline identity was lost before capture".into());
+                return;
+            };
+            pending.captured_identity = Some(identity);
+            pending.snapshot.pending_requests = pending.probes.clone();
+            pending.snapshot.requests_initialized = true;
+            pending.snapshot.started_at = Instant::now();
+        }
+        let Some((_, capture_epoch)) = pending.captured_identity else {
+            self.notify(
+                "Plug-in configuration was not changed: missing exact capture epoch".into(),
+            );
+            return;
+        };
+        for probe in std::mem::take(&mut pending.snapshot.pending_requests) {
+            match self.request_plugin_state_probe_for_epoch(
+                probe,
+                pending.snapshot.request_id,
+                Some(capture_epoch),
+            ) {
+                Some(true) => {
+                    self.suppress_plugin_config_native_capture(probe);
+                    pending.snapshot.waiting.insert(probe.instance_id());
+                }
+                Some(false) => pending.snapshot.pending_requests.push(probe),
+                None => {
+                    pending.snapshot.failure =
+                        Some("the exact plug-in state route was replaced".into());
+                }
+            }
+        }
+        if !pending.snapshot.ready() {
+            self.pending_plugin_slot_config = Some(pending);
+            return;
+        }
+        if pending.prepared.is_none() {
+            match self.prepare_plugin_slot_config(&pending) {
+                Ok(prepared) => {
+                    pending.prepared = Some(prepared);
+                    pending.snapshot.started_at = Instant::now();
+                }
+                Err(error) => {
+                    self.notify(format!("Plug-in configuration was not changed: {error}; previous model and endpoint retained"));
+                    return;
+                }
+            }
+        }
+        match pending.prepared.as_mut().expect("candidate prepared above").poll() {
+            Ok(false) => self.pending_plugin_slot_config = Some(pending),
+            Err(error) => self.notify(format!("Plug-in configuration was not changed: {error}; previous model and endpoint retained")),
+            Ok(true) => {
+                let prepared = pending.prepared.take().expect("candidate prepared above");
+                if self.install_plugin_slot_config_candidate(pending.instance_id, prepared.candidate, prepared.chain) {
+                    // Only a new exact Timeline activation may restore play intent.
+                    self.playing = pending.resume_playback && !self.plugin_processing_blocks_playback();
+                    self.notify("Plug-in configuration prepared; waiting for exact endpoint and Timeline activation".into());
+                }
+            }
+        }
+    }
+
+    fn prepare_plugin_slot_config(
+        &mut self,
+        pending: &PendingPluginSlotConfig,
+    ) -> Result<PreparedPluginSlotConfig, String> {
+        let candidate = plugin_slot_config_candidate(
+            &self.project,
+            pending.instance_id,
+            pending.config,
+            &pending.snapshot.states,
+        )
+        .ok_or("the plug-in disappeared before preparation")?;
+        let (ids, specs) = match pending.probes.first() {
+            Some(PluginStateProbe::Insert { track, .. }) => {
+                mixer_track_runtime_specs(&candidate, *track)?
+            }
+            Some(PluginStateProbe::Generator { channel_id, .. }) => {
+                let (id, _, spec) = channel_generator_runtime_spec(&candidate, *channel_id)?
+                    .ok_or("the generator disappeared before preparation")?;
+                (vec![id], vec![spec])
+            }
+            None => return Err("the captured chain is empty".into()),
+        };
+        let sample_rate = self
+            .audio
+            .as_ref()
+            .ok_or("audio is unavailable")?
+            .snapshot()
+            .sample_rate as f32;
+        let chain = self.plugin_host.spawn_identified_chain(
+            ids.iter().copied().zip(specs).collect(),
+            sample_rate,
+            MAX_MIXER_BLOCK_FRAMES as u32,
+        )?;
+        let request_id = self.allocate_save_state_request_id();
+        Ok(PreparedPluginSlotConfig::new(
+            candidate, chain, ids, request_id,
+        ))
+    }
+
+    fn commit_plugin_slot_config(
+        &mut self,
+        instance_id: u64,
+        config: SlotConfig,
+        states: &HashMap<u64, Vec<u8>>,
+    ) -> bool {
+        let Some(candidate) =
+            plugin_slot_config_candidate(&self.project, instance_id, config, states)
+        else {
+            return false;
+        };
+
+        // A genuinely offline project has no worker to mutate or replace. Keep its
+        // editable state independent from device availability, as before.
+        if self.audio.is_none()
+            && self.running_generator_chains.is_empty()
+            && self.pending_generator_chains.is_empty()
+            && self.running_insert_chains.is_empty()
+            && self.pending_insert_chains.is_empty()
+        {
+            self.project = candidate;
+            self.request_immediate_timeline_compile();
+            return true;
+        }
+
+        // Live edits must pass the captured, prepared-worker transaction above.
+        false
+    }
+
+    fn install_plugin_slot_config_candidate(
+        &mut self,
+        instance_id: u64,
+        candidate: Project,
+        prepared: plugins::plugin_runtime::PluginChain,
+    ) -> bool {
+        // Bypass/enabled changes can change effective plug-in latency. Prepare the
+        // new configuration on a replacement worker; never change the admitted
+        // worker's latency identity using its live control queue. The existing
+        // endpoint transaction retains rollback state until callback admission.
+        let result = if let Some(channel_id) = self
+            .project
+            .channels
+            .iter()
+            .find(|channel| channel.instrument_plugin_instance_id == Some(instance_id))
+            .map(|channel| channel.id)
+        {
+            let previous_state = snapshot_channel_generator(&self.project, channel_id);
+            self.queue_channel_generator_candidate_prepared(
+                channel_id,
+                candidate,
+                previous_state,
+                Some(prepared),
+            )
+        } else if let Some(track) = self
+            .project
+            .mixer_insert_slots
+            .iter()
+            .find(|slot| slot.plugin_instance_id == instance_id)
+            .and_then(|slot| self.project.mixer_runtime_slot(slot.track))
+        {
+            let previous_state = snapshot_mixer_plugin_track(&self.project, track);
+            self.queue_mixer_track_candidate_prepared(
+                track,
+                candidate,
+                Some(previous_state),
+                Some(prepared),
+            )
+        } else {
+            Err("the plug-in no longer has a valid runtime placement".into())
+        };
+        match result {
+            Ok(()) => {
+                // Configuration is part of the timeline fingerprint. A new compiled
+                // generation and its normal fresh chase rebind endpoint/PDC identity.
+                self.request_immediate_timeline_compile();
+                true
+            }
+            Err(error) => {
+                self.notify(format!("Plug-in control failed: {error}"));
+                false
+            }
         }
     }
 
@@ -18769,6 +19502,10 @@ impl eframe::App for CitrusApp {
         self.poll_timeline_compile(&ctx);
         self.poll_audio_asset_events();
         self.poll_timeline_audio_runtime(&ctx);
+        self.drive_plugin_slot_config_capture();
+        if self.pending_plugin_slot_config.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(8));
+        }
         let legacy_automation_audio_frozen =
             self.callback_timeline_owns_note_clip() && !self.timeline_audio_matches_desired();
         self.apply_automation();
@@ -18803,6 +19540,7 @@ impl eframe::App for CitrusApp {
         if self.project_lifecycle.is_modal()
             || self.recovery_available
             || self.audio_restart_state.locks_session_actions()
+            || self.pending_plugin_slot_config.is_some()
             || self.piano_roll_transform.is_some()
             || self.piano_note_properties.is_some()
             || self.project_media.open
@@ -23401,20 +24139,21 @@ impl CitrusApp {
             .descriptors()
             .iter()
             .map(|descriptor| {
-                let route = if self.save_barrier.is_some() {
-                    Err("parameter editing is paused while plug-in state is being saved".into())
-                } else if self.plugin_topology_is_settling() {
-                    Err("the plug-in graph is still confirming a topology change".into())
-                } else {
-                    self.plugin_parameter_edit_route(
-                        binding.project_session,
-                        binding.endpoint_id,
-                        binding.instance_id,
-                        binding.slot,
-                        descriptor.id,
-                        true,
-                    )
-                };
+                let route =
+                    if self.save_barrier.is_some() || self.pending_plugin_slot_config.is_some() {
+                        Err("parameter editing is paused while plug-in state is being saved".into())
+                    } else if self.plugin_topology_is_settling() {
+                        Err("the plug-in graph is still confirming a topology change".into())
+                    } else {
+                        self.plugin_parameter_edit_route(
+                            binding.project_session,
+                            binding.endpoint_id,
+                            binding.instance_id,
+                            binding.slot,
+                            descriptor.id,
+                            true,
+                        )
+                    };
                 (descriptor.id, route)
             })
             .collect::<HashMap<_, _>>();
@@ -26826,7 +27565,8 @@ fn runtime_event_instance_id(instance_ids: &[u64], event: &RuntimeEvent) -> Opti
         | RuntimeEvent::ParameterCatalogPage { slot, .. }
         | RuntimeEvent::ParameterSetAck { slot, .. }
         | RuntimeEvent::ParameterCommandFailed { slot, .. }
-        | RuntimeEvent::State { slot, .. } => *slot,
+        | RuntimeEvent::State { slot, .. }
+        | RuntimeEvent::StateRejected { slot, .. } => *slot,
         RuntimeEvent::ShutdownComplete => return None,
     };
     instance_ids.get(slot).copied()
@@ -26944,6 +27684,34 @@ fn restore_channel_generator(project: &mut Project, state: &ChannelGeneratorStat
             project.plugin_instances.push(previous.clone());
         }
     }
+}
+
+fn plugin_slot_config_candidate(
+    project: &Project,
+    instance_id: u64,
+    config: SlotConfig,
+    states: &HashMap<u64, Vec<u8>>,
+) -> Option<Project> {
+    let mut candidate = project.clone();
+    for instance in &mut candidate.plugin_instances {
+        if let Some(bytes) = states.get(&instance.id) {
+            instance.opaque_state.clone_from(bytes);
+        }
+    }
+    let instance = candidate
+        .plugin_instances
+        .iter_mut()
+        .find(|instance| instance.id == instance_id)?;
+    if instance.enabled == config.enabled
+        && instance.bypass == config.bypassed
+        && instance.wet.to_bits() == config.wet.to_bits()
+    {
+        return None;
+    }
+    instance.enabled = config.enabled;
+    instance.bypass = config.bypassed;
+    instance.wet = config.wet;
+    Some(candidate)
 }
 
 fn plugin_instance_runtime_spec(instance: &PluginInstance) -> PluginLoadSpec {
@@ -27195,7 +27963,8 @@ fn apply_plugin_runtime_event(
         | RuntimeEvent::ParameterCatalogPage { slot, .. }
         | RuntimeEvent::ParameterSetAck { slot, .. }
         | RuntimeEvent::ParameterCommandFailed { slot, .. }
-        | RuntimeEvent::State { slot, .. } => *slot,
+        | RuntimeEvent::State { slot, .. }
+        | RuntimeEvent::StateRejected { slot, .. } => *slot,
         RuntimeEvent::ShutdownComplete => return None,
     };
     let instance_id = *instance_ids.get(slot)?;
@@ -27223,7 +27992,7 @@ fn apply_plugin_runtime_event(
             instance.opaque_state.clone_from(bytes);
             None
         }
-        RuntimeEvent::ShutdownComplete => None,
+        RuntimeEvent::StateRejected { .. } | RuntimeEvent::ShutdownComplete => None,
     }
 }
 
@@ -33403,6 +34172,7 @@ mod playback_tests {
             &RuntimeEvent::State {
                 slot: 0,
                 request_id: 0,
+                epoch: None,
                 bytes: vec![4, 5, 6],
             },
         );
@@ -33440,6 +34210,7 @@ mod playback_tests {
                 &RuntimeEvent::State {
                     slot: ids.len(),
                     request_id: 0,
+                    epoch: None,
                     bytes: vec![9],
                 },
             )
@@ -33489,6 +34260,7 @@ mod playback_tests {
             RuntimeEvent::State {
                 slot: 0,
                 request_id: 77,
+                epoch: None,
                 bytes: vec![1, 2, 3],
             },
             RuntimeEvent::SlotFault {
@@ -34167,6 +34939,7 @@ mod playback_tests {
                 &RuntimeEvent::State {
                     slot: 1,
                     request_id: 123,
+                    epoch: None,
                     bytes: vec![],
                 }
             ),

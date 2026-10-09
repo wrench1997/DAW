@@ -67,6 +67,12 @@ impl PluginBackend for MidiRouteBackend {
     }
 
     fn prepare(&mut self, _config: PluginPrepareConfig) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while self.probe.failure.load(Ordering::Acquire) == 5 {
+            if std::time::Instant::now() >= deadline { return Err("fixture preparation release timed out".into()); }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        if self.probe.failure.load(Ordering::Acquire) == 4 { return Err("deliberate candidate prepare/restore failure".into()); }
         Ok(())
     }
 
@@ -358,6 +364,7 @@ struct MidiGraphFixture {
     insert: Arc<MidiRouteProbe>,
     loop_token: u64,
     timing: PreparedPluginTimingPlan,
+    timeline_revision: u64,
     activation_playing: bool,
 }
 
@@ -460,7 +467,7 @@ impl MidiGraphFixture {
         let master_instances: Vec<_> = project
             .mixer_insert_slots
             .iter()
-            .filter(|slot| slot.track == 0)
+            .filter(|slot| project.mixer_runtime_slot(slot.track) == Some(0))
             .map(|slot| slot.plugin_instance_id)
             .collect();
         if !master_instances.is_empty() {
@@ -489,27 +496,29 @@ impl MidiGraphFixture {
             insert,
             loop_token,
             timing: PreparedPluginTimingPlan::conservative(48000).unwrap(),
+            timeline_revision: 71,
             activation_playing: true,
         }
     }
 
-    fn queue_activation(&mut self, epoch: u64, frame: u64) -> TimelineTransportActivationTicket {
+    fn enqueue_activation(&mut self, epoch: u64, frame: u64) {
         let mut chase = self
             .controller
             .prepare_chase(
                 &self.timeline,
-                71,
+                self.timeline_revision,
                 epoch,
                 frame,
                 TimelineChaseOptions::default(),
             )
             .unwrap();
         chase.plugin_timing = self.timing;
+        chase.plugin_topology_revision = self.dsp.plugin_topology_revision;
         self.controller.install_chase(chase).unwrap();
         self.controller
             .activate_transport(
                 TimelineTransportActivationSpec {
-                    revision: 71,
+                    revision: self.timeline_revision,
                     target_epoch: epoch,
                     minimum_epoch: epoch,
                     frame,
@@ -526,8 +535,24 @@ impl MidiGraphFixture {
                 self.mailbox.try_load().unwrap().request_id,
             )
             .unwrap();
-        assert_eq!(self.dsp.apply_pending_timeline_commands(), 2);
+    }
+
+    fn queue_activation(&mut self, epoch: u64, frame: u64) -> TimelineTransportActivationTicket {
+        self.enqueue_activation(epoch, frame);
+        crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+            assert_eq!(self.dsp.apply_pending_timeline_commands(), 2);
+        });
         self.dsp.pending_timeline_transport_activation().unwrap()
+    }
+
+    fn replace_timeline(&mut self, project: &Project) {
+        self.timeline_revision += 1;
+        self.timeline = compile_timeline_test_project(project);
+        let bank = Box::new(PreparedMixerGraphDelayBank::new(self.timeline.mixer_graph(), MIDI_TEST_MAX_DELAY).unwrap());
+        self.controller.install_with_mixer_resources(self.timeline_revision, Arc::clone(&self.timeline), bank).unwrap();
+        let chase = self.controller.prepare_loop_chase(&self.timeline, self.timeline_revision, 0, TimelineChaseOptions::default()).unwrap();
+        self.loop_token = self.controller.install_loop_chase(chase).unwrap();
+        crate::realtime_test_alloc::assert_no_alloc_or_drop(|| { assert_eq!(self.dsp.apply_pending_timeline_commands(), 2); });
     }
 
     fn select_timing_profile(&mut self, budget: u32) {
@@ -549,11 +574,13 @@ impl MidiGraphFixture {
         self.queue_activation(epoch, frame);
         // The production callback owns the single preflight/commit transaction.
         // Preflighting here as well would consume the staged chase twice.
-        self.transport
-            .apply_pending_timeline_activation(&self.status, &mut self.dsp);
+        crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+            self.dsp.refresh_pdc_plan(&self.status, 128);
+            self.transport.apply_pending_timeline_activation(&self.status, &mut self.dsp);
+        });
         assert_eq!(self.transport.epoch, epoch);
         assert_eq!(self.transport.timeline_frame, frame);
-        assert_eq!(self.dsp.timeline_channel_revision, Some(71));
+        assert_eq!(self.dsp.timeline_channel_revision, Some(self.timeline_revision));
         assert!(self.dsp.mixer_graph_binding_is_exact());
         self.wait_workers();
     }
@@ -1020,19 +1047,15 @@ fn midi_port_graph_bypassed_fx_keeps_audio_and_midi_route_working() {
         true,
         &[(37, [0x90, 73, 100]), (12_000, [0x80, 73, 0])],
     );
-    let insert_control = &fixture.controls[2];
-    assert!(insert_control.set_slot_config(
-        0,
-        crate::plugins::plugin_runtime::SlotConfig {
-            bypassed: true,
-            ..Default::default()
-        }
-    ));
-    wait_until(|| {
-        insert_control
-            .plugin_latency_snapshot()
-            .is_some_and(|snapshot| snapshot.active_mask == 0)
-    });
+    // Prepare the bypassed chain before callback ownership transfer. A direct admin mutation
+    // of an already-installed latency identity is intentionally a different (faulting) path.
+    let PluginChain { audio, control, guard } = midi_route_multi_insert(&[INSERT_INSTANCE], &fixture.insert);
+    assert!(control.set_slot_config(0, crate::plugins::plugin_runtime::SlotConfig { bypassed: true, ..Default::default() }));
+    wait_until(|| control.plugin_latency_snapshot().is_some_and(|snapshot| snapshot.active_mask == 0));
+    let endpoint = fixed_adapter(audio);
+    fixture.controls.push(control);
+    fixture.guards.push(guard);
+    crate::realtime_test_alloc::assert_no_alloc_or_drop(|| fixture.dsp.install_insert_endpoint(2, 55_004, endpoint));
     fixture.activate(2, 0);
     let output = fixture.render_frames(10_240, 512);
     assert!(output.iter().any(|frame| frame[0] != 0.0));
@@ -1276,9 +1299,10 @@ fn every_profile_rejects_budget_plus_one_before_submission_and_retry_is_fresh_st
         assert!(fixture.timing.revision > old_revision);
         fixture.queue_activation(4, 0);
         // The explicit retry is a stopped replan; no automatic playing or loop replay.
-        fixture
-            .transport
-            .apply_pending_timeline_activation(&fixture.status, &mut fixture.dsp);
+        crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+            fixture.dsp.refresh_pdc_plan(&fixture.status, 128);
+            fixture.transport.apply_pending_timeline_activation(&fixture.status, &mut fixture.dsp);
+        });
         assert_eq!(fixture.transport.epoch, 4);
         assert!(!fixture.transport.request.playing);
         assert!(!fixture.transport.request.loop_enabled);
@@ -1297,7 +1321,7 @@ fn serial_fx_slots_share_one_bridge_and_master_adds_one_under_changing_callbacks
             plugin.role = PluginRole::Effect;
             project.plugin_instances.push(plugin);
             project.mixer_insert_slots.push(MixerInsertSlotRef {
-                track,
+                track: crate::model::mixer_track_id_for_runtime_slot(track),
                 slot,
                 plugin_instance_id: instance,
             });
@@ -1506,5 +1530,296 @@ fn latency_change_requires_explicit_stopped_retry_and_new_exact_attestations() {
             .unwrap()
             .revision
     );
+    fixture.finish();
+}
+
+
+#[test]
+fn topology_replacement_paused_gap_stale_chase_and_retirement_backpressure_are_allocation_free() {
+    let mut fixture = MidiGraphFixture::new(midi_route_project(false, false), false, true, true, &[]);
+    fixture.activation_playing = false;
+    fixture.activate(2, 0);
+    let old_endpoint = fixture.dsp.insert_endpoints[2].as_ref().unwrap().endpoint_id;
+    let old_revision = fixture.dsp.plugin_topology_revision;
+    let PluginChain { audio, control, guard } = midi_route_multi_insert(&[INSERT_INSTANCE], &fixture.insert);
+    fixture.controls.push(control);
+    fixture.guards.push(guard);
+    let replacement = fixed_adapter(audio);
+    let (mut commands, mut callback_commands) = RingBuffer::new(8);
+    let (mut retired_assets, _assets) = RingBuffer::new(8);
+    let (mut events, _events) = RingBuffer::new(8);
+    let (retired, mut reclaim) = RingBuffer::new(1);
+    fixture.dsp.retired_insert_endpoints = Some(retired);
+    // A full retirement ring must retain ownership in the command ring without mutation.
+    let PluginChain { audio, control, guard } = midi_route_multi_insert(&[INSERT_INSTANCE], &fixture.insert);
+    fixture.controls.push(control);
+    fixture.guards.push(guard);
+    fixture.dsp.retire_insert_endpoint(fixed_adapter(audio));
+    commands.push(AudioCommand::InstallInsertEndpoint { insert: 2, endpoint_id: 55_001, endpoint: replacement }).unwrap();
+    crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+        process_commands(&mut fixture.dsp, &mut callback_commands, &mut retired_assets, &mut events);
+        fixture.dsp.refresh_pdc_plan(&fixture.status, 128);
+    });
+    assert!(callback_commands.peek().is_ok());
+    assert_eq!(fixture.dsp.plugin_topology_revision, old_revision);
+    assert_eq!(fixture.dsp.insert_endpoints[2].as_ref().unwrap().endpoint_id, old_endpoint);
+    drop(reclaim.pop().unwrap()); // Only the control/test thread destroys retired resources.
+    // Prepared before callback acceptance, then installed in production command order.
+    fixture.enqueue_activation(3, 0);
+    // Also preserve an edit already admitted to the surviving generator's partial quantum.
+    // The topology gap must not silently service it using fail_timeline_block's revision 0.
+    let source_index = fixture.dsp.find_generator_slot(SOURCE_CHANNEL).unwrap();
+    let mut edit_batch = TimelineEndpointBatchPlan::new_boxed();
+    let endpoint_id = fixture.dsp.generator_endpoints[source_index].as_ref().unwrap().endpoint_id;
+    let edit = ParameterEditSubmission {
+        edit_id: crate::plugin_parameter_edit::ParameterEditId(701),
+        route: ParameterEditRoute {
+            project_session: 0,
+            endpoint: crate::plugin_parameter_edit::ParameterEndpoint { kind: ParameterEndpointKind::Generator, id: endpoint_id },
+            instance_id: SOURCE_INSTANCE,
+            slot: 0,
+            parameter_id: 9,
+        },
+        normalized: 0.7,
+    };
+    crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+        assert_eq!(DspState::try_admit_plugin_parameter_edit(
+            &mut fixture.dsp.generator_endpoints[source_index].as_mut().unwrap().endpoint,
+            TimelineEndpointKey::new(SOURCE_CHANNEL, endpoint_id, SOURCE_INSTANCE),
+            false, edit, edit_batch.as_mut()), Ok(true));
+    });
+    fixture.dsp.admitted_live_edit_endpoint_count = 1;
+    let before: Vec<_> = fixture.controls.iter().map(|c| c.stats().submitted).collect();
+    // The production boundary accepts replacement, refreshes old PDC, rejects the stale chase,
+    // rejects paused parameter/MIDI commands, and renders silence without any worker submission.
+    commands.push(AudioCommand::SetGeneratorParameter { channel_id: SOURCE_CHANNEL, slot: 0, id: 1, normalized: 0.4 }).unwrap();
+    commands.push(AudioCommand::SendGeneratorMidi { channel_id: SOURCE_CHANNEL, slot: None, data: [0x90, 60, 100], sample_offset: 0 }).unwrap();
+    let mut rendered = [[1.0; 2]; 128];
+    crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+        process_commands(&mut fixture.dsp, &mut callback_commands, &mut retired_assets, &mut events);
+        assert_eq!(fixture.dsp.apply_pending_timeline_commands(), 2);
+        fixture.dsp.refresh_pdc_plan(&fixture.status, 128);
+        fixture.transport.apply_pending_timeline_activation(&fixture.status, &mut fixture.dsp);
+        assert!(fixture.dsp.admit_plugin_callback(128));
+        render_transport_chunk(&mut fixture.dsp, &fixture.status, &fixture.mailbox, &mut fixture.transport, 128,
+            |offset, block| rendered[offset..offset + block.len()].copy_from_slice(block));
+    });
+    assert!(rendered.iter().all(|frame| *frame == [0.0; 2]));
+    assert_eq!(fixture.transport.epoch, 2);
+    assert!(fixture.dsp.plugin_topology_replan_pending);
+    assert!(fixture.dsp.plugin_fault.is_none());
+    assert_eq!(fixture.controls.iter().map(|c| c.stats().submitted).collect::<Vec<_>>(), before);
+    assert!(fixture.dsp.generator_endpoints.iter().flatten().all(|e| e.endpoint.adapter.processing_fault().is_none()));
+    assert_eq!(fixture.dsp.plugin_processing_snapshot().health, PluginProcessingHealth::Priming);
+    // No explicit retry or timing revision change: a newly prepared exact candidate suffices.
+    let timing = fixture.timing;
+    fixture.activate(4, 0);
+    assert_eq!(fixture.dsp.plugin_timing, timing);
+    assert!(!fixture.dsp.plugin_topology_replan_pending);
+    assert!(fixture.dsp.plugin_fault.is_none());
+    assert_eq!(fixture.dsp.plugin_fault_count, 0);
+    drop(reclaim.pop().unwrap());
+    fixture.finish();
+}
+
+#[test]
+fn authorized_topology_remove_add_and_generator_replace_require_exact_manifests() {
+    let mut project = midi_route_project(false, false);
+    let mut fixture = MidiGraphFixture::new(project.clone(), false, true, true, &[]);
+    fixture.activate(2, 0);
+    // Removal suspends first; the old manifest is rejected despite its fresh topology stamp.
+    crate::realtime_test_alloc::assert_no_alloc_or_drop(|| fixture.dsp.remove_insert_endpoint(2));
+    fixture.queue_activation(3, 0);
+    crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+        fixture.dsp.refresh_pdc_plan(&fixture.status, 128);
+        fixture.transport.apply_pending_timeline_activation(&fixture.status, &mut fixture.dsp);
+    });
+    assert_eq!(fixture.transport.epoch, 2);
+    assert!(fixture.dsp.plugin_fault.is_none());
+    project.mixer_insert_slots.clear();
+    fixture.replace_timeline(&project);
+    fixture.activate(4, 0);
+    assert!(!fixture.dsp.plugin_topology_replan_pending);
+    project.mixer_insert_slots.push(MixerInsertSlotRef { track: 2, slot: 0, plugin_instance_id: INSERT_INSTANCE });
+    let PluginChain { audio, control, guard } = midi_route_multi_insert(&[INSERT_INSTANCE], &fixture.insert);
+    let endpoint = fixed_adapter(audio);
+    fixture.controls.push(control); fixture.guards.push(guard);
+    crate::realtime_test_alloc::assert_no_alloc_or_drop(|| fixture.dsp.install_insert_endpoint(2, 55_002, endpoint));
+    fixture.replace_timeline(&project);
+    fixture.activate(5, 0);
+    let PluginChain { audio, control, guard } = midi_route_chain(SOURCE_INSTANCE, MidiTestRole::Source, (true, true), &fixture.source, &[]);
+    let endpoint = fixed_adapter(audio);
+    let pdc = StereoDelayLine::new(MIDI_TEST_MAX_DELAY).unwrap();
+    fixture.controls.push(control); fixture.guards.push(guard);
+    crate::realtime_test_alloc::assert_no_alloc_or_drop(|| fixture.dsp.install_generator_endpoint(SOURCE_CHANNEL, 55_003, SOURCE_INSTANCE, 1, endpoint, pdc));
+    fixture.activate(6, 0);
+    assert_eq!(fixture.dsp.plugin_fault_count, 0);
+    // An identity mutation without an accepted lifecycle command is still a real fault.
+    fixture.dsp.insert_endpoints[2].as_mut().unwrap().endpoint_id = 999_999;
+    crate::realtime_test_alloc::assert_no_alloc_or_drop(|| fixture.dsp.refresh_pdc_plan(&fixture.status, 128));
+    assert_eq!(fixture.dsp.plugin_fault.unwrap().reason, PluginProcessingFaultReason::EndpointChanged);
+    fixture.finish();
+}
+
+#[test]
+fn recovered_health_belongs_to_current_epoch_only() {
+    let mut fixture = MidiGraphFixture::new(midi_route_project(false, false), false, true, true, &[]);
+    fixture.select_timing_profile(128);
+    fixture.activate(2, 0);
+    assert!(!fixture.dsp.admit_plugin_callback(129));
+    fixture.select_timing_profile(128);
+    fixture.activation_playing = false;
+    fixture.activate(3, 0);
+    assert_eq!(fixture.dsp.plugin_processing_snapshot().health, PluginProcessingHealth::Priming);
+    fixture.activation_playing = true;
+    // Explicit Play gets another fresh epoch. A pending recovery follows that epoch until
+    // actual output is primed, but must not permanently label subsequent normal epochs.
+    fixture.activate(4, 0);
+    fixture.render_frames(4096, 128);
+    assert_eq!(fixture.dsp.plugin_processing_snapshot().health, PluginProcessingHealth::Recovered);
+    assert_eq!(fixture.dsp.plugin_recovered_count, 1);
+    fixture.activate(5, 0);
+    fixture.render_frames(4096, 128);
+    assert_eq!(fixture.dsp.plugin_processing_snapshot().health, PluginProcessingHealth::Running);
+    assert_eq!(fixture.dsp.plugin_recovered_count, 1);
+    fixture.finish();
+}
+
+
+#[test]
+fn production_endpoint_admission_waits_for_worker_prepare_and_failed_candidate_retains_old_chain() {
+    for fail in [true, false] {
+        let mut fixture = MidiGraphFixture::new(midi_route_project(false, false), false, true, true, &[]);
+        fixture.activation_playing = false;
+        fixture.activate(2, 0);
+        let old_id = fixture.dsp.insert_endpoints[2].as_ref().unwrap().endpoint_id;
+        let old_topology = fixture.dsp.plugin_topology_revision;
+        let probe = Arc::new(MidiRouteProbe::default());
+        probe.failure.store(5, Ordering::Release);
+        let backend_probe = Arc::clone(&probe);
+        let PluginChain { audio, control, guard } = PluginChain::spawn_identified_with_backend_factory(
+            &[INSERT_INSTANCE], move || vec![BackendSlot::new(Box::new(MidiRouteBackend {
+                role: MidiTestRole::Insert, capabilities: (false, false), probe: backend_probe,
+                transport: PluginTransport::default(), generated: Vec::new(), pending: Vec::new(),
+                output: PluginMidiBatch::default(), active: [false; 128],
+            }))], PluginPrepareConfig { sample_rate: 48000.0, max_block_frames: 128 }).unwrap();
+        let mut endpoint = fixed_adapter(audio);
+        endpoint.project_session = 7; // The actual production admission contract.
+        fixture.controls.push(control); fixture.guards.push(guard);
+        let candidate_control = fixture.controls.len() - 1;
+        let (mut commands, mut callback_commands) = RingBuffer::new(4);
+        let (mut retired_assets, _assets) = RingBuffer::new(4);
+        let (mut asset_events, _events) = RingBuffer::new(4);
+        let (events, mut confirmations) = RingBuffer::new(4);
+        fixture.dsp.insert_endpoint_events = Some(events);
+        commands.push(AudioCommand::InstallInsertEndpoint { insert: 2, endpoint_id: 55_010, endpoint }).unwrap();
+        crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+            process_commands(&mut fixture.dsp, &mut callback_commands, &mut retired_assets, &mut asset_events);
+            fixture.dsp.refresh_pdc_plan(&fixture.status, 128);
+        });
+        assert!(callback_commands.peek().is_ok());
+        assert_eq!(fixture.dsp.insert_endpoints[2].as_ref().unwrap().endpoint_id, old_id);
+        assert_eq!(fixture.dsp.plugin_topology_revision, old_topology);
+        assert!(confirmations.pop().is_err());
+        probe.failure.store(if fail { 4 } else { 0 }, Ordering::Release);
+        wait_until(|| fixture.controls[candidate_control].plugin_latency_snapshot().is_some());
+        crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+            process_commands(&mut fixture.dsp, &mut callback_commands, &mut retired_assets, &mut asset_events);
+            fixture.dsp.refresh_pdc_plan(&fixture.status, 128);
+        });
+        assert!(callback_commands.peek().is_err());
+        assert!(matches!(confirmations.pop().unwrap(), InsertEndpointEvent::Installed { success, .. } if success != fail));
+        if fail {
+            assert_eq!(fixture.dsp.insert_endpoints[2].as_ref().unwrap().endpoint_id, old_id);
+            assert_eq!(fixture.dsp.plugin_topology_revision, old_topology);
+            assert!(!fixture.dsp.plugin_topology_replan_pending);
+        } else {
+            assert_eq!(fixture.dsp.insert_endpoints[2].as_ref().unwrap().endpoint_id, 55_010);
+            assert!(fixture.dsp.plugin_topology_replan_pending);
+            fixture.activate(3, 0);
+        }
+        assert!(fixture.dsp.plugin_fault.is_none());
+        fixture.finish();
+    }
+}
+
+#[test]
+fn authorized_timeline_clear_and_non_plugin_resync_do_not_latch_endpoint_fault() {
+    for with_plugins in [true, false] {
+        let project = if with_plugins { midi_route_project(false, false) } else { timeline_test_project(4.0) };
+        let mut fixture = MidiGraphFixture::new(midi_route_project(false, false), false, true, true, &[]);
+        if !with_plugins {
+            fixture.dsp.clear_insert_endpoints(1);
+            fixture.dsp.clear_generator_endpoints(1);
+            fixture.replace_timeline(&project);
+        }
+        fixture.activate(2, 0);
+        fixture.render(63);
+        fixture.controller.clear(fixture.timeline_revision).unwrap();
+        let before: Vec<_> = fixture.controls.iter().map(|control| control.stats().submitted).collect();
+        let mut output = [[1.0; 2]; 128];
+        crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+            assert_eq!(fixture.dsp.apply_pending_timeline_commands(), 1);
+            fixture.dsp.refresh_pdc_plan(&fixture.status, 128);
+            fixture.transport.apply_pending_timeline_activation(&fixture.status, &mut fixture.dsp);
+            assert!(fixture.dsp.admit_plugin_callback(128));
+            render_transport_chunk(&mut fixture.dsp, &fixture.status, &fixture.mailbox, &mut fixture.transport, 128,
+                |offset, block| output[offset..offset + block.len()].copy_from_slice(block));
+        });
+        assert!(output.iter().all(|frame| *frame == [0.0; 2]));
+        assert!(fixture.dsp.plugin_fault.is_none());
+        assert_eq!(fixture.controls.iter().map(|control| control.stats().submitted).collect::<Vec<_>>(), before);
+        fixture.replace_timeline(&project);
+        fixture.activate(3, 0);
+        assert_eq!(fixture.dsp.plugin_fault_count, 0);
+        // A non-plugin Timeline failure has the same known suspended binding, while actual
+        // MIDI routing loss uses its separate non-droppable cause latch.
+        crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+            fixture.dsp.timeline_runtime.as_mut().unwrap().require_resync();
+            fixture.dsp.fail_timeline_block();
+            fixture.dsp.refresh_pdc_plan(&fixture.status, 128);
+            assert!(fixture.dsp.admit_plugin_callback(128));
+        });
+        assert!(fixture.dsp.plugin_fault.is_none());
+        fixture.activate(4, 0);
+        assert_eq!(fixture.dsp.plugin_fault_count, 0);
+        fixture.finish();
+    }
+}
+
+#[test]
+fn empty_endpoint_destination_still_reserves_retirement_for_late_worker_rejection() {
+    let mut fixture = MidiGraphFixture::new(midi_route_project(false, false), false, true, true, &[]);
+    fixture.activation_playing = false;
+    fixture.activate(2, 0);
+    let (retired, mut reclaim) = RingBuffer::new(1);
+    fixture.dsp.retired_insert_endpoints = Some(retired);
+    let PluginChain { audio, control, guard } = midi_route_multi_insert(&[INSERT_INSTANCE], &fixture.insert);
+    fixture.dsp.retire_insert_endpoint(fixed_adapter(audio));
+    fixture.controls.push(control); fixture.guards.push(guard);
+    let PluginChain { audio, control, guard } = midi_route_multi_insert(&[55_020], &fixture.insert);
+    let mut endpoint = fixed_adapter(audio);
+    endpoint.project_session = 7;
+    let (mut commands, mut callback_commands) = RingBuffer::new(2);
+    let (mut retired_assets, _assets) = RingBuffer::new(2);
+    let (mut asset_events, _events) = RingBuffer::new(2);
+    commands.push(AudioCommand::InstallInsertEndpoint { insert: 3, endpoint_id: 55_020, endpoint }).unwrap();
+    crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+        process_commands(&mut fixture.dsp, &mut callback_commands, &mut retired_assets, &mut asset_events);
+    });
+    assert!(callback_commands.peek().is_ok());
+    assert!(fixture.dsp.insert_endpoints[3].is_none());
+    // The candidate can stop after a readiness observation; it must still have a guaranteed
+    // off-thread retirement destination when the command is eventually popped and rejected.
+    assert_eq!(guard.shutdown_blocking(std::time::Duration::from_secs(2)),
+        crate::plugins::plugin_runtime::ShutdownOutcome::Joined);
+    assert!(control.stats().stopped);
+    drop(reclaim.pop().unwrap());
+    crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+        process_commands(&mut fixture.dsp, &mut callback_commands, &mut retired_assets, &mut asset_events);
+    });
+    assert!(callback_commands.peek().is_err());
+    assert!(fixture.dsp.insert_endpoints[3].is_none());
+    drop(reclaim.pop().expect("rejected candidate was retired, not leaked or callback-dropped"));
     fixture.finish();
 }

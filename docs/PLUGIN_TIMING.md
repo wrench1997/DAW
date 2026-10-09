@@ -40,9 +40,32 @@ sample rate and still-current requested revision. Existing candidate preflight
 binds the plan to exact physical endpoint manifests and coherent latency snapshots.
 Only the existing fresh-epoch transaction switches timing, endpoint lookahead,
 PDC, content-time transport, route bindings and Q128 control histories together.
-An obsolete candidate cannot silently apply a prior profile. Seek/loop epochs
+A callback-acknowledged topology revision also binds each prepared chase. Accepted endpoint
+install/remove/replace/route commands suspend plug-in processing while a matching candidate
+is prepared. During this gap, paused MIDI and parameter service cannot submit against cleared
+latency bindings. Only a newly prepared chase with exact Generator and all Mixer slot manifests
+clears the gap; ordinary edits need no explicit Retry. An accepted Timeline clear or non-plug-in
+resync also suspends old bindings without mislabeling that gap as a physical endpoint fault. Unsolicited identity drift still faults.
+A full retirement queue leaves the lifecycle command and its ownership queued, without entering
+this gap or destroying any resource on the callback. An obsolete candidate cannot silently apply
+a prior profile or authorize a replacement accepted after that candidate was prepared. Seek/loop epochs
 reset partial quanta and queued output; a fault needs an explicit newer timing
 revision, rather than being cleared by a loop or ordinary same-plan seek.
+
+Bypass/enabled/wet changes use an asynchronous stopped state-capture transaction instead of
+mutating an admitted worker's latency identity. New generic edits and conflicting lifecycle
+operations are fenced; existing edits drain before the exact stopped epoch. Every slot in the
+replaced physical chain contributes a tagged live-state receipt. A fresh worker receives those
+captured blobs and reconciled parameter bases. All slots must finish load/prepare, report coherent
+latency, and acknowledge parameter replay before the endpoint is transferred. Preparation retains
+the authoritative captured blobs; it does not re-save a not-yet-processed replacement or claim
+arbitrary plug-in state equality. No hidden Process block is inserted as a generic state-settling
+operation. Old-chain capture verifies worker epoch both before and after the backend call.
+An epoch-tagged snapshot error does not mark the host processor slot faulted. Failure, cancellation, timeout or stale identity
+preserves the previous configuration and chain and leaves playback paused. A connected MIDI-port
+source/sink cannot be bypassed or disabled in this slice; disconnect its route first. FX along
+that path remain configurable. These transactions are separate from explicit fault Retry and
+cannot silently restart a faulted session.
 
 Routed instrument transport is delayed by the producer's actual prepared L.
 Mixer/Master transport uses graph join latency; serial slots subtract preceding
@@ -56,9 +79,10 @@ submission burst is 16 quanta, including every initial partial-quantum phase.
 K + ceil(B/Q) + 2 = 46 fits each preallocated 48-block input, output and future
 queue. Compile-time size ceilings keep all three queues plus endpoint scratch
 under 4 MiB per physical endpoint, and each adapter under 512 KiB. With the existing
-96 physical-endpoint maximum this storage is bounded below 432 MiB, independent
-of how many slots share each endpoint. Device/PDC and plug-in-internal memory are
-separate from this worker-bridge bound. Preparation/allocation and retirement stay
+96 active physical-endpoint maximum this storage is bounded below 432 MiB, independent
+of how many slots share each endpoint. This is an active-graph bound, not a whole-process
+memory cap: off-thread prepared, queued and retired endpoints require additional storage,
+as do device/PDC buffers and plug-in-internal memory. Preparation/allocation and retirement stay
 off the device callback; there is no queue growth, plug-in call, IPC, mutex, join or
 resource destruction in the timing/health callback path.
 
@@ -95,7 +119,8 @@ The new tests explicitly cover whole-callback-only worker progress, every Q128
 initial phase and profiles at 48000/384000 Hz, sizes 1/31/64/127/128/129/255/256/512/2048,
 changing partitions, MIDI offsets 0/1/127 aligned with audio and declared graph PDC,
 ordinary Generators, routed fan-out, serial FX slots, Master, stopped direct MIDI,
-B+1 before submission, allocation/deallocation guards, stale candidates, partial
+B+1 before submission, allocation/deallocation guards around command processing, retirement
+backpressure, refresh, activation/rejection and render, stale candidates, partial
 quanta, endpoint/latency identity, cleanup and explicit fresh-epoch retry. Settings
 are exercised by real egui pointer/AccessKit tests, with separate image review.
 

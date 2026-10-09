@@ -1916,6 +1916,7 @@ enum AdminCommand {
     SaveState {
         slot: usize,
         request_id: u64,
+        expected_epoch: Option<u64>,
     },
     LoadState {
         slot: usize,
@@ -1933,6 +1934,12 @@ pub enum PluginParameterCommand {
 }
 
 /// Messages produced by the worker and drained by the UI/control thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StateCaptureRejectReason {
+    EpochChanged,
+    BackendFailure,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum RuntimeEvent {
     SlotReady {
@@ -1976,7 +1983,14 @@ pub enum RuntimeEvent {
     State {
         slot: usize,
         request_id: u64,
+        epoch: Option<u64>,
         bytes: Vec<u8>,
+    },
+    StateRejected {
+        slot: usize,
+        request_id: u64,
+        epoch: u64,
+        reason: StateCaptureRejectReason,
     },
     ShutdownComplete,
 }
@@ -2132,7 +2146,25 @@ impl PluginChainControl {
         if !manifest_accepts_slot(self.manifest, slot) {
             return false;
         }
-        self.try_admin(AdminCommand::SaveState { slot, request_id })
+        self.try_admin(AdminCommand::SaveState {
+            slot,
+            request_id,
+            expected_epoch: None,
+        })
+    }
+
+    /// Capture only after the worker has reset to this exact callback-requested epoch.
+    /// The epoch is checked again after the potentially slow backend save; stale work emits
+    /// StateRejected rather than a successful receipt. This control method is never callback-safe.
+    pub fn request_state_tagged_for_epoch(&self, slot: usize, request_id: u64, epoch: u64) -> bool {
+        request_id != 0
+            && epoch != 0
+            && manifest_accepts_slot(self.manifest, slot)
+            && self.try_admin(AdminCommand::SaveState {
+                slot,
+                request_id,
+                expected_epoch: Some(epoch),
+            })
     }
 
     pub fn load_state(&self, slot: usize, state: Vec<u8>) -> bool {
@@ -2776,6 +2808,43 @@ fn run_worker(
                     shutdown = true;
                     break;
                 }
+                Ok(AdminCommand::SaveState {
+                    slot,
+                    request_id,
+                    expected_epoch: Some(epoch),
+                }) => {
+                    if requested_epoch.load(Ordering::Acquire) != epoch {
+                        push_event(
+                            &mut events,
+                            RuntimeEvent::StateRejected {
+                                slot,
+                                request_id,
+                                epoch,
+                                reason: StateCaptureRejectReason::EpochChanged,
+                            },
+                            &metrics,
+                        );
+                        continue;
+                    }
+                    // A request may arrive after this worker turn's first epoch read. Reset now,
+                    // before calling the backend, rather than mistaking callback acknowledgment
+                    // for completion of the worker's reset.
+                    if active_epoch != epoch {
+                        active_epoch = epoch;
+                        dry = StereoBlock::silence();
+                        reset_worker_epoch(active_epoch, &mut slots, &mut events, &metrics);
+                        metrics.worker_epoch_resets.fetch_add(1, Ordering::Relaxed);
+                        update_latency_and_tail(&mut slots, &mut events, &metrics);
+                    }
+                    admin_metadata_changed |= capture_worker_state(
+                        slot,
+                        request_id,
+                        Some((epoch, &requested_epoch)),
+                        &mut slots,
+                        &mut events,
+                        &metrics,
+                    );
+                }
                 Ok(command) => {
                     admin_metadata_changed |=
                         handle_admin(command, &mut slots, &mut events, &metrics);
@@ -3282,6 +3351,94 @@ fn handle_tagged_rt_parameter(
     }
 }
 
+fn capture_worker_state(
+    slot: usize,
+    request_id: u64,
+    epoch: Option<(u64, &AtomicU64)>,
+    slots: &mut [WorkerSlot],
+    events: &mut Producer<RuntimeEvent>,
+    metrics: &BridgeMetrics,
+) -> bool {
+    let stale =
+        || epoch.is_some_and(|(expected, requested)| requested.load(Ordering::Acquire) != expected);
+    if stale() {
+        push_event(
+            events,
+            RuntimeEvent::StateRejected {
+                slot,
+                request_id,
+                epoch: epoch.expect("stale tagged capture").0,
+                reason: StateCaptureRejectReason::EpochChanged,
+            },
+            metrics,
+        );
+        return false;
+    }
+    let Some(runtime) = slots
+        .get_mut(slot)
+        .filter(|runtime| runtime.fault.is_none())
+    else {
+        return false;
+    };
+    let Some(backend) = runtime.backend.as_mut() else {
+        return false;
+    };
+    runtime.parameter_catalog_cache = None;
+    let result = catch_backend(|| {
+        capture_native_backend(slot, backend.as_mut(), &runtime.native_base_ids, metrics)
+    });
+    match result {
+        Ok(bytes) if stale() => {
+            // Destruction is on the worker. Never publish stale capture bytes to the control model.
+            drop(bytes);
+            push_event(
+                events,
+                RuntimeEvent::StateRejected {
+                    slot,
+                    request_id,
+                    epoch: epoch.expect("stale tagged capture").0,
+                    reason: StateCaptureRejectReason::EpochChanged,
+                },
+                metrics,
+            );
+            false
+        }
+        Ok(bytes) => {
+            push_event(
+                events,
+                RuntimeEvent::State {
+                    slot,
+                    request_id,
+                    epoch: epoch.map(|(value, _)| value),
+                    bytes,
+                },
+                metrics,
+            );
+            false
+        }
+        Err(_) if epoch.is_some() => {
+            // A failed configuration snapshot must not poison the still-owned working chain.
+            // The caller rejects the candidate and can explicitly retry capturing later.
+            push_event(
+                events,
+                RuntimeEvent::StateRejected {
+                    slot,
+                    request_id,
+                    epoch: epoch.expect("tagged capture failure").0,
+                    reason: StateCaptureRejectReason::BackendFailure,
+                },
+                metrics,
+            );
+            false
+        }
+        Err(message) => {
+            runtime.fault = Some(message.clone());
+            register_fault(slot, message, events, metrics);
+            true
+        }
+    }
+}
+
 fn handle_admin(
     command: AdminCommand,
     slots: &mut [WorkerSlot],
@@ -3375,6 +3532,10 @@ fn handle_admin(
             |backend| backend.set_parameter(id, value),
         ) {
             ParameterCommandOutcome::Success(()) => {
+                // Preparation waits for these acknowledgments before transferring a worker.
+                // Publish any parameter-induced latency metadata first, so success cannot
+                // authorize a coherent-but-obsolete endpoint identity.
+                update_latency_and_tail(slots, events, metrics);
                 if request_id != 0 {
                     push_event(
                         events,
@@ -3438,41 +3599,16 @@ fn handle_admin(
         } => handle_parameter_catalog_request(
             slot, request_id, cursor, limit, slots, events, metrics,
         ),
-        AdminCommand::SaveState { slot, request_id } => {
-            let mut faulted = false;
-            if let Some(runtime) = slots.get_mut(slot)
-                && runtime.fault.is_none()
-                && let Some(backend) = runtime.backend.as_mut()
-            {
-                runtime.parameter_catalog_cache = None;
-                let result = catch_backend(|| {
-                    capture_native_backend(
-                        slot,
-                        backend.as_mut(),
-                        &runtime.native_base_ids,
-                        metrics,
-                    )
-                });
-                match result {
-                    Ok(bytes) => {
-                        push_event(
-                            events,
-                            RuntimeEvent::State {
-                                slot,
-                                request_id,
-                                bytes,
-                            },
-                            metrics,
-                        );
-                    }
-                    Err(message) => {
-                        runtime.fault = Some(message.clone());
-                        register_fault(slot, message, events, metrics);
-                        faulted = true;
-                    }
-                }
-            }
-            faulted
+        AdminCommand::SaveState {
+            slot,
+            request_id,
+            expected_epoch,
+        } => {
+            debug_assert!(
+                expected_epoch.is_none(),
+                "epoch-bound capture is dispatched by the worker loop"
+            );
+            capture_worker_state(slot, request_id, None, slots, events, metrics)
         }
         AdminCommand::LoadState { slot, state } => {
             let faulted = with_backend(slot, slots, events, metrics, |backend| {
@@ -5336,6 +5472,7 @@ mod tests {
         );
         handle_admin(
             AdminCommand::SaveState {
+                expected_epoch: None,
                 slot: 0,
                 request_id: 42,
             },
@@ -5472,6 +5609,7 @@ mod tests {
         mock.lock().unwrap().parameter_value = 0.875;
         handle_admin(
             AdminCommand::SaveState {
+                expected_epoch: None,
                 slot: 0,
                 request_id: 2,
             },
@@ -8434,5 +8572,235 @@ mod tests {
         }
         assert_eq!(parameter, Some(0.75));
         assert_eq!(state, Some((42, vec![9, 8, 7])));
+    }
+
+    #[derive(Default)]
+    struct EpochCaptureProbe {
+        entered: AtomicBool,
+        release: AtomicBool,
+        block_save: AtomicBool,
+        fail_save: AtomicBool,
+        slow_latency: AtomicBool,
+        latency: AtomicU32,
+        resets: AtomicU64,
+        saves: AtomicU64,
+    }
+    struct EpochCaptureBackend(Arc<EpochCaptureProbe>);
+    impl EpochCaptureBackend {
+        fn wait_release(&self) -> Result<(), String> {
+            self.0.entered.store(true, Ordering::Release);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !self.0.release.load(Ordering::Acquire) {
+                if Instant::now() >= deadline {
+                    return Err("test release timeout".into());
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            Ok(())
+        }
+    }
+    impl PluginBackend for EpochCaptureBackend {
+        fn name(&self) -> &str {
+            "epoch capture fence"
+        }
+        fn prepare(&mut self, _: PluginPrepareConfig) -> Result<(), String> {
+            Ok(())
+        }
+        fn process(&mut self, _: &mut [f32], _: &mut [f32], _: usize) -> Result<(), String> {
+            Ok(())
+        }
+        fn send_midi(&mut self, _: MidiMessage) -> Result<(), String> {
+            Ok(())
+        }
+        fn set_parameter(&mut self, _: u32, value: f32) -> Result<(), String> {
+            self.wait_release()?;
+            self.0
+                .latency
+                .store((value * 64.0) as u32, Ordering::Release);
+            Ok(())
+        }
+        fn get_parameter(&mut self, _: u32) -> Result<f32, String> {
+            Ok(0.0)
+        }
+        fn save_state(&mut self) -> Result<Vec<u8>, String> {
+            self.0.saves.fetch_add(1, Ordering::Relaxed);
+            if self.0.fail_save.load(Ordering::Acquire) {
+                return Err("deliberate snapshot failure".into());
+            }
+            if self.0.block_save.load(Ordering::Acquire) {
+                self.wait_release()?;
+            }
+            Ok(self.0.resets.load(Ordering::Acquire).to_le_bytes().to_vec())
+        }
+        fn load_state(&mut self, _: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+        fn reset_processing(&mut self) -> Result<(), String> {
+            self.0.resets.fetch_add(1, Ordering::Release);
+            Ok(())
+        }
+        fn latency_samples(&self) -> u32 {
+            let latency = self.0.latency.load(Ordering::Acquire);
+            if latency != 0 && self.0.slow_latency.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(50));
+            }
+            latency
+        }
+        fn tail_samples(&self) -> u32 {
+            0
+        }
+    }
+
+    #[test]
+    fn tagged_capture_resets_worker_after_mid_admin_epoch_change_and_rejects_slow_stale_save() {
+        let probe = Arc::new(EpochCaptureProbe::default());
+        let backend_probe = Arc::clone(&probe);
+        let mut chain = PluginChain::spawn_identified_with_backend_factory(
+            &[42],
+            move || {
+                vec![BackendSlot::new(Box::new(EpochCaptureBackend(
+                    backend_probe,
+                )))]
+            },
+            config(),
+        )
+        .unwrap();
+        wait_until(|| chain.control.plugin_latency_snapshot().is_some());
+        assert!(!chain.control.request_state_tagged_for_epoch(0, 0, 2));
+        assert!(!chain.control.request_state_tagged_for_epoch(0, 1, 0));
+        // Force the callback epoch update after the worker's top-of-turn read, while it is
+        // already inside the admin loop. The next tagged capture must perform the reset itself.
+        assert!(chain.control.set_parameter(0, 1, 0.5));
+        wait_until(|| probe.entered.load(Ordering::Acquire));
+        assert!(chain.audio.set_epoch(2));
+        assert!(chain.control.request_state_tagged_for_epoch(0, 101, 2));
+        probe.release.store(true, Ordering::Release);
+        let event = wait_for_event(&mut chain.control, |event| {
+            matches!(
+                event,
+                RuntimeEvent::State {
+                    request_id: 101,
+                    ..
+                }
+            )
+        });
+        let RuntimeEvent::State { epoch, bytes, .. } = event else {
+            unreachable!()
+        };
+        assert_eq!(epoch, Some(2));
+        assert_eq!(u64::from_le_bytes(bytes.try_into().unwrap()), 1);
+        // A backend save cannot be interrupted. A newer epoch while it is running must discard
+        // the saved bytes and emit an explicit rejection, never a success receipt for old state.
+        probe.entered.store(false, Ordering::Release);
+        probe.release.store(false, Ordering::Release);
+        probe.block_save.store(true, Ordering::Release);
+        assert!(chain.control.request_state_tagged_for_epoch(0, 102, 2));
+        wait_until(|| probe.entered.load(Ordering::Acquire));
+        assert!(chain.audio.set_epoch(3));
+        probe.release.store(true, Ordering::Release);
+        let event = wait_for_event(&mut chain.control, |event| {
+            matches!(
+                event,
+                RuntimeEvent::StateRejected {
+                    request_id: 102,
+                    ..
+                }
+            )
+        });
+        assert!(matches!(
+            event,
+            RuntimeEvent::StateRejected { epoch: 2, .. }
+        ));
+        let saves = probe.saves.load(Ordering::Acquire);
+        assert!(chain.control.request_state_tagged_for_epoch(0, 103, 2));
+        let _ = wait_for_event(&mut chain.control, |event| {
+            matches!(
+                event,
+                RuntimeEvent::StateRejected {
+                    request_id: 103,
+                    epoch: 2,
+                    ..
+                }
+            )
+        });
+        assert_eq!(probe.saves.load(Ordering::Acquire), saves);
+        // A capture failure is not a processor failure and must leave the old worker usable.
+        probe.fail_save.store(true, Ordering::Release);
+        assert!(chain.control.request_state_tagged_for_epoch(0, 104, 3));
+        let _ = wait_for_event(&mut chain.control, |event| {
+            matches!(
+                event,
+                RuntimeEvent::StateRejected {
+                    request_id: 104,
+                    epoch: 3,
+                    reason: StateCaptureRejectReason::BackendFailure,
+                    ..
+                }
+            )
+        });
+        assert_eq!(chain.control.stats().faults, 0);
+        probe.fail_save.store(false, Ordering::Release);
+        assert!(chain.control.request_state_tagged_for_epoch(0, 105, 3));
+        let _ = wait_for_event(&mut chain.control, |event| {
+            matches!(
+                event,
+                RuntimeEvent::State {
+                    request_id: 105,
+                    epoch: Some(3),
+                    ..
+                }
+            )
+        });
+        assert_eq!(chain.control.stats().faults, 0);
+        drop(chain.audio);
+        chain.guard.shutdown();
+    }
+
+    #[test]
+    fn tagged_parameter_success_follows_its_coherent_latency_publication() {
+        let probe = Arc::new(EpochCaptureProbe::default());
+        probe.release.store(true, Ordering::Release);
+        probe.slow_latency.store(true, Ordering::Release);
+        let backend_probe = Arc::clone(&probe);
+        let mut chain = PluginChain::spawn_identified_with_backend_factory(
+            &[42],
+            move || {
+                vec![BackendSlot::new(Box::new(EpochCaptureBackend(
+                    backend_probe,
+                )))]
+            },
+            config(),
+        )
+        .unwrap();
+        wait_until(|| chain.control.plugin_latency_snapshot().is_some());
+        assert_eq!(
+            chain
+                .control
+                .plugin_latency_snapshot()
+                .unwrap()
+                .total_plugin_latency_samples,
+            0
+        );
+        assert!(chain.control.set_parameter_tagged(0, 1, 0.5, 901));
+        let _ = wait_for_event(&mut chain.control, |event| {
+            matches!(
+                event,
+                RuntimeEvent::ParameterSetAck {
+                    request_id: 901,
+                    ..
+                }
+            )
+        });
+        assert_eq!(
+            chain
+                .control
+                .plugin_latency_snapshot()
+                .unwrap()
+                .total_plugin_latency_samples,
+            32
+        );
+        assert_eq!(chain.control.stats().faults, 0);
+        drop(chain.audio);
+        chain.guard.shutdown();
     }
 }

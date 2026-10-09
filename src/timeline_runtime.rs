@@ -227,6 +227,7 @@ pub enum TimelineRuntimeCreateError {
 /// Owned discontinuity state prepared entirely on the control thread.
 #[derive(Debug)]
 pub struct PreparedTimelineChase {
+    pub(crate) plugin_topology_revision: u64,
     pub(crate) plugin_timing: crate::plugin_timing::PreparedPluginTimingPlan,
     revision: u64,
     epoch: u64,
@@ -656,6 +657,7 @@ impl TimelineRuntimeController {
         validate_chase_state(&state)?;
         validate_chase_endpoint_capacities(timeline, &state)?;
         Ok(Box::new(PreparedTimelineChase {
+            plugin_topology_revision: 0,
             plugin_timing: crate::plugin_timing::PreparedPluginTimingPlan::conservative(
                 timeline.sample_rate(),
             )
@@ -1653,6 +1655,25 @@ impl RealtimeTimelineRuntime {
                     .filter(|chase| chase.chase.revision == ticket.spec.revision)
             })
             .map(|chase| chase.chase.plugin_timing)
+    }
+
+    pub(crate) fn transport_activation_plugin_topology_revision(
+        &self,
+        ticket: TimelineTransportActivationTicket,
+    ) -> Option<u64> {
+        let pending = self.pending_transport_activation?;
+        if pending.request_id != ticket.request_id || pending.spec != ticket.spec {
+            return None;
+        }
+        self.candidate_one_shot_chase
+            .as_ref()
+            .filter(|chase| chase.chase.revision == ticket.spec.revision)
+            .or_else(|| {
+                self.one_shot_chase
+                    .as_ref()
+                    .filter(|chase| chase.chase.revision == ticket.spec.revision)
+            })
+            .map(|chase| chase.chase.plugin_topology_revision)
     }
 
     pub(crate) fn transport_activation_chase(
@@ -5843,6 +5864,7 @@ mod tests {
             ))
         ));
         let invalid = Box::new(PreparedTimelineChase {
+            plugin_topology_revision: 0,
             plugin_timing: crate::plugin_timing::PreparedPluginTimingPlan::conservative(48000)
                 .unwrap(),
             revision: 1,
@@ -6183,6 +6205,7 @@ mod tests {
             value: 1.0,
         };
         let chase = Box::new(PreparedTimelineChase {
+            plugin_topology_revision: 0,
             plugin_timing: crate::plugin_timing::PreparedPluginTimingPlan::conservative(48000)
                 .unwrap(),
             revision: 1,

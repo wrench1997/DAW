@@ -1007,6 +1007,7 @@ impl fmt::Debug for AudioCommand {
 #[derive(Debug)]
 pub struct AudioStatus {
     plugin_processing: PluginProcessingTelemetry,
+    plugin_topology_revision: AtomicU64,
     pub playing: AtomicBool,
     pub recording: AtomicBool,
     /// App preference, independent of project/transport activation and command queue capacity.
@@ -1050,6 +1051,7 @@ impl Default for AudioStatus {
     fn default() -> Self {
         Self {
             plugin_processing: PluginProcessingTelemetry::default(),
+            plugin_topology_revision: AtomicU64::new(0),
             playing: AtomicBool::new(false),
             recording: AtomicBool::new(false),
             metronome_enabled: AtomicBool::new(false),
@@ -1674,6 +1676,8 @@ impl AudioEngine {
             .timeline_runtime_ref()
             .prepare_chase(timeline, generation, epoch, frame, options)?;
         chase.plugin_timing = self.prepare_plugin_timing();
+        chase.plugin_topology_revision =
+            self.status.plugin_topology_revision.load(Ordering::Acquire);
         Ok(chase)
     }
 
@@ -2974,19 +2978,26 @@ fn render_transport_chunk(
         // Also clear while paused, awaiting Timeline activation, or monitoring live MIDI,
         // when the normal source renderer may not run at all.
         dsp.clear_disabled_metronome(status);
-        let segment_frames = transport.frames_before_loop(frames - rendered);
+        let segment_frames = if dsp.plugin_fault.is_some() || dsp.plugin_processing_suspended() {
+            frames - rendered
+        } else {
+            transport.frames_before_loop(frames - rendered)
+        };
         if segment_frames == 0 {
             transport.wrap_loop(status, dsp);
             transport.publish(status);
             continue;
         }
         let capture_device_frame = transport.device_frame;
-        if dsp.plugin_fault.is_some() {
+        if dsp.plugin_fault.is_some() || dsp.plugin_processing_suspended() {
             dsp.master_block[..segment_frames].fill([0.0; 2]);
             consume(rendered, &dsp.master_block[..segment_frames]);
             transport.device_frame = transport.device_frame.saturating_add(segment_frames as u64);
-            transport.request.playing = false;
-            transport.request.loop_enabled = false;
+            if dsp.plugin_fault.is_some() {
+                transport.request.playing = false;
+                transport.request.loop_enabled = false;
+            }
+            dsp.publish_plugin_epoch_status(status);
             transport.publish(status);
             rendered += segment_frames;
             continue;
@@ -5581,6 +5592,9 @@ struct DspState {
     plugin_fault_count: u64,
     plugin_recovered_count: u64,
     plugin_recovery_pending: bool,
+    plugin_recovered_epoch: Option<u64>,
+    plugin_topology_revision: u64,
+    plugin_topology_replan_pending: bool,
     plugin_deadline_misses: u64,
     plugin_input_losses: u64,
     plugin_output_losses: u64,
@@ -5645,6 +5659,7 @@ struct DspState {
     callback_transport_anchor: MidiRecordClockAnchor,
     callback_transport_playing: bool,
     midi_route_faulted: u64,
+    midi_route_event_loss: bool,
     paused_midi_safety: [Option<PausedMidiSafetyService>; MAX_GENERATOR_ENDPOINTS],
     retired_midi_inputs: Option<Producer<RetiredMidiInputResource>>,
     midi_input_route_events: Option<Producer<MidiInputRouteEvent>>,
@@ -5809,6 +5824,9 @@ impl DspState {
             plugin_fault_count: 0,
             plugin_recovered_count: 0,
             plugin_recovery_pending: false,
+            plugin_recovered_epoch: None,
+            plugin_topology_revision: 0,
+            plugin_topology_replan_pending: false,
             plugin_deadline_misses: 0,
             plugin_input_losses: 0,
             plugin_output_losses: 0,
@@ -5878,6 +5896,7 @@ impl DspState {
             },
             callback_transport_playing: false,
             midi_route_faulted: 0,
+            midi_route_event_loss: false,
             paused_midi_safety: [None; MAX_GENERATOR_ENDPOINTS],
             retired_midi_inputs: None,
             midi_input_route_events: None,
@@ -5944,6 +5963,7 @@ impl DspState {
     }
 
     fn clear_timeline_render_binding(&mut self) {
+        self.block_plugin_midi_until_epoch();
         for slot in self.generator_endpoints.iter_mut().flatten() {
             if slot.endpoint.midi_port_input {
                 slot.endpoint.adapter.block_midi_until_epoch();
@@ -6925,6 +6945,27 @@ impl DspState {
     }
 
     fn handle(&mut self, command: AudioCommand, retired_assets: &mut Producer<Arc<[f32]>>) {
+        if self.plugin_topology_replan_pending || self.plugin_fault.is_some() {
+            match command {
+                AudioCommand::EditPluginParameter(submission) => {
+                    self.reject_plugin_parameter_edit(
+                        submission,
+                        CallbackRejectReason::StaleEndpoint,
+                    );
+                    return;
+                }
+                AudioCommand::SendInsertMidi { .. }
+                | AudioCommand::SendGeneratorMidi { .. }
+                | AudioCommand::SetInsertParameter { .. }
+                | AudioCommand::SetGeneratorParameter { .. } => {
+                    self.fixed_quantum_endpoint_event_rejections = self
+                        .fixed_quantum_endpoint_event_rejections
+                        .saturating_add(1);
+                    return;
+                }
+                _ => {}
+            }
+        }
         match command {
             AudioCommand::RegisterAsset {
                 operation,
@@ -7520,13 +7561,18 @@ impl DspState {
             .as_ref()
             .and_then(|runtime| runtime.transport_activation_plugin_timing(ticket))
             .ok_or(TimelineTransportActivationRejectReason::GraphPdcPlan)?;
-        if PreparedPluginTimingPlan::new(
-            candidate_timing.revision,
-            candidate_timing.sample_rate,
-            candidate_timing.callback_budget_frames,
-        )
-        .ok()
-            != Some(candidate_timing)
+        if self
+            .timeline_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.transport_activation_plugin_topology_revision(ticket))
+            != Some(self.plugin_topology_revision)
+            || PreparedPluginTimingPlan::new(
+                candidate_timing.revision,
+                candidate_timing.sample_rate,
+                candidate_timing.callback_budget_frames,
+            )
+            .ok()
+                != Some(candidate_timing)
             || candidate_timing.revision != self.requested_plugin_timing_revision
             || candidate_timing.sample_rate != self.sample_rate as u32
             || self
@@ -7540,6 +7586,7 @@ impl DspState {
         self.plugin_timing_activation = Some(candidate_timing);
         let DspState {
             timeline_runtime,
+            plugin_topology_replan_pending,
             timeline_executor,
             timeline_automation,
             timeline_activation_plan,
@@ -7690,6 +7737,25 @@ impl DspState {
             return Err(TimelineTransportActivationRejectReason::PluginAutomationBinding);
         }
 
+        // Unstamped, route-free low-level callers retain their legacy fixture path. Every
+        // production endpoint and every compiled plug-in route requires the complete manifest,
+        // including non-automated Mixer slots that must never silently disappear into dry audio.
+        let requires_exact_topology = *plugin_topology_replan_pending
+            || !timeline.plugin_routes().is_empty()
+            || insert_endpoints
+                .iter()
+                .flatten()
+                .any(|slot| slot.endpoint.project_session != 0)
+            || generator_endpoints
+                .iter()
+                .flatten()
+                .any(|slot| slot.endpoint.project_session != 0);
+        if requires_exact_topology
+            && !Self::plugin_topology_matches(timeline, insert_endpoints, generator_endpoints)
+        {
+            return Err(TimelineTransportActivationRejectReason::GeneratorRouteBinding);
+        }
+
         timeline_activation_plan.clear();
         if timeline_executor
             .stage_reset_from_chase(actual_epoch, chase, timeline_activation_plan.as_mut())
@@ -7821,6 +7887,7 @@ impl DspState {
     ) -> CommittedTimelineTransportActivation {
         let spec = ticket.spec();
         self.apply_transport_epoch(status, actual_epoch, spec.beat_q32);
+        self.plugin_topology_replan_pending = false;
         self.plugin_timing = self
             .plugin_timing_activation
             .take()
@@ -8268,6 +8335,7 @@ impl DspState {
     }
 
     fn fail_timeline_block(&mut self) {
+        self.block_plugin_midi_until_epoch();
         for (index, slot) in self.generator_endpoints.iter().enumerate() {
             if let Some(slot) = slot
                 && slot.endpoint.midi_port_input
@@ -8295,7 +8363,11 @@ impl DspState {
 
     fn apply_transport_epoch(&mut self, status: &AudioStatus, epoch: u64, beat_q32: u64) {
         debug_assert_ne!(epoch, 0);
+        if self.transport_epoch != epoch {
+            self.plugin_recovered_epoch = None;
+        }
         self.transport_epoch = epoch;
+        self.midi_route_event_loss = false;
         self.timeline_transport_beat_q32 = beat_q32;
 
         let mut resets = 0_u64;
@@ -8399,6 +8471,9 @@ impl DspState {
 
     fn publish_plugin_epoch_status(&self, status: &AudioStatus) {
         status
+            .plugin_topology_revision
+            .store(self.plugin_topology_revision, Ordering::Release);
+        status
             .plugin_processing
             .publish(self.plugin_processing_snapshot());
         status.plugin_midi_faulted_destinations.store(
@@ -8469,6 +8544,10 @@ impl DspState {
     }
 
     fn refresh_pdc_plan(&mut self, status: &AudioStatus, _frames: usize) {
+        if self.plugin_processing_suspended() {
+            self.publish_plugin_epoch_status(status);
+            return;
+        }
         if self.mixer_graph_was_activated {
             if !self.refresh_graph_pdc_plan(status) {
                 self.latch_plugin_processing_fault(
@@ -8840,19 +8919,31 @@ impl DspState {
         }
     }
 
+    fn endpoint_preparation_state(endpoint: &PreparedFixedEndpoint) -> Option<bool> {
+        // The initial latency publication follows every loader/prepare result. Its Acquire
+        // also orders the preceding fault counters. Unstamped legacy fixtures retain their
+        // isolated caller contract; App always transfers project-stamped endpoints.
+        let published = endpoint.adapter.plugin_latency_snapshot().is_some();
+        let stats = endpoint.adapter.bridge_stats();
+        if stats.faults != 0 || stats.stopped {
+            Some(false)
+        } else if published {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
     fn endpoint_command_ready(&self, command: &AudioCommand) -> bool {
         match command {
-            AudioCommand::InstallInsertEndpoint {
-                insert,
-                endpoint_id,
-                ..
-            } => {
-                let retirements = if *insert >= TRACK_COUNT || *endpoint_id == 0 {
-                    1
-                } else {
-                    usize::from(self.insert_endpoints[*insert].is_some())
-                };
-                self.insert_lifecycle_command_ready(retirements)
+            AudioCommand::InstallInsertEndpoint { endpoint, .. } => {
+                let preparation = Self::endpoint_preparation_state(endpoint);
+                if endpoint.project_session != 0 && preparation.is_none() {
+                    return false;
+                }
+                // Even an empty destination may need to retire the incoming endpoint if its
+                // worker faults between this capacity proof and the install validation.
+                self.insert_lifecycle_command_ready(1)
             }
             AudioCommand::RemoveInsertEndpoint { insert } => {
                 let retirements = self
@@ -8869,24 +8960,12 @@ impl DspState {
                     .count();
                 self.insert_lifecycle_command_ready(retirements)
             }
-            AudioCommand::InstallGeneratorEndpoint {
-                channel_id,
-                endpoint_id,
-                plugin_instance_id,
-                mixer_track,
-                pdc_delay,
-                ..
-            } => {
-                let invalid = *endpoint_id == 0
-                    || *plugin_instance_id == 0
-                    || *mixer_track >= TRACK_COUNT
-                    || pdc_delay.maximum_delay_samples() < self.pdc_maximum_delay_samples;
-                let retirements = usize::from(
-                    invalid
-                        || self.find_generator_slot(*channel_id).is_some()
-                        || self.generator_endpoints.iter().all(Option::is_some),
-                );
-                self.generator_lifecycle_command_ready(retirements)
+            AudioCommand::InstallGeneratorEndpoint { endpoint, .. } => {
+                let preparation = Self::endpoint_preparation_state(endpoint);
+                if endpoint.project_session != 0 && preparation.is_none() {
+                    return false;
+                }
+                self.generator_lifecycle_command_ready(1)
             }
             AudioCommand::RemoveGeneratorEndpoint { channel_id } => {
                 let retirements = usize::from(self.find_generator_slot(*channel_id).is_some());
@@ -8960,13 +9039,132 @@ impl DspState {
             .is_some_and(|events| events.slots() > self.midi_recording_event_reservations)
     }
 
+    fn plugin_processing_suspended(&self) -> bool {
+        self.plugin_topology_replan_pending
+            || (self.mixer_graph_was_activated && self.timeline_channel_revision.is_none())
+    }
+
+    fn block_plugin_midi_until_epoch(&self) {
+        for endpoint in self
+            .insert_endpoints
+            .iter()
+            .flatten()
+            .map(|slot| &slot.endpoint)
+            .chain(
+                self.generator_endpoints
+                    .iter()
+                    .flatten()
+                    .map(|slot| &slot.endpoint),
+            )
+        {
+            endpoint.adapter.block_midi_until_epoch();
+        }
+    }
+
+    /// Only accepted callback lifecycle operations authorize this gap. Unsolicited worker
+    /// identity/latency drift still latches a fault. No plugin path may submit until an exact
+    /// newly prepared topology revision commits, including paused MIDI and parameter service.
+    fn begin_plugin_topology_replan(&mut self) {
+        if !self.mixer_graph_was_activated {
+            return;
+        }
+        self.plugin_topology_revision = next_nonzero_id(self.plugin_topology_revision);
+        self.plugin_topology_replan_pending = true;
+        for endpoint in self
+            .insert_endpoints
+            .iter()
+            .flatten()
+            .map(|s| &s.endpoint)
+            .chain(
+                self.generator_endpoints
+                    .iter()
+                    .flatten()
+                    .map(|s| &s.endpoint),
+            )
+        {
+            endpoint.adapter.block_midi_until_epoch();
+        }
+        if let Some(runtime) = self.timeline_runtime.as_mut() {
+            runtime.require_resync();
+        }
+        self.fail_timeline_block();
+    }
+
+    fn plugin_topology_matches(
+        timeline: &CompiledTimeline,
+        inserts: &mut [Option<InsertEndpointSlot>; TRACK_COUNT],
+        generators: &mut [Option<GeneratorEndpointSlot>; MAX_GENERATOR_ENDPOINTS],
+    ) -> bool {
+        let routes = timeline.plugin_routes();
+        for (track, endpoint) in inserts.iter_mut().enumerate() {
+            let expected = routes.iter().any(|route| {
+                matches!(route.destination, PluginRouteDestination::MixerInsert { track: t, .. }
+                    if usize::from(t) == track)
+            });
+            match endpoint {
+                Some(endpoint) if expected => {
+                    if !endpoint
+                        .endpoint
+                        .exact_endpoint_snapshot()
+                        .is_some_and(|snapshot| {
+                            mixer_manifest_matches(snapshot, routes, track as u8)
+                        })
+                    {
+                        return false;
+                    }
+                }
+                None if !expected => {}
+                _ => return false,
+            }
+        }
+        for endpoint in generators.iter_mut().flatten() {
+            let route_matches = routes.iter().any(|route| {
+                route.instance_id == endpoint.plugin_instance_id
+                    && matches!(route.destination, PluginRouteDestination::Generator { channel_id, slot: 0 }
+                        if channel_id == endpoint.channel_id)
+            });
+            let mixer_track_matches = timeline.channel_bases().iter().any(|base| {
+                base.channel_id == endpoint.channel_id
+                    && usize::from(base.mixer_track) == endpoint.mixer_track
+            });
+            let manifest_matches =
+                endpoint
+                    .endpoint
+                    .exact_endpoint_snapshot()
+                    .is_some_and(|snapshot| {
+                        snapshot.slot_count() == 1
+                            && snapshot.slot(0).is_some_and(|slot| {
+                                slot.instance_id() == endpoint.plugin_instance_id
+                            })
+                    });
+            if !route_matches || !mixer_track_matches || !manifest_matches {
+                return false;
+            }
+        }
+        routes.iter().all(|route| match route.destination {
+            PluginRouteDestination::Generator {
+                channel_id,
+                slot: 0,
+            } => generators.iter().flatten().any(|endpoint| {
+                endpoint.channel_id == channel_id
+                    && endpoint.plugin_instance_id == route.instance_id
+            }),
+            PluginRouteDestination::Generator { .. } => false,
+            PluginRouteDestination::MixerInsert { .. } => true,
+        })
+    }
+
     fn install_insert_endpoint(
         &mut self,
         insert: usize,
         endpoint_id: u64,
         mut endpoint: PreparedFixedEndpoint,
     ) {
-        if insert >= TRACK_COUNT || endpoint_id == 0 {
+        if insert >= TRACK_COUNT
+            || endpoint_id == 0
+            || (endpoint.project_session != 0
+                && Self::endpoint_preparation_state(&endpoint) != Some(true))
+        {
             self.retire_insert_endpoint(endpoint);
             self.emit_insert_endpoint_event(InsertEndpointEvent::Installed {
                 insert,
@@ -8977,6 +9175,7 @@ impl DspState {
             return;
         }
 
+        endpoint.refresh_latency_snapshot();
         let epoch_sync = synchronize_endpoint_epoch(&mut endpoint, self.transport_epoch);
         if let Some(snapshot) = endpoint.coherent_latency_snapshot() {
             endpoint.set_expected_latency_revision(snapshot.revision);
@@ -8993,6 +9192,7 @@ impl DspState {
             return;
         }
 
+        self.begin_plugin_topology_replan();
         let replaced = self.insert_endpoints[insert].take();
         let replaced_endpoint_id = replaced.as_ref().map(|slot| slot.endpoint_id);
         let invalidates_timeline = replaced_endpoint_id.is_some_and(|endpoint_id| {
@@ -9025,6 +9225,13 @@ impl DspState {
     }
 
     fn remove_insert_endpoint(&mut self, insert: usize) {
+        if self
+            .insert_endpoints
+            .get(insert)
+            .is_some_and(Option::is_some)
+        {
+            self.begin_plugin_topology_replan();
+        }
         let removed = self.insert_endpoints.get_mut(insert).and_then(Option::take);
         let endpoint_id = removed.as_ref().map(|slot| slot.endpoint_id);
         let invalidates_timeline = endpoint_id.is_some_and(|endpoint_id| {
@@ -9050,6 +9257,9 @@ impl DspState {
     }
 
     fn clear_insert_endpoints(&mut self, request_id: u64) {
+        if self.insert_endpoints.iter().any(Option::is_some) {
+            self.begin_plugin_topology_replan();
+        }
         let invalidates_timeline = self
             .timeline_plugin_automation_bindings
             .iter()
@@ -9148,6 +9358,8 @@ impl DspState {
             || plugin_instance_id == 0
             || mixer_track >= TRACK_COUNT
             || pdc_delay.maximum_delay_samples() < self.pdc_maximum_delay_samples
+            || (endpoint.project_session != 0
+                && Self::endpoint_preparation_state(&endpoint) != Some(true))
         {
             self.retire_endpoint_resource(RetiredEndpointResource {
                 _endpoint: endpoint,
@@ -9185,6 +9397,7 @@ impl DspState {
             return;
         };
 
+        endpoint.refresh_latency_snapshot();
         let epoch_sync = synchronize_endpoint_epoch(&mut endpoint, self.transport_epoch);
         if let Some(snapshot) = endpoint.coherent_latency_snapshot() {
             endpoint.set_expected_latency_revision(snapshot.revision);
@@ -9207,6 +9420,7 @@ impl DspState {
             return;
         }
 
+        self.begin_plugin_topology_replan();
         let replaced = self.generator_endpoints[target].take();
         let replaced_endpoint_id = replaced.as_ref().map(|slot| slot.endpoint_id);
         let replaced_plugin_instance_id = replaced.as_ref().map(|slot| slot.plugin_instance_id);
@@ -9236,6 +9450,9 @@ impl DspState {
     }
 
     fn remove_generator_endpoint(&mut self, channel_id: u32) {
+        if self.find_generator_slot(channel_id).is_some() {
+            self.begin_plugin_topology_replan();
+        }
         let removed = self
             .find_generator_slot(channel_id)
             .and_then(|index| self.generator_endpoints[index].take());
@@ -9253,6 +9470,9 @@ impl DspState {
     }
 
     fn clear_generator_endpoints(&mut self, request_id: u64) {
+        if self.generator_endpoints.iter().any(Option::is_some) {
+            self.begin_plugin_topology_replan();
+        }
         let mut removed = 0;
         for index in 0..MAX_GENERATOR_ENDPOINTS {
             if let Some(slot) = self.generator_endpoints[index].take() {
@@ -9277,6 +9497,12 @@ impl DspState {
                     self.record_endpoint_epoch_sync(sync, self.transport_epoch)
                 });
                 if epoch_ready {
+                    if self.generator_endpoints[index]
+                        .as_ref()
+                        .is_some_and(|slot| slot.mixer_track != mixer_track)
+                    {
+                        self.begin_plugin_topology_replan();
+                    }
                     let slot = self.generator_endpoints[index]
                         .as_mut()
                         .expect("located generator endpoint must remain installed");
@@ -10824,7 +11050,7 @@ impl DspState {
                 }
             }
         }
-        if fault.is_none() && self.midi_route_faulted != 0 {
+        if fault.is_none() && self.midi_route_event_loss {
             fault = Some((0, 0, PluginProcessingFaultReason::EventLoss));
         }
         if let Some((id, sequence, reason)) = fault {
@@ -10832,6 +11058,7 @@ impl DspState {
         }
         if self.plugin_fault.is_none() && self.plugin_recovery_pending && all_primed {
             self.plugin_recovery_pending = false;
+            self.plugin_recovered_epoch = Some(self.transport_epoch);
             self.plugin_recovered_count = self.plugin_recovered_count.saturating_add(1);
         }
     }
@@ -10855,9 +11082,10 @@ impl DspState {
             plan: self.plugin_timing,
             health: if self.plugin_fault.is_some() {
                 PluginProcessingHealth::Faulted
-            } else if !primed || self.plugin_recovery_pending {
+            } else if !primed || self.plugin_recovery_pending || self.plugin_processing_suspended()
+            {
                 PluginProcessingHealth::Priming
-            } else if self.plugin_recovered_count != 0 {
+            } else if self.plugin_recovered_epoch == Some(self.transport_epoch) {
                 PluginProcessingHealth::Recovered
             } else {
                 PluginProcessingHealth::Running
@@ -10980,6 +11208,7 @@ impl DspState {
                         *edge = Some((source, destination));
                     } else {
                         self.midi_route_faulted |= 1_u64 << destination;
+                        self.midi_route_event_loss = true;
                     }
                 }
             }
@@ -11103,6 +11332,7 @@ impl DspState {
                     || !slot.endpoint.adapter.midi_capabilities().0)
             {
                 self.midi_route_faulted |= 1_u64 << index;
+                self.midi_route_event_loss = true;
                 slot.endpoint.adapter.block_midi_until_epoch();
                 slot.endpoint.clear_and_stage_all_notes_off();
             }
@@ -11209,6 +11439,7 @@ impl DspState {
                 }
                 if failed {
                     self.midi_route_faulted |= 1_u64 << destination_index;
+                    self.midi_route_event_loss = true;
                     destination.endpoint.adapter.block_midi_until_epoch();
                     destination.endpoint.clear_and_stage_all_notes_off();
                 }

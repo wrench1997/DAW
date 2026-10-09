@@ -1,11 +1,10 @@
 //! Callback-safe adaptation from arbitrary device callback sizes to fixed plug-in quanta.
 //!
-//! [`AudioThreadEndpoint`] deliberately matches one submitted block with the immediately
-//! preceding block.  Device callbacks, however, are not guaranteed to have a stable length. This
-//! adapter accumulates the input stream into a fixed power-of-two quantum and drains the returned
-//! stream through a fixed ring.  Its timeline is intentionally conservative and invariant under
-//! callback splitting: one quantum of accumulation pre-roll plus the endpoint's one-quantum
-//! bridge delay, for an exact total of `2 * quantum_frames`.
+//! The prepared timing plan gives every physical endpoint the same whole-callback budget and
+//! worker lookahead K. This adapter accumulates arbitrary device fragments into fixed quanta and
+//! drains exact-sequence output through a bounded ring. Accumulation adds one quantum, so the
+//! production bridge latency is `(K + 1) * quantum_frames`, independent of callback splitting.
+//! The legacy low-level default K=1 remains available to isolated adapter callers/tests.
 //!
 //! Construction (including the boxed scratch allocation) belongs on the control thread. The two
 //! processing methods allocate nothing, lock nothing and perform no I/O.
