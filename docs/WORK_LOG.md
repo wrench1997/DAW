@@ -172,7 +172,7 @@ Append-only from 2026-10-08 UTC. Timestamps use UTC. Source inspection, executed
 ## 2026-10-09 03:52 UTC — Complete native prerelease suite passes on default stack
 
 - Verified merged source commit `bb5817118b16fde04689d21131fdf1510a177713` (0.5.0-alpha.1). `cargo check --offline --locked --no-default-features --all-targets` passed. `cargo test --offline --locked --no-default-features --bin citrus-studio` completed with **860 passed, 0 failed, 0 ignored**, using the default test stack and real linked installed ALSA runtime. The previously failing atomic activation and new 64KiB/zero-capacity packet construction tests both pass.
-- Integrated narrow heap fix `3ccaf104` as `845fbc2`: allocate TimelinePacket directly on the control-thread heap, initialize required scalar fields in place, leave its existing MaybeUninit event storage untouched. Independent static review and201-source subset tests passed. Refill/audio callback allocation behavior is unchanged; no stack/profile increase or test suppression was used.
+- Integrated narrow heap fix `3ccaf104` as `845fbc2`: allocate TimelinePacket directly on the control-thread heap, initialize required scalar fields in place, leave its existing MaybeUninit event storage untouched. Independent static review and 201-source subset tests passed. Refill/audio callback allocation behavior is unchanged; no stack/profile increase or test suppression was used.
 - Initial complete rerun reached859 passes with one historical Windows-path fixture failure on Linux. Only its non-Windows test path is now POSIX-native; Windows retains the original backslash fixture and production normalization is unchanged. The final complete860-test run passed.
 - Corrected two split App-test default-field Clippy findings. Local diagnostic no-default Clippy exits 0 with only inherited Linux MIDI unused/dead-code warnings; this is not a claim of strict Windows Clippy completion. Full fmt and diff checks pass.
 - Packaging/helper Python discovery passes52 tests; explicit feature-document allowlist includes media recovery, cancellation/export contract, split fidelity and WAV options, and all14 packaged source-document links validate. The Windows fixture CRLF fix is included; production checksum enforcement remains unchanged.
@@ -288,7 +288,7 @@ guards remain intact. Window sizing probes no longer reset the Piano pitch origi
 
 Final isolated-source gates: 954 app +14 helper +5 protocol all-feature tests; 952
 no-default tests; both strict Clippy modes; format; all-bin build; Windows MSVC
-no-default/all-target cross-check; 20 actual UI flows and27 Vulkan offscreen frames.
+no-default/all-target cross-check; 20 actual UI flows and 27 Vulkan offscreen frames.
 PNG conversion is RGB-identical. Independent source review has no outstanding
 high-priority findings. Detailed controls and acceptance boundaries are documented
 in `docs/MULTIWINDOW_WORKSPACE.md`. This implements internal native-app windows,
@@ -967,3 +967,60 @@ not imply DSP-thread isolation, resize performance, hardware or cross-platform q
 - Complete all-feature/all-target1170app+22helper+5editor+2transport and no-default1166core pass, zero failed/ignored on default stack.362 available source-linked vendor cases pass with one explicitly excluded missing upstream Dexed fixture, plus26doctests. fmt,bothstrictrootClippy modes,all-bin build,actual helper smoke,andbothMSVCsource profiles pass. Full239Python cases pass including four actual Unix descriptor tests.
 - Fresh combined helper SHA59b6bcbdb7a90b08fe5c8ebb2da2ba3ffe368c1089d70a6c7d4e7ab28b90d086 is byte-identical to independent native/headless/default2048 evidence. All124 tested source hashes match7d7294b; App/reset/timing/wire remain unchanged. Existing exact-source native results are bound through equivalence, not relabeled as a new measurement.
 - New55-file exact whitelist/pinned inventory and provenance regressions pass; all551 actual source-package inputs have closed links and exact vendor/historical/newQA hashes. Read-only parent review found no blocker. Publication/WindowsCI remain pending at this checkpoint entry; no reset proposal is included.
+
+## 2026-10-09 — private scoped domain-session checkpoint 1
+
+A separate worktree based on reviewed event commit 7d8a416 introduces the approved private scoped
+ControlOps/ProcessorOps seam and the AtomicBool-only data-exchange RAII gate. Owner/module/COM
+ownership remains in place and exclusively borrowed until rejoin; both facades remain !Send/!Sync.
+Only runtime-independent operations are factored. Mixed controller setters, cache refresh,
+state/lifecycle/metadata and the separately designed reset operation remain aggregate-only.
+No helper/broker/thread/default-policy change is introduced. Full source/helper/native gates and
+private positive/negative compiler contracts are recorded in the final receipt.
+
+Final source gates pass 374 available vendor tests (one known missing upstream SDK metadata
+fixture remains excluded), 26 doctests, 22 helper tests plus 5 editor and 2 transport protocol tests,
+strict root Clippy and direct vendor Clippy with only existing deprecated/drain_collect exceptions,
+format/diff checks, 124 packaging, 79 Python helper-smoke tests, 4 Unix descriptor tests and direct
+helper smoke. Four new RAII gate tests and eight real scoped-session tests complement all retained
+state/native/parameter/event regressions. The checked-in private compiler runner passes 47/47,
+including a real private positive baseline and 46 diagnosed negative cases, with stable source and
+manifest/lock hashes and no custom flags/compiler wrappers. Exact runtime dependencies/features
+are recorded; this does not claim the unavailable original upstream dev manifest ran.
+
+One initial Clippy failure exposed cross-worktree shared-target metadata: the unchanged session
+helper saw another branch's reset command variants. The raw failure is retained. An exclusively
+coordinated timestamp-only source refresh forced this worktree's vendor compile; verbose rustc
+commands identify the current source and the helper's exact linked rlib, with before/after source
+hashes and copied dep-info. A second forced build reproduced the identical helper. No cross-branch
+cache deletion, reset imports or permissive helper match-arm workaround was used.
+
+Frozen helper: `e094690aa0de2788c2a8cea64817859aac44332cd6290a45410e16deea5a944b`.
+Frozen Rust/compiler-runner diff: `51f9549fe5e93c52765879b9e8e413f02887b1d325617a21eb379783f6763dbf`.
+The 44-file manifest and forced-artifact binding are independently reviewed without a source
+blocker. The cumulative vendor patch replays byte-for-byte against the exact original crate;
+packaging changes are provenance pins only. New copied-helper headless regression passes all 12
+Surge fresh/used-active/used-stopped cases at 17/47/128/256 plus Stochas state/MIDI. Current receipt
+root is the retained domain-session QA record; genuine native-window and newly produced GUI
+state/first-note results are recorded separately after this immutable freeze.
+
+The newly produced domain-session native stopped-edit/poll/save blob restores on the exact frozen
+helper with normalized volume 0.8691863417625427 and component volume −6.27905654907227 dB before
+and after first-note PCM at 17/47/128/256. All four renders are finite/nonzero without positive
+warmup. Observed first nonzero frames 64/44/64/54 describe these functional traces only. The
+new-run blob hash is `011ded9e14952b8a631e9e9b443fad6f0997daf641919862e95f5e860f414272`;
+its deterministic bytes match earlier captures, but the actual drag, 20 stopped poll rounds and
+capture were repeated with this helper. Exact result and command traces are retained under the
+current receipt root. No default2048 or timing result from an earlier helper is relabeled here.
+
+Independent new native acceptance passes the complete trusted fixture, stopped Surge edit and
+20 polling rounds followed by zero-sample SaveState, fresh native numeric agreement, same-window
+and closed-used preflight guards, and Stochas used-instance empty reset then exact seventh-column
+C3 cell restoration (row115/step6/probability20), re-export and repaint. All 44 frozen source hashes
+match before/after; 113 exact wire exchanges and six current-run captures are retained. Shutdown
+exits 0 and no plugin window remains. Receipt:
+the retained `native-domain-session-receipt.json`,
+SHA256 `3b69b430879369a14ed6f589a752be60d0b57c753c910403ac8549b1f3669653`.
+These source-bound Linux results complete this same-thread ownership checkpoint's functional
+regression gates; hardware, cross-platform native runtime and processing-deadline acceptance
+remain separate.

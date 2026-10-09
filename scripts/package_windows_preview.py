@@ -599,8 +599,8 @@ VENDOR_COMMIT = "ed054908cfe057694d8cf037d0c39dfb5eb4c2ca"
 # modified dependency's entire source tree. A changed bundle needs fresh review.
 VENDOR_FILE_HASHES = {
     f"{VENDOR_PATH}/LICENSE": "a65a537295910b776a8b2edb2e7410c3b0e975ca6388994e032c4d1842b4952d",
-    f"{VENDOR_PATH}/CITRUS_PATCHES.md": "b36248cb17dc94332de5ac4ac8d3f0c3202dee5fd4399df5c1410a3ac0c37174",
-    f"{VENDOR_PATH}/CITRUS.patch": "e98eaca9106473971a45ae89b6a443a1624f675f014ee463f1dd0bbc03df5086",
+    f"{VENDOR_PATH}/CITRUS_PATCHES.md": "086b4bf9e9505dcfd93190305b75dbd2d7287b073ec87ceb317ea6330bacc7f0",
+    f"{VENDOR_PATH}/CITRUS.patch": "27b2640e4f03df144e1db7e397aa271c5c8eaf03e852a527fb3a91c30914ab90",
     f"{VENDOR_PATH}/.cargo_vcs_info.json": "737b52ce29e201e3cc14bab20bc449c6e4a3238c78320391a14d8bc1cf8a9657",
 }
 VENDOR_FILES = frozenset(VENDOR_FILE_HASHES)

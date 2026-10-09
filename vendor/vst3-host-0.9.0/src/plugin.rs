@@ -820,6 +820,26 @@ pub struct MainThreadPlugin {
 }
 
 impl MainThreadPlugin {
+    /// Internal same-thread capability seam. The exclusive owner borrow spans the callback;
+    /// state/setup/metadata/teardown must wait until both restricted borrows end.
+    /// Deliberately does not invoke arbitrary legacy Plugin user callbacks or metering hooks.
+    #[allow(dead_code)] // future helper command factoring is a separate checkpoint
+    pub(crate) fn with_domain_session(
+        &mut self,
+        callback: &mut crate::internal::plugin_impl::domain_session::DomainSessionCallback<'_>,
+    ) -> Result<()> {
+        if std::thread::current().id() != self.loading_thread {
+            return Err(Error::Other(
+                "domain session must run on the plugin loading thread".to_string(),
+            ));
+        }
+        self.plugin
+            .internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .with_domain_session(callback)
+    }
+
     // Only the in-process host loader calls this; there is no public conversion from a
     // legacy movable Plugin that may have initialized its controller on another thread.
     pub(crate) fn from_in_process(plugin: Plugin) -> Self {
@@ -1284,6 +1304,16 @@ impl Drop for MainThreadPlugin {
 
 // Internal trait for hiding implementation details
 pub(crate) trait PluginInternal: Send {
+    /// Private synchronous domain visit. Other backends expose no local capabilities.
+    fn with_domain_session(
+        &mut self,
+        _callback: &mut crate::internal::plugin_impl::domain_session::DomainSessionCallback<'_>,
+    ) -> Result<()> {
+        Err(Error::Other(
+            "scoped local plugin domains are unsupported by this backend".to_string(),
+        ))
+    }
+
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()>;
     /// Schedule a parameter change at a sample offset within the next process block.
     /// Defaults to a block-start change (ignores the offset) for implementations that don't
@@ -3165,14 +3195,14 @@ const MIDI_DATA_MAX: u8 = 127;
 /// Highest value a 14-bit MIDI pitch-bend can carry.
 const MIDI_PITCH_BEND_MAX: u16 = 16383;
 
-fn validate_note(note: u8) -> Result<()> {
+pub(crate) fn validate_note(note: u8) -> Result<()> {
     if note > MIDI_DATA_MAX {
         return Err(Error::MidiError(format!("Invalid note number: {}", note)));
     }
     Ok(())
 }
 
-fn validate_velocity(velocity: u8) -> Result<()> {
+pub(crate) fn validate_velocity(velocity: u8) -> Result<()> {
     if velocity > MIDI_DATA_MAX {
         return Err(Error::MidiError(format!("Invalid velocity: {}", velocity)));
     }
@@ -3254,7 +3284,7 @@ fn validate_midi_event(event: &MidiEvent) -> Result<()> {
     }
 }
 
-fn validate_plugin_event(event: &PluginEvent) -> Result<()> {
+pub(crate) fn validate_plugin_event(event: &PluginEvent) -> Result<()> {
     if event.bus_index < 0 {
         return Err(Error::MidiError(format!(
             "Invalid event bus index: {}",

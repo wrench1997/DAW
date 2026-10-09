@@ -97,12 +97,15 @@ impl HostApplication {
         self.data_exchange.set_active(active);
     }
 
-    pub fn enter_data_exchange_process(&self) {
-        self.data_exchange.enter_process();
+    pub(super) fn data_exchange_process_gate(
+        &self,
+    ) -> super::data_exchange::DataExchangeProcessGate<'_> {
+        self.data_exchange.process_gate()
     }
 
-    pub fn leave_data_exchange_process(&self) {
-        self.data_exchange.leave_process();
+    #[cfg(test)]
+    pub(super) fn is_data_exchange_in_process_for_test(&self) -> bool {
+        self.data_exchange.is_in_process_for_test()
     }
 
     pub fn flush_data_exchange(&self) {

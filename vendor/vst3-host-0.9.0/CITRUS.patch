@@ -266,7 +266,29 @@
      pub fn take_progress_notifications(&self) -> Vec<crate::plugin::HostNotification> {
          let mut state = self
              .progress
-@@ -90,6 +118,7 @@
+@@ -69,12 +97,15 @@
+         self.data_exchange.set_active(active);
+     }
+ 
+-    pub fn enter_data_exchange_process(&self) {
+-        self.data_exchange.enter_process();
+-    }
+-
+-    pub fn leave_data_exchange_process(&self) {
+-        self.data_exchange.leave_process();
++    pub(super) fn data_exchange_process_gate(
++        &self,
++    ) -> super::data_exchange::DataExchangeProcessGate<'_> {
++        self.data_exchange.process_gate()
++    }
++
++    #[cfg(test)]
++    pub(super) fn is_data_exchange_in_process_for_test(&self) -> bool {
++        self.data_exchange.is_in_process_for_test()
+     }
+ 
+     pub fn flush_data_exchange(&self) {
+@@ -90,6 +121,7 @@
      }
  }
  
@@ -274,7 +296,7 @@
  impl Class for HostApplication {
      // The standard SDK host context implements both IHostApplication and
      // IPlugInterfaceSupport; plugins query the context for either.
-@@ -98,6 +127,17 @@
+@@ -98,6 +130,17 @@
          IPlugInterfaceSupport,
          IProgress,
          IDataExchangeHandler,
@@ -292,7 +314,7 @@
      );
  }
  
-@@ -1158,15 +1198,19 @@
+@@ -1158,15 +1201,19 @@
  /// the plugin impl (servicing, driven by the host each UI frame).
  #[cfg(target_os = "linux")]
  pub struct RunLoopRegistry {
@@ -312,7 +334,7 @@
      pub handler: vst3::ComPtr<vst3::Steinberg::Linux::ITimerHandler>,
      pub interval_ms: u64,
      pub due: std::time::Instant,
-@@ -1178,6 +1222,37 @@
+@@ -1178,6 +1225,37 @@
          Self {
              handlers: Vec::new(),
              timers: Vec::new(),
@@ -350,7 +372,7 @@
          }
      }
  }
-@@ -1230,70 +1305,201 @@
+@@ -1230,70 +1308,201 @@
      type Interfaces = (IPlugFrame,);
  }
  
@@ -610,7 +632,7 @@
          }
      }
  }
-@@ -1615,10 +1821,10 @@
+@@ -1615,10 +1824,10 @@
  
  // Component Handler implementation
  //
@@ -624,7 +646,7 @@
  //
  // - `edits` — the per-parameter gesture log (`beginEdit`/`performEdit`/`endEdit`), drained by
  //   `take_parameter_edits`.
-@@ -1634,11 +1840,12 @@
+@@ -1634,11 +1843,12 @@
  // Interleaving them into one ordered stream would change the public shape of both accessors
  // and is not implemented.
  pub struct ComponentHandler {
@@ -639,7 +661,7 @@
      // Ordered against itself only — see the type comment about the group-edit brackets.
      edits: Arc<Mutex<Vec<crate::plugin::ParameterEdit>>>,
      // Union of every `restartComponent` flag the plugin has raised since the host last drained
-@@ -1656,14 +1863,37 @@
+@@ -1656,14 +1866,37 @@
  }
  
  impl ComponentHandler {
@@ -685,7 +707,7 @@
      }
  
      /// Take the accumulated `restartComponent` flags, clearing them.
-@@ -1761,16 +1991,20 @@
+@@ -1761,16 +1994,20 @@
      }
  
      unsafe fn performEdit(&self, id: u32, value_normalized: f64) -> i32 {
@@ -709,7 +731,7 @@
          }
          // ...and as an ordered gesture event for the richer `take_parameter_edits` drain.
          self.push_edit(crate::plugin::ParameterEdit {
-@@ -1792,6 +2026,9 @@
+@@ -1792,6 +2029,9 @@
      }
  
      unsafe fn restartComponent(&self, flags: i32) -> i32 {
@@ -719,7 +741,7 @@
          log::debug!("Host: Restart component requested with flags: {flags:#x}");
          // Recorded for the host to poll (`Plugin::take_restart_flags`), not acted on here: the
          // host decides what a restart means for it. See `RestartFlags` for which flags this
-@@ -1827,6 +2064,9 @@
+@@ -1827,6 +2067,9 @@
  
  impl IComponentHandler2Trait for ComponentHandler {
      unsafe fn setDirty(&self, state: u8) -> i32 {
@@ -729,7 +751,7 @@
          log::debug!("Host: Plugin marked state as dirty (state: {})", state);
          if self.push_notification(crate::plugin::HostNotification::DirtyChanged(state != 0)) {
              kResultOk
-@@ -1912,9 +2152,19 @@
+@@ -1912,9 +2155,19 @@
  pub const MAX_QUEUED_EVENTS: usize = 4096;
  const MAX_QUEUED_EVENT_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
  
@@ -749,7 +771,7 @@
  }
  
  impl HostEventList {
-@@ -1922,7 +2172,13 @@
+@@ -1922,7 +2175,13 @@
          Self {
              events: Mutex::new(Vec::with_capacity(MAX_QUEUED_EVENTS)),
              payload_bytes: AtomicUsize::new(0),
@@ -764,7 +786,7 @@
      }
  
      pub fn clear(&self) {
-@@ -1933,6 +2189,7 @@
+@@ -1933,6 +2192,7 @@
                  log::trace!("HostEventList: Cleared all events");
              }
              Err(_) => {
@@ -772,7 +794,7 @@
                  log::error!("HostEventList: Failed to lock events for clear");
              }
          }
-@@ -1951,6 +2208,7 @@
+@@ -1951,6 +2211,7 @@
      /// every other path into the list; the excess is dropped with a warning.
      pub fn reset_with(&self, events: impl IntoIterator<Item = PluginEvent>) {
          let Ok(mut queued) = self.events.lock() else {
@@ -780,7 +802,7 @@
              log::error!("HostEventList: Failed to lock events for reset_with");
              return;
          };
-@@ -1958,11 +2216,13 @@
+@@ -1958,11 +2219,13 @@
          let mut payload_bytes = 0usize;
          for event in events {
              if queued.len() >= MAX_QUEUED_EVENTS {
@@ -794,7 +816,7 @@
                  log::warn!(
                      "HostEventList: dropping event, payload budget exceeds \
                       {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
-@@ -1980,7 +2240,10 @@
+@@ -1980,7 +2243,10 @@
          self.events
              .lock()
              .map(|events| events.is_empty())
@@ -806,7 +828,7 @@
      }
  
      /// Move each queued event into `f`, leaving the list empty while retaining its backing
-@@ -1992,52 +2255,80 @@
+@@ -1992,52 +2258,80 @@
                  f(event);
              }
              self.payload_bytes.store(0, Ordering::Relaxed);
@@ -933,7 +955,7 @@
      }
  }
  
-@@ -2103,47 +2394,14 @@
+@@ -2103,47 +2397,14 @@
      }
  
      unsafe fn addEvent(&self, event: *mut Event) -> i32 {
@@ -986,7 +1008,7 @@
          }
      }
  }
-@@ -2296,14 +2554,109 @@
+@@ -2296,14 +2557,109 @@
      Ok(raw)
  }
  
@@ -1099,7 +1121,7 @@
          Ok(if len == 0 {
              Vec::new()
          } else {
-@@ -2312,9 +2665,7 @@
+@@ -2312,9 +2668,7 @@
      }
  
      unsafe fn copy_text(ptr: *const u16, len: usize) -> std::result::Result<Vec<u16>, ()> {
@@ -1110,7 +1132,7 @@
          Ok(if len == 0 {
              Vec::new()
          } else {
-@@ -2428,75 +2779,649 @@
+@@ -2428,75 +2782,649 @@
  }
  
  // Parameter Changes implementation
@@ -1820,7 +1842,7 @@
      }
  }
  
-@@ -2506,174 +3431,80 @@
+@@ -2506,174 +3434,80 @@
  
  impl IParameterChangesTrait for ParameterChanges {
      unsafe fn getParameterCount(&self) -> i32 {
@@ -2055,7 +2077,7 @@
  }
  
  impl Class for ParameterValueQueue {
-@@ -2682,50 +3513,57 @@
+@@ -2682,50 +3516,57 @@
  
  impl IParamValueQueueTrait for ParameterValueQueue {
      unsafe fn getParameterId(&self) -> u32 {
@@ -2146,7 +2168,7 @@
      }
  }
  
-@@ -2753,6 +3591,108 @@
+@@ -2753,6 +3594,108 @@
  mod component_handler_tests {
      use super::*;
      use crate::plugin::{ContextMenuItem, HostNotification, ParameterEdit, ParameterEditKind};
@@ -2255,7 +2277,7 @@
  
      struct TestContextMenuTarget {
          calls: Arc<Mutex<Vec<i32>>>,
-@@ -2786,7 +3726,7 @@
+@@ -2786,7 +3729,7 @@
  
      #[test]
      fn captures_begin_perform_end_in_order_and_drains() {
@@ -2264,7 +2286,7 @@
  
          // Drive a full gesture: mouse-down, two drag values, mouse-up.
          unsafe {
-@@ -2836,7 +3776,7 @@
+@@ -2836,7 +3779,7 @@
      /// `performEdit` (and one gesture event) per UI frame, for as long as the editor is open.
      #[test]
      fn editor_feedback_is_capped_when_the_host_never_polls() {
@@ -2273,7 +2295,7 @@
  
          // Simulate a very long drag: far more edits than the cap, never polled.
          unsafe {
-@@ -2865,7 +3805,7 @@
+@@ -2865,7 +3808,7 @@
  
      #[test]
      fn handler2_requests_are_ordered_and_report_backpressure() {
@@ -2282,7 +2304,7 @@
          unsafe {
              assert_eq!(handler.setDirty(1), kResultOk);
              assert_eq!(handler.requestOpenEditor(c"editor".as_ptr()), kResultOk);
-@@ -2899,7 +3839,7 @@
+@@ -2899,7 +3842,7 @@
  
      #[test]
      fn handler3_context_menu_preserves_items_and_executes_plugin_target() {
@@ -2291,7 +2313,7 @@
          let handler_wrapper = ComWrapper::new(handler);
          assert!(
              handler_wrapper.as_com_ref::<IComponentHandler3>().is_some(),
-@@ -2986,7 +3926,7 @@
+@@ -2986,7 +3929,7 @@
  
      #[test]
      fn handler3_rejects_invalid_views_and_releases_dismissed_targets() {
@@ -2300,7 +2322,7 @@
          assert!(unsafe { handler.createContextMenu(ptr::null_mut(), ptr::null()) }.is_null());
  
          let menu = unsafe {
-@@ -3011,7 +3951,7 @@
+@@ -3011,7 +3954,7 @@
  
      #[test]
      fn unit_handler_requests_are_ordered_and_preserve_whole_list_changes() {
@@ -2309,7 +2331,7 @@
          unsafe {
              assert_eq!(handler.notifyUnitSelection(7), kResultOk);
              assert_eq!(handler.notifyProgramListChange(11, 3), kResultOk);
-@@ -3046,7 +3986,7 @@
+@@ -3046,7 +3989,7 @@
      #[test]
      fn restart_flags_accumulate_until_drained() {
          use vst3::Steinberg::Vst::RestartFlags_ as Flags;
@@ -2318,7 +2340,7 @@
          assert!(handler.take_restart_flags().is_empty());
  
          // Two separate restarts, e.g. a preset load followed by a mode switch.
-@@ -3329,6 +4269,499 @@
+@@ -3329,6 +4272,499 @@
  #[cfg(test)]
  mod host_event_list_tests {
      use super::*;
@@ -2818,7 +2840,7 @@
  
      /// `process()` is the input list's only drain and it returns early while the plugin isn't
      /// processing, so queueing MIDI at a stopped plugin must not grow the list forever.
-@@ -3338,7 +4771,7 @@
+@@ -3338,7 +4774,7 @@
          let event: Event = unsafe { std::mem::zeroed() };
  
          for _ in 0..(MAX_QUEUED_EVENTS + 500) {
@@ -2827,7 +2849,7 @@
          }
          assert_eq!(unsafe { list.getEventCount() }, MAX_QUEUED_EVENTS as i32);
  
-@@ -3353,7 +4786,7 @@
+@@ -3353,7 +4789,7 @@
          list.clear();
          assert_eq!(unsafe { list.getEventCount() }, 0);
          assert!(list.events.lock().unwrap().capacity() >= MAX_QUEUED_EVENTS);
@@ -2836,7 +2858,7 @@
          assert_eq!(unsafe { list.getEventCount() }, 1);
      }
  
-@@ -3637,129 +5070,1292 @@
+@@ -3637,129 +5073,1292 @@
  #[cfg(test)]
  mod parameter_changes_tests {
      use super::*;
@@ -4248,7 +4270,7 @@
      }
  }
  
-@@ -3958,3 +6554,348 @@
+@@ -3958,3 +6557,348 @@
          assert_eq!(read_attribute(&project, c"FilePathString"), None);
      }
  }
@@ -4597,6 +4619,171 @@
 +        assert!(handler.native_state_capture_revision().is_ok());
 +    }
 +}
+--- a/src/internal/data_exchange.rs
++++ b/src/internal/data_exchange.rs
+@@ -3,7 +3,9 @@
+ use crossbeam_queue::ArrayQueue;
+ use std::alloc::{alloc_zeroed, dealloc, Layout};
+ use std::collections::VecDeque;
++use std::marker::PhantomData;
+ use std::ptr::{self, NonNull};
++use std::rc::Rc;
+ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU8, AtomicUsize, Ordering};
+ use std::sync::{Arc, Condvar, Mutex, OnceLock};
+ use std::thread::{self, JoinHandle, Thread, ThreadId};
+@@ -160,6 +162,41 @@
+ struct SnapshotSink {
+     blocks: VecDeque<OwnedDataExchangeBlock>,
+     bytes: usize,
++}
++
++/// Borrowed permission to mark one serial SDK process invocation as active.
++///
++/// This view deliberately reaches only the process flag: it cannot retain the host,
++/// acquire a receiver, dispatch queues, or perform lifecycle work. The owner creates
++/// one gate for its exclusive process session and keeps that session on its thread.
++pub(super) struct DataExchangeProcessGate<'owner> {
++    in_process: &'owner AtomicBool,
++    _not_send_sync: PhantomData<Rc<()>>,
++}
++
++impl DataExchangeProcessGate<'_> {
++    /// Keep data-exchange block access enabled only for the returned guard's scope.
++    /// Borrowing the gate exclusively prevents overlapping entries through this view.
++    pub(super) fn enter(&mut self) -> DataExchangeProcessGuard<'_> {
++        self.in_process.store(true, Ordering::Release);
++        DataExchangeProcessGuard {
++            in_process: self.in_process,
++            _not_send_sync: PhantomData,
++        }
++    }
++}
++
++/// Ends the process interval on success, early return, or Rust unwinding.
++#[must_use = "dropping the guard ends the data-exchange process interval"]
++pub(super) struct DataExchangeProcessGuard<'gate> {
++    in_process: &'gate AtomicBool,
++    _not_send_sync: PhantomData<Rc<()>>,
++}
++
++impl Drop for DataExchangeProcessGuard<'_> {
++    fn drop(&mut self) {
++        self.in_process.store(false, Ordering::Release);
++    }
+ }
+ 
+ /// State shared by the host context, the audio callback, and one background dispatcher.
+@@ -237,12 +274,16 @@
+         self.active.store(active, Ordering::Release);
+     }
+ 
+-    pub fn enter_process(&self) {
+-        self.in_process.store(true, Ordering::Release);
+-    }
+-
+-    pub fn leave_process(&self) {
+-        self.in_process.store(false, Ordering::Release);
++    pub(super) fn process_gate(&self) -> DataExchangeProcessGate<'_> {
++        DataExchangeProcessGate {
++            in_process: &self.in_process,
++            _not_send_sync: PhantomData,
++        }
++    }
++
++    #[cfg(test)]
++    pub(super) fn is_in_process_for_test(&self) -> bool {
++        self.in_process.load(Ordering::Acquire)
+     }
+ 
+     fn queue(&self, id: u32) -> Option<&ExchangeQueue> {
+@@ -575,6 +616,87 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use crate::internal::native_edit_transport::tests::allocation_free;
++
++    #[test]
++    fn process_gate_flag_follows_each_guard_scope() {
++        let state = DataExchangeState::new();
++        let mut gate = state.process_gate();
++        assert!(!state.is_in_process_for_test());
++
++        for _ in 0..4 {
++            {
++                let _process = gate.enter();
++                assert!(state.is_in_process_for_test());
++            }
++            assert!(!state.is_in_process_for_test());
++        }
++    }
++
++    #[test]
++    fn process_gate_clears_flag_on_error_return() {
++        let state = DataExchangeState::new();
++        let mut gate = state.process_gate();
++        let result = (|| -> Result<(), &'static str> {
++            let _process = gate.enter();
++            assert!(state.is_in_process_for_test());
++            Err::<(), _>("process failed")?;
++            Ok(())
++        })();
++
++        assert_eq!(result, Err("process failed"));
++        assert!(!state.is_in_process_for_test());
++        let process = gate.enter();
++        assert!(state.is_in_process_for_test());
++        drop(process);
++        assert!(!state.is_in_process_for_test());
++    }
++
++    #[test]
++    fn process_gate_clears_flag_on_unwind() {
++        let state = DataExchangeState::new();
++        let mut gate = state.process_gate();
++        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let _process = gate.enter();
++            assert!(state.is_in_process_for_test());
++            panic!("process test unwind");
++        }));
++
++        assert!(result.is_err());
++        assert!(!state.is_in_process_for_test());
++        let process = gate.enter();
++        assert!(state.is_in_process_for_test());
++        drop(process);
++        assert!(!state.is_in_process_for_test());
++    }
++
++    #[test]
++    fn process_gate_is_allocation_free_and_does_not_retain_state() {
++        let state = DataExchangeState::new();
++        let strong_count = Arc::strong_count(&state);
++        assert_eq!(
++            std::mem::size_of::<DataExchangeProcessGate<'_>>(),
++            std::mem::size_of::<&AtomicBool>()
++        );
++        assert_eq!(
++            std::mem::size_of::<DataExchangeProcessGuard<'_>>(),
++            std::mem::size_of::<&AtomicBool>()
++        );
++
++        allocation_free(|| {
++            for _ in 0..256 {
++                let mut gate = state.process_gate();
++                assert_eq!(Arc::strong_count(&state), strong_count);
++                {
++                    let _process = gate.enter();
++                    assert!(state.is_in_process_for_test());
++                    assert_eq!(Arc::strong_count(&state), strong_count);
++                }
++                assert!(!state.is_in_process_for_test());
++            }
++        });
++        assert_eq!(Arc::strong_count(&state), strong_count);
++    }
+ 
+     #[test]
+     fn exchange_queue_exhausts_and_recycles_without_allocating() {
 --- a/src/internal/isolated_plugin_impl.rs
 +++ b/src/internal/isolated_plugin_impl.rs
 @@ -39,6 +39,7 @@
@@ -6464,15 +6651,18 @@
 +}
 --- a/src/internal/plugin_impl.rs
 +++ b/src/internal/plugin_impl.rs
-@@ -1,5 +1,7 @@
+@@ -1,5 +1,10 @@
  //! Internal VST3 plugin implementation
  
++use super::data_exchange::DataExchangeProcessGate;
 +use super::native_edit_transport::NativeEditReceiver;
++
++pub(crate) mod domain_session;
 +use super::processor_lease::{ProcessorCalls, ProcessorLease};
  use crate::{
      audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
      error::{Error, Result},
-@@ -12,7 +14,10 @@
+@@ -12,7 +17,10 @@
  };
  use crossbeam_queue::ArrayQueue;
  use std::ptr;
@@ -6484,7 +6674,7 @@
  use std::thread::{self, ThreadId};
  use vst3::Steinberg::Vst::BusDirections_::*;
  use vst3::Steinberg::Vst::Event_::EventTypes_::*;
-@@ -29,8 +34,8 @@
+@@ -29,8 +37,8 @@
          create_event_list, create_host_application, create_host_plug_frame,
          create_memory_stream_from_with_metadata, create_memory_stream_with_metadata,
          create_state_restore_stream, ComponentHandler, ConnectionPair, HostApplication,
@@ -6495,7 +6685,7 @@
      },
      module_loader::{load_module, VstModule},
  };
-@@ -135,8 +140,22 @@
+@@ -135,8 +143,22 @@
      event_outputs: Vec<bool>,
  }
  
@@ -6504,7 +6694,7 @@
 +/// on its loading thread; legacy `Plugin` users retain their existing `Send` API.
 +///
 +/// Runtime drops before control ownership, so host process data cannot outlive the module.
-+/// This is an ownership extraction only: the legacy bridge still locks/allocates and all
++/// This is ownership preparation only: other processing work still locks/allocates and all
 +/// helper plugin calls still run synchronously on the main thread.
  pub struct PluginImpl {
 +    pub(crate) info: PluginInfo,
@@ -6519,7 +6709,7 @@
      // Core VST3 interfaces
      component: ComPtr<IComponent>,
      processor: ComPtr<IAudioProcessor>,
-@@ -146,19 +165,72 @@
+@@ -146,19 +168,73 @@
      /// `setComponentState` on top of it would double-apply and corrupt parameters.
      single_component: bool,
  
@@ -6585,7 +6775,8 @@
 +/// processing reads them without querying component/controller metadata.
 +///
 +/// This preparatory type is NOT a promise of real-time safety or cross-thread access:
-+/// ParameterChanges/EventList and the legacy callback bridge still need bounded replacement.
++/// Event payloads and other callback work still allocate; prepared parameter/event headers
++/// retain synchronization. The scoped capabilities do not activate cross-thread access.
 +struct ProcessorRuntime {
 +    is_processing: bool,
 +    // A positive processor call may activate deferred state even when it returns an error.
@@ -6599,7 +6790,7 @@
      /// Transport tempo (BPM) advertised in the host `ProcessContext`.
      tempo: f64,
      /// Time signature numerator advertised in the host `ProcessContext`.
-@@ -167,13 +239,12 @@
+@@ -167,13 +243,12 @@
      time_sig_denominator: i32,
      /// Whether the transport is playing (the `kPlaying` flag in `ProcessContext.state`).
      playing: bool,
@@ -6614,7 +6805,7 @@
      sample_size: ProcessingSampleSize,
      bus_activation: BusActivationState,
      /// Monotonic allocator for per-voice note ids (note_on); 0/-1 reserved for "unset".
-@@ -190,37 +261,23 @@
+@@ -190,37 +265,23 @@
      // the callback; `restartComponent` merely records invalidation flags atomically.
      midi_mapping_cache: MidiMappingCache,
      program_change_cache: Vec<ProgramChangeMapping>,
@@ -6654,7 +6845,7 @@
  
      // Event handling
      input_events: ComWrapper<HostEventList>,
-@@ -235,34 +292,37 @@
+@@ -235,34 +296,13 @@
      // audio thread can push without locking and a UI thread can drain concurrently; when full
      // the oldest event is dropped (bounded memory if the host never polls).
      output_events_owned: Arc<ArrayQueue<PluginEvent>>,
@@ -6689,38 +6880,14 @@
 +    output_events_lost: std::sync::atomic::AtomicBool,
 +}
 +
-+/// Temporary adapter for the unchanged synchronous data-exchange path. The native-edit
-+/// consumer is runtime-owned; it no longer reaches through control-domain GUI locks.
-+struct LegacyProcessBridge<'a> {
-+    host_app: &'a HostApplication,
-+}
-+
-+impl LegacyProcessBridge<'_> {
-+    fn enter_process(&self) {
-+        self.host_app.enter_data_exchange_process();
-+    }
-+    fn leave_process(&self) {
-+        self.host_app.leave_data_exchange_process();
-+    }
-+}
-+
 +impl ControlDomain {
 +    fn processor_lease(&mut self) -> ProcessorLease<'_> {
 +        ProcessorLease::new(&mut self.processor, self._module.as_ref())
 +    }
-+
-+    fn processing_parts(&mut self) -> (ProcessorLease<'_>, LegacyProcessBridge<'_>) {
-+        (
-+            ProcessorLease::new(&mut self.processor, self._module.as_ref()),
-+            LegacyProcessBridge {
-+                host_app: &self._host_app,
-+            },
-+        )
-+    }
  }
  
  // Processing data structure
-@@ -284,6 +344,48 @@
+@@ -284,6 +324,48 @@
  enum CallerAudioBuffers<'a> {
      Flat(&'a mut AudioBuffers),
      Buses(&'a mut BusAudioBuffers),
@@ -6769,7 +6936,7 @@
  }
  
  impl CallerAudioBuffers<'_> {
-@@ -335,9 +437,9 @@
+@@ -335,9 +417,9 @@
  
  /// Per-bus channel pointers into the (audio-thread-owned) audio buffers.
  ///
@@ -6782,7 +6949,7 @@
  struct SendChannelPtrs<T>(Vec<Vec<*mut T>>);
  unsafe impl<T: Send> Send for SendChannelPtrs<T> {}
  
-@@ -905,7 +1007,7 @@
+@@ -905,7 +987,7 @@
  
  impl PluginImpl {
      fn ensure_control_thread(&self, operation: &str) -> Result<()> {
@@ -6791,7 +6958,7 @@
              Ok(())
          } else {
              Err(Error::Other(format!(
-@@ -945,18 +1047,21 @@
+@@ -945,89 +1027,53 @@
          time_sig_numerator: i32,
          time_sig_denominator: i32,
      ) {
@@ -6811,46 +6978,47 @@
      fn update_tempo(&mut self, bpm: f64) {
 -        self.tempo = bpm;
 -        if let Some(ref mut data) = self.process_data {
-+        self.runtime.tempo = bpm;
-+        if let Some(transport) = &mut self.runtime.process_transport {
-+            transport.tempo = bpm;
-+        }
-+        if let Some(ref mut data) = self.runtime.process_data {
-             data.transport_tempo = bpm;
-             if process_context_needs(
-                 data.process_context_requirements,
-@@ -971,9 +1076,13 @@
+-            data.transport_tempo = bpm;
+-            if process_context_needs(
+-                data.process_context_requirements,
+-                IProcessContextRequirements_::Flags_::kNeedTempo as u32,
+-            ) {
+-                data.process_context.tempo = bpm;
+-            }
+-        }
++        self.runtime.update_tempo(bpm)
+     }
+ 
+     /// Update the transport time signature for the **next** processed block, even while
      /// processing is active (stored fields plus the live `ProcessContext`).
      #[allow(clippy::unnecessary_cast)]
      fn update_time_signature(&mut self, numerator: i32, denominator: i32) {
 -        self.time_sig_numerator = numerator;
 -        self.time_sig_denominator = denominator;
 -        if let Some(ref mut data) = self.process_data {
-+        if let Some(transport) = &mut self.runtime.process_transport {
-+            transport.time_sig_numerator = numerator;
-+            transport.time_sig_denominator = denominator;
-+        }
-+        self.runtime.time_sig_numerator = numerator;
-+        self.runtime.time_sig_denominator = denominator;
-+        if let Some(ref mut data) = self.runtime.process_data {
-             if process_context_needs(
-                 data.process_context_requirements,
-                 IProcessContextRequirements_::Flags_::kNeedTimeSignature as u32,
-@@ -987,8 +1096,11 @@
+-            if process_context_needs(
+-                data.process_context_requirements,
+-                IProcessContextRequirements_::Flags_::kNeedTimeSignature as u32,
+-            ) {
+-                data.process_context.timeSigNumerator = numerator;
+-                data.process_context.timeSigDenominator = denominator;
+-            }
+-        }
++        self.runtime.update_time_signature(numerator, denominator)
+     }
+ 
      /// Toggle the transport playing state (`kPlaying`) for the **next** processed block, even
      /// while processing is active (stored field plus the live `ProcessContext.state`).
      fn update_playing(&mut self, playing: bool) {
 -        self.playing = playing;
 -        if let Some(ref mut data) = self.process_data {
-+        self.runtime.playing = playing;
-+        if let Some(transport) = &mut self.runtime.process_transport {
-+            transport.playing = playing;
-+        }
-+        if let Some(ref mut data) = self.runtime.process_data {
-             data.process_context.state =
-                 process_context_state(data.process_context_requirements, playing);
-         }
-@@ -998,36 +1110,23 @@
+-            data.process_context.state =
+-                process_context_state(data.process_context_requirements, playing);
+-        }
++        self.runtime.update_playing(playing)
+     }
+ 
+     /// Apply the host-configured sample rate / block size before processing starts. Called at
      /// load so `setupProcessing` (which runs at `start_processing`) uses the builder's settings
      /// rather than the internal defaults.
      pub fn set_audio_config(&mut self, sample_rate: f64, block_size: usize) {
@@ -6895,7 +7063,7 @@
              }
          }
          changes
-@@ -1042,7 +1141,7 @@
+@@ -1042,7 +1088,7 @@
      /// automation on real plugins. Log it and carry on; `log` skips the formatting entirely when
      /// the level is disabled.
      fn apply_controller_parameter(&self, id: u32, value: f64) {
@@ -6904,7 +7072,7 @@
              return;
          };
          let result = unsafe { controller.setParamNormalized(id, value) };
-@@ -1061,20 +1160,22 @@
+@@ -1061,20 +1107,22 @@
      /// service call. The queue drops its oldest entry when full: the newest value for a
      /// parameter is the one worth showing.
      fn mirror_parameter_to_controller(&self, id: u32, value: f64) {
@@ -6931,7 +7099,7 @@
              self.apply_controller_parameter(id, value);
          }
      }
-@@ -1083,32 +1184,37 @@
+@@ -1083,32 +1131,37 @@
      /// and apply parameter values queued for the controller from the same place. A no-op
      /// anywhere but the control thread; both halves are `IEditController` traffic.
      fn service_control_thread_caches(&mut self) {
@@ -6974,7 +7142,7 @@
              return;
          };
          unsafe {
-@@ -1132,12 +1238,12 @@
+@@ -1132,12 +1185,12 @@
                  }
              }
          }
@@ -6990,7 +7158,7 @@
              return;
          };
          let Some(unit_info) = controller.cast::<IUnitInfo>() else {
-@@ -1176,18 +1282,21 @@
+@@ -1176,18 +1229,21 @@
                      continue;
                  };
                  if *program_count > 0 {
@@ -7018,7 +7186,7 @@
              .iter()
              .copied()
              .find(|mapping| mapping.unit_id == unit_id)
-@@ -1227,6 +1336,9 @@
+@@ -1227,6 +1283,9 @@
              // (whether via `InitializedComponent` or `Drop for PluginImpl`) must complete before
              // the module unmaps.
              log::debug!("Step 1: Loading VST3 module...");
@@ -7028,7 +7196,7 @@
              let module = load_module(path)?;
              log::debug!("VST3 module loaded successfully");
  
-@@ -1248,7 +1360,8 @@
+@@ -1248,7 +1307,8 @@
  
              // Factory3 must receive the host context before any class is instantiated. Keep the
              // same context alive for the complete component/controller lifetime.
@@ -7038,7 +7206,7 @@
              let host_ctx = host_app.to_com_ptr::<IHostApplication>();
              let context = host_ctx
                  .as_ref()
-@@ -1336,8 +1449,8 @@
+@@ -1336,8 +1396,8 @@
              // Create component handler for parameter change notifications
              log::debug!("Step 8: Creating component handler...");
              let parameter_changes = Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK)));
@@ -7049,7 +7217,7 @@
              log::debug!("Component handler created");
  
              // Get or create controller (handles both single-component and separate controller)
-@@ -1478,60 +1591,70 @@
+@@ -1478,60 +1538,70 @@
              );
  
              let mut plugin = Self {
@@ -7169,7 +7337,7 @@
  
              // IMidiMapping and unit/program metadata are controller calls and therefore belong
              // here on the loading thread, never in process() or a playback command drain.
-@@ -1565,10 +1688,47 @@
+@@ -1565,10 +1635,47 @@
              log::info!(
                  "Has GUI: {}, Active: {}",
                  plugin.info.has_gui,
@@ -7218,7 +7386,7 @@
      }
  
      /// Put the component into the active state (`IComponent::setActive(true)`).
-@@ -1582,23 +1742,23 @@
+@@ -1582,23 +1689,23 @@
                  "Failed to activate component: {result:#x}"
              )));
          }
@@ -7249,7 +7417,7 @@
          }
          result
      }
-@@ -1744,7 +1904,7 @@
+@@ -1744,7 +1851,7 @@
  
      /// Map the configured [`ProcessMode`](crate::plugin::ProcessMode) to the VST3 enum value.
      fn vst_process_mode(&self) -> i32 {
@@ -7258,7 +7426,7 @@
              crate::plugin::ProcessMode::Offline => ProcessModes_::kOffline as i32,
              crate::plugin::ProcessMode::Prefetch => ProcessModes_::kPrefetch as i32,
              crate::plugin::ProcessMode::Realtime => ProcessModes_::kRealtime as i32,
-@@ -1779,7 +1939,7 @@
+@@ -1779,7 +1886,7 @@
          let arrangements = self.bus_arrangements()?;
          let mut inputs: Vec<u64> = arrangements.inputs.iter().map(|a| a.raw()).collect();
          let mut outputs: Vec<u64> = arrangements.outputs.iter().map(|a| a.raw()).collect();
@@ -7267,7 +7435,7 @@
              inputs.as_mut_ptr(),
              inputs.len() as i32,
              outputs.as_mut_ptr(),
-@@ -1800,26 +1960,35 @@
+@@ -1800,26 +1907,35 @@
      /// The configuration currently baked into the plugin via `setupProcessing`.
      fn current_setup(&self) -> AppliedSetup {
          AppliedSetup {
@@ -7310,7 +7478,7 @@
              if result != kResultOk {
                  return Err(Error::InterfaceError(format!(
                      "Failed to setup processing: {:#x}",
-@@ -1829,7 +1998,7 @@
+@@ -1829,7 +1945,7 @@
  
              // Create process data
              self.create_process_data()?;
@@ -7319,7 +7487,7 @@
  
              Ok(())
          }
-@@ -1843,7 +2012,7 @@
+@@ -1843,7 +1959,7 @@
          unsafe {
              let mut data = Box::new(HostProcessData {
                  process_data: std::mem::zeroed(),
@@ -7328,7 +7496,7 @@
                      ProcessingSampleSize::F32 => HostSampleBuffers::F32(TypedSampleBuffers {
                          inputs: Vec::new(),
                          outputs: Vec::new(),
-@@ -1860,50 +2029,66 @@
+@@ -1860,50 +1976,66 @@
                  input_bus_buffers: Vec::new(),
                  output_bus_buffers: Vec::new(),
                  process_context: std::mem::zeroed(),
@@ -7412,7 +7580,7 @@
                  .output_events
                  .as_com_ref::<IEventList>()
                  .map(|ptr| ptr.as_ptr())
-@@ -1924,21 +2109,28 @@
+@@ -1924,21 +2056,28 @@
              // Prepare buffers
              self.prepare_buffers(&mut data)?;
  
@@ -7444,7 +7612,7 @@
                  .component
                  .getBusInfo(kAudio as i32, direction, bus_idx, &mut bus_info)
                  == kResultOk
-@@ -1949,6 +2141,7 @@
+@@ -1949,6 +2088,7 @@
              // Fall back to the processor's arrangement, whose set bits define its channels.
              let mut arrangement = 0u64;
              if self
@@ -7452,7 +7620,7 @@
                  .processor
                  .getBusArrangement(direction, bus_idx, &mut arrangement)
                  == kResultOk
-@@ -1976,11 +2169,11 @@
+@@ -1976,11 +2116,11 @@
          match &mut data.sample_buffers {
              HostSampleBuffers::F32(samples) => {
                  *samples = build_typed_sample_buffers(
@@ -7467,7 +7635,7 @@
                  );
                  for (bus, pointers) in data
                      .input_bus_buffers
-@@ -2007,11 +2200,11 @@
+@@ -2007,11 +2147,11 @@
              }
              HostSampleBuffers::F64(samples) => {
                  *samples = build_typed_sample_buffers(
@@ -7482,7 +7650,7 @@
                  );
                  for (bus, pointers) in data
                      .input_bus_buffers
-@@ -2061,7 +2254,15 @@
+@@ -2061,7 +2201,15 @@
      }
  }
  
@@ -7499,12 +7667,12 @@
      /// Process exactly `frames` samples starting at `frame_offset` within the caller's
      /// buffers. `frames` is always <= the configured `block_size`, which is what the plugin
      /// was set up to accept; `process` splits a larger caller block into successive chunks.
-@@ -2072,12 +2273,14 @@
+@@ -2072,12 +2220,14 @@
      /// past the end of the caller's block.
      fn process_chunk(
          &mut self,
 +        processor: &mut ProcessorLease<'_>,
-+        bridge: &LegacyProcessBridge<'_>,
++        gate: &mut DataExchangeProcessGate<'_>,
          buffers: &mut CallerAudioBuffers<'_>,
          frame_offset: usize,
          frames: usize,
@@ -7515,7 +7683,7 @@
              unsafe {
                  // Clear output events only - input events should be preserved for processing
                  self.output_events.clear();
-@@ -2089,7 +2292,14 @@
+@@ -2089,7 +2239,14 @@
                  // Without this, addParameterData()/addPoint() would keep appending to queues
                  // from prior blocks, mixing stale points into new ones, growing point storage
                  // unbounded, and risking a reallocation on the audio thread long after warm-up.
@@ -7531,7 +7699,7 @@
  
                  // VST3 allows numSamples to vary up to the maximum given to setupProcessing; the
                  // caller's block may be shorter (BufferSize::Default gives variable sizes) or, if
-@@ -2105,41 +2315,37 @@
+@@ -2105,41 +2262,37 @@
                  for pc in &self.pending_param_changes {
                      if let Some(off) = chunk_offset(pc.sample_offset, frame_offset, frames, is_last)
                      {
@@ -7602,7 +7770,7 @@
                  }
  
                  match buffers {
-@@ -2175,10 +2381,14 @@
+@@ -2175,10 +2328,15 @@
                  // A zero-sample flush carries events/parameter queues only. The VST3 process
                  // contract requires no audio buses or pointers for that call.
                  let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
@@ -7610,9 +7778,10 @@
 -                let process_result = self.processor.process(&mut data.process_data);
 -                self._host_app.leave_data_exchange_process();
 +                self.has_processed_audio |= frames != 0;
-+                bridge.enter_process();
-+                let process_result = processor.process(&mut data.process_data);
-+                bridge.leave_process();
++                let process_result = {
++                    let _process_scope = gate.enter();
++                    processor.process(&mut data.process_data)
++                };
                  restore_process_audio_io(&mut data.process_data, saved_audio_io);
 +                let _ = self
 +                    .native_edits
@@ -7620,7 +7789,7 @@
  
                  // Everything from here to the output copy is per-block cleanup and MUST run even
                  // when the plugin reported failure. Returning early instead would leave this
-@@ -2194,25 +2404,37 @@
+@@ -2194,25 +2352,37 @@
                      &mut data.process_context,
                      data.process_context_requirements,
                      data.transport_tempo,
@@ -7662,7 +7831,7 @@
  
                  // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
                  // Drain the event list in place (no `mem::take`) and push each converted event
-@@ -2221,11 +2443,20 @@
+@@ -2221,11 +2391,20 @@
                  if !self.output_events.is_empty() {
                      let out = &self.output_events_owned;
                      self.output_events.drain_each(|event| {
@@ -7685,7 +7854,7 @@
                      // Leave the caller's buffers as they were (the playback bridges pre-fill them
                      // with silence) rather than copying out whatever the failed call left behind.
                      Err(Error::ProcessFailed(process_result))
-@@ -2258,9 +2489,7 @@
+@@ -2258,9 +2437,7 @@
              }
          } else {
              Err(Error::Other("Process data not initialized".to_string()))
@@ -7696,7 +7865,7 @@
      }
  
      /// Distribute the block's queued input events over its chunks and process each one.
-@@ -2268,7 +2497,13 @@
+@@ -2268,7 +2445,13 @@
      /// `total` is the caller's block length, already known non-zero by the caller; the empty
      /// block is handled separately (some plugins use a zero-sample call to flush pending
      /// parameter changes).
@@ -7704,23 +7873,23 @@
 +    fn process_chunks(
 +        &mut self,
 +        processor: &mut ProcessorLease<'_>,
-+        bridge: &LegacyProcessBridge<'_>,
++        gate: &mut DataExchangeProcessGate<'_>,
 +        buffers: &mut CallerAudioBuffers<'_>,
 +        total: usize,
 +    ) -> Result<()> {
          // `.max(1)`: a zero block size would make every chunk empty and never advance `offset`,
          // spinning forever on the audio thread. `Vst3HostBuilder::build` rejects 0, but
          // `block_size` is plain state and this loop must terminate regardless.
-@@ -2284,7 +2519,7 @@
+@@ -2284,7 +2467,7 @@
                  frames,
                  is_last,
              );
 -            self.process_chunk(buffers, offset, frames, is_last)?;
-+            self.process_chunk(processor, bridge, buffers, offset, frames, is_last)?;
++            self.process_chunk(processor, gate, buffers, offset, frames, is_last)?;
              offset += frames;
          }
          Ok(())
-@@ -2360,8 +2595,32 @@
+@@ -2360,8 +2543,32 @@
          )
      }
  
@@ -7744,7 +7913,7 @@
 +    fn process_buffer_view(
 +        &mut self,
 +        processor: &mut ProcessorLease<'_>,
-+        bridge: &LegacyProcessBridge<'_>,
++        gate: &mut DataExchangeProcessGate<'_>,
 +        is_active: bool,
 +        buffers: &mut CallerAudioBuffers<'_>,
 +    ) -> Result<()> {
@@ -7755,32 +7924,37 @@
              return Err(Error::NotProcessing);
          }
  
-@@ -2371,9 +2630,9 @@
+@@ -2371,9 +2578,9 @@
  
          let result = if total == 0 {
              stage_chunk_events(&mut self.chunk_events, &self.input_events, 0, 0, true);
 -            self.process_chunk(buffers, 0, 0, true)
-+            self.process_chunk(processor, bridge, buffers, 0, 0, true)
++            self.process_chunk(processor, gate, buffers, 0, 0, true)
          } else {
 -            self.process_chunks(buffers, total)
-+            self.process_chunks(processor, bridge, buffers, total)
++            self.process_chunks(processor, gate, buffers, total)
          };
  
          self.chunk_events.clear();
-@@ -2382,13 +2641,22 @@
+@@ -2382,13 +2589,27 @@
      }
  }
  
 +impl PluginImpl {
 +    fn process_buffer_view(&mut self, buffers: &mut CallerAudioBuffers<'_>) -> Result<()> {
-+        let is_active = self.control.is_active;
-+        let (mut processor, bridge) = self.control.processing_parts();
-+        self.runtime
-+            .process_buffer_view(&mut processor, &bridge, is_active, buffers)
++        domain_session::process_buffer_view(self, buffers)
 +    }
 +}
 +
  impl PluginInternal for PluginImpl {
++    fn with_domain_session(
++        &mut self,
++        callback: &mut domain_session::DomainSessionCallback<'_>,
++    ) -> Result<()> {
++        self.ensure_control_thread("domain session")?;
++        domain_session::visit(self, callback)
++    }
++
      fn set_parameter(&mut self, id: u32, value: f64) -> Result<()> {
          self.set_parameter_at(id, value, 0)
      }
@@ -7791,7 +7965,7 @@
              return Err(Error::InterfaceError("No controller available".to_string()));
          }
          // VST3 requires both halves: the controller (for GUI/display/formatting) and the
-@@ -2403,26 +2671,16 @@
+@@ -2403,26 +2624,12 @@
          value: f64,
          sample_offset: i32,
      ) -> Result<()> {
@@ -7800,11 +7974,7 @@
 -        // plugin's own editor, `get_parameter`, `format_parameter` and saved state — deferred
 -        // to the control thread when it arrives from the audio callback.
 +        // Refuse before mirroring: a rejected DSP point must not mutate the controller.
-+        if self.runtime.pending_param_changes.len() >= MAX_PENDING_PARAM_CHANGES {
-+            self.runtime.dropped_param_changes =
-+                self.runtime.dropped_param_changes.saturating_add(1);
-+            return Err(Error::ParameterInputRejected);
-+        }
++        self.runtime.preflight_parameter_admission()?;
 +        // Controller mirroring remains existing control/deferred behavior, outside the
 +        // bounded parameter COM store's no-allocation claim.
          self.mirror_parameter_to_controller(id, value);
@@ -7827,30 +7997,18 @@
              id,
              value,
              sample_offset,
-@@ -2430,6 +2688,22 @@
+@@ -2430,6 +2637,10 @@
          Ok(())
      }
  
 +    fn set_process_transport(&mut self, transport: crate::plugin::ProcessTransport) -> Result<()> {
-+        transport.validate()?;
-+        self.update_tempo(transport.tempo);
-+        self.update_time_signature(transport.time_sig_numerator, transport.time_sig_denominator);
-+        self.update_playing(transport.playing);
-+        self.runtime.process_transport = Some(transport);
-+        if let Some(data) = &mut self.runtime.process_data {
-+            apply_process_transport(
-+                &mut data.process_context,
-+                data.process_context_requirements,
-+                transport,
-+            );
-+        }
-+        Ok(())
++        self.runtime.set_process_transport(transport)
 +    }
 +
      fn set_tempo(&mut self, bpm: f64) -> Result<()> {
          self.update_tempo(bpm);
          Ok(())
-@@ -2447,7 +2721,7 @@
+@@ -2447,7 +2658,7 @@
  
      fn get_parameter(&self, id: u32) -> Result<f64> {
          self.drain_deferred_controller_sync();
@@ -7859,7 +8017,7 @@
              unsafe { Ok(controller.getParamNormalized(id)) }
          } else {
              Err(Error::InterfaceError("No controller available".to_string()))
-@@ -2458,7 +2732,7 @@
+@@ -2458,7 +2669,7 @@
          self.drain_deferred_controller_sync();
          let mut params = Vec::new();
  
@@ -7868,7 +8026,7 @@
              unsafe {
                  let count = controller.getParameterCount();
  
-@@ -2495,7 +2769,7 @@
+@@ -2495,7 +2706,7 @@
  
      fn format_parameter(&self, id: u32, normalized: f64) -> Result<String> {
          self.drain_deferred_controller_sync();
@@ -7877,7 +8035,7 @@
              unsafe {
                  let mut buf: String128 = std::mem::zeroed();
                  if controller.getParamStringByValue(id, normalized, &mut buf) == kResultOk {
-@@ -2515,38 +2789,37 @@
+@@ -2515,38 +2726,37 @@
      }
  
      fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
@@ -7931,7 +8089,7 @@
              return Err(e);
          }
  
-@@ -2558,20 +2831,20 @@
+@@ -2558,20 +2768,20 @@
                      result
                  )));
              }
@@ -7955,7 +8113,7 @@
                  Some(value)
                      if value == ePrefetchableSupport_::kIsNeverPrefetchable as u32
                          || value == ePrefetchableSupport_::kIsNotYetPrefetchable as u32 =>
-@@ -2587,19 +2860,18 @@
+@@ -2587,19 +2797,18 @@
              }
          }
          // VST3 requires the component inactive for setupProcessing; mirror reconfigure.
@@ -7980,7 +8138,7 @@
              return Err(e);
          }
  
-@@ -2611,7 +2883,7 @@
+@@ -2611,7 +2820,7 @@
                      result
                  )));
              }
@@ -7989,7 +8147,7 @@
          }
          Ok(())
      }
-@@ -2620,11 +2892,11 @@
+@@ -2620,11 +2829,11 @@
          use crate::audio::SpeakerArrangement;
          unsafe {
              let read = |dir: i32| -> Vec<SpeakerArrangement> {
@@ -8003,7 +8161,7 @@
                          SpeakerArrangement::from_raw(arr)
                      })
                      .collect()
-@@ -2641,7 +2913,7 @@
+@@ -2641,7 +2850,7 @@
          inputs: &[crate::audio::SpeakerArrangement],
          outputs: &[crate::audio::SpeakerArrangement],
      ) -> Result<()> {
@@ -8012,7 +8170,7 @@
              return Err(Error::Other(
                  "cannot set bus arrangements while processing".to_string(),
              ));
-@@ -2650,32 +2922,30 @@
+@@ -2650,32 +2859,30 @@
          let mut out_raw: Vec<u64> = outputs.iter().map(|a| a.raw()).collect();
          unsafe {
              // VST3 requires the component inactive for setBusArrangements + setupProcessing.
@@ -8054,7 +8212,7 @@
                  return Err(Error::InterfaceError(format!(
                      "setBusArrangements failed: {arrangement_result:#x}"
                  )));
-@@ -2691,7 +2961,7 @@
+@@ -2691,7 +2898,7 @@
                          result
                      )));
                  }
@@ -8063,7 +8221,7 @@
              }
          }
          Ok(())
-@@ -2705,7 +2975,7 @@
+@@ -2705,7 +2912,7 @@
          active: bool,
      ) -> Result<()> {
          use crate::audio::{BusDirection, MediaType};
@@ -8072,7 +8230,7 @@
              return Err(Error::Other(
                  "cannot activate a bus while processing".to_string(),
              ));
-@@ -2720,7 +2990,7 @@
+@@ -2720,7 +2927,7 @@
              BusDirection::Output => kOutput as i32,
          };
          unsafe {
@@ -8081,7 +8239,7 @@
              if bus_index < 0 || bus_index >= count {
                  return Err(Error::InvalidParameter(format!(
                      "bus index {bus_index} out of range for {media_type:?} {direction:?} \
-@@ -2728,35 +2998,35 @@
+@@ -2728,35 +2935,35 @@
                  )));
              }
  
@@ -8125,7 +8283,7 @@
                      self.create_process_data()
                  } else {
                      Ok(())
-@@ -2775,7 +3045,7 @@
+@@ -2775,7 +2982,7 @@
                          "Failed to reactivate after set_bus_active: {reactivate:#x}"
                      )));
                  }
@@ -8134,7 +8292,7 @@
              }
  
              update_result?;
-@@ -2791,6 +3061,7 @@
+@@ -2791,6 +2998,7 @@
          // Floor to non-negative (the VST3 SDK treats a negative sampleOffset as undefined);
          // `process()` additionally clamps queued offsets to the actual block length.
          let sample_offset = sample_offset.max(0);
@@ -8142,7 +8300,7 @@
          unsafe {
              let mut vst_event: Event = std::mem::zeroed();
              vst_event.busIndex = 0;
-@@ -2806,11 +3077,14 @@
+@@ -2806,11 +3014,14 @@
                  } => {
                      let index = channel.as_index() as usize * 128 + note as usize;
                      let released = write_midi_note_on(&mut vst_event, channel, note, velocity);
@@ -8160,7 +8318,7 @@
                  }
                  MidiEvent::NoteOff {
                      channel,
-@@ -2818,8 +3092,10 @@
+@@ -2818,8 +3029,10 @@
                      velocity,
                  } => {
                      let index = channel.as_index() as usize * 128 + note as usize;
@@ -8173,7 +8331,7 @@
                      write_note_off_event(&mut vst_event, channel, note, velocity);
                  }
                  MidiEvent::ControlChange {
-@@ -2889,70 +3165,44 @@
+@@ -2889,70 +3102,41 @@
                  }
              }
  
@@ -8191,10 +8349,7 @@
  
      fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
 -        self.input_events.add_event(event);
-+        self.runtime
-+            .input_events
-+            .try_add_event(event)
-+            .map_err(|_| Error::EventInputRejected)
++        self.runtime.send_plugin_event(event)
 +    }
 +
 +    fn start_processing(&mut self) -> Result<()> {
@@ -8273,7 +8428,7 @@
      }
  
      fn has_editor(&self) -> bool {
-@@ -2963,12 +3213,12 @@
+@@ -2963,12 +3147,12 @@
  
          // An open editor is proof enough, and probing for a second view while one is attached
          // upsets plugins that assume a single live view.
@@ -8288,7 +8443,7 @@
              unsafe {
                  // Check if controller can create an editor view
                  let view_type = c"editor".as_ptr();
-@@ -2989,7 +3239,7 @@
+@@ -2989,7 +3173,7 @@
      }
  
      fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()> {
@@ -8297,7 +8452,7 @@
              return Err(Error::Other("Editor already open".to_string()));
          }
          if parent.is_null() {
-@@ -2998,7 +3248,22 @@
+@@ -2998,7 +3182,22 @@
              ));
          }
  
@@ -8321,7 +8476,7 @@
              unsafe {
                  // Create editor view
                  let view_type = c"editor".as_ptr();
-@@ -3025,9 +3290,13 @@
+@@ -3025,9 +3224,13 @@
  
                  // Hand the plugin an IPlugFrame (before attach, per the SDK) so it can
                  // request host-side resizes; requests land in `editor_resize`.
@@ -8338,7 +8493,7 @@
                  let frame_result = view.setFrame(frame.as_ptr());
                  if frame_result != kResultOk && frame_result != kResultTrue {
                      return Err(Error::Other(format!(
-@@ -3037,7 +3306,7 @@
+@@ -3037,7 +3240,7 @@
  
                  // Offer the current scale factor, but never let the answer decide whether the
                  // editor opens: a view that declines simply renders at its own scale.
@@ -8347,7 +8502,7 @@
  
                  // Platform-specific attachment
                  #[cfg(target_os = "macos")]
-@@ -3075,7 +3344,7 @@
+@@ -3075,7 +3278,7 @@
  
                  #[cfg(not(target_os = "android"))]
                  {
@@ -8356,7 +8511,7 @@
                      Ok(())
                  }
              }
-@@ -3086,7 +3355,7 @@
+@@ -3086,7 +3289,7 @@
  
      fn close_editor(&mut self) -> Result<()> {
          let mut close_error = None;
@@ -8365,7 +8520,7 @@
              unsafe {
                  let removed_result = view.removed();
                  // Break the view -> host-frame reference before releasing the view. The frame
-@@ -3109,63 +3378,29 @@
+@@ -3109,63 +3312,29 @@
          // `Plugin::service_run_loop` is public with no editor-open guard, a host driving it from
          // its frame loop would then dispatch straight into the removed view.
          #[cfg(target_os = "linux")]
@@ -8443,7 +8598,7 @@
              unsafe {
                  let mut view_rect = ViewRect {
                      left: 0,
-@@ -3180,7 +3415,7 @@
+@@ -3180,7 +3349,7 @@
              }
          }
  
@@ -8452,7 +8607,7 @@
              unsafe {
                  // Create a temporary view to get size
                  let view_type = c"editor".as_ptr();
-@@ -3220,11 +3455,11 @@
+@@ -3220,11 +3389,11 @@
  
      fn editor_can_resize(&self) -> bool {
          unsafe {
@@ -8466,15 +8621,85 @@
                  return false;
              };
              let view_ptr = controller.createView(c"editor".as_ptr());
-@@ -3242,6 +3477,7 @@
-             ));
-         }
-         let view = self
-+            .control
-             .plugin_view
-             .as_ref()
-             .ok_or_else(|| Error::Other("Plugin editor is not open".to_string()))?;
-@@ -3314,11 +3550,11 @@
+@@ -3236,76 +3405,7 @@
+     }
+ 
+     fn resize_editor(&mut self, width: i32, height: i32) -> Result<(i32, i32)> {
+-        if width <= 0 || height <= 0 {
+-            return Err(Error::Other(
+-                "editor dimensions must be greater than zero".to_string(),
+-            ));
+-        }
+-        let view = self
+-            .plugin_view
+-            .as_ref()
+-            .ok_or_else(|| Error::Other("Plugin editor is not open".to_string()))?;
+-
+-        unsafe {
+-            if view.canResize() != kResultTrue {
+-                let mut current = ViewRect {
+-                    left: 0,
+-                    top: 0,
+-                    right: 0,
+-                    bottom: 0,
+-                };
+-                if view.getSize(&mut current) != kResultOk {
+-                    return Err(Error::Other(
+-                        "Plugin editor is fixed-size and its size could not be queried".to_string(),
+-                    ));
+-                }
+-                return view_rect_size(&current);
+-            }
+-
+-            let mut requested = ViewRect {
+-                left: 0,
+-                top: 0,
+-                right: width,
+-                bottom: height,
+-            };
+-            // The view constrains `requested` in place. `kResultFalse` means it left the rect
+-            // alone (nothing to constrain, or it wants a different size than asked for) — a
+-            // refusal to adapt, not a broken call — so take whatever rect it ended up with and
+-            // only reject result codes that mean the call itself failed.
+-            let constraint_result = view.checkSizeConstraint(&mut requested);
+-            let constrained = constraint_result == kResultOk
+-                || constraint_result == kResultTrue
+-                || constraint_result == kResultFalse
+-                || constraint_result == kNotImplemented;
+-            if !constrained {
+-                return Err(Error::Other(format!(
+-                    "Plugin failed to check the editor size constraint: {constraint_result:#x}"
+-                )));
+-            }
+-            let accepted = view_rect_size(&requested)?;
+-
+-            // The SDK calls onSize only when the size actually changes; re-sending the current
+-            // one makes VSTGUI-based editors rebuild their frame for nothing.
+-            let mut current = ViewRect {
+-                left: 0,
+-                top: 0,
+-                right: 0,
+-                bottom: 0,
+-            };
+-            if view.getSize(&mut current) == kResultOk
+-                && view_rect_size(&current).ok() == Some(accepted)
+-            {
+-                return Ok(accepted);
+-            }
+-
+-            let resize_result = view.onSize(&mut requested);
+-            if resize_result != kResultOk && resize_result != kResultTrue {
+-                return Err(Error::Other(format!(
+-                    "Plugin rejected editor resize: {resize_result:#x}"
+-                )));
+-            }
+-            Ok(accepted)
+-        }
++        domain_session::resize_view(&self.control.plugin_view, width, height)
+     }
+ 
+     fn set_editor_scale_factor(&mut self, factor: f32) -> Result<bool> {
+@@ -3314,11 +3414,11 @@
                  "editor scale factor must be finite and greater than zero".to_string(),
              ));
          }
@@ -8488,7 +8713,7 @@
          Ok(supported)
      }
  
-@@ -3328,49 +3564,62 @@
+@@ -3328,49 +3428,62 @@
  
      fn take_parameter_edits(&mut self) -> Vec<crate::plugin::ParameterEdit> {
          self.service_control_thread_caches();
@@ -8557,7 +8782,7 @@
              .as_ref()
              .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?
              .dismiss_context_menu(menu_id)
-@@ -3378,6 +3627,7 @@
+@@ -3378,6 +3491,7 @@
  
      fn take_restart_flags(&mut self) -> crate::plugin::RestartFlags {
          let flags = self
@@ -8565,7 +8790,7 @@
              .component_handler
              .as_ref()
              .map(|h| h.take_restart_flags())
-@@ -3387,19 +3637,19 @@
+@@ -3387,19 +3501,19 @@
          // main-thread-domain controller calls (the MIDI map alone is buses × 16 × 130 of them).
          // So record what went stale and let the control thread rebuild.
          if bits & RestartFlags_::kMidiCCAssignmentChanged != 0 {
@@ -8589,7 +8814,7 @@
              return Err(Error::Other(
                  "restart requests must be serviced on the plugin control thread".to_string(),
              ));
-@@ -3411,37 +3661,39 @@
+@@ -3411,37 +3525,39 @@
          }
  
          unsafe {
@@ -8638,7 +8863,7 @@
                          self.negotiate_default_bus_arrangements()
                              .and_then(|()| self.setup_processing())
                      }
-@@ -3451,12 +3703,16 @@
+@@ -3451,12 +3567,16 @@
                  Ok(())
              };
  
@@ -8657,24 +8882,20 @@
                      Ok(())
                  } else {
                      Err(Error::Other(format!(
-@@ -3477,38 +3733,51 @@
+@@ -3476,39 +3596,43 @@
+     }
  
      fn take_output_events(&self) -> Vec<PluginEvent> {
-         let mut out = Vec::new();
+-        let mut out = Vec::new();
 -        while let Some(event) = self.output_events_owned.pop() {
-+        while let Some(event) = self.runtime.output_events_owned.pop() {
-             out.push(event);
-         }
-         out
+-            out.push(event);
+-        }
+-        out
++        self.runtime.take_output_events()
 +    }
 +
 +    fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
-+        let events = self.take_output_events();
-+        let lost = self
-+            .runtime
-+            .output_events_lost
-+            .swap(false, std::sync::atomic::Ordering::AcqRel);
-+        (events, lost)
++        self.runtime.take_output_events_with_loss()
      }
  
      fn output_midi_handle(&self) -> Option<crate::plugin::OutputMidiConsumer> {
@@ -8716,7 +8937,7 @@
      }
  
      fn note_on(
-@@ -3518,19 +3787,20 @@
+@@ -3518,58 +3642,11 @@
          velocity: u8,
          sample_offset: i32,
      ) -> Result<crate::midi::NoteId> {
@@ -8733,85 +8954,72 @@
 -        }
 -        self.active_notes
 -            .push((id, channel.as_index() as i16, note as i16));
-+        // Do not admit a voice whose exact release obligation cannot be retained.
-+        if self.runtime.active_notes.len() >= MAX_TRACKED_NOTES {
-+            return Err(Error::EventInputRejected);
-+        }
-+        let id = self.runtime.next_note_id;
-+        // Preserve the established wrap policy, but never reuse a still-live candidate ID.
-+        if self
-+            .runtime
-+            .active_notes
-+            .iter()
-+            .any(|&(active, _, _)| active == id)
-+        {
-+            return Err(Error::EventInputRejected);
-+        }
-         unsafe {
-             let mut ev: Event = std::mem::zeroed();
-             ev.busIndex = 0;
-@@ -3541,8 +3811,15 @@
-             ev.__field0.noteOn.pitch = note as i16;
-             ev.__field0.noteOn.velocity = velocity as f32 / 127.0;
-             ev.__field0.noteOn.noteId = id;
+-        unsafe {
+-            let mut ev: Event = std::mem::zeroed();
+-            ev.busIndex = 0;
+-            ev.sampleOffset = sample_offset.max(0);
+-            ev.flags = Event_::EventFlags_::kIsLive as u16;
+-            ev.r#type = kNoteOnEvent as u16;
+-            ev.__field0.noteOn.channel = channel.as_index() as i16;
+-            ev.__field0.noteOn.pitch = note as i16;
+-            ev.__field0.noteOn.velocity = velocity as f32 / 127.0;
+-            ev.__field0.noteOn.noteId = id;
 -            self.input_events.add_raw_event(&ev);
 -        }
-+            self.runtime
-+                .input_events
-+                .try_add_raw_event(&ev)
-+                .map_err(|_| Error::EventInputRejected)?;
-+        }
-+        self.runtime.next_note_id = id.wrapping_add(1).max(1);
-+        self.runtime
-+            .active_notes
-+            .push((id, channel.as_index() as i16, note as i16));
-         Ok(crate::midi::NoteId(id))
+-        Ok(crate::midi::NoteId(id))
++        self.runtime.note_on(channel, note, velocity, sample_offset)
      }
  
-@@ -3550,11 +3827,12 @@
-         // Recover the note's channel and pitch from the note-on. Without them the event carries
-         // pitch 0 on channel 1, which any synth matching releases by pitch ignores — leaving the
-         // real note sounding forever.
+     fn note_off(&mut self, id: crate::midi::NoteId, sample_offset: i32) -> Result<()> {
+-        // Recover the note's channel and pitch from the note-on. Without them the event carries
+-        // pitch 0 on channel 1, which any synth matching releases by pitch ignores — leaving the
+-        // real note sounding forever.
 -        let tracked = self
-+        let tracked_index = self
-+            .runtime
-             .active_notes
-             .iter()
+-            .active_notes
+-            .iter()
 -            .position(|&(tracked_id, _, _)| tracked_id == id.0)
 -            .map(|i| self.active_notes.swap_remove(i));
-+            .position(|&(tracked_id, _, _)| tracked_id == id.0);
-+        let tracked = tracked_index.map(|index| self.runtime.active_notes[index]);
-         unsafe {
-             let mut ev: Event = std::mem::zeroed();
-             ev.busIndex = 0;
-@@ -3567,7 +3845,13 @@
-                 ev.__field0.noteOff.pitch = pitch;
-             }
-             // A release velocity of 0 is the SDK's own default for "unspecified".
+-        unsafe {
+-            let mut ev: Event = std::mem::zeroed();
+-            ev.busIndex = 0;
+-            ev.sampleOffset = sample_offset.max(0);
+-            ev.flags = Event_::EventFlags_::kIsLive as u16;
+-            ev.r#type = kNoteOffEvent as u16;
+-            ev.__field0.noteOff.noteId = id.0;
+-            if let Some((_, channel, pitch)) = tracked {
+-                ev.__field0.noteOff.channel = channel;
+-                ev.__field0.noteOff.pitch = pitch;
+-            }
+-            // A release velocity of 0 is the SDK's own default for "unspecified".
 -            self.input_events.add_raw_event(&ev);
-+            self.runtime
-+                .input_events
-+                .try_add_raw_event(&ev)
-+                .map_err(|_| Error::EventInputRejected)?;
-+        }
-+        if let Some(index) = tracked_index {
-+            self.runtime.active_notes.swap_remove(index);
-         }
-         Ok(())
+-        }
+-        Ok(())
++        self.runtime.note_off(id, sample_offset)
      }
-@@ -3588,7 +3872,10 @@
-             ev.__field0.noteExpressionValue.typeId = kind.type_id();
-             ev.__field0.noteExpressionValue.noteId = id.0;
-             ev.__field0.noteExpressionValue.value = value.clamp(0.0, 1.0);
+ 
+     fn send_note_expression(
+@@ -3579,18 +3656,8 @@
+         value: f64,
+         sample_offset: i32,
+     ) -> Result<()> {
+-        unsafe {
+-            let mut ev: Event = std::mem::zeroed();
+-            ev.busIndex = 0;
+-            ev.sampleOffset = sample_offset.max(0);
+-            ev.flags = Event_::EventFlags_::kIsLive as u16;
+-            ev.r#type = kNoteExpressionValueEvent as u16;
+-            ev.__field0.noteExpressionValue.typeId = kind.type_id();
+-            ev.__field0.noteExpressionValue.noteId = id.0;
+-            ev.__field0.noteExpressionValue.value = value.clamp(0.0, 1.0);
 -            self.input_events.add_raw_event(&ev);
-+            self.runtime
-+                .input_events
-+                .try_add_raw_event(&ev)
-+                .map_err(|_| Error::EventInputRejected)?;
-         }
-         Ok(())
+-        }
+-        Ok(())
++        self.runtime
++            .send_note_expression(id, kind, value, sample_offset)
      }
-@@ -3600,6 +3887,7 @@
+ 
+     fn note_expressions(
+@@ -3600,6 +3667,7 @@
      ) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
          use crate::midi::{NoteExpressionInfo, NoteExpressionType};
          let Some(ctrl) = self
@@ -8819,7 +9027,7 @@
              .controller
              .as_ref()
              .and_then(|c| c.cast::<INoteExpressionController>())
-@@ -3635,12 +3923,13 @@
+@@ -3635,12 +3703,13 @@
  
      fn get_units(&self) -> Result<Vec<crate::plugin::PluginUnit>> {
          use crate::plugin::PluginUnit;
@@ -8834,7 +9042,7 @@
              .unit_cache
              .lock()
              .unwrap_or_else(|poison| poison.into_inner())
-@@ -3649,7 +3938,7 @@
+@@ -3649,7 +3718,7 @@
          {
              return Ok(units);
          }
@@ -8843,7 +9051,7 @@
              return Ok(Vec::new());
          };
          // IUnitInfo is optional; plugins without it (no units/program lists) return empty.
-@@ -3696,6 +3985,7 @@
+@@ -3696,6 +3765,7 @@
                  });
              }
              *self
@@ -8851,7 +9059,7 @@
                  .unit_cache
                  .lock()
                  .unwrap_or_else(|poison| poison.into_inner()) = Some(units.clone());
-@@ -3706,7 +3996,7 @@
+@@ -3706,7 +3776,7 @@
      fn select_program(&mut self, unit_id: i32, program_index: i32) -> Result<()> {
          self.service_control_thread_caches();
          if self.cached_program_change(unit_id).is_none()
@@ -8860,7 +9068,7 @@
          {
              self.refresh_program_change_cache();
          }
-@@ -3736,12 +4026,13 @@
+@@ -3736,12 +3806,13 @@
      }
  
      fn selected_unit(&self) -> Result<Option<i32>> {
@@ -8875,7 +9083,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3753,12 +4044,13 @@
+@@ -3753,12 +3824,13 @@
      }
  
      fn select_unit(&mut self, unit_id: i32) -> Result<()> {
@@ -8890,7 +9098,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3783,12 +4075,13 @@
+@@ -3783,12 +3855,13 @@
                  "program index must be non-negative, got {program_index}"
              )));
          }
@@ -8905,7 +9113,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3831,6 +4124,7 @@
+@@ -3831,6 +3904,7 @@
          }
          self.ensure_control_thread("program data read")?;
          let Some(data_interface) = self
@@ -8913,7 +9121,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IProgramListData>())
-@@ -3871,6 +4165,7 @@
+@@ -3871,6 +3945,7 @@
          self.ensure_stream_size(data)?;
          self.ensure_control_thread("program data restore")?;
          let data_interface = self
@@ -8921,7 +9129,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IProgramListData>())
-@@ -3895,6 +4190,7 @@
+@@ -3895,6 +3970,7 @@
                  data_interface.setProgramData(program_list_id, program_index, stream_ptr.as_ptr());
              if result == kResultOk {
                  *self
@@ -8929,7 +9137,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -3911,6 +4207,7 @@
+@@ -3911,6 +3987,7 @@
      fn get_unit_data(&self, unit_id: i32) -> Result<Option<Vec<u8>>> {
          self.ensure_control_thread("unit data read")?;
          let Some(data_interface) = self
@@ -8937,7 +9145,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitData>())
-@@ -3940,6 +4237,7 @@
+@@ -3940,6 +4017,7 @@
          self.ensure_stream_size(data)?;
          self.ensure_control_thread("unit data restore")?;
          let data_interface = self
@@ -8945,7 +9153,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitData>())
-@@ -3961,6 +4259,7 @@
+@@ -3961,6 +4039,7 @@
              let result = data_interface.setUnitData(unit_id, stream_ptr.as_ptr());
              if result == kResultOk {
                  *self
@@ -8953,7 +9161,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -3977,6 +4276,7 @@
+@@ -3977,6 +4056,7 @@
      fn begin_host_edit(&mut self, parameter_id: u32) -> Result<()> {
          self.ensure_control_thread("host edit begin")?;
          let editing = self
@@ -8961,7 +9169,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
-@@ -3992,6 +4292,7 @@
+@@ -3992,6 +4072,7 @@
      fn end_host_edit(&mut self, parameter_id: u32) -> Result<()> {
          self.ensure_control_thread("host edit end")?;
          let editing = self
@@ -8969,7 +9177,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
-@@ -4012,6 +4313,7 @@
+@@ -4012,6 +4093,7 @@
          }
          self.ensure_control_thread("MIDI learn notification")?;
          let midi_learn = self
@@ -8977,7 +9185,7 @@
              .controller
              .as_ref()
              .and_then(|edit_controller| edit_controller.cast::<IMidiLearn>())
-@@ -4026,6 +4328,7 @@
+@@ -4026,6 +4108,7 @@
          use crate::plugin::AutomationState;
          self.ensure_control_thread("automation state update")?;
          let automation = self
@@ -8985,7 +9193,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IAutomationState>())
-@@ -4052,6 +4355,7 @@
+@@ -4052,6 +4135,7 @@
          })?;
          self.ensure_control_thread("parameter id remapping")?;
          let Some(remapper) = self
@@ -8993,7 +9201,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IRemapParamID>())
-@@ -4075,8 +4379,11 @@
+@@ -4075,8 +4159,11 @@
      }
  
      fn midi_panic(&mut self) -> Result<()> {
@@ -9007,7 +9215,7 @@
              unsafe {
                  let mut event: Event = std::mem::zeroed();
                  event.busIndex = 0;
-@@ -4086,30 +4393,46 @@
+@@ -4086,30 +4173,46 @@
                  event.__field0.noteOff.noteId = note_id;
                  event.__field0.noteOff.channel = channel;
                  event.__field0.noteOff.pitch = pitch;
@@ -9078,7 +9286,7 @@
          }
  
          // Also route the standard panic controllers through IMidiMapping for plugins that
-@@ -4126,11 +4449,20 @@
+@@ -4126,11 +4229,20 @@
      }
  
      fn output_channel_count(&self) -> usize {
@@ -9100,7 +9308,7 @@
                      .bus_activation
                      .audio_outputs
                      .get(i as usize)
-@@ -4141,6 +4473,7 @@
+@@ -4141,6 +4253,7 @@
                  }
                  let mut info: BusInfo = std::mem::zeroed();
                  if self
@@ -9108,7 +9316,7 @@
                      .component
                      .getBusInfo(kAudio as i32, kOutput as i32, i, &mut info)
                      == kResultOk
-@@ -4149,6 +4482,7 @@
+@@ -4149,6 +4262,7 @@
                  } else {
                      let mut arrangement = 0u64;
                      if self
@@ -9116,7 +9324,7 @@
                          .processor
                          .getBusArrangement(kOutput as i32, i, &mut arrangement)
                          == kResultOk
-@@ -4162,14 +4496,23 @@
+@@ -4162,14 +4276,23 @@
      }
  
      fn save_state(&self) -> Result<Vec<u8>> {
@@ -9141,7 +9349,7 @@
              if result != kResultOk {
                  return Err(Error::Other(format!(
                      "Plugin does not provide state (getState: {result:#x})"
-@@ -4180,8 +4523,11 @@
+@@ -4180,8 +4303,11 @@
              // its state returns the blob above a second time: the envelope would carry the same
              // bytes twice, the combined size cap would effectively halve, and `load_state` would
              // apply `setState` twice. `load_state` has the matching guard.
@@ -9155,7 +9363,7 @@
              {
                  let stream = create_memory_stream_with_metadata(None, StreamStateType::Project);
                  let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
-@@ -4201,56 +4547,82 @@
+@@ -4201,56 +4327,82 @@
                  None
              };
  
@@ -9253,7 +9461,7 @@
                          let stream =
                              create_state_restore_stream(snapshot.component.clone(), context);
                          let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
-@@ -4268,9 +4640,13 @@
+@@ -4268,9 +4420,13 @@
                      }
                  }
  
@@ -9270,7 +9478,7 @@
                      let stream = create_state_restore_stream(controller_state.clone(), context);
                      let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                          Error::InterfaceError("Failed to create controller state stream".into())
-@@ -4283,11 +4659,27 @@
+@@ -4283,11 +4439,27 @@
                      }
                  }
  
@@ -9301,7 +9509,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -4297,17 +4689,25 @@
+@@ -4297,17 +4469,25 @@
              })();
  
              let restore_result = (|| -> Result<()> {
@@ -9329,7 +9537,7 @@
                  }
                  Ok(())
              })();
-@@ -4405,43 +4805,72 @@
+@@ -4405,43 +4585,72 @@
          // Rebuild the table here if a restart invalidated it off-thread; a no-op on the audio
          // thread, which must never make controller calls.
          self.service_control_thread_caches();
@@ -9428,7 +9636,7 @@
          })
      }
  
-@@ -4576,7 +5005,7 @@
+@@ -4576,7 +4785,7 @@
  /// still fail — and by then the plugin may have spawned threads and registered callbacks.
  /// Releasing its interfaces and unloading the module without `terminate()` leaves that code
  /// running inside memory the unload is about to unmap. This guard runs the same sequence
@@ -9437,7 +9645,7 @@
  ///
  /// It holds its own references (COM refcounts), so `load` keeps using the originals as it
  /// builds; the extra references are released when the guard drops either way.
-@@ -4617,8 +5046,10 @@
+@@ -4617,8 +4826,10 @@
          self.connection.take()
      }
  
@@ -9450,7 +9658,7 @@
          self.armed = false;
      }
  }
-@@ -4681,21 +5112,23 @@
+@@ -4681,21 +4892,23 @@
          let _ = PluginInternal::close_editor(self);
  
          let _ = self.stop_processing();
@@ -9481,7 +9689,7 @@
      }
  }
  
-@@ -4776,18 +5209,53 @@
+@@ -4776,18 +4989,53 @@
          .unwrap_or_default()
  }
  
@@ -9538,7 +9746,7 @@
      if process_context_needs(requirements, R::kNeedContinousTimeSamples as u32) {
          ctx.continousTimeSamples = ctx.continousTimeSamples.wrapping_add(frames);
      }
-@@ -4798,17 +5266,82 @@
+@@ -4798,17 +5046,82 @@
          let nanos = (frames as f64 * 1_000_000_000.0 / ctx.sampleRate).round() as i64;
          ctx.systemTime = ctx.systemTime.saturating_add(nanos);
      }
@@ -9625,7 +9833,7 @@
  
      fn buses(channels: &[i32]) -> Vec<AudioBusBuffers> {
          channels
-@@ -5053,7 +5586,7 @@
+@@ -5053,7 +5366,7 @@
          // One second of audio at 48 kHz in 512-sample blocks.
          let blocks = 48_000 / 512;
          for _ in 0..blocks {
@@ -9634,7 +9842,7 @@
          }
          let advanced = (blocks * 512) as i64;
          assert_eq!(ctx.projectTimeSamples, advanced);
-@@ -5448,3 +5981,69 @@
+@@ -5448,3 +5761,256 @@
          assert_eq!(calls.load(Ordering::SeqCst), 0);
      }
  }
@@ -9704,9 +9912,517 @@
 +
 +#[cfg(test)]
 +mod domain_tests;
++
++impl ProcessorRuntime {
++    #[allow(clippy::unnecessary_cast)]
++    fn update_tempo(&mut self, bpm: f64) {
++        self.tempo = bpm;
++        if let Some(transport) = &mut self.process_transport {
++            transport.tempo = bpm;
++        }
++        if let Some(ref mut data) = self.process_data {
++            data.transport_tempo = bpm;
++            if process_context_needs(
++                data.process_context_requirements,
++                IProcessContextRequirements_::Flags_::kNeedTempo as u32,
++            ) {
++                data.process_context.tempo = bpm;
++            }
++        }
++    }
++
++    #[allow(clippy::unnecessary_cast)]
++    fn update_time_signature(&mut self, numerator: i32, denominator: i32) {
++        if let Some(transport) = &mut self.process_transport {
++            transport.time_sig_numerator = numerator;
++            transport.time_sig_denominator = denominator;
++        }
++        self.time_sig_numerator = numerator;
++        self.time_sig_denominator = denominator;
++        if let Some(ref mut data) = self.process_data {
++            if process_context_needs(
++                data.process_context_requirements,
++                IProcessContextRequirements_::Flags_::kNeedTimeSignature as u32,
++            ) {
++                data.process_context.timeSigNumerator = numerator;
++                data.process_context.timeSigDenominator = denominator;
++            }
++        }
++    }
++
++    fn update_playing(&mut self, playing: bool) {
++        self.playing = playing;
++        if let Some(transport) = &mut self.process_transport {
++            transport.playing = playing;
++        }
++        if let Some(ref mut data) = self.process_data {
++            data.process_context.state =
++                process_context_state(data.process_context_requirements, playing);
++        }
++    }
++
++    fn set_process_transport(&mut self, transport: crate::plugin::ProcessTransport) -> Result<()> {
++        transport.validate()?;
++        self.update_tempo(transport.tempo);
++        self.update_time_signature(transport.time_sig_numerator, transport.time_sig_denominator);
++        self.update_playing(transport.playing);
++        self.process_transport = Some(transport);
++        if let Some(data) = &mut self.process_data {
++            apply_process_transport(
++                &mut data.process_context,
++                data.process_context_requirements,
++                transport,
++            );
++        }
++        Ok(())
++    }
++
++    fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
++        self.input_events
++            .try_add_event(event)
++            .map_err(|_| Error::EventInputRejected)
++    }
++
++    fn note_on(
++        &mut self,
++        channel: MidiChannel,
++        note: u8,
++        velocity: u8,
++        sample_offset: i32,
++    ) -> Result<crate::midi::NoteId> {
++        // Do not admit a voice whose exact release obligation cannot be retained.
++        if self.active_notes.len() >= MAX_TRACKED_NOTES {
++            return Err(Error::EventInputRejected);
++        }
++        let id = self.next_note_id;
++        // Preserve the established wrap policy, but never reuse a still-live candidate ID.
++        if self.active_notes.iter().any(|&(active, _, _)| active == id) {
++            return Err(Error::EventInputRejected);
++        }
++        unsafe {
++            let mut ev: Event = std::mem::zeroed();
++            ev.busIndex = 0;
++            ev.sampleOffset = sample_offset.max(0);
++            ev.flags = Event_::EventFlags_::kIsLive as u16;
++            ev.r#type = kNoteOnEvent as u16;
++            ev.__field0.noteOn.channel = channel.as_index() as i16;
++            ev.__field0.noteOn.pitch = note as i16;
++            ev.__field0.noteOn.velocity = velocity as f32 / 127.0;
++            ev.__field0.noteOn.noteId = id;
++            self.input_events
++                .try_add_raw_event(&ev)
++                .map_err(|_| Error::EventInputRejected)?;
++        }
++        self.next_note_id = id.wrapping_add(1).max(1);
++        self.active_notes
++            .push((id, channel.as_index() as i16, note as i16));
++        Ok(crate::midi::NoteId(id))
++    }
++
++    fn note_off(&mut self, id: crate::midi::NoteId, sample_offset: i32) -> Result<()> {
++        // Recover the note's channel and pitch from the note-on. Without them the event carries
++        // pitch 0 on channel 1, which any synth matching releases by pitch ignores — leaving the
++        // real note sounding forever.
++        let tracked_index = self
++            .active_notes
++            .iter()
++            .position(|&(tracked_id, _, _)| tracked_id == id.0);
++        let tracked = tracked_index.map(|index| self.active_notes[index]);
++        unsafe {
++            let mut ev: Event = std::mem::zeroed();
++            ev.busIndex = 0;
++            ev.sampleOffset = sample_offset.max(0);
++            ev.flags = Event_::EventFlags_::kIsLive as u16;
++            ev.r#type = kNoteOffEvent as u16;
++            ev.__field0.noteOff.noteId = id.0;
++            if let Some((_, channel, pitch)) = tracked {
++                ev.__field0.noteOff.channel = channel;
++                ev.__field0.noteOff.pitch = pitch;
++            }
++            // A release velocity of 0 is the SDK's own default for "unspecified".
++            self.input_events
++                .try_add_raw_event(&ev)
++                .map_err(|_| Error::EventInputRejected)?;
++        }
++        if let Some(index) = tracked_index {
++            self.active_notes.swap_remove(index);
++        }
++        Ok(())
++    }
++
++    fn send_note_expression(
++        &mut self,
++        id: crate::midi::NoteId,
++        kind: crate::midi::NoteExpressionType,
++        value: f64,
++        sample_offset: i32,
++    ) -> Result<()> {
++        unsafe {
++            let mut ev: Event = std::mem::zeroed();
++            ev.busIndex = 0;
++            ev.sampleOffset = sample_offset.max(0);
++            ev.flags = Event_::EventFlags_::kIsLive as u16;
++            ev.r#type = kNoteExpressionValueEvent as u16;
++            ev.__field0.noteExpressionValue.typeId = kind.type_id();
++            ev.__field0.noteExpressionValue.noteId = id.0;
++            ev.__field0.noteExpressionValue.value = value.clamp(0.0, 1.0);
++            self.input_events
++                .try_add_raw_event(&ev)
++                .map_err(|_| Error::EventInputRejected)?;
++        }
++        Ok(())
++    }
++
++    fn take_output_events(&self) -> Vec<PluginEvent> {
++        let mut out = Vec::new();
++        while let Some(event) = self.output_events_owned.pop() {
++            out.push(event);
++        }
++        out
++    }
++
++    fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
++        let events = self.take_output_events();
++        let lost = self
++            .output_events_lost
++            .swap(false, std::sync::atomic::Ordering::AcqRel);
++        (events, lost)
++    }
++}
++
++impl ProcessorRuntime {
++    fn preflight_parameter_admission(&mut self) -> Result<()> {
++        if self.pending_param_changes.len() >= MAX_PENDING_PARAM_CHANGES {
++            self.dropped_param_changes = self.dropped_param_changes.saturating_add(1);
++            return Err(Error::ParameterInputRejected);
++        }
++        Ok(())
++    }
++}
+--- /dev/null
++++ b/src/internal/plugin_impl/domain_session.rs
+@@ -0,0 +1,318 @@
++//! Scoped, same-thread capabilities. The aggregate remains exclusively borrowed and owns
++//! every COM reference, module and runtime field throughout the visit. No handback state,
++//! movable owner, user callback or worker authority is introduced.
++
++use super::*;
++use std::{marker::PhantomData, rc::Rc};
++
++pub(crate) type DomainSessionCallback<'callback> = dyn for<'owner> FnMut(&mut ControlOps<'owner>, &mut ProcessorOps<'owner>) -> Result<()>
++    + 'callback;
++
++/// Only controller/editor/UI fields. No component, processor, module, factory or runtime.
++pub(crate) struct ControlOps<'owner> {
++    controller: &'owner Option<ComPtr<IEditController>>,
++    view: &'owner Option<ComPtr<IPlugView>>,
++    resize: &'owner Arc<Mutex<Option<(i32, i32)>>>,
++    deferred_controller_sync: &'owner ArrayQueue<(u32, f64)>,
++    control_thread: ThreadId,
++    #[cfg(target_os = "linux")]
++    host_ui: &'owner HostApplication,
++    #[cfg(target_os = "linux")]
++    run_loop: &'owner Arc<Mutex<RunLoopRegistry>>,
++    _same_thread: PhantomData<Rc<()>>,
++}
++
++/// Only exclusive runtime state, a non-owning process capability, and an active-call marker.
++/// The copied active flag cannot become stale: no facade can activate/deactivate the owner.
++pub(crate) struct ProcessorOps<'owner> {
++    runtime: &'owner mut ProcessorRuntime,
++    processor: ProcessorLease<'owner>,
++    gate: DataExchangeProcessGate<'owner>,
++    is_active: bool,
++    _same_thread: PhantomData<Rc<()>>,
++}
++
++pub(super) fn visit(
++    owner: &mut PluginImpl,
++    callback: &mut DomainSessionCallback<'_>,
++) -> Result<()> {
++    let ControlDomain {
++        processor,
++        controller,
++        plugin_view,
++        editor_resize,
++        deferred_controller_sync,
++        control_thread,
++        _host_app,
++        #[cfg(target_os = "linux")]
++        run_loop,
++        _module,
++        is_active,
++        ..
++    } = &mut owner.control;
++    let mut control = ControlOps {
++        controller,
++        view: plugin_view,
++        resize: editor_resize,
++        deferred_controller_sync,
++        control_thread: *control_thread,
++        #[cfg(target_os = "linux")]
++        host_ui: _host_app,
++        #[cfg(target_os = "linux")]
++        run_loop,
++        _same_thread: PhantomData,
++    };
++    let mut processing = ProcessorOps {
++        runtime: &mut owner.runtime,
++        processor: ProcessorLease::new(processor, _module.as_ref()),
++        gate: _host_app.data_exchange_process_gate(),
++        is_active: *is_active,
++        _same_thread: PhantomData,
++    };
++    callback(&mut control, &mut processing)
++}
++
++// The established legacy processor call remains legal on its caller thread. Only an explicit
++// two-domain session requires the loading thread; otherwise existing playback would change.
++pub(super) fn process_buffer_view(
++    owner: &mut PluginImpl,
++    buffers: &mut CallerAudioBuffers<'_>,
++) -> Result<()> {
++    let mut processing = ProcessorOps {
++        runtime: &mut owner.runtime,
++        processor: ProcessorLease::new(
++            &mut owner.control.processor,
++            owner.control._module.as_ref(),
++        ),
++        gate: owner.control._host_app.data_exchange_process_gate(),
++        is_active: owner.control.is_active,
++        _same_thread: PhantomData,
++    };
++    processing.process_buffer_view(buffers)
++}
++
++// This private seam is intentionally not yet used by helper dispatch. Its methods are tested
++// against real COM mocks; exposing a future dispatcher is a separate reviewed checkpoint.
++#[allow(dead_code)]
++impl ControlOps<'_> {
++    fn drain_controller_sync(&self) {
++        debug_assert_eq!(thread::current().id(), self.control_thread);
++        while let Some((id, value)) = self.deferred_controller_sync.pop() {
++            let Some(controller) = self.controller.as_ref() else {
++                continue;
++            };
++            let result = unsafe { controller.setParamNormalized(id, value) };
++            if result != kResultOk && result != kResultTrue {
++                log::debug!(
++                    "setParamNormalized({id}) returned {result:#x}; applying anyway \
++                    (many plugins report kResultFalse on success)"
++                );
++            }
++        }
++    }
++
++    pub(crate) fn get_parameter(&self, id: u32) -> Result<f64> {
++        self.drain_controller_sync();
++        let controller = self
++            .controller
++            .as_ref()
++            .ok_or_else(|| Error::InterfaceError("No controller available".to_string()))?;
++        unsafe { Ok(controller.getParamNormalized(id)) }
++    }
++
++    pub(crate) fn format_parameter(&self, id: u32, normalized: f64) -> Result<String> {
++        self.drain_controller_sync();
++        let controller = self
++            .controller
++            .as_ref()
++            .ok_or_else(|| Error::InterfaceError("No controller available".to_string()))?;
++        unsafe {
++            let mut text: String128 = std::mem::zeroed();
++            if controller.getParamStringByValue(id, normalized, &mut text) == kResultOk {
++                return Ok(crate::internal::utils::vst_string_to_string(&text));
++            }
++        }
++        Err(Error::InvalidParameter(format!(
++            "Plugin could not format parameter {id}"
++        )))
++    }
++
++    /// Resize an already attached editor. Attachment/detachment still rejoins the owner.
++    pub(crate) fn resize_editor(&mut self, width: i32, height: i32) -> Result<(i32, i32)> {
++        resize_view(self.view, width, height)
++    }
++
++    pub(crate) fn take_editor_resize_request(&self) -> Option<(i32, i32)> {
++        self.resize
++            .lock()
++            .ok()
++            .and_then(|mut request| request.take())
++    }
++
++    #[cfg(target_os = "linux")]
++    pub(crate) fn service_run_loop(&mut self) {
++        self.host_ui.service_run_loop();
++        super::super::com_implementations::service_linux_run_loop(self.run_loop);
++    }
++}
++
++#[allow(dead_code)]
++impl ProcessorOps<'_> {
++    fn process_buffer_view(&mut self, buffers: &mut CallerAudioBuffers<'_>) -> Result<()> {
++        self.runtime.process_buffer_view(
++            &mut self.processor,
++            &mut self.gate,
++            self.is_active,
++            buffers,
++        )
++    }
++
++    pub(crate) fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
++        self.process_buffer_view(&mut CallerAudioBuffers::Flat(buffers))
++    }
++
++    pub(crate) fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
++        self.runtime.validate_bus_buffers(buffers)?;
++        self.process_buffer_view(&mut CallerAudioBuffers::Buses(buffers))
++    }
++
++    /// DSP queue admission only. Does not mirror, query or acknowledge the edit controller.
++    /// Mixed legacy setters keep their existing capacity-preflight → mirror → queue sequence.
++    pub(crate) fn queue_parameter_at(&mut self, id: u32, value: f64, offset: i32) -> Result<()> {
++        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
++            return Err(Error::InvalidParameter(format!(
++                "Value {value} is out of range [0.0, 1.0]"
++            )));
++        }
++        self.runtime.preflight_parameter_admission()?;
++        self.runtime.pending_param_changes.push(ParameterChange {
++            id,
++            value,
++            sample_offset: offset,
++        });
++        Ok(())
++    }
++
++    pub(crate) fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
++        crate::plugin::validate_plugin_event(&event)?;
++        self.runtime.send_plugin_event(event)
++    }
++
++    pub(crate) fn note_on(
++        &mut self,
++        channel: MidiChannel,
++        note: u8,
++        velocity: u8,
++        offset: i32,
++    ) -> Result<crate::midi::NoteId> {
++        crate::plugin::validate_note(note)?;
++        crate::plugin::validate_velocity(velocity)?;
++        self.runtime.note_on(channel, note, velocity, offset)
++    }
++
++    pub(crate) fn note_off(&mut self, id: crate::midi::NoteId, offset: i32) -> Result<()> {
++        self.runtime.note_off(id, offset)
++    }
++
++    pub(crate) fn send_note_expression(
++        &mut self,
++        id: crate::midi::NoteId,
++        kind: crate::midi::NoteExpressionType,
++        value: f64,
++        offset: i32,
++    ) -> Result<()> {
++        if !(0.0..=1.0).contains(&value) {
++            return Err(Error::InvalidParameter(format!(
++                "note-expression value {value} out of range [0.0, 1.0]"
++            )));
++        }
++        self.runtime.send_note_expression(id, kind, value, offset)
++    }
++
++    pub(crate) fn set_process_transport(
++        &mut self,
++        transport: crate::plugin::ProcessTransport,
++    ) -> Result<()> {
++        self.runtime.set_process_transport(transport)
++    }
++
++    pub(crate) fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
++        self.runtime.take_output_events_with_loss()
++    }
++}
++
++pub(super) fn resize_view(
++    plugin_view: &Option<ComPtr<IPlugView>>,
++    width: i32,
++    height: i32,
++) -> Result<(i32, i32)> {
++    if width <= 0 || height <= 0 {
++        return Err(Error::Other(
++            "editor dimensions must be greater than zero".to_string(),
++        ));
++    }
++    let view = plugin_view
++        .as_ref()
++        .ok_or_else(|| Error::Other("Plugin editor is not open".to_string()))?;
++
++    unsafe {
++        if view.canResize() != kResultTrue {
++            let mut current = ViewRect {
++                left: 0,
++                top: 0,
++                right: 0,
++                bottom: 0,
++            };
++            if view.getSize(&mut current) != kResultOk {
++                return Err(Error::Other(
++                    "Plugin editor is fixed-size and its size could not be queried".to_string(),
++                ));
++            }
++            return view_rect_size(&current);
++        }
++
++        let mut requested = ViewRect {
++            left: 0,
++            top: 0,
++            right: width,
++            bottom: height,
++        };
++        // The view constrains `requested` in place. `kResultFalse` means it left the rect
++        // alone (nothing to constrain, or it wants a different size than asked for) — a
++        // refusal to adapt, not a broken call — so take whatever rect it ended up with and
++        // only reject result codes that mean the call itself failed.
++        let constraint_result = view.checkSizeConstraint(&mut requested);
++        let constrained = constraint_result == kResultOk
++            || constraint_result == kResultTrue
++            || constraint_result == kResultFalse
++            || constraint_result == kNotImplemented;
++        if !constrained {
++            return Err(Error::Other(format!(
++                "Plugin failed to check the editor size constraint: {constraint_result:#x}"
++            )));
++        }
++        let accepted = view_rect_size(&requested)?;
++
++        // The SDK calls onSize only when the size actually changes; re-sending the current
++        // one makes VSTGUI-based editors rebuild their frame for nothing.
++        let mut current = ViewRect {
++            left: 0,
++            top: 0,
++            right: 0,
++            bottom: 0,
++        };
++        if view.getSize(&mut current) == kResultOk
++            && view_rect_size(&current).ok() == Some(accepted)
++        {
++            return Ok(accepted);
++        }
++
++        let resize_result = view.onSize(&mut requested);
++        if resize_result != kResultOk && resize_result != kResultTrue {
++            return Err(Error::Other(format!(
++                "Plugin rejected editor resize: {resize_result:#x}"
++            )));
++        }
++        Ok(accepted)
++    }
++}
 --- /dev/null
 +++ b/src/internal/plugin_impl/domain_tests.rs
-@@ -0,0 +1,2602 @@
+@@ -0,0 +1,2612 @@
 +//! Synchronous ownership/lifecycle regression tests using real VST3 COM interfaces.
 +//! These mocks intentionally allocate and lock; these are not real-time-safety tests.
 +
@@ -9866,6 +10582,7 @@
 +    no_alloc_process: AtomicBool,
 +    realtime_calls: AtomicUsize,
 +    realtime_points: AtomicUsize,
++    processed_event_count: AtomicUsize,
 +    output_points: AtomicUsize,
 +    output_event_attempts: AtomicUsize,
 +    rejected_output_events: AtomicUsize,
@@ -9891,6 +10608,7 @@
 +            no_alloc_process: AtomicBool::new(false),
 +            realtime_calls: AtomicUsize::new(0),
 +            realtime_points: AtomicUsize::new(0),
++            processed_event_count: AtomicUsize::new(0),
 +            output_points: AtomicUsize::new(0),
 +            output_event_attempts: AtomicUsize::new(0),
 +            rejected_output_events: AtomicUsize::new(0),
@@ -10100,6 +10818,11 @@
 +        kResultOk
 +    }
 +    unsafe fn process(&self, data: *mut ProcessData) -> tresult {
++        if let Some(events) = vst3::ComRef::from_raw((*data).inputEvents) {
++            self.state
++                .processed_event_count
++                .fetch_add(events.getEventCount() as usize, Ordering::Relaxed);
++        }
 +        if self.state.no_alloc_process.load(Ordering::Acquire) {
 +            // Dedicated fixed-state processor path: no trace Vec, formatting or callback hook.
 +            // Parameter/scalar-event operations use prepared storage; data exchange stays empty.
@@ -10244,6 +10967,7 @@
 +        value
 +    }
 +    unsafe fn getParamNormalized(&self, _id: u32) -> f64 {
++        self.probe.record("getParamNormalized");
 +        f64::from_bits(self.state.last_mirrored.load(Ordering::Acquire))
 +    }
 +    unsafe fn setParamNormalized(&self, _id: u32, value: f64) -> tresult {
@@ -12309,6 +13033,388 @@
 +    assert_eq!(state.realtime_calls.load(Ordering::Acquire), 2);
 +    assert_eq!(plugin.take_output_events_with_loss(), (Vec::new(), false));
 +}
++
++mod session_tests;
+--- /dev/null
++++ b/src/internal/plugin_impl/domain_tests/session_tests.rs
+@@ -0,0 +1,377 @@
++//! Real same-thread capability tests. Rust callback unwind is not foreign COM unwind recovery.
++use super::*;
++
++fn main_thread_owner(internal: PluginImpl) -> crate::plugin::MainThreadPlugin {
++    let plugin = crate::plugin::Plugin {
++        info: internal.info.clone(),
++        compatibility: Vec::new(),
++        is_processing: internal.runtime.is_processing,
++        sample_rate: internal.runtime.sample_rate,
++        block_size: internal.runtime.block_size,
++        audio_levels: Arc::new(Mutex::new(crate::audio::AudioLevels::new(1))),
++        parameter_change_callback: None,
++        audio_callback: None,
++        internal: Some(Box::new(internal)),
++    };
++    crate::plugin::MainThreadPlugin::from_in_process(plugin)
++}
++
++#[test]
++fn scoped_domains_use_borrowed_com_on_loading_thread_and_rejoin_before_teardown() {
++    let trace = Trace::default();
++    let state = Arc::new(MockState::default());
++    let mut plugin = plugin_fixture(&trace, &state);
++    plugin.start_processing().unwrap();
++    plugin.set_parameter(1, 0.25).unwrap();
++    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
++    assert_eq!(unsafe { handler.performEdit(3, 0.75) }, kResultOk);
++    *plugin.control.editor_resize.lock().unwrap() = Some((640, 480));
++    let host = plugin.control._host_app.clone();
++    let saw_gate = Arc::new(AtomicBool::new(false));
++    let saw = saw_gate.clone();
++    let callback_host = host.clone();
++    *state.process_callback.lock().unwrap() = Some(Box::new(move || {
++        saw.store(
++            callback_host.is_data_exchange_in_process_for_test(),
++            Ordering::Release,
++        );
++    }));
++    let mut bus = BusAudioBuffers::new(&plugin.audio_bus_layout().unwrap(), 16, 48000.0);
++    let mut flat = AudioBuffers::new(0, 1, 16, 48000.0);
++    let mut owner = main_thread_owner(plugin);
++    trace.clear();
++    owner
++        .with_domain_session(&mut |control, processor| {
++            assert_eq!(control.get_parameter(1)?, 0.25);
++            assert_eq!(control.take_editor_resize_request(), Some((640, 480)));
++            #[cfg(target_os = "linux")]
++            control.service_run_loop();
++            processor.queue_parameter_at(2, 0.5, 0)?;
++            assert_eq!(control.get_parameter(2)?, 0.25); // queue admission does not claim mirroring
++            let id = processor.note_on(MidiChannel::Ch1, 60, 100, 0)?;
++            processor.send_note_expression(id, crate::midi::NoteExpressionType::Volume, 0.5, 0)?;
++            processor.set_process_transport(crate::plugin::ProcessTransport {
++                sample_position: 1024,
++                quarter_note_position: 4.0,
++                tempo: 120.0,
++                playing: true,
++                time_sig_numerator: 4,
++                time_sig_denominator: 4,
++            })?;
++            processor.process(&mut flat)?;
++            processor.note_off(id, 0)?;
++            processor.process_buses(&mut bus)?;
++            assert_eq!(
++                processor.take_output_events_with_loss(),
++                (Vec::new(), false)
++            );
++            Ok(())
++        })
++        .unwrap();
++    assert!(saw_gate.load(Ordering::Acquire));
++    assert!(!host.is_data_exchange_in_process_for_test());
++    assert_eq!(state.processed_event_count.load(Ordering::Acquire), 3);
++    assert_eq!(
++        state.processed_parameters.lock().unwrap()[0],
++        [(1, 0, 0.25), (2, 0, 0.5), (3, 0, 0.75)]
++    );
++    assert!(flat.outputs[0].iter().all(|v| *v == 1.0));
++    assert!(bus.outputs[0].channels[0].iter().all(|v| *v == 1.0));
++    assert_eq!(handler.native_edits.snapshot().applied, 1);
++    assert!(trace
++        .methods()
++        .iter()
++        .all(|(_, method)| !matches!(*method, "addRef" | "release" | "terminate" | "module_drop")));
++    trace.assert_thread(thread::current().id());
++    // State/lifecycle become available only after the synchronous visit has returned.
++    assert!(!owner.save_state().unwrap().is_empty());
++    owner.stop_processing().unwrap();
++    drop(owner);
++    let calls = trace.methods();
++    let at = |target| calls.iter().position(|call| *call == target).unwrap();
++    assert!(at(("component", "terminate")) < at(("module", "drop")));
++    assert_eq!(
++        calls
++            .iter()
++            .filter(|call| **call == ("component", "terminate"))
++            .count(),
++        1
++    );
++    assert_eq!(
++        calls
++            .iter()
++            .filter(|call| **call == ("component", "drop"))
++            .count(),
++        1
++    );
++}
++
++#[test]
++fn callback_error_and_rust_unwind_release_owner_without_fake_native_ack() {
++    for unwind in [false, true] {
++        let state = Arc::new(MockState::default());
++        let mut plugin = plugin_fixture(&Trace::default(), &state);
++        plugin.start_processing().unwrap();
++        let handler = plugin.control.component_handler.as_ref().unwrap().clone();
++        let host = plugin.control._host_app.clone();
++        let before = handler.native_edits.snapshot();
++        let mut owner = main_thread_owner(plugin);
++        if unwind {
++            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++                let _ = owner.with_domain_session(&mut |_control, _processor| {
++                    panic!("controlled Rust visitor unwind before processor invocation");
++                });
++            }));
++            assert!(caught.is_err());
++        } else {
++            assert!(matches!(
++                owner.with_domain_session(&mut |_, _| Err(Error::EventInputRejected)),
++                Err(Error::EventInputRejected)
++            ));
++        }
++        assert_eq!(handler.native_edits.snapshot(), before);
++        assert!(!host.is_data_exchange_in_process_for_test());
++        owner
++            .with_domain_session(&mut |_, processor| {
++                processor.process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
++            })
++            .unwrap();
++        assert!(!owner.save_state().unwrap().is_empty());
++        owner.stop_processing().unwrap();
++    }
++}
++
++#[test]
++fn scoped_failed_sdk_and_output_fault_keep_exact_ack_and_capture_semantics() {
++    for (sdk_fails, output_overflow) in [(true, false), (false, true), (true, true)] {
++        let state = Arc::new(MockState::default());
++        state.no_alloc_process.store(true, Ordering::Release);
++        state.fail_process.store(sdk_fails, Ordering::Release);
++        state
++            .output_points
++            .store(if output_overflow { 4097 } else { 0 }, Ordering::Release);
++        let mut plugin = plugin_fixture(&Trace::default(), &state);
++        plugin.start_processing().unwrap();
++        let handler = plugin.control.component_handler.as_ref().unwrap().clone();
++        unsafe {
++            handler.performEdit(7, 0.5);
++        }
++        let host = plugin.control._host_app.clone();
++        let mut owner = main_thread_owner(plugin);
++        let result = owner.with_domain_session(&mut |_, processor| {
++            processor.process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
++        });
++        if output_overflow {
++            assert!(matches!(result, Err(Error::ParameterOutputRejected)));
++        } else {
++            assert!(matches!(result, Err(Error::ProcessFailed(result)) if result == kResultFalse));
++        }
++        let status = handler.native_edits.snapshot();
++        assert_eq!(status.applied, u64::from(!sdk_fails));
++        assert_eq!(status.lost, sdk_fails);
++        assert!(!host.is_data_exchange_in_process_for_test());
++        assert!(owner.save_state().is_err());
++        state.fail_process.store(false, Ordering::Release);
++        state.output_points.store(0, Ordering::Release);
++        owner.stop_processing().unwrap();
++        owner.start_processing().unwrap();
++        let result = owner.with_domain_session(&mut |_, processor| {
++            processor.process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
++        });
++        if output_overflow {
++            assert!(matches!(result, Err(Error::ParameterOutputRejected)));
++        } else {
++            result.unwrap();
++        }
++        assert!(owner.save_state().is_err());
++    }
++}
++
++#[test]
++fn scoped_zero_sample_flush_and_positive_attempt_preserve_surge_history() {
++    for fail_positive in [false, true] {
++        let state = Arc::new(MockState::default());
++        let mut plugin = plugin_fixture(&Trace::default(), &state);
++        identify_surge_fixture(&mut plugin);
++        plugin.start_processing().unwrap();
++        let handler = plugin.control.component_handler.as_ref().unwrap().clone();
++        unsafe {
++            handler.performEdit(7, 0.5);
++        }
++        plugin
++            .with_domain_session(&mut |_, processor| {
++                processor.process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
++            })
++            .unwrap();
++        assert_eq!(handler.native_edits.snapshot().applied, 1);
++        assert!(plugin.preflight_state_restore().is_ok());
++        let saved = plugin.save_state().unwrap();
++        plugin.load_state(&saved).unwrap();
++        state.fail_process.store(fail_positive, Ordering::Release);
++        let result = plugin.with_domain_session(&mut |_, processor| {
++            processor.process(&mut AudioBuffers::new(0, 1, 1, 48000.0))
++        });
++        assert_eq!(result.is_err(), fail_positive);
++        assert!(plugin.preflight_state_restore().is_err());
++        let before = handler.native_edits.snapshot();
++        assert!(plugin.load_state(&saved).is_err());
++        assert_eq!(handler.native_edits.snapshot(), before);
++    }
++}
++
++#[test]
++fn scoped_admission_rejection_keeps_checked_note_and_parameter_obligations() {
++    let mut plugin = plugin_fixture(&Trace::default(), &Arc::new(MockState::default()));
++    fill_admission_queue(&mut plugin, MAX_QUEUED_EVENTS);
++    let next = plugin.runtime.next_note_id;
++    plugin
++        .with_domain_session(&mut |_, processor| {
++            assert!(matches!(
++                processor.note_on(MidiChannel::Ch1, 60, 100, 0),
++                Err(Error::EventInputRejected)
++            ));
++            assert!(matches!(
++                processor.send_plugin_event(admission_scalar_event()),
++                Err(Error::EventInputRejected)
++            ));
++            assert!(processor.note_on(MidiChannel::Ch1, 128, 100, 0).is_err());
++            assert!(processor
++                .send_note_expression(
++                    crate::midi::NoteId(1),
++                    crate::midi::NoteExpressionType::Volume,
++                    f64::NAN,
++                    0
++                )
++                .is_err());
++            assert!(processor.queue_parameter_at(1, f64::NAN, 0).is_err());
++            for id in 0..MAX_PENDING_PARAM_CHANGES {
++                processor.queue_parameter_at(id as u32, 0.5, 0)?;
++            }
++            assert!(matches!(
++                processor.queue_parameter_at(9999, 0.5, 0),
++                Err(Error::ParameterInputRejected)
++            ));
++            assert!(matches!(
++                processor.process(&mut AudioBuffers::new(0, 1, 0, 48000.0)),
++                Err(Error::NotProcessing)
++            ));
++            Ok(())
++        })
++        .unwrap();
++    assert_eq!(plugin.runtime.next_note_id, next);
++    assert!(plugin.runtime.active_notes.is_empty());
++    assert_eq!(
++        plugin.runtime.pending_param_changes.len(),
++        MAX_PENDING_PARAM_CHANGES
++    );
++    assert_eq!(
++        plugin.runtime.input_events.events.lock().unwrap().len(),
++        MAX_QUEUED_EVENTS
++    );
++}
++
++#[test]
++fn explicit_session_rejects_non_control_thread_identity_before_visiting() {
++    let mut plugin = plugin_fixture(&Trace::default(), &Arc::new(MockState::default()));
++    let original = plugin.control.control_thread;
++    plugin.control.control_thread = thread::spawn(|| thread::current().id()).join().unwrap();
++    let mut called = false;
++    assert!(plugin
++        .with_domain_session(&mut |_, _| {
++            called = true;
++            Ok(())
++        })
++        .is_err());
++    assert!(!called);
++    plugin.control.control_thread = original;
++}
++
++#[test]
++fn visitor_failure_after_successful_sdk_call_does_not_revoke_native_application() {
++    for unwind in [false, true] {
++        let state = Arc::new(MockState::default());
++        let mut plugin = plugin_fixture(&Trace::default(), &state);
++        plugin.start_processing().unwrap();
++        let handler = plugin.control.component_handler.as_ref().unwrap().clone();
++        unsafe {
++            handler.performEdit(7, 0.5);
++        }
++        let host = plugin.control._host_app.clone();
++        let mut owner = main_thread_owner(plugin);
++        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            owner.with_domain_session(&mut |_, processor| {
++                processor.process(&mut AudioBuffers::new(0, 1, 0, 48000.0))?;
++                if unwind {
++                    panic!("controlled Rust visitor unwind after successful SDK call");
++                }
++                Err(Error::EventInputRejected)
++            })
++        }));
++        if unwind {
++            assert!(outcome.is_err());
++        } else {
++            assert!(matches!(outcome.unwrap(), Err(Error::EventInputRejected)));
++        }
++        let native = handler.native_edits.snapshot();
++        assert_eq!(native.applied, 1);
++        assert!(!native.lost);
++        assert!(!host.is_data_exchange_in_process_for_test());
++        assert!(!owner.save_state().unwrap().is_empty());
++        owner.stop_processing().unwrap();
++    }
++}
++
++struct BackendWithoutDomains;
++impl PluginInternal for BackendWithoutDomains {
++    fn set_parameter(&mut self, _: u32, _: f64) -> Result<()> {
++        unreachable!()
++    }
++    fn get_parameter(&self, _: u32) -> Result<f64> {
++        unreachable!()
++    }
++    fn get_all_parameters(&self) -> Result<Vec<Parameter>> {
++        unreachable!()
++    }
++    fn format_parameter(&self, _: u32, _: f64) -> Result<String> {
++        unreachable!()
++    }
++    fn process(&mut self, _: &mut AudioBuffers) -> Result<()> {
++        unreachable!()
++    }
++    fn send_midi_event(&mut self, _: MidiEvent) -> Result<()> {
++        unreachable!()
++    }
++    fn start_processing(&mut self) -> Result<()> {
++        unreachable!()
++    }
++    fn stop_processing(&mut self) -> Result<()> {
++        unreachable!()
++    }
++    fn has_editor(&self) -> bool {
++        unreachable!()
++    }
++    fn open_editor(&mut self, _: *mut c_void) -> Result<()> {
++        unreachable!()
++    }
++    fn close_editor(&mut self) -> Result<()> {
++        unreachable!()
++    }
++    fn get_editor_size(&self) -> Result<(i32, i32)> {
++        unreachable!()
++    }
++    fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
++        unreachable!()
++    }
++}
++
++#[test]
++fn unsupported_backend_uses_object_safe_default_without_running_callback() {
++    let mut backend: Box<dyn PluginInternal> = Box::new(BackendWithoutDomains);
++    let mut invoked = false;
++    let result = backend.with_domain_session(&mut |_, _| {
++        invoked = true;
++        Ok(())
++    });
++    assert!(result.unwrap_err().to_string().contains("unsupported"));
++    assert!(!invoked);
++}
 --- /dev/null
 +++ b/src/internal/processor_lease.rs
 @@ -0,0 +1,61 @@
@@ -12454,7 +13560,7 @@
  /// VST3 plugin instance
  #[allow(clippy::type_complexity)] // callback fields are Box<dyn Fn...>; intrinsic to the API
  pub struct Plugin {
-@@ -723,6 +770,518 @@
+@@ -723,8 +770,550 @@
      pub(crate) internal: Option<Box<dyn PluginInternal>>,
  }
  
@@ -12508,6 +13614,26 @@
 +}
 +
 +impl MainThreadPlugin {
++    /// Internal same-thread capability seam. The exclusive owner borrow spans the callback;
++    /// state/setup/metadata/teardown must wait until both restricted borrows end.
++    /// Deliberately does not invoke arbitrary legacy Plugin user callbacks or metering hooks.
++    #[allow(dead_code)] // future helper command factoring is a separate checkpoint
++    pub(crate) fn with_domain_session(
++        &mut self,
++        callback: &mut crate::internal::plugin_impl::domain_session::DomainSessionCallback<'_>,
++    ) -> Result<()> {
++        if std::thread::current().id() != self.loading_thread {
++            return Err(Error::Other(
++                "domain session must run on the plugin loading thread".to_string(),
++            ));
++        }
++        self.plugin
++            .internal
++            .as_mut()
++            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
++            .with_domain_session(callback)
++    }
++
 +    // Only the in-process host loader calls this; there is no public conversion from a
 +    // legacy movable Plugin that may have initialized its controller on another thread.
 +    pub(crate) fn from_in_process(plugin: Plugin) -> Self {
@@ -12972,8 +14098,20 @@
 +
  // Internal trait for hiding implementation details
  pub(crate) trait PluginInternal: Send {
++    /// Private synchronous domain visit. Other backends expose no local capabilities.
++    fn with_domain_session(
++        &mut self,
++        _callback: &mut crate::internal::plugin_impl::domain_session::DomainSessionCallback<'_>,
++    ) -> Result<()> {
++        Err(Error::Other(
++            "scoped local plugin domains are unsupported by this backend".to_string(),
++        ))
++    }
++
      fn set_parameter(&mut self, id: u32, value: f64) -> Result<()>;
-@@ -805,9 +1364,13 @@
+     /// Schedule a parameter change at a sample offset within the next process block.
+     /// Defaults to a block-start change (ignores the offset) for implementations that don't
+@@ -805,9 +1394,13 @@
              "bus activation is not supported for this plugin".to_string(),
          ))
      }
@@ -12990,7 +14128,7 @@
      fn set_tempo(&mut self, _bpm: f64) -> Result<()> {
          Err(Error::Other(
              "runtime transport mutation is not supported for this plugin".to_string(),
-@@ -898,10 +1461,21 @@
+@@ -898,10 +1491,21 @@
      }
      fn start_processing(&mut self) -> Result<()>;
      fn stop_processing(&mut self) -> Result<()>;
@@ -13012,7 +14150,7 @@
      /// Whether the editor accepts host-driven size changes.
      fn editor_can_resize(&self) -> bool {
          false
-@@ -931,6 +1505,19 @@
+@@ -931,6 +1535,19 @@
      fn take_host_notifications(&mut self) -> Vec<HostNotification> {
          Vec::new()
      }
@@ -13032,7 +14170,7 @@
      /// Dispatch any main-thread data-exchange blocks to the controller and drain owned host
      /// snapshots. Background-dispatched queues are copied into the same bounded snapshot sink.
      fn take_data_exchange_blocks(&mut self) -> Vec<DataExchangeBlock> {
-@@ -962,8 +1549,11 @@
+@@ -962,8 +1579,11 @@
      fn take_output_events(&self) -> Vec<PluginEvent> {
          Vec::new()
      }
@@ -13046,7 +14184,7 @@
      fn output_midi_handle(&self) -> Option<OutputMidiConsumer> {
          None
      }
-@@ -1066,6 +1656,11 @@
+@@ -1066,6 +1686,11 @@
              "state save/restore is not supported".to_string(),
          ))
      }
@@ -13058,7 +14196,7 @@
      /// Restore the plugin's state from a blob previously returned by [`Self::save_state`],
      /// telling the plugin what kind of restore this is via the stream's attributes.
      ///
-@@ -1341,6 +1936,19 @@
+@@ -1341,6 +1966,19 @@
              .queue_processor_parameter_at(id, value, sample_offset)
      }
  
@@ -13078,7 +14216,7 @@
      /// Change the transport tempo (beats per minute) advertised to the plugin in the host
      /// `ProcessContext`, taking effect on the **next** processed block — even while the plugin
      /// is actively processing. Drives tempo-synced DSP (LFOs, synced delays, arpeggiators).
-@@ -1387,10 +1995,8 @@
+@@ -1387,10 +2025,8 @@
      /// `ProcessContext` (the `kPlaying` flag), taking effect on the **next** processed block —
      /// even while the plugin is actively processing.
      ///
@@ -13091,7 +14229,7 @@
      pub fn set_playing(&mut self, playing: bool) -> Result<()> {
          self.internal
              .as_mut()
-@@ -1846,10 +2452,15 @@
+@@ -1846,10 +2482,15 @@
              return Ok(());
          }
  
@@ -13111,7 +14249,7 @@
  
          self.is_processing = false;
          Ok(())
-@@ -1986,6 +2597,29 @@
+@@ -1986,6 +2627,29 @@
              .as_ref()
              .map(|i| i.has_editor())
              .unwrap_or(false)
@@ -13141,7 +14279,7 @@
      }
  
      /// Open the plugin editor window
-@@ -2115,6 +2749,39 @@
+@@ -2115,6 +2779,39 @@
              .unwrap_or_default()
      }
  
@@ -13181,7 +14319,7 @@
      /// Drain ordered requests the plugin reported through `IComponentHandler2`.
      pub fn take_host_notifications(&mut self) -> Vec<HostNotification> {
          self.internal
-@@ -2176,10 +2843,17 @@
+@@ -2176,10 +2873,17 @@
      /// lifecycle. The returned flags still describe every request; in particular,
      /// [`RestartFlags::reload_component`] means the caller must replace this plugin instance.
      pub fn service_host_requests(&mut self) -> Result<RestartFlags> {
@@ -13203,7 +14341,7 @@
      }
  
      /// Take the MIDI events the plugin has emitted (e.g. from an arpeggiator or MPE
-@@ -2191,7 +2865,8 @@
+@@ -2191,7 +2895,8 @@
      /// marshalled back alongside each processed block.
      ///
      /// The buffer is capped at 4096 events: if you never poll while a chatty plugin keeps
@@ -13213,7 +14351,7 @@
      pub fn take_output_midi(&self) -> Vec<MidiEvent> {
          self.internal
              .as_ref()
-@@ -2209,6 +2884,19 @@
+@@ -2209,6 +2914,19 @@
          self.internal
              .as_ref()
              .map(|i| i.take_output_events())
@@ -13233,7 +14371,7 @@
              .unwrap_or_default()
      }
  
-@@ -2248,6 +2936,15 @@
+@@ -2248,6 +2966,15 @@
              .save_state()
      }
  
@@ -13249,7 +14387,7 @@
      /// Restore plugin state from a blob produced by [`Self::save_state`] on the *same*
      /// plugin. Applies to both the processor and the controller, so parameter values and
      /// the editor reflect the restored state.
-@@ -2258,10 +2955,17 @@
+@@ -2258,10 +2985,17 @@
      /// The plugin is told this is a project/session restore ([`StateContext::Project`]). Use
      /// [`Self::load_state_with_context`] when the bytes came from a preset file instead.
      pub fn load_state(&mut self, data: &[u8]) -> Result<()> {
@@ -13271,7 +14409,7 @@
      }
  
      /// Restore plugin state as [`Self::load_state`] does, and tell the plugin where the bytes
-@@ -2276,10 +2980,17 @@
+@@ -2276,10 +3010,17 @@
      /// Works both in-process and across process isolation — an isolated plugin's `setState`
      /// sees the same attributes.
      pub fn load_state_with_context(&mut self, data: &[u8], context: &StateContext) -> Result<()> {
@@ -13293,7 +14431,33 @@
      }
  
      /// Save this plugin's state to a file as a [`PluginPreset`] (JSON: the plugin's `uid`
-@@ -2669,6 +3380,59 @@
+@@ -2454,14 +3195,14 @@
+ /// Highest value a 14-bit MIDI pitch-bend can carry.
+ const MIDI_PITCH_BEND_MAX: u16 = 16383;
+ 
+-fn validate_note(note: u8) -> Result<()> {
++pub(crate) fn validate_note(note: u8) -> Result<()> {
+     if note > MIDI_DATA_MAX {
+         return Err(Error::MidiError(format!("Invalid note number: {}", note)));
+     }
+     Ok(())
+ }
+ 
+-fn validate_velocity(velocity: u8) -> Result<()> {
++pub(crate) fn validate_velocity(velocity: u8) -> Result<()> {
+     if velocity > MIDI_DATA_MAX {
+         return Err(Error::MidiError(format!("Invalid velocity: {}", velocity)));
+     }
+@@ -2543,7 +3284,7 @@
+     }
+ }
+ 
+-fn validate_plugin_event(event: &PluginEvent) -> Result<()> {
++pub(crate) fn validate_plugin_event(event: &PluginEvent) -> Result<()> {
+     if event.bus_index < 0 {
+         return Err(Error::MidiError(format!(
+             "Invalid event bus index: {}",
+@@ -2669,6 +3410,59 @@
              "Legacy MIDI CC events are plugin output only".to_string(),
          )),
      }
@@ -13353,7 +14517,7 @@
  }
  
  /// Platform-specific window handle
-@@ -2950,6 +3714,14 @@
+@@ -2950,6 +3744,14 @@
  #[cfg(test)]
  mod public_surface_tests {
      use super::*;
@@ -13368,7 +14532,7 @@
  
      /// A `Plugin` with no backing implementation. Enough to exercise the checks the public
      /// surface performs *before* it reaches into `internal`.
-@@ -3327,3 +4099,68 @@
+@@ -3327,3 +4129,68 @@
          assert!(decode_state_snapshot(&bytes).is_err());
      }
  }

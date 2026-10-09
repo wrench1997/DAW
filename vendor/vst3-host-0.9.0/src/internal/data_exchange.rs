@@ -3,7 +3,9 @@
 use crossbeam_queue::ArrayQueue;
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::collections::VecDeque;
+use std::marker::PhantomData;
 use std::ptr::{self, NonNull};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::{self, JoinHandle, Thread, ThreadId};
@@ -162,6 +164,41 @@ struct SnapshotSink {
     bytes: usize,
 }
 
+/// Borrowed permission to mark one serial SDK process invocation as active.
+///
+/// This view deliberately reaches only the process flag: it cannot retain the host,
+/// acquire a receiver, dispatch queues, or perform lifecycle work. The owner creates
+/// one gate for its exclusive process session and keeps that session on its thread.
+pub(super) struct DataExchangeProcessGate<'owner> {
+    in_process: &'owner AtomicBool,
+    _not_send_sync: PhantomData<Rc<()>>,
+}
+
+impl DataExchangeProcessGate<'_> {
+    /// Keep data-exchange block access enabled only for the returned guard's scope.
+    /// Borrowing the gate exclusively prevents overlapping entries through this view.
+    pub(super) fn enter(&mut self) -> DataExchangeProcessGuard<'_> {
+        self.in_process.store(true, Ordering::Release);
+        DataExchangeProcessGuard {
+            in_process: self.in_process,
+            _not_send_sync: PhantomData,
+        }
+    }
+}
+
+/// Ends the process interval on success, early return, or Rust unwinding.
+#[must_use = "dropping the guard ends the data-exchange process interval"]
+pub(super) struct DataExchangeProcessGuard<'gate> {
+    in_process: &'gate AtomicBool,
+    _not_send_sync: PhantomData<Rc<()>>,
+}
+
+impl Drop for DataExchangeProcessGuard<'_> {
+    fn drop(&mut self) {
+        self.in_process.store(false, Ordering::Release);
+    }
+}
+
 /// State shared by the host context, the audio callback, and one background dispatcher.
 pub struct DataExchangeState {
     queues: [AtomicPtr<ExchangeQueue>; MAX_QUEUES],
@@ -237,12 +274,16 @@ impl DataExchangeState {
         self.active.store(active, Ordering::Release);
     }
 
-    pub fn enter_process(&self) {
-        self.in_process.store(true, Ordering::Release);
+    pub(super) fn process_gate(&self) -> DataExchangeProcessGate<'_> {
+        DataExchangeProcessGate {
+            in_process: &self.in_process,
+            _not_send_sync: PhantomData,
+        }
     }
 
-    pub fn leave_process(&self) {
-        self.in_process.store(false, Ordering::Release);
+    #[cfg(test)]
+    pub(super) fn is_in_process_for_test(&self) -> bool {
+        self.in_process.load(Ordering::Acquire)
     }
 
     fn queue(&self, id: u32) -> Option<&ExchangeQueue> {
@@ -575,6 +616,87 @@ impl Drop for DataExchangeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::internal::native_edit_transport::tests::allocation_free;
+
+    #[test]
+    fn process_gate_flag_follows_each_guard_scope() {
+        let state = DataExchangeState::new();
+        let mut gate = state.process_gate();
+        assert!(!state.is_in_process_for_test());
+
+        for _ in 0..4 {
+            {
+                let _process = gate.enter();
+                assert!(state.is_in_process_for_test());
+            }
+            assert!(!state.is_in_process_for_test());
+        }
+    }
+
+    #[test]
+    fn process_gate_clears_flag_on_error_return() {
+        let state = DataExchangeState::new();
+        let mut gate = state.process_gate();
+        let result = (|| -> Result<(), &'static str> {
+            let _process = gate.enter();
+            assert!(state.is_in_process_for_test());
+            Err::<(), _>("process failed")?;
+            Ok(())
+        })();
+
+        assert_eq!(result, Err("process failed"));
+        assert!(!state.is_in_process_for_test());
+        let process = gate.enter();
+        assert!(state.is_in_process_for_test());
+        drop(process);
+        assert!(!state.is_in_process_for_test());
+    }
+
+    #[test]
+    fn process_gate_clears_flag_on_unwind() {
+        let state = DataExchangeState::new();
+        let mut gate = state.process_gate();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _process = gate.enter();
+            assert!(state.is_in_process_for_test());
+            panic!("process test unwind");
+        }));
+
+        assert!(result.is_err());
+        assert!(!state.is_in_process_for_test());
+        let process = gate.enter();
+        assert!(state.is_in_process_for_test());
+        drop(process);
+        assert!(!state.is_in_process_for_test());
+    }
+
+    #[test]
+    fn process_gate_is_allocation_free_and_does_not_retain_state() {
+        let state = DataExchangeState::new();
+        let strong_count = Arc::strong_count(&state);
+        assert_eq!(
+            std::mem::size_of::<DataExchangeProcessGate<'_>>(),
+            std::mem::size_of::<&AtomicBool>()
+        );
+        assert_eq!(
+            std::mem::size_of::<DataExchangeProcessGuard<'_>>(),
+            std::mem::size_of::<&AtomicBool>()
+        );
+
+        allocation_free(|| {
+            for _ in 0..256 {
+                let mut gate = state.process_gate();
+                assert_eq!(Arc::strong_count(&state), strong_count);
+                {
+                    let _process = gate.enter();
+                    assert!(state.is_in_process_for_test());
+                    assert_eq!(Arc::strong_count(&state), strong_count);
+                }
+                assert!(!state.is_in_process_for_test());
+            }
+        });
+        assert_eq!(Arc::strong_count(&state), strong_count);
+    }
 
     #[test]
     fn exchange_queue_exhausts_and_recycles_without_allocating() {

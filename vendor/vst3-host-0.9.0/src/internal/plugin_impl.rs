@@ -1,6 +1,9 @@
 //! Internal VST3 plugin implementation
 
+use super::data_exchange::DataExchangeProcessGate;
 use super::native_edit_transport::NativeEditReceiver;
+
+pub(crate) mod domain_session;
 use super::processor_lease::{ProcessorCalls, ProcessorLease};
 use crate::{
     audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
@@ -144,7 +147,7 @@ struct BusActivationState {
 /// on its loading thread; legacy `Plugin` users retain their existing `Send` API.
 ///
 /// Runtime drops before control ownership, so host process data cannot outlive the module.
-/// This is an ownership extraction only: the legacy bridge still locks/allocates and all
+/// This is ownership preparation only: other processing work still locks/allocates and all
 /// helper plugin calls still run synchronously on the main thread.
 pub struct PluginImpl {
     pub(crate) info: PluginInfo,
@@ -220,7 +223,8 @@ struct ControlDomain {
 /// processing reads them without querying component/controller metadata.
 ///
 /// This preparatory type is NOT a promise of real-time safety or cross-thread access:
-/// ParameterChanges/EventList and the legacy callback bridge still need bounded replacement.
+/// Event payloads and other callback work still allocate; prepared parameter/event headers
+/// retain synchronization. The scoped capabilities do not activate cross-thread access.
 struct ProcessorRuntime {
     is_processing: bool,
     // A positive processor call may activate deferred state even when it returns an error.
@@ -295,33 +299,9 @@ struct ProcessorRuntime {
     output_events_lost: std::sync::atomic::AtomicBool,
 }
 
-/// Temporary adapter for the unchanged synchronous data-exchange path. The native-edit
-/// consumer is runtime-owned; it no longer reaches through control-domain GUI locks.
-struct LegacyProcessBridge<'a> {
-    host_app: &'a HostApplication,
-}
-
-impl LegacyProcessBridge<'_> {
-    fn enter_process(&self) {
-        self.host_app.enter_data_exchange_process();
-    }
-    fn leave_process(&self) {
-        self.host_app.leave_data_exchange_process();
-    }
-}
-
 impl ControlDomain {
     fn processor_lease(&mut self) -> ProcessorLease<'_> {
         ProcessorLease::new(&mut self.processor, self._module.as_ref())
-    }
-
-    fn processing_parts(&mut self) -> (ProcessorLease<'_>, LegacyProcessBridge<'_>) {
-        (
-            ProcessorLease::new(&mut self.processor, self._module.as_ref()),
-            LegacyProcessBridge {
-                host_app: &self._host_app,
-            },
-        )
     }
 }
 
@@ -1057,53 +1037,20 @@ impl PluginImpl {
     /// `ProcessContext` both move. Existing musical position is preserved.
     #[allow(clippy::unnecessary_cast)]
     fn update_tempo(&mut self, bpm: f64) {
-        self.runtime.tempo = bpm;
-        if let Some(transport) = &mut self.runtime.process_transport {
-            transport.tempo = bpm;
-        }
-        if let Some(ref mut data) = self.runtime.process_data {
-            data.transport_tempo = bpm;
-            if process_context_needs(
-                data.process_context_requirements,
-                IProcessContextRequirements_::Flags_::kNeedTempo as u32,
-            ) {
-                data.process_context.tempo = bpm;
-            }
-        }
+        self.runtime.update_tempo(bpm)
     }
 
     /// Update the transport time signature for the **next** processed block, even while
     /// processing is active (stored fields plus the live `ProcessContext`).
     #[allow(clippy::unnecessary_cast)]
     fn update_time_signature(&mut self, numerator: i32, denominator: i32) {
-        if let Some(transport) = &mut self.runtime.process_transport {
-            transport.time_sig_numerator = numerator;
-            transport.time_sig_denominator = denominator;
-        }
-        self.runtime.time_sig_numerator = numerator;
-        self.runtime.time_sig_denominator = denominator;
-        if let Some(ref mut data) = self.runtime.process_data {
-            if process_context_needs(
-                data.process_context_requirements,
-                IProcessContextRequirements_::Flags_::kNeedTimeSignature as u32,
-            ) {
-                data.process_context.timeSigNumerator = numerator;
-                data.process_context.timeSigDenominator = denominator;
-            }
-        }
+        self.runtime.update_time_signature(numerator, denominator)
     }
 
     /// Toggle the transport playing state (`kPlaying`) for the **next** processed block, even
     /// while processing is active (stored field plus the live `ProcessContext.state`).
     fn update_playing(&mut self, playing: bool) {
-        self.runtime.playing = playing;
-        if let Some(transport) = &mut self.runtime.process_transport {
-            transport.playing = playing;
-        }
-        if let Some(ref mut data) = self.runtime.process_data {
-            data.process_context.state =
-                process_context_state(data.process_context_requirements, playing);
-        }
+        self.runtime.update_playing(playing)
     }
 
     /// Apply the host-configured sample rate / block size before processing starts. Called at
@@ -2274,7 +2221,7 @@ impl ProcessorRuntime {
     fn process_chunk(
         &mut self,
         processor: &mut ProcessorLease<'_>,
-        bridge: &LegacyProcessBridge<'_>,
+        gate: &mut DataExchangeProcessGate<'_>,
         buffers: &mut CallerAudioBuffers<'_>,
         frame_offset: usize,
         frames: usize,
@@ -2382,9 +2329,10 @@ impl ProcessorRuntime {
                 // contract requires no audio buses or pointers for that call.
                 let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
                 self.has_processed_audio |= frames != 0;
-                bridge.enter_process();
-                let process_result = processor.process(&mut data.process_data);
-                bridge.leave_process();
+                let process_result = {
+                    let _process_scope = gate.enter();
+                    processor.process(&mut data.process_data)
+                };
                 restore_process_audio_io(&mut data.process_data, saved_audio_io);
                 let _ = self
                     .native_edits
@@ -2500,7 +2448,7 @@ impl ProcessorRuntime {
     fn process_chunks(
         &mut self,
         processor: &mut ProcessorLease<'_>,
-        bridge: &LegacyProcessBridge<'_>,
+        gate: &mut DataExchangeProcessGate<'_>,
         buffers: &mut CallerAudioBuffers<'_>,
         total: usize,
     ) -> Result<()> {
@@ -2519,7 +2467,7 @@ impl ProcessorRuntime {
                 frames,
                 is_last,
             );
-            self.process_chunk(processor, bridge, buffers, offset, frames, is_last)?;
+            self.process_chunk(processor, gate, buffers, offset, frames, is_last)?;
             offset += frames;
         }
         Ok(())
@@ -2613,7 +2561,7 @@ impl ProcessorRuntime {
     fn process_buffer_view(
         &mut self,
         processor: &mut ProcessorLease<'_>,
-        bridge: &LegacyProcessBridge<'_>,
+        gate: &mut DataExchangeProcessGate<'_>,
         is_active: bool,
         buffers: &mut CallerAudioBuffers<'_>,
     ) -> Result<()> {
@@ -2630,9 +2578,9 @@ impl ProcessorRuntime {
 
         let result = if total == 0 {
             stage_chunk_events(&mut self.chunk_events, &self.input_events, 0, 0, true);
-            self.process_chunk(processor, bridge, buffers, 0, 0, true)
+            self.process_chunk(processor, gate, buffers, 0, 0, true)
         } else {
-            self.process_chunks(processor, bridge, buffers, total)
+            self.process_chunks(processor, gate, buffers, total)
         };
 
         self.chunk_events.clear();
@@ -2643,14 +2591,19 @@ impl ProcessorRuntime {
 
 impl PluginImpl {
     fn process_buffer_view(&mut self, buffers: &mut CallerAudioBuffers<'_>) -> Result<()> {
-        let is_active = self.control.is_active;
-        let (mut processor, bridge) = self.control.processing_parts();
-        self.runtime
-            .process_buffer_view(&mut processor, &bridge, is_active, buffers)
+        domain_session::process_buffer_view(self, buffers)
     }
 }
 
 impl PluginInternal for PluginImpl {
+    fn with_domain_session(
+        &mut self,
+        callback: &mut domain_session::DomainSessionCallback<'_>,
+    ) -> Result<()> {
+        self.ensure_control_thread("domain session")?;
+        domain_session::visit(self, callback)
+    }
+
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()> {
         self.set_parameter_at(id, value, 0)
     }
@@ -2672,11 +2625,7 @@ impl PluginInternal for PluginImpl {
         sample_offset: i32,
     ) -> Result<()> {
         // Refuse before mirroring: a rejected DSP point must not mutate the controller.
-        if self.runtime.pending_param_changes.len() >= MAX_PENDING_PARAM_CHANGES {
-            self.runtime.dropped_param_changes =
-                self.runtime.dropped_param_changes.saturating_add(1);
-            return Err(Error::ParameterInputRejected);
-        }
+        self.runtime.preflight_parameter_admission()?;
         // Controller mirroring remains existing control/deferred behavior, outside the
         // bounded parameter COM store's no-allocation claim.
         self.mirror_parameter_to_controller(id, value);
@@ -2689,19 +2638,7 @@ impl PluginInternal for PluginImpl {
     }
 
     fn set_process_transport(&mut self, transport: crate::plugin::ProcessTransport) -> Result<()> {
-        transport.validate()?;
-        self.update_tempo(transport.tempo);
-        self.update_time_signature(transport.time_sig_numerator, transport.time_sig_denominator);
-        self.update_playing(transport.playing);
-        self.runtime.process_transport = Some(transport);
-        if let Some(data) = &mut self.runtime.process_data {
-            apply_process_transport(
-                &mut data.process_context,
-                data.process_context_requirements,
-                transport,
-            );
-        }
-        Ok(())
+        self.runtime.set_process_transport(transport)
     }
 
     fn set_tempo(&mut self, bpm: f64) -> Result<()> {
@@ -3177,10 +3114,7 @@ impl PluginInternal for PluginImpl {
     }
 
     fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
-        self.runtime
-            .input_events
-            .try_add_event(event)
-            .map_err(|_| Error::EventInputRejected)
+        self.runtime.send_plugin_event(event)
     }
 
     fn start_processing(&mut self) -> Result<()> {
@@ -3471,77 +3405,7 @@ impl PluginInternal for PluginImpl {
     }
 
     fn resize_editor(&mut self, width: i32, height: i32) -> Result<(i32, i32)> {
-        if width <= 0 || height <= 0 {
-            return Err(Error::Other(
-                "editor dimensions must be greater than zero".to_string(),
-            ));
-        }
-        let view = self
-            .control
-            .plugin_view
-            .as_ref()
-            .ok_or_else(|| Error::Other("Plugin editor is not open".to_string()))?;
-
-        unsafe {
-            if view.canResize() != kResultTrue {
-                let mut current = ViewRect {
-                    left: 0,
-                    top: 0,
-                    right: 0,
-                    bottom: 0,
-                };
-                if view.getSize(&mut current) != kResultOk {
-                    return Err(Error::Other(
-                        "Plugin editor is fixed-size and its size could not be queried".to_string(),
-                    ));
-                }
-                return view_rect_size(&current);
-            }
-
-            let mut requested = ViewRect {
-                left: 0,
-                top: 0,
-                right: width,
-                bottom: height,
-            };
-            // The view constrains `requested` in place. `kResultFalse` means it left the rect
-            // alone (nothing to constrain, or it wants a different size than asked for) — a
-            // refusal to adapt, not a broken call — so take whatever rect it ended up with and
-            // only reject result codes that mean the call itself failed.
-            let constraint_result = view.checkSizeConstraint(&mut requested);
-            let constrained = constraint_result == kResultOk
-                || constraint_result == kResultTrue
-                || constraint_result == kResultFalse
-                || constraint_result == kNotImplemented;
-            if !constrained {
-                return Err(Error::Other(format!(
-                    "Plugin failed to check the editor size constraint: {constraint_result:#x}"
-                )));
-            }
-            let accepted = view_rect_size(&requested)?;
-
-            // The SDK calls onSize only when the size actually changes; re-sending the current
-            // one makes VSTGUI-based editors rebuild their frame for nothing.
-            let mut current = ViewRect {
-                left: 0,
-                top: 0,
-                right: 0,
-                bottom: 0,
-            };
-            if view.getSize(&mut current) == kResultOk
-                && view_rect_size(&current).ok() == Some(accepted)
-            {
-                return Ok(accepted);
-            }
-
-            let resize_result = view.onSize(&mut requested);
-            if resize_result != kResultOk && resize_result != kResultTrue {
-                return Err(Error::Other(format!(
-                    "Plugin rejected editor resize: {resize_result:#x}"
-                )));
-            }
-            Ok(accepted)
-        }
+        domain_session::resize_view(&self.control.plugin_view, width, height)
     }
 
     fn set_editor_scale_factor(&mut self, factor: f32) -> Result<bool> {
@@ -3732,20 +3596,11 @@ impl PluginInternal for PluginImpl {
     }
 
     fn take_output_events(&self) -> Vec<PluginEvent> {
-        let mut out = Vec::new();
-        while let Some(event) = self.runtime.output_events_owned.pop() {
-            out.push(event);
-        }
-        out
+        self.runtime.take_output_events()
     }
 
     fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
-        let events = self.take_output_events();
-        let lost = self
-            .runtime
-            .output_events_lost
-            .swap(false, std::sync::atomic::Ordering::AcqRel);
-        (events, lost)
+        self.runtime.take_output_events_with_loss()
     }
 
     fn output_midi_handle(&self) -> Option<crate::plugin::OutputMidiConsumer> {
@@ -3787,73 +3642,11 @@ impl PluginInternal for PluginImpl {
         velocity: u8,
         sample_offset: i32,
     ) -> Result<crate::midi::NoteId> {
-        // Do not admit a voice whose exact release obligation cannot be retained.
-        if self.runtime.active_notes.len() >= MAX_TRACKED_NOTES {
-            return Err(Error::EventInputRejected);
-        }
-        let id = self.runtime.next_note_id;
-        // Preserve the established wrap policy, but never reuse a still-live candidate ID.
-        if self
-            .runtime
-            .active_notes
-            .iter()
-            .any(|&(active, _, _)| active == id)
-        {
-            return Err(Error::EventInputRejected);
-        }
-        unsafe {
-            let mut ev: Event = std::mem::zeroed();
-            ev.busIndex = 0;
-            ev.sampleOffset = sample_offset.max(0);
-            ev.flags = Event_::EventFlags_::kIsLive as u16;
-            ev.r#type = kNoteOnEvent as u16;
-            ev.__field0.noteOn.channel = channel.as_index() as i16;
-            ev.__field0.noteOn.pitch = note as i16;
-            ev.__field0.noteOn.velocity = velocity as f32 / 127.0;
-            ev.__field0.noteOn.noteId = id;
-            self.runtime
-                .input_events
-                .try_add_raw_event(&ev)
-                .map_err(|_| Error::EventInputRejected)?;
-        }
-        self.runtime.next_note_id = id.wrapping_add(1).max(1);
-        self.runtime
-            .active_notes
-            .push((id, channel.as_index() as i16, note as i16));
-        Ok(crate::midi::NoteId(id))
+        self.runtime.note_on(channel, note, velocity, sample_offset)
     }
 
     fn note_off(&mut self, id: crate::midi::NoteId, sample_offset: i32) -> Result<()> {
-        // Recover the note's channel and pitch from the note-on. Without them the event carries
-        // pitch 0 on channel 1, which any synth matching releases by pitch ignores — leaving the
-        // real note sounding forever.
-        let tracked_index = self
-            .runtime
-            .active_notes
-            .iter()
-            .position(|&(tracked_id, _, _)| tracked_id == id.0);
-        let tracked = tracked_index.map(|index| self.runtime.active_notes[index]);
-        unsafe {
-            let mut ev: Event = std::mem::zeroed();
-            ev.busIndex = 0;
-            ev.sampleOffset = sample_offset.max(0);
-            ev.flags = Event_::EventFlags_::kIsLive as u16;
-            ev.r#type = kNoteOffEvent as u16;
-            ev.__field0.noteOff.noteId = id.0;
-            if let Some((_, channel, pitch)) = tracked {
-                ev.__field0.noteOff.channel = channel;
-                ev.__field0.noteOff.pitch = pitch;
-            }
-            // A release velocity of 0 is the SDK's own default for "unspecified".
-            self.runtime
-                .input_events
-                .try_add_raw_event(&ev)
-                .map_err(|_| Error::EventInputRejected)?;
-        }
-        if let Some(index) = tracked_index {
-            self.runtime.active_notes.swap_remove(index);
-        }
-        Ok(())
+        self.runtime.note_off(id, sample_offset)
     }
 
     fn send_note_expression(
@@ -3863,21 +3656,8 @@ impl PluginInternal for PluginImpl {
         value: f64,
         sample_offset: i32,
     ) -> Result<()> {
-        unsafe {
-            let mut ev: Event = std::mem::zeroed();
-            ev.busIndex = 0;
-            ev.sampleOffset = sample_offset.max(0);
-            ev.flags = Event_::EventFlags_::kIsLive as u16;
-            ev.r#type = kNoteExpressionValueEvent as u16;
-            ev.__field0.noteExpressionValue.typeId = kind.type_id();
-            ev.__field0.noteExpressionValue.noteId = id.0;
-            ev.__field0.noteExpressionValue.value = value.clamp(0.0, 1.0);
-            self.runtime
-                .input_events
-                .try_add_raw_event(&ev)
-                .map_err(|_| Error::EventInputRejected)?;
-        }
-        Ok(())
+        self.runtime
+            .send_note_expression(id, kind, value, sample_offset)
     }
 
     fn note_expressions(
@@ -6047,3 +5827,190 @@ mod authoritative_transport_tests {
 
 #[cfg(test)]
 mod domain_tests;
+
+impl ProcessorRuntime {
+    #[allow(clippy::unnecessary_cast)]
+    fn update_tempo(&mut self, bpm: f64) {
+        self.tempo = bpm;
+        if let Some(transport) = &mut self.process_transport {
+            transport.tempo = bpm;
+        }
+        if let Some(ref mut data) = self.process_data {
+            data.transport_tempo = bpm;
+            if process_context_needs(
+                data.process_context_requirements,
+                IProcessContextRequirements_::Flags_::kNeedTempo as u32,
+            ) {
+                data.process_context.tempo = bpm;
+            }
+        }
+    }
+
+    #[allow(clippy::unnecessary_cast)]
+    fn update_time_signature(&mut self, numerator: i32, denominator: i32) {
+        if let Some(transport) = &mut self.process_transport {
+            transport.time_sig_numerator = numerator;
+            transport.time_sig_denominator = denominator;
+        }
+        self.time_sig_numerator = numerator;
+        self.time_sig_denominator = denominator;
+        if let Some(ref mut data) = self.process_data {
+            if process_context_needs(
+                data.process_context_requirements,
+                IProcessContextRequirements_::Flags_::kNeedTimeSignature as u32,
+            ) {
+                data.process_context.timeSigNumerator = numerator;
+                data.process_context.timeSigDenominator = denominator;
+            }
+        }
+    }
+
+    fn update_playing(&mut self, playing: bool) {
+        self.playing = playing;
+        if let Some(transport) = &mut self.process_transport {
+            transport.playing = playing;
+        }
+        if let Some(ref mut data) = self.process_data {
+            data.process_context.state =
+                process_context_state(data.process_context_requirements, playing);
+        }
+    }
+
+    fn set_process_transport(&mut self, transport: crate::plugin::ProcessTransport) -> Result<()> {
+        transport.validate()?;
+        self.update_tempo(transport.tempo);
+        self.update_time_signature(transport.time_sig_numerator, transport.time_sig_denominator);
+        self.update_playing(transport.playing);
+        self.process_transport = Some(transport);
+        if let Some(data) = &mut self.process_data {
+            apply_process_transport(
+                &mut data.process_context,
+                data.process_context_requirements,
+                transport,
+            );
+        }
+        Ok(())
+    }
+
+    fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
+        self.input_events
+            .try_add_event(event)
+            .map_err(|_| Error::EventInputRejected)
+    }
+
+    fn note_on(
+        &mut self,
+        channel: MidiChannel,
+        note: u8,
+        velocity: u8,
+        sample_offset: i32,
+    ) -> Result<crate::midi::NoteId> {
+        // Do not admit a voice whose exact release obligation cannot be retained.
+        if self.active_notes.len() >= MAX_TRACKED_NOTES {
+            return Err(Error::EventInputRejected);
+        }
+        let id = self.next_note_id;
+        // Preserve the established wrap policy, but never reuse a still-live candidate ID.
+        if self.active_notes.iter().any(|&(active, _, _)| active == id) {
+            return Err(Error::EventInputRejected);
+        }
+        unsafe {
+            let mut ev: Event = std::mem::zeroed();
+            ev.busIndex = 0;
+            ev.sampleOffset = sample_offset.max(0);
+            ev.flags = Event_::EventFlags_::kIsLive as u16;
+            ev.r#type = kNoteOnEvent as u16;
+            ev.__field0.noteOn.channel = channel.as_index() as i16;
+            ev.__field0.noteOn.pitch = note as i16;
+            ev.__field0.noteOn.velocity = velocity as f32 / 127.0;
+            ev.__field0.noteOn.noteId = id;
+            self.input_events
+                .try_add_raw_event(&ev)
+                .map_err(|_| Error::EventInputRejected)?;
+        }
+        self.next_note_id = id.wrapping_add(1).max(1);
+        self.active_notes
+            .push((id, channel.as_index() as i16, note as i16));
+        Ok(crate::midi::NoteId(id))
+    }
+
+    fn note_off(&mut self, id: crate::midi::NoteId, sample_offset: i32) -> Result<()> {
+        // Recover the note's channel and pitch from the note-on. Without them the event carries
+        // pitch 0 on channel 1, which any synth matching releases by pitch ignores — leaving the
+        // real note sounding forever.
+        let tracked_index = self
+            .active_notes
+            .iter()
+            .position(|&(tracked_id, _, _)| tracked_id == id.0);
+        let tracked = tracked_index.map(|index| self.active_notes[index]);
+        unsafe {
+            let mut ev: Event = std::mem::zeroed();
+            ev.busIndex = 0;
+            ev.sampleOffset = sample_offset.max(0);
+            ev.flags = Event_::EventFlags_::kIsLive as u16;
+            ev.r#type = kNoteOffEvent as u16;
+            ev.__field0.noteOff.noteId = id.0;
+            if let Some((_, channel, pitch)) = tracked {
+                ev.__field0.noteOff.channel = channel;
+                ev.__field0.noteOff.pitch = pitch;
+            }
+            // A release velocity of 0 is the SDK's own default for "unspecified".
+            self.input_events
+                .try_add_raw_event(&ev)
+                .map_err(|_| Error::EventInputRejected)?;
+        }
+        if let Some(index) = tracked_index {
+            self.active_notes.swap_remove(index);
+        }
+        Ok(())
+    }
+
+    fn send_note_expression(
+        &mut self,
+        id: crate::midi::NoteId,
+        kind: crate::midi::NoteExpressionType,
+        value: f64,
+        sample_offset: i32,
+    ) -> Result<()> {
+        unsafe {
+            let mut ev: Event = std::mem::zeroed();
+            ev.busIndex = 0;
+            ev.sampleOffset = sample_offset.max(0);
+            ev.flags = Event_::EventFlags_::kIsLive as u16;
+            ev.r#type = kNoteExpressionValueEvent as u16;
+            ev.__field0.noteExpressionValue.typeId = kind.type_id();
+            ev.__field0.noteExpressionValue.noteId = id.0;
+            ev.__field0.noteExpressionValue.value = value.clamp(0.0, 1.0);
+            self.input_events
+                .try_add_raw_event(&ev)
+                .map_err(|_| Error::EventInputRejected)?;
+        }
+        Ok(())
+    }
+
+    fn take_output_events(&self) -> Vec<PluginEvent> {
+        let mut out = Vec::new();
+        while let Some(event) = self.output_events_owned.pop() {
+            out.push(event);
+        }
+        out
+    }
+
+    fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
+        let events = self.take_output_events();
+        let lost = self
+            .output_events_lost
+            .swap(false, std::sync::atomic::Ordering::AcqRel);
+        (events, lost)
+    }
+}
+
+impl ProcessorRuntime {
+    fn preflight_parameter_admission(&mut self) -> Result<()> {
+        if self.pending_param_changes.len() >= MAX_PENDING_PARAM_CHANGES {
+            self.dropped_param_changes = self.dropped_param_changes.saturating_add(1);
+            return Err(Error::ParameterInputRejected);
+        }
+        Ok(())
+    }
+}

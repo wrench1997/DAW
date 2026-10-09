@@ -495,3 +495,99 @@ Fresh combined gates pass1170app+22helper+5+2protocol,1166core,362availablevendo
 build/helper smoke and bothMSVCsource profiles. Fresh helper hash equals the
 independently tested59b6bcbd artifact; no post-gate production edit. Exact Windows
 CI remains separate and pending.
+
+## Private scoped domain sessions (checkpoint 1)
+
+The additive crate-private `MainThreadPlugin::with_domain_session` enters through an object-safe
+`PluginInternal` callback seam. Non-local/unsupported backends reject it by default. An explicit
+session checks the loading/control thread and exclusively borrows the outer owner for the entire
+callback. The ordinary legacy processing path keeps its existing caller-thread behavior.
+No helper dispatch, broker, worker, metadata policy or public owner-extraction API is added.
+
+Opaque `ControlOps` and `ProcessorOps` each contain an explicit Rc marker and remain !Send/!Sync.
+Their constructors and fields are private; neither has Deref, into_inner, raw COM extraction,
+owner access or a second-session entry. Higher-ranked callback lifetimes prevent a capability
+or borrow from escaping. All component/controller/processor references, module/factory and
+runtime fields remain physically owned by the original aggregate; no runtime slot is removed,
+no replacement sentinel is needed and no owning COM reference is cloned/released for a visit.
+
+- `ControlOps` borrows only disjoint controller/view/resize/deferred-display fields and Linux
+  host UI services. It can read/format controller values, resize an already attached editor,
+  drain resize requests and service the UI run loop. Attach/detach, state, setup, activation,
+  teardown and processor metadata remain aggregate-owner operations after rejoin.
+- `ProcessorOps` exclusively borrows runtime state, the existing module-backed ProcessorLease,
+  a restricted data-exchange gate and a copied active flag. It provides ordinary flat/bus
+  processing, validated processor-only parameter admission, shared owned-event/tracked-note/
+  expression admission, explicit transport and output drain. Queue-only parameter admission
+  does not mirror or freshly confirm the controller. Mixed legacy setters and mapped MIDI keep
+  their existing capacity-preflight → controller mirror → queue order on the aggregate owner.
+- The copied active flag cannot be changed through either facade. Metadata/cache refresh and
+  every coupled administrative operation require lexical session completion first. Ending the
+  borrow is the fence; no timeout or readiness boolean substitutes for it. Existing user audio
+  callbacks and metering hooks are not smuggled into the internal capability API.
+
+`LegacyProcessBridge` is removed. Its replacement borrows only the existing data-exchange
+in_process AtomicBool. `enter(&mut gate)` returns a !Send/!Sync guard whose Drop clears that flag
+on return or Rust unwind. Enter/drop allocate nothing, clone no Arc/COM reference and acquire
+no GUI/lifecycle mutex. The guard surrounds only each actual SDK Process call. Existing data-
+exchange queues, receiver delivery, main/background dispatch and shutdown remain unchanged.
+
+Existing ordinary processing now uses the same restricted processor capability synchronously.
+Runtime note, transport and output bodies are mechanically shared with legacy entry points.
+Native acknowledgment still follows actual successful SDK calls; callback errors after success
+do not revoke application, and failed SDK/native/output-parameter paths keep their original
+loss/fault semantics. Zero-sample save flushing and exact Surge preflight/history are unchanged.
+Rust callback/gate unwind tests do not establish recovery from a plugin unwinding across an
+extern COM boundary or retroactively promise rollback of arbitrary plugin-side effects.
+
+Real COM mocks verify scope/rejoin, loading-thread UI work, flat/bus samples, host/native/event
+admission, reference-count ledgers, single-component termination before module drop, error/unwind,
+unsupported backends and state/Surge/fault boundaries. Private compiler fixtures use the actual
+source/API with one passing same-import baseline before testing forbidden capabilities and
+borrows. An unavailable private import is explicitly rejected as false-positive evidence.
+This is reusable ownership factoring only. Event payloads and other callback work can allocate,
+locks remain, and the historical 346.9 ms native-resize process stall remains unresolved.
+### Private domain-session compile contracts
+
+`scripts/check_vst3_domain_contracts.py` checks the real crate-private scoped API
+without adding production exports, test hooks, feature flags, or dependencies.
+It generates one shared positive body and 46 negative cases in an external QA
+directory. The positive fixture reaches both actual entry points and all allowed
+facade methods before any negative can count. Negative diagnostics must match
+the stated error codes/text and originate in the fixture; unavailable imports
+and inaccessible entry points are explicitly rejected.
+
+Requires Python 3.11+, the same approved runtime-only source-linked vendor
+manifest/lockfile used by the vendor source gates, and a coordinated exclusive
+slot for the existing Cargo target. The input manifest must reference the selected
+production `src/lib.rs`, preserve its dependencies/features/target dependencies,
+and omit bin/test/example/dev-dependency targets. Keep that exact matching lock;
+the runner neither substitutes root `Cargo.lock` nor resolves/downloads packages.
+The caller supplies the established toolchain, build-profile and platform library
+environment (for the shared low-debug target: `CARGO_PROFILE_DEV_DEBUG=0`,
+`CARGO_PROFILE_TEST_DEBUG=0`, `CARGO_INCREMENTAL=0`).
+
+```
+python3 scripts/check_vst3_domain_contracts.py \
+  --repo "$REPO" \
+  --manifest "$VENDOR_QA/Cargo.toml" \
+  --lockfile "$VENDOR_QA/Cargo.lock" \
+  --qa-dir "$QA/private-domain-contracts" \
+  --target-dir "$CARGO_TARGET_DIR"
+```
+
+Do not run this concurrently with another task using that target. `--target-dir`
+may be omitted when `CARGO_TARGET_DIR` is set; conflicting values are rejected.
+All checks use `cargo check --locked --offline --lib --no-default-features
+--features cpal-backend,process-isolation`. Generated artifacts must stay outside
+the repository. `report.json` and per-run logs preserve exact fixture sources,
+compiler identity, all diagnostics, input-lock/shim/runner hashes, and before/after
+production source hashes. Source or manifest/lock drift fails the run. Repeated
+`--case NAME` options support diagnosis, always preceded by the positive case;
+a selected-case run is not the complete 47-case gate.
+
+Coverage includes both facades' Send/Sync exclusions, scoped-reference escape,
+move/borrow restrictions, owner SaveState/LoadState/reconfigure/drop and nested
+session exclusion, and missing admin/metadata/raw pointer/into_inner/Deref APIs.
+These static guarantees complement the runtime session/COM lifetime tests; they
+do not establish real-time safety or authorize an audio worker thread.

@@ -297,3 +297,30 @@ state, split-block, MIDI, native delivery and Surge guards are retained. Source 
 helper/protocol/application/timing/lease and payload representation. See the event section in
 `docs/PLUGIN_PROCESSOR_DOMAINS.md` for remaining legacy ignored-result and void-staging limits.
 The original upstream archive, MIT license, version and dependency manifests are unchanged.
+
+## Scoped private domain-session checkpoint
+
+`src/plugin.rs` adds a crate-private checked MainThreadPlugin callback entry and an object-safe
+PluginInternal default that rejects unsupported backends. The new
+`src/internal/plugin_impl/domain_session.rs` constructs disjoint borrowed !Send/!Sync UI/control
+and processor capabilities while the aggregate remains exclusively borrowed. Constructors and
+fields are private; no downcast, owning extraction, raw COM accessor or movable runtime slot is
+introduced. Existing owner fields, initialization/alias/drop order and public compatibility API
+remain unchanged. Mixed controller/runtime operations still require owner rejoin.
+
+`src/internal/plugin_impl.rs` shares mechanically extracted runtime-only note/transport/output
+bodies, preserves legacy parameter mirror ordering and routes ordinary processing through the
+same restricted processor capability. Validation helpers are crate-visible only so the private
+facade reuses existing validation. No helper/broker/worker/metadata-policy change is made.
+`src/internal/data_exchange.rs` and the HostApplication accessor replace rich process-bridge
+access with an AtomicBool-only borrowed RAII process gate. Existing data-exchange receiver,
+delivery, dispatch, background thread and shutdown semantics are unchanged. No unsafe Send/Sync
+is added. Guard Drop clears the active-call marker on return/Rust unwind without allocation or
+COM retention; no foreign COM unwind recovery guarantee is made.
+
+Direct gate and real domain fixtures cover borrowed COM ledgers, loading-thread behavior,
+success/error/unwind rejoin, native acknowledgment, output faults, alias teardown and unchanged
+Surge/state/zero-sample behavior. Private compile-only fixtures use the real crate source and a
+positive same-import baseline before checking owner-borrow/capability exclusions. See the scoped
+session guide in `docs/PLUGIN_PROCESSOR_DOMAINS.md` for scope and reproduction. This checkpoint
+retains all previous finite-storage, lifetime, legacy-caller and native-resize limitations.

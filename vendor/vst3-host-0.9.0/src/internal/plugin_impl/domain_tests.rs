@@ -157,6 +157,7 @@ struct MockState {
     no_alloc_process: AtomicBool,
     realtime_calls: AtomicUsize,
     realtime_points: AtomicUsize,
+    processed_event_count: AtomicUsize,
     output_points: AtomicUsize,
     output_event_attempts: AtomicUsize,
     rejected_output_events: AtomicUsize,
@@ -182,6 +183,7 @@ impl Default for MockState {
             no_alloc_process: AtomicBool::new(false),
             realtime_calls: AtomicUsize::new(0),
             realtime_points: AtomicUsize::new(0),
+            processed_event_count: AtomicUsize::new(0),
             output_points: AtomicUsize::new(0),
             output_event_attempts: AtomicUsize::new(0),
             rejected_output_events: AtomicUsize::new(0),
@@ -391,6 +393,11 @@ impl<const S: bool, const C: bool> IAudioProcessorTrait for MockPlugin<S, C> {
         kResultOk
     }
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
+        if let Some(events) = vst3::ComRef::from_raw((*data).inputEvents) {
+            self.state
+                .processed_event_count
+                .fetch_add(events.getEventCount() as usize, Ordering::Relaxed);
+        }
         if self.state.no_alloc_process.load(Ordering::Acquire) {
             // Dedicated fixed-state processor path: no trace Vec, formatting or callback hook.
             // Parameter/scalar-event operations use prepared storage; data exchange stays empty.
@@ -535,6 +542,7 @@ impl<const S: bool, const C: bool> IEditControllerTrait for MockPlugin<S, C> {
         value
     }
     unsafe fn getParamNormalized(&self, _id: u32) -> f64 {
+        self.probe.record("getParamNormalized");
         f64::from_bits(self.state.last_mirrored.load(Ordering::Acquire))
     }
     unsafe fn setParamNormalized(&self, _id: u32, value: f64) -> tresult {
@@ -2600,3 +2608,5 @@ fn output_event_overflow_reports_drain_loss_without_falsifying_successful_native
     assert_eq!(state.realtime_calls.load(Ordering::Acquire), 2);
     assert_eq!(plugin.take_output_events_with_loss(), (Vec::new(), false));
 }
+
+mod session_tests;
