@@ -152,7 +152,7 @@ Save/restore and unload all detach first; normal project save barriers still req
 tagged state receipts. Unsupported editor actions do not fault an
 otherwise healthy plugin. Best-effort close remains available for a faulted instance.
 
-## Verification record (2026-10-09)
+## Feature-branch verification record (2026-10-09, before integration)
 
 - Linux `cargo test --offline --locked --all-features --all-targets`: 883 tests passed
   (864 application, 14 helper, 5 editor protocol), using the default thread stack.
@@ -185,3 +185,29 @@ handle exists), with initialization failure terminating the helper. The trusted 
 writes valid fake protocol responses through Rust stdout, direct Win32 output and CRT stdio. Its
 real Windows smoke requires all three to appear on stderr while protocol replies remain correct.
 Pure Python routing tests do not establish that the Windows handle routing executed.
+
+## Integrated source checkpoint (2026-10-09 05:25 UTC)
+
+At `8c09f457bc994271d9d8bff824b38960bb240131`, the complete combined Linux tree passed
+936 application + 14 helper + 5 protocol tests with all features, and 934 application tests
+without default features, all on the default test stack. Formatting, both strict Clippy
+configurations, app/helper builds, real no-plugin helper smoke and 153 Python regressions passed.
+The numbers above in the feature-branch record describe an earlier isolated tree, not this suite.
+
+The packaged preview now admits only the exact reviewed `vst3-host` 0.9.0 path override,
+with its original MIT license and pinned four-file provenance bundle. The original crate archive
+checksum is explicitly distinguished from modified source identity. Vendor source has explicit
+LF checkout attributes so Windows checkout cannot silently change the reviewed provenance bytes.
+The published fixture README link is pinned to the integrated source commit rather than an
+unpublished feature-branch hash.
+
+The trusted Windows fixture harness additionally verifies stopped native edits captured through
+SaveState, native revision, restored project context and exact component/controller bytes in a
+fresh instance. Linux returns 77, UNSUPPORTED / NOT VERIFIED. Windows execution remains pending;
+neither the proposed CI step nor its passing Python orchestration tests establishes a GUI pass.
+
+An independent integration review found a separate pre-existing Browser race: queued generator
+replacement could overwrite completed WAV import. The shared project snapshot-transition predicate
+now protects both import completion and native Open. The actual-app regression covers successful
+and failed replacement plus independent import Undo; MIDI teardown is injected at its completion
+seam. This finding was not covered by the earlier feature-branch review.

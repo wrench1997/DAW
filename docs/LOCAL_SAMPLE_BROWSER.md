@@ -56,3 +56,7 @@ Reviewed feature commit `3e4335ed4a8152884640be821d603f75d12a8010` integrated cl
 ### Production UI input follow-up
 
 The [headless app UI suite](HEADLESS_UI_QA.md) now drives actual Browser text focus, hidden-selection filtering, Refresh/Up, failed WAV import followed by success, one-step Undo/Redo and dirty-project Cancel using real egui input. Folder selection is injected only at the native picker return boundary; the OS picker itself remains untested. Genuine Vulkan offscreen render checkpoints cover these states without claiming native desktop or audible-output acceptance.
+
+## Integration follow-up: deferred generator replacement
+
+The 2026-10-09 integration review found an additional whole-Project owner in the earlier Browser baseline: a generator replacement retained while live MIDI disconnects. WAV completion now shares the explicit project snapshot-transition predicate used by native editor opening and leaves its result queued until replacement succeeds or terminates. The actual-app regression covers both outcomes and independent import Undo; generation/session checks still run after the barrier. Teardown is injected at its completion seam in this test, so it is not live MIDI/hardware acceptance.
