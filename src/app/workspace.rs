@@ -427,6 +427,16 @@ impl CitrusApp {
         }
     }
 
+    pub(super) fn cancel_piano_mouse_pointer(&mut self, ctx: &egui::Context) {
+        self.workspace.cancel_pointer_gesture |= ctx.input(|input| input.pointer.primary_down());
+        ctx.stop_dragging();
+        self.finish_piano_roll_gesture();
+    }
+
+    pub(super) fn piano_pointer_blocked(&self) -> bool {
+        self.workspace.cancel_pointer_gesture || self.workspace.chrome_gesture.is_some()
+    }
+
     pub(super) fn editor_pointer_gesture_active(&self) -> bool {
         self.workspace.pointer_dragging || self.workspace.cancel_pointer_gesture
     }
@@ -451,12 +461,14 @@ impl CitrusApp {
             self.workspace.dirty = true;
         }
         let blocked = !ui.is_enabled()
+            || !ui.input(|input| input.focused)
             || self.shortcut_blocking_layer_active()
             || self.top_shortcut_modal().is_some();
         if blocked
             && (self.editor_drag_in_progress(ui.ctx())
                 || self.playlist_gesture_before.is_some()
-                || self.piano_roll_gesture_before.is_some())
+                || self.piano_roll_gesture_before.is_some()
+                || piano_mouse::active(ui.ctx()))
         {
             self.workspace.cancel_pointer_gesture = true;
         }
@@ -469,16 +481,14 @@ impl CitrusApp {
             ui.ctx().stop_dragging();
             ui.ctx().data_mut(|data| {
                 data.remove::<PianoNoteResizeGesture>(Id::new("piano-note-resize-gesture"));
+                piano_mouse::clear(data);
             });
             if !ui.input(|input| input.pointer.primary_down()) {
                 self.workspace.cancel_pointer_gesture = false;
             }
         }
         self.workspace.pointer_dragging = self.editor_drag_in_progress(ui.ctx());
-        let mut enabled = !interrupted
-            && ui.is_enabled()
-            && !self.shortcut_blocking_layer_active()
-            && self.top_shortcut_modal().is_none();
+        let mut enabled = !interrupted && !blocked;
         if !enabled {
             ui.disable();
         }
@@ -522,6 +532,7 @@ impl CitrusApp {
         if !enabled {
             ui.ctx().data_mut(|data| {
                 data.remove::<PianoNoteResizeGesture>(Id::new("piano-note-resize-gesture"));
+                piano_mouse::clear(data);
             });
             self.finish_playlist_gesture();
             self.finish_piano_roll_gesture();
@@ -541,6 +552,7 @@ impl CitrusApp {
         if !self.workspace.windows[index(StudioView::PianoRoll)].visible {
             ctx.data_mut(|data| {
                 data.remove::<PianoNoteResizeGesture>(Id::new("piano-note-resize-gesture"));
+                piano_mouse::clear(data);
             });
         }
         let bounds_changed = self.workspace.bounds != Some(bounds);

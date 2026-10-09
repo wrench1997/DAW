@@ -4,6 +4,7 @@ mod headless_ui_capture;
 #[cfg(test)]
 mod headless_ui_tests;
 mod piano_clipboard;
+mod piano_mouse;
 mod piano_shortcuts;
 mod project_media_ui;
 mod sample_browser_ui;
@@ -10163,6 +10164,14 @@ impl CitrusApp {
     }
 
     fn undo(&mut self) {
+        // A pointer preview owns a pre-press snapshot. Never replace its project
+        // from a prior history entry while its origins can still be replayed.
+        if self.editor_pointer_gesture_active()
+            || self.piano_roll_gesture_before.is_some()
+            || self.playlist_gesture_before.is_some()
+        {
+            return;
+        }
         self.poll_native_editor_snapshots();
         if let Err(error) = self.native_editor_topology_guard() {
             self.notify(error);
@@ -10197,6 +10206,14 @@ impl CitrusApp {
     }
 
     fn redo(&mut self) {
+        // A pointer preview owns a pre-press snapshot. Never replace its project
+        // from a prior history entry while its origins can still be replayed.
+        if self.editor_pointer_gesture_active()
+            || self.piano_roll_gesture_before.is_some()
+            || self.playlist_gesture_before.is_some()
+        {
+            return;
+        }
         self.poll_native_editor_snapshots();
         if let Err(error) = self.native_editor_topology_guard() {
             self.notify(error);
@@ -20356,6 +20373,13 @@ impl CitrusApp {
     }
 
     fn piano_roll(&mut self, ui: &mut egui::Ui) {
+        // A whole-project import/save/native snapshot must not race a note preview.
+        if self.project_snapshot_transition_pending()
+            || self.project_lifecycle_barriers_active()
+            || !ui.input(|input| input.focused)
+        {
+            ui.disable();
+        }
         let channel_choices = self
             .project
             .channels
@@ -20772,7 +20796,7 @@ impl CitrusApp {
         let mut split_note = None;
         let mut group_mute_request = None;
         let mut note_clicked = false;
-        let mut group_move_request = None;
+        let mut mouse_press = None;
         let mut group_resize_request = None;
         let mut group_velocity_request = None;
         let mut piano_edit_notice = None;
@@ -20783,7 +20807,14 @@ impl CitrusApp {
         // must sit above the canvas rather than letting Draw create a duplicate
         // through an existing note.
         let grid_response = ui.interact(grid, Id::new("piano-grid"), Sense::click_and_drag());
-        let bypass_snap = ui.input(|input| input.modifiers.alt);
+        let modifiers = ui.input(|input| input.modifiers);
+        let press_input = piano_mouse::primary_press(ui.ctx());
+        let selection_modifiers = press_input.map_or(modifiers, |(_, modifiers)| modifiers);
+        let selecting = selection_modifiers.ctrl
+            || selection_modifiers.command
+            || piano_mouse::selecting(ui.ctx());
+        let bypass_snap = modifiers.alt;
+        let primary_pressed = press_input.is_some();
         let resize_gesture_key = Id::new("piano-note-resize-gesture");
         let (primary_down, primary_released, pointer_position) = ui.input(|input| {
             (
@@ -20798,6 +20829,17 @@ impl CitrusApp {
             .active_pattern
             .min(self.project.patterns.len().saturating_sub(1));
         let note_snapshot = self.project.patterns[pattern_index].notes.clone();
+        piano_mouse::resolve_batched_press(
+            ui,
+            grid,
+            self.piano_viewport,
+            &note_snapshot,
+            selected_channel_route.map(|(id, _)| id),
+        );
+        if primary_pressed && ui.is_enabled() && piano_mouse::owns_primary_press(&grid_response) {
+            mouse_press = Some(piano_mouse::PressTarget::Canvas);
+        }
+
         if self.piano_roll_state.tool == PianoRollTool::Stamp
             && let Some(pointer) = grid_response
                 .hover_pos()
@@ -20805,15 +20847,13 @@ impl CitrusApp {
             && let Some(root_note) =
                 piano_pitch_at_pixel(self.piano_viewport.y, f64::from(pointer.y - grid.top()))
         {
-            let start = (self
-                .piano_viewport
-                .x
-                .content_at_pixel(f64::from(pointer.x - grid.left()))
-                as f32
-                / piano_snap)
-                .floor()
-                * piano_snap;
-            let start = start.max(0.0);
+            let start = piano_mouse::insertion_start(
+                self.piano_viewport
+                    .x
+                    .content_at_pixel(f64::from(pointer.x - grid.left())) as f32,
+                piano_snap,
+                bypass_snap,
+            );
             let preview_color = selected_channel_route
                 .and_then(|(channel_id, _)| {
                     channel_choices
@@ -20887,35 +20927,10 @@ impl CitrusApp {
             if !content_span_is_visible(self.piano_viewport.y, pitch_row, pitch_row + 1.0) {
                 continue;
             }
-            let y = grid.top() + self.piano_viewport.y.pixel_for_content(pitch_row) as f32;
-            let raw_rect = Rect::from_min_size(
-                Pos2::new(
-                    grid.left()
-                        + self
-                            .piano_viewport
-                            .x
-                            .pixel_for_content(f64::from(note.start))
-                            as f32
-                        + 1.0,
-                    y + 1.0,
-                ),
-                Vec2::new((note.length * beat_w - 2.0).max(5.0), row_h - 2.0),
-            );
-            let rect = raw_rect.intersect(grid);
+            // Painting, normal egui hit testing and batched-input recovery share geometry.
+            let (_, rect, body_rect, resize_rect) =
+                piano_mouse::note_rects(grid, self.piano_viewport, note);
             let id = Id::new(("piano-note", note.id));
-            // Keep the visible FL-style edge grip compact, but give it a
-            // forgiving hit target so short notes remain practical to resize.
-            let resize_width = raw_rect.width().min(12.0);
-            let resize_rect = Rect::from_min_max(
-                Pos2::new(raw_rect.right() - resize_width, raw_rect.top()),
-                Pos2::new(raw_rect.right() + 3.0, raw_rect.bottom()),
-            )
-            .intersect(grid);
-            let body_rect = Rect::from_min_max(
-                raw_rect.left_top(),
-                Pos2::new(resize_rect.left().max(rect.left() + 2.0), rect.bottom()),
-            )
-            .intersect(grid);
             if !editable {
                 note_grid_painter.rect_filled(
                     rect,
@@ -20978,73 +20993,64 @@ impl CitrusApp {
                     Stroke::new(1.5, Color32::WHITE.gamma_multiply(0.75)),
                 );
             }
+            if primary_pressed
+                && ui.is_enabled()
+                && (piano_mouse::owns_primary_press(&response)
+                    || (selecting && piano_mouse::owns_primary_press(&resize_response)))
+            {
+                mouse_press = Some(piano_mouse::PressTarget::Note(note.id));
+                self.piano_roll_state.last_note_length = note.length;
+            }
+            if primary_pressed && !selecting && piano_mouse::owns_primary_press(&resize_response) {
+                // The edge grip owns the press even in a complete batched drag.
+                mouse_press = None;
+            }
             if response.clicked() {
                 note_clicked = true;
-                match self.piano_roll_state.tool {
-                    PianoRollTool::Select
-                    | PianoRollTool::Draw
-                    | PianoRollTool::Paint
-                    | PianoRollTool::Stamp => {
-                        let modifiers = ui.input(|input| input.modifiers);
-                        if modifiers.command || modifiers.ctrl {
-                            toggle_note_group_selection(
-                                &note_snapshot,
-                                &mut self.piano_roll_state.selection_ids,
-                                note.id,
-                                grouping_enabled,
-                            );
-                        } else if modifiers.shift {
-                            select_note_group_members(
-                                &note_snapshot,
-                                &mut self.piano_roll_state.selection_ids,
-                                note.id,
-                                grouping_enabled,
-                                true,
-                            );
-                        } else {
-                            select_note_group_members(
-                                &note_snapshot,
-                                &mut self.piano_roll_state.selection_ids,
-                                note.id,
-                                grouping_enabled,
-                                false,
-                            );
+                if !selecting {
+                    match self.piano_roll_state.tool {
+                        PianoRollTool::Select
+                        | PianoRollTool::Draw
+                        | PianoRollTool::Paint
+                        | PianoRollTool::Stamp => {
+                            if let Some((channel_id, _, mixer_track, _)) = note_route {
+                                audition_notes.push((
+                                    *channel_id,
+                                    note.note,
+                                    note.velocity,
+                                    note.length.clamp(0.1, 0.5),
+                                    *mixer_track,
+                                ));
+                            }
                         }
-                        if let Some((channel_id, _, mixer_track, _)) = note_route {
-                            audition_notes.push((
-                                *channel_id,
-                                note.note,
-                                note.velocity,
-                                note.length.clamp(0.1, 0.5),
-                                *mixer_track,
+                        PianoRollTool::Delete => {
+                            delete_note_ids = Some(note_group_members(
+                                &note_snapshot,
+                                note.id,
+                                grouping_enabled,
                             ));
                         }
-                    }
-                    PianoRollTool::Delete => {
-                        delete_note_ids = Some(note_group_members(
-                            &note_snapshot,
-                            note.id,
-                            grouping_enabled,
-                        ));
-                    }
-                    PianoRollTool::Mute => {
-                        group_mute_request = Some((
-                            note_group_members(&note_snapshot, note.id, grouping_enabled),
-                            !note.muted,
-                        ));
-                    }
-                    PianoRollTool::Slice => {
-                        if let Some(pointer) = response.interact_pointer_pos() {
-                            let beat = (self
-                                .piano_viewport
-                                .x
-                                .content_at_pixel(f64::from(pointer.x - grid.left()))
-                                as f32
-                                / piano_snap)
-                                .round()
-                                * piano_snap;
-                            if beat > note.start + 0.05 && beat < note.start + note.length - 0.05 {
-                                split_note = Some((index, beat));
+                        PianoRollTool::Mute => {
+                            group_mute_request = Some((
+                                note_group_members(&note_snapshot, note.id, grouping_enabled),
+                                !note.muted,
+                            ));
+                        }
+                        PianoRollTool::Slice => {
+                            if let Some(pointer) = response.interact_pointer_pos() {
+                                let beat = (self
+                                    .piano_viewport
+                                    .x
+                                    .content_at_pixel(f64::from(pointer.x - grid.left()))
+                                    as f32
+                                    / piano_snap)
+                                    .round()
+                                    * piano_snap;
+                                if beat > note.start + 0.05
+                                    && beat < note.start + note.length - 0.05
+                                {
+                                    split_note = Some((index, beat));
+                                }
                             }
                         }
                     }
@@ -21058,7 +21064,8 @@ impl CitrusApp {
                 ));
                 note_clicked = true;
             }
-            if resize_response.clicked() {
+            if resize_response.clicked() && !selecting {
+                self.piano_roll_state.last_note_length = note.length;
                 ensure_note_group_selected(
                     &note_snapshot,
                     &mut self.piano_roll_state.selection_ids,
@@ -21067,57 +21074,10 @@ impl CitrusApp {
                 );
                 note_clicked = true;
             }
-            let move_key = id.with("move-origin");
-            if response.drag_started() {
-                if matches!(
-                    self.piano_roll_state.tool,
-                    PianoRollTool::Select | PianoRollTool::Draw | PianoRollTool::Paint
-                ) {
-                    project_gesture_started = true;
-                }
-                ensure_note_group_selected(
-                    &note_snapshot,
-                    &mut self.piano_roll_state.selection_ids,
-                    note.id,
-                    grouping_enabled,
-                );
-                let origins = note_snapshot
-                    .iter()
-                    .filter(|origin| self.piano_roll_state.selection_ids.contains(&origin.id))
-                    .cloned()
-                    .collect::<Vec<_>>();
-                ui.ctx()
-                    .data_mut(|data| data.insert_temp(move_key, origins));
-            }
-            if matches!(
-                self.piano_roll_state.tool,
-                PianoRollTool::Select | PianoRollTool::Draw | PianoRollTool::Paint
-            ) && response.dragged()
-                && let Some(origins) = ui
-                    .ctx()
-                    .data(|data| data.get_temp::<Vec<PianoNote>>(move_key))
-                && let Some(anchor) = origins.iter().find(|origin| origin.id == note.id)
-                && let Some(drag_delta) = response.total_drag_delta()
-                && let Ok(anchor_start) =
-                    moved_note_start(anchor.start, drag_delta.x / beat_w, piano_snap, bypass_snap)
-            {
-                let row_delta = (drag_delta.y / row_h).round() as i16;
-                if let Ok((time_delta, pitch_delta)) =
-                    clamp_group_move_delta(&origins, anchor_start - anchor.start, -row_delta)
-                {
-                    group_move_request = Some((origins, time_delta, pitch_delta));
-                }
-            }
-            if response.drag_stopped()
-                && matches!(
-                    self.piano_roll_state.tool,
-                    PianoRollTool::Select | PianoRollTool::Draw | PianoRollTool::Paint
-                )
-            {
-                project_gesture_stopped = true;
-            }
             let resize_started = ui.is_enabled()
-                && resize_response.is_pointer_button_down_on()
+                && !selecting
+                && primary_pressed
+                && piano_mouse::owns_primary_press(&resize_response)
                 && ui.ctx().data(|data| {
                     data.get_temp::<PianoNoteResizeGesture>(resize_gesture_key)
                         .is_none()
@@ -21132,10 +21092,14 @@ impl CitrusApp {
                 );
                 let origins = note_snapshot
                     .iter()
-                    .filter(|origin| self.piano_roll_state.selection_ids.contains(&origin.id))
+                    .filter(|origin| {
+                        self.piano_roll_state.selection_ids.contains(&origin.id)
+                            && origin.channel_id == selected_channel_route.map(|(id, _)| id)
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
-                if let Some(pointer) = pointer_position {
+                if let Some((pointer, _)) = press_input {
+                    self.piano_roll_state.last_note_length = note.length;
                     ui.ctx().data_mut(|data| {
                         data.insert_temp(
                             resize_gesture_key,
@@ -21167,7 +21131,18 @@ impl CitrusApp {
                 )
                 && let Ok(delta) = clamp_group_resize_delta(&drag.origins, length - anchor.length)
             {
-                group_resize_request = Some((drag.origins.clone(), delta));
+                let room = drag
+                    .origins
+                    .iter()
+                    .map(|note| 4096.0 - note.start - note.length)
+                    .fold(f32::INFINITY, f32::min);
+                // Legacy files may legally contain notes extending beyond the interactive
+                // horizon. Preserve those notes rather than applying an impossible common
+                // upper bound that can overturn the minimum-length clamp.
+                if room >= 0.0 {
+                    group_resize_request =
+                        Some((drag.origins.clone(), delta.min(room), drag.note_id));
+                }
             }
             if active_resize
                 .as_ref()
@@ -21218,7 +21193,10 @@ impl CitrusApp {
                     );
                     let origins = note_snapshot
                         .iter()
-                        .filter(|origin| self.piano_roll_state.selection_ids.contains(&origin.id))
+                        .filter(|origin| {
+                            self.piano_roll_state.selection_ids.contains(&origin.id)
+                                && origin.channel_id == selected_channel_route.map(|(id, _)| id)
+                        })
                         .cloned()
                         .collect::<Vec<_>>();
                     ui.ctx()
@@ -21256,28 +21234,13 @@ impl CitrusApp {
                 data.remove::<PianoNoteResizeGesture>(resize_gesture_key);
             });
         }
-        if let Some((origins, time_delta, pitch_delta)) = group_move_request {
-            for origin in origins {
-                if let Some(note) = notes.iter_mut().find(|note| note.id == origin.id) {
-                    note.start = origin.start + time_delta;
-                    let moved_pitch = (i16::from(origin.note) + pitch_delta) as u8;
-                    note.note = if self.piano_roll_state.snap_to_scale && !bypass_snap {
-                        snap_pitch_to_scale(
-                            moved_pitch,
-                            self.piano_roll_state.scale_root,
-                            self.piano_roll_state.scale,
-                        )
-                    } else {
-                        moved_pitch
-                    };
-                }
-            }
-        }
-        if let Some((origins, length_delta)) = group_resize_request {
+        if let Some((origins, length_delta, anchor_id)) = group_resize_request {
             for origin in origins {
                 if let Some(note) = notes.iter_mut().find(|note| note.id == origin.id) {
                     note.length = origin.length + length_delta;
-                    self.piano_roll_state.last_note_length = note.length;
+                    if note.id == anchor_id {
+                        self.piano_roll_state.last_note_length = note.length;
+                    }
                 }
             }
         }
@@ -21295,82 +21258,8 @@ impl CitrusApp {
                 }
             }
         }
-        let marquee_key = Id::new("piano-selection-marquee-origin");
-        if self.piano_roll_state.tool == PianoRollTool::Select
-            && grid_response.drag_started()
-            && let Some(pointer) = grid_response.interact_pointer_pos()
-        {
-            ui.ctx()
-                .data_mut(|data| data.insert_temp(marquee_key, pointer));
-        }
-        if self.piano_roll_state.tool == PianoRollTool::Select
-            && (grid_response.dragged() || grid_response.drag_stopped())
-            && let Some(origin) = ui.ctx().data(|data| data.get_temp::<Pos2>(marquee_key))
-            && let Some(pointer) = grid_response.interact_pointer_pos()
-        {
-            let marquee = Rect::from_min_max(
-                Pos2::new(origin.x.min(pointer.x), origin.y.min(pointer.y)),
-                Pos2::new(origin.x.max(pointer.x), origin.y.max(pointer.y)),
-            )
-            .intersect(grid);
-            note_grid_painter.rect_filled(
-                marquee,
-                0.0,
-                theme::SETTINGS_ACTIVE.gamma_multiply(0.12),
-            );
-            note_grid_painter.rect_stroke(
-                marquee,
-                0.0,
-                Stroke::new(1.0, theme::SETTINGS_ACTIVE),
-                StrokeKind::Inside,
-            );
-            if grid_response.drag_stopped() {
-                let current_channel = selected_channel_route.map(|(channel_id, _)| channel_id);
-                let hit_ids = notes
-                    .iter()
-                    .filter(|note| note.channel_id == current_channel && note.note <= 127)
-                    .filter_map(|note| {
-                        let pitch_row = piano_pitch_row(note.note);
-                        let note_rect = Rect::from_min_size(
-                            Pos2::new(
-                                grid.left()
-                                    + self
-                                        .piano_viewport
-                                        .x
-                                        .pixel_for_content(f64::from(note.start))
-                                        as f32,
-                                grid.top()
-                                    + self.piano_viewport.y.pixel_for_content(pitch_row) as f32,
-                            ),
-                            Vec2::new((note.length * beat_w).max(5.0), row_h),
-                        )
-                        .intersect(grid);
-                        marquee.intersects(note_rect).then_some(note.id)
-                    })
-                    .collect::<HashSet<_>>();
-                let hit_ids =
-                    expand_note_group_selection(&note_snapshot, &hit_ids, grouping_enabled);
-                let modifiers = ui.input(|input| input.modifiers);
-                if modifiers.command || modifiers.ctrl {
-                    let remove = !hit_ids.is_empty()
-                        && hit_ids
-                            .iter()
-                            .all(|id| self.piano_roll_state.selection_ids.contains(id));
-                    if remove {
-                        self.piano_roll_state
-                            .selection_ids
-                            .retain(|id| !hit_ids.contains(id));
-                    } else {
-                        self.piano_roll_state.selection_ids.extend(hit_ids);
-                    }
-                } else if modifiers.shift {
-                    self.piano_roll_state.selection_ids.extend(hit_ids);
-                } else {
-                    self.piano_roll_state.selection_ids = hit_ids;
-                }
-            }
-        }
         if self.piano_roll_state.tool == PianoRollTool::Delete
+            && !selecting
             && grid_response.dragged()
             && let Some(pointer) = grid_response.interact_pointer_pos()
             && let Some(pitch) =
@@ -21397,9 +21286,13 @@ impl CitrusApp {
         }
         if matches!(
             self.piano_roll_state.tool,
-            PianoRollTool::Draw | PianoRollTool::Paint | PianoRollTool::Delete
-        ) {
-            project_gesture_started |= grid_response.drag_started();
+            PianoRollTool::Paint | PianoRollTool::Delete
+        ) && !selecting
+        {
+            project_gesture_started |= grid_response.drag_started()
+                || (primary_pressed
+                    && matches!(mouse_press, Some(piano_mouse::PressTarget::Canvas))
+                    && self.piano_roll_state.tool == PianoRollTool::Paint);
             project_gesture_stopped |= grid_response.drag_stopped();
         }
         if let Some(note_ids) = delete_note_ids {
@@ -21429,29 +21322,19 @@ impl CitrusApp {
             );
         }
 
-        if self.piano_roll_state.tool == PianoRollTool::Select
-            && grid_response.clicked()
-            && !note_clicked
-            && !ui.input(|input| {
-                input.modifiers.command || input.modifiers.ctrl || input.modifiers.shift
-            })
-        {
-            self.piano_roll_state.clear_selection();
-        }
         if self.piano_roll_state.tool == PianoRollTool::Stamp
+            && !selecting
             && grid_response.clicked()
             && !note_clicked
             && let Some(pointer) = grid_response.interact_pointer_pos()
         {
-            let start = (self
-                .piano_viewport
-                .x
-                .content_at_pixel(f64::from(pointer.x - grid.left()))
-                as f32
-                / piano_snap)
-                .floor()
-                * piano_snap;
-            let start = start.max(0.0);
+            let start = piano_mouse::insertion_start(
+                self.piano_viewport
+                    .x
+                    .content_at_pixel(f64::from(pointer.x - grid.left())) as f32,
+                piano_snap,
+                bypass_snap,
+            );
             let Some(root_note) =
                 piano_pitch_at_pixel(self.piano_viewport.y, f64::from(pointer.y - grid.top()))
             else {
@@ -21461,7 +21344,8 @@ impl CitrusApp {
             let length = self
                 .piano_roll_state
                 .last_note_length
-                .max(crate::piano_roll::MIN_NOTE_LENGTH_BEATS);
+                .max(crate::piano_roll::MIN_NOTE_LENGTH_BEATS)
+                .min(4096.0 - start);
             match stamp_chord_notes(
                 notes,
                 channel_id,
@@ -21475,9 +21359,26 @@ impl CitrusApp {
                 self.piano_roll_state.snap_to_scale && !bypass_snap,
             ) {
                 Ok(result) if !result.inserted_notes.is_empty() => {
+                    // The pure stamp helper only sees this pattern; route its new notes
+                    // through the project-wide allocator before publishing the candidate.
+                    let mut result = result;
+                    let mut remapped = HashMap::new();
+                    for note in &mut result.inserted_notes {
+                        let Some(id) = allocate_piano_note_id(&mut used_note_ids) else {
+                            return;
+                        };
+                        remapped.insert(note.id, id);
+                        note.id = id;
+                    }
+                    for note in &mut result.notes {
+                        if result.selection_ids.contains(&note.id) {
+                            note.id = remapped[&note.id];
+                        }
+                    }
                     let inserted_notes = result.inserted_notes;
                     *notes = result.notes;
-                    self.piano_roll_state.selection_ids = result.selection_ids;
+                    self.piano_roll_state.selection_ids =
+                        inserted_notes.iter().map(|note| note.id).collect();
                     if let Some((channel_id, mixer_track)) = selected_channel_route {
                         audition_notes.extend(
                             inserted_notes.iter().map(|note| {
@@ -21498,66 +21399,76 @@ impl CitrusApp {
                     piano_edit_notice = Some(format!("Chord was not stamped: {error}"));
                 }
             }
-        } else if (grid_response.double_clicked()
-            || (matches!(
-                self.piano_roll_state.tool,
-                PianoRollTool::Draw | PianoRollTool::Paint
-            ) && (grid_response.clicked() || grid_response.dragged())))
+        } else if self.piano_roll_state.tool == PianoRollTool::Paint
+            && !selecting
+            && (grid_response.clicked()
+                || grid_response.dragged()
+                || (primary_pressed
+                    && matches!(mouse_press, Some(piano_mouse::PressTarget::Canvas))))
+            && (!primary_pressed || matches!(mouse_press, Some(piano_mouse::PressTarget::Canvas)))
             && !note_clicked
-            && let Some(pointer) = grid_response.interact_pointer_pos()
         {
-            let start = (self
-                .piano_viewport
-                .x
-                .content_at_pixel(f64::from(pointer.x - grid.left()))
-                as f32
-                / piano_snap)
-                .floor()
-                * piano_snap;
-            let start = start.max(0.0);
-            let Some(mut note) =
-                piano_pitch_at_pixel(self.piano_viewport.y, f64::from(pointer.y - grid.top()))
-            else {
-                return;
-            };
-            if self.piano_roll_state.snap_to_scale && !bypass_snap {
-                note = snap_pitch_to_scale(
-                    note,
-                    self.piano_roll_state.scale_root,
-                    self.piano_roll_state.scale,
+            let positions = press_input.filter(|_| primary_pressed).into_iter().chain(
+                grid_response
+                    .interact_pointer_pos()
+                    .map(|pos| (pos, modifiers)),
+            );
+            for (pointer, point_modifiers) in positions {
+                let bypass_snap = point_modifiers.alt;
+                let start = piano_mouse::insertion_start(
+                    self.piano_viewport
+                        .x
+                        .content_at_pixel(f64::from(pointer.x - grid.left()))
+                        as f32,
+                    piano_snap,
+                    bypass_snap,
                 );
-            }
-            let channel_id = selected_channel_route.map(|(channel_id, _)| channel_id);
-            let duplicate_cell = notes.iter().any(|existing| {
-                existing.channel_id == channel_id
-                    && existing.note == note
-                    && (existing.start - start).abs() < 0.0001
-            });
-            if !duplicate_cell {
-                let Some(id) = allocate_piano_note_id(&mut used_note_ids) else {
-                    return;
+                let Some(mut note) =
+                    piano_pitch_at_pixel(self.piano_viewport.y, f64::from(pointer.y - grid.top()))
+                else {
+                    continue;
                 };
-                let length = self
-                    .piano_roll_state
-                    .last_note_length
-                    .max(crate::piano_roll::MIN_NOTE_LENGTH_BEATS);
-                notes.push(crate::model::PianoNote {
-                    id,
-                    channel_id,
-                    group_id: None,
-                    note,
-                    start,
-                    length,
-                    velocity: 0.75,
-                    selected: false,
-                    muted: false,
+                if self.piano_roll_state.snap_to_scale && !bypass_snap {
+                    note = snap_pitch_to_scale(
+                        note,
+                        self.piano_roll_state.scale_root,
+                        self.piano_roll_state.scale,
+                    );
+                }
+                let channel_id = selected_channel_route.map(|(channel_id, _)| channel_id);
+                let duplicate_cell = notes.iter().any(|existing| {
+                    existing.channel_id == channel_id
+                        && existing.note == note
+                        && (existing.start - start).abs() < 0.0001
                 });
-                self.piano_roll_state.select_only(id);
-                if let Some((channel_id, mixer_track)) = selected_channel_route {
-                    audition_notes.push((channel_id, note, 0.75, 0.25, mixer_track));
+                if !duplicate_cell && notes.len() < crate::piano_roll::MAX_TRANSFORM_NOTES {
+                    let Some(id) = allocate_piano_note_id(&mut used_note_ids) else {
+                        return;
+                    };
+                    let length = self
+                        .piano_roll_state
+                        .last_note_length
+                        .max(crate::piano_roll::MIN_NOTE_LENGTH_BEATS)
+                        .min(4096.0 - start);
+                    notes.push(crate::model::PianoNote {
+                        id,
+                        channel_id,
+                        group_id: None,
+                        note,
+                        start,
+                        length,
+                        velocity: 0.75,
+                        selected: false,
+                        muted: false,
+                    });
+                    self.piano_roll_state.select_only(id);
+                    if let Some((channel_id, mixer_track)) = selected_channel_route {
+                        audition_notes.push((channel_id, note, 0.75, 0.25, mixer_track));
+                    }
                 }
             }
         }
+        self.piano_mouse_gesture(ui, grid, mouse_press);
         if project_gesture_started && self.piano_roll_gesture_before.is_none() {
             let mut before = self.project.clone();
             before.patterns[pattern_index].notes = note_snapshot;
