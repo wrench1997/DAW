@@ -11,3 +11,5 @@ pub(crate) mod utils;
 pub(crate) mod isolated_plugin_impl;
 
 pub(crate) mod processor_lease;
+
+pub(crate) mod native_edit_transport;

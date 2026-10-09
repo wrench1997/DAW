@@ -212,3 +212,31 @@ IEditController::setState when controller and component are the same object. Bot
 calls now share the alias guard. Added controlled fixtures cover exact policy selection,
 zero/positive/failed Process history, editor attempts, rejection without COM or queue mutation,
 continued processing, and a nonempty legacy controller payload on a single-component instance.
+
+## Bounded native-edit delivery and acknowledgment
+
+`src/internal/native_edit_transport.rs` adds an existing-rtrb, fixed-capacity native value lane
+with generation/sequence tags, preallocated runtime staging, checked admission and per-SDK-call
+acknowledgment. Only the producer uses a nonblocking try_lock; the exclusive consumer has no GUI
+producer/display mutex access. No unsafe Send/Sync, worker, wire change or settlement processing
+is added. `ComponentHandler` retains independent display/gesture logs and durable dirty/loss
+status. Stopped display polling no longer steals processor edits needed by a later explicit
+zero-sample flush and SaveState. Display overflow is distinct from native delivery loss.
+
+`ParameterChanges::try_enqueue` reports admission failures, but its existing COM queue locks and
+dynamically sized storage remain. Successful Process acknowledges only that call's admitted
+native batch; failure/abandonment cannot be hidden by later empty queues or successful calls.
+Capture checks submitted/applied, in-flight publication/process, sticky loss/exhaustion and dirty
+revision before/after state serialization. Ordinary empty failed Process does not invent loss.
+
+Successful state application supersedes old native intent without claiming it was processed, at
+the existing queue-clear boundary even if subsequent setup fails. Rejected Surge restore still
+preflights before any mutation. A post-application producer/fence contention permanently closes
+native input and refuses capture with an explicit partial-restore error rather than replaying
+stale values. Existing positive-call/editor-attempt history, aliases and stopped flush semantics
+are preserved. Administrative capture/restore still relies on main-thread serialization.
+
+Transport-only allocation tests and a blocked-producer/display independence fixture are narrowly
+scoped. They do not prove whole-plugin allocation freedom, enable independent helper processing,
+or qualify native resize latency. See `docs/PLUGIN_PROCESSOR_DOMAINS.md` and executed receipts in
+`docs/WORK_LOG.md`; upstream archive/license/version/dependencies remain unchanged.

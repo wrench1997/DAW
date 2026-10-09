@@ -1,5 +1,6 @@
 //! Internal COM interface implementations for VST3
 
+use super::native_edit_transport::{native_edit_channel, NativeEditReceiver, NativeEditSender};
 use crate::midi::{PluginEvent, PluginEventData, MAX_EVENT_PAYLOAD_BYTES, MAX_EVENT_TEXT_UNITS};
 use crate::plugin::StateContext;
 use std::collections::{HashMap, HashSet};
@@ -1820,10 +1821,10 @@ impl IContextMenuTrait for HostContextMenu {
 
 // Component Handler implementation
 //
-// # Two independently ordered streams
+// # Independent delivery and UI streams
 //
-// Everything a plugin reports through the component handler lands in one of two queues, and
-// **the two are ordered only within themselves — there is no cross-ordering between them**:
+// Native processor input has its own acknowledged transport. The two UI/control logs below
+// are ordered only within themselves, with no cross-ordering between them:
 //
 // - `edits` — the per-parameter gesture log (`beginEdit`/`performEdit`/`endEdit`), drained by
 //   `take_parameter_edits`.
@@ -1839,11 +1840,12 @@ impl IContextMenuTrait for HostContextMenu {
 // Interleaving them into one ordered stream would change the public shape of both accessors
 // and is not implemented.
 pub struct ComponentHandler {
-    // Track parameter changes from the plugin
+    // UI-only value feedback. Polling this never consumes processor input.
     pub parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>,
+    pub(super) native_edits: NativeEditSender,
     // Ordered log of begin/change/end gestures the editor reports, preserving their order so
     // the host can reconstruct each gesture (drained via `take_parameter_edits`). This is the
-    // richer superset of `parameter_changes` (which keeps only the value changes for the DSP).
+    // richer superset of `parameter_changes` (which keeps display values only).
     // Ordered against itself only — see the type comment about the group-edit brackets.
     edits: Arc<Mutex<Vec<crate::plugin::ParameterEdit>>>,
     // Union of every `restartComponent` flag the plugin has raised since the host last drained
@@ -1851,12 +1853,6 @@ pub struct ComponentHandler {
     // "re-read my parameters"), so accumulating them is both complete and inherently bounded —
     // a plugin that spams restartComponent while nothing polls costs one word, not a queue.
     restart_flags: AtomicI32,
-    // Durable, per-instance evidence independent of the bounded feedback queues. Never drained
-    // or reset; saturation makes checked reads fail rather than wrapping to a clean baseline.
-    native_dirty_revision: AtomicU64,
-    // Once a native value failed to reach the processor, a later empty queue cannot prove that
-    // its state is current. Only a new plugin instance clears this conservative capture guard.
-    native_parameter_feedback_lost: AtomicBool,
     // Ordered IComponentHandler2 / IUnitHandler / IProgress / context-menu requests. These are
     // control-plane work items, never executed from inside the plugin callback. Ordered against
     // themselves only — not against `edits`. Capped at MAX_HOST_NOTIFICATIONS, and a push past
@@ -1867,66 +1863,37 @@ pub struct ComponentHandler {
 }
 
 impl ComponentHandler {
-    pub fn new(parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>) -> Self {
-        ComponentHandler {
-            parameter_changes,
-            edits: Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK))),
-            restart_flags: AtomicI32::new(0),
-            native_dirty_revision: AtomicU64::new(0),
-            native_parameter_feedback_lost: AtomicBool::new(false),
-            notifications: Arc::new(Mutex::new(Vec::with_capacity(MAX_HOST_NOTIFICATIONS))),
-            context_menus: Arc::new(ContextMenuRegistry::new()),
-        }
+    pub fn new(parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>) -> (Self, NativeEditReceiver) {
+        let (native_edits, receiver) = native_edit_channel(MAX_EDITOR_FEEDBACK);
+        (
+            ComponentHandler {
+                native_edits,
+                parameter_changes,
+                edits: Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK))),
+                restart_flags: AtomicI32::new(0),
+                notifications: Arc::new(Mutex::new(Vec::with_capacity(MAX_HOST_NOTIFICATIONS))),
+                context_menus: Arc::new(ContextMenuRegistry::new()),
+            },
+            receiver,
+        )
     }
 
     fn mark_native_dirty(&self) {
-        let mut revision = self.native_dirty_revision.load(Ordering::Acquire);
-        loop {
-            match self.native_dirty_revision.compare_exchange_weak(
-                revision,
-                revision.saturating_add(1),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(current) => revision = current,
-            }
-        }
+        let _ = self.native_edits.mark_dirty();
     }
 
     pub fn native_dirty_revision(&self) -> crate::Result<u64> {
-        let revision = self.native_dirty_revision.load(Ordering::Acquire);
-        if revision == u64::MAX {
-            return Err(crate::Error::Other(
-                "native dirty revision exhausted".into(),
-            ));
-        }
-        Ok(revision)
+        self.native_edits.dirty_revision().map_err(|error| {
+            crate::Error::Other(format!("native edit revision unavailable: {error:?}"))
+        })
     }
 
-    pub fn mark_native_parameter_feedback_lost(&self) {
-        self.native_parameter_feedback_lost
-            .store(true, Ordering::Release);
-    }
-
-    /// State is authoritative only after every native value reached a successful processor
-    /// call. This does not drain evidence, and bounded gesture/notification loss cannot reset it.
+    /// Capture is permitted only after checked admission and successful Process acknowledged
+    /// every submitted native value. Display drains never acknowledge processor delivery.
     pub fn native_state_capture_revision(&self) -> crate::Result<u64> {
-        if self.native_parameter_feedback_lost.load(Ordering::Acquire) {
-            return Err(crate::Error::Other(
-                "native parameter feedback was lost; reload the plugin before capturing state"
-                    .into(),
-            ));
-        }
-        let pending = self.parameter_changes.lock().map_err(|_| {
-            crate::Error::Other("native parameter feedback lock is poisoned".into())
-        })?;
-        if !pending.is_empty() {
-            return Err(crate::Error::Other(
-                "native parameter values must be flushed before capturing state".into(),
-            ));
-        }
-        self.native_dirty_revision()
+        self.native_edits.capture_revision().map_err(|error| {
+            crate::Error::Other(format!("native edit capture fence is not ready: {error:?}"))
+        })
     }
 
     /// Take the accumulated `restartComponent` flags, clearing them.
@@ -2024,19 +1991,20 @@ impl IComponentHandlerTrait for ComponentHandler {
     }
 
     unsafe fn performEdit(&self, id: u32, value_normalized: f64) -> i32 {
-        // Record before either bounded queue can reject the value.
-        self.mark_native_dirty();
+        // Publish independently of both UI locks. Rejection records durable dirty/loss
+        // evidence; an empty display queue can never make capture appear current.
+        let _ = self.native_edits.send(id, value_normalized);
         log::debug!(
             "Host: Perform edit for parameter {} = {}",
             id,
             value_normalized
         );
-        // Store the parameter change for the DSP-feeding drain...
+        // Independent bounded display feedback; overflow here is not DSP delivery loss.
         match self.parameter_changes.lock() {
             Ok(mut changes) if changes.len() < MAX_EDITOR_FEEDBACK => {
                 changes.push((id, value_normalized));
             }
-            _ => self.mark_native_parameter_feedback_lost(),
+            _ => {}
         }
         // ...and as an ordered gesture event for the richer `take_parameter_edits` drain.
         self.push_edit(crate::plugin::ParameterEdit {
@@ -2754,24 +2722,39 @@ impl ParameterChanges {
     /// rather than allocating, so this is allocation-free in steady state once the pool has
     /// grown to the per-block working set.
     pub fn enqueue(&self, id: u32, sample_offset: i32, value: f64) {
-        if let Ok(mut queues) = self.queues.lock() {
-            let used = self.used.load(Ordering::Relaxed);
-            // Merge into an already-active queue for this id (e.g. several offsets in one block).
-            if let Some(q) = queues[..used].iter().find(|q| q.param_id() == id) {
-                q.insert_point(sample_offset, value);
-                return;
-            }
-            // Otherwise activate a slot: recycle a pooled queue if one exists, else grow once.
-            if used < queues.len() {
-                queues[used].reset(id);
-                queues[used].insert_point(sample_offset, value);
-            } else {
-                let q = ComWrapper::new(ParameterValueQueue::new(id));
-                q.insert_point(sample_offset, value);
-                queues.push(q);
-            }
-            self.used.store(used + 1, Ordering::Relaxed);
+        let _ = self.try_enqueue(id, sample_offset, value);
+    }
+
+    /// Checked host admission. This still uses legacy COM queue locks and can grow storage;
+    /// it is not a fixed-capacity/RT-safe replacement. Unlike `enqueue`, failure cannot be
+    /// mistaken for native-edit delivery by the acknowledgment fence.
+    pub fn try_enqueue(&self, id: u32, sample_offset: i32, value: f64) -> Result<(), ()> {
+        let mut queues = self.queues.lock().map_err(|_| ())?;
+        let used = self.used.load(Ordering::Relaxed);
+        if used > queues.len() {
+            return Err(());
         }
+        if let Some(q) = queues[..used].iter().find(|q| q.param_id() == id) {
+            return q.try_insert_point(sample_offset, value);
+        }
+        if used < queues.len() {
+            // A poisoned point lock must not activate an unpopulated queue.
+            let q = &queues[used];
+            let mut points = q.points.lock().map_err(|_| ())?;
+            if points.capacity() == 0 {
+                points.try_reserve(1).map_err(|_| ())?;
+            }
+            points.clear();
+            points.push((sample_offset, value));
+            q.param_id.store(id, Ordering::Relaxed);
+        } else {
+            queues.try_reserve(1).map_err(|_| ())?;
+            let q = ComWrapper::new(ParameterValueQueue::new(id));
+            q.try_insert_point(sample_offset, value)?;
+            queues.push(q);
+        }
+        self.used.store(used + 1, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Forget all queued changes. Call after each `process()` block so values don't re-stick.
@@ -2964,14 +2947,15 @@ impl ParameterValueQueue {
 
     /// Insert a point keeping sample-offset order (safe host-side population, mirroring the
     /// COM `addPoint`).
-    fn insert_point(&self, sample_offset: i32, value: f64) {
-        if let Ok(mut points) = self.points.lock() {
-            let pos = points
-                .iter()
-                .position(|(off, _)| *off > sample_offset)
-                .unwrap_or(points.len());
-            points.insert(pos, (sample_offset, value));
-        }
+    fn try_insert_point(&self, sample_offset: i32, value: f64) -> Result<(), ()> {
+        let mut points = self.points.lock().map_err(|_| ())?;
+        points.try_reserve(1).map_err(|_| ())?;
+        let pos = points
+            .iter()
+            .position(|(off, _)| *off > sample_offset)
+            .unwrap_or(points.len());
+        points.insert(pos, (sample_offset, value));
+        Ok(())
     }
 }
 
@@ -3055,7 +3039,7 @@ mod component_handler_tests {
 
     #[test]
     fn native_dirty_revision_survives_all_feedback_drains() {
-        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let (handler, mut _native_edits) = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
         assert_eq!(handler.native_dirty_revision().unwrap(), 0);
         unsafe {
             handler.beginEdit(7);
@@ -3078,14 +3062,18 @@ mod component_handler_tests {
         handler.take_host_notifications();
         handler.take_restart_flags();
         assert_eq!(handler.native_dirty_revision().unwrap(), 4);
-        // Model a successful processor delivery: only the raw DSP queue is consumed.
+        // Polling display values cannot acknowledge native processor delivery.
         handler.parameter_changes.lock().unwrap().clear();
+        assert!(handler.native_state_capture_revision().is_err());
+        _native_edits.stage(|_| true).unwrap();
+        assert!(handler.native_state_capture_revision().is_err());
+        _native_edits.finish_process(true).unwrap();
         assert_eq!(handler.native_state_capture_revision().unwrap(), 4);
     }
 
     #[test]
     fn native_dirty_revision_survives_bounded_feedback_overflow() {
-        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let (handler, mut _native_edits) = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
         unsafe {
             for _ in 0..(MAX_EDITOR_FEEDBACK + 3) {
                 handler.performEdit(7, 0.5);
@@ -3114,27 +3102,22 @@ mod component_handler_tests {
 
     #[test]
     fn native_dirty_revision_exhaustion_never_wraps_to_clean() {
-        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
-        handler
-            .native_dirty_revision
-            .store(u64::MAX - 1, Ordering::Release);
+        let (handler, mut _native_edits) = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        handler.native_edits.test_set_dirty_revision(u64::MAX - 1);
         assert_eq!(handler.native_dirty_revision().unwrap(), u64::MAX - 1);
         unsafe {
             handler.setDirty(1);
             handler.setDirty(1);
         }
-        assert_eq!(
-            handler.native_dirty_revision.load(Ordering::Acquire),
-            u64::MAX
-        );
+        assert_eq!(handler.native_edits.snapshot().dirty, u64::MAX);
         assert!(handler.native_dirty_revision().is_err());
         assert!(handler.native_state_capture_revision().is_err());
     }
 
     #[test]
-    fn native_feedback_poison_is_visible_after_the_edit() {
+    fn display_feedback_poison_does_not_steal_processor_input() {
         let changes = Arc::new(Mutex::new(Vec::new()));
-        let handler = ComponentHandler::new(changes.clone());
+        let (handler, mut _native_edits) = ComponentHandler::new(changes.clone());
         let _ = std::panic::catch_unwind(|| {
             let _guard = changes.lock().unwrap();
             panic!("simulate a poisoned native feedback queue");
@@ -3144,6 +3127,16 @@ mod component_handler_tests {
         }
         assert_eq!(handler.native_dirty_revision().unwrap(), 1);
         assert!(handler.native_state_capture_revision().is_err());
+        let mut received = Vec::new();
+        _native_edits
+            .stage(|edit| {
+                received.push((edit.id, edit.value));
+                true
+            })
+            .unwrap();
+        _native_edits.finish_process(true).unwrap();
+        assert_eq!(received, [(7, 0.5)]);
+        assert_eq!(handler.native_state_capture_revision().unwrap(), 1);
     }
 
     struct TestContextMenuTarget {
@@ -3178,7 +3171,7 @@ mod component_handler_tests {
 
     #[test]
     fn captures_begin_perform_end_in_order_and_drains() {
-        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let (handler, mut _native_edits) = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
 
         // Drive a full gesture: mouse-down, two drag values, mouse-up.
         unsafe {
@@ -3228,7 +3221,7 @@ mod component_handler_tests {
     /// `performEdit` (and one gesture event) per UI frame, for as long as the editor is open.
     #[test]
     fn editor_feedback_is_capped_when_the_host_never_polls() {
-        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let (handler, mut _native_edits) = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
 
         // Simulate a very long drag: far more edits than the cap, never polled.
         unsafe {
@@ -3257,7 +3250,7 @@ mod component_handler_tests {
 
     #[test]
     fn handler2_requests_are_ordered_and_report_backpressure() {
-        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let (handler, mut _native_edits) = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
         unsafe {
             assert_eq!(handler.setDirty(1), kResultOk);
             assert_eq!(handler.requestOpenEditor(c"editor".as_ptr()), kResultOk);
@@ -3291,7 +3284,7 @@ mod component_handler_tests {
 
     #[test]
     fn handler3_context_menu_preserves_items_and_executes_plugin_target() {
-        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let (handler, mut _native_edits) = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
         let handler_wrapper = ComWrapper::new(handler);
         assert!(
             handler_wrapper.as_com_ref::<IComponentHandler3>().is_some(),
@@ -3378,7 +3371,7 @@ mod component_handler_tests {
 
     #[test]
     fn handler3_rejects_invalid_views_and_releases_dismissed_targets() {
-        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let (handler, mut _native_edits) = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
         assert!(unsafe { handler.createContextMenu(ptr::null_mut(), ptr::null()) }.is_null());
 
         let menu = unsafe {
@@ -3403,7 +3396,7 @@ mod component_handler_tests {
 
     #[test]
     fn unit_handler_requests_are_ordered_and_preserve_whole_list_changes() {
-        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let (handler, mut _native_edits) = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
         unsafe {
             assert_eq!(handler.notifyUnitSelection(7), kResultOk);
             assert_eq!(handler.notifyProgramListChange(11, 3), kResultOk);
@@ -3438,7 +3431,7 @@ mod component_handler_tests {
     #[test]
     fn restart_flags_accumulate_until_drained() {
         use vst3::Steinberg::Vst::RestartFlags_ as Flags;
-        let handler = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let (handler, mut _native_edits) = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
         assert!(handler.take_restart_flags().is_empty());
 
         // Two separate restarts, e.g. a preset load followed by a mode switch.
@@ -4089,7 +4082,9 @@ mod parameter_changes_tests {
             assert!(!queue_ptr.is_null());
             assert!(index >= 0);
             let queues = pc.queues.lock().unwrap();
-            queues[index as usize].insert_point(offset, value);
+            queues[index as usize]
+                .try_insert_point(offset, value)
+                .unwrap();
         };
 
         // Block 1: plugin writes one point for parameter 42.
@@ -4649,5 +4644,45 @@ mod linux_run_loop_epoch_tests {
             assert_eq!(frame.registerTimer(timer.as_ptr(), 1), kInternalError);
         }
         assert!(registry.lock().unwrap().timers.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod native_parameter_admission_tests {
+    use super::*;
+
+    #[test]
+    fn checked_admission_refuses_poisoned_existing_or_recycled_point_storage() {
+        for recycle in [false, true] {
+            let changes = ParameterChanges::default();
+            changes.try_enqueue(7, 0, 0.25).unwrap();
+            let queue = changes.queues.lock().unwrap()[0].clone();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _guard = queue.points.lock().unwrap();
+                panic!("controlled point admission failure");
+            }));
+            if recycle {
+                changes.clear_all();
+            }
+            assert!(changes.try_enqueue(7, 0, 0.75).is_err());
+            assert_eq!(changes.used.load(Ordering::Relaxed), usize::from(!recycle));
+        }
+    }
+
+    #[test]
+    fn display_overflow_and_polling_are_independent_of_native_delivery() {
+        let display = Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK)));
+        let (handler, mut receiver) = ComponentHandler::new(display.clone());
+        for i in 0..MAX_EDITOR_FEEDBACK + 2 {
+            unsafe {
+                handler.performEdit(7, i as f64);
+            }
+            receiver
+                .stage(|edit| edit.id == 7 && edit.value == i as f64)
+                .unwrap();
+            receiver.finish_process(true).unwrap();
+        }
+        assert_eq!(display.lock().unwrap().len(), MAX_EDITOR_FEEDBACK);
+        assert!(handler.native_state_capture_revision().is_ok());
     }
 }

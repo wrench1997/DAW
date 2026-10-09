@@ -63,7 +63,7 @@ loss/capture rejection, editor detach, zero-sample flushes, checked drains, data
 Linux factory/frame IRunLoop ownership remain in the existing synchronous paths. There is no new
 worker to detach and no module-unload-on-hung-worker policy implied by this commit.
 
-The temporary `LegacyProcessBridge` explicitly retains existing GUI-parameter locks, feedback
+At the ownership checkpoint the temporary `LegacyProcessBridge` retained GUI-parameter locks, feedback
 behavior and host data-exchange callbacks. ParameterChanges/EventList storage and public plugin
 metering still require bounded, allocation/lock-safe replacements before enabling a processor
 thread. An `Arc<Mutex<Plugin>>` would not solve native editor stalls.
@@ -181,3 +181,57 @@ Source references: [Surge processor, release 1.3.4](https://github.com/surge-syn
 [Surge synthesis and background loading](https://github.com/surge-synthesizer/surge/blob/release_xt_1.3.4/src/common/SurgeSynthesizer.cpp),
 [state queue/application](https://github.com/surge-synthesizer/surge/blob/release_xt_1.3.4/src/common/SurgeSynthesizerIO.cpp),
 [the release's pinned JUCE wrapper](https://github.com/surge-synthesizer/JUCE/blob/cf5754b19c87ea63758802e3f4239c05a77f1412/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp).
+
+
+## Bounded native-edit delivery and capture fence
+
+The next bounded slice replaces the native editor-to-processor bridge only. The helper still
+executes GUI and Process requests on its existing single thread. It does not solve the measured
+resize stall, create a DSP worker, change protocol ordering, or establish whole-process real-time
+safety.
+
+`internal/native_edit_transport.rs` allocates a fixed-capacity rtrb ring and equally bounded staging
+storage at instance creation. Each native value carries its generation, sequence, parameter ID
+and value. `ComponentHandler` owns the producer, serialized by a producer-only `try_lock`; a
+contending/reentrant producer refuses delivery and records sticky loss rather than waiting. The
+runtime exclusively owns the consumer. No producer/display guard is held around a plugin call,
+and the consumer never takes either guard. No new unsafe Send/Sync implementation is introduced.
+
+Each actual SDK Process call, including an explicit zero-sample flush and each split chunk, has
+its own admission/acknowledgment unit. `ParameterChanges::try_enqueue` reports failed queue/point
+admission. Only complete admission followed by a successful Process advances the applied
+watermark. Failed or abandoned staged values make delivery loss sticky for that instance; later
+empty or successful calls cannot erase the uncertainty. An unrelated failed call with no staged
+native values does not invent native delivery loss. Existing COM parameter/event storage can still
+allocate and lock, and data-exchange/metering remain separate future work.
+
+Display values and gesture polling are independent of DSP input. This intentionally fixes stopped
+polling: polling native values while stopped no longer consumes the pending processor edit or
+permanently invalidates an otherwise deliverable save. A later explicit zero-sample flush can
+admit and acknowledge the values, after which state capture is allowed. Display-log overflow is
+not the same as processor-delivery loss.
+
+Capture requires no in-flight publication/process, submitted and applied watermarks to agree,
+no lifetime-sticky loss/exhaustion, and the same durable native dirty revision before and after
+component/controller state serialization. Queue emptiness alone is never delivery evidence.
+Counter exhaustion refuses capture instead of wrapping.
+
+Successful component/controller state application explicitly supersedes pending edits in a new
+generation at the existing queue-clear boundary. Discarding old values never labels them applied.
+This also applies if later bus/setup rebuilding fails: subsequent recovery must not replay edits
+from before the applied state. Earlier rejected/failed state application leaves generation and
+pending native input unchanged. The exact Surge preflight still precedes all of these mutations,
+and its positive-call/editor-attempt history remains sticky.
+
+If the post-application supersession fence cannot acquire its producer guard, or overlaps a
+publisher already in flight, state has already been applied. The operation returns an explicit
+restore-fence error and permanently invalidates native input for that instance; queued/new native
+values cannot replay, and state capture remains refused until a fresh instance is loaded. This
+partial-restore failure is distinct from the mutation-free Surge eligibility rejection.
+
+The transport-only allocation tests measure first-use, full/empty, wraparound and failure paths
+without per-operation allocation or deallocation. A latch-controlled 350 ms producer/display
+stall fixture demonstrates that an independent consumer can finish already-admitted transport
+work before those guards are released. It does not run a real plugin or demonstrate independent
+DSP execution in the still-single-threaded helper. COM integration fixtures intentionally allocate
+and lock and cannot be used as whole-process real-time evidence.

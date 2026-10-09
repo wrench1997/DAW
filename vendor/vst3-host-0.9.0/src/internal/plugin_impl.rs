@@ -1,5 +1,6 @@
 //! Internal VST3 plugin implementation
 
+use super::native_edit_transport::NativeEditReceiver;
 use super::processor_lease::{ProcessorCalls, ProcessorLease};
 use crate::{
     audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
@@ -174,12 +175,6 @@ struct ControlDomain {
     component_handler: Option<ComWrapper<ComponentHandler>>,
     connection: Option<ConnectionPair>,
 
-    // Parameter edits the plugin's *own editor* reported via `IComponentHandler::performEdit`,
-    // after `process()` has routed them into the processor's input queue. Drained by the host
-    // via `get_parameter_changes()` to update its UI. Separate from the raw performEdit sink
-    // (`component_handler.parameter_changes`) so feeding the DSP and updating the display are
-    // not two consumers racing to drain the same buffer.
-    gui_param_changes_for_host: Arc<Mutex<Vec<(u32, f64)>>>,
     // Parameter values that reached the processor queue from a thread that must not call
     // `IEditController` (the audio callback, via the playback handles). Bounded, lock-free and
     // drop-oldest; the control-thread service paths drain it into setParamNormalized so the
@@ -269,6 +264,8 @@ struct ProcessorRuntime {
     // with process() by the caller's &mut access, so a plain Vec (no lock) is sufficient.
     // Pre-reserved to MAX_PENDING_PARAM_CHANGES and capped there — see the constant.
     pending_param_changes: Vec<ParameterChange>,
+    // Exclusive bounded native-edit consumer; the processor never takes UI producer/display locks.
+    native_edits: NativeEditReceiver,
     // How many parameter changes have been dropped because the queue was full. Reported in the
     // warning so a host sees a running total rather than one line per lost change.
     dropped_param_changes: u64,
@@ -292,52 +289,13 @@ struct ProcessorRuntime {
     output_events_lost: std::sync::atomic::AtomicBool,
 }
 
-/// Temporary adapter for the unchanged synchronous path. This still takes GUI queue locks
-/// and feeds growable host COM containers; replace it before enabling a processor thread.
+/// Temporary adapter for the unchanged synchronous data-exchange path. The native-edit
+/// consumer is runtime-owned; it no longer reaches through control-domain GUI locks.
 struct LegacyProcessBridge<'a> {
-    handler: Option<&'a ComponentHandler>,
-    gui_feedback: &'a Mutex<Vec<(u32, f64)>>,
     host_app: &'a HostApplication,
 }
 
 impl LegacyProcessBridge<'_> {
-    fn stage_native_edits(&self, changes: &ParameterChanges) -> bool {
-        let mut native_edits_staged = false;
-        if let Some(ref handler) = self.handler {
-            if let Ok(mut gui_changes) = handler.parameter_changes.lock() {
-                if !gui_changes.is_empty() {
-                    native_edits_staged = true;
-                    for &(id, value) in gui_changes.iter() {
-                        changes.enqueue(id, 0, value);
-                    }
-                    if let Ok(mut stash) = self.gui_feedback.lock() {
-                        // Bounded: nothing drains the stash unless the host polls
-                        // `get_parameter_changes`, and the realtime runner never does, so
-                        // an unbounded append here would grow forever and reallocate on
-                        // the audio thread. Both buffers are pre-reserved to the cap, so
-                        // the steady-state append allocates nothing.
-                        let room = MAX_EDITOR_FEEDBACK.saturating_sub(stash.len());
-                        if room >= gui_changes.len() {
-                            stash.append(&mut gui_changes);
-                        } else {
-                            stash.extend(gui_changes.drain(..room));
-                            gui_changes.clear();
-                        }
-                    } else {
-                        gui_changes.clear();
-                    }
-                }
-            }
-        }
-        native_edits_staged
-    }
-
-    fn mark_native_feedback_lost(&self) {
-        if let Some(handler) = self.handler {
-            handler.mark_native_parameter_feedback_lost();
-        }
-    }
-
     fn enter_process(&self) {
         self.host_app.enter_data_exchange_process();
     }
@@ -355,8 +313,6 @@ impl ControlDomain {
         (
             ProcessorLease::new(&mut self.processor, self._module.as_ref()),
             LegacyProcessBridge {
-                handler: self.component_handler.as_deref(),
-                gui_feedback: &self.gui_param_changes_for_host,
                 host_app: &self._host_app,
             },
         )
@@ -1154,35 +1110,17 @@ impl PluginImpl {
 
     /// Get parameter changes the plugin's editor made (for the host to update its UI).
     ///
-    /// Returns edits that `process()` has already routed into the processor's input queue, so
-    /// the DSP and the host display stay in sync. (Before processing has started, falls back to
-    /// the raw performEdit sink so edits aren't lost.)
+    /// UI feedback is independent of processor delivery, including while stopped. Polling
+    /// values or gestures cannot steal the edits needed by a subsequent zero-sample flush.
     pub fn get_parameter_changes(&self) -> Vec<(u32, f64)> {
         self.drain_deferred_controller_sync();
         let mut changes = Vec::new();
         while let Some(change) = self.runtime.output_param_feedback.pop() {
             changes.push(change);
         }
-        // Both drains take the elements in place rather than `mem::take`-ing the `Vec`: taking it
-        // would leave a zero-capacity buffer behind, so the next block's `append` would
-        // reallocate — on the audio thread, for the stash.
-        if let Ok(mut stash) = self.control.gui_param_changes_for_host.lock() {
-            if !stash.is_empty() {
-                changes.extend(stash.drain(..));
-            }
-        }
-        // Not processing yet (process() hasn't run to move edits into the stash): drain the raw
-        // performEdit sink directly so the host UI still reflects editor changes.
-        if !self.runtime.is_processing {
-            if let Some(ref handler) = self.control.component_handler {
-                if let Ok(mut raw_changes) = handler.parameter_changes.lock() {
-                    if !raw_changes.is_empty() {
-                        // This legacy display drain bypasses DSP while stopped. Do not later
-                        // claim a component snapshot contains values removed by this route.
-                        handler.mark_native_parameter_feedback_lost();
-                    }
-                    changes.extend(raw_changes.drain(..));
-                }
+        if let Some(handler) = self.control.component_handler.as_ref() {
+            if let Ok(mut display) = handler.parameter_changes.lock() {
+                changes.extend(display.drain(..));
             }
         }
         changes
@@ -1505,8 +1443,8 @@ impl PluginImpl {
             // Create component handler for parameter change notifications
             log::debug!("Step 8: Creating component handler...");
             let parameter_changes = Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK)));
-            let component_handler =
-                ComWrapper::new(ComponentHandler::new(parameter_changes.clone()));
+            let (component_handler, native_edits) = ComponentHandler::new(parameter_changes);
+            let component_handler = ComWrapper::new(component_handler);
             log::debug!("Component handler created");
 
             // Get or create controller (handles both single-component and separate controller)
@@ -1670,6 +1608,7 @@ impl PluginImpl {
                     program_change_cache: Vec::new(),
                     process_data: None,
                     pending_param_changes: Vec::with_capacity(MAX_PENDING_PARAM_CHANGES),
+                    native_edits,
                     dropped_param_changes: 0,
                     output_param_feedback: Arc::new(ArrayQueue::new(MAX_OUTPUT_PARAMETER_FEEDBACK)),
                     input_events,
@@ -1690,9 +1629,6 @@ impl PluginImpl {
                     unit_cache: Mutex::new(None),
                     component_handler: Some(component_handler),
                     connection: initialized.take_connection(),
-                    gui_param_changes_for_host: Arc::new(Mutex::new(Vec::with_capacity(
-                        MAX_EDITOR_FEEDBACK,
-                    ))),
                     deferred_controller_sync: ArrayQueue::new(MAX_DEFERRED_CONTROLLER_SYNC),
                     editor_has_been_opened: false,
                     plugin_view: None,
@@ -2364,14 +2300,19 @@ impl ProcessorRuntime {
                     }
                 }
 
-                // Route parameter edits the plugin's *own editor* reported via performEdit into
-                // the processor too, so turning a knob in the plugin GUI affects the audio — not
-                // just the host's display. (Some plugins relay editor→processor internally over
-                // the component/controller connection; others rely on the host to do this. We do
-                // it unconditionally; a plugin that also self-relays just gets the same value
-                // twice in the same block, which is idempotent.) Drained here at offset 0 and
-                // stashed for the host's display poll (get_parameter_changes).
-                let native_edits_staged = bridge.stage_native_edits(&data.input_param_changes);
+                // Drain only the runtime-owned bounded native channel. Checked admission
+                // precedes the actual SDK call; no UI producer/display lock is touched here.
+                if let Err(error) = self.native_edits.stage(|edit| {
+                    data.input_param_changes
+                        .try_enqueue(edit.id, 0, edit.value)
+                        .is_ok()
+                }) {
+                    data.input_param_changes.clear_all();
+                    self.input_events.clear();
+                    return Err(Error::Other(format!(
+                        "native edit admission failed: {error:?}"
+                    )));
+                }
 
                 match buffers {
                     CallerAudioBuffers::Flat(buffers) => {
@@ -2411,6 +2352,9 @@ impl ProcessorRuntime {
                 let process_result = processor.process(&mut data.process_data);
                 bridge.leave_process();
                 restore_process_audio_io(&mut data.process_data, saved_audio_io);
+                let _ = self
+                    .native_edits
+                    .finish_process(process_result == kResultOk);
 
                 // Everything from here to the output copy is per-block cleanup and MUST run even
                 // when the plugin reported failure. Returning early instead would leave this
@@ -2468,9 +2412,6 @@ impl ProcessorRuntime {
                 }
 
                 if process_result != kResultOk {
-                    if native_edits_staged {
-                        bridge.mark_native_feedback_lost();
-                    }
                     // Leave the caller's buffers as they were (the playback bridges pre-fill them
                     // with silence) rather than copying out whatever the failed call left behind.
                     Err(Error::ProcessFailed(process_result))
@@ -4614,13 +4555,19 @@ impl PluginInternal for PluginImpl {
 
                 self.runtime.pending_param_changes.clear();
                 if let Some(handler) = self.control.component_handler.as_ref() {
+                    // State is applied: explicitly supersede old native packets, including
+                    // when subsequent layout rebuilding fails. Discard is not delivery.
                     handler
-                        .parameter_changes
-                        .lock()
-                        .map_err(|_| {
-                            Error::Other("native parameter feedback lock is poisoned".into())
-                        })?
-                        .clear();
+                        .native_edits
+                        .supersede(&mut self.runtime.native_edits)
+                        .map_err(|error| {
+                            Error::Other(format!(
+                                "state applied but native edit restore fence failed: {error:?}"
+                            ))
+                        })?;
+                    if let Ok(mut display) = handler.parameter_changes.lock() {
+                        display.clear();
+                    }
                 }
                 if let Some(process_data) = self.runtime.process_data.as_ref() {
                     process_data.input_param_changes.clear_all();

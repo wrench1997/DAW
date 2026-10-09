@@ -691,3 +691,60 @@ optimized bounded-capture evidence remains future work.
 - Combined4fdfbc2 + helper9dd18d74 passes all **four default2048** ordinary/routed × fixed/changing cases after real Surge Effects0→32 latency fence and actual stopped Retry/new revision/epoch. Every active endpoint completes375 blocks with357 exact +18 startup; exact PDC4896/7328 and events pass. Fresh Surge state restore immediately sounds the first note (sample60, peak0.21138866245746613 over1024frames), with controller0.8691863417625427 and component−6.27905654907227dB unchanged.
 - Matched preallocated **debug128 remains2/4**: fixed ordinary/routed cases fail FX DeadlineMiss at sequence151/1. No capture overflow occurs. Delivery PASS must not imply timing PASS: passing2048 changing cases still have14 callback-core interval overruns each;128 changing cases have18/24. The helper/harness/source binding and each raw non-audio receipt hash are in the separate [combined summary](../qa/plugin_timing_combined/README.md). It retains original summary bytes with SHA256 `57300eb4cac2e40eb81d7db9cb4228c475f11d7a12bfee82c63c1cf0b867d0e7`; its small publication is a summary, not a complete new reproduction harness.
 - Added this distinct three-file summary with pinned inventory and strict missing/changed/extra/rewrite package regressions. Historical250-file debug publication and earlier91 files remain byte-identical and separately attributed. Full post-document/package Python verification is **207 tests**, including actual Unix helper cases. Actual package closure is **383 inputs**. New exact Windows CI is required after publication. The approved cold optimized experiment runs separately and is not a prerequisite or a claimed result of this correctness checkpoint.
+
+## 2026-10-09 13:36 UTC — Bounded native-edit delivery and capture fence
+
+Separate slice from published `244f622`; helper/wire/public Plugin/processor lease/App/timing and
+Cargo sources are unchanged. Native performEdit values now use an existing-rtrb fixed-capacity
+channel with generation/sequence tags, producer-only nonblocking synchronization and an exclusive
+runtime consumer/preallocated staging. Display and gesture polling are separate. Checked COM
+parameter admission plus each actual successful SDK Process is required to acknowledge a batch;
+empty queues are not proof of delivery. Sticky loss/exhaustion and dirty-revision checks survive
+polling, later successful blocks and state supersession. No new unsafe Send/Sync or worker.
+
+Stopped polling is an intentional behavior fix: it no longer steals DSP edits and poisons a
+subsequent save. Successful state application explicitly supersedes earlier native packets at the
+existing queue-clear boundary, including setup-failure recovery; discarded edits are not called
+applied. A contended/in-flight post-application fence fails explicitly and permanently closes
+native input/capture instead of replaying stale edits. Rejected Surge preflight still leaves
+queues, generation, lifecycle and history unchanged. Administration remains main-thread serialized.
+
+Executed against the final frozen Rust source:
+- 304 available vendor unit tests pass, including 19 channel tests and COM integration fixtures;
+  26 doctests pass, including positive main-thread use and ownership compile-fail cases. The one
+  named upstream metadata test remains excluded because the registry archive omits its Dexed
+  fixture. The source-linked harness retains production source/features/dependency versions;
+  original-manifest offline dev-dependency and prior-stage fixture limitations remain documented.
+- 22 helper + 5 editor protocol + 2 transport protocol tests; 79 Python smoke-harness tests;
+  4 executed Unix descriptor tests; 124 packaging tests; production helper build, root strict
+  Clippy, rustfmt and diff checks pass. Direct vendor Clippy passes with explicit exceptions for
+  unchanged deprecated-atomic and drain_collect diagnostics; the initial strict failure is kept.
+  An initial pytest invocation failed because pytest is absent; the repository's unittest runner
+  then executed all packaging tests successfully, without installing anything.
+- Cumulative vendor patch replay onto the unchanged registry archive is byte-for-byte verified,
+  with mechanical package provenance pins refreshed. No dependency/archive/license changes.
+- Genuine copied-helper matrix passes 12 Surge fresh/used-active/used-stopped cases across
+  17/47/128/256 frames plus Stochas state/MIDI. Fresh first-note PCM/getter/component state agree;
+  used Surge restoration is safely rejected while the old instance remains usable.
+- New real native Surge edit while stopped: volume 1.0→0.8691863417625427 (native −6.28 dB),
+  then 20 rounds/80 requests polling dirty/value/changes/gestures, then SaveState with no positive
+  Process. The newly produced 51,929-byte state, SHA256
+  `011ded9e14952b8a631e9e9b443fad6f0997daf641919862e95f5e860f414272`, restores into fresh instances
+  at all four profiles with correct getter/component state and finite first-note PCM without
+  positive warmup. Peaks 0.194–0.214; this is functional evidence, not a latency measurement.
+- Independent native verifier passes the complete trusted fixture, same-XID/generation/geometry
+  Surge rejection before detach, closed-used rejection/reopen, and Stochas used/open restore of a
+  native-created row115/step3 cell. Shutdown exits 0; no native windows remain.
+
+Copied helper SHA256: `dca08353e3f23308d535a791c9fa2c89635ee683db29625fa8d2a3d0a988cbe8`.
+Frozen Rust diff SHA256: `810e6a4f85c043c154a0ed90aa61110d660c6be98e377cf596f684646f90d2e6`.
+Independent review verified all 41 source hashes and the helper and found no blocking issue.
+Evidence index: `/workspace/shared/DAW-native-edit-transport-qa/validation-receipt.json`;
+new native receipts: `/workspace/shared/DAW-linux-editors-qa/native-edit-transport`.
+
+The channel tests establish no per-operation allocation/free and consumer independence while
+producer/display guards are held at least 350 ms, with a 3 s scheduling watchdog. They do not
+establish whole-plugin real-time safety or remove the helper's single-threaded GUI resize stall.
+Legacy COM parameter/event allocation/locks, data exchange/metering, hardware qualification and
+Windows/macOS native execution remain separate work. The legacy full-chain Admin LoadState
+closure/fault limitation is unchanged. No DSP latency/dropout improvement is claimed.

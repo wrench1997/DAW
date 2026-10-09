@@ -150,6 +150,10 @@ struct MockState {
     fail_deactivate: AtomicBool,
     contexts: Mutex<Vec<usize>>,
     processed_layouts: Mutex<Vec<Vec<i32>>>,
+    processed_parameters: Mutex<Vec<Vec<(u32, i32, f64)>>>,
+    capture_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    process_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    fail_state: AtomicBool,
 }
 
 impl Default for MockState {
@@ -164,6 +168,10 @@ impl Default for MockState {
             fail_deactivate: AtomicBool::new(false),
             contexts: Mutex::new(Vec::new()),
             processed_layouts: Mutex::new(Vec::new()),
+            processed_parameters: Mutex::new(Vec::new()),
+            capture_callback: Mutex::new(None),
+            process_callback: Mutex::new(None),
+            fail_state: AtomicBool::new(false),
         }
     }
 }
@@ -286,14 +294,23 @@ impl<const S: bool, const C: bool> IComponentTrait for MockPlugin<S, C> {
     }
     unsafe fn setState(&self, _stream: *mut IBStream) -> tresult {
         self.probe.record("component.setState");
+        if self.state.fail_state.load(Ordering::Acquire) {
+            return kResultFalse;
+        }
         if self.state.expand_on_state.load(Ordering::Relaxed) {
             self.state.output_buses.store(2, Ordering::Relaxed);
             self.state.channels.store(2, Ordering::Relaxed);
         }
         kResultOk
     }
-    unsafe fn getState(&self, _stream: *mut IBStream) -> tresult {
-        kNotImplemented
+    unsafe fn getState(&self, stream: *mut IBStream) -> tresult {
+        self.probe.record("component.getState");
+        if let Some(callback) = self.state.capture_callback.lock().unwrap().as_ref() {
+            callback();
+        }
+        let stream = vst3::ComRef::from_raw(stream).unwrap();
+        let mut value = 42u8;
+        stream.write((&mut value as *mut u8).cast(), 1, ptr::null_mut())
     }
 }
 
@@ -365,6 +382,25 @@ impl<const S: bool, const C: bool> IAudioProcessorTrait for MockPlugin<S, C> {
             return kResultFalse;
         }
         let data = &mut *data;
+        let mut parameters = Vec::new();
+        if let Some(changes) = vst3::ComRef::from_raw(data.inputParameterChanges) {
+            for index in 0..changes.getParameterCount() {
+                let queue = vst3::ComRef::from_raw(changes.getParameterData(index)).unwrap();
+                for point in 0..queue.getPointCount() {
+                    let (mut offset, mut value) = (0, 0.0);
+                    assert_eq!(queue.getPoint(point, &mut offset, &mut value), kResultOk);
+                    parameters.push((queue.getParameterId(), offset, value));
+                }
+            }
+        }
+        self.state
+            .processed_parameters
+            .lock()
+            .unwrap()
+            .push(parameters);
+        if let Some(callback) = self.state.process_callback.lock().unwrap().as_ref() {
+            callback();
+        }
         let mut layout = Vec::new();
         for index in 0..data.numOutputs.max(0) as usize {
             let bus = &mut *data.outputs.add(index);
@@ -690,6 +726,9 @@ fn plugin_fixture(trace: &Trace, state: &Arc<MockState>) -> PluginImpl {
     let plug_frame = create_host_plug_frame(editor_resize.clone(), run_loop.clone());
     #[cfg(not(target_os = "linux"))]
     let plug_frame = create_host_plug_frame(editor_resize.clone());
+    let (handler, native_edits) = ComponentHandler::new(Arc::new(Mutex::new(Vec::with_capacity(
+        MAX_EDITOR_FEEDBACK,
+    ))));
     PluginImpl {
         info: PluginInfo {
             path: "ownership-test.vst3".into(),
@@ -726,6 +765,7 @@ fn plugin_fixture(trace: &Trace, state: &Arc<MockState>) -> PluginImpl {
             program_change_cache: Vec::new(),
             process_data: None,
             pending_param_changes: Vec::new(),
+            native_edits,
             dropped_param_changes: 0,
             output_param_feedback: Arc::new(ArrayQueue::new(8)),
             input_events: create_event_list(),
@@ -744,9 +784,8 @@ fn plugin_fixture(trace: &Trace, state: &Arc<MockState>) -> PluginImpl {
             prefetchable_support: None,
             dirty_caches: DirtyCaches::default(),
             unit_cache: Mutex::new(None),
-            component_handler: None,
+            component_handler: Some(ComWrapper::new(handler)),
             connection: None,
-            gui_param_changes_for_host: Arc::new(Mutex::new(Vec::new())),
             deferred_controller_sync: ArrayQueue::new(8),
             editor_has_been_opened: false,
             plugin_view: None,
@@ -1079,9 +1118,13 @@ fn io_restart_rebuilds_layout_and_failed_rebuild_stays_quiescent() {
     let trace = Trace::default();
     let state = Arc::new(MockState::default());
     let mut plugin = plugin_fixture(&trace, &state);
-    let handler = ComWrapper::new(ComponentHandler::new(Arc::new(Mutex::new(Vec::new()))));
-    let callback = handler.to_com_ptr::<IComponentHandler>().unwrap();
-    plugin.control.component_handler = Some(handler);
+    let callback = plugin
+        .control
+        .component_handler
+        .as_ref()
+        .unwrap()
+        .to_com_ptr::<IComponentHandler>()
+        .unwrap();
     plugin.start_processing().unwrap();
     state.output_buses.store(2, Ordering::Relaxed);
     state.channels.store(2, Ordering::Relaxed);
@@ -1132,6 +1175,23 @@ fn surge_reused_restore_rejects_before_lifecycle_state_and_queue_mutations() {
         }
         let prior_note = plugin.note_on(MidiChannel::Ch1, 60, 100, 0).unwrap();
         plugin.set_parameter(7, 0.75).unwrap();
+        let callback = plugin
+            .control
+            .component_handler
+            .as_ref()
+            .unwrap()
+            .to_com_ptr::<IComponentHandler>()
+            .unwrap();
+        unsafe {
+            callback.performEdit(8, 0.25);
+        }
+        let native_before = plugin
+            .control
+            .component_handler
+            .as_ref()
+            .unwrap()
+            .native_edits
+            .snapshot();
         let process_data =
             plugin.runtime.process_data.as_ref().unwrap().as_ref() as *const HostProcessData;
         let next_note = plugin.runtime.next_note_id;
@@ -1150,6 +1210,16 @@ fn surge_reused_restore_rejects_before_lifecycle_state_and_queue_mutations() {
         assert!(
             trace.methods().is_empty(),
             "rejection must not enter plugin COM code"
+        );
+        assert_eq!(
+            plugin
+                .control
+                .component_handler
+                .as_ref()
+                .unwrap()
+                .native_edits
+                .snapshot(),
+            native_before
         );
         assert_eq!(plugin.runtime.is_processing, !stopped);
         assert_eq!(plugin.control.is_active, !stopped);
@@ -1174,6 +1244,13 @@ fn surge_reused_restore_rejects_before_lifecycle_state_and_queue_mutations() {
         let new_note = plugin.note_on(MidiChannel::Ch1, 64, 100, 0).unwrap();
         assert_ne!(prior_note, new_note);
         process_and_assert_samples(&mut plugin, 1, 1);
+        assert!(state
+            .processed_parameters
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .contains(&(8, 0, 0.25)));
     }
 }
 
@@ -1295,4 +1372,260 @@ fn aliased_controller_blob_is_not_applied_as_a_second_component_state() {
     assert!(!calls
         .iter()
         .any(|(_, method)| *method == "controller.setState" || *method == "setComponentState"));
+}
+
+#[test]
+fn stopped_display_and_gesture_polls_preserve_native_zero_sample_flush_and_capture() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    let callback = plugin
+        .control
+        .component_handler
+        .as_ref()
+        .unwrap()
+        .to_com_ptr::<IComponentHandler>()
+        .unwrap();
+    unsafe {
+        callback.beginEdit(7);
+        callback.performEdit(7, 0.25);
+        callback.performEdit(7, 0.75);
+        callback.endEdit(7);
+    }
+    assert_eq!(plugin.get_parameter_changes(), [(7, 0.25), (7, 0.75)]);
+    assert_eq!(plugin.take_parameter_edits().len(), 4);
+    assert!(plugin.save_state().is_err());
+    plugin.start_processing().unwrap();
+    plugin
+        .process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
+        .unwrap();
+    assert!(!plugin.runtime.has_processed_audio);
+    assert_eq!(
+        *state.processed_parameters.lock().unwrap(),
+        [vec![(7, 0, 0.25), (7, 0, 0.75)]]
+    );
+    plugin.stop_processing().unwrap();
+    assert!(plugin.save_state().is_ok());
+}
+
+#[test]
+fn reentrant_native_edit_during_component_capture_is_rejected() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
+    *state.capture_callback.lock().unwrap() = Some(Box::new(move || unsafe {
+        handler.performEdit(7, 0.5);
+    }));
+    assert!(plugin.save_state().is_err());
+    *state.capture_callback.lock().unwrap() = None;
+    plugin.start_processing().unwrap();
+    plugin
+        .process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
+        .unwrap();
+    assert!(plugin.save_state().is_ok());
+}
+
+#[test]
+fn failed_native_process_never_becomes_capture_success_after_later_empty_process() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    unsafe {
+        plugin
+            .control
+            .component_handler
+            .as_ref()
+            .unwrap()
+            .performEdit(7, 0.5);
+    }
+    state.fail_process.store(true, Ordering::Release);
+    assert!(plugin
+        .process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
+        .is_err());
+    assert!(plugin.save_state().is_err());
+    state.fail_process.store(false, Ordering::Release);
+    plugin
+        .process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
+        .unwrap();
+    assert!(plugin.save_state().is_err());
+}
+
+#[test]
+fn state_applied_then_setup_failed_supersedes_native_edits_without_replaying_on_recovery() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    unsafe {
+        plugin
+            .control
+            .component_handler
+            .as_ref()
+            .unwrap()
+            .performEdit(7, 0.5);
+    }
+    let before = plugin
+        .control
+        .component_handler
+        .as_ref()
+        .unwrap()
+        .native_edits
+        .snapshot();
+    state.fail_setup.store(true, Ordering::Release);
+    assert!(plugin
+        .load_state_with_context(&[1], &StateContext::Project)
+        .is_err());
+    let after = plugin
+        .control
+        .component_handler
+        .as_ref()
+        .unwrap()
+        .native_edits
+        .snapshot();
+    assert_eq!(after.generation, before.generation + 1);
+    assert_eq!(after.submitted, 0);
+    assert_eq!(after.applied, 0); // superseded, never falsely delivered
+    assert_eq!(after.dirty, before.dirty);
+    state.fail_setup.store(false, Ordering::Release);
+    plugin.start_processing().unwrap();
+    plugin
+        .process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
+        .unwrap();
+    assert_eq!(*state.processed_parameters.lock().unwrap(), [vec![]]);
+}
+
+#[test]
+fn failed_state_application_preserves_native_generation_and_pending_packets() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    unsafe {
+        plugin
+            .control
+            .component_handler
+            .as_ref()
+            .unwrap()
+            .performEdit(7, 0.5);
+    }
+    let before = plugin
+        .control
+        .component_handler
+        .as_ref()
+        .unwrap()
+        .native_edits
+        .snapshot();
+    state.fail_state.store(true, Ordering::Release);
+    assert!(plugin
+        .load_state_with_context(&[1], &StateContext::Project)
+        .is_err());
+    assert_eq!(
+        plugin
+            .control
+            .component_handler
+            .as_ref()
+            .unwrap()
+            .native_edits
+            .snapshot(),
+        before
+    );
+    plugin
+        .process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
+        .unwrap();
+    assert_eq!(
+        *state.processed_parameters.lock().unwrap(),
+        [vec![(7, 0, 0.5)]]
+    );
+}
+
+#[test]
+fn split_calls_acknowledge_only_the_native_values_in_each_successful_sdk_call() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
+    unsafe {
+        handler.performEdit(7, 0.25);
+    }
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let captured = observed.clone();
+    *state.process_callback.lock().unwrap() = Some(Box::new(move || {
+        let snapshot = handler.native_edits.snapshot();
+        captured
+            .lock()
+            .unwrap()
+            .push((snapshot.submitted, snapshot.applied));
+        if snapshot.submitted == 1 {
+            unsafe {
+                handler.performEdit(7, 0.75);
+            }
+        }
+    }));
+    plugin
+        .process(&mut AudioBuffers::new(0, 1, 32, 48000.0))
+        .unwrap();
+    assert_eq!(*observed.lock().unwrap(), [(1, 0), (2, 1)]);
+    assert_eq!(
+        *state.processed_parameters.lock().unwrap(),
+        [vec![(7, 0, 0.25)], vec![(7, 0, 0.75)]]
+    );
+    let snapshot = plugin
+        .control
+        .component_handler
+        .as_ref()
+        .unwrap()
+        .native_edits
+        .snapshot();
+    assert_eq!((snapshot.submitted, snapshot.applied), (2, 2));
+    *state.process_callback.lock().unwrap() = None;
+}
+
+#[test]
+fn native_checked_admission_failure_rejects_process_and_keeps_capture_uncertain() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    unsafe {
+        plugin
+            .control
+            .component_handler
+            .as_ref()
+            .unwrap()
+            .performEdit(7, 0.5);
+    }
+    let changes = plugin
+        .runtime
+        .process_data
+        .as_ref()
+        .unwrap()
+        .input_param_changes
+        .clone();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = changes.queues.lock().unwrap();
+        panic!("controlled parameter admission failure");
+    }));
+    trace.clear();
+    assert!(plugin
+        .process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
+        .is_err());
+    assert!(!trace
+        .methods()
+        .iter()
+        .any(|(_, method)| *method == "process"));
+    assert!(plugin.save_state().is_err());
+    assert_eq!(
+        plugin
+            .control
+            .component_handler
+            .as_ref()
+            .unwrap()
+            .native_edits
+            .snapshot()
+            .applied,
+        0
+    );
 }
