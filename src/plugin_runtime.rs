@@ -29,11 +29,12 @@ use super::{PluginDescriptor, PluginFormat};
 
 /// Maximum block accepted by the plug-in bridge. This matches the Mixer's preallocated blocks.
 pub const MAX_PLUGIN_BLOCK_FRAMES: usize = 2_048;
-// Two maximum 2048-frame callback bursts plus margin at Q128. Queue allocation
-// happens off the audio thread; default sequence latency remains one quantum.
-const DEFAULT_QUEUE_CAPACITY: usize = 36;
+// The largest admitted lookahead (28), one full callback burst (16), and two
+// sequence/reset slots fit within 48. All queues and future blocks allocate off-thread.
+const DEFAULT_QUEUE_CAPACITY: usize = crate::plugin_timing::PLUGIN_QUEUE_CAPACITY;
 const LEGACY_QUEUE_ADMISSION: usize = 4;
-pub const MAX_MIDI_BRIDGE_LOOKAHEAD_QUANTA: usize = 16;
+pub const MAX_PLUGIN_BRIDGE_LOOKAHEAD_QUANTA: usize =
+    crate::plugin_timing::MAX_PLUGIN_LOOKAHEAD_QUANTA;
 pub const MAX_PLUGIN_CHAIN_SLOTS: usize = 10;
 /// Maximum number of parameters exposed by one plug-in instance to the generic control surface.
 pub const MAX_PLUGIN_PARAMETER_CATALOG_ITEMS: usize = 4_096;
@@ -125,9 +126,13 @@ pub struct PluginPrepareConfig {
 
 impl PluginPrepareConfig {
     fn validate(self) -> Result<Self, String> {
-        if !(self.sample_rate.is_finite() && self.sample_rate > 0.0) {
+        if !(self.sample_rate.is_finite()
+            && self.sample_rate > 0.0
+            && self.sample_rate.fract() == 0.0
+            && self.sample_rate <= f64::from(crate::plugin_timing::MAX_PLUGIN_SAMPLE_RATE))
+        {
             return Err(format!(
-                "plug-in sample rate must be finite and positive, got {}",
+                "plug-in sample rate must be a finite integer in 1..=384000 Hz, got {}",
                 self.sample_rate
             ));
         }
@@ -842,6 +847,14 @@ pub struct StereoBlock {
     right: [f32; MAX_PLUGIN_BLOCK_FRAMES],
 }
 
+// Hard storage ceiling: two SPSC rings, one future cache and endpoint scratch. The engine
+// supports at most 96 physical endpoints, so this bridge storage is bounded below 384 MiB.
+const _: () = assert!(
+    3 * DEFAULT_QUEUE_CAPACITY * std::mem::size_of::<StereoBlock>()
+        + std::mem::size_of::<EndpointScratch>()
+        < 4 * 1024 * 1024
+);
+
 impl StereoBlock {
     fn silence() -> Self {
         Self {
@@ -914,6 +927,8 @@ struct EndpointScratch {
     pending_rt_events: [RtCommand; MAX_RT_EVENTS_PER_BLOCK],
     delayed_dry: DryBlock,
     bridge_lookahead_quanta: usize,
+    strict_timing: bool,
+    processing_fault: Option<(crate::plugin_timing::PluginProcessingFaultReason, u64)>,
     future_outputs: Box<[StereoBlock]>,
     future_output_valid: [bool; DEFAULT_QUEUE_CAPACITY],
 }
@@ -927,6 +942,8 @@ impl EndpointScratch {
             pending_rt_events: [RtCommand::EMPTY; MAX_RT_EVENTS_PER_BLOCK],
             delayed_dry: DryBlock::silence(),
             bridge_lookahead_quanta: 1,
+            strict_timing: false,
+            processing_fault: None,
             future_outputs: (0..DEFAULT_QUEUE_CAPACITY)
                 .map(|_| StereoBlock::silence())
                 .collect::<Vec<_>>()
@@ -1070,6 +1087,7 @@ impl AudioThreadEndpoint {
 
         self.epoch = epoch;
         self.next_sequence = 1;
+        self.scratch.processing_fault = None;
         self.metrics.midi_blocked.store(false, Ordering::Release);
         self.requested_epoch.store(epoch, Ordering::Release);
         self.metrics.current_epoch.store(epoch, Ordering::Release);
@@ -1173,6 +1191,10 @@ impl AudioThreadEndpoint {
                 .store(self.epoch, sequence, left, right, false);
             self.metrics.input_overflows.fetch_add(1, Ordering::Relaxed);
             self.metrics.input_gaps.fetch_add(1, Ordering::Relaxed);
+            self.latch_processing_fault(
+                crate::plugin_timing::PluginProcessingFaultReason::InputLoss,
+                sequence,
+            );
             self.metrics
                 .dropped_rt_events
                 .fetch_add(event_count as u64, Ordering::Relaxed);
@@ -1303,6 +1325,26 @@ impl AudioThreadEndpoint {
         {
             return RealtimeProcessStatus::InvalidFrameCount;
         }
+        if self.scratch.strict_timing && expected_revision == 0 {
+            self.latch_processing_fault(
+                crate::plugin_timing::PluginProcessingFaultReason::LatencyDrift,
+                0,
+            );
+        }
+        if self.scratch.processing_fault.is_some() {
+            output_left[..frames].fill(0.0);
+            output_right[..frames].fill(0.0);
+            self.scratch.midi_output = PluginMidiBatch::default();
+            self.scratch.midi_output.audio_lost = true;
+            return RealtimeProcessStatus::Processed {
+                sequence: self.next_sequence,
+                frames,
+                submit: SubmitStatus::Gap {
+                    sequence: self.next_sequence,
+                },
+                source: RealtimeOutputSource::DelayedDry,
+            };
+        }
         self.scratch.midi_output = PluginMidiBatch::default();
         let sequence = self.next_sequence;
         let expected_sequence = if self.scratch.bridge_lookahead_quanta == 1 {
@@ -1367,6 +1409,34 @@ impl AudioThreadEndpoint {
                 RealtimeOutputSource::DelayedDry
             }
         };
+        if self.scratch.strict_timing {
+            use crate::plugin_timing::PluginProcessingFaultReason as Reason;
+            let reason = match source {
+                RealtimeOutputSource::LatencyDrift => Some(Reason::LatencyDrift),
+                RealtimeOutputSource::DelayedDry if expected_sequence != 0 => {
+                    Some(Reason::DeadlineMiss)
+                }
+                RealtimeOutputSource::Plugin if self.scratch.midi_output.audio_lost => {
+                    Some(Reason::WorkerFault)
+                }
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                self.latch_processing_fault(reason, expected_sequence);
+            }
+            if self.scratch.processing_fault.is_some() {
+                output_left[..frames].fill(0.0);
+                output_right[..frames].fill(0.0);
+                self.scratch.midi_output.len = 0;
+                self.scratch.midi_output.audio_lost = true;
+                return RealtimeProcessStatus::Processed {
+                    sequence: expected_sequence,
+                    frames,
+                    submit: SubmitStatus::Gap { sequence },
+                    source: RealtimeOutputSource::DelayedDry,
+                };
+            }
+        }
         let submit = self.submit_valid_block(input_left, input_right, expected_revision);
         RealtimeProcessStatus::Processed {
             sequence: expected_sequence,
@@ -1475,6 +1545,10 @@ impl AudioThreadEndpoint {
                         self.metrics
                             .future_output_overflows
                             .fetch_add(1, Ordering::Relaxed);
+                        self.latch_processing_fault(
+                            crate::plugin_timing::PluginProcessingFaultReason::OutputLoss,
+                            expected_sequence,
+                        );
                     }
                 }
             }
@@ -1482,12 +1556,45 @@ impl AudioThreadEndpoint {
         ReceiveStatus::Empty
     }
 
+    pub fn configure_timing_plan(
+        &mut self,
+        plan: crate::plugin_timing::PreparedPluginTimingPlan,
+    ) -> bool {
+        if !self.set_bridge_lookahead_quanta(plan.lookahead_quanta as usize) {
+            return false;
+        }
+        self.scratch.strict_timing = true;
+        true
+    }
+
+    pub fn expected_sequence(&self) -> u64 {
+        self.next_sequence
+            .saturating_sub(self.scratch.bridge_lookahead_quanta as u64)
+    }
+
+    pub fn processing_fault(
+        &self,
+    ) -> Option<(crate::plugin_timing::PluginProcessingFaultReason, u64)> {
+        self.scratch.processing_fault
+    }
+
+    fn latch_processing_fault(
+        &mut self,
+        reason: crate::plugin_timing::PluginProcessingFaultReason,
+        sequence: u64,
+    ) {
+        if self.scratch.strict_timing && self.scratch.processing_fault.is_none() {
+            self.scratch.processing_fault = Some((reason, sequence));
+            self.block_midi_until_epoch();
+        }
+    }
+
     pub fn bridge_lookahead_quanta(&self) -> usize {
         self.scratch.bridge_lookahead_quanta
     }
     /// Only change at an epoch boundary before any input has been submitted.
     pub fn set_bridge_lookahead_quanta(&mut self, quanta: usize) -> bool {
-        if self.next_sequence != 1 || !(1..=MAX_MIDI_BRIDGE_LOOKAHEAD_QUANTA).contains(&quanta) {
+        if self.next_sequence != 1 || !(1..=MAX_PLUGIN_BRIDGE_LOOKAHEAD_QUANTA).contains(&quanta) {
             return false;
         }
         self.scratch.bridge_lookahead_quanta = quanta;
@@ -2102,6 +2209,7 @@ struct BridgeMetrics {
     input_gaps: AtomicU64,
     deadline_misses: AtomicU64,
     output_overflows: AtomicU64,
+    output_loss_epoch: AtomicU64,
     output_too_small: AtomicU64,
     frame_mismatches: AtomicU64,
     stale_outputs: AtomicU64,
@@ -2144,7 +2252,8 @@ impl BridgeMetrics {
             input_overflows: self.input_overflows.load(Ordering::Relaxed),
             input_gaps: self.input_gaps.load(Ordering::Relaxed),
             deadline_misses: self.deadline_misses.load(Ordering::Relaxed),
-            output_overflows: self.output_overflows.load(Ordering::Relaxed),
+            output_overflows: self.output_overflows.load(Ordering::Acquire),
+            output_loss_epoch: self.output_loss_epoch.load(Ordering::Acquire),
             output_too_small: self.output_too_small.load(Ordering::Relaxed),
             frame_mismatches: self.frame_mismatches.load(Ordering::Relaxed),
             stale_outputs: self.stale_outputs.load(Ordering::Relaxed),
@@ -2233,6 +2342,8 @@ pub struct BridgeStats {
     /// Submitted preceding sequences whose processed output missed its callback deadline.
     pub deadline_misses: u64,
     pub output_overflows: u64,
+    /// Epoch of the latest worker output-ring loss. Older-epoch loss remains cumulative only.
+    pub output_loss_epoch: u64,
     pub output_too_small: u64,
     pub frame_mismatches: u64,
     /// Older completed blocks discarded when the callback catches up after a stall.
@@ -2776,8 +2887,11 @@ fn run_worker(
                     Ok(()) => {
                         metrics.completed.fetch_add(1, Ordering::Relaxed);
                     }
-                    Err(PushError::Full(_)) => {
-                        metrics.output_overflows.fetch_add(1, Ordering::Relaxed);
+                    Err(PushError::Full(block)) => {
+                        metrics
+                            .output_loss_epoch
+                            .store(block.epoch, Ordering::Relaxed);
+                        metrics.output_overflows.fetch_add(1, Ordering::Release);
                     }
                 }
             }

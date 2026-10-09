@@ -31,7 +31,7 @@ use eframe::egui::{
 
 use crate::{
     audio::{
-        self, AudioAssetEvent, AudioAssetOperation, AudioCommand, AudioEngine,
+        self, AudioAssetEvent, AudioAssetOperation, AudioCommand, AudioEngine, AudioSnapshot,
         GeneratorEndpointEvent, InsertEndpointEvent, MAX_MIXER_BLOCK_FRAMES,
         MasterCaptureEndpointEvent, MidiGeneratorRouteStamp, MidiInputRouteEvent,
         MidiRecordingEndpointEvent, PreparedMidiInputRoute,
@@ -107,6 +107,7 @@ use crate::{
         PluginParameterCatalogPhase, PluginParameterCatalogRequestState,
         PluginParameterCatalogUpdate, PluginParameterEditorState,
     },
+    plugin_timing::{PluginProcessingFault, PluginProcessingHealth},
     plugins::{
         self, NativePluginHost, PluginDescriptor, PluginFormat as ScannedPluginFormat,
         plugin_runtime::{
@@ -2601,6 +2602,24 @@ const fn default_allow_audio_fallback() -> bool {
     true
 }
 
+const PLUGIN_CALLBACK_BUDGET_PROFILES: [u32; 4] = crate::plugin_timing::PLUGIN_CALLBACK_PROFILES;
+
+const fn default_plugin_callback_budget_frames() -> u32 {
+    2_048
+}
+
+fn plugin_processing_retry_acknowledged(
+    previous_revision: u64,
+    previous_epoch: u64,
+    snapshot: &AudioSnapshot,
+    exact_timeline_active: bool,
+) -> bool {
+    snapshot.plugin_timing_revision != previous_revision
+        && snapshot.transport_epoch != previous_epoch
+        && snapshot.plugin_processing_health != PluginProcessingHealth::Faulted
+        && exact_timeline_active
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct AppAudioPreferences {
     version: u32,
@@ -2612,6 +2631,8 @@ struct AppAudioPreferences {
     allow_default_fallback: bool,
     #[serde(default)]
     metronome_enabled: bool,
+    #[serde(default = "default_plugin_callback_budget_frames")]
+    plugin_callback_budget_frames: u32,
 }
 
 impl Default for AppAudioPreferences {
@@ -2623,6 +2644,7 @@ impl Default for AppAudioPreferences {
             last_known_good_output: None,
             allow_default_fallback: true,
             metronome_enabled: false,
+            plugin_callback_budget_frames: default_plugin_callback_budget_frames(),
         }
     }
 }
@@ -2683,7 +2705,7 @@ fn decode_audio_preferences(raw: Option<&str>) -> (AppAudioPreferences, Option<S
     let Some(raw) = raw else {
         return (AppAudioPreferences::default(), None);
     };
-    let preferences = match serde_json::from_str::<AppAudioPreferences>(raw) {
+    let mut preferences = match serde_json::from_str::<AppAudioPreferences>(raw) {
         Ok(preferences) => preferences,
         Err(error) => {
             return (
@@ -2710,7 +2732,20 @@ fn decode_audio_preferences(raw: Option<&str>) -> (AppAudioPreferences, Option<S
             })
     };
     match validation {
-        Ok(()) => (preferences, None),
+        Ok(()) => {
+            // A stale plug-in timing preference must not discard the independently
+            // committed device choice or the user's metronome preference.
+            if !PLUGIN_CALLBACK_BUDGET_PROFILES.contains(&preferences.plugin_callback_budget_frames)
+            {
+                preferences.plugin_callback_budget_frames = default_plugin_callback_budget_frames();
+                (
+                    preferences,
+                    Some("Unsupported plug-in callback ceiling was reset to 2048 frames".into()),
+                )
+            } else {
+                (preferences, None)
+            }
+        }
         Err(error) => (
             AppAudioPreferences::default(),
             Some(format!("Audio preferences were reset: {error}")),
@@ -4944,6 +4979,13 @@ pub struct CitrusApp {
     audio_stream_fault_revision: u64,
     audio_stream_invalidating_fault_revision: u64,
     audio_committed_stream_invalidated: bool,
+    /// Faults remain latched across Stop, seek, loop and device replacement. Only the
+    /// explicit processing retry/profile action authorizes a new processing epoch.
+    plugin_processing_retry_required: bool,
+    plugin_processing_seen_fault: Option<(u64, u64)>,
+    plugin_processing_last_fault: Option<PluginProcessingFault>,
+    plugin_processing_retry_pending: Option<(u64, u64)>,
+    plugin_processing_request_error: Option<String>,
     plugin_host: NativePluginHost,
     project_session: u64,
     running_insert_chains: HashMap<usize, RunningInsertChain>,
@@ -5046,6 +5088,7 @@ impl CitrusApp {
         );
         let mut startup_failures = Vec::new();
         let mut startup_source = None;
+        let mut plugin_processing_request_error = None;
         let mut audio = None;
         for attempt in startup_context
             .attempts
@@ -5053,8 +5096,18 @@ impl CitrusApp {
             .filter(|_| external_services)
         {
             match AudioEngine::start_with_profile(&attempt.profile) {
-                Ok(engine) => {
+                Ok(mut engine) => {
                     engine.set_metronome_enabled(audio_preferences.metronome_enabled);
+                    if engine.plugin_timing_profile()
+                        != audio_preferences.plugin_callback_budget_frames
+                        && let Err(error) = engine.request_plugin_timing_profile(
+                            audio_preferences.plugin_callback_budget_frames,
+                        )
+                    {
+                        plugin_processing_request_error = Some(format!(
+                            "Saved plug-in timing profile was not applied: {error}. The conservative ceiling remains active."
+                        ));
+                    }
                     startup_source = Some(attempt.source);
                     audio = Some(engine);
                     break;
@@ -5264,6 +5317,11 @@ impl CitrusApp {
                 audio_stream_fault_revision: 0,
                 audio_stream_invalidating_fault_revision: 0,
                 audio_committed_stream_invalidated: false,
+                plugin_processing_retry_required: false,
+                plugin_processing_seen_fault: None,
+                plugin_processing_last_fault: None,
+                plugin_processing_retry_pending: None,
+                plugin_processing_request_error,
                 plugin_host: NativePluginHost::default(),
                 project_session: 1,
                 running_insert_chains: HashMap::new(),
@@ -5419,6 +5477,346 @@ impl CitrusApp {
         };
     }
 
+    fn plugin_processing_blocks_playback(&self) -> bool {
+        self.plugin_processing_retry_required
+            || self.plugin_processing_retry_pending.is_some()
+            || self.audio.as_ref().is_some_and(|audio| {
+                audio.snapshot().plugin_processing_health == PluginProcessingHealth::Faulted
+            })
+    }
+
+    fn plugin_processing_status_label(&self) -> &'static str {
+        if self.plugin_processing_retry_required {
+            return "Faulted · explicit retry required";
+        }
+        if self.plugin_processing_retry_pending.is_some() {
+            return "Priming · stopped replan pending";
+        }
+        match self
+            .audio
+            .as_ref()
+            .map(|audio| audio.snapshot().plugin_processing_health)
+        {
+            Some(PluginProcessingHealth::Priming) => "Priming",
+            Some(PluginProcessingHealth::Running) => "Running",
+            Some(PluginProcessingHealth::Faulted) => "Faulted · explicit retry required",
+            Some(PluginProcessingHealth::Recovered) => "Recovered",
+            None => "Offline",
+        }
+    }
+
+    fn poll_plugin_processing_health(&mut self) {
+        let Some(snapshot) = self.audio.as_ref().map(AudioEngine::snapshot) else {
+            return;
+        };
+        if snapshot.plugin_processing_health == PluginProcessingHealth::Faulted {
+            let identity = (
+                snapshot
+                    .plugin_processing_fault
+                    .map_or(snapshot.plugin_timing_revision, |fault| {
+                        fault.timing_revision
+                    }),
+                snapshot.plugin_fault_count,
+            );
+            if self.plugin_processing_seen_fault != Some(identity) {
+                self.plugin_processing_seen_fault = Some(identity);
+                if snapshot.plugin_processing_fault.is_some() {
+                    self.plugin_processing_last_fault = snapshot.plugin_processing_fault;
+                }
+                self.plugin_processing_retry_required = true;
+                self.plugin_processing_retry_pending = None;
+                self.plugin_processing_request_error = None;
+                self.timeline_pending_chase = None;
+                self.timeline_pending_loop_chase = None;
+                self.pause_audio_runtime_after_fault();
+                if self.input_recorder.is_some() {
+                    self.finish_input_recording();
+                }
+                if !self.midi_recording.is_idle() {
+                    self.request_midi_recording_stop(MidiRecordAfterStop::PauseAtCurrent);
+                }
+                self.notify("Plug-in processing faulted. Playback is stopped; review Audio settings and explicitly retry processing".into());
+            }
+        }
+        if self.plugin_processing_retry_required {
+            // Old queued activations and asynchronous device transitions cannot restore
+            // UI play intent or advance legacy/loop scheduling after this latch is set.
+            self.playing = false;
+            self.transport_clock_playing = false;
+            if snapshot.transport_playing
+                && let Some(audio) = &self.audio
+            {
+                audio.set_playing(false);
+            }
+        }
+        if let Some((previous_revision, previous_epoch)) = self.plugin_processing_retry_pending
+            && plugin_processing_retry_acknowledged(
+                previous_revision,
+                previous_epoch,
+                &snapshot,
+                self.timeline_audio_matches_desired(),
+            )
+        {
+            self.plugin_processing_retry_pending = None;
+            // Recovery restores processing readiness, never the previous Play intent.
+            self.playing = false;
+            self.transport_clock_playing = false;
+            self.notify("Plug-in processing replan confirmed. Transport remains stopped; press Play when ready".into());
+        }
+    }
+
+    fn plugin_processing_change_is_available(&self) -> bool {
+        (self.audio_restart_state.allows_realtime_session_actions()
+            || (self.audio_restart_state.is_restoring() && self.plugin_processing_retry_required))
+            && self.plugin_processing_retry_pending.is_none()
+            && self.input_recorder.is_none()
+            && self.pending_recording.is_none()
+            && self.midi_recording.is_idle()
+            && self.master_capture.is_none()
+            && self.pending_master_capture.is_none()
+            && self.project_lifecycle.is_idle()
+            && self.save_barrier.is_none()
+    }
+
+    fn plugin_callback_profile_has_evidence(&self, budget: u32) -> bool {
+        budget == default_plugin_callback_budget_frames()
+            || self.audio.as_ref().is_some_and(|audio| {
+                let telemetry = audio.stream_telemetry();
+                telemetry.callback_count != 0
+                    && telemetry
+                        .maximum_frames
+                        .is_some_and(|frames| frames <= budget)
+            })
+    }
+
+    fn request_plugin_processing_replan(&mut self, callback_budget_frames: Option<u32>) {
+        if !self.plugin_processing_change_is_available() {
+            self.notify("Wait for the current audio, recording or project operation before changing plug-in timing".into());
+            return;
+        }
+        if let Some(budget) = callback_budget_frames {
+            if !PLUGIN_CALLBACK_BUDGET_PROFILES.contains(&budget)
+                || !self.plugin_callback_profile_has_evidence(budget)
+            {
+                self.plugin_processing_request_error = Some(
+                    "A smaller provisional ceiling needs observed callbacks within that ceiling. The hardware buffer request is not a backend maximum.".into(),
+                );
+                return;
+            }
+            if self.audio.is_none() {
+                self.audio_preferences.plugin_callback_budget_frames = budget;
+                self.audio_preferences_dirty = true;
+                self.plugin_processing_request_error = None;
+                return;
+            }
+        }
+        let Some(snapshot) = self.audio.as_ref().map(AudioEngine::snapshot) else {
+            self.plugin_processing_request_error =
+                Some("Start an audio device before retrying plug-in processing".into());
+            return;
+        };
+        if !self.timeline_worker_available {
+            self.plugin_processing_request_error = Some("The timeline compiler is unavailable; a fresh stopped processing plan cannot be prepared".into());
+            return;
+        }
+        self.pause_audio_runtime_after_fault();
+        let audio = self.audio.as_mut().expect("audio snapshot was available");
+        let result = match callback_budget_frames {
+            Some(budget) => audio.request_plugin_timing_profile(budget),
+            None => audio.retry_plugin_processing(),
+        };
+        if let Err(error) = result {
+            self.plugin_processing_request_error = Some(error);
+            return;
+        }
+        if let Some(budget) = callback_budget_frames {
+            self.audio_preferences.plugin_callback_budget_frames = budget;
+            self.audio_preferences_dirty = true;
+        }
+        self.plugin_processing_retry_required = false;
+        self.plugin_processing_retry_pending =
+            Some((snapshot.plugin_timing_revision, snapshot.transport_epoch));
+        self.plugin_processing_request_error = None;
+        if let AudioRestartState::Restoring(restore) = &mut self.audio_restart_state {
+            restore.started_at = Instant::now();
+        }
+        self.plugin_processing_seen_fault =
+            (snapshot.plugin_processing_health == PluginProcessingHealth::Faulted).then_some((
+                snapshot
+                    .plugin_processing_fault
+                    .map_or(snapshot.plugin_timing_revision, |fault| {
+                        fault.timing_revision
+                    }),
+                snapshot.plugin_fault_count,
+            ));
+        self.beat_position = snapshot.beat_position as f32;
+        self.disable_timeline_loop_until_chased();
+        // A new compiled generation also prepares a fresh PDC bank. Reusing the old
+        // revision would be rejected and could keep a loop template with stale timing.
+        self.timeline_desired_generation = next_nonzero_app_id(self.timeline_desired_generation);
+        self.timeline_compile_deadline = Instant::now();
+        self.timeline_deferred_job = None;
+        self.timeline_pending_chase = None;
+        self.timeline_pending_loop_chase = None;
+        self.timeline_audio_sync.loop_token = None;
+        self.timeline_audio_sync.phase = TimelineAudioSyncPhase::Unavailable;
+        self.timeline_audio_sync.retain_callback_ownership = true;
+        self.timeline_audio_sync
+            .request_seek(snapshot.beat_position, snapshot.timeline_frame);
+        self.notify("Preparing a fresh plug-in timing epoch while stopped. Playback will not restart automatically".into());
+    }
+
+    fn plugin_processing_settings(&mut self, ui: &mut egui::Ui) {
+        let snapshot = self.audio.as_ref().map(AudioEngine::snapshot);
+        let health_color = if self.plugin_processing_retry_required
+            || snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.plugin_processing_health == PluginProcessingHealth::Faulted
+            }) {
+            theme::SETTINGS_ERROR
+        } else {
+            theme::SETTINGS_TEXT
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Plug-in health:").size(10.0));
+            ui.label(
+                RichText::new(self.plugin_processing_status_label())
+                    .strong()
+                    .size(10.0)
+                    .color(health_color),
+            );
+        });
+        if let Some(snapshot) = &snapshot {
+            ui.label(
+                RichText::new(format!(
+                    "Current epoch {} · timing revision {} · cumulative faults {} / recoveries {}",
+                    snapshot.transport_epoch,
+                    snapshot.plugin_timing_revision,
+                    snapshot.plugin_fault_count,
+                    snapshot.plugin_recovered_count,
+                ))
+                .size(8.5)
+                .color(theme::SETTINGS_MUTED),
+            );
+        }
+        let requested = self.audio.as_ref().map_or(
+            self.audio_preferences.plugin_callback_budget_frames,
+            AudioEngine::plugin_timing_profile,
+        );
+        let can_change = self.plugin_processing_change_is_available();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Provisional callback ceiling").size(9.0));
+            for budget in PLUGIN_CALLBACK_BUDGET_PROFILES {
+                let evidence = self.plugin_callback_profile_has_evidence(budget);
+                let response = ui.add_enabled(
+                    can_change && evidence,
+                    egui::Button::new(format!("{budget} frames")).selected(requested == budget),
+                ).on_hover_text(if budget == 2_048 {
+                    "Conservative operating ceiling; not a guaranteed maximum callback or a hardware certification. Selecting it stops playback and prepares a fresh timing epoch."
+                } else {
+                    "Explicit provisional profile. Requires observed callbacks no larger than this ceiling; future callbacks can still exceed it and fault closed. Selecting it stops playback."
+                });
+                if response.clicked() && requested != budget {
+                    self.request_plugin_processing_replan(Some(budget));
+                }
+            }
+        });
+        ui.label(RichText::new("Hardware buffer requests do not guarantee a backend maximum. Smaller ceilings require observed callback evidence; none is hardware-certified.")
+            .size(8.5).color(theme::SETTINGS_MUTED));
+        if let Some(snapshot) = &snapshot {
+            let per_stage_ms = f64::from(snapshot.plugin_bridge_latency_frames) * 1_000.0
+                / f64::from(snapshot.sample_rate.max(1));
+            ui.label(
+                RichText::new(format!(
+                    "Active B={} · Q=128 · K={} · L={} frames / {:.2} ms per physical bridge",
+                    snapshot.plugin_callback_budget_frames,
+                    snapshot.plugin_lookahead_quanta,
+                    snapshot.plugin_bridge_latency_frames,
+                    per_stage_ms,
+                ))
+                .size(8.5),
+            );
+            ui.label(RichText::new(format!(
+                "Source → synth path (2L): {} frames / {:.2} ms estimated · final PDC: {} frames",
+                snapshot.plugin_bridge_latency_frames.saturating_mul(2), per_stage_ms * 2.0,
+                snapshot.pdc_output_latency_samples,
+            )).size(8.5));
+        }
+        ui.label(RichText::new("Guard: 4 ms rounded up to Q128 at the active sample rate (up to 384 kHz). Serial FX slots share one physical bridge. Native editor stalls are not fixed by this buffer.")
+            .size(8.5).color(theme::SETTINGS_MUTED));
+        if ui
+            .add_enabled(
+                can_change && self.audio.is_some(),
+                egui::Button::new("RETRY AUDIO PROCESSING"),
+            )
+            .clicked()
+        {
+            self.request_plugin_processing_replan(None);
+        }
+        ui.label(RichText::new("Retry and profile changes create a fresh stopped epoch. Press Play yourself after confirmation.")
+            .size(8.5).color(theme::SETTINGS_MUTED));
+        if let Some(error) = &self.plugin_processing_request_error {
+            ui.colored_label(theme::SETTINGS_ERROR, RichText::new(error).size(9.0));
+        }
+        if let Some(snapshot) = &snapshot {
+            egui::CollapsingHeader::new("Plug-in fault details")
+                .id_salt("plugin-processing-fault-details")
+                .default_open(
+                    self.plugin_processing_retry_required
+                        || snapshot.plugin_processing_health == PluginProcessingHealth::Faulted,
+                )
+                .show(ui, |ui| {
+                    Self::plugin_processing_diagnostics(
+                        ui,
+                        snapshot,
+                        self.plugin_processing_last_fault,
+                    )
+                });
+        }
+    }
+
+    fn plugin_processing_diagnostics(
+        ui: &mut egui::Ui,
+        snapshot: &AudioSnapshot,
+        last_fault: Option<PluginProcessingFault>,
+    ) {
+        ui.label(
+            RichText::new(format!(
+                "Cumulative plug-in misses: deadlines {} · input losses {} · output losses {}",
+                snapshot.plugin_deadline_misses,
+                snapshot.plugin_input_losses,
+                snapshot.plugin_output_losses,
+            ))
+            .size(8.5),
+        );
+        let retained_fault = snapshot.plugin_processing_fault.is_none() && last_fault.is_some();
+        if let Some(fault) = snapshot.plugin_processing_fault.or(last_fault) {
+            if retained_fault {
+                ui.label(RichText::new("Last latched fault (retained from its recorded epoch/revision; current engine totals above)")
+                    .size(8.5).color(theme::SETTINGS_WARNING));
+            }
+            ui.colored_label(
+                theme::SETTINGS_ERROR,
+                RichText::new(format!(
+                    "{:?}: endpoint {} · epoch {} · expected sequence {}",
+                    fault.reason, fault.endpoint_id, fault.epoch, fault.expected_sequence,
+                ))
+                .size(8.5),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "Raw callback {} frames · ceiling {} · K={} · timing revision {}",
+                    fault.raw_callback_frames,
+                    fault.callback_budget_frames,
+                    fault.lookahead_quanta,
+                    fault.timing_revision,
+                ))
+                .size(8.5),
+            );
+        } else {
+            ui.label(RichText::new("No current-epoch plug-in fault reported").size(8.5));
+        }
+    }
+
     fn pause_audio_runtime_after_fault(&mut self) {
         self.playing = false;
         self.recording = false;
@@ -5433,6 +5831,12 @@ impl CitrusApp {
     }
 
     fn enter_audio_degraded(&mut self, message: String) {
+        if self.plugin_processing_retry_pending.take().is_some() {
+            self.plugin_processing_retry_required = true;
+            self.plugin_processing_request_error = Some(format!(
+                "Device failure interrupted the stopped plug-in replan: {message}"
+            ));
+        }
         self.pause_audio_runtime_after_fault();
         self.audio_transition_diagnostic = Some(message.clone());
         self.audio_restart_state = AudioRestartState::Degraded { message };
@@ -6105,6 +6509,12 @@ impl CitrusApp {
     }
 
     fn begin_midi_recording(&mut self) {
+        if self.plugin_processing_blocks_playback() {
+            self.notify(
+                "MIDI recording is paused until plug-in processing is explicitly retried".into(),
+            );
+            return;
+        }
         if !self.audio_restart_state.allows_realtime_session_actions() {
             self.notify("MIDI recording is unavailable during an audio device transaction".into());
             return;
@@ -7233,6 +7643,13 @@ impl CitrusApp {
     }
 
     fn request_audio_restart(&mut self) {
+        if self.plugin_processing_retry_pending.is_some() {
+            self.notify(
+                "Wait for the stopped plug-in processing replan before changing audio devices"
+                    .into(),
+            );
+            return;
+        }
         let blocker = first_audio_restart_blocker(AudioRestartBarrierSnapshot {
             restart_in_progress: self.audio_restart_state.is_transitioning(),
             midi_route_transition: self.midi_input.state.blocks_audio_restart(),
@@ -7712,7 +8129,7 @@ impl CitrusApp {
             return;
         }
         let AudioRestartCandidate {
-            engine,
+            mut engine,
             context,
             plugin_states,
             ..
@@ -7720,6 +8137,11 @@ impl CitrusApp {
         engine.set_playing(false);
         engine.set_recording(false);
         engine.set_metronome_enabled(self.audio_preferences.metronome_enabled);
+        if engine.plugin_timing_profile() != self.audio_preferences.plugin_callback_budget_frames {
+            self.plugin_processing_request_error = engine
+                .request_plugin_timing_profile(self.audio_preferences.plugin_callback_budget_frames)
+                .err();
+        }
         let effective_profile = engine.effective_device_profile().clone();
         let stream_telemetry = engine.stream_telemetry();
 
@@ -7818,10 +8240,17 @@ impl CitrusApp {
             return;
         }
         let ready = telemetry.callback_count != 0
+            && !self.plugin_processing_blocks_playback()
             && self.timeline_audio_matches_desired()
             && self.plugin_runtime_is_ready_for_transport()
             && self.restart_initial_state_waiting.is_empty();
         if !ready {
+            if self.plugin_processing_retry_required {
+                // A device replacement is not permission to restart failed processing.
+                // Keep explicit Retry available rather than timing out into a dead end.
+                self.audio_restart_state = AudioRestartState::Restoring(restore);
+                return;
+            }
             if restore.started_at.elapsed() >= AUDIO_RESTART_RESTORE_TIMEOUT {
                 let message = format!(
                     "Audio replacement is running but session restore did not confirm within {:?}; transport remains paused",
@@ -7869,6 +8298,7 @@ impl CitrusApp {
             self.connect_selected_midi_input();
         }
         if self.playing
+            && !self.plugin_processing_blocks_playback()
             && !self.request_timeline_resume_chase()
             && let Some(engine) = &self.audio
         {
@@ -10639,6 +11069,10 @@ impl CitrusApp {
     }
 
     fn publish_current_transport_loop(&mut self) {
+        if self.plugin_processing_blocks_playback() {
+            self.transport_loop_dirty = true;
+            return;
+        }
         if !self.audio_restart_state.allows_runtime_dispatch() {
             self.transport_loop_dirty = true;
             return;
@@ -10669,6 +11103,9 @@ impl CitrusApp {
     }
 
     fn publish_transport_seek(&mut self, beat: f64) {
+        if self.plugin_processing_retry_required {
+            return;
+        }
         if !self.audio_restart_state.allows_runtime_dispatch() {
             return;
         }
@@ -10691,6 +11128,9 @@ impl CitrusApp {
     }
 
     fn request_timeline_resume_chase(&mut self) -> bool {
+        if self.plugin_processing_blocks_playback() {
+            return false;
+        }
         let Some(audio) = &self.audio else {
             return false;
         };
@@ -11467,6 +11907,11 @@ impl CitrusApp {
     }
 
     fn toggle_play(&mut self) {
+        self.poll_plugin_processing_health();
+        if self.plugin_processing_blocks_playback() {
+            self.notify("Plug-in processing is paused. Use RETRY AUDIO PROCESSING in Audio settings, then press Play when ready".into());
+            return;
+        }
         if !self.audio_restart_state.allows_realtime_session_actions() {
             self.notify(
                 "Playback remains paused until the audio device transaction confirms".into(),
@@ -11527,6 +11972,11 @@ impl CitrusApp {
     }
 
     fn toggle_record(&mut self) {
+        self.poll_plugin_processing_health();
+        if self.plugin_processing_blocks_playback() {
+            self.notify("Recording is paused until plug-in processing is explicitly retried in Audio settings".into());
+            return;
+        }
         if !self.audio_restart_state.allows_realtime_session_actions() {
             self.notify("Recording is unavailable during an audio device transaction".into());
             return;
@@ -12313,8 +12763,9 @@ impl CitrusApp {
                 .wrapping_sub(self.last_audio_loop_count);
             let epoch_changed = snapshot.transport_epoch != self.last_audio_transport_epoch;
 
-            self.transport_clock_playing = snapshot.transport_playing;
-            self.transport_delta_beats = if snapshot.transport_playing {
+            self.transport_clock_playing =
+                snapshot.transport_playing && !self.plugin_processing_blocks_playback();
+            self.transport_delta_beats = if self.transport_clock_playing {
                 if loop_delta != 0 {
                     (song_length - previous_beat).max(0.0)
                         + current_beat
@@ -12694,6 +13145,11 @@ impl CitrusApp {
                     self.timeline_compiled_fingerprint = None;
                     self.timeline_compile_stats = None;
                     self.timeline_compile_diagnostics.clear();
+                    if self.plugin_processing_retry_pending.take().is_some() {
+                        self.plugin_processing_retry_required = true;
+                        self.plugin_processing_request_error =
+                            Some(format!("Stopped plug-in replan could not compile: {error}"));
+                    }
                     self.timeline_compile_error = Some(error);
                     if self.timeline_audio_source.is_none() {
                         self.transport_loop_dirty = true;
@@ -12706,6 +13162,12 @@ impl CitrusApp {
             self.timeline_pending_generation = None;
             self.timeline_deferred_job = None;
             self.timeline_compile_error = Some("Timeline compiler worker stopped".into());
+            if self.plugin_processing_retry_pending.take().is_some() {
+                self.plugin_processing_retry_required = true;
+                self.plugin_processing_request_error = Some(
+                    "The timeline compiler stopped before the plug-in replan was confirmed".into(),
+                );
+            }
             if self.timeline_audio_source.is_none() {
                 self.transport_loop_dirty = true;
             }
@@ -12843,6 +13305,11 @@ impl CitrusApp {
     }
 
     fn fault_timeline_audio(&mut self, message: String) {
+        if self.plugin_processing_retry_pending.take().is_some() {
+            self.plugin_processing_retry_required = true;
+            self.plugin_processing_request_error =
+                Some(format!("Stopped plug-in replan failed: {message}"));
+        }
         self.timeline_pending_chase = None;
         self.timeline_pending_loop_chase = None;
         if self.timeline_audio_sync.asset_handoff_silenced {
@@ -12851,7 +13318,9 @@ impl CitrusApp {
             self.timeline_audio_sync.asset_handoff_assets_released = false;
             if let Some(audio) = &self.audio {
                 audio.set_playing(
-                    self.playing && self.audio_restart_state.allows_realtime_session_actions(),
+                    self.playing
+                        && !self.plugin_processing_blocks_playback()
+                        && self.audio_restart_state.allows_realtime_session_actions(),
                 );
             }
         }
@@ -13014,6 +13483,9 @@ impl CitrusApp {
             self.handle_timeline_runtime_event(event);
         }
 
+        if self.plugin_processing_retry_required {
+            return;
+        }
         self.observe_timeline_runtime_activation();
         self.recover_timeline_runtime_if_needed();
         self.drive_timeline_fault_clear();
@@ -13132,7 +13604,9 @@ impl CitrusApp {
                     self.automation_evaluator.reset();
                     // Seek/Stop intents that arrived while Clear was queued
                     // are replayed only after callback ownership is gone.
-                    if let Some(audio) = &self.audio {
+                    if !self.plugin_processing_retry_required
+                        && let Some(audio) = &self.audio
+                    {
                         publish_audio_transport_seek(audio, self.tempo_map.as_ref(), beat);
                     }
                 }
@@ -13280,6 +13754,9 @@ impl CitrusApp {
     }
 
     fn recover_timeline_runtime_if_needed(&mut self) {
+        if self.plugin_processing_blocks_playback() {
+            return;
+        }
         let Some(audio) = &self.audio else {
             return;
         };
@@ -13455,6 +13932,9 @@ impl CitrusApp {
     }
 
     fn drive_timeline_audio_sync(&mut self) {
+        if self.plugin_processing_retry_required {
+            return;
+        }
         let Some((timeline, generation)) = self
             .timeline_audio_source
             .as_ref()
@@ -13519,6 +13999,9 @@ impl CitrusApp {
     }
 
     fn drive_timeline_transport_activation(&mut self) {
+        if self.plugin_processing_retry_required {
+            return;
+        }
         let TimelineAudioSyncPhase::AwaitingActivation {
             generation,
             seek_serial,
@@ -13562,8 +14045,9 @@ impl CitrusApp {
             loop_start_q32: audio::beat_to_q32(source.loop_start_beat),
             loop_end_q32: audio::beat_to_q32(source.loop_end_beat),
             loop_token,
-            loop_enabled: !newer_seek_waiting,
+            loop_enabled: !newer_seek_waiting && !self.plugin_processing_retry_required,
             playing: self.playing
+                && !self.plugin_processing_blocks_playback()
                 && !newer_seek_waiting
                 && self.audio_restart_state.allows_realtime_session_actions(),
             mixer_pan_release,
@@ -15338,21 +15822,17 @@ impl CitrusApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.label(
                             RichText::new(format!(
-                                "RT {}    UI {:.1} ms / {:.0} fps",
-                                if xruns == 0 && queue_full == 0 {
-                                    "STABLE"
-                                } else {
-                                    "CHECK"
-                                },
+                                "PLUG-IN {}    UI {:.1} ms / {:.0} fps",
+                                self.plugin_processing_status_label(),
                                 self.frame_time_ms,
                                 1000.0 / self.frame_time_ms.max(0.1),
                             ))
                             .monospace()
                             .size(9.0)
-                            .color(if xruns == 0 && queue_full == 0 {
-                                theme::GREEN
+                            .color(if self.plugin_processing_blocks_playback() {
+                                theme::RED
                             } else {
-                                theme::AMBER
+                                theme::MUTED
                             }),
                         );
                     });
@@ -16640,7 +17120,7 @@ impl CitrusApp {
                     .as_ref()
                     .is_some_and(|audio| audio.snapshot().plugin_midi_faulted_destinations != 0)
                 {
-                    ui.colored_label(theme::RED, "MIDI routing stopped safely after a lost/late event or device fault. Stop/restart transport after fixing the cause.");
+                    ui.colored_label(theme::RED, "MIDI routing stopped safely after a lost/late event or device fault. Fix the cause, then use Retry audio processing in Settings.");
                 }
             });
             if ports != original
@@ -18254,6 +18734,7 @@ impl eframe::App for CitrusApp {
         let wide_layout = ui.available_width() >= 1280.0;
         self.poll_audio_device_catalog();
         self.poll_audio_stream_fault();
+        self.poll_plugin_processing_health();
         self.retry_deferred_plugin_rebuilds();
         self.poll_insert_endpoint_events();
         self.poll_generator_endpoint_events();
@@ -23471,7 +23952,7 @@ impl CitrusApp {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new(presentation.status_label)
+                        RichText::new(format!("Device stream: {}", presentation.status_label))
                             .size(10.0)
                             .strong()
                             .color(status_color),
@@ -23486,6 +23967,11 @@ impl CitrusApp {
                 });
                 ui.label(
                     RichText::new(&presentation.detail)
+                        .size(9.0)
+                        .color(theme::SETTINGS_MUTED),
+                );
+                ui.label(
+                    RichText::new(format!("Device XRUNs: {}", presentation.underruns))
                         .size(9.0)
                         .color(theme::SETTINGS_MUTED),
                 );
@@ -23516,7 +24002,11 @@ impl CitrusApp {
 
         egui::ScrollArea::vertical()
             .id_salt("settings-audio-page")
+            // Processing diagnostics can be long. Reserve the device-action footer
+            // before laying out scroll content, including at the minimum window size.
+            .max_height((ui.available_height() - 44.0).max(120.0))
             .show(ui, |ui| {
+                settings_card(ui, "PLUG-IN PROCESSING", |ui| self.plugin_processing_settings(ui));
                 settings_card(ui, "OUTPUT", |ui| {
                     audio_profile_controls(
                         ui,
@@ -24129,16 +24619,8 @@ impl CitrusApp {
                             }
                             property_line(
                                 ui,
-                                "Real-time status",
-                                if snapshot.xruns == 0
-                                    && snapshot.command_queue_full == 0
-                                    && snapshot.pdc_clamped_path_count == 0
-                                    && snapshot.plugin_epoch_reset_failures == 0
-                                {
-                                    "Stable"
-                                } else {
-                                    "Check diagnostics"
-                                },
+                                "Device XRUNs",
+                                &snapshot.xruns.to_string(),
                             );
                         } else {
                             ui.colored_label(theme::RED, "Audio engine is offline");
@@ -24149,6 +24631,7 @@ impl CitrusApp {
                                 );
                             }
                         }
+                        self.plugin_processing_settings(ui);
                         ui.horizontal(|ui| {
                             if ui
                                 .add_enabled(

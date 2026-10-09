@@ -362,6 +362,8 @@ struct AdapterScratch {
     pending_event_count: usize,
 }
 
+const _: () = assert!(std::mem::size_of::<AdapterScratch>() < 512 * 1024);
+
 impl AdapterScratch {
     fn new() -> Self {
         Self {
@@ -446,15 +448,21 @@ impl FixedQuantumAdapter<AudioThreadEndpoint> {
         self.endpoint.bridge_lookahead_quanta()
     }
 
-    pub fn set_midi_bridge_lookahead(&mut self, enabled: bool) -> bool {
-        if self.scratch.input_fill != 0 {
-            return false;
-        }
-        self.endpoint.set_bridge_lookahead_quanta(if enabled {
-            crate::plugins::plugin_runtime::MAX_MIDI_BRIDGE_LOOKAHEAD_QUANTA
-        } else {
-            1
-        })
+    pub fn configure_timing_plan(
+        &mut self,
+        plan: crate::plugin_timing::PreparedPluginTimingPlan,
+    ) -> bool {
+        self.scratch.input_fill == 0 && self.endpoint.configure_timing_plan(plan)
+    }
+
+    pub fn expected_sequence(&self) -> u64 {
+        self.endpoint.expected_sequence()
+    }
+
+    pub fn processing_fault(
+        &self,
+    ) -> Option<(crate::plugin_timing::PluginProcessingFaultReason, u64)> {
+        self.endpoint.processing_fault()
     }
 
     pub fn block_midi_until_epoch(&self) {
@@ -1802,6 +1810,7 @@ mod tests {
     /// Deterministic worker that makes no progress during a device callback. Only the
     /// test driver's callback boundary promotes submitted work to completed work.
     struct BurstWorker {
+        lookahead: usize,
         epoch: u64,
         sequence: u64,
         ready: VecDeque<(u64, PluginTransport)>,
@@ -1814,6 +1823,7 @@ mod tests {
     impl BurstWorker {
         fn new() -> Self {
             Self {
+                lookahead: 16,
                 epoch: 1,
                 sequence: 1,
                 ready: VecDeque::new(),
@@ -1830,7 +1840,7 @@ mod tests {
     }
     impl FixedQuantumEndpoint for BurstWorker {
         fn fixed_bridge_lookahead_quanta(&self) -> usize {
-            16
+            self.lookahead
         }
         fn fixed_max_block_frames(&self) -> usize {
             128
@@ -1845,7 +1855,7 @@ mod tests {
             None
         }
         fn fixed_reported_latency_samples(&self) -> u32 {
-            2048
+            (128 * self.lookahead) as u32
         }
         fn fixed_set_epoch(&mut self, epoch: u64) -> bool {
             if epoch == self.epoch {
@@ -1879,7 +1889,7 @@ mod tests {
         ) -> RealtimeProcessStatus {
             let sequence = self.sequence;
             self.sequence += 1;
-            let expected = sequence.saturating_sub(16);
+            let expected = sequence.saturating_sub(self.lookahead as u64);
             left.fill(0.0);
             right.fill(0.0);
             let mut source = RealtimeOutputSource::DelayedDry;
@@ -1956,6 +1966,76 @@ mod tests {
             adapter.endpoint.work_between_callbacks();
         }
         (midi, audio, adapter)
+    }
+
+    #[test]
+    fn prepared_timing_covers_all_callback_phases_and_profiles_without_worker_progress_inside_callback()
+     {
+        use crate::plugin_timing::{PLUGIN_CALLBACK_PROFILES, PreparedPluginTimingPlan};
+        for rate in [48_000, 384_000] {
+            for budget in PLUGIN_CALLBACK_PROFILES {
+                let plan = PreparedPluginTimingPlan::new(1, rate, budget).unwrap();
+                for phase in 0..128 {
+                    for partition in [1, 31, 64, 127, 128, 129, 255, 256, 512, 2048] {
+                        if partition > budget as usize {
+                            continue;
+                        }
+                        let mut endpoint = BurstWorker::new();
+                        endpoint.lookahead = plan.lookahead_quanta as usize;
+                        let mut adapter =
+                            FixedQuantumAdapter::with_endpoint(endpoint, 128).unwrap();
+                        let total = plan.bridge_latency_frames as usize + 384;
+                        let mut absolute = 0;
+                        let mut midi = Vec::new();
+                        let mut audio = Vec::new();
+                        let mut left = [0.0; 2048];
+                        let mut right = [0.0; 2048];
+                        while absolute < total {
+                            let frames = if absolute == 0 && phase != 0 {
+                                phase
+                            } else {
+                                partition
+                            }
+                            .min(total - absolute);
+                            assert!(plan.admits_callback(frames));
+                            adapter.process_generator(
+                                1,
+                                frames,
+                                &mut left[..frames],
+                                &mut right[..frames],
+                                &[],
+                            );
+                            for event in &adapter.midi_output().events[..adapter.midi_output().len]
+                            {
+                                midi.push((
+                                    absolute + usize::from(event.message.sample_offset),
+                                    event.message.data,
+                                ));
+                            }
+                            audio.extend_from_slice(&left[..frames]);
+                            absolute += frames;
+                            adapter.endpoint.work_between_callbacks();
+                        }
+                        assert_eq!(
+                            adapter.endpoint.misses, 0,
+                            "rate={rate} B={budget} phase={phase} partition={partition}"
+                        );
+                        let latency = plan.bridge_latency_frames as usize;
+                        assert_eq!(
+                            &midi[..3],
+                            &[
+                                (latency, [0x90, 60, 100]),
+                                (latency + 1, [0x80, 60, 0]),
+                                (latency + 127, [0x90, 64, 90])
+                            ]
+                        );
+                        for (frame, data) in midi {
+                            assert_eq!(audio[frame], data[0] as f32);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

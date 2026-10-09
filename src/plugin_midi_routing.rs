@@ -4,10 +4,6 @@ use crate::{automation::AutomationTarget, model::Project};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_MIDI_PORT_ROUTES: usize = 64;
-/// Sixteen async Q128 turns plus one Q128 accumulation pre-roll. Fixed, independent
-/// of callback partitioning, and conservatively safe for callbacks up to 2048 frames.
-pub const MIDI_ROUTE_BRIDGE_FRAMES: u32 = 128 * (16 + 1);
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PluginMidiPorts {

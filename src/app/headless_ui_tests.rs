@@ -2803,3 +2803,334 @@ fn plugin_midi_port_controls_change_real_model_and_keep_monitor_separate() {
     ui.click("Off");
     assert_eq!(ui.app.project.plugin_instances[0].midi_ports.input, None);
 }
+
+fn plugin_processing_fixture(
+    health: crate::plugin_timing::PluginProcessingHealth,
+    revision: u64,
+) -> crate::plugin_timing::PluginProcessingSnapshot {
+    use crate::plugin_timing::{
+        PluginProcessingFault, PluginProcessingFaultReason, PreparedPluginTimingPlan,
+    };
+    let plan = PreparedPluginTimingPlan::new(revision, 48_000, 2_048).unwrap();
+    crate::plugin_timing::PluginProcessingSnapshot {
+        plan,
+        health,
+        fault: (health == PluginProcessingHealth::Faulted).then_some(PluginProcessingFault {
+            endpoint_id: 17,
+            epoch: 6,
+            expected_sequence: 29,
+            raw_callback_frames: 4_096,
+            callback_budget_frames: plan.callback_budget_frames,
+            lookahead_quanta: plan.lookahead_quanta,
+            timing_revision: revision,
+            reason: PluginProcessingFaultReason::CallbackBudgetExceeded,
+        }),
+        fault_count: 1,
+        recovered_count: u64::from(health == PluginProcessingHealth::Recovered),
+        deadline_misses: 3,
+        input_losses: 2,
+        output_losses: 1,
+    }
+}
+
+#[test]
+fn full_app_plugin_profile_controls_require_observations_and_keep_device_preferences() {
+    let mut ui = UiHarness::new();
+    let before_preferences = ui.app.audio_preferences.clone();
+    let before_output = ui.app.audio_output_draft.clone();
+    let before_input = ui.app.audio_input_draft.clone();
+    let before_project = project_fingerprint(&ui.app.project);
+    ui.key(egui::Key::F10, egui::Modifiers::NONE);
+    assert!(ui.button("128 frames").is_disabled());
+    assert!(ui.button("256 frames").is_disabled());
+    assert!(ui.button("512 frames").is_disabled());
+    assert!(!ui.button("2048 frames").is_disabled());
+    assert!(ui.button("RETRY AUDIO PROCESSING").is_disabled());
+    assert!(!ui.app.audio_preferences.metronome_enabled);
+
+    let engine = AudioEngine::test_engine();
+    engine.observe_test_callback(256);
+    ui.app.audio = Some(engine);
+    ui.settle();
+    assert!(ui.button("128 frames").is_disabled());
+    assert!(!ui.button("256 frames").is_disabled());
+    assert!(!ui.button("512 frames").is_disabled());
+    let generation = ui.app.timeline_desired_generation;
+    ui.app.playing = true;
+    ui.click("512 frames");
+    assert_eq!(ui.app.audio.as_ref().unwrap().plugin_timing_profile(), 512);
+    assert_eq!(ui.app.audio_preferences.plugin_callback_budget_frames, 512);
+    assert!(ui.app.plugin_processing_retry_pending.is_some());
+    assert!(ui.app.timeline_desired_generation > generation);
+    assert!(!ui.app.playing);
+    assert!(ui.button("512 frames").is_disabled());
+    assert!(ui.button("RETRY AUDIO PROCESSING").is_disabled());
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|node| node.value().or_else(|| node.label()))
+            .any(|label| label.contains("stopped replan pending"))
+    );
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|node| node.value().or_else(|| node.label()))
+            .any(|label| label.contains("Active B=2048")),
+        "requested ceiling must not be shown as already active"
+    );
+    assert_eq!(
+        ui.app.audio_preferences.requested_output,
+        before_preferences.requested_output
+    );
+    assert_eq!(
+        ui.app.audio_preferences.requested_input,
+        before_preferences.requested_input
+    );
+    assert_eq!(
+        ui.app.audio_preferences.last_known_good_output,
+        before_preferences.last_known_good_output
+    );
+    assert_eq!(ui.app.audio_output_draft, before_output);
+    assert_eq!(ui.app.audio_input_draft, before_input);
+    assert!(!ui.app.audio_preferences.metronome_enabled);
+    assert_eq!(project_fingerprint(&ui.app.project), before_project);
+    ui.app.toggle_play();
+    assert!(
+        !ui.app.playing,
+        "a pending exact acknowledgment cannot start playback"
+    );
+
+    let mut storage = WorkspaceTestStorage::default();
+    ui.app.save(&mut storage);
+    let restored = UiHarness::with_storage(Some(&storage), true);
+    assert_eq!(
+        restored.app.audio_preferences.plugin_callback_budget_frames,
+        512
+    );
+    assert_eq!(restored.app.audio_output_draft, before_output);
+    assert!(!restored.app.audio_preferences.metronome_enabled);
+}
+
+#[test]
+fn full_app_plugin_fault_requires_explicit_retry_and_never_automatically_replays() {
+    let mut ui = UiHarness::new();
+    let engine = AudioEngine::test_engine();
+    engine.observe_test_callback(128);
+    engine.set_plugin_processing_test_snapshot(plugin_processing_fixture(
+        PluginProcessingHealth::Faulted,
+        1,
+    ));
+    ui.app.audio = Some(engine);
+    ui.app.playing = true;
+    ui.key(egui::Key::F10, egui::Modifiers::NONE);
+    assert!(!ui.app.playing);
+    assert!(ui.app.plugin_processing_retry_required);
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|node| node.value().or_else(|| node.label()))
+            .any(|label| label == "Device XRUNs: 0")
+    );
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|node| node.value().or_else(|| node.label()))
+            .any(|label| label.contains("Faulted · explicit retry required"))
+    );
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|node| node.value().or_else(|| node.label()))
+            .any(|label| label.contains("endpoint 17 · epoch 6 · expected sequence 29"))
+    );
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|node| node.value().or_else(|| node.label()))
+            .any(|label| label.contains("Raw callback 4096 frames"))
+    );
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|node| node.value().or_else(|| node.label()))
+            .any(|label| label.contains("cumulative faults 1 / recoveries 0"))
+    );
+    let seek_serial = ui.app.timeline_audio_sync.desired_seek.serial;
+    ui.app.recover_timeline_runtime_if_needed();
+    ui.app.publish_transport_seek(4.0);
+    ui.app.publish_current_transport_loop();
+    ui.app.toggle_play();
+    ui.app.toggle_record();
+    assert_eq!(ui.app.timeline_audio_sync.desired_seek.serial, seek_serial);
+    assert!(!ui.app.playing);
+    assert!(!ui.app.recording);
+    assert!(ui.app.plugin_processing_retry_required);
+    ui.capture("settings-plugin-fault");
+
+    let generation = ui.app.timeline_desired_generation;
+    ui.click("RETRY AUDIO PROCESSING");
+    assert!(!ui.app.plugin_processing_retry_required);
+    assert!(ui.app.plugin_processing_retry_pending.is_some());
+    assert!(ui.app.timeline_desired_generation > generation);
+    assert!(ui.app.timeline_audio_sync.desired_seek.serial > seek_serial);
+    assert!(!ui.app.playing);
+    assert!(!ui.app.audio_preferences.metronome_enabled);
+    ui.settle();
+    assert!(
+        !ui.app.plugin_processing_retry_required,
+        "the same old fault snapshot must not undo an explicit retry"
+    );
+    assert!(ui.button("RETRY AUDIO PROCESSING").is_disabled());
+    let requested_generation = ui.app.timeline_desired_generation;
+    ui.app.request_plugin_processing_replan(None);
+    assert_eq!(
+        ui.app.timeline_desired_generation, requested_generation,
+        "a repeated retry cannot enqueue a second replan"
+    );
+
+    // Presentation injection is intentionally not a DSP recovery proof: even a
+    // recovered snapshot cannot authorize playback without the exact activation.
+    ui.app
+        .audio
+        .as_ref()
+        .unwrap()
+        .set_plugin_processing_test_snapshot(plugin_processing_fixture(
+            PluginProcessingHealth::Recovered,
+            2,
+        ));
+    ui.settle();
+    assert!(ui.app.plugin_processing_retry_pending.is_some());
+    ui.app.toggle_play();
+    assert!(!ui.app.playing);
+    ui.app
+        .audio
+        .as_ref()
+        .unwrap()
+        .set_plugin_processing_test_snapshot(plugin_processing_fixture(
+            PluginProcessingHealth::Faulted,
+            2,
+        ));
+    ui.settle();
+    assert!(
+        ui.app.plugin_processing_retry_required,
+        "a fault in the requested revision must latch again"
+    );
+    assert!(ui.app.plugin_processing_retry_pending.is_none());
+    assert!(!ui.app.playing);
+}
+
+#[test]
+fn plugin_processing_retry_acknowledgment_requires_timing_epoch_and_exact_timeline() {
+    let engine = AudioEngine::test_engine();
+    let mut snapshot = engine.snapshot();
+    snapshot.plugin_processing_health = PluginProcessingHealth::Recovered;
+    snapshot.plugin_timing_revision = 2;
+    snapshot.transport_epoch = 2;
+    assert!(plugin_processing_retry_acknowledged(1, 1, &snapshot, true));
+    assert!(!plugin_processing_retry_acknowledged(2, 1, &snapshot, true));
+    assert!(!plugin_processing_retry_acknowledged(1, 2, &snapshot, true));
+    assert!(!plugin_processing_retry_acknowledged(
+        1, 1, &snapshot, false
+    ));
+    snapshot.plugin_processing_health = PluginProcessingHealth::Faulted;
+    assert!(!plugin_processing_retry_acknowledged(1, 1, &snapshot, true));
+}
+
+#[test]
+fn plugin_profile_preference_migration_keeps_metronome_off_and_device_requests() {
+    let preferences = AppAudioPreferences {
+        requested_output: AudioDeviceProfile {
+            buffer_size: AudioBufferSizeRequest::Fixed(256),
+            ..AudioDeviceProfile::system_default_output()
+        },
+        ..Default::default()
+    };
+    let mut legacy = serde_json::to_value(&preferences).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("plugin_callback_budget_frames");
+    let (migrated, error) = decode_audio_preferences(Some(&legacy.to_string()));
+    assert!(error.is_none());
+    assert_eq!(migrated.plugin_callback_budget_frames, 2_048);
+    assert_eq!(migrated.requested_output, preferences.requested_output);
+    assert!(!migrated.metronome_enabled);
+    legacy["plugin_callback_budget_frames"] = serde_json::json!(777);
+    let (repaired, error) = decode_audio_preferences(Some(&legacy.to_string()));
+    assert!(error.is_some());
+    assert_eq!(repaired.plugin_callback_budget_frames, 2_048);
+    assert_eq!(repaired.requested_output, preferences.requested_output);
+    assert!(!repaired.metronome_enabled);
+}
+
+#[test]
+fn full_app_plugin_fault_diagnostic_survives_device_replacement_without_recovery_permission() {
+    let mut ui = UiHarness::new();
+    let faulted = AudioEngine::test_engine();
+    faulted.set_plugin_processing_test_snapshot(plugin_processing_fixture(
+        PluginProcessingHealth::Faulted,
+        7,
+    ));
+    ui.app.audio = Some(faulted);
+    ui.settle();
+    assert!(ui.app.plugin_processing_retry_required);
+    assert_eq!(ui.app.plugin_processing_last_fault.unwrap().epoch, 6);
+    ui.app.audio = Some(AudioEngine::test_engine());
+    ui.key(egui::Key::F10, egui::Modifiers::NONE);
+    assert!(ui.app.plugin_processing_retry_required);
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|node| node.value().or_else(|| node.label()))
+            .any(|text| text.contains("Last latched fault"))
+    );
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|node| node.value().or_else(|| node.label()))
+            .any(|text| text.contains("timing revision 7"))
+    );
+    assert!(
+        ui.nodes
+            .iter()
+            .filter_map(|node| node.value().or_else(|| node.label()))
+            .any(|text| text.contains("cumulative faults 0 / recoveries 0")),
+        "replacement counters must not be confused with the retained fault"
+    );
+    ui.app.toggle_play();
+    assert!(!ui.app.playing);
+    assert!(!ui.app.audio_preferences.metronome_enabled);
+}
+
+#[test]
+fn full_app_plugin_settings_retry_and_device_footer_remain_clickable_at_small_size() {
+    for (size, capture) in [
+        (egui::vec2(1440.0, 900.0), "settings-plugin-fault-full"),
+        (egui::vec2(1000.0, 700.0), "settings-plugin-fault-small"),
+    ] {
+        let mut ui = UiHarness::new();
+        ui.size = size;
+        let engine = AudioEngine::test_engine();
+        engine.observe_test_callback(128);
+        engine.set_plugin_processing_test_snapshot(plugin_processing_fixture(
+            PluginProcessingHealth::Faulted,
+            1,
+        ));
+        ui.app.audio = Some(engine);
+        ui.key(egui::Key::F10, egui::Modifiers::NONE);
+        ui.app.audio_output_draft.buffer_size = AudioBufferSizeRequest::Fixed(256);
+        ui.settle();
+        ui.capture(capture);
+        ui.click("REVERT");
+        assert_eq!(
+            ui.app.audio_output_draft, ui.app.audio_preferences.requested_output,
+            "the device footer must accept its actual pointer event at {size:?}"
+        );
+        ui.click("RETRY AUDIO PROCESSING");
+        assert!(
+            ui.app.plugin_processing_retry_pending.is_some(),
+            "processing Retry must accept its actual pointer event at {size:?}"
+        );
+        assert!(!ui.app.playing);
+    }
+}

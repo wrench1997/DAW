@@ -30,8 +30,11 @@ pub mod plugin_graph;
 mod plugin_midi_routing;
 pub mod plugin_parameter_edit;
 pub mod plugin_parameter_editor;
+pub mod plugin_timing;
 mod plugins;
 mod project_media;
+#[cfg(test)]
+mod realtime_test_alloc;
 pub mod recording;
 mod sample_browser;
 mod settings_ui;

@@ -26,6 +26,10 @@ The [state-restore report](docs/PLUGIN_STATE_RESTORE_LIMITS.md) preserves the co
 pre-existing reused-instance Surge defect and distinguishes it from successful
 fresh-instance restoration. A narrowly matched Surge XT 1.3.4 guard now refuses reused/editor-opened LoadState before helper editor closure or state mutation. It requires a fresh candidate and does not implement hidden processing or a general restoration transaction. The legacy full-chain live-admin caller closes its editor before backend LoadState and faults its slot when that call rejects; its preservation is not established.
 
+Plug-in workers now share a [callback-budget timing plan](docs/PLUGIN_TIMING.md),
+with explicit provisional profiles, whole-callback admission, independent plug-in
+health and stopped retry. Device XRUN=0 alone is not realtime qualification.
+
 ## Architecture
 
 - `eframe`, `egui`, and `wgpu`: native GPU-rendered desktop UI

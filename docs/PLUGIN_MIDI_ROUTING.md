@@ -32,31 +32,27 @@ change the port configuration while playback is running.
 
 - VST calls, helper IPC, process reset and shutdown remain off the device callback.
   Callback routing uses preallocated, bounded data only.
-- Processing quantum is 128 frames. In projects with active MIDI port edges, source
-  and destination Generators use a fixed 16-quantum worker lookahead plus one quantum
-  of accumulation: **2,176 frames per endpoint**. Existing Mixer insert and Master
-  workers use this conservative lookahead in the same project so downstream FX do
-  not depend on completing IPC within the current callback.
-- Minimum source-to-instrument audio latency is therefore **4,352 frames**, about
-  **90.7 ms at 48 kHz**, before reported plugin latency and downstream inserts. Each
-  worker-backed Mixer stage adds its bridge and plugin latency. This is not a
-  low-latency performance mode. The Inspector shows final graph output latency.
-- Projects without plugin MIDI routes retain their previous one-quantum worker
-  bridge timing. Non-routed Generators also retain that timing. **This legacy path
-  is not realtime-qualified by routed-mode results:** the paced Linux Off baseline
-  observed deadline misses even with 128-frame callbacks. General bridge timing
-  remains a separate follow-up.
-- The supported maximum *whole device callback* is 2,048 frames. Larger callbacks
-  fail routed MIDI closed even if the engine splits them internally. A lookahead
-  prevents deterministic same-callback misses; it does not guarantee an overloaded
-  CPU or helper will meet its deadline.
+- Processing uses the common [prepared plug-in timing plan](PLUGIN_TIMING.md) for
+  ordinary and routed Generators, Mixer inserts and Master workers. Q=128,
+  K=ceil(B/Q)+a sample-rate-derived 4 ms guard, and L=(K+1)Q per physical worker.
+  The unknown-stream default is B=2048; smaller 128/256/512-frame profiles are
+  explicitly provisional and require observed callback evidence.
+- Source-to-instrument latency is 2L plus reported plug-in latency and downstream
+  physical FX stages. The Inspector shows final graph output latency. Serial FX
+  slots share one worker bridge. At 48 kHz, the conservative default adds 4864
+  frames (101.3 ms) source-to-instrument before downstream inserts; the B=128
+  operating profile estimates 1024 frames (21.3 ms), without hardware certification.
+- Every *whole device callback* is checked against B before internal splitting or
+  submission. B+1 fails closed and requests explicit stopped replan/retry;
+  callbacks above 2048 are unsupported. A device buffer request is not a future
+  callback ceiling. A lookahead does not guarantee an overloaded CPU/helper deadline.
 - Output events travel inside their originating audio block and are accepted only
   for the exact epoch, sequence and latency attestation. The adapter schedules each
   event at the corresponding audio-output stream position, then converts it to the
   destination callback offset. It does not forward whichever event arrived most
   recently and does not promise zero-latency or universal sample-accurate VST behavior.
 - Sink transport describes the incoming content position, delayed by the producer's
-  2,176-frame bridge. Negative preroll positions are supported. Per-block BPM,
+  prepared L-frame bridge. Negative preroll positions are supported. Per-block BPM,
   sample/quarter-note position, play state and existing 4/4 signature travel in the
   same helper audio request; the helper must acknowledge applying them. Serial FX
   slots additionally subtract the preceding active plugin latency from their context.
@@ -97,8 +93,9 @@ blocks queued MIDI, and silences the affected sink until a new transport epoch. 
 cleanup queues native NoteOff messages through `midi_panic`, consumes them in a
 stopped worker process flush, discards flush output, and performs the existing reset.
 Sustain/all-notes/all-sound-off controllers supplement native NoteOff cleanup.
-The Inspector reports a routing fault and directs the user to fix the cause and
-stop/restart transport. A plugin may change its declared latency only after its
+The Inspector reports a routing fault. Fix the cause, then use **Retry audio
+processing** in Settings for a stopped fresh-epoch replan; music does not restart
+automatically. A plugin may change its declared latency only after its
 first DSP block. The old graph fails closed; a stopped fresh-epoch activation
 rebuilds PDC from the coherent new latency. The genuine Surge Effects 0-to-32-frame
 transition exercised this recovery. Suppression and fault ownership from an old
@@ -185,8 +182,8 @@ Native no-note checks at the reviewed `e54a6e4` routing checkpoint isolated the
 instrument bus because that checkpoint's Master metronome clicked automatically.
 Its peak must not be misreported as an unreleased plugin voice. The subsequent
 [metronome control](METRONOME.md) defaults Off; this does not change the historical
-acceptance source or qualify the old Off-mode bridge. A callback-safe general
-bridge remains separate work.
+acceptance source or qualify the old Off-mode bridge. The new common timing
+implementation has its own source-bound verification in [plug-in timing](PLUGIN_TIMING.md).
 
 Harmony Blueprint, Windows/macOS execution, physical speakers/devices, native
 plugin UI, seamless loops and stopped live multi-plugin audition remain unverified

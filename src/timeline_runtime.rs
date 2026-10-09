@@ -110,6 +110,8 @@ pub enum TimelineRuntimeValidationError {
     InvalidRevision,
     #[error("timeline epoch must be non-zero")]
     InvalidEpoch,
+    #[error("unsupported plug-in timing plan")]
+    InvalidPluginTiming,
     #[error("{resource:?} contains {actual} items, exceeding the runtime maximum {maximum}")]
     ResourceLimitExceeded {
         resource: TimelineRuntimeResource,
@@ -225,6 +227,7 @@ pub enum TimelineRuntimeCreateError {
 /// Owned discontinuity state prepared entirely on the control thread.
 #[derive(Debug)]
 pub struct PreparedTimelineChase {
+    pub(crate) plugin_timing: crate::plugin_timing::PreparedPluginTimingPlan,
     revision: u64,
     epoch: u64,
     frame: u64,
@@ -237,6 +240,7 @@ pub struct PreparedTimelineChase {
 /// epoch without cloning any of its vectors.
 #[derive(Debug)]
 pub struct PreparedLoopTimelineChase {
+    pub(crate) plugin_timing: crate::plugin_timing::PreparedPluginTimingPlan,
     revision: u64,
     frame: u64,
     state: TimelineDiscontinuityState,
@@ -652,6 +656,10 @@ impl TimelineRuntimeController {
         validate_chase_state(&state)?;
         validate_chase_endpoint_capacities(timeline, &state)?;
         Ok(Box::new(PreparedTimelineChase {
+            plugin_timing: crate::plugin_timing::PreparedPluginTimingPlan::conservative(
+                timeline.sample_rate(),
+            )
+            .map_err(|_| TimelineRuntimeValidationError::InvalidPluginTiming)?,
             revision,
             epoch,
             frame,
@@ -673,6 +681,10 @@ impl TimelineRuntimeController {
         validate_chase_state(&state)?;
         validate_chase_endpoint_capacities(timeline, &state)?;
         Ok(Box::new(PreparedLoopTimelineChase {
+            plugin_timing: crate::plugin_timing::PreparedPluginTimingPlan::conservative(
+                timeline.sample_rate(),
+            )
+            .map_err(|_| TimelineRuntimeValidationError::InvalidPluginTiming)?,
             revision,
             frame,
             state,
@@ -1622,6 +1634,25 @@ impl RealtimeTimelineRuntime {
             .as_ref()
             .filter(|timeline| timeline.revision == ticket.spec.revision)
             .and_then(|timeline| timeline.mixer_delay_bank.as_deref())
+    }
+
+    pub(crate) fn transport_activation_plugin_timing(
+        &self,
+        ticket: TimelineTransportActivationTicket,
+    ) -> Option<crate::plugin_timing::PreparedPluginTimingPlan> {
+        let pending = self.pending_transport_activation?;
+        if pending.request_id != ticket.request_id || pending.spec != ticket.spec {
+            return None;
+        }
+        self.candidate_one_shot_chase
+            .as_ref()
+            .filter(|chase| chase.chase.revision == ticket.spec.revision)
+            .or_else(|| {
+                self.one_shot_chase
+                    .as_ref()
+                    .filter(|chase| chase.chase.revision == ticket.spec.revision)
+            })
+            .map(|chase| chase.chase.plugin_timing)
     }
 
     pub(crate) fn transport_activation_chase(
@@ -5812,6 +5843,8 @@ mod tests {
             ))
         ));
         let invalid = Box::new(PreparedTimelineChase {
+            plugin_timing: crate::plugin_timing::PreparedPluginTimingPlan::conservative(48000)
+                .unwrap(),
             revision: 1,
             epoch: 0,
             frame: 0,
@@ -6150,6 +6183,8 @@ mod tests {
             value: 1.0,
         };
         let chase = Box::new(PreparedTimelineChase {
+            plugin_timing: crate::plugin_timing::PreparedPluginTimingPlan::conservative(48000)
+                .unwrap(),
             revision: 1,
             epoch: 1,
             frame: 0,

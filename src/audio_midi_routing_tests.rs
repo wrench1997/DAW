@@ -3,7 +3,11 @@
 // are test-driver waits between device callbacks, never waits in the audio path;
 // these tests establish deterministic semantics, not real-time scheduling claims.
 use super::*;
-use crate::plugin_midi_routing::MIDI_ROUTE_BRIDGE_FRAMES;
+fn route_bridge_frames() -> u32 {
+    PreparedPluginTimingPlan::conservative(48000)
+        .unwrap()
+        .bridge_latency_frames
+}
 use crate::plugins::plugin_runtime::{MAX_PLUGIN_OUTPUT_EVENTS, PluginMidiBatch, PluginTransport};
 use std::sync::Mutex;
 
@@ -36,6 +40,7 @@ struct MidiRouteProbe {
     active_notes: AtomicU32,
     resets: AtomicU32,
     failure: AtomicU32,
+    latency_frames: AtomicU32,
 }
 
 #[derive(Clone, Copy)]
@@ -206,7 +211,7 @@ impl PluginBackend for MidiRouteBackend {
         Ok(())
     }
     fn latency_samples(&self) -> u32 {
-        0
+        self.probe.latency_frames.load(Ordering::Acquire)
     }
     fn tail_samples(&self) -> u32 {
         0
@@ -249,6 +254,44 @@ fn midi_route_chain(
             .is_some_and(|snapshot| {
                 snapshot.slot_is_active(0) && snapshot.total_plugin_latency_samples == 0
             })
+    });
+    chain
+}
+
+fn midi_route_multi_insert(instances: &[u64], probe: &Arc<MidiRouteProbe>) -> PluginChain {
+    let owned = instances.to_vec();
+    let probe = Arc::clone(probe);
+    let count = instances.len();
+    let chain = PluginChain::spawn_identified_with_backend_factory(
+        instances,
+        move || {
+            owned
+                .iter()
+                .map(|_| {
+                    BackendSlot::new(Box::new(MidiRouteBackend {
+                        role: MidiTestRole::Insert,
+                        capabilities: (false, false),
+                        probe: Arc::clone(&probe),
+                        transport: PluginTransport::default(),
+                        generated: Vec::new(),
+                        pending: Vec::new(),
+                        output: PluginMidiBatch::default(),
+                        active: [false; 128],
+                    }))
+                })
+                .collect()
+        },
+        PluginPrepareConfig {
+            sample_rate: 48000.0,
+            max_block_frames: 128,
+        },
+    )
+    .unwrap();
+    wait_until(|| {
+        chain
+            .control
+            .plugin_latency_snapshot()
+            .is_some_and(|snapshot| snapshot.active_mask.count_ones() as usize == count)
     });
     chain
 }
@@ -314,6 +357,8 @@ struct MidiGraphFixture {
     sink: Arc<MidiRouteProbe>,
     insert: Arc<MidiRouteProbe>,
     loop_token: u64,
+    timing: PreparedPluginTimingPlan,
+    activation_playing: bool,
 }
 
 impl MidiGraphFixture {
@@ -371,13 +416,13 @@ impl MidiGraphFixture {
             &sink,
             &[],
         );
-        let insert_chain = midi_route_chain(
-            INSERT_INSTANCE,
-            MidiTestRole::Insert,
-            (false, false),
-            &insert,
-            &[],
-        );
+        let insert_instances: Vec<_> = project
+            .mixer_insert_slots
+            .iter()
+            .filter(|slot| slot.track == 2)
+            .map(|slot| slot.plugin_instance_id)
+            .collect();
+        let insert_chain = midi_route_multi_insert(&insert_instances, &insert);
         let mut controls = Vec::new();
         let mut guards = Vec::new();
         let mut generators = vec![
@@ -412,6 +457,22 @@ impl MidiGraphFixture {
         dsp.install_insert_endpoint(2, INSERT_INSTANCE + 10_000, fixed_adapter(audio));
         controls.push(control);
         guards.push(guard);
+        let master_instances: Vec<_> = project
+            .mixer_insert_slots
+            .iter()
+            .filter(|slot| slot.track == 0)
+            .map(|slot| slot.plugin_instance_id)
+            .collect();
+        if !master_instances.is_empty() {
+            let PluginChain {
+                audio,
+                control,
+                guard,
+            } = midi_route_multi_insert(&master_instances, &insert);
+            dsp.install_insert_endpoint(0, 50_000, fixed_adapter(audio));
+            controls.push(control);
+            guards.push(guard);
+        }
         assert_eq!(dsp.apply_pending_timeline_commands(), 2);
         Self {
             dsp,
@@ -427,11 +488,13 @@ impl MidiGraphFixture {
             sink,
             insert,
             loop_token,
+            timing: PreparedPluginTimingPlan::conservative(48000).unwrap(),
+            activation_playing: true,
         }
     }
 
     fn queue_activation(&mut self, epoch: u64, frame: u64) -> TimelineTransportActivationTicket {
-        let chase = self
+        let mut chase = self
             .controller
             .prepare_chase(
                 &self.timeline,
@@ -441,6 +504,7 @@ impl MidiGraphFixture {
                 TimelineChaseOptions::default(),
             )
             .unwrap();
+        chase.plugin_timing = self.timing;
         self.controller.install_chase(chase).unwrap();
         self.controller
             .activate_transport(
@@ -456,7 +520,7 @@ impl MidiGraphFixture {
                     loop_end_q32: 0,
                     loop_token: self.loop_token,
                     loop_enabled: false,
-                    playing: true,
+                    playing: self.activation_playing,
                     mixer_pan_release: TimelineMixerPanRelease::EMPTY,
                 },
                 self.mailbox.try_load().unwrap().request_id,
@@ -464,6 +528,21 @@ impl MidiGraphFixture {
             .unwrap();
         assert_eq!(self.dsp.apply_pending_timeline_commands(), 2);
         self.dsp.pending_timeline_transport_activation().unwrap()
+    }
+
+    fn select_timing_profile(&mut self, budget: u32) {
+        self.timing =
+            PreparedPluginTimingPlan::new(self.timing.revision + 1, 48000, budget).unwrap();
+        self.dsp.requested_plugin_timing_revision = self.timing.revision;
+        self.status
+            .plugin_processing
+            .requested_revision
+            .store(self.timing.revision, Ordering::Release);
+        self.status
+            .plugin_processing
+            .requested_budget
+            .store(budget, Ordering::Release);
+        self.dsp.raw_callback_frames = 0;
     }
 
     fn activate(&mut self, epoch: u64, frame: u64) {
@@ -503,14 +582,24 @@ impl MidiGraphFixture {
             },
             self.transport.request.playing,
         );
-        render_transport_chunk(
-            &mut self.dsp,
-            &self.status,
-            &self.mailbox,
-            &mut self.transport,
-            frames,
-            |_, block| output.extend_from_slice(block),
-        );
+        if !self.dsp.admit_plugin_callback(frames) {
+            self.transport.request.playing = false;
+            self.transport.request.loop_enabled = false;
+            self.dsp.publish_plugin_epoch_status(&self.status);
+            output.resize(frames, [0.0; 2]);
+            self.wait_workers();
+            return output;
+        }
+        crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+            render_transport_chunk(
+                &mut self.dsp,
+                &self.status,
+                &self.mailbox,
+                &mut self.transport,
+                frames,
+                |_, block| output.extend_from_slice(block),
+            )
+        });
         self.wait_workers();
         output
     }
@@ -592,7 +681,7 @@ fn midi_port_graph_routes_generated_and_transformed_notes_through_real_workers_a
             "generated output, transformed input, and exact offsets; partition {partition}"
         );
         assert_eq!(fixture.sink.active_notes.load(Ordering::Acquire), 0);
-        let delay = MIDI_ROUTE_BRIDGE_FRAMES as usize * 3;
+        let delay = route_bridge_frames() as usize * 3;
         for (frame, actual) in rendered.iter().enumerate() {
             let mut expected = if frame >= delay { SOURCE_AUDIO } else { 0.0 };
             if (delay + 13..delay + 221).contains(&frame) {
@@ -628,7 +717,7 @@ fn midi_port_graph_monitor_mute_preserves_events_and_exact_source_sink_transport
         observed_notes(&fixture.sink),
         vec![(37, [0x90, 73, 100]), (311, [0x80, 73, 0])]
     );
-    let delay = MIDI_ROUTE_BRIDGE_FRAMES as usize * 3;
+    let delay = route_bridge_frames() as usize * 3;
     for (frame, actual) in rendered.iter().enumerate() {
         let expected = if (delay + 37..delay + 311).contains(&frame) {
             (SINK_NOTE_AUDIO * INSERT_GAIN).tanh()
@@ -646,7 +735,7 @@ fn midi_port_graph_monitor_mute_preserves_events_and_exact_source_sink_transport
             assert_eq!(source.sample_position, quantum as i64 * 128);
             assert_eq!(
                 sink.sample_position,
-                source.sample_position - i64::from(MIDI_ROUTE_BRIDGE_FRAMES)
+                source.sample_position - i64::from(route_bridge_frames())
             );
             for transport in [source, sink] {
                 assert!(transport.playing);
@@ -740,7 +829,7 @@ fn midi_port_graph_output_overflow_process_failure_and_panic_silence_held_notes(
         // Failure is injected at input frame 2560. It can take one producer bridge
         // to reach the router; existing zero-tail FX can retain at most one further
         // bridge. The sink is already cleared; no new notes were admitted above.
-        let last_allowed_audio_frame = 2_560 + 2 * MIDI_ROUTE_BRIDGE_FRAMES as usize;
+        let last_allowed_audio_frame = 2_560 + 2 * route_bridge_frames() as usize;
         let later_start = 2_560 + 4_096;
         let drain = last_allowed_audio_frame.saturating_sub(later_start);
         assert!(
@@ -878,7 +967,7 @@ fn midi_port_graph_activation_rejects_source_instance_replacement() {
 }
 
 #[test]
-fn midi_port_graph_off_keeps_existing_two_quantum_worker_bridges() {
+fn ordinary_plugin_graph_uses_the_same_admitted_timing_as_routed_graphs() {
     let mut project = midi_route_project(false, false);
     for plugin in &mut project.plugin_instances {
         plugin.midi_ports = crate::plugin_midi_routing::PluginMidiPorts::default();
@@ -886,11 +975,10 @@ fn midi_port_graph_off_keeps_existing_two_quantum_worker_bridges() {
     let mut fixture = MidiGraphFixture::new(project, false, true, true, &[]);
     assert!(fixture.timeline.midi_port_routes().is_empty());
     fixture.activate(2, 0);
-    let rendered = fixture.render_frames(1_024, 128);
+    let rendered = fixture.render_frames(2 * route_bridge_frames() as usize + 512, 128);
     fixture.assert_clean();
-    // Both Generator and track insert retain the existing Q128 accumulation
-    // plus one asynchronous Q128 turn, rather than acquiring MIDI-route latency.
-    let graph_delay = 2 * (2 * DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES);
+    // Ordinary Generators and the insert share the same operating plan as MIDI routes.
+    let graph_delay = 2 * route_bridge_frames() as usize;
     for (frame, actual) in rendered.iter().enumerate() {
         let expected = if frame >= graph_delay {
             SOURCE_AUDIO.tanh()
@@ -900,7 +988,7 @@ fn midi_port_graph_off_keeps_existing_two_quantum_worker_bridges() {
         assert_eq!(*actual, [expected; 2], "normal-project frame {frame}");
     }
     for control in &fixture.controls {
-        assert_eq!(control.stats().latency_samples, 128);
+        assert_eq!(control.stats().latency_samples, route_bridge_frames() - 128);
     }
     fixture.finish();
 }
@@ -964,9 +1052,9 @@ fn midi_port_graph_oversized_whole_callback_latches_sink_before_internal_chunks(
     fixture.activate(2, 0);
     fixture.render_frames(3_072, 512);
     assert_eq!(fixture.sink.active_notes.load(Ordering::Acquire), 1);
-    fixture.dsp.reject_oversized_midi_callback(2_049);
+    assert!(!fixture.dsp.admit_plugin_callback(2_049));
     wait_until(|| fixture.sink.active_notes.load(Ordering::Acquire) == 0);
-    assert_ne!(fixture.dsp.midi_route_faulted, 0);
+    assert!(fixture.dsp.plugin_fault.is_some());
     fixture.finish();
 }
 
@@ -1063,6 +1151,7 @@ fn midi_port_graph_new_epoch_clears_old_failure_suppression_and_recovers() {
         .publish(TransportMutation::SetPlaying(false));
     fixture.render(128);
     let failures = fixture.dsp.timeline_execution_failures;
+    fixture.select_timing_profile(2048);
     fixture.activate(3, 0);
     assert!(
         fixture
@@ -1084,5 +1173,338 @@ fn midi_port_graph_new_epoch_clears_old_failure_suppression_and_recovers() {
     assert_eq!(fixture.dsp.midi_route_faulted, 0);
     assert_eq!(fixture.dsp.timeline_execution_failures, failures);
     assert!(output.iter().any(|frame| frame[0] != 0.0));
+    fixture.finish();
+}
+
+#[test]
+fn common_timing_profiles_align_routed_midi_audio_and_one_physical_fx_bridge() {
+    for budget in crate::plugin_timing::PLUGIN_CALLBACK_PROFILES {
+        for partition in [1, 31, 64, 127, 128, 129, 255, 256, 512, 2048] {
+            if partition > budget as usize {
+                continue;
+            }
+            let mut fixture = MidiGraphFixture::new(
+                midi_route_project(true, false),
+                true,
+                true,
+                true,
+                &[
+                    (0, [0x90, 60, 100]),
+                    (1, [0x80, 60, 0]),
+                    (127, [0x90, 64, 100]),
+                    (128, [0x80, 64, 0]),
+                ],
+            );
+            fixture.select_timing_profile(budget);
+            fixture.activate(2, 0);
+            let latency = fixture.timing.bridge_latency_frames as usize * 3;
+            assert_eq!(
+                fixture
+                    .dsp
+                    .graph_pdc_plan
+                    .as_ref()
+                    .as_ref()
+                    .unwrap()
+                    .master_output_latency_samples(),
+                latency as u64
+            );
+            let output = fixture.render_frames(latency + 512, partition);
+            fixture.assert_clean();
+            assert_eq!(
+                observed_notes(&fixture.sink),
+                vec![
+                    (0, [0x90, 60, 100]),
+                    (1, [0x80, 60, 0]),
+                    (127, [0x90, 64, 100]),
+                    (128, [0x80, 64, 0])
+                ]
+            );
+            for (frame, stereo) in output.iter().enumerate() {
+                let expected = if frame == latency || frame == latency + 127 {
+                    (SINK_NOTE_AUDIO * INSERT_GAIN).tanh()
+                } else {
+                    0.0
+                };
+                assert!(
+                    (stereo[0] - expected).abs() < 1e-6,
+                    "B={budget} partition={partition} frame={frame}: {stereo:?} vs {expected}"
+                );
+            }
+            fixture.finish();
+        }
+    }
+}
+
+#[test]
+fn every_profile_rejects_budget_plus_one_before_submission_and_retry_is_fresh_stopped() {
+    for budget in crate::plugin_timing::PLUGIN_CALLBACK_PROFILES {
+        let mut fixture =
+            MidiGraphFixture::new(midi_route_project(true, false), false, true, true, &[]);
+        fixture.select_timing_profile(budget);
+        fixture.activate(2, 0);
+        let before: Vec<_> = fixture
+            .controls
+            .iter()
+            .map(|control| control.stats().submitted)
+            .collect();
+        crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+            assert!(!fixture.dsp.admit_plugin_callback(budget as usize + 1));
+            fixture.dsp.publish_plugin_epoch_status(&fixture.status);
+        });
+        assert_eq!(
+            fixture
+                .controls
+                .iter()
+                .map(|control| control.stats().submitted)
+                .collect::<Vec<_>>(),
+            before
+        );
+        let fault = fixture.dsp.plugin_fault.unwrap();
+        assert_eq!(fault.raw_callback_frames, budget + 1);
+        assert_eq!(fault.callback_budget_frames, budget);
+        let old_revision = fixture.timing.revision;
+        fixture.queue_activation(3, 0);
+        fixture
+            .transport
+            .apply_pending_timeline_activation(&fixture.status, &mut fixture.dsp);
+        assert_eq!(
+            fixture.transport.epoch, 2,
+            "same timing revision must not clear a fault"
+        );
+        fixture.select_timing_profile(budget);
+        fixture.activation_playing = false;
+        assert!(fixture.timing.revision > old_revision);
+        fixture.queue_activation(4, 0);
+        // The explicit retry is a stopped replan; no automatic playing or loop replay.
+        fixture
+            .transport
+            .apply_pending_timeline_activation(&fixture.status, &mut fixture.dsp);
+        assert_eq!(fixture.transport.epoch, 4);
+        assert!(!fixture.transport.request.playing);
+        assert!(!fixture.transport.request.loop_enabled);
+        assert!(fixture.dsp.plugin_fault.is_none());
+        assert_eq!(fixture.dsp.plugin_fault_count, 1);
+        fixture.finish();
+    }
+}
+
+#[test]
+fn serial_fx_slots_share_one_bridge_and_master_adds_one_under_changing_callbacks() {
+    for budget in crate::plugin_timing::PLUGIN_CALLBACK_PROFILES {
+        let mut project = midi_route_project(true, false);
+        for (instance, track, slot) in [(3004, 2, 1), (4001, 0, 0)] {
+            let mut plugin = timeline_test_plugin(instance);
+            plugin.role = PluginRole::Effect;
+            project.plugin_instances.push(plugin);
+            project.mixer_insert_slots.push(MixerInsertSlotRef {
+                track,
+                slot,
+                plugin_instance_id: instance,
+            });
+        }
+        let mut fixture = MidiGraphFixture::new(
+            project,
+            true,
+            true,
+            true,
+            &[
+                (0, [0x90, 60, 100]),
+                (1, [0x80, 60, 0]),
+                (127, [0x90, 64, 100]),
+                (128, [0x80, 64, 0]),
+            ],
+        );
+        fixture.select_timing_profile(budget);
+        fixture.activate(2, 0);
+        let expected_latency = 4 * fixture.timing.bridge_latency_frames as usize;
+        assert_eq!(
+            fixture
+                .dsp
+                .graph_pdc_plan
+                .as_ref()
+                .as_ref()
+                .unwrap()
+                .master_output_latency_samples(),
+            expected_latency as u64
+        );
+        let partitions: Vec<usize> = [1, 31, 64, 127, 128, 129, 255, 256, 512, 2048]
+            .into_iter()
+            .filter(|frames| *frames <= budget as usize)
+            .collect();
+        let mut output = Vec::new();
+        let total = expected_latency + 512;
+        let mut index = 0;
+        while output.len() < total {
+            output.extend(
+                fixture.render(partitions[index % partitions.len()].min(total - output.len())),
+            );
+            index += 1;
+        }
+        fixture.assert_clean();
+        for (frame, stereo) in output.iter().enumerate() {
+            let expected = if frame == expected_latency || frame == expected_latency + 127 {
+                (SINK_NOTE_AUDIO * INSERT_GAIN.powi(3)).tanh()
+            } else {
+                0.0
+            };
+            assert!(
+                (stereo[0] - expected).abs() < 1e-6,
+                "B={budget}, frame={frame}: {stereo:?} expected {expected}"
+            );
+        }
+        fixture.finish();
+    }
+}
+
+#[test]
+fn timing_candidate_is_stale_after_profile_request_and_commits_partial_quanta_atomically() {
+    let mut fixture =
+        MidiGraphFixture::new(midi_route_project(true, false), false, true, true, &[]);
+    let stale = fixture.queue_activation(2, 0);
+    let old_plan = fixture.dsp.plugin_timing;
+    fixture.select_timing_profile(128);
+    assert!(
+        fixture
+            .dsp
+            .preflight_timeline_transport_activation(stale, 2)
+            .is_err()
+    );
+    fixture.dsp.reject_timeline_transport_activation(
+        stale,
+        TimelineTransportActivationRejectReason::GraphPdcPlan,
+    );
+    assert_eq!(fixture.dsp.plugin_timing, old_plan);
+    assert_eq!(fixture.transport.epoch, 1);
+    let mut left = [0.0; 31];
+    let mut right = [0.0; 31];
+    fixture.dsp.generator_endpoints[0]
+        .as_mut()
+        .unwrap()
+        .endpoint
+        .process_generator(1, 31, &mut left, &mut right);
+    assert_eq!(
+        fixture.dsp.generator_endpoints[0]
+            .as_ref()
+            .unwrap()
+            .endpoint
+            .input_phase_frames(),
+        31
+    );
+    let next = fixture.queue_activation(3, 0);
+    fixture
+        .dsp
+        .preflight_timeline_transport_activation(next, 3)
+        .unwrap();
+    assert_eq!(fixture.dsp.plugin_timing, old_plan);
+    assert_eq!(
+        fixture.dsp.generator_endpoints[0]
+            .as_ref()
+            .unwrap()
+            .endpoint
+            .input_phase_frames(),
+        31
+    );
+    // Reset already-staged preflight scratch before using the production single-preflight driver.
+    fixture.dsp.timeline_executor.abort_staged_reset();
+    fixture.dsp.timeline_automation.abort_staged_reset();
+    fixture
+        .transport
+        .apply_pending_timeline_activation(&fixture.status, &mut fixture.dsp);
+    assert_eq!(fixture.transport.epoch, 3);
+    assert_eq!(fixture.dsp.plugin_timing, fixture.timing);
+    for slot in fixture.dsp.generator_endpoints.iter().flatten() {
+        assert_eq!(slot.endpoint.input_phase_frames(), 0);
+        assert_eq!(
+            slot.endpoint.adapter.latency().total_frames,
+            fixture.timing.bridge_latency_frames as usize
+        );
+    }
+    assert_eq!(
+        fixture
+            .dsp
+            .graph_pdc_plan
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .master_output_latency_samples(),
+        3 * u64::from(fixture.timing.bridge_latency_frames)
+    );
+    fixture.finish();
+}
+
+#[test]
+fn latency_change_requires_explicit_stopped_retry_and_new_exact_attestations() {
+    let mut fixture =
+        MidiGraphFixture::new(midi_route_project(true, false), false, true, true, &[]);
+    fixture.activate(2, 0);
+    fixture.render_frames(256, 128);
+    let original_pdc = fixture
+        .dsp
+        .graph_pdc_plan
+        .as_ref()
+        .as_ref()
+        .unwrap()
+        .master_output_latency_samples();
+    let original_revision = fixture.controls[2]
+        .plugin_latency_snapshot()
+        .unwrap()
+        .revision;
+    fixture.insert.latency_frames.store(32, Ordering::Release);
+    fixture.controls[2].set_slot_config(0, SlotConfig::default());
+    wait_until(|| {
+        fixture.controls[2]
+            .plugin_latency_snapshot()
+            .is_some_and(|snapshot| snapshot.revision != original_revision)
+    });
+    fixture.dsp.refresh_pdc_plan(&fixture.status, 128);
+    assert!(fixture.dsp.plugin_fault.is_some());
+    assert_eq!(
+        fixture
+            .dsp
+            .graph_pdc_plan
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .master_output_latency_samples(),
+        original_pdc
+    );
+    let submitted: Vec<_> = fixture
+        .controls
+        .iter()
+        .map(|control| control.stats().submitted)
+        .collect();
+    assert!(fixture.render(128).iter().all(|frame| *frame == [0.0; 2]));
+    assert_eq!(
+        fixture
+            .controls
+            .iter()
+            .map(|control| control.stats().submitted)
+            .collect::<Vec<_>>(),
+        submitted
+    );
+    fixture.select_timing_profile(2048);
+    fixture.activation_playing = false;
+    fixture.activate(3, 0);
+    assert!(fixture.dsp.plugin_fault.is_none());
+    assert!(!fixture.transport.request.playing);
+    assert_eq!(fixture.dsp.plugin_fault_count, 1);
+    assert_eq!(
+        fixture
+            .dsp
+            .graph_pdc_plan
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .master_output_latency_samples(),
+        original_pdc + 32
+    );
+    let endpoint = &fixture.dsp.insert_endpoints[2].as_ref().unwrap().endpoint;
+    assert_eq!(
+        endpoint.expected_latency_revision(),
+        fixture.controls[2]
+            .plugin_latency_snapshot()
+            .unwrap()
+            .revision
+    );
     fixture.finish();
 }

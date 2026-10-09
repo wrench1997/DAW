@@ -1,3 +1,7 @@
+use crate::plugin_timing::{
+    PluginProcessingFault, PluginProcessingFaultReason, PluginProcessingHealth,
+    PluginProcessingSnapshot, PluginProcessingTelemetry, PreparedPluginTimingPlan,
+};
 use std::{
     f32::consts::TAU,
     fmt,
@@ -1002,6 +1006,7 @@ impl fmt::Debug for AudioCommand {
 
 #[derive(Debug)]
 pub struct AudioStatus {
+    plugin_processing: PluginProcessingTelemetry,
     pub playing: AtomicBool,
     pub recording: AtomicBool,
     /// App preference, independent of project/transport activation and command queue capacity.
@@ -1044,6 +1049,7 @@ pub struct AudioStatus {
 impl Default for AudioStatus {
     fn default() -> Self {
         Self {
+            plugin_processing: PluginProcessingTelemetry::default(),
             playing: AtomicBool::new(false),
             recording: AtomicBool::new(false),
             metronome_enabled: AtomicBool::new(false),
@@ -1158,6 +1164,17 @@ impl AudioStatus {
 
 #[derive(Clone, Debug)]
 pub struct AudioSnapshot {
+    pub plugin_callback_budget_frames: u32,
+    pub plugin_lookahead_quanta: u32,
+    pub plugin_bridge_latency_frames: u32,
+    pub plugin_timing_revision: u64,
+    pub plugin_processing_health: PluginProcessingHealth,
+    pub plugin_processing_fault: Option<PluginProcessingFault>,
+    pub plugin_fault_count: u64,
+    pub plugin_recovered_count: u64,
+    pub plugin_deadline_misses: u64,
+    pub plugin_input_losses: u64,
+    pub plugin_output_losses: u64,
     pub device: String,
     pub sample_rate: u32,
     /// Original control-plane request. `BackendDefault` means no concrete
@@ -1470,6 +1487,87 @@ impl AudioEngine {
         self.callback_telemetry.snapshot()
     }
 
+    pub fn plugin_timing_profile(&self) -> u32 {
+        self.status
+            .plugin_processing
+            .requested_budget
+            .load(Ordering::Acquire)
+    }
+
+    /// Changes only the operating admission limit. Hardware device preferences are untouched.
+    /// The caller must prepare and activate a stopped fresh timeline chase after this request.
+    pub fn request_plugin_timing_profile(&mut self, budget: u32) -> Result<(), String> {
+        if self.transport_mailbox.playing.load(Ordering::Acquire)
+            || (self.status.playing.load(Ordering::Acquire)
+                && self.transport_mailbox.control_thread_request_id()
+                    == self
+                        .status
+                        .applied_transport_request
+                        .load(Ordering::Acquire))
+        {
+            return Err("Stop playback before changing plug-in timing".into());
+        }
+        let sample_rate = self.status.sample_rate.load(Ordering::Relaxed);
+        let revision = next_nonzero_id(
+            self.status
+                .plugin_processing
+                .requested_revision
+                .load(Ordering::Acquire),
+        );
+        PreparedPluginTimingPlan::new(revision, sample_rate, budget).map_err(str::to_owned)?;
+        let telemetry = self.stream_telemetry();
+        if budget < crate::plugin_timing::MAX_PLUGIN_CALLBACK_FRAMES {
+            let observed = telemetry.maximum_frames.ok_or_else(|| "Wait for a raw device callback before choosing a smaller provisional plug-in budget".to_owned())?;
+            if observed > budget {
+                return Err(format!(
+                    "Observed callback {observed} exceeds the {budget}-frame operating budget"
+                ));
+            }
+        }
+        self.status
+            .plugin_processing
+            .requested_budget
+            .store(budget, Ordering::Release);
+        self.status
+            .plugin_processing
+            .requested_revision
+            .store(revision, Ordering::Release);
+        Ok(())
+    }
+
+    pub fn retry_plugin_processing(&mut self) -> Result<(), String> {
+        self.request_plugin_timing_profile(self.plugin_timing_profile())
+    }
+
+    fn prepare_plugin_timing(&self) -> PreparedPluginTimingPlan {
+        PreparedPluginTimingPlan::new(
+            self.status
+                .plugin_processing
+                .requested_revision
+                .load(Ordering::Acquire),
+            self.status.sample_rate.load(Ordering::Relaxed),
+            self.plugin_timing_profile(),
+        )
+        .expect("validated control-side timing request")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_engine() -> Self {
+        let (controller, _) = create_timeline_runtime();
+        tests::timeline_test_engine(controller)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_plugin_processing_test_snapshot(&self, snapshot: PluginProcessingSnapshot) {
+        self.status.plugin_processing.publish(snapshot);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_test_callback(&self, frames: u32) {
+        self.callback_telemetry
+            .observe_callback(frames as usize * 2, 2);
+    }
+
     /// Measured post-fader, pre-output-protection stereo bus peaks. No transport
     /// playing check: paused live MIDI monitoring can genuinely be audible.
     pub fn poll_meters(
@@ -1572,8 +1670,11 @@ impl AudioEngine {
         frame: u64,
         options: TimelineChaseOptions,
     ) -> Result<Box<PreparedTimelineChase>, TimelinePrepareChaseError> {
-        self.timeline_runtime_ref()
-            .prepare_chase(timeline, generation, epoch, frame, options)
+        let mut chase = self
+            .timeline_runtime_ref()
+            .prepare_chase(timeline, generation, epoch, frame, options)?;
+        chase.plugin_timing = self.prepare_plugin_timing();
+        Ok(chase)
     }
 
     /// Queues already prepared discontinuity state. It becomes active only after
@@ -1594,8 +1695,11 @@ impl AudioEngine {
         frame: u64,
         options: TimelineChaseOptions,
     ) -> Result<Box<PreparedLoopTimelineChase>, TimelinePrepareChaseError> {
-        self.timeline_runtime_ref()
-            .prepare_loop_chase(timeline, generation, frame, options)
+        let mut chase = self
+            .timeline_runtime_ref()
+            .prepare_loop_chase(timeline, generation, frame, options)?;
+        chase.plugin_timing = self.prepare_plugin_timing();
+        Ok(chase)
     }
 
     /// Queues a reusable loop-start chase template. Wait for the matching
@@ -2325,7 +2429,22 @@ impl AudioEngine {
         let requested_buffer_size = self.device_profile.buffer_size;
         let effective_buffer_size = self.effective_stream_config.buffer_size;
         let actual_buffer_size = telemetry.last_frames;
+        let plugin = self
+            .status
+            .plugin_processing
+            .snapshot(self.status.sample_rate.load(Ordering::Relaxed));
         AudioSnapshot {
+            plugin_callback_budget_frames: plugin.plan.callback_budget_frames,
+            plugin_lookahead_quanta: plugin.plan.lookahead_quanta,
+            plugin_bridge_latency_frames: plugin.plan.bridge_latency_frames,
+            plugin_timing_revision: plugin.plan.revision,
+            plugin_processing_health: plugin.health,
+            plugin_processing_fault: plugin.fault,
+            plugin_fault_count: plugin.fault_count,
+            plugin_recovered_count: plugin.recovered_count,
+            plugin_deadline_misses: plugin.deadline_misses,
+            plugin_input_losses: plugin.input_losses,
+            plugin_output_losses: plugin.output_losses,
             device: self.device_name.clone(),
             sample_rate: self.status.sample_rate.load(Ordering::Relaxed),
             requested_buffer_size,
@@ -2658,6 +2777,19 @@ impl RealtimeTransport {
             return;
         }
 
+        if dsp.plugin_timing_activation.is_none_or(|plan| {
+            plan.revision
+                != status
+                    .plugin_processing
+                    .requested_revision
+                    .load(Ordering::Acquire)
+        }) {
+            dsp.reject_timeline_transport_activation(
+                ticket,
+                TimelineTransportActivationRejectReason::GraphPdcPlan,
+            );
+            return;
+        }
         let committed = dsp.commit_timeline_transport_activation(status, ticket, actual_epoch);
         self.beat_q32 = spec.beat_q32;
         self.timeline_frame = spec.frame;
@@ -2849,6 +2981,16 @@ fn render_transport_chunk(
             continue;
         }
         let capture_device_frame = transport.device_frame;
+        if dsp.plugin_fault.is_some() {
+            dsp.master_block[..segment_frames].fill([0.0; 2]);
+            consume(rendered, &dsp.master_block[..segment_frames]);
+            transport.device_frame = transport.device_frame.saturating_add(segment_frames as u64);
+            transport.request.playing = false;
+            transport.request.loop_enabled = false;
+            transport.publish(status);
+            rendered += segment_frames;
+            continue;
+        }
         let timeline_ready = dsp.prepare_timeline_render(
             transport.epoch,
             transport.timeline_frame,
@@ -2909,6 +3051,12 @@ fn render_transport_chunk(
                 let safety_generator_mask = dsp.service_paused_midi_safety(segment_frames, 0);
                 dsp.service_paused_parameter_edits(segment_frames, safety_generator_mask, 0);
             }
+        }
+        dsp.observe_plugin_processing_health();
+        if dsp.plugin_fault.is_some() {
+            dsp.master_block[..segment_frames].fill([0.0; 2]);
+            transport.request.playing = false;
+            transport.request.loop_enabled = false;
         }
         dsp.publish_plugin_epoch_status(status);
         dsp.capture_rendered_master(capture_device_frame, segment_frames);
@@ -3009,6 +3157,26 @@ where
             );
 
             let device_callback_frames = output.len() / channels;
+            dsp.raw_callback_frames = device_callback_frames;
+            dsp.requested_plugin_timing_revision = status
+                .plugin_processing
+                .requested_revision
+                .load(Ordering::Acquire);
+            dsp.apply_pending_timeline_commands();
+            dsp.refresh_pdc_plan(&status, device_callback_frames.min(MAX_MIXER_BLOCK_FRAMES));
+            transport.apply_pending_timeline_activation(&status, &mut dsp);
+            transport.apply_latest_request(&transport_mailbox, &status, &mut dsp);
+            if !dsp.admit_plugin_callback(device_callback_frames) {
+                output.fill(T::from_sample(0.0));
+                transport.request.playing = false;
+                transport.request.loop_enabled = false;
+                transport.device_frame = transport
+                    .device_frame
+                    .saturating_add(device_callback_frames as u64);
+                transport.publish(&status);
+                dsp.publish_plugin_epoch_status(&status);
+                return;
+            }
             for output_block in output.chunks_mut(channels * MAX_MIXER_BLOCK_FRAMES) {
                 let frames = output_block.len() / channels;
                 dsp.apply_pending_timeline_commands();
@@ -3017,7 +3185,6 @@ where
                 // a third read later to fail closed on worker drift.
                 dsp.refresh_pdc_plan(&status, frames);
                 transport.apply_pending_timeline_activation(&status, &mut dsp);
-                dsp.reject_oversized_midi_callback(device_callback_frames);
                 render_transport_chunk(
                     &mut dsp,
                     &status,
@@ -4697,6 +4864,9 @@ pub struct PreparedFixedEndpoint {
     project_session: u64,
     manifest: PluginEndpointManifest,
     coherent_latency: Option<PluginLatencySnapshot>,
+    health_observed: crate::plugins::plugin_runtime::BridgeStats,
+    priming_output_count: u64,
+    health_observed_fixed: FixedQuantumStats,
     partial_quantum_usage: EndpointQuantumClassUsage,
     admitted_live_edit_markers: u8,
     #[cfg(test)]
@@ -4721,6 +4891,9 @@ impl PreparedFixedEndpoint {
             project_session: 0,
             manifest,
             coherent_latency,
+            health_observed: crate::plugins::plugin_runtime::BridgeStats::default(),
+            priming_output_count: 0,
+            health_observed_fixed: FixedQuantumStats::default(),
             partial_quantum_usage: EndpointQuantumClassUsage::default(),
             admitted_live_edit_markers: 0,
             #[cfg(test)]
@@ -4739,6 +4912,7 @@ impl PreparedFixedEndpoint {
     fn set_epoch(&mut self, epoch: u64) -> bool {
         let changed = self.adapter.set_epoch(epoch);
         if changed {
+            self.priming_output_count = self.adapter.stats().plugin_output_quanta;
             self.partial_quantum_usage = EndpointQuantumClassUsage::default();
             self.admitted_live_edit_markers = 0;
         }
@@ -5182,6 +5356,7 @@ struct MixerGraphGeneratorLatencyIdentity {
 /// PDC plan still publishes the exact latency generation used to build it.
 #[derive(PartialEq, Eq)]
 struct MixerGraphEndpointIdentityTable {
+    timing_plan: Option<PreparedPluginTimingPlan>,
     inserts: [Option<MixerGraphInsertLatencyIdentity>; TRACK_COUNT],
     generators: [Option<MixerGraphGeneratorLatencyIdentity>; MAX_GENERATOR_ENDPOINTS],
     insert_count: usize,
@@ -5191,6 +5366,7 @@ struct MixerGraphEndpointIdentityTable {
 impl MixerGraphEndpointIdentityTable {
     fn new() -> Self {
         Self {
+            timing_plan: None,
             inserts: [None; TRACK_COUNT],
             generators: [None; MAX_GENERATOR_ENDPOINTS],
             insert_count: 0,
@@ -5199,6 +5375,7 @@ impl MixerGraphEndpointIdentityTable {
     }
 
     fn clear(&mut self) {
+        self.timing_plan = None;
         self.inserts.fill(None);
         self.generators.fill(None);
         self.insert_count = 0;
@@ -5266,15 +5443,11 @@ impl MixerGraphEndpointIdentityTable {
         maximum_delay_samples: u32,
         midi_routes: &[crate::plugin_midi_routing::CompiledMidiPortRoute],
     ) -> Option<GraphPdcPlan> {
-        let bridge_latency = (DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES as u64).checked_mul(2)?;
+        let bridge_latency = u64::from(self.timing_plan?.bridge_latency_frames);
         let mut stage_latencies = [0_u64; MIXER_GRAPH_MAX_NODES];
         for identity in self.inserts[..self.insert_count].iter().flatten() {
-            stage_latencies[usize::from(identity.runtime_slot)] = (if midi_routes.is_empty() {
-                bridge_latency
-            } else {
-                u64::from(crate::plugin_midi_routing::MIDI_ROUTE_BRIDGE_FRAMES)
-            })
-            .checked_add(u64::from(identity.snapshot.total_plugin_latency_samples()))?;
+            stage_latencies[usize::from(identity.runtime_slot)] = bridge_latency
+                .checked_add(u64::from(identity.snapshot.total_plugin_latency_samples()))?;
         }
         let empty_generator = GraphPdcGenerator {
             endpoint_id: 0,
@@ -5297,25 +5470,18 @@ impl MixerGraphEndpointIdentityTable {
                 endpoint_id: identity.endpoint_id,
                 channel_id: identity.channel_id,
                 destination_id,
-                latency_samples: (if midi_routes.iter().any(|route| {
-                    route.source_instance == identity.plugin_instance_id
-                        || route.destination_instance == identity.plugin_instance_id
-                }) {
-                    u64::from(crate::plugin_midi_routing::MIDI_ROUTE_BRIDGE_FRAMES)
-                } else {
-                    bridge_latency
-                })
-                .checked_add(
-                    if midi_routes
-                        .iter()
-                        .any(|route| route.destination_instance == identity.plugin_instance_id)
-                    {
-                        u64::from(crate::plugin_midi_routing::MIDI_ROUTE_BRIDGE_FRAMES)
-                    } else {
-                        0
-                    },
-                )?
-                .checked_add(u64::from(identity.snapshot.total_plugin_latency_samples()))?,
+                latency_samples: bridge_latency
+                    .checked_add(
+                        if midi_routes
+                            .iter()
+                            .any(|route| route.destination_instance == identity.plugin_instance_id)
+                        {
+                            bridge_latency
+                        } else {
+                            0
+                        },
+                    )?
+                    .checked_add(u64::from(identity.snapshot.total_plugin_latency_samples()))?,
             };
         }
         GraphPdcPlan::build_for_mixer_graph(
@@ -5407,6 +5573,17 @@ impl MixerGraphEndpointIdentityTable {
 }
 
 struct DspState {
+    plugin_timing: PreparedPluginTimingPlan,
+    plugin_timing_activation: Option<PreparedPluginTimingPlan>,
+    requested_plugin_timing_revision: u64,
+    raw_callback_frames: usize,
+    plugin_fault: Option<PluginProcessingFault>,
+    plugin_fault_count: u64,
+    plugin_recovered_count: u64,
+    plugin_recovery_pending: bool,
+    plugin_deadline_misses: u64,
+    plugin_input_losses: u64,
+    plugin_output_losses: u64,
     voices: [Voice; MAX_VOICES],
     next_voice: usize,
     audio_assets: [AudioAssetSlot; MAX_REGISTERED_AUDIO_ASSETS],
@@ -5604,6 +5781,13 @@ impl DspState {
         pdc_maximum_delay_samples: u32,
         timeline_runtime: Option<RealtimeTimelineRuntime>,
     ) -> Result<Self> {
+        if !sample_rate.is_finite() || sample_rate.fract() != 0.0 {
+            return Err(anyhow!(
+                "Plug-in timing requires a finite whole-number sample rate"
+            ));
+        }
+        let plugin_timing = PreparedPluginTimingPlan::conservative(sample_rate as u32)
+            .map_err(|error| anyhow!(error))?;
         let mut pdc_raw_track_delays = Vec::with_capacity(TRACK_COUNT);
         for _ in 0..TRACK_COUNT {
             pdc_raw_track_delays.push(StereoDelayLine::new(pdc_maximum_delay_samples)?);
@@ -5617,6 +5801,17 @@ impl DspState {
         }
 
         Ok(Self {
+            plugin_timing,
+            plugin_timing_activation: None,
+            requested_plugin_timing_revision: 1,
+            raw_callback_frames: 0,
+            plugin_fault: None,
+            plugin_fault_count: 0,
+            plugin_recovered_count: 0,
+            plugin_recovery_pending: false,
+            plugin_deadline_misses: 0,
+            plugin_input_losses: 0,
+            plugin_output_losses: 0,
             voices: [Voice::default(); MAX_VOICES],
             next_voice: 0,
             audio_assets: std::array::from_fn(|_| AudioAssetSlot::default()),
@@ -7299,17 +7494,18 @@ impl DspState {
 
     fn build_graph_pdc_plan(
         graph: &CompiledMixerGraph,
+        timing_plan: PreparedPluginTimingPlan,
         endpoint_identities: &mut MixerGraphEndpointIdentityTable,
         insert_endpoints: &mut [Option<InsertEndpointSlot>; TRACK_COUNT],
         generator_endpoints: &mut [Option<GeneratorEndpointSlot>; MAX_GENERATOR_ENDPOINTS],
         maximum_delay_samples: u32,
         midi_routes: &[crate::plugin_midi_routing::CompiledMidiPortRoute],
     ) -> Option<GraphPdcPlan> {
-        endpoint_identities
-            .capture(graph, insert_endpoints, generator_endpoints)
-            .then(|| {
-                endpoint_identities.build_pdc_plan(graph, maximum_delay_samples, midi_routes)
-            })?
+        if !endpoint_identities.capture(graph, insert_endpoints, generator_endpoints) {
+            return None;
+        }
+        endpoint_identities.timing_plan = Some(timing_plan);
+        endpoint_identities.build_pdc_plan(graph, maximum_delay_samples, midi_routes)
     }
 
     /// Writes only preallocated scratch members. Every active runtime, voice,
@@ -7319,6 +7515,29 @@ impl DspState {
         ticket: TimelineTransportActivationTicket,
         actual_epoch: u64,
     ) -> Result<(), TimelineTransportActivationRejectReason> {
+        let candidate_timing = self
+            .timeline_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.transport_activation_plugin_timing(ticket))
+            .ok_or(TimelineTransportActivationRejectReason::GraphPdcPlan)?;
+        if PreparedPluginTimingPlan::new(
+            candidate_timing.revision,
+            candidate_timing.sample_rate,
+            candidate_timing.callback_budget_frames,
+        )
+        .ok()
+            != Some(candidate_timing)
+            || candidate_timing.revision != self.requested_plugin_timing_revision
+            || candidate_timing.sample_rate != self.sample_rate as u32
+            || self
+                .plugin_fault
+                .is_some_and(|fault| candidate_timing.revision <= fault.timing_revision)
+            || (self.raw_callback_frames != 0
+                && !candidate_timing.admits_callback(self.raw_callback_frames))
+        {
+            return Err(TimelineTransportActivationRejectReason::GraphPdcPlan);
+        }
+        self.plugin_timing_activation = Some(candidate_timing);
         let DspState {
             timeline_runtime,
             timeline_executor,
@@ -7403,6 +7622,7 @@ impl DspState {
         });
         let next_graph_pdc_plan = Self::build_graph_pdc_plan(
             timeline.mixer_graph(),
+            candidate_timing,
             mixer_graph_activation_endpoint_identities,
             insert_endpoints,
             generator_endpoints,
@@ -7576,6 +7796,7 @@ impl DspState {
         ticket: TimelineTransportActivationTicket,
         reason: TimelineTransportActivationRejectReason,
     ) {
+        self.plugin_timing_activation = None;
         self.timeline_executor.abort_staged_reset();
         self.timeline_automation.abort_staged_reset();
         self.timeline_activation_plan.clear();
@@ -7600,6 +7821,32 @@ impl DspState {
     ) -> CommittedTimelineTransportActivation {
         let spec = ticket.spec();
         self.apply_transport_epoch(status, actual_epoch, spec.beat_q32);
+        self.plugin_timing = self
+            .plugin_timing_activation
+            .take()
+            .expect("preflighted timing plan");
+        if self.plugin_fault.take().is_some() {
+            self.plugin_recovery_pending = true;
+        }
+        for endpoint in self
+            .insert_endpoints
+            .iter_mut()
+            .flatten()
+            .map(|s| &mut s.endpoint)
+            .chain(
+                self.generator_endpoints
+                    .iter_mut()
+                    .flatten()
+                    .map(|s| &mut s.endpoint),
+            )
+        {
+            let configured = endpoint.adapter.configure_timing_plan(self.plugin_timing);
+            debug_assert!(
+                configured,
+                "fresh epoch admits the prepared common timing plan"
+            );
+        }
+
         self.timeline_executor.commit_staged_reset();
         self.timeline_automation.commit_staged_reset();
         std::mem::swap(&mut self.timeline_plan, &mut self.timeline_activation_plan);
@@ -7664,33 +7911,11 @@ impl DspState {
             .as_ref()
             .and_then(RealtimeTimelineRuntime::active_timeline)
         {
-            for slot in self.insert_endpoints.iter_mut().flatten() {
-                let configured = slot
-                    .endpoint
-                    .adapter
-                    .set_midi_bridge_lookahead(!timeline.midi_port_routes().is_empty());
-                debug_assert!(
-                    configured,
-                    "committed epoch resets inserts before lookahead selection"
-                );
-            }
             for slot in self.generator_endpoints.iter_mut().flatten() {
                 slot.endpoint.midi_port_input = timeline
                     .midi_port_routes()
                     .iter()
                     .any(|route| route.destination_instance == slot.plugin_instance_id);
-                let participates = timeline.midi_port_routes().iter().any(|route| {
-                    route.source_instance == slot.plugin_instance_id
-                        || route.destination_instance == slot.plugin_instance_id
-                });
-                let configured = slot
-                    .endpoint
-                    .adapter
-                    .set_midi_bridge_lookahead(participates);
-                debug_assert!(
-                    configured,
-                    "committed epoch resets every Generator before lookahead selection"
-                );
             }
         }
         let graph_pdc_plan = self
@@ -7768,6 +7993,7 @@ impl DspState {
         self.timeline_plan_has_chase = true;
         self.timeline_plan_render_active = false;
         self.timeline_transport_beat_q32 = spec.beat_q32;
+        self.publish_plugin_epoch_status(status);
         committed
     }
 
@@ -8172,6 +8398,9 @@ impl DspState {
     }
 
     fn publish_plugin_epoch_status(&self, status: &AudioStatus) {
+        status
+            .plugin_processing
+            .publish(self.plugin_processing_snapshot());
         status.plugin_midi_faulted_destinations.store(
             u64::from(self.midi_route_faulted.count_ones()),
             Ordering::Relaxed,
@@ -8242,6 +8471,11 @@ impl DspState {
     fn refresh_pdc_plan(&mut self, status: &AudioStatus, _frames: usize) {
         if self.mixer_graph_was_activated {
             if !self.refresh_graph_pdc_plan(status) {
+                self.latch_plugin_processing_fault(
+                    0,
+                    0,
+                    PluginProcessingFaultReason::EndpointChanged,
+                );
                 self.fail_mixer_graph_render(0);
             }
             return;
@@ -8249,11 +8483,16 @@ impl DspState {
         let mut insert_latencies = [0_u32; TRACK_COUNT];
         let mut master_latency_samples = 0;
         let mut latency_identity_changed = false;
+        let mut latency_drifted = false;
         for (insert, slot) in self.insert_endpoints.iter_mut().enumerate() {
             let Some(slot) = slot else {
                 continue;
             };
             latency_identity_changed |= slot.endpoint.refresh_latency_snapshot();
+            if let Some(snapshot) = slot.endpoint.coherent_latency_snapshot() {
+                let expected = slot.endpoint.adapter.expected_latency_revision();
+                latency_drifted |= expected != 0 && expected != snapshot.revision;
+            }
             let latency = fixed_quantum_endpoint_latency(&slot.endpoint);
             if insert == 0 {
                 master_latency_samples = latency;
@@ -8276,6 +8515,10 @@ impl DspState {
                 continue;
             };
             latency_identity_changed |= slot.endpoint.refresh_latency_snapshot();
+            if let Some(snapshot) = slot.endpoint.coherent_latency_snapshot() {
+                let expected = slot.endpoint.adapter.expected_latency_revision();
+                latency_drifted |= expected != 0 && expected != snapshot.revision;
+            }
             generator_paths[generator_count] = GeneratorPathLatency {
                 endpoint_id: slot.endpoint_id,
                 channel_id: slot.channel_id,
@@ -8286,6 +8529,10 @@ impl DspState {
             generator_count += 1;
         }
 
+        if latency_drifted {
+            self.latch_plugin_processing_fault(0, 0, PluginProcessingFaultReason::LatencyDrift);
+            return;
+        }
         let Ok(next_plan) = PdcPlan::build(
             insert_latencies,
             master_latency_samples,
@@ -8359,6 +8606,7 @@ impl DspState {
         let changed = {
             let DspState {
                 timeline_runtime,
+                plugin_timing,
                 insert_endpoints,
                 generator_endpoints,
                 pdc_raw_track_delays,
@@ -8379,6 +8627,7 @@ impl DspState {
             };
             let Some(next_plan) = Self::build_graph_pdc_plan(
                 graph,
+                *plugin_timing,
                 mixer_graph_activation_endpoint_identities,
                 insert_endpoints,
                 generator_endpoints,
@@ -8413,7 +8662,7 @@ impl DspState {
             // Retiming an already-running Q128 parameter history requires a new
             // transport chase. Preserve the old graph transaction and fail
             // closed instead of mixing control and audio time domains.
-            if timeline_plugin_automation_bindings.iter().next().is_some() {
+            if identity_changed || timeline_plugin_automation_bindings.iter().next().is_some() {
                 mixer_graph_activation_endpoint_identities.clear();
                 return false;
             }
@@ -8729,7 +8978,11 @@ impl DspState {
         }
 
         let epoch_sync = synchronize_endpoint_epoch(&mut endpoint, self.transport_epoch);
-        if !self.record_endpoint_epoch_sync(epoch_sync, self.transport_epoch) {
+        if let Some(snapshot) = endpoint.coherent_latency_snapshot() {
+            endpoint.set_expected_latency_revision(snapshot.revision);
+        }
+        let timing_ready = endpoint.adapter.configure_timing_plan(self.plugin_timing);
+        if !self.record_endpoint_epoch_sync(epoch_sync, self.transport_epoch) || !timing_ready {
             self.retire_insert_endpoint(endpoint);
             self.emit_insert_endpoint_event(InsertEndpointEvent::Installed {
                 insert,
@@ -8933,7 +9186,11 @@ impl DspState {
         };
 
         let epoch_sync = synchronize_endpoint_epoch(&mut endpoint, self.transport_epoch);
-        if !self.record_endpoint_epoch_sync(epoch_sync, self.transport_epoch) {
+        if let Some(snapshot) = endpoint.coherent_latency_snapshot() {
+            endpoint.set_expected_latency_revision(snapshot.revision);
+        }
+        let timing_ready = endpoint.adapter.configure_timing_plan(self.plugin_timing);
+        if !self.record_endpoint_epoch_sync(epoch_sync, self.transport_epoch) || !timing_ready {
             self.retire_endpoint_resource(RetiredEndpointResource {
                 _endpoint: endpoint,
                 _pdc_delay: Some(pdc_delay),
@@ -10434,17 +10691,183 @@ impl DspState {
         }
     }
 
-    fn reject_oversized_midi_callback(&mut self, frames: usize) {
-        if frames <= crate::fixed_quantum::MAX_DEVICE_CALLBACK_FRAMES {
+    /// Runs once for the complete backend callback, before chunking or any plug-in submission.
+    fn admit_plugin_callback(&mut self, frames: usize) -> bool {
+        self.raw_callback_frames = frames;
+        if !self.plugin_timing.admits_callback(frames) {
+            self.latch_plugin_processing_fault(
+                0,
+                0,
+                if frames > crate::plugin_timing::MAX_PLUGIN_CALLBACK_FRAMES as usize {
+                    PluginProcessingFaultReason::UnsupportedCallback
+                } else {
+                    PluginProcessingFaultReason::CallbackBudgetExceeded
+                },
+            );
+        }
+        self.observe_plugin_processing_health();
+        self.plugin_fault.is_none()
+    }
+
+    fn latch_plugin_processing_fault(
+        &mut self,
+        endpoint_id: u64,
+        expected_sequence: u64,
+        reason: PluginProcessingFaultReason,
+    ) {
+        if self.plugin_fault.is_some() {
             return;
         }
-        for (index, slot) in self.generator_endpoints.iter().enumerate() {
-            if let Some(slot) = slot
-                && slot.endpoint.midi_port_input
+        self.plugin_fault = Some(PluginProcessingFault {
+            endpoint_id,
+            epoch: self.transport_epoch,
+            expected_sequence,
+            raw_callback_frames: self.raw_callback_frames.min(u32::MAX as usize) as u32,
+            callback_budget_frames: self.plugin_timing.callback_budget_frames,
+            lookahead_quanta: self.plugin_timing.lookahead_quanta,
+            timing_revision: self.plugin_timing.revision,
+            reason,
+        });
+        self.plugin_fault_count = self.plugin_fault_count.saturating_add(1);
+        // Independent atomic cleanup cannot be displaced by a full command/event queue and is
+        // serviced off-thread even if no more audio is submitted.
+        for endpoint in self
+            .insert_endpoints
+            .iter()
+            .flatten()
+            .map(|s| &s.endpoint)
+            .chain(
+                self.generator_endpoints
+                    .iter()
+                    .flatten()
+                    .map(|s| &s.endpoint),
+            )
+        {
+            endpoint.adapter.block_midi_until_epoch();
+        }
+        if let Some(runtime) = self.timeline_runtime.as_mut() {
+            runtime.require_resync();
+        }
+        self.fail_timeline_block();
+    }
+
+    fn observe_plugin_processing_health(&mut self) {
+        let mut fault = None;
+        let mut all_primed = true;
+        for (id, endpoint) in self
+            .insert_endpoints
+            .iter_mut()
+            .flatten()
+            .map(|s| (s.endpoint_id, &mut s.endpoint))
+            .chain(
+                self.generator_endpoints
+                    .iter_mut()
+                    .flatten()
+                    .map(|s| (s.endpoint_id, &mut s.endpoint)),
+            )
+        {
+            let now = endpoint.adapter.bridge_stats();
+            let old = endpoint.health_observed;
+            self.plugin_deadline_misses = self
+                .plugin_deadline_misses
+                .saturating_add(now.deadline_misses.saturating_sub(old.deadline_misses));
+            self.plugin_input_losses = self
+                .plugin_input_losses
+                .saturating_add(now.input_gaps.saturating_sub(old.input_gaps));
+            let output_loss = now
+                .output_overflows
+                .saturating_sub(old.output_overflows)
+                .saturating_add(
+                    now.future_output_overflows
+                        .saturating_sub(old.future_output_overflows),
+                );
+            self.plugin_output_losses = self.plugin_output_losses.saturating_add(output_loss);
+            endpoint.health_observed = now;
+            let fixed = endpoint.adapter.stats();
+            let previous_fixed = endpoint.health_observed_fixed;
+            endpoint.health_observed_fixed = fixed;
+            if fault.is_none()
+                && (fixed.frame_event_overflows > previous_fixed.frame_event_overflows
+                    || fixed.invalid_frame_events > previous_fixed.invalid_frame_events
+                    || fixed.endpoint_event_rejections > previous_fixed.endpoint_event_rejections)
             {
-                self.midi_route_faulted |= 1_u64 << index;
-                slot.endpoint.adapter.block_midi_until_epoch();
+                fault = Some((
+                    id,
+                    now.callback_sequences
+                        .saturating_sub(u64::from(self.plugin_timing.lookahead_quanta)),
+                    PluginProcessingFaultReason::EventLoss,
+                ));
             }
+            all_primed &=
+                endpoint.adapter.stats().plugin_output_quanta > endpoint.priming_output_count;
+            if fault.is_none() {
+                fault = endpoint
+                    .adapter
+                    .processing_fault()
+                    .map(|(reason, sequence)| (id, sequence, reason));
+                if fault.is_none()
+                    && output_loss != 0
+                    && now.output_loss_epoch == self.transport_epoch
+                {
+                    fault = Some((
+                        id,
+                        endpoint.adapter.expected_sequence(),
+                        PluginProcessingFaultReason::OutputLoss,
+                    ));
+                }
+                if fault.is_none() && now.faults > old.faults {
+                    fault = Some((
+                        id,
+                        endpoint.adapter.expected_sequence(),
+                        PluginProcessingFaultReason::WorkerFault,
+                    ));
+                }
+            }
+        }
+        if fault.is_none() && self.midi_route_faulted != 0 {
+            fault = Some((0, 0, PluginProcessingFaultReason::EventLoss));
+        }
+        if let Some((id, sequence, reason)) = fault {
+            self.latch_plugin_processing_fault(id, sequence, reason);
+        }
+        if self.plugin_fault.is_none() && self.plugin_recovery_pending && all_primed {
+            self.plugin_recovery_pending = false;
+            self.plugin_recovered_count = self.plugin_recovered_count.saturating_add(1);
+        }
+    }
+
+    fn plugin_processing_snapshot(&self) -> PluginProcessingSnapshot {
+        let primed = self
+            .insert_endpoints
+            .iter()
+            .flatten()
+            .map(|s| &s.endpoint)
+            .chain(
+                self.generator_endpoints
+                    .iter()
+                    .flatten()
+                    .map(|s| &s.endpoint),
+            )
+            .all(|endpoint| {
+                endpoint.adapter.stats().plugin_output_quanta > endpoint.priming_output_count
+            });
+        PluginProcessingSnapshot {
+            plan: self.plugin_timing,
+            health: if self.plugin_fault.is_some() {
+                PluginProcessingHealth::Faulted
+            } else if !primed || self.plugin_recovery_pending {
+                PluginProcessingHealth::Priming
+            } else if self.plugin_recovered_count != 0 {
+                PluginProcessingHealth::Recovered
+            } else {
+                PluginProcessingHealth::Running
+            },
+            fault: self.plugin_fault,
+            fault_count: self.plugin_fault_count,
+            recovered_count: self.plugin_recovered_count,
+            deadline_misses: self.plugin_deadline_misses,
+            input_losses: self.plugin_input_losses,
+            output_losses: self.plugin_output_losses,
         }
     }
 
@@ -10465,7 +10888,7 @@ impl DspState {
             );
         for slot in self.generator_endpoints.iter_mut().flatten() {
             let delay = if slot.endpoint.midi_port_input {
-                i64::from(crate::plugin_midi_routing::MIDI_ROUTE_BRIDGE_FRAMES)
+                i64::from(self.plugin_timing.bridge_latency_frames)
             } else {
                 0
             };
@@ -10613,7 +11036,7 @@ impl DspState {
                 slot.endpoint.adapter.block_midi_until_epoch();
             }
             let delay = if routed_input {
-                u64::from(crate::plugin_midi_routing::MIDI_ROUTE_BRIDGE_FRAMES)
+                u64::from(self.plugin_timing.bridge_latency_frames)
             } else {
                 0
             };
@@ -13300,12 +13723,13 @@ mod tests {
         );
         let mut endpoint = fixed_adapter(audio);
         endpoint.project_session = 7;
+        dsp.install_generator_endpoint(9, 70, 700, 1, endpoint, test_pdc_delay());
+        let endpoint = &mut dsp.generator_endpoints[0].as_mut().unwrap().endpoint;
         let mut left = [0.0; 64];
         let mut right = [0.0; 64];
         let _ = endpoint.process_generator(1, 64, &mut left, &mut right);
         endpoint.partial_quantum_usage.system = 1;
         endpoint.partial_quantum_usage.total = 1;
-        dsp.install_generator_endpoint(9, 70, 700, 1, endpoint, test_pdc_delay());
         let stamp = MidiGeneratorRouteStamp {
             project_session: 7,
             channel_id: 9,
@@ -13651,7 +14075,7 @@ mod tests {
     }
 
     fn test_pdc_delay() -> StereoDelayLine {
-        StereoDelayLine::new(512).unwrap()
+        StereoDelayLine::new(8192).unwrap()
     }
 
     fn fixed_adapter(endpoint: AudioThreadEndpoint) -> PreparedFixedEndpoint {
@@ -13860,7 +14284,7 @@ mod tests {
         timeline: Arc<CompiledTimeline>,
     ) -> u64 {
         let bank = Box::new(
-            PreparedMixerGraphDelayBank::new(timeline.mixer_graph(), 512)
+            PreparedMixerGraphDelayBank::new(timeline.mixer_graph(), 8192)
                 .expect("test mixer graph delay bank"),
         );
         controller
@@ -14599,7 +15023,15 @@ mod tests {
         let mut measured_monitor_peak = 0.0_f32;
         assert!(!status.playing.load(Ordering::Acquire));
 
-        for _ in 0..24 {
+        let preroll_callbacks = dsp
+            .graph_pdc_plan
+            .as_ref()
+            .as_ref()
+            .unwrap()
+            .master_output_latency_samples()
+            .div_ceil(DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES as u64)
+            + 4;
+        for _ in 0..preroll_callbacks {
             let target_completed = target_control.stats().completed;
             let first_completed = first_downstream_control.stats().completed;
             let second_completed = second_downstream_control.stats().completed;
@@ -14765,7 +15197,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_graph_pdc_commit_and_candidate_second_read_rejection_are_atomic() {
+    fn dynamic_graph_latency_requires_epoch_and_candidate_second_read_rejection_is_atomic() {
         let timeline = compile_timeline_test_project(&Project::blank());
         let latency = Arc::new(AtomicU32::new(8));
         let insert = spawn_identified_mock_latency_transform(880, Arc::clone(&latency));
@@ -14877,49 +15309,28 @@ mod tests {
             })
         });
         let published = control.plugin_latency_snapshot().unwrap();
-        assert!(dsp.refresh_graph_pdc_plan(&status));
-        let dynamic_identity = dsp.mixer_graph_endpoint_identities.inserts[0]
-            .expect("dynamically refreshed insert identity");
-        let dynamic_plan = dsp.graph_pdc_plan.as_ref().as_ref().unwrap();
-        let dynamic_target = dsp
-            .timeline_runtime
-            .as_ref()
-            .unwrap()
-            .active_mixer_delay_bank()
-            .unwrap()
-            .target_delay_samples(route_slot)
-            .unwrap();
-        assert!(dsp.pdc_plan_revision > initial_plan_revision);
-        assert_eq!(dynamic_identity.snapshot.revision(), published.revision);
+        assert!(!dsp.refresh_graph_pdc_plan(&status));
+        assert_eq!(dsp.pdc_plan_revision, initial_plan_revision);
+        assert_eq!(
+            dsp.mixer_graph_endpoint_identities.inserts[0],
+            Some(initial_identity)
+        );
         assert_eq!(
             dsp.insert_endpoints[1]
                 .as_ref()
                 .unwrap()
                 .endpoint
                 .expected_latency_revision(),
-            published.revision
+            initial_expected_revision
         );
-        assert_ne!(dynamic_target, initial_target);
-        assert_eq!(
-            dynamic_target,
-            dynamic_plan
-                .main_input_for_runtime_slot(route_slot)
-                .unwrap()
-                .delay
-                .applied_samples()
-        );
-        assert!(dsp.graph_pdc_activation_plan.is_none());
-        assert_eq!(
-            dsp.mixer_graph_activation_endpoint_identities.insert_count,
-            0
-        );
-        assert_eq!(status.pdc_fields().plan_revision, dsp.pdc_plan_revision);
-
+        assert_ne!(initial_expected_revision, published.revision);
+        let dynamic_identity = initial_identity;
+        let dynamic_plan = dsp.graph_pdc_plan.as_ref().as_ref().unwrap();
         let active_graph_identity = dsp.mixer_graph_identity;
         let active_graph_fingerprint = dsp.mixer_graph_plan.fingerprint();
         let active_pdc = dynamic_plan.clone();
         let active_endpoint_identity = dynamic_identity;
-        let active_expected_revision = published.revision;
+        let active_expected_revision = initial_expected_revision;
         let active_runtime_frame = dsp.timeline_runtime.as_ref().unwrap().next_frame();
         let (active_bank_address, active_bank_current, active_bank_targets) = {
             let bank = dsp
@@ -15108,7 +15519,7 @@ mod tests {
         routes
     }
 
-    fn timeline_test_engine(controller: TimelineRuntimeController) -> AudioEngine {
+    pub(super) fn timeline_test_engine(controller: TimelineRuntimeController) -> AudioEngine {
         let (producer, _commands) = RingBuffer::new(4);
         let (_retired_asset_tx, retired_assets) = RingBuffer::new(4);
         let (_asset_event_tx, asset_events) = RingBuffer::new(4);
@@ -15156,7 +15567,7 @@ mod tests {
     }
 
     fn timeline_test_dsp(realtime: RealtimeTimelineRuntime) -> DspState {
-        DspState::try_new_inner(48_000.0, None, None, None, None, 512, Some(realtime)).unwrap()
+        DspState::try_new_inner(48_000.0, None, None, None, None, 8192, Some(realtime)).unwrap()
     }
 
     fn run_timeline_callback_until_shutdown(
@@ -20839,6 +21250,10 @@ mod tests {
         wait_until(|| control.stats().completed >= 2);
         dsp.render_block(&status, DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES);
         wait_until(|| control.stats().completed >= 3);
+        for completed in 4..=u64::from(dsp.plugin_timing.lookahead_quanta + 2) {
+            dsp.render_block(&status, DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES);
+            wait_until(|| control.stats().completed >= completed);
+        }
         let expected = (0.5_f32 * 0.5 * 0.72).tanh();
         for frame in &dsp.master_block[..DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES] {
             assert!((frame[0] - expected).abs() < 1.0e-6);
@@ -21026,7 +21441,8 @@ mod tests {
                 && effect_control.stats().completed >= 1
         });
 
-        for completed in 2..=5 {
+        let output_callback = 2 * u64::from(dsp.plugin_timing.lookahead_quanta + 1) + 1;
+        for completed in 2..=output_callback {
             dsp.render_block(&status, DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES);
             wait_until(|| {
                 instrument_control.stats().completed >= completed
@@ -21056,10 +21472,10 @@ mod tests {
         dsp.render_block(&status, DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES);
         wait_until(|| {
             instrument_midi.load(Ordering::Acquire) == u32::from_le_bytes([0x80, 60, 0, 0])
-                && instrument_control.stats().completed >= 6
-                && effect_control.stats().completed >= 6
+                && instrument_control.stats().completed > output_callback
+                && effect_control.stats().completed > output_callback
         });
-        for completed in 7..=10 {
+        for completed in output_callback + 2..=2 * output_callback {
             dsp.render_block(&status, DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES);
             wait_until(|| {
                 instrument_control.stats().completed >= completed
@@ -21640,7 +22056,7 @@ mod tests {
     }
 
     #[test]
-    fn generator_input_queue_full_is_silent_and_observable() {
+    fn generator_worker_stall_faults_silent_before_exhausting_the_bounded_queue() {
         let last_midi = Arc::new(AtomicU32::new(0));
         let chain = spawn_mock_instrument_with_delay(
             0.5,
@@ -21693,10 +22109,16 @@ mod tests {
         let _ = generator_event_rx.pop().unwrap();
         dsp.process_generator_endpoints(DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES);
         wait_until(|| last_midi.load(Ordering::Acquire) == u32::from_le_bytes([0x90, 60, 127, 0]));
-        for _ in 0..10 {
+        for _ in 0..dsp.plugin_timing.lookahead_quanta + 2 {
             dsp.process_generator_endpoints(DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES);
         }
-        assert!(control.stats().input_overflows > 0);
+        assert!(control.stats().deadline_misses > 0);
+        assert_eq!(control.stats().input_overflows, 0);
+        dsp.observe_plugin_processing_health();
+        assert_eq!(
+            dsp.plugin_fault.unwrap().reason,
+            PluginProcessingFaultReason::DeadlineMiss
+        );
 
         command_tx
             .push(AudioCommand::RemoveGeneratorEndpoint { channel_id: 5 })
