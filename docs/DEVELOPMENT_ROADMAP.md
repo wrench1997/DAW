@@ -1,13 +1,13 @@
 # Development roadmap
 
-Updated: 2026-10-09 UTC. This roadmap tracks acceptance, not promised delivery dates. Current changes are published on an independent validation branch. Current handoff: source fixes and independent static review complete; all Windows development gates passed at `122596a`, including 775 tests with all 15 new reliability regressions. A follow-up adds a plugin-free helper-protocol smoke harness and CI step; actual Windows smoke execution is pending.
+Updated: 2026-10-09 UTC. This roadmap tracks acceptance, not promised delivery dates. Current changes are published on an independent validation branch. Current handoff: source fixes and independent static review complete; all Windows development gates passed at `acdcf23`, including 775 Rust tests with all 15 new reliability regressions, 14 Python harness tests and actual plugin-free helper-protocol smoke. The result-summary follow-up changes documentation only.
 
 ## P0 — Establish a trustworthy baseline
 
 - Keep toolchain, dependency inputs and exact command evidence recorded for each candidate.
 - Run locked baseline tests, formatting and Clippy; preserve failures rather than treating absent tooling as a code failure or a pass.
 - Acceptance: exact tested revision/working tree, command, exit status and per-target test summary are in WORK_LOG; Windows-only gates remain separate from host checks.
-- Status: Windows Rust/Cargo 1.99.0 development gates **passed** at `122596a`; [execution evidence](https://github.com/wrench1997/DAW/actions/runs/37871876943). Linux Cargo check remains blocked before project compilation at the unavailable ALSA native dependency.
+- Status: Windows Rust/Cargo 1.99.0 development gates plus Python 3.12.10 harness tests and actual helper smoke **passed** at `acdcf23`; [execution evidence](https://github.com/wrench1997/DAW/actions/runs/37873807018). Linux Cargo check remains blocked before project compilation at the unavailable ALSA native dependency.
 
 ## P0 — Protect project saves
 
@@ -34,7 +34,7 @@ Updated: 2026-10-09 UTC. This roadmap tracks acceptance, not promised delivery d
 ## P2 — Release candidate gates
 
 - Run fmt, all-feature/all-target Clippy, locked full tests and all-bin release build on the intended Windows toolchain.
-- Perform helper protocol smoke, clean Windows launch, actual Audio Slip/fade/Crossfade mouse tests, group-resize and transport regressions, project save/reopen/recovery checks.
+- Repeat helper protocol smoke against the pinned gnullvm Release binary (MSVC debug smoke passed at `acdcf23`), then perform clean Windows launch, actual Audio Slip/fade/Crossfade mouse tests, group-resize and transport regressions, project save/reopen/recovery checks.
 - Acceptance: exact candidate hash and logs, all required runtime files, documentation/package link checks and explicit unresolved issues; no commercial-ready claim based on unit tests alone.
 
 ## Later commercial programs

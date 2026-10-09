@@ -1,16 +1,16 @@
 # 当前开发状态
 
-最后更新：2026-10-09 02:14 UTC。以当前源码和实际命令结果为准。
+最后更新：2026-10-09 02:25 UTC。以当前源码和实际命令结果为准。
 
 ## 当前基线与验证边界
 
 - 项目：Citrus Studio 0.4.0，clean-room Rust DAW；尚未达到完整 FL-class 商用品质。
-- 本轮 Git 基线：`9c159953163763a354634b3a9f95f84de174641b`；已验证源码提交：`122596ae37e23be4420db1766aff88019d231b3c`，独立分支 `ci/windows-reliability-20261009`。
-- **Windows 开发质量门禁全部通过**：[CI #3](https://github.com/wrench1997/DAW/actions/runs/37871876943)，Windows Server 2025 / x86_64-pc-windows-msvc，Rust/Cargo 1.99.0。
-- **Rust 测试：775 通过，0 失败、0 忽略**；helper target 为 0 tests。通过命令还包括 fmt、all-feature/all-target Clippy `-D warnings`、application + VST3 helper debug build、no-default-features all-target check。
-- 新增测试工具：`scripts/smoke_vst3_helper.py` 与 14 项 fake-helper harness 回归；本地 Python 自测通过，实际 Windows helper smoke 待 CI 执行。工作流在 all-bin build 后运行 smoke，应用源码、Cargo 输入、feature gates 与固定 Release 工具链未变。Python 仅供开发验收，不是应用运行依赖。分支运行见 [GitHub Actions](https://github.com/wrench1997/DAW/actions)；`main` 未合并本轮修改，未发布 Release。
+- 本轮 Git 基线：`9c159953163763a354634b3a9f95f84de174641b`；含 helper smoke 的已验证提交：`acdcf236d49cd3e5cd4d09506856c935b79eb12a`，独立分支 `ci/windows-reliability-20261009`。
+- **Windows 开发质量门禁全部通过**：[helper smoke CI](https://github.com/wrench1997/DAW/actions/runs/37873807018)，Windows Server 2025 / x86_64-pc-windows-msvc，Rust/Cargo 1.99.0。
+- **Rust 测试：775 通过，0 失败、0 忽略**；helper Rust target 为 0 tests；独立的 14 项 Python harness 测试及实际 Windows helper 协议 smoke 全部通过。通过命令还包括 fmt、all-feature/all-target Clippy `-D warnings`、application + VST3 helper debug build、no-default-features all-target check。
+- `scripts/smoke_vst3_helper.py` 已实际启动 MSVC debug helper，确认三次 JSON 回复、无效命令恢复、stdin 保持打开时 Shutdown 以 0 退出及子进程回收；未加载真实插件。Python 3.12.10 仅供开发验收，不是应用运行依赖。应用源码、Cargo 输入、feature gates 与固定 Release 工具链未变。此验证摘要的后续提交只改文档，分支运行见 [GitHub Actions](https://github.com/wrench1997/DAW/actions)；`main` 未合并本轮修改，未发布 Release。
 - 本地 Rust/Cargo 1.99.0 的 fmt 检查也通过。Linux Cargo check 在依赖 alsa-sys 构建阶段因缺少 alsa.pc 停止，尚未编译项目源码；不能把 Windows 通过结果当作 Linux 构建通过。
-- 仍未验证：Windows GUI、真实音频设备、真实 VST、helper 协议 smoke、固定 gnullvm Release 构建和干净系统打包验收。CI 的 MSVC debug build 不是可分发 Release 包。
+- 仍未验证：Windows GUI、真实音频设备、真实 VST、固定 gnullvm Release 构建及其 helper smoke和干净系统打包验收。CI 的 MSVC debug build 不是可分发 Release 包。
 
 ## 源码已经具备的能力
 

@@ -8,11 +8,11 @@
 
 ## 当前验证状态（2026-10-09）
 
-本页是 Windows 发布流程和历史工具链记录，不代表当前版本已完成发布验收。源码提交 `122596ae37e23be4420db1766aff88019d231b3c` 已通过 [Windows MSVC 开发 CI](https://github.com/wrench1997/DAW/actions/runs/37871876943)：775 项测试及全部开发门禁通过。以下固定 gnullvm Release 流程尚未在本轮执行；不能用 MSVC debug 构建替代发布验收。完整命令与历史失败见 `WORK_LOG.md`。
+本页是 Windows 发布流程和历史工具链记录，不代表当前版本已完成发布验收。提交 `acdcf236d49cd3e5cd4d09506856c935b79eb12a` 已通过 [Windows MSVC 开发 CI](https://github.com/wrench1997/DAW/actions/runs/37873807018)：775 项 Rust 测试、14 项 Python harness 回归、实际 helper 协议 smoke 及全部开发门禁通过。以下固定 gnullvm Release 流程尚未在本轮执行；不能用 MSVC debug 构建替代发布验收。完整命令与历史失败见 `WORK_LOG.md`。
 
 ## 开发 CI（独立分支验证）
 
-`.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build、独立的 helper harness 回归 / 实际 helper 协议 smoke 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；第三次运行已在 Rust/Cargo 1.99.0 上全部通过。本次追加 helper 自动 smoke 后的 Windows 结果待验证，分支后续运行见 GitHub Actions。开发 smoke 不替代下述历史固定 gnullvm 发布流程、Release helper smoke、干净 Windows 实机验收与打包校验。
+`.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build、独立的 helper harness 回归 / 实际 helper 协议 smoke 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；含 helper 自动 smoke 的运行已在 Rust/Cargo 1.99.0、Python 3.12.10 上全部通过。验证摘要后续提交只改文档，分支后续运行见 GitHub Actions。开发 smoke 不替代下述历史固定 gnullvm 发布流程、Release helper smoke、干净 Windows 实机验收与打包校验。
 
 ## 发布契约
 
