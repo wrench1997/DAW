@@ -2152,6 +2152,15 @@ impl IUnitHandler2Trait for ComponentHandler {
 pub const MAX_QUEUED_EVENTS: usize = 4096;
 const MAX_QUEUED_EVENT_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
 
+/// Fixed admission outcomes; rejecting an event never changes the queued events or budget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EventAdmissionError {
+    QueueFull,
+    PayloadBudget,
+    InvalidEvent,
+    Poisoned,
+}
+
 pub struct HostEventList {
     pub events: Mutex<Vec<PluginEvent>>,
     payload_bytes: AtomicUsize,
@@ -2251,53 +2260,75 @@ impl HostEventList {
         }
     }
 
-    pub fn add_event(&self, event: PluginEvent) {
-        match self.events.lock() {
-            Ok(mut events) => {
-                if events.len() >= MAX_QUEUED_EVENTS {
-                    self.lost.store(true, Ordering::Release);
-                    log::warn!(
-                        "HostEventList: dropping event, queue full at {MAX_QUEUED_EVENTS} \
-                         (is the plugin processing?)"
-                    );
-                    return;
-                }
-                let queued_payload_bytes = self.payload_bytes.load(Ordering::Relaxed);
-                if queued_payload_bytes.saturating_add(event.payload_bytes())
-                    > MAX_QUEUED_EVENT_PAYLOAD_BYTES
-                {
-                    self.lost.store(true, Ordering::Release);
-                    log::warn!(
-                        "HostEventList: dropping event, payload budget exceeds \
-                         {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
-                    );
-                    return;
-                }
-                self.payload_bytes.store(
-                    queued_payload_bytes + event.payload_bytes(),
-                    Ordering::Relaxed,
-                );
-                events.push(event);
-                log::trace!(
-                    "HostEventList: Added event via add_event, total count: {}",
-                    events.len()
-                );
-            }
-            Err(_) => {
-                self.lost.store(true, Ordering::Release);
-                log::error!("HostEventList: Failed to lock events for add_event");
-            }
-        }
+    fn reject_admission(&self, error: EventAdmissionError) -> EventAdmissionError {
+        self.lost.store(true, Ordering::Release);
+        error
     }
 
-    /// Deep-copy a raw SDK event into the owned list.
-    pub fn add_raw_event(&self, event: &Event) -> bool {
-        let Ok(event) = (unsafe { raw_event_to_plugin_event(event) }) else {
-            self.lost.store(true, Ordering::Release);
-            return false;
-        };
-        self.add_event(event);
-        true
+    // The caller holds the events guard until it publishes the event and this new total.
+    fn admitted_payload_total(&self, additional: usize) -> Result<usize, EventAdmissionError> {
+        self.payload_bytes
+            .load(Ordering::Relaxed)
+            .checked_add(additional)
+            .filter(|total| *total <= MAX_QUEUED_EVENT_PAYLOAD_BYTES)
+            .ok_or(EventAdmissionError::PayloadBudget)
+    }
+
+    /// Admit an already-owned event without changing the queue or budget on rejection.
+    /// Dropping a rejected event may free its existing payload allocation.
+    pub(crate) fn try_add_event(&self, event: PluginEvent) -> Result<(), EventAdmissionError> {
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|_| self.reject_admission(EventAdmissionError::Poisoned))?;
+        if events.len() >= MAX_QUEUED_EVENTS {
+            return Err(self.reject_admission(EventAdmissionError::QueueFull));
+        }
+        let payload_bytes =
+            owned_event_payload_bytes(&event).map_err(|error| self.reject_admission(error))?;
+        let next_payload_bytes = self
+            .admitted_payload_total(payload_bytes)
+            .map_err(|error| self.reject_admission(error))?;
+        events.push(event);
+        self.payload_bytes
+            .store(next_payload_bytes, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Check metadata and both budgets before deep-copying a raw SDK event.
+    /// The same guard covers preflight, copying, and publication, so rejection leaves
+    /// both the queued events and their payload-byte total unchanged.
+    ///
+    /// # Safety
+    /// Unless the header queue is full, the union member selected by the event type
+    /// must be initialized so its metadata can be inspected.
+    /// A pointer-backed payload must remain readable for its declared nonzero length
+    /// while this call copies it. No payload pointer is dereferenced if the header
+    /// queue is full, the payload metadata is invalid, or the aggregate budget is
+    /// exceeded; those cases do not require a readable payload. Metadata checks alone
+    /// cannot establish that an otherwise admissible pointer is readable.
+    pub(crate) unsafe fn try_add_raw_event(
+        &self,
+        event: &Event,
+    ) -> Result<(), EventAdmissionError> {
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|_| self.reject_admission(EventAdmissionError::Poisoned))?;
+        if events.len() >= MAX_QUEUED_EVENTS {
+            return Err(self.reject_admission(EventAdmissionError::QueueFull));
+        }
+        let payload_bytes = unsafe { raw_event_payload_bytes(event) }
+            .map_err(|error| self.reject_admission(error))?;
+        let next_payload_bytes = self
+            .admitted_payload_total(payload_bytes)
+            .map_err(|error| self.reject_admission(error))?;
+        let owned = unsafe { raw_event_to_plugin_event(event) }
+            .map_err(|()| self.reject_admission(EventAdmissionError::InvalidEvent))?;
+        events.push(owned);
+        self.payload_bytes
+            .store(next_payload_bytes, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -2363,54 +2394,14 @@ impl IEventListTrait for HostEventList {
     }
 
     unsafe fn addEvent(&self, event: *mut Event) -> i32 {
-        if event.is_null() {
-            self.lost.store(true, Ordering::Release);
-            log::warn!("HostEventList: addEvent called with null event pointer");
+        if event.is_null() || !event.is_aligned() {
+            self.reject_admission(EventAdmissionError::InvalidEvent);
             return kResultFalse;
         }
 
-        match self.events.lock() {
-            Ok(mut events) => {
-                // Bound what a plugin can emit into the output list in a single block, so a
-                // misbehaving plugin can't drive unbounded growth from inside `process()`.
-                if events.len() >= MAX_QUEUED_EVENTS {
-                    self.lost.store(true, Ordering::Release);
-                    log::warn!(
-                        "HostEventList: dropping plugin event, queue full at {MAX_QUEUED_EVENTS}"
-                    );
-                    return kResultFalse;
-                }
-                let owned = match raw_event_to_plugin_event(&*event) {
-                    Ok(event) => event,
-                    Err(()) => {
-                        self.lost.store(true, Ordering::Release);
-                        return kResultFalse;
-                    }
-                };
-                let queued_payload_bytes = self.payload_bytes.load(Ordering::Relaxed);
-                if queued_payload_bytes.saturating_add(owned.payload_bytes())
-                    > MAX_QUEUED_EVENT_PAYLOAD_BYTES
-                {
-                    self.lost.store(true, Ordering::Release);
-                    log::warn!(
-                        "HostEventList: dropping plugin event, payload budget exceeds \
-                         {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
-                    );
-                    return kResultFalse;
-                }
-                self.payload_bytes.store(
-                    queued_payload_bytes + owned.payload_bytes(),
-                    Ordering::Relaxed,
-                );
-                events.push(owned);
-                log::trace!("HostEventList: Added event, total count: {}", events.len());
-                kResultOk
-            }
-            Err(_) => {
-                self.lost.store(true, Ordering::Release);
-                log::error!("HostEventList: Failed to lock events for addEvent");
-                kResultFalse
-            }
+        match unsafe { self.try_add_raw_event(&*event) } {
+            Ok(()) => kResultOk,
+            Err(_) => kResultFalse,
         }
     }
 }
@@ -2563,14 +2554,109 @@ fn plugin_event_to_raw(event: &PluginEvent) -> std::result::Result<Event, ()> {
     Ok(raw)
 }
 
+fn checked_payload_bytes<T>(len: usize, max_len: usize) -> Result<usize, EventAdmissionError> {
+    if len > max_len {
+        return Err(EventAdmissionError::InvalidEvent);
+    }
+    len.checked_mul(std::mem::size_of::<T>())
+        .ok_or(EventAdmissionError::InvalidEvent)
+}
+
+fn owned_event_payload_bytes(event: &PluginEvent) -> Result<usize, EventAdmissionError> {
+    match &event.data {
+        PluginEventData::Data { bytes, .. } => {
+            checked_payload_bytes::<u8>(bytes.len(), MAX_EVENT_PAYLOAD_BYTES)
+        }
+        PluginEventData::NoteExpressionText { text, .. }
+        | PluginEventData::Chord { text, .. }
+        | PluginEventData::Scale { text, .. } => {
+            checked_payload_bytes::<u16>(text.len(), MAX_EVENT_TEXT_UNITS)
+        }
+        PluginEventData::NoteOn { .. }
+        | PluginEventData::NoteOff { .. }
+        | PluginEventData::PolyPressure { .. }
+        | PluginEventData::NoteExpressionValue { .. }
+        | PluginEventData::NoteExpressionIntValue { .. }
+        | PluginEventData::LegacyMidiCcOut { .. } => Ok(0),
+    }
+}
+
+// Inspect only the declared metadata. Do not construct a slice or read any payload
+// until both the individual bounds and the list's aggregate budget have passed.
+fn checked_raw_payload_bytes<T>(
+    pointer: *const T,
+    len: usize,
+    max_len: usize,
+) -> Result<usize, EventAdmissionError> {
+    let bytes = checked_payload_bytes::<T>(len, max_len)?;
+    if len != 0 && (pointer.is_null() || !pointer.is_aligned()) {
+        return Err(EventAdmissionError::InvalidEvent);
+    }
+    Ok(bytes)
+}
+
+// The union member selected by the event type must be initialized. Payload
+// pointer validity is deliberately not required for this metadata-only preflight.
+#[allow(non_upper_case_globals, clippy::unnecessary_cast)]
+unsafe fn raw_event_payload_bytes(raw: &Event) -> Result<usize, EventAdmissionError> {
+    use Event_::EventTypes_::*;
+
+    // All fields read here are plain SDK scalars/pointers. The payload is not read.
+    unsafe {
+        match raw.r#type as u32 {
+            t if t == kDataEvent as u32 => {
+                let value = raw.__field0.data;
+                checked_raw_payload_bytes(
+                    value.bytes,
+                    usize::try_from(value.size).map_err(|_| EventAdmissionError::InvalidEvent)?,
+                    MAX_EVENT_PAYLOAD_BYTES,
+                )
+            }
+            t if t == kNoteExpressionTextEvent as u32 => {
+                let value = raw.__field0.noteExpressionText;
+                checked_raw_payload_bytes(
+                    value.text,
+                    usize::try_from(value.textLen)
+                        .map_err(|_| EventAdmissionError::InvalidEvent)?,
+                    MAX_EVENT_TEXT_UNITS,
+                )
+            }
+            t if t == kChordEvent as u32 => {
+                let value = raw.__field0.chord;
+                checked_raw_payload_bytes(
+                    value.text,
+                    usize::from(value.textLen),
+                    MAX_EVENT_TEXT_UNITS,
+                )
+            }
+            t if t == kScaleEvent as u32 => {
+                let value = raw.__field0.scale;
+                checked_raw_payload_bytes(
+                    value.text,
+                    usize::from(value.textLen),
+                    MAX_EVENT_TEXT_UNITS,
+                )
+            }
+            t if t == kNoteOnEvent as u32
+                || t == kNoteOffEvent as u32
+                || t == kPolyPressureEvent as u32
+                || t == kNoteExpressionValueEvent as u32
+                || t == kNoteExpressionIntValueEvent as u32
+                || t == kLegacyMIDICCOutEvent as u32 =>
+            {
+                Ok(0)
+            }
+            _ => Err(EventAdmissionError::InvalidEvent),
+        }
+    }
+}
+
 #[allow(non_upper_case_globals, clippy::unnecessary_cast)]
 unsafe fn raw_event_to_plugin_event(raw: &Event) -> std::result::Result<PluginEvent, ()> {
     use Event_::EventTypes_::*;
 
     unsafe fn copy_bytes(ptr: *const u8, len: usize) -> std::result::Result<Vec<u8>, ()> {
-        if len > MAX_EVENT_PAYLOAD_BYTES || (len != 0 && ptr.is_null()) {
-            return Err(());
-        }
+        checked_raw_payload_bytes(ptr, len, MAX_EVENT_PAYLOAD_BYTES).map_err(|_| ())?;
         Ok(if len == 0 {
             Vec::new()
         } else {
@@ -2579,9 +2665,7 @@ unsafe fn raw_event_to_plugin_event(raw: &Event) -> std::result::Result<PluginEv
     }
 
     unsafe fn copy_text(ptr: *const u16, len: usize) -> std::result::Result<Vec<u16>, ()> {
-        if len > MAX_EVENT_TEXT_UNITS || (len != 0 && ptr.is_null()) {
-            return Err(());
-        }
+        checked_raw_payload_bytes(ptr, len, MAX_EVENT_TEXT_UNITS).map_err(|_| ())?;
         Ok(if len == 0 {
             Vec::new()
         } else {
@@ -4185,6 +4269,499 @@ mod connection_proxy_tests {
 #[cfg(test)]
 mod host_event_list_tests {
     use super::*;
+    use crate::internal::native_edit_transport::tests::{allocation_free, measure_allocations};
+
+    fn owned(data: PluginEventData, sample_offset: i32) -> PluginEvent {
+        PluginEvent {
+            bus_index: 3,
+            sample_offset,
+            ppq_position: 12.25,
+            flags: 0x1234,
+            data,
+        }
+    }
+
+    fn note(sample_offset: i32) -> PluginEvent {
+        owned(
+            PluginEventData::NoteOn {
+                channel: 4,
+                pitch: 63,
+                tuning: -12.5,
+                velocity: 0.75,
+                length: 127,
+                note_id: 901,
+            },
+            sample_offset,
+        )
+    }
+
+    fn raw_data(bytes: *const u8, size: u32) -> Event {
+        let mut raw: Event = unsafe { std::mem::zeroed() };
+        raw.r#type = Event_::EventTypes_::kDataEvent as u16;
+        raw.__field0.data = DataEvent {
+            size,
+            r#type: 0xfeed,
+            bytes,
+        };
+        raw
+    }
+
+    fn text_data(kind: usize, text: Vec<u16>) -> PluginEventData {
+        match kind {
+            0 => PluginEventData::NoteExpressionText {
+                type_id: 44,
+                note_id: 17,
+                text,
+            },
+            1 => PluginEventData::Chord {
+                root: -7,
+                bass_note: 9,
+                mask: 0x123,
+                text,
+            },
+            2 => PluginEventData::Scale {
+                root: -2,
+                mask: 0x456,
+                text,
+            },
+            _ => unreachable!(),
+        }
+    }
+
+    fn state(list: &HostEventList) -> (usize, usize) {
+        let events = list.events.lock().unwrap();
+        (events.len(), list.payload_bytes.load(Ordering::Relaxed))
+    }
+
+    #[test]
+    fn checked_scalar_admission_is_allocation_free_cold_through_exact_header_capacity() {
+        let list = HostEventList::new();
+        allocation_free(|| {
+            for index in 0..MAX_QUEUED_EVENTS {
+                let event = note(index as i32);
+                match index % 3 {
+                    0 => list.try_add_event(event).unwrap(),
+                    1 => unsafe {
+                        list.try_add_raw_event(&plugin_event_to_raw(&event).unwrap())
+                            .unwrap();
+                    },
+                    _ => {
+                        let mut raw = plugin_event_to_raw(&event).unwrap();
+                        assert_eq!(unsafe { list.addEvent(&mut raw) }, kResultOk);
+                    }
+                }
+            }
+            assert_eq!(state(&list), (MAX_QUEUED_EVENTS, 0));
+            assert!(!list.take_loss());
+            assert_eq!(
+                list.try_add_event(note(-1)),
+                Err(EventAdmissionError::QueueFull)
+            );
+            let mut raw = plugin_event_to_raw(&note(-2)).unwrap();
+            assert_eq!(
+                unsafe { list.try_add_raw_event(&raw) },
+                Err(EventAdmissionError::QueueFull)
+            );
+            assert_eq!(unsafe { list.addEvent(&mut raw) }, kResultFalse);
+            assert_eq!(state(&list), (MAX_QUEUED_EVENTS, 0));
+            assert!(list.take_loss());
+            assert!(!list.take_loss());
+        });
+        let events = list.events.lock().unwrap();
+        for (index, event) in events.iter().enumerate() {
+            assert_eq!(*event, note(index as i32));
+        }
+    }
+
+    #[test]
+    fn full_headers_reject_before_touching_or_copying_payload() {
+        let list = HostEventList::new();
+        for _ in 0..MAX_QUEUED_EVENTS {
+            list.try_add_event(note(0)).unwrap();
+        }
+        // The documented QueueFull short-circuit does not require readable payload
+        // memory. This pointer has no backing allocation and must never be read.
+        let mut raw = raw_data(ptr::dangling(), MAX_EVENT_PAYLOAD_BYTES as u32);
+        allocation_free(|| {
+            assert_eq!(
+                unsafe { list.try_add_raw_event(&raw) },
+                Err(EventAdmissionError::QueueFull)
+            );
+            assert_eq!(unsafe { list.addEvent(&mut raw) }, kResultFalse);
+            assert_eq!(state(&list), (MAX_QUEUED_EVENTS, 0));
+        });
+    }
+
+    #[test]
+    fn checked_data_admission_enforces_exact_individual_limit_for_raw_and_owned() {
+        let list = HostEventList::new();
+        let source = vec![0x7d; MAX_EVENT_PAYLOAD_BYTES];
+        let raw = raw_data(source.as_ptr(), source.len() as u32);
+        let (result, stats) = measure_allocations(|| unsafe { list.try_add_raw_event(&raw) });
+        assert_eq!(result, Ok(()));
+        assert_eq!(
+            stats.allocations, 1,
+            "successful payload copying still allocates"
+        );
+        assert_eq!(stats.deallocations, 0);
+        assert_eq!(stats.allocated_bytes, MAX_EVENT_PAYLOAD_BYTES);
+        assert_eq!(state(&list), (1, MAX_EVENT_PAYLOAD_BYTES));
+
+        let exact = PluginEvent::sysex(vec![0x7e; MAX_EVENT_PAYLOAD_BYTES]);
+        allocation_free(|| list.try_add_event(exact).unwrap());
+        let oversized = raw_data(ptr::dangling(), (MAX_EVENT_PAYLOAD_BYTES + 1) as u32);
+        allocation_free(|| {
+            assert_eq!(
+                unsafe { list.try_add_raw_event(&oversized) },
+                Err(EventAdmissionError::InvalidEvent)
+            );
+        });
+        let too_large = PluginEvent::sysex(vec![0; MAX_EVENT_PAYLOAD_BYTES + 1]);
+        let (result, stats) = measure_allocations(|| list.try_add_event(too_large));
+        assert_eq!(result, Err(EventAdmissionError::InvalidEvent));
+        assert_eq!(stats.allocations, 0);
+        assert_eq!(
+            stats.deallocations, 1,
+            "rejected owned payloads are dropped"
+        );
+        assert_eq!(state(&list), (2, 2 * MAX_EVENT_PAYLOAD_BYTES));
+        let events = list.events.lock().unwrap();
+        assert_eq!(
+            events[0].data,
+            PluginEventData::Data {
+                data_type: 0xfeed,
+                bytes: source
+            }
+        );
+    }
+
+    #[test]
+    fn checked_text_admission_enforces_each_exact_limit_and_preserves_declared_units() {
+        for kind in 0..3 {
+            let list = HostEventList::new();
+            let exact = owned(text_data(kind, vec![0xd800; MAX_EVENT_TEXT_UNITS]), 4);
+            let raw = plugin_event_to_raw(&exact).unwrap();
+            unsafe { list.try_add_raw_event(&raw) }.unwrap();
+            list.try_add_event(exact.clone()).unwrap();
+            assert_eq!(state(&list), (2, 4 * MAX_EVENT_TEXT_UNITS));
+            assert_eq!(list.events.lock().unwrap()[0], exact);
+
+            let oversized = owned(text_data(kind, vec![0; MAX_EVENT_TEXT_UNITS + 1]), 5);
+            let mut raw = plugin_event_to_raw(&oversized).unwrap();
+            allocation_free(|| {
+                assert_eq!(
+                    unsafe { list.try_add_raw_event(&raw) },
+                    Err(EventAdmissionError::InvalidEvent)
+                );
+                assert_eq!(unsafe { list.addEvent(&mut raw) }, kResultFalse);
+            });
+            assert_eq!(
+                list.try_add_event(oversized),
+                Err(EventAdmissionError::InvalidEvent)
+            );
+            assert_eq!(state(&list), (2, 4 * MAX_EVENT_TEXT_UNITS));
+
+            // Embedded NULs and unpaired surrogates are copied verbatim, and no
+            // terminator is scanned or appended beyond the declared three units.
+            let source = owned(text_data(kind, vec![0xd800, 0, 0xffff]), 7);
+            let raw = plugin_event_to_raw(&source).unwrap();
+            unsafe { list.try_add_raw_event(&raw) }.unwrap();
+            let expected = source.clone();
+            drop(source);
+            assert_eq!(list.events.lock().unwrap()[2], expected);
+            let mut returned: Event = unsafe { std::mem::zeroed() };
+            assert_eq!(unsafe { list.getEvent(2, &mut returned) }, kResultOk);
+            assert_eq!(
+                unsafe { raw_event_to_plugin_event(&returned) }.unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn checked_aggregate_budget_rejects_before_copy_and_keeps_the_existing_queue() {
+        let list = HostEventList::new();
+        let source = vec![0x7d; MAX_EVENT_PAYLOAD_BYTES];
+        let raw = raw_data(source.as_ptr(), source.len() as u32);
+        for _ in 0..MAX_QUEUED_EVENT_PAYLOAD_BYTES / MAX_EVENT_PAYLOAD_BYTES {
+            unsafe { list.try_add_raw_event(&raw) }.unwrap();
+        }
+        assert_eq!(state(&list), (8, MAX_QUEUED_EVENT_PAYLOAD_BYTES));
+        // The budget short-circuit is also documented not to dereference this
+        // payload, whose declared metadata would otherwise permit a copy.
+        let mut one_more = raw_data(ptr::dangling(), 1);
+        allocation_free(|| {
+            assert_eq!(
+                unsafe { list.try_add_raw_event(&one_more) },
+                Err(EventAdmissionError::PayloadBudget)
+            );
+            assert_eq!(unsafe { list.addEvent(&mut one_more) }, kResultFalse);
+        });
+        assert_eq!(
+            list.try_add_event(PluginEvent::sysex(vec![9])),
+            Err(EventAdmissionError::PayloadBudget)
+        );
+        assert_eq!(state(&list), (8, MAX_QUEUED_EVENT_PAYLOAD_BYTES));
+        assert!(list.take_loss());
+        assert!(!list.take_loss());
+        allocation_free(|| list.try_add_event(note(42)).unwrap());
+        assert_eq!(state(&list), (9, MAX_QUEUED_EVENT_PAYLOAD_BYTES));
+        assert!(list.events.lock().unwrap()[..8]
+            .iter()
+            .all(|event| matches!(
+                &event.data, PluginEventData::Data { data_type: 0xfeed, bytes } if bytes == &source
+            )));
+    }
+
+    #[test]
+    fn mixed_text_and_data_share_one_exact_aggregate_byte_budget() {
+        let list = HostEventList::new();
+        for _ in 0..7 {
+            list.try_add_event(PluginEvent::sysex(vec![1; MAX_EVENT_PAYLOAD_BYTES]))
+                .unwrap();
+        }
+        let text_bytes = MAX_EVENT_TEXT_UNITS * std::mem::size_of::<u16>();
+        for index in 0..MAX_EVENT_PAYLOAD_BYTES / text_bytes {
+            let event = owned(
+                text_data(index % 3, vec![0x1234; MAX_EVENT_TEXT_UNITS]),
+                index as i32,
+            );
+            list.try_add_event(event).unwrap();
+        }
+        let before = state(&list);
+        assert_eq!(before, (39, MAX_QUEUED_EVENT_PAYLOAD_BYTES));
+        assert_eq!(
+            list.try_add_event(PluginEvent::sysex(vec![1])),
+            Err(EventAdmissionError::PayloadBudget)
+        );
+        let text = owned(text_data(0, vec![0x4321]), 0);
+        let raw = plugin_event_to_raw(&text).unwrap();
+        allocation_free(|| {
+            assert_eq!(
+                unsafe { list.try_add_raw_event(&raw) },
+                Err(EventAdmissionError::PayloadBudget)
+            );
+        });
+        assert_eq!(
+            list.try_add_event(text),
+            Err(EventAdmissionError::PayloadBudget)
+        );
+        assert_eq!(state(&list), before);
+    }
+
+    #[test]
+    fn malformed_raw_payloads_and_unknown_variants_fail_without_allocation_or_mutation() {
+        let list = HostEventList::new();
+        list.try_add_event(PluginEvent::sysex(vec![1, 2, 3]))
+            .unwrap();
+        let mut unknown: Event = unsafe { std::mem::zeroed() };
+        // 0xffff is the supported legacy MIDI CC event, so use the unassigned
+        // adjacent value rather than accidentally exercising a valid scalar.
+        unknown.r#type = u16::MAX - 1;
+        let bad_data = [
+            raw_data(ptr::null(), 1),
+            raw_data(ptr::dangling(), u32::MAX),
+            unknown,
+        ];
+        allocation_free(|| {
+            for mut raw in bad_data {
+                assert_eq!(
+                    unsafe { list.try_add_raw_event(&raw) },
+                    Err(EventAdmissionError::InvalidEvent)
+                );
+                assert_eq!(unsafe { list.addEvent(&mut raw) }, kResultFalse);
+                assert_eq!(state(&list), (1, 3));
+            }
+        });
+        let source = [0u16; 2];
+        let misaligned = unsafe { source.as_ptr().cast::<u8>().add(1).cast::<u16>() };
+        for kind in 0..3 {
+            let event = owned(text_data(kind, vec![3]), 1);
+            for pointer in [ptr::null(), misaligned] {
+                let mut raw = plugin_event_to_raw(&event).unwrap();
+                match kind {
+                    0 => raw.__field0.noteExpressionText.text = pointer,
+                    1 => raw.__field0.chord.text = pointer,
+                    _ => raw.__field0.scale.text = pointer,
+                }
+                allocation_free(|| {
+                    assert_eq!(
+                        unsafe { list.try_add_raw_event(&raw) },
+                        Err(EventAdmissionError::InvalidEvent)
+                    );
+                    assert_eq!(unsafe { list.addEvent(&mut raw) }, kResultFalse);
+                    assert_eq!(state(&list), (1, 3));
+                });
+            }
+        }
+        allocation_free(|| {
+            assert_eq!(unsafe { list.addEvent(ptr::null_mut()) }, kResultFalse);
+            assert_eq!(
+                unsafe { list.addEvent(ptr::dangling_mut::<u8>().cast()) },
+                kResultFalse
+            );
+            assert_eq!(state(&list), (1, 3));
+            assert!(list.take_loss());
+            assert!(!list.take_loss());
+        });
+    }
+
+    #[test]
+    fn empty_payloads_accept_null_pointers_without_reading_or_allocating() {
+        let list = HostEventList::new();
+        let raw = raw_data(ptr::null(), 0);
+        allocation_free(|| unsafe { list.try_add_raw_event(&raw).unwrap() });
+        for kind in 0..3 {
+            let event = owned(text_data(kind, Vec::new()), 0);
+            let mut raw = plugin_event_to_raw(&event).unwrap();
+            match kind {
+                0 => raw.__field0.noteExpressionText.text = ptr::null(),
+                1 => raw.__field0.chord.text = ptr::null(),
+                _ => raw.__field0.scale.text = ptr::null(),
+            }
+            allocation_free(|| unsafe { list.try_add_raw_event(&raw).unwrap() });
+        }
+        assert_eq!(state(&list), (4, 0));
+        assert!(!list.take_loss());
+    }
+
+    #[test]
+    fn poisoned_admission_reports_loss_without_allocating_or_mutating() {
+        let list = HostEventList::new();
+        list.try_add_event(note(17)).unwrap();
+        list.try_add_event(PluginEvent::sysex(vec![1, 2, 3]))
+            .unwrap();
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = list.events.lock().unwrap();
+            panic!("poison the event mutex outside allocation measurement");
+        }))
+        .is_err());
+        let mut raw = plugin_event_to_raw(&note(29)).unwrap();
+        allocation_free(|| {
+            assert_eq!(
+                list.try_add_event(note(19)),
+                Err(EventAdmissionError::Poisoned)
+            );
+            assert_eq!(
+                unsafe { list.try_add_raw_event(&raw) },
+                Err(EventAdmissionError::Poisoned)
+            );
+            assert_eq!(unsafe { list.addEvent(&mut raw) }, kResultFalse);
+            assert!(list.take_loss());
+            assert!(!list.take_loss());
+        });
+        let events = list.events.lock().unwrap_err().into_inner();
+        assert_eq!(
+            events.as_slice(),
+            &[note(17), PluginEvent::sysex(vec![1, 2, 3])]
+        );
+        assert_eq!(list.payload_bytes.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn checked_payload_arithmetic_rejects_overflow_without_mutation() {
+        assert_eq!(
+            checked_payload_bytes::<u16>(usize::MAX, usize::MAX),
+            Err(EventAdmissionError::InvalidEvent)
+        );
+        let list = HostEventList::new();
+        list.payload_bytes.store(usize::MAX, Ordering::Relaxed);
+        let raw = raw_data(ptr::dangling(), 1);
+        allocation_free(|| {
+            assert_eq!(
+                unsafe { list.try_add_raw_event(&raw) },
+                Err(EventAdmissionError::PayloadBudget)
+            );
+            assert_eq!(
+                list.try_add_event(note(0)),
+                Err(EventAdmissionError::PayloadBudget)
+            );
+            assert_eq!(state(&list), (0, usize::MAX));
+        });
+    }
+
+    #[test]
+    fn all_scalar_variants_keep_their_values_and_fifo_offsets() {
+        let list = HostEventList::new();
+        let scalars = [
+            note(93).data,
+            PluginEventData::NoteOff {
+                channel: 5,
+                pitch: 74,
+                velocity: 0.625,
+                note_id: -8,
+                tuning: 3.5,
+            },
+            PluginEventData::PolyPressure {
+                channel: 6,
+                pitch: 65,
+                pressure: 0.5,
+                note_id: 37,
+            },
+            PluginEventData::NoteExpressionValue {
+                type_id: u32::MAX,
+                note_id: -10,
+                value: -0.125,
+            },
+            PluginEventData::NoteExpressionIntValue {
+                type_id: 42,
+                note_id: 7,
+                value: u64::MAX,
+            },
+            PluginEventData::LegacyMidiCcOut {
+                control_number: 130,
+                channel: -3,
+                value: 200,
+                value2: 250,
+            },
+        ];
+        allocation_free(|| {
+            for (index, data) in scalars.iter().enumerate() {
+                let event = owned(data.clone(), 93 - index as i32 * 17);
+                let mut raw = plugin_event_to_raw(&event).unwrap();
+                assert_eq!(unsafe { list.addEvent(&mut raw) }, kResultOk);
+            }
+            let events = list.events.lock().unwrap();
+            for (index, event) in events.iter().enumerate() {
+                assert_eq!(
+                    *event,
+                    owned(scalars[index].clone(), 93 - index as i32 * 17)
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn concurrent_admission_cannot_overcommit_payload_budget() {
+        let list = HostEventList::new();
+        for _ in 0..7 {
+            list.try_add_event(PluginEvent::sysex(vec![0; MAX_EVENT_PAYLOAD_BYTES]))
+                .unwrap();
+        }
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let spawn = || {
+                scope.spawn(|| {
+                    let source = vec![0x7f; MAX_EVENT_PAYLOAD_BYTES];
+                    let raw = raw_data(source.as_ptr(), source.len() as u32);
+                    barrier.wait();
+                    unsafe { list.try_add_raw_event(&raw) }
+                })
+            };
+            let first = spawn();
+            let second = spawn();
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| **result == Err(EventAdmissionError::PayloadBudget))
+                .count(),
+            1
+        );
+        assert_eq!(state(&list), (8, MAX_QUEUED_EVENT_PAYLOAD_BYTES));
+    }
 
     /// `process()` is the input list's only drain and it returns early while the plugin isn't
     /// processing, so queueing MIDI at a stopped plugin must not grow the list forever.
@@ -4194,7 +4771,7 @@ mod host_event_list_tests {
         let event: Event = unsafe { std::mem::zeroed() };
 
         for _ in 0..(MAX_QUEUED_EVENTS + 500) {
-            list.add_raw_event(&event);
+            let _ = unsafe { list.try_add_raw_event(&event) };
         }
         assert_eq!(unsafe { list.getEventCount() }, MAX_QUEUED_EVENTS as i32);
 
@@ -4209,7 +4786,7 @@ mod host_event_list_tests {
         list.clear();
         assert_eq!(unsafe { list.getEventCount() }, 0);
         assert!(list.events.lock().unwrap().capacity() >= MAX_QUEUED_EVENTS);
-        list.add_raw_event(&event);
+        unsafe { list.try_add_raw_event(&event) }.unwrap();
         assert_eq!(unsafe { list.getEventCount() }, 1);
     }
 
@@ -5991,7 +6568,7 @@ mod output_event_loss_tests {
             velocity: 0,
         });
         for _ in 0..MAX_QUEUED_EVENTS + 1 {
-            list.add_event(event.clone());
+            let _ = list.try_add_event(event.clone());
         }
         list.clear();
         assert!(list.take_loss());

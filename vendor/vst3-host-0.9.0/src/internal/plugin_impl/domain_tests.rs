@@ -158,6 +158,8 @@ struct MockState {
     realtime_calls: AtomicUsize,
     realtime_points: AtomicUsize,
     output_points: AtomicUsize,
+    output_event_attempts: AtomicUsize,
+    rejected_output_events: AtomicUsize,
     last_mirrored: AtomicU64,
 }
 
@@ -181,6 +183,8 @@ impl Default for MockState {
             realtime_calls: AtomicUsize::new(0),
             realtime_points: AtomicUsize::new(0),
             output_points: AtomicUsize::new(0),
+            output_event_attempts: AtomicUsize::new(0),
+            rejected_output_events: AtomicUsize::new(0),
             last_mirrored: AtomicU64::new(0),
         }
     }
@@ -389,7 +393,7 @@ impl<const S: bool, const C: bool> IAudioProcessorTrait for MockPlugin<S, C> {
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
         if self.state.no_alloc_process.load(Ordering::Acquire) {
             // Dedicated fixed-state processor path: no trace Vec, formatting or callback hook.
-            // Parameter operations alone are exercised with empty event/data-exchange lanes.
+            // Parameter/scalar-event operations use prepared storage; data exchange stays empty.
             let data = &mut *data;
             self.state.realtime_calls.fetch_add(1, Ordering::Relaxed);
             let mut point_count = 0;
@@ -414,6 +418,27 @@ impl<const S: bool, const C: bool> IAudioProcessorTrait for MockPlugin<S, C> {
                 for point in 0..output_count {
                     // Deliberately ignore write failures, like an uncooperative plugin.
                     let _ = queue.addPoint(point as i32, 0.5, ptr::null_mut());
+                }
+            }
+            let output_events = self.state.output_event_attempts.load(Ordering::Acquire);
+            if output_events != 0 {
+                let output = vst3::ComRef::from_raw(data.outputEvents).unwrap();
+                for index in 0..output_events {
+                    let mut event: Event = std::mem::zeroed();
+                    event.r#type = Event_::EventTypes_::kNoteOffEvent as u16;
+                    event.__field0.noteOff = NoteOffEvent {
+                        channel: 0,
+                        pitch: 60,
+                        velocity: 0.0,
+                        noteId: index as i32,
+                        tuning: 0.0,
+                    };
+                    // A plugin may ignore the returned rejection and still report success.
+                    if output.addEvent(&mut event) != kResultOk {
+                        self.state
+                            .rejected_output_events
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
             return if self.state.fail_process.load(Ordering::Acquire) {
@@ -2075,4 +2100,503 @@ fn unreported_output_failure_is_promoted_before_rebuild_or_event_staging() {
         ));
         assert_eq!(state.realtime_calls.load(Ordering::Acquire), 0);
     }
+}
+
+// Event-admission tests measure only prepared scalar host paths. General mock lifecycle,
+// payload ownership and invalid public MidiError formatting are outside allocation regions.
+fn admission_scalar_event() -> PluginEvent {
+    PluginEvent {
+        bus_index: 0,
+        sample_offset: 7,
+        ppq_position: 0.25,
+        flags: 0,
+        data: crate::midi::PluginEventData::PolyPressure {
+            channel: 0,
+            pitch: 60,
+            pressure: 0.5,
+            note_id: -1,
+        },
+    }
+}
+
+fn fill_admission_queue(plugin: &mut PluginImpl, count: usize) {
+    for _ in 0..count {
+        plugin.send_plugin_event(admission_scalar_event()).unwrap();
+    }
+}
+
+fn queued_note_releases(plugin: &PluginImpl) -> Vec<(i32, i16, i16)> {
+    plugin
+        .runtime
+        .input_events
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event.data {
+            crate::midi::PluginEventData::NoteOff {
+                note_id,
+                channel,
+                pitch,
+                ..
+            } => Some((note_id, channel, pitch)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn every_scalar_event_rejection_preserves_notes_parameters_and_native_fence() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    for operation in [
+        "ordinary_on",
+        "ordinary_off",
+        "zero_on",
+        "poly_pressure",
+        "owned",
+        "voice_on",
+        "voice_off",
+        "unknown_off",
+        "expression",
+        "panic",
+    ] {
+        let trace = Trace::default();
+        let state = Arc::new(MockState::default());
+        state.no_alloc_process.store(true, Ordering::Release);
+        let mut plugin = plugin_fixture(&trace, &state);
+        plugin.start_processing().unwrap();
+        plugin.runtime.active_notes = Vec::with_capacity(MAX_TRACKED_NOTES);
+        plugin.runtime.active_notes.extend([(7, 0, 60), (9, 1, 62)]);
+        plugin.runtime.next_note_id = 10;
+        plugin.runtime.ordinary_note_counts[60] = 3;
+        plugin.queue_processor_parameter_at(55, 0.25, 0).unwrap();
+        let handler = plugin.control.component_handler.as_ref().unwrap().clone();
+        unsafe {
+            assert_eq!(handler.performEdit(88, 0.75), kResultOk);
+        }
+        fill_admission_queue(&mut plugin, MAX_QUEUED_EVENTS);
+        let before_native = handler.native_edits.snapshot();
+        let before_notes = plugin.runtime.active_notes.clone();
+        let before_counts = plugin.runtime.ordinary_note_counts;
+        trace.clear();
+        allocation_free(|| {
+            let result = match operation {
+                "ordinary_on" => plugin.send_midi_event(MidiEvent::NoteOn {
+                    channel: MidiChannel::Ch1,
+                    note: 60,
+                    velocity: 100,
+                }),
+                "ordinary_off" => plugin.send_midi_event(MidiEvent::NoteOff {
+                    channel: MidiChannel::Ch1,
+                    note: 60,
+                    velocity: 20,
+                }),
+                "zero_on" => plugin.send_midi_event(MidiEvent::NoteOn {
+                    channel: MidiChannel::Ch1,
+                    note: 60,
+                    velocity: 0,
+                }),
+                "poly_pressure" => plugin.send_midi_event(MidiEvent::PolyAftertouch {
+                    channel: MidiChannel::Ch1,
+                    note: 60,
+                    pressure: 50,
+                }),
+                "owned" => plugin.send_plugin_event(admission_scalar_event()),
+                "voice_on" => plugin.note_on(MidiChannel::Ch2, 64, 100, 0).map(|_| ()),
+                "voice_off" => plugin.note_off(crate::midi::NoteId(7), 0),
+                "unknown_off" => plugin.note_off(crate::midi::NoteId(500), 0),
+                "expression" => plugin.send_note_expression(
+                    crate::midi::NoteId(7),
+                    crate::midi::NoteExpressionType::Tuning,
+                    0.5,
+                    0,
+                ),
+                "panic" => plugin.midi_panic(),
+                _ => unreachable!(),
+            };
+            assert!(matches!(result, Err(Error::EventInputRejected)));
+        });
+        assert_eq!(plugin.runtime.active_notes, before_notes, "{operation}");
+        assert_eq!(
+            plugin.runtime.ordinary_note_counts, before_counts,
+            "{operation}"
+        );
+        assert_eq!(plugin.runtime.next_note_id, 10);
+        assert_eq!(
+            plugin.runtime.input_events.events.lock().unwrap().len(),
+            MAX_QUEUED_EVENTS
+        );
+        assert_eq!(plugin.runtime.pending_param_changes.len(), 1);
+        assert_eq!(plugin.runtime.pending_param_changes[0].id, 55);
+        assert_eq!(plugin.runtime.pending_param_changes[0].value, 0.25);
+        assert_eq!(handler.native_edits.snapshot(), before_native);
+        assert_eq!(state.realtime_calls.load(Ordering::Acquire), 0);
+        assert!(trace.methods().is_empty());
+        assert!(plugin.runtime.input_events.take_loss());
+    }
+}
+
+#[test]
+fn rejected_event_is_retryable_without_forging_sdk_or_native_application() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    state.no_alloc_process.store(true, Ordering::Release);
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    plugin.runtime.active_notes = Vec::with_capacity(MAX_TRACKED_NOTES);
+    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
+    unsafe {
+        handler.performEdit(42, 0.75);
+    }
+    fill_admission_queue(&mut plugin, MAX_QUEUED_EVENTS);
+    let next = plugin.runtime.next_note_id;
+    allocation_free(|| {
+        assert!(matches!(
+            plugin.note_on(MidiChannel::Ch1, 60, 100, 3),
+            Err(Error::EventInputRejected)
+        ))
+    });
+    assert_eq!(plugin.runtime.next_note_id, next);
+    assert_eq!(handler.native_edits.snapshot().applied, 0);
+    plugin.runtime.input_events.clear();
+    let id = allocation_free(|| plugin.note_on(MidiChannel::Ch1, 60, 100, 3).unwrap());
+    assert_eq!(id.0, next);
+    assert_eq!(plugin.runtime.next_note_id, next + 1);
+    assert_eq!(plugin.runtime.active_notes, [(id.0, 0, 60)]);
+    assert_eq!(handler.native_edits.snapshot().applied, 0);
+    assert_eq!(state.realtime_calls.load(Ordering::Acquire), 0);
+    let mut audio = AudioBuffers::new(0, 1, 16, 48000.0);
+    plugin.process(&mut audio).unwrap();
+    assert_eq!(state.realtime_calls.load(Ordering::Acquire), 1);
+    assert_eq!(handler.native_edits.snapshot().applied, 1);
+}
+
+#[test]
+fn tracked_voice_limit_rejects_without_eviction_then_retries_after_release() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    let mut plugin = plugin_fixture(&Trace::default(), &Arc::new(MockState::default()));
+    plugin.runtime.active_notes = (1..=MAX_TRACKED_NOTES as i32)
+        .map(|id| (id, 0, 60))
+        .collect();
+    plugin.runtime.next_note_id = MAX_TRACKED_NOTES as i32 + 1;
+    let before = plugin.runtime.active_notes.clone();
+    allocation_free(|| {
+        assert!(matches!(
+            plugin.note_on(MidiChannel::Ch1, 61, 100, 0),
+            Err(Error::EventInputRejected)
+        ))
+    });
+    assert_eq!(plugin.runtime.active_notes, before);
+    assert_eq!(plugin.runtime.next_note_id, MAX_TRACKED_NOTES as i32 + 1);
+    assert!(plugin.runtime.input_events.is_empty());
+    allocation_free(|| {
+        plugin.note_off(crate::midi::NoteId(1), 2).unwrap();
+        assert_eq!(
+            plugin.note_on(MidiChannel::Ch1, 61, 100, 3).unwrap().0,
+            MAX_TRACKED_NOTES as i32 + 1
+        );
+    });
+    assert_eq!(plugin.runtime.active_notes.len(), MAX_TRACKED_NOTES);
+    assert!(!plugin
+        .runtime
+        .active_notes
+        .iter()
+        .any(|&(id, _, _)| id == 1));
+    assert_eq!(queued_note_releases(&plugin), [(1, 0, 60)]);
+}
+
+#[test]
+fn tracked_id_wrap_rejects_live_collision_and_allows_retry_after_release() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    for first_id_live in [false, true] {
+        let mut plugin = plugin_fixture(&Trace::default(), &Arc::new(MockState::default()));
+        plugin.runtime.active_notes = Vec::with_capacity(MAX_TRACKED_NOTES);
+        if first_id_live {
+            plugin.runtime.active_notes.push((1, 1, 61));
+        }
+        plugin.runtime.next_note_id = i32::MAX;
+        allocation_free(|| {
+            assert_eq!(
+                plugin.note_on(MidiChannel::Ch1, 60, 100, 0).unwrap().0,
+                i32::MAX
+            )
+        });
+        assert_eq!(plugin.runtime.next_note_id, 1);
+        if first_id_live {
+            let before = plugin.runtime.active_notes.clone();
+            allocation_free(|| {
+                assert!(matches!(
+                    plugin.note_on(MidiChannel::Ch1, 62, 100, 0),
+                    Err(Error::EventInputRejected)
+                ))
+            });
+            assert_eq!(plugin.runtime.active_notes, before);
+            assert_eq!(plugin.runtime.next_note_id, 1);
+            assert_eq!(plugin.runtime.input_events.events.lock().unwrap().len(), 1);
+            allocation_free(|| plugin.note_off(crate::midi::NoteId(1), 0).unwrap());
+        }
+        allocation_free(|| assert_eq!(plugin.note_on(MidiChannel::Ch1, 62, 100, 0).unwrap().0, 1));
+        assert_eq!(plugin.runtime.next_note_id, 2);
+        assert_eq!(
+            plugin
+                .runtime
+                .active_notes
+                .iter()
+                .filter(|&&(id, _, _)| id == 1)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn ordinary_counter_max_rejects_positive_on_but_zero_velocity_release_allows_retry() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    let mut plugin = plugin_fixture(&Trace::default(), &Arc::new(MockState::default()));
+    plugin.runtime.ordinary_note_counts[60] = u16::MAX;
+    let on = MidiEvent::NoteOn {
+        channel: MidiChannel::Ch1,
+        note: 60,
+        velocity: 100,
+    };
+    allocation_free(|| {
+        assert!(matches!(
+            plugin.send_midi_event(on),
+            Err(Error::EventInputRejected)
+        ))
+    });
+    assert!(plugin.runtime.input_events.is_empty());
+    assert_eq!(plugin.runtime.ordinary_note_counts[60], u16::MAX);
+    allocation_free(|| {
+        plugin
+            .send_midi_event(MidiEvent::NoteOn {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 0,
+            })
+            .unwrap();
+        assert_eq!(plugin.runtime.ordinary_note_counts[60], u16::MAX - 1);
+        plugin.send_midi_event(on).unwrap();
+        assert_eq!(plugin.runtime.ordinary_note_counts[60], u16::MAX);
+        assert!(matches!(
+            plugin.send_midi_event(on),
+            Err(Error::EventInputRejected)
+        ));
+        plugin
+            .send_midi_event(MidiEvent::NoteOff {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 0,
+            })
+            .unwrap();
+    });
+    assert_eq!(plugin.runtime.ordinary_note_counts[60], u16::MAX - 1);
+    assert_eq!(plugin.runtime.input_events.events.lock().unwrap().len(), 3);
+    assert_eq!(queued_note_releases(&plugin), [(-1, 0, 60), (-1, 0, 60)]);
+}
+
+#[test]
+fn panic_commits_only_tracked_prefix_and_retry_does_not_replay_it() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    let mut plugin = plugin_fixture(&Trace::default(), &Arc::new(MockState::default()));
+    plugin.runtime.active_notes = vec![(11, 0, 60), (12, 1, 61), (13, 2, 62)];
+    plugin.runtime.next_note_id = 14;
+    plugin.runtime.ordinary_note_counts[65] = 2;
+    fill_admission_queue(&mut plugin, MAX_QUEUED_EVENTS - 2);
+    allocation_free(|| {
+        assert!(matches!(
+            plugin.midi_panic(),
+            Err(Error::EventInputRejected)
+        ))
+    });
+    assert_eq!(plugin.runtime.active_notes, [(13, 2, 62)]);
+    assert_eq!(plugin.runtime.ordinary_note_counts[65], 2);
+    assert_eq!(queued_note_releases(&plugin), [(11, 0, 60), (12, 1, 61)]);
+    plugin.runtime.input_events.clear();
+    allocation_free(|| plugin.midi_panic().unwrap());
+    assert!(plugin.runtime.active_notes.is_empty());
+    assert_eq!(plugin.runtime.ordinary_note_counts[65], 0);
+    assert_eq!(plugin.runtime.next_note_id, 14);
+    assert_eq!(
+        queued_note_releases(&plugin),
+        [(13, 2, 62), (-1, 0, 65), (-1, 0, 65)]
+    );
+    allocation_free(|| plugin.midi_panic().unwrap());
+    assert_eq!(plugin.runtime.input_events.events.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn panic_keeps_each_unadmitted_repeated_ordinary_release_for_retry() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    let mut plugin = plugin_fixture(&Trace::default(), &Arc::new(MockState::default()));
+    plugin.runtime.ordinary_note_counts[60] = 5;
+    plugin.runtime.ordinary_note_counts[61] = 2;
+    fill_admission_queue(&mut plugin, MAX_QUEUED_EVENTS - 3);
+    allocation_free(|| {
+        assert!(matches!(
+            plugin.midi_panic(),
+            Err(Error::EventInputRejected)
+        ))
+    });
+    assert_eq!(plugin.runtime.ordinary_note_counts[60], 2);
+    assert_eq!(plugin.runtime.ordinary_note_counts[61], 2);
+    assert_eq!(queued_note_releases(&plugin), [(-1, 0, 60); 3]);
+    plugin.runtime.input_events.clear();
+    allocation_free(|| plugin.midi_panic().unwrap());
+    assert_eq!(
+        queued_note_releases(&plugin),
+        [(-1, 0, 60), (-1, 0, 60), (-1, 0, 61), (-1, 0, 61)]
+    );
+    assert!(plugin
+        .runtime
+        .ordinary_note_counts
+        .iter()
+        .all(|&count| count == 0));
+}
+
+#[test]
+fn panic_exact_4096_combined_releases_succeeds_and_larger_obligation_is_bounded() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    for remaining in [0u16, 1] {
+        let mut plugin = plugin_fixture(&Trace::default(), &Arc::new(MockState::default()));
+        plugin.runtime.active_notes = (1..=MAX_TRACKED_NOTES as i32)
+            .map(|id| (id, 0, 60))
+            .collect();
+        plugin.runtime.ordinary_note_counts[61] =
+            (MAX_QUEUED_EVENTS - MAX_TRACKED_NOTES) as u16 + remaining;
+        allocation_free(|| {
+            let result = plugin.midi_panic();
+            if remaining == 0 {
+                assert!(result.is_ok());
+            } else {
+                assert!(matches!(result, Err(Error::EventInputRejected)));
+            }
+        });
+        assert!(plugin.runtime.active_notes.is_empty());
+        assert_eq!(
+            plugin.runtime.input_events.events.lock().unwrap().len(),
+            MAX_QUEUED_EVENTS
+        );
+        assert_eq!(plugin.runtime.ordinary_note_counts[61], remaining);
+        if remaining != 0 {
+            plugin.runtime.input_events.clear();
+            allocation_free(|| plugin.midi_panic().unwrap());
+            assert_eq!(queued_note_releases(&plugin), [(-1, 0, 61)]);
+        }
+    }
+}
+
+#[test]
+fn panic_parameter_stage_failure_does_not_undo_or_repeat_accepted_event_releases() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    let mut plugin = plugin_fixture(&Trace::default(), &Arc::new(MockState::default()));
+    plugin.runtime.active_notes = vec![(7, 0, 60)];
+    plugin.runtime.ordinary_note_counts[61] = 2;
+    plugin.runtime.pending_param_changes = (0..MAX_PENDING_PARAM_CHANGES)
+        .map(|id| ParameterChange {
+            id: id as u32,
+            value: 0.5,
+            sample_offset: 0,
+        })
+        .collect();
+    plugin.runtime.midi_mapping_cache = MidiMappingCache {
+        buses: 1,
+        assignments: vec![None; MIDI_CHANNEL_COUNT * MIDI_CONTROLLER_COUNT],
+    };
+    plugin.runtime.midi_mapping_cache.assignments[123] = Some(99);
+    for _ in 0..2 {
+        allocation_free(|| {
+            assert!(matches!(
+                plugin.midi_panic(),
+                Err(Error::ParameterInputRejected)
+            ))
+        });
+        assert!(plugin.runtime.active_notes.is_empty());
+        assert_eq!(plugin.runtime.ordinary_note_counts[61], 0);
+        assert_eq!(
+            plugin.runtime.pending_param_changes.len(),
+            MAX_PENDING_PARAM_CHANGES
+        );
+        assert_eq!(
+            queued_note_releases(&plugin),
+            [(7, 0, 60), (-1, 0, 61), (-1, 0, 61)]
+        );
+    }
+}
+
+#[test]
+fn poisoned_event_admission_retains_exact_note_bookkeeping_without_allocation() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    let mut plugin = plugin_fixture(&Trace::default(), &Arc::new(MockState::default()));
+    plugin.runtime.active_notes = vec![(7, 0, 60)];
+    plugin.runtime.next_note_id = 8;
+    plugin.runtime.ordinary_note_counts[60] = 2;
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = plugin.runtime.input_events.events.lock().unwrap();
+        panic!("controlled input event-list poison");
+    }));
+    allocation_free(|| {
+        assert!(matches!(
+            plugin.note_off(crate::midi::NoteId(7), 0),
+            Err(Error::EventInputRejected)
+        ));
+        assert!(matches!(
+            plugin.note_on(MidiChannel::Ch1, 62, 100, 0),
+            Err(Error::EventInputRejected)
+        ));
+        assert!(matches!(
+            plugin.send_midi_event(MidiEvent::NoteOff {
+                channel: MidiChannel::Ch1,
+                note: 60,
+                velocity: 0
+            }),
+            Err(Error::EventInputRejected)
+        ));
+        assert!(matches!(
+            plugin.midi_panic(),
+            Err(Error::EventInputRejected)
+        ));
+    });
+    assert_eq!(plugin.runtime.active_notes, [(7, 0, 60)]);
+    assert_eq!(plugin.runtime.next_note_id, 8);
+    assert_eq!(plugin.runtime.ordinary_note_counts[60], 2);
+    assert!(plugin.runtime.input_events.take_loss());
+}
+
+#[test]
+fn output_event_overflow_reports_drain_loss_without_falsifying_successful_native_ack() {
+    use crate::midi::PluginEventData;
+    let state = Arc::new(MockState::default());
+    state.no_alloc_process.store(true, Ordering::Release);
+    state.output_event_attempts.store(4097, Ordering::Release);
+    let mut plugin = plugin_fixture(&Trace::default(), &state);
+    plugin.runtime.output_events_owned = Arc::new(ArrayQueue::new(4096));
+    plugin.start_processing().unwrap();
+    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
+    assert_eq!(unsafe { handler.performEdit(42, 0.25) }, kResultOk);
+    plugin
+        .process(&mut AudioBuffers::new(1, 1, 1, 48000.0))
+        .unwrap();
+    assert_eq!(state.rejected_output_events.load(Ordering::Acquire), 1);
+    assert_eq!(state.realtime_calls.load(Ordering::Acquire), 1);
+    let native = handler.native_edits.snapshot();
+    assert_eq!(native.applied, native.submitted);
+    assert_eq!(native.applied, 1);
+    assert!(!native.lost);
+    let (events, lost) = plugin.take_output_events_with_loss();
+    assert!(lost);
+    assert_eq!(events.len(), 4096);
+    for (index, event) in events.iter().enumerate() {
+        assert!(
+            matches!(event.data, PluginEventData::NoteOff { note_id, .. } if note_id == index as i32)
+        );
+    }
+    assert_eq!(plugin.take_output_events_with_loss(), (Vec::new(), false));
+    state.output_event_attempts.store(0, Ordering::Release);
+    plugin
+        .process(&mut AudioBuffers::new(1, 1, 1, 48000.0))
+        .unwrap();
+    assert_eq!(state.realtime_calls.load(Ordering::Acquire), 2);
+    assert_eq!(plugin.take_output_events_with_loss(), (Vec::new(), false));
 }

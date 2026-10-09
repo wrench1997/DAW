@@ -3061,6 +3061,7 @@ impl PluginInternal for PluginImpl {
         // Floor to non-negative (the VST3 SDK treats a negative sampleOffset as undefined);
         // `process()` additionally clamps queued offsets to the actual block length.
         let sample_offset = sample_offset.max(0);
+        let mut note_count_commit = None;
         unsafe {
             let mut vst_event: Event = std::mem::zeroed();
             vst_event.busIndex = 0;
@@ -3076,11 +3077,14 @@ impl PluginInternal for PluginImpl {
                 } => {
                     let index = channel.as_index() as usize * 128 + note as usize;
                     let released = write_midi_note_on(&mut vst_event, channel, note, velocity);
-                    self.runtime.ordinary_note_counts[index] = if released {
+                    let next_count = if released {
                         self.runtime.ordinary_note_counts[index].saturating_sub(1)
                     } else {
-                        self.runtime.ordinary_note_counts[index].saturating_add(1)
+                        self.runtime.ordinary_note_counts[index]
+                            .checked_add(1)
+                            .ok_or(Error::EventInputRejected)?
                     };
+                    note_count_commit = Some((index, next_count));
                 }
                 MidiEvent::NoteOff {
                     channel,
@@ -3088,8 +3092,10 @@ impl PluginInternal for PluginImpl {
                     velocity,
                 } => {
                     let index = channel.as_index() as usize * 128 + note as usize;
-                    self.runtime.ordinary_note_counts[index] =
-                        self.runtime.ordinary_note_counts[index].saturating_sub(1);
+                    note_count_commit = Some((
+                        index,
+                        self.runtime.ordinary_note_counts[index].saturating_sub(1),
+                    ));
                     write_note_off_event(&mut vst_event, channel, note, velocity);
                 }
                 MidiEvent::ControlChange {
@@ -3159,14 +3165,22 @@ impl PluginInternal for PluginImpl {
                 }
             }
 
-            self.runtime.input_events.add_raw_event(&vst_event);
+            self.runtime
+                .input_events
+                .try_add_raw_event(&vst_event)
+                .map_err(|_| Error::EventInputRejected)?;
+        }
+        if let Some((index, count)) = note_count_commit {
+            self.runtime.ordinary_note_counts[index] = count;
         }
         Ok(())
     }
 
     fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
-        self.runtime.input_events.add_event(event);
-        Ok(())
+        self.runtime
+            .input_events
+            .try_add_event(event)
+            .map_err(|_| Error::EventInputRejected)
     }
 
     fn start_processing(&mut self) -> Result<()> {
@@ -3773,20 +3787,20 @@ impl PluginInternal for PluginImpl {
         velocity: u8,
         sample_offset: i32,
     ) -> Result<crate::midi::NoteId> {
-        let id = self.runtime.next_note_id;
-        self.runtime.next_note_id = self.runtime.next_note_id.wrapping_add(1).max(1);
-        // Remember which (channel, pitch) this id stands for. VST3 note-off carries both the
-        // noteId *and* the pitch/channel, and plugins that don't track note ids (most non-MPE
-        // synths) match the release by pitch — so `note_off` has to reproduce them.
+        // Do not admit a voice whose exact release obligation cannot be retained.
         if self.runtime.active_notes.len() >= MAX_TRACKED_NOTES {
-            // Full only if a caller started notes it never released (a MIDI panic sends CCs, not
-            // note-offs, so entries can also be left behind that way). Evict one in O(1) rather
-            // than refusing to track, so new notes keep getting correct releases.
-            self.runtime.active_notes.swap_remove(0);
+            return Err(Error::EventInputRejected);
         }
-        self.runtime
+        let id = self.runtime.next_note_id;
+        // Preserve the established wrap policy, but never reuse a still-live candidate ID.
+        if self
+            .runtime
             .active_notes
-            .push((id, channel.as_index() as i16, note as i16));
+            .iter()
+            .any(|&(active, _, _)| active == id)
+        {
+            return Err(Error::EventInputRejected);
+        }
         unsafe {
             let mut ev: Event = std::mem::zeroed();
             ev.busIndex = 0;
@@ -3797,8 +3811,15 @@ impl PluginInternal for PluginImpl {
             ev.__field0.noteOn.pitch = note as i16;
             ev.__field0.noteOn.velocity = velocity as f32 / 127.0;
             ev.__field0.noteOn.noteId = id;
-            self.runtime.input_events.add_raw_event(&ev);
+            self.runtime
+                .input_events
+                .try_add_raw_event(&ev)
+                .map_err(|_| Error::EventInputRejected)?;
         }
+        self.runtime.next_note_id = id.wrapping_add(1).max(1);
+        self.runtime
+            .active_notes
+            .push((id, channel.as_index() as i16, note as i16));
         Ok(crate::midi::NoteId(id))
     }
 
@@ -3806,12 +3827,12 @@ impl PluginInternal for PluginImpl {
         // Recover the note's channel and pitch from the note-on. Without them the event carries
         // pitch 0 on channel 1, which any synth matching releases by pitch ignores — leaving the
         // real note sounding forever.
-        let tracked = self
+        let tracked_index = self
             .runtime
             .active_notes
             .iter()
-            .position(|&(tracked_id, _, _)| tracked_id == id.0)
-            .map(|i| self.runtime.active_notes.swap_remove(i));
+            .position(|&(tracked_id, _, _)| tracked_id == id.0);
+        let tracked = tracked_index.map(|index| self.runtime.active_notes[index]);
         unsafe {
             let mut ev: Event = std::mem::zeroed();
             ev.busIndex = 0;
@@ -3824,7 +3845,13 @@ impl PluginInternal for PluginImpl {
                 ev.__field0.noteOff.pitch = pitch;
             }
             // A release velocity of 0 is the SDK's own default for "unspecified".
-            self.runtime.input_events.add_raw_event(&ev);
+            self.runtime
+                .input_events
+                .try_add_raw_event(&ev)
+                .map_err(|_| Error::EventInputRejected)?;
+        }
+        if let Some(index) = tracked_index {
+            self.runtime.active_notes.swap_remove(index);
         }
         Ok(())
     }
@@ -3845,7 +3872,10 @@ impl PluginInternal for PluginImpl {
             ev.__field0.noteExpressionValue.typeId = kind.type_id();
             ev.__field0.noteExpressionValue.noteId = id.0;
             ev.__field0.noteExpressionValue.value = value.clamp(0.0, 1.0);
-            self.runtime.input_events.add_raw_event(&ev);
+            self.runtime
+                .input_events
+                .try_add_raw_event(&ev)
+                .map_err(|_| Error::EventInputRejected)?;
         }
         Ok(())
     }
@@ -4349,8 +4379,11 @@ impl PluginInternal for PluginImpl {
     }
 
     fn midi_panic(&mut self) -> Result<()> {
-        // Release per-voice notes with their exact ids first.
-        for &(note_id, channel, pitch) in self.runtime.active_notes.iter() {
+        // Commit a FIFO prefix only. One compaction retains every unadmitted exact-ID
+        // release, so a retry neither loses obligations nor replays accepted releases.
+        let mut accepted_releases = 0usize;
+        let mut tracked_complete = true;
+        for &(note_id, channel, pitch) in &self.runtime.active_notes {
             unsafe {
                 let mut event: Event = std::mem::zeroed();
                 event.busIndex = 0;
@@ -4360,30 +4393,46 @@ impl PluginInternal for PluginImpl {
                 event.__field0.noteOff.noteId = note_id;
                 event.__field0.noteOff.channel = channel;
                 event.__field0.noteOff.pitch = pitch;
-                self.runtime.input_events.add_raw_event(&event);
+                if accepted_releases == MAX_QUEUED_EVENTS
+                    || self.runtime.input_events.try_add_raw_event(&event).is_err()
+                {
+                    tracked_complete = false;
+                    break;
+                }
             }
+            accepted_releases += 1;
         }
-        self.runtime.active_notes.clear();
+        self.runtime.active_notes.drain(..accepted_releases);
+        if !tracked_complete {
+            return Err(Error::EventInputRejected);
+        }
 
-        // Ordinary MIDI events use noteId -1, so release every channel/pitch that is active.
+        // Ordinary MIDI can hold repeated obligations for the same channel/pitch.
+        // Decrement one per accepted release; never silently clear a larger count.
         for index in 0..self.runtime.ordinary_note_counts.len() {
-            if self.runtime.ordinary_note_counts[index] == 0 {
-                continue;
+            while self.runtime.ordinary_note_counts[index] != 0 {
+                if accepted_releases == MAX_QUEUED_EVENTS {
+                    return Err(Error::EventInputRejected);
+                }
+                let channel = (index / 128) as i16;
+                let pitch = (index % 128) as i16;
+                unsafe {
+                    let mut event: Event = std::mem::zeroed();
+                    event.busIndex = 0;
+                    event.sampleOffset = 0;
+                    event.flags = Event_::EventFlags_::kIsLive as u16;
+                    event.r#type = kNoteOffEvent as u16;
+                    event.__field0.noteOff.noteId = -1;
+                    event.__field0.noteOff.channel = channel;
+                    event.__field0.noteOff.pitch = pitch;
+                    self.runtime
+                        .input_events
+                        .try_add_raw_event(&event)
+                        .map_err(|_| Error::EventInputRejected)?;
+                }
+                self.runtime.ordinary_note_counts[index] -= 1;
+                accepted_releases += 1;
             }
-            let channel = (index / 128) as i16;
-            let pitch = (index % 128) as i16;
-            unsafe {
-                let mut event: Event = std::mem::zeroed();
-                event.busIndex = 0;
-                event.sampleOffset = 0;
-                event.flags = Event_::EventFlags_::kIsLive as u16;
-                event.r#type = kNoteOffEvent as u16;
-                event.__field0.noteOff.noteId = -1;
-                event.__field0.noteOff.channel = channel;
-                event.__field0.noteOff.pitch = pitch;
-                self.runtime.input_events.add_raw_event(&event);
-            }
-            self.runtime.ordinary_note_counts[index] = 0;
         }
 
         // Also route the standard panic controllers through IMidiMapping for plugins that

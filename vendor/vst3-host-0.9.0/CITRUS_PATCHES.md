@@ -273,3 +273,27 @@ allocator helper in `native_edit_transport.rs` changes; its production transport
 identical. No event, helper, wire, application, timing or processor-lease behavior is changed.
 See the parameter-storage section of `docs/PLUGIN_PROCESSOR_DOMAINS.md` and executed receipts in
 `docs/WORK_LOG.md` for constructor memory, comparative cost and qualification limits.
+
+## Checked event admission and transactional note bookkeeping
+
+The event portions of `src/internal/com_implementations.rs` replace silent owned/raw enqueue
+with checked results, reused by `IEventList::addEvent`. Existing header, aggregate payload and
+per-event limits are checked under one mutex before raw payload copying. Malformed metadata
+and unsupported variants fail without publication; admitted payload ownership/UTF-16
+representation remains unchanged. Checked admission failures use the existing loss latch
+rather than logging. No payload arena or lifetime-sticky output-event fault is introduced.
+
+`src/internal/plugin_impl.rs` propagates `src/error.rs`'s unit `EventInputRejected`. Ordinary
+counters and tracked IDs/voices commit only after enqueue. Full tracked storage, a full ordinary
+counter and a still-active wrapped candidate ID reject before enqueue without eviction or
+silent saturation. Rejected releases retain tracking. Panic commits only its admitted prefix,
+up to 4096 combined releases, and retains each unadmitted obligation for retry. A later parameter
+failure cannot undo that prefix. These are disclosed correctness changes, not only refactoring.
+
+Focused COM/domain fixtures check limits, pre-copy rejection, malformed pointers/lengths,
+FIFO/deep-copy ownership, poison/no-allocation scalar paths, bookkeeping rollback, wrapped IDs,
+partial panic/retry and output-event loss versus successful native acknowledgment. Existing
+state, split-block, MIDI, native delivery and Surge guards are retained. Source scope excludes
+helper/protocol/application/timing/lease and payload representation. See the event section in
+`docs/PLUGIN_PROCESSOR_DOMAINS.md` for remaining legacy ignored-result and void-staging limits.
+The original upstream archive, MIT license, version and dependency manifests are unchanged.

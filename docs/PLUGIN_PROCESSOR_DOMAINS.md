@@ -432,3 +432,49 @@ Raw cost CSV CRLF bytes are preserved exactly. The archive excludes executables,
 plugin assets, captured state/audio, caches and unrelated files. It is a validation
 appendix, not another Git source tree or a renewed whole-plugin realtime measurement.
 The earlier optimized244f622 appendix stays independently historical.
+
+## Checked event admission and note-release obligations
+
+The event-admission checkpoint checks the existing 4096 event-header, 8 MiB aggregate-payload,
+1 MiB per-data-payload and 16,384 UTF-16-unit per-text limits before copying raw SDK payloads.
+One existing event-list mutex covers capacity/metadata checks, deep copy and publication.
+Unknown variants, invalid/oversized declared lengths, nonempty null payloads and misaligned text pointers
+are rejected before constructing slices. Raw callers must still provide initialized selected
+union fields and readable payload memory for admitted events; these checks cannot validate an
+arbitrary foreign pointer. Text representation and declared-length copying are unchanged.
+
+The checked owned/raw paths return an allocation-free internal error, and SDK `addEvent` returns
+failure when enqueue fails. Checked admission and SDK addEvent callbacks no longer format or log errors;
+the existing loss latch reports failure and retains its existing draining acknowledgment.
+Rejected writes leave event order, count and payload budget unchanged. Scalar admission,
+full-capacity and poisoned-lock rejection use no allocation/free in focused counted tests.
+Payload success still allocates a Vec, and rejecting an already-owned payload may free it.
+This is not a prepared payload arena or whole-Process allocation guarantee.
+
+`EventInputRejected` now reaches ordinary MIDI, owned events, note expressions and tracked
+voice APIs instead of claiming success after a dropped event. Note counters, candidate IDs and
+tracked voices commit only after admission. A rejected note-off retains its release obligation.
+At 1024 tracked voices a new tracked note is rejected rather than evicting an existing voice.
+A positive ordinary note-on at its per-key u16 maximum is rejected; a zero-velocity note-on still
+acts as note-off. The existing wrapping ID policy is retained, with rejection if its candidate
+is still active; releasing that ID permits a retry without skipping IDs.
+
+Panic is prefix-commit, not atomic rollback: exact tracked releases are queued first in tracker
+order, then one event per ordinary count. Only admitted releases are removed/decremented.
+It admits at most 4096 releases per call across both kinds; full queues or remaining obligations
+return failure and retain the unsent suffix for retry. Exactly 4096 releases succeed when no
+obligation remains. A later mapped-controller parameter failure does not undo earlier accepted
+releases. Accepted admission means queued, not confirmation that SDK Process applied it.
+Event admission itself does not call SDK Process or acknowledge native parameters. Output-event
+overflow retains its existing one-shot loss-aware drain and does not turn a successful SDK call
+into the separate permanent output-parameter fault or falsify native acknowledgment.
+
+Production changes in this checkpoint are limited to event admission and note bookkeeping.
+Chunk routing, failed-process cleanup, state fences, parameter/native storage and helper/wire
+behavior are unchanged. The active application propagates event failures through its existing
+slot-fault/note-safety path. The unchanged vendor legacy playback/realtime helpers still ignore
+some send results. Existing void `reset_with` / staging-drain poison behavior also remains a
+separate follow-up. Existing getEvent/getEventCount and clear/reset diagnostics are also unchanged.
+Public invalid-MIDI validation may still allocate formatted errors.
+Locks, payload allocation/free and arbitrary plugin callbacks remain; the single-thread helper's
+historical 346.9 ms native-resize stall is not resolved by this correctness slice.

@@ -59,6 +59,10 @@ pub enum Error {
     #[error("Plugin is not processing")]
     NotProcessing,
 
+    /// Event admission or note bookkeeping failed; panic may have committed an admitted prefix.
+    #[error("Input event was rejected; unqueued note releases remain available for retry")]
+    EventInputRejected,
+
     /// Host input could not enter the bounded parameter store. No SDK process call is made.
     #[error("Input parameter changes were rejected by bounded storage")]
     ParameterInputRejected,

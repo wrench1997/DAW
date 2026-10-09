@@ -174,7 +174,7 @@ Append-only from 2026-10-08 UTC. Timestamps use UTC. Source inspection, executed
 - Verified merged source commit `bb5817118b16fde04689d21131fdf1510a177713` (0.5.0-alpha.1). `cargo check --offline --locked --no-default-features --all-targets` passed. `cargo test --offline --locked --no-default-features --bin citrus-studio` completed with **860 passed, 0 failed, 0 ignored**, using the default test stack and real linked installed ALSA runtime. The previously failing atomic activation and new 64KiB/zero-capacity packet construction tests both pass.
 - Integrated narrow heap fix `3ccaf104` as `845fbc2`: allocate TimelinePacket directly on the control-thread heap, initialize required scalar fields in place, leave its existing MaybeUninit event storage untouched. Independent static review and201-source subset tests passed. Refill/audio callback allocation behavior is unchanged; no stack/profile increase or test suppression was used.
 - Initial complete rerun reached859 passes with one historical Windows-path fixture failure on Linux. Only its non-Windows test path is now POSIX-native; Windows retains the original backslash fixture and production normalization is unchanged. The final complete860-test run passed.
-- Corrected two split App-test default-field Clippy findings. Local diagnostic no-default Clippy exits0 with only inherited Linux MIDI unused/dead-code warnings; this is not a claim of strict Windows Clippy completion. Full fmt and diff checks pass.
+- Corrected two split App-test default-field Clippy findings. Local diagnostic no-default Clippy exits 0 with only inherited Linux MIDI unused/dead-code warnings; this is not a claim of strict Windows Clippy completion. Full fmt and diff checks pass.
 - Packaging/helper Python discovery passes52 tests; explicit feature-document allowlist includes media recovery, cancellation/export contract, split fidelity and WAV options, and all14 packaged source-document links validate. The Windows fixture CRLF fix is included; production checksum enforcement remains unchanged.
 - The following canonical documentation checkpoint changes no executable inputs. A single branch push will run both unweakened Windows quality and pinned static-CRT preview workflows. Main, official release tooling, publishing defaults and credentials remain unchanged.
 
@@ -688,7 +688,7 @@ optimized bounded-capture evidence remains future work.
 
 ## 2026-10-09 12:59 UTC — Exact combined real-plugin check and publication freeze
 
-- Combined4fdfbc2 + helper9dd18d74 passes all **four default2048** ordinary/routed × fixed/changing cases after real Surge Effects0→32 latency fence and actual stopped Retry/new revision/epoch. Every active endpoint completes375 blocks with357 exact +18 startup; exact PDC4896/7328 and events pass. Fresh Surge state restore immediately sounds the first note (sample60, peak0.21138866245746613 over1024frames), with controller0.8691863417625427 and component−6.27905654907227dB unchanged.
+- Combined4fdfbc2 + helper9dd18d74 passes all **four default2048** ordinary/routed × fixed/changing cases after real Surge Effects0→32 latency fence and actual stopped Retry/new revision/epoch. Every active endpoint completes375 blocks with357 exact +18 startup; exact PDC4896/7328 and events pass. Fresh Surge state restore immediately sounds the first note (sample60, peak0.21138866245746613 over1024frames), with controller0.8691863417625427 and component−6.27905654907227 dB unchanged.
 - Matched preallocated **debug128 remains2/4**: fixed ordinary/routed cases fail FX DeadlineMiss at sequence151/1. No capture overflow occurs. Delivery PASS must not imply timing PASS: passing2048 changing cases still have14 callback-core interval overruns each;128 changing cases have18/24. The helper/harness/source binding and each raw non-audio receipt hash are in the separate [combined summary](../qa/plugin_timing_combined/README.md). It retains original summary bytes with SHA256 `57300eb4cac2e40eb81d7db9cb4228c475f11d7a12bfee82c63c1cf0b867d0e7`; its small publication is a summary, not a complete new reproduction harness.
 - Added this distinct three-file summary with pinned inventory and strict missing/changed/extra/rewrite package regressions. Historical250-file debug publication and earlier91 files remain byte-identical and separately attributed. Full post-document/package Python verification is **207 tests**, including actual Unix helper cases. Actual package closure is **383 inputs**. New exact Windows CI is required after publication. The approved cold optimized experiment runs separately and is not a prerequisite or a claimed result of this correctness checkpoint.
 
@@ -877,3 +877,73 @@ The prior dense-index native run remains explicitly superseded and is not counte
 - Approved immutable source-only appendix `parameter-storage-bf573a4-source-evidence.zip`:5092126bytes,SHA1bd33df7c1ec9afa58cd5b6a508b7af12c4a84f68ce4ad12cda5dca3f388773c. Content-addressed435 text objects reconstruct1677 logical files, with450 members verified,28 source/license associations and no binaries/assets/state/audio/cache payload. All rejected drafts and original observations remain; the archive avoids redundant copies without losing reconstructability.
 - [Nine concise Git records](../qa/parameter_storage_cost/README.md) preserve complete final matrices, constructor/native/source results,105-entry raw-cost inventory and exact full-archive identity. Raw/published hashes and normalization counts remain explicit; the private reverse map is not published. The two original CSVs keep their CRLF bytes with exact file-specific attributes; every other new text file usesLF. Strict whitelists/inventories reject tampering and partial sets.
 - Exact final Python aggregate passes **231 cases**, including four actual Unix descriptor tests. Real package closure is **496 inputs** with all existing and new provenance/link checks; all61 new correctness/cost files retain publication bytes, including raw CRLF CSVs. Production source remainsfb7b91a and helpera29e4942, with no post-gate runtime edits.
+
+## 2026-10-09 — checked event admission and note bookkeeping
+
+A separate bounded correctness slice on `bf573a4` checks event-header/payload admission before
+raw deep copy and propagates enqueue failure through MIDI, owned-event, expression and tracked
+voice APIs. Existing limits are 4096 headers, 8 MiB total payload, 1 MiB individual data and
+16,384 UTF-16 units per text event. Rejected admission preserves queued contents and budgets;
+callbacks use bounded loss evidence rather than formatting admission errors.
+
+Ordinary counts and tracked voice IDs commit after successful admission. Full tracking rejects
+instead of evicting an active voice; full ordinary counters and wrapped-ID collisions reject
+without mutation. Panic commits only its admitted release prefix, retains remaining tracked and
+ordinary obligations, and bounds each call to 4096 combined releases. Controller-parameter
+failure after successful releases cannot undo or replay that prefix. These are explicit behavior
+fixes. Admission remains distinct from SDK processing or native-edit acknowledgment.
+
+Source-linked available vendor suite: 362 passing tests, one known absent upstream SDK metadata
+fixture filtered; 26 doctests; 22 helper, 5 editor-protocol and 2 transport-protocol tests. Strict
+root Clippy passes; direct vendor Clippy retains only the established deprecated and intentional
+drain_collect exceptions. Formatting/diff checks, 124 packaging tests, 79 Python helper-smoke
+unit tests, 4 Unix descriptor tests and direct copied-helper smoke pass. Dependency versions and
+actual enabled cpal-backend/process-isolation features remain recorded in the temporary harness;
+its lib.path points directly to unchanged production source files. The original unavailable
+upstream dev-dependency manifest and missing fixture are not claimed as executed.
+
+New focused tests cover every supported scalar and payload boundary, malformed metadata,
+no-copy rejection with unread payload pointers, exact aggregate limits, deep-copy/FIFO ownership,
+poison, scalar first-use/high-water/retry with zero measured allocation/free, and transactional
+note/panic rejection. A successful SDK mock that ignores output-event overflow still acknowledges
+its native input, succeeds and exposes the existing loss-aware event drain; that loss does not
+become the separate permanent output-parameter fault. All existing native/state/Surge/split and
+failed-SDK cleanup regressions run in the same suite. Initial fixture errors (using valid legacy
+MIDI tag 65535 as an unknown tag, and output-fixture constructor/import mistakes) are retained in
+raw logs; they required no production workaround.
+
+Payload Vec allocation/free, Mutex synchronization, legacy void staging failure handling and
+vendor legacy playback/realtime ignored results remain outside this slice. Active App fault
+propagation was inspected but not changed. Helper/wire/application/timing/lease/native transport
+and parameter storage behavior remain unchanged; no worker or hidden state-settlement Process
+is introduced. The historical 346.9 ms native-resize stall remains unresolved. Actual-plugin
+and native-window acceptance is recorded separately after immutable source/helper freeze.
+
+Frozen copied helper: `59b6bcbdb7a90b08fe5c8ebb2da2ba3ffe368c1089d70a6c7d4e7ab28b90d086`.
+Rust diff: `482031cc4050ca3747db2b276a5b2957b0a55d32f98a07c684eb408683584e23`.
+The cumulative patch replays against the checksum-verified original crate with every source file
+byte-compared. Package script/test changes are only refreshed patch/manifest pins. The new helper
+passes all 12 fresh/used-active/used-stopped Surge cases at 17/47/128/256 frames and Stochas
+state/MIDI. No caller warmup or state-guard bypass is used. Exact native-produced-state first-note
+and window checks remain separately recorded. Evidence root: the retained event-admission QA record.
+
+The newly produced event-helper native stopped-edit/poll/save blob restores on the same frozen
+helper with normalized volume 0.8691863417625427 and component volume −6.27905654907227 dB before
+and after first-note PCM at 17/47/128/256. PCM is finite/nonzero without positive warmup; observed
+first nonzero frames 25/46/24/23 are functional evidence, not latency qualification. Independent
+exact-helper default2048 checks pass four routed/ordinary fixed/changing cases plus authoritative
+fresh-state first note, with correct PDC and 8 note-on / 8 note-off routed pairs, no worker fault or
+capture overflow. Changing debug cases retain 12/14 core interval overruns and do not establish
+performance acceptance. That separate receipt root is
+the separately retained `checked-event-admission-regression` record.
+
+Independent native acceptance on the frozen event helper passes the complete trusted fixture,
+new stopped Surge edit plus 20 display/gesture poll rounds and zero-sample SaveState, fresh native
+numeric agreement, same-window preflight rejection before detach, closed-used rejection/reopen,
+and Stochas used-instance empty reset then exact native-created row115/step5 cell restoration,
+re-export and repaint. Shutdown exits 0 with no native windows remaining. All 41 source hashes
+are independently verified before/after; 113 raw wire exchanges and new captures are retained.
+Receipt: the retained `native-event-admission-receipt.json`,
+SHA256 `835ccf39085011738adf12cd5587ad4cac8d3968a0d0318023b1741a1b0dfc25`.
+The independent review binds the final Rust/helper bytes with no source blocker. GUI results do
+not imply DSP-thread isolation, resize performance, hardware or cross-platform qualification.
