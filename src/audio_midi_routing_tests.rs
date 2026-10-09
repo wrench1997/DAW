@@ -1823,3 +1823,190 @@ fn empty_endpoint_destination_still_reserves_retirement_for_late_worker_rejectio
     drop(reclaim.pop().expect("rejected candidate was retired, not leaked or callback-dropped"));
     fixture.finish();
 }
+
+#[test]
+fn late_plugin_latency_observation_cannot_become_an_unfaulted_suspended_graph() {
+    // The worker publishes after the production pre-admission refresh. Cover the later
+    // automation-batch read, normal render's third refresh, and paused monitor refresh.
+    for budget in [128, 256, 512, 2048] {
+        for routed in [false, true] {
+            for phase in 0..4 {
+                let mut project = midi_route_project(true, true);
+                if !routed {
+                    for plugin in &mut project.plugin_instances {
+                        plugin.midi_ports = crate::plugin_midi_routing::PluginMidiPorts::default();
+                    }
+                }
+                if phase == 0 || phase == 3 {
+                    push_timeline_automation(&mut project, 1,
+                        AutomationTarget::PluginParameter { instance: INSERT_INSTANCE, parameter: 9 },
+                        AutomationCurve::Linear,
+                        [AutomationPoint::new(0.0, 0.25), AutomationPoint::new(1.0, 0.75)]);
+                }
+                let mut fixture = MidiGraphFixture::new(project, false, true, true, &[]);
+                fixture.select_timing_profile(budget);
+                fixture.activation_playing = phase != 2;
+                fixture.activate(2, 0);
+                if phase == 0 || phase == 3 {
+                    assert_eq!(fixture.dsp.timeline_plugin_automation_bindings.iter().count(), 1);
+                }
+                fixture.dsp.raw_callback_frames = budget as usize;
+                crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+                    fixture.dsp.refresh_pdc_plan(&fixture.status, budget as usize);
+                    assert!(fixture.dsp.admit_plugin_callback(budget as usize));
+                });
+                let original = fixture.controls[2].plugin_latency_snapshot().unwrap();
+                let old_revision = original.revision;
+                fixture.insert.latency_frames.store(32, Ordering::Release);
+                assert!(fixture.controls[2].set_slot_config(0, SlotConfig::default()));
+                wait_until(|| fixture.controls[2].plugin_latency_snapshot()
+                    .is_some_and(|snapshot| snapshot.revision != old_revision));
+                if phase == 3 {
+                    // The first batch identity read still matches; drift becomes visible only
+                    // in precommit's second read, after matrix/event preparation has finished.
+                    let newer = fixture.controls[2].plugin_latency_snapshot().unwrap();
+                    fixture.dsp.insert_endpoints[2].as_mut().unwrap().endpoint
+                        .script_fresh_endpoint_snapshots([Some(original), Some(newer)]);
+                }
+                let submissions: Vec<_> = fixture.controls.iter().map(|c| c.stats().submitted).collect();
+                let mut output = vec![[1.0; 2]; budget as usize];
+                crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+                    if phase == 2 {
+                        let monitor = PausedMidiMonitorRoute {
+                            generator_index: fixture.dsp.find_generator_slot(SINK_CHANNEL).unwrap(),
+                            mixer_track: 2,
+                        };
+                        fixture.dsp.render_paused_midi_monitor_graph(&fixture.status, budget as usize, monitor);
+                        output.copy_from_slice(&fixture.dsp.master_block[..budget as usize]);
+                    } else {
+                        render_transport_chunk(&mut fixture.dsp, &fixture.status, &fixture.mailbox,
+                            &mut fixture.transport, budget as usize,
+                            |offset, block| output[offset..offset + block.len()].copy_from_slice(block));
+                    }
+                });
+                assert!(output.iter().all(|frame| *frame == [0.0; 2]));
+                let fault = fixture.dsp.plugin_fault.expect("late observed drift must not stay Priming");
+                assert_eq!(fault.reason, PluginProcessingFaultReason::LatencyDrift);
+                assert_eq!(fault.endpoint_id, INSERT_INSTANCE + 10_000);
+                assert_eq!(fault.epoch, 2);
+                assert_eq!(fault.timing_revision, fixture.timing.revision);
+                assert_eq!(fault.raw_callback_frames, budget);
+                assert_eq!(fault.expected_sequence, 0);
+                assert_eq!(fixture.controls.iter().map(|c| c.stats().submitted).collect::<Vec<_>>(), submissions);
+                // Further raw callbacks cannot service paused MIDI/parameters or silently
+                // recover. A same-plan chase is rejected; explicit stopped Retry is required.
+                assert!(fixture.render(budget as usize).iter().all(|frame| *frame == [0.0; 2]));
+                fixture.queue_activation(3, 0);
+                crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+                    fixture.transport.apply_pending_timeline_activation(&fixture.status, &mut fixture.dsp);
+                });
+                assert_eq!(fixture.transport.epoch, 2);
+                assert_eq!(fixture.dsp.plugin_fault, Some(fault));
+                fixture.select_timing_profile(budget);
+                fixture.activation_playing = false;
+                fixture.activate(4, 0);
+                assert!(fixture.dsp.plugin_fault.is_none());
+                assert!(!fixture.transport.request.playing);
+                assert_eq!(fixture.dsp.plugin_fault_count, 1);
+                fixture.finish();
+            }
+        }
+    }
+}
+
+#[test]
+fn generic_timeline_failure_retains_observed_drift_without_an_extra_shared_read() {
+    for observed_drift in [false, true] {
+        let mut fixture = MidiGraphFixture::new(midi_route_project(false, false), false, true, true, &[]);
+        fixture.activate(2, 0);
+        let endpoint = &mut fixture.dsp.insert_endpoints[2].as_mut().unwrap().endpoint;
+        let original = endpoint.coherent_latency_snapshot().unwrap();
+        let newer = PluginLatencySnapshot { revision: next_nonzero_id(original.revision), ..original };
+        endpoint.script_fresh_endpoint_snapshots([if observed_drift { Some(newer) } else { None }, None]);
+        crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+            // Represents the identity-bearing batch read that failed before cleanup.
+            let _ = fixture.dsp.insert_endpoints[2].as_mut().unwrap().endpoint.exact_endpoint_snapshot();
+            fixture.dsp.fail_timeline_block();
+        });
+        assert_eq!(fixture.dsp.insert_endpoints[2].as_ref().unwrap().endpoint.fresh_snapshot_script_cursor, 1,
+            "generic failure classification must not re-read shared metadata");
+        if observed_drift {
+            let fault = fixture.dsp.plugin_fault.unwrap();
+            assert_eq!(fault.endpoint_id, INSERT_INSTANCE + 10_000);
+            assert_eq!(fault.reason, PluginProcessingFaultReason::LatencyDrift);
+        } else {
+            assert!(fixture.dsp.plugin_fault.is_none(), "packet failure plus an unavailable read is not positive drift evidence");
+        }
+        fixture.finish();
+    }
+}
+
+#[test]
+fn late_paused_monitor_fault_fences_same_callback_safety_and_parameter_services() {
+    for frames in [31, 128, 2048] {
+        let mut project = midi_route_project(false, false);
+        for plugin in &mut project.plugin_instances {
+            plugin.midi_ports = crate::plugin_midi_routing::PluginMidiPorts::default();
+        }
+        let mut fixture = MidiGraphFixture::new(project, false, true, true, &[]);
+        for endpoint in fixture.dsp.generator_endpoints.iter_mut().flatten() {
+            endpoint.endpoint.project_session = 7;
+        }
+        fixture.activation_playing = false;
+        fixture.activate(2, 0);
+        let source_index = fixture.dsp.find_generator_slot(SOURCE_CHANNEL).unwrap();
+        let source_id = fixture.dsp.generator_endpoints[source_index].as_ref().unwrap().endpoint_id;
+        let sink_id = fixture.dsp.generator_endpoints[fixture.dsp.find_generator_slot(SINK_CHANNEL).unwrap()]
+            .as_ref().unwrap().endpoint_id;
+        let (retired_midi_tx, _retired_midi_rx) = RingBuffer::new(4);
+        let (midi_event_tx, _midi_event_rx) = RingBuffer::new(4);
+        fixture.dsp.retired_midi_inputs = Some(retired_midi_tx);
+        fixture.dsp.midi_input_route_events = Some(midi_event_tx);
+        let (_sender, receiver) = crate::midi_device::test_input_mailbox(8, 33);
+        fixture.dsp.install_midi_input(5, PreparedMidiInputRoute::new(receiver, MidiGeneratorRouteStamp {
+            project_session: 7, channel_id: SINK_CHANNEL, endpoint_id: sink_id,
+            plugin_instance_id: SINK_INSTANCE, slot: None,
+        }).unwrap());
+        let mut batch = TimelineEndpointBatchPlan::new_boxed();
+        let edit = ParameterEditSubmission {
+            edit_id: crate::plugin_parameter_edit::ParameterEditId(702),
+            route: ParameterEditRoute {
+                project_session: 7,
+                endpoint: crate::plugin_parameter_edit::ParameterEndpoint {
+                    kind: ParameterEndpointKind::Generator, id: source_id,
+                },
+                instance_id: SOURCE_INSTANCE, slot: 0, parameter_id: 9,
+            }, normalized: 0.7,
+        };
+        assert_eq!(DspState::try_admit_plugin_parameter_edit(
+            &mut fixture.dsp.generator_endpoints[source_index].as_mut().unwrap().endpoint,
+            TimelineEndpointKey::new(SOURCE_CHANNEL, source_id, SOURCE_INSTANCE),
+            false, edit, batch.as_mut()), Ok(true));
+        fixture.dsp.admitted_live_edit_endpoint_count = 1;
+        fixture.dsp.paused_midi_safety[source_index] = Some(PausedMidiSafetyService {
+            stamp: MidiGeneratorRouteStamp { project_session: 7, channel_id: SOURCE_CHANNEL,
+                endpoint_id: source_id, plugin_instance_id: SOURCE_INSTANCE, slot: None },
+            remaining_frames: 128,
+        });
+        fixture.dsp.raw_callback_frames = frames;
+        fixture.dsp.refresh_pdc_plan(&fixture.status, frames);
+        assert!(fixture.dsp.admit_plugin_callback(frames));
+        let old = fixture.controls[2].plugin_latency_snapshot().unwrap().revision;
+        fixture.insert.latency_frames.store(32, Ordering::Release);
+        assert!(fixture.controls[2].set_slot_config(0, SlotConfig::default()));
+        wait_until(|| fixture.controls[2].plugin_latency_snapshot().is_some_and(|s| s.revision != old));
+        let callbacks = fixture.dsp.generator_endpoints[source_index].as_ref().unwrap().endpoint.stats().callbacks;
+        let mut output = vec![[1.0; 2]; frames];
+        crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+            render_transport_chunk(&mut fixture.dsp, &fixture.status, &fixture.mailbox,
+                &mut fixture.transport, frames,
+                |offset, block| output[offset..offset + block.len()].copy_from_slice(block));
+        });
+        assert_eq!(fixture.dsp.plugin_fault.unwrap().reason, PluginProcessingFaultReason::LatencyDrift);
+        assert!(output.iter().all(|frame| *frame == [0.0; 2]));
+        assert_eq!(fixture.dsp.generator_endpoints[source_index].as_ref().unwrap().endpoint.stats().callbacks, callbacks);
+        assert_eq!(fixture.dsp.paused_midi_safety[source_index].unwrap().remaining_frames, 128);
+        assert!(fixture.controls.iter().all(|c| c.stats().submitted == 0));
+        fixture.finish();
+    }
+}

@@ -626,3 +626,26 @@ Windows desktop acceptance. No publication was performed from this worktree.
 - Its exact source archive contains269 tracked files and a full original-main patch; patch application reproduces every source byte and ZIP CRC/inventory pass. SHA256 `43a99163e9835d22f36fa13ef4c0222c542424b4df0f4a5bf67176462af0bac9`. Historical first-note/getter/content-size failures remain explicitly unpassed.
 - Integrated only reviewed guard `c056dc5` as `60134a5cd668e90eb0801f6da4afc9aaca5abe1c`. Helper/vendor/Cargo/fixture bytes exactly match reviewed source; app/audio/UI/metronome remain unchanged from5befb51. Additive ownership-guide and work-log conflicts preserve both historical and new evidence. The exact package pins preserve strict provenance and all91 earlier source-only QA files.
 - Updated canonical documents to distinguish newly blocked unsafe helper operations from the pre-existing deferred-state behavior. Fresh candidate restoration remains supported; no hidden settlement or universal restoration/latency improvement is claimed. Legacy public full-chain Admin closes the editor before backend LoadState and faults the slot when that call rejects. Timing changes are excluded. Full combined gates and new CI have not yet run; source/docs/package preparation is held during another candidate's coordinated build/quiet QA.
+## 2026-10-09 — Preserve late plug-in drift evidence before Timeline suspension
+
+Genuine plug-in QA against `f164e91` exposed a cold-start classification race: Surge FX
+published latency 0 → 32 after activation, and a later render freshness check cleared the
+Timeline binding without latching a plug-in fault. The resulting authorized-gap guard kept
+processing in Priming with zero submissions. Read-only activation/callback traces reproduce
+this on all four B2048 fixture variants; this was not a worker deadline failure.
+
+The correction classifies already-observed coherent endpoint evidence against the active
+identity table before generic Timeline cleanup. Same endpoint/new latency revision records
+LatencyDrift with endpoint and expected sequence; physical identity loss records EndpointChanged.
+Generic packet/ownership failures do not perform a new shared read or become plug-in faults
+without positive identity evidence. All raw, normal-render and paused-monitor PDC freshness
+failures use the same latch path. Paused safety/parameter helpers additionally refuse work
+if a fault or suspension arose earlier in the same callback.
+
+New deterministic tests cover all four profiles, ordinary/routed paths, prepare/precommit
+identity reads, normal and paused refresh, exact fault identity, zero pre-fault submissions,
+same-revision rejection, stopped Retry, cached drift versus unavailable-read negatives, and
+full paused-monitor continuation with an unrelated admitted edit and armed safety budget.
+These paths run inside callback allocation/deallocation guards. Prior genuine deadline
+failures at B128/B256 remain evidence; this correction does not tune the guard or certify
+any profile, hardware device, or native editor.

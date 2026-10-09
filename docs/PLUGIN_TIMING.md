@@ -91,6 +91,11 @@ faulted and recovered state identify the current epoch/revision; cumulative
 miss/input-loss/output-loss/fault/recovery counters retain earlier evidence.
 The first fault is latched independently of event queues, with endpoint, epoch,
 expected sequence, raw callback frames, active B/K, timing revision and reason.
+A latency publication observed after the initial callback refresh is classified before
+Timeline cleanup clears its binding, including the second endpoint-batch precommit read and
+normal/paused render refresh. Same-callback paused safety and parameter service stop immediately
+once a fault or suspended binding is established; an unrelated Timeline error without observed
+plug-in drift does not manufacture a plug-in fault.
 Only exact epoch/sequence/latency output may become audible; missed or invalid
 output cannot silently bypass an effect with dry audio. A worker safety latch
 requests off-thread note cleanup even when no subsequent block is submitted.

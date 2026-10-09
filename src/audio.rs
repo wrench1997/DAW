@@ -5546,6 +5546,72 @@ impl MixerGraphEndpointIdentityTable {
         true
     }
 
+    /// Classify evidence already observed by a failed exact read before generic Timeline
+    /// cleanup clears its binding. Do not introduce another shared read here: a transient
+    /// seqlock collision during an unrelated packet failure is not positive drift evidence.
+    fn observed_fault(
+        &self,
+        insert_endpoints: &[Option<InsertEndpointSlot>; TRACK_COUNT],
+        generator_endpoints: &[Option<GeneratorEndpointSlot>; MAX_GENERATOR_ENDPOINTS],
+    ) -> Option<(u64, u64, PluginProcessingFaultReason)> {
+        fn changed(
+            endpoint_id: u64,
+            endpoint: &PreparedFixedEndpoint,
+            expected: PluginEndpointSnapshot,
+        ) -> Option<(u64, u64, PluginProcessingFaultReason)> {
+            let actual = endpoint.cached_exact_endpoint_snapshot();
+            (actual != Some(expected)).then(|| {
+                let reason =
+                    if actual.is_some_and(|actual| actual.manifest() == expected.manifest()) {
+                        PluginProcessingFaultReason::LatencyDrift
+                    } else {
+                        PluginProcessingFaultReason::EndpointChanged
+                    };
+                (endpoint_id, endpoint.adapter.expected_sequence(), reason)
+            })
+        }
+        for identity in self.inserts[..self.insert_count].iter().flatten() {
+            let Some(endpoint) = insert_endpoints[usize::from(identity.runtime_slot)]
+                .as_ref()
+                .filter(|endpoint| endpoint.endpoint_id == identity.endpoint_id)
+            else {
+                return Some((
+                    identity.endpoint_id,
+                    0,
+                    PluginProcessingFaultReason::EndpointChanged,
+                ));
+            };
+            if let Some(fault) =
+                changed(identity.endpoint_id, &endpoint.endpoint, identity.snapshot)
+            {
+                return Some(fault);
+            }
+        }
+        for identity in self.generators[..self.generator_count].iter().flatten() {
+            let Some(endpoint) = generator_endpoints[usize::from(identity.endpoint_index)]
+                .as_ref()
+                .filter(|endpoint| {
+                    endpoint.mixer_track == usize::from(identity.runtime_slot)
+                        && endpoint.channel_id == identity.channel_id
+                        && endpoint.endpoint_id == identity.endpoint_id
+                        && endpoint.plugin_instance_id == identity.plugin_instance_id
+                })
+            else {
+                return Some((
+                    identity.endpoint_id,
+                    0,
+                    PluginProcessingFaultReason::EndpointChanged,
+                ));
+            };
+            if let Some(fault) =
+                changed(identity.endpoint_id, &endpoint.endpoint, identity.snapshot)
+            {
+                return Some(fault);
+            }
+        }
+        None
+    }
+
     fn apply_expected_revisions(
         &self,
         insert_endpoints: &mut [Option<InsertEndpointSlot>; TRACK_COUNT],
@@ -8335,6 +8401,19 @@ impl DspState {
     }
 
     fn fail_timeline_block(&mut self) {
+        // A later endpoint-batch/precommit read can observe drift after the raw callback
+        // refresh succeeded. Preserve that positive evidence before clearing the binding;
+        // otherwise the authorized-gap suspension guard would hide the fault indefinitely.
+        if self.plugin_fault.is_none()
+            && self.mixer_graph_was_activated
+            && !self.plugin_processing_suspended()
+            && let Some((endpoint, sequence, reason)) = self
+                .mixer_graph_endpoint_identities
+                .observed_fault(&self.insert_endpoints, &self.generator_endpoints)
+        {
+            self.latch_plugin_processing_fault(endpoint, sequence, reason);
+            return;
+        }
         self.block_plugin_midi_until_epoch();
         for (index, slot) in self.generator_endpoints.iter().enumerate() {
             if let Some(slot) = slot
@@ -8550,11 +8629,7 @@ impl DspState {
         }
         if self.mixer_graph_was_activated {
             if !self.refresh_graph_pdc_plan(status) {
-                self.latch_plugin_processing_fault(
-                    0,
-                    0,
-                    PluginProcessingFaultReason::EndpointChanged,
-                );
+                self.latch_graph_pdc_failure();
                 self.fail_mixer_graph_render(0);
             }
             return;
@@ -8675,6 +8750,14 @@ impl DspState {
                 self.fail_timeline_block();
             }
         }
+    }
+
+    fn latch_graph_pdc_failure(&mut self) {
+        let (endpoint, sequence, reason) = self
+            .mixer_graph_endpoint_identities
+            .observed_fault(&self.insert_endpoints, &self.generator_endpoints)
+            .unwrap_or((0, 0, PluginProcessingFaultReason::EndpointChanged));
+        self.latch_plugin_processing_fault(endpoint, sequence, reason);
     }
 
     fn refresh_graph_pdc_plan(&mut self, status: &AudioStatus) -> bool {
@@ -11638,7 +11721,12 @@ impl DspState {
             self.track_block[start..start + frames].fill([0.0; 2]);
         }
         self.master_block[..frames].fill([0.0; 2]);
-        if !self.mixer_graph_binding_is_exact() || !self.refresh_graph_pdc_plan(status) {
+        if !self.mixer_graph_binding_is_exact() {
+            self.fail_mixer_graph_render(frames);
+            return progress;
+        }
+        if !self.refresh_graph_pdc_plan(status) {
+            self.latch_graph_pdc_failure();
             self.fail_mixer_graph_render(frames);
             return progress;
         }
@@ -11853,6 +11941,9 @@ impl DspState {
     }
 
     fn service_paused_midi_safety(&mut self, frames: usize, skip_mask: u64) -> u64 {
+        if self.plugin_fault.is_some() || self.plugin_processing_suspended() {
+            return 0;
+        }
         let mut processed_mask = 0_u64;
         for index in 0..MAX_GENERATOR_ENDPOINTS {
             if skip_mask & (1_u64 << index) != 0 {
@@ -11904,6 +11995,9 @@ impl DspState {
     }
 
     fn observe_midi_safety_progress(&mut self, processed_mask: u64, frames: usize) {
+        if self.plugin_fault.is_some() || self.plugin_processing_suspended() {
+            return;
+        }
         for index in 0..MAX_GENERATOR_ENDPOINTS {
             if processed_mask & (1_u64 << index) == 0 {
                 continue;
@@ -11930,7 +12024,11 @@ impl DspState {
         skip_generator_mask: u64,
         skip_insert_mask: u32,
     ) {
-        if device_frames == 0 || self.admitted_live_edit_endpoint_count == 0 {
+        if device_frames == 0
+            || self.admitted_live_edit_endpoint_count == 0
+            || self.plugin_fault.is_some()
+            || self.plugin_processing_suspended()
+        {
             return;
         }
         let mut latency_drifted = false;
@@ -12400,6 +12498,7 @@ impl DspState {
             return;
         }
         if !self.refresh_graph_pdc_plan(status) {
+            self.latch_graph_pdc_failure();
             self.fail_mixer_graph_render(frames);
             self.publish_plugin_epoch_status(status);
             return;
