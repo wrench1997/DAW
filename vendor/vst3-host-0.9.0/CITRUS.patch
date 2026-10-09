@@ -1,0 +1,367 @@
+--- a/src/plugin.rs
++++ b/src/plugin.rs
+@@ -902,6 +902,13 @@
+     fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()>;
+     fn close_editor(&mut self) -> Result<()>;
+     fn get_editor_size(&self) -> Result<(i32, i32)>;
++    /// Control a native editor owned by an isolated helper. In-process implementations cannot
++    /// satisfy this contract and keep returning an explicit error.
++    fn isolated_editor(&mut self, _command: IsolatedEditorCommand) -> Result<IsolatedEditorState> {
++        Err(Error::Other(
++            "plugin is not hosted by an editor-capable isolated helper".to_string(),
++        ))
++    }
+     /// Whether the editor accepts host-driven size changes.
+     fn editor_can_resize(&self) -> bool {
+         false
+@@ -930,6 +937,15 @@
+     /// Drain ordered requests reported through `IComponentHandler2`.
+     fn take_host_notifications(&mut self) -> Vec<HostNotification> {
+         Vec::new()
++    }
++    /// Checked editor drain for hosts whose dirty-state accounting must not treat IPC failure
++    /// as an empty edit batch. In-process implementations have no transport failure.
++    fn try_take_parameter_edits(&mut self) -> Result<Vec<ParameterEdit>> {
++        Ok(self.take_parameter_edits())
++    }
++    /// Checked host-notification drain; preserves errors across the isolation boundary.
++    fn try_take_host_notifications(&mut self) -> Result<Vec<HostNotification>> {
++        Ok(self.take_host_notifications())
+     }
+     /// Dispatch any main-thread data-exchange blocks to the controller and drain owned host
+     /// snapshots. Background-dispatched queues are copied into the same bounded snapshot sink.
+@@ -1988,6 +2004,29 @@
+             .unwrap_or(false)
+     }
+ 
++    /// Query, open/focus or close a native editor owned by the isolated helper.
++    ///
++    /// This safe API carries only a logical owner's integer identity across IPC. The helper
++    /// validates it and constructs a real local native parent before calling the plugin.
++    /// Calling this on an in-process plugin returns an error. All work is control-plane work;
++    /// do not invoke it from a realtime audio callback.
++    pub fn isolated_editor(
++        &mut self,
++        command: IsolatedEditorCommand,
++    ) -> Result<IsolatedEditorState> {
++        if let IsolatedEditorCommand::Open { owner: Some(owner) } = command {
++            if owner.window == 0 || owner.process_id == 0 {
++                return Err(Error::Other(
++                    "isolated editor owner must have a nonzero window and process id".to_string(),
++                ));
++            }
++        }
++        self.internal
++            .as_mut()
++            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
++            .isolated_editor(command)
++    }
++
+     /// Open the plugin editor window
+     pub fn open_editor(&mut self, parent: WindowHandle) -> Result<()> {
+         self.internal
+@@ -2113,6 +2152,25 @@
+             .as_mut()
+             .map(|i| i.take_parameter_edits())
+             .unwrap_or_default()
++    }
++
++    /// Drain editor gestures while surfacing transport/protocol failure. Unlike the legacy
++    /// infallible drain, an empty successful batch is never substituted for a failed exchange.
++    /// Polling is control-plane work and must not run on a realtime audio callback.
++    pub fn try_take_parameter_edits(&mut self) -> Result<Vec<ParameterEdit>> {
++        self.internal
++            .as_mut()
++            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
++            .try_take_parameter_edits()
++    }
++
++    /// Drain host notifications while surfacing transport/protocol failure. Hosts should retain
++    /// conservative unsaved-state evidence if this fails after native editing was possible.
++    pub fn try_take_host_notifications(&mut self) -> Result<Vec<HostNotification>> {
++        self.internal
++            .as_mut()
++            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
++            .try_take_host_notifications()
+     }
+ 
+     /// Drain ordered requests the plugin reported through `IComponentHandler2`.
+@@ -2669,6 +2727,59 @@
+             "Legacy MIDI CC events are plugin output only".to_string(),
+         )),
+     }
++}
++
++/// Logical owner of an isolated Windows editor, transported as data rather than a pointer.
++///
++/// The helper validates both the live HWND and its process id. It owns its editor container
++/// independently: Windows must not destroy that container before the plugin can detach when
++/// the owner disappears. This is a standalone associated window, not cross-process embedding.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct IsolatedEditorOwner {
++    /// The owner's HWND value. Zero is invalid; the helper also rejects width truncation.
++    pub window: u64,
++    /// Process which owns that HWND. Zero is invalid.
++    pub process_id: u32,
++}
++
++/// Control-plane request to a helper-owned native editor. No fabricated `WindowHandle` is needed.
++///
++/// New helpers implement this additive protocol; an older helper returns an ordinary error.
++/// These requests may perform synchronous IPC and must never run on a realtime audio callback.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++pub enum IsolatedEditorCommand {
++    /// Query actual helper-side capability and state, including a user-closed editor.
++    Query,
++    /// Open once, or focus the existing editor. A different live owner is rejected while open.
++    Open {
++        /// Optional logical owning application window; `None` is a standalone editor.
++        owner: Option<IsolatedEditorOwner>,
++    },
++    /// Focus an already open editor. Fails if it has been closed.
++    Focus,
++    /// Detach the plugin view before destroying its container. Closing twice is harmless.
++    Close,
++}
++
++/// Authoritative snapshot from the isolated helper, not a cached "open was requested" flag.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct IsolatedEditorState {
++    /// Whether this helper platform implements the native lifecycle protocol.
++    pub supported: bool,
++    /// Whether the loaded plugin advertises a native editor; false if no plugin is loaded.
++    pub has_editor: bool,
++    /// Whether a real plugin view is currently attached to a live helper-owned container.
++    pub open: bool,
++    /// Current accepted client width, or zero when closed.
++    pub width: i32,
++    /// Current accepted client height, or zero when closed.
++    pub height: i32,
++    /// Increases on each successful new attachment in this helper process; zero before first open.
++    /// Combine with the host's instance/helper identity: a restarted process begins at zero.
++    pub generation: u64,
+ }
+ 
+ /// Platform-specific window handle
+--- a/src/process_isolation.rs
++++ b/src/process_isolation.rs
+@@ -455,7 +455,12 @@
+     },
+     /// Unload the current plugin
+     UnloadPlugin,
+-    /// Create plugin GUI
++    /// Control a helper-owned native editor using the additive Citrus lifecycle protocol.
++    Editor {
++        /// Typed query/open/focus/close request. Native handles are never dereferenced in the host.
++        command: crate::plugin::IsolatedEditorCommand,
++    },
++    /// Create plugin GUI (legacy protocol; unchanged for existing clients).
+     CreateGui,
+     /// Close plugin GUI
+     CloseGui,
+@@ -838,6 +843,11 @@
+         width: i32,
+         /// Editor height in pixels.
+         height: i32,
++    },
++    /// Actual native editor capability and state, in reply to `Editor`.
++    EditorState {
++        /// Snapshot from the helper which owns the native window.
++        state: crate::plugin::IsolatedEditorState,
+     },
+     /// Plugin information
+     PluginInfo {
+--- a/src/internal/isolated_plugin_impl.rs
++++ b/src/internal/isolated_plugin_impl.rs
+@@ -74,6 +74,101 @@
+ /// Pause between auto-recover attempts whose respawn+reload itself failed, so a helper that
+ /// cannot start at all is not hammered for the whole retry budget.
+ const RECOVERY_RETRY_BACKOFF: Duration = Duration::from_millis(250);
++
++/// Validate the wire snapshot before updating legacy caches or returning it to the host.
++fn validate_editor_state(state: &crate::plugin::IsolatedEditorState) -> Result<()> {
++    if state.width < 0
++        || state.height < 0
++        || (!state.open && (state.width != 0 || state.height != 0))
++        || (state.open
++            && (!state.supported
++                || !state.has_editor
++                || state.generation == 0
++                || state.width == 0
++                || state.height == 0))
++    {
++        return Err(Error::Other(
++            "helper returned an inconsistent native editor state".to_string(),
++        ));
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod editor_state_tests {
++    use super::validate_editor_state;
++    use crate::plugin::IsolatedEditorState;
++
++    fn closed() -> IsolatedEditorState {
++        IsolatedEditorState {
++            supported: true,
++            has_editor: true,
++            open: false,
++            width: 0,
++            height: 0,
++            generation: 2,
++        }
++    }
++
++    #[test]
++    fn closed_editor_rejects_stale_dimensions() {
++        for (width, height) in [(560, 0), (0, 400), (560, 400), (-1, 0), (0, -1)] {
++            assert!(validate_editor_state(&IsolatedEditorState {
++                width,
++                height,
++                ..closed()
++            })
++            .is_err());
++        }
++    }
++
++    #[test]
++    fn valid_closed_and_open_snapshots_are_accepted() {
++        assert!(validate_editor_state(&closed()).is_ok());
++        assert!(validate_editor_state(&IsolatedEditorState {
++            supported: false,
++            has_editor: false,
++            generation: 0,
++            ..closed()
++        })
++        .is_ok());
++        assert!(validate_editor_state(&IsolatedEditorState {
++            open: true,
++            width: 560,
++            height: 400,
++            ..closed()
++        })
++        .is_ok());
++    }
++
++    #[test]
++    fn open_editor_requires_capability_dimensions_and_generation() {
++        let open = IsolatedEditorState {
++            open: true,
++            width: 560,
++            height: 400,
++            ..closed()
++        };
++        for state in [
++            IsolatedEditorState {
++                supported: false,
++                ..open
++            },
++            IsolatedEditorState {
++                has_editor: false,
++                ..open
++            },
++            IsolatedEditorState { width: 0, ..open },
++            IsolatedEditorState { height: 0, ..open },
++            IsolatedEditorState {
++                generation: 0,
++                ..open
++            },
++        ] {
++            assert!(validate_editor_state(&state).is_err());
++        }
++    }
++}
+ 
+ impl IsolatedPluginImpl {
+     /// Create a new isolated plugin implementation
+@@ -832,6 +927,26 @@
+         self.info.has_gui
+     }
+ 
++    fn isolated_editor(
++        &mut self,
++        command: crate::plugin::IsolatedEditorCommand,
++    ) -> Result<crate::plugin::IsolatedEditorState> {
++        match self.send_command(HostCommand::Editor { command })? {
++            HostResponse::EditorState { state } => {
++                validate_editor_state(&state)?;
++                self.has_open_editor = state.open;
++                self.editor_size = state.open.then_some((state.width, state.height));
++                Ok(state)
++            }
++            HostResponse::Error { message } => {
++                Err(Error::Other(format!("Isolated editor: {message}")))
++            }
++            _ => Err(Error::Other(
++                "Unexpected response from Editor command".to_string(),
++            )),
++        }
++    }
++
+     fn open_editor(&mut self, _parent: *mut std::ffi::c_void) -> Result<()> {
+         let response = self.send_command(HostCommand::CreateGui)?;
+ 
+@@ -918,6 +1033,30 @@
+             },
+         )
+         .unwrap_or_default()
++    }
++
++    fn try_take_parameter_edits(&mut self) -> Result<Vec<crate::plugin::ParameterEdit>> {
++        match self.send_command(HostCommand::TakeParameterEdits)? {
++            HostResponse::ParameterEdits { edits } => Ok(edits),
++            HostResponse::Error { message } => {
++                Err(Error::Other(format!("TakeParameterEdits: {message}")))
++            }
++            _ => Err(Error::Other(
++                "TakeParameterEdits: unexpected response".to_string(),
++            )),
++        }
++    }
++
++    fn try_take_host_notifications(&mut self) -> Result<Vec<crate::plugin::HostNotification>> {
++        match self.send_command(HostCommand::TakeHostNotifications)? {
++            HostResponse::HostNotifications { notifications } => Ok(notifications),
++            HostResponse::Error { message } => {
++                Err(Error::Other(format!("TakeHostNotifications: {message}")))
++            }
++            _ => Err(Error::Other(
++                "TakeHostNotifications: unexpected response".to_string(),
++            )),
++        }
+     }
+ 
+     fn take_data_exchange_blocks(&mut self) -> Vec<crate::plugin::DataExchangeBlock> {
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -111,9 +111,10 @@
+     RtAudioHandle,
+ };
+ pub use plugin::{
+-    AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification, OutputMidiConsumer,
+-    ParameterEdit, ParameterEditKind, Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode,
+-    ProgramPitchName, ProgressKind, ProgressValue, RestartFlags, StateContext, WindowHandle,
++    AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification, IsolatedEditorCommand,
++    IsolatedEditorOwner, IsolatedEditorState, OutputMidiConsumer, ParameterEdit, ParameterEditKind,
++    Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode, ProgramPitchName, ProgressKind,
++    ProgressValue, RestartFlags, StateContext, WindowHandle,
+ };
+ pub use realtime::{RealtimePluginRunner, RtControl};
+ pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
+--- a/src/bin/vst3-host-helper.rs
++++ b/src/bin/vst3-host-helper.rs
+@@ -629,6 +629,10 @@
+             Ok(flags) => HostResponse::RestartFlags { bits: flags.bits() },
+             Err(error) => err("ServiceHostRequests", error),
+         }),
++        HostCommand::Editor { .. } => HostResponse::Error {
++            message: "This upstream helper does not implement the Citrus native editor protocol"
++                .to_string(),
++        },
+         HostCommand::CreateGui => gui_request(gui, true),
+         HostCommand::CloseGui => gui_request(gui, false),
+         HostCommand::Shutdown => HostResponse::Success {

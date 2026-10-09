@@ -1,13 +1,9 @@
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
-// Vendored from vst3-host 0.9.0's official process-isolation helper.
-// Upstream: https://github.com/HelgeSverre/rust-vst3-host
-// License: MIT. Keep this file synchronized with the pinned vst3-host version.
 //! VST3 Host Helper Process
 //!
 //! Runs a single VST3 plugin in isolation from the main process. It is intentionally
 //! a thin wrapper around the library's own (in-process) public API: every command
 //! delegates to a real [`vst3_host::Plugin`], so the isolated path reuses exactly the
-//! same, verified plugin handling as the non-isolated path -- there is no separate
+//! same, verified plugin handling as the non-isolated path — there is no separate
 //! VST3 implementation to drift out of sync.
 //!
 //! The protocol enums are imported from the library (`vst3_host::process_isolation`),
@@ -20,34 +16,24 @@
 //! processing moves to a worker thread; the plugin is shared behind an
 //! `Arc<Mutex<Option<Plugin>>>`. `CreateGui`/`CloseGui` are forwarded from the worker to
 //! the main thread (which owns the `NSWindow`) over a channel. Audio/control commands run
-//! exactly as before, just on the worker thread.
-//!
-//! On Windows, stdin reading/parsing alone runs on a bounded-queue worker. The main
-//! thread owns the native message pump, every plugin call, and every protocol reply.
-//! Window callbacks only record intent; editor lifecycle and resize calls happen after
-//! native dispatch returns. Other platforms retain the headless stdin loop.
+//! exactly as before, just on the worker thread. On other platforms the helper stays a
+//! single-threaded stdin loop and GUI is not yet supported.
 
-use std::io::Write;
-#[cfg(not(target_os = "windows"))]
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
 
 use vst3_host::{
-    IsolatedEditorState, Plugin, Vst3Host,
     audio::AudioBuffers,
     process_isolation::{HostCommand, HostResponse, ProtocolChannel},
+    Plugin, Vst3Host,
 };
-
-#[cfg(any(target_os = "windows", test))]
-#[path = "vst3_editor_windows/mod.rs"]
-mod windows;
 
 /// Loaded plugin shared between the command worker and (on macOS) the UI main thread.
 type SharedPlugin = Arc<Mutex<Option<Plugin>>>;
 
 fn main() {
-    // Before anything else -- certainly before a plugin binary is loaded and can run its own
-    // code -- take the protocol channel away from stdout. A hosted plugin shares this
+    // Before anything else — certainly before a plugin binary is loaded and can run its own
+    // code — take the protocol channel away from stdout. A hosted plugin shares this
     // process's descriptors and third-party plugins do print; on the shared stdout a single
     // `printf` line would be read by the host as a response and desynchronise every later
     // command from its reply.
@@ -62,10 +48,7 @@ fn main() {
         macos::run(plugin, protocol);
     }
 
-    #[cfg(target_os = "windows")]
-    windows::run(plugin, protocol);
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(target_os = "macos"))]
     {
         // No UI run loop needed: process commands on this (main) thread directly.
         let mut protocol = protocol;
@@ -86,7 +69,6 @@ fn main() {
 }
 
 /// Parse one stdin line into a command, reporting (and skipping) blank/invalid lines.
-#[cfg(not(target_os = "windows"))]
 fn parse_line(line: io::Result<String>, protocol: &mut ProtocolChannel) -> Option<HostCommand> {
     let line = match line {
         Ok(l) => l,
@@ -147,7 +129,7 @@ fn handle(
             Err(_) => {
                 return HostResponse::Error {
                     message: "plugin lock poisoned".to_string(),
-                };
+                }
             }
         };
         match guard.as_mut() {
@@ -476,7 +458,7 @@ fn handle(
             let sr = *sample_rate;
             with(plugin, |p| {
                 // Live channel count (sums getBusInfo across output buses), so a negotiated
-                // non-stereo arrangement (mono, 5.1, etc.) marshals all its channels back.
+                // non-stereo arrangement (mono, 5.1, …) marshals all its channels back.
                 let out_channels = p.output_channel_count().max(1);
                 let mut buffers = AudioBuffers {
                     inputs,
@@ -647,25 +629,12 @@ fn handle(
             Ok(flags) => HostResponse::RestartFlags { bits: flags.bits() },
             Err(error) => err("ServiceHostRequests", error),
         }),
+        HostCommand::Editor { .. } => HostResponse::Error {
+            message: "This upstream helper does not implement the Citrus native editor protocol"
+                .to_string(),
+        },
         HostCommand::CreateGui => gui_request(gui, true),
         HostCommand::CloseGui => gui_request(gui, false),
-        // Windows intercepts these before the common handler. The typed ownership
-        // contract is intentionally unsupported elsewhere; macOS's legacy GUI path
-        // above remains unchanged.
-        HostCommand::Editor { command: _ } => HostResponse::EditorState {
-            state: IsolatedEditorState {
-                supported: false,
-                has_editor: plugin
-                    .lock()
-                    .ok()
-                    .and_then(|guard| guard.as_ref().map(|p| p.info().has_gui))
-                    .unwrap_or(false),
-                open: false,
-                width: 0,
-                height: 0,
-                generation: 0,
-            },
-        },
         HostCommand::Shutdown => HostResponse::Success {
             message: "shutting down".to_string(),
         },
@@ -751,7 +720,7 @@ mod macos {
                     let response = handle(command, &plugin, &mut sample_rate, Some(&gui));
                     respond(&mut protocol, &response);
                 }
-                // stdin closed -> ask the main loop to exit too.
+                // stdin closed → ask the main loop to exit too.
                 let _ = shutdown_tx.send(());
             });
         }
@@ -891,37 +860,6 @@ mod macos {
         }
         if let Some(w) = window {
             w.close();
-        }
-    }
-}
-
-#[cfg(all(test, not(target_os = "windows")))]
-mod isolated_editor_tests {
-    use super::*;
-    use vst3_host::IsolatedEditorCommand;
-
-    #[test]
-    fn typed_editor_lifecycle_is_explicitly_unsupported_off_windows() {
-        let plugin = Arc::new(Mutex::new(None));
-        let mut sample_rate = 44_100.0;
-        for command in [
-            IsolatedEditorCommand::Query,
-            IsolatedEditorCommand::Open { owner: None },
-            IsolatedEditorCommand::Focus,
-            IsolatedEditorCommand::Close,
-        ] {
-            let HostResponse::EditorState { state } = handle(
-                HostCommand::Editor { command },
-                &plugin,
-                &mut sample_rate,
-                None,
-            ) else {
-                panic!("expected explicit unsupported editor state");
-            };
-            assert!(!state.supported);
-            assert!(!state.has_editor);
-            assert!(!state.open);
-            assert_eq!((state.width, state.height, state.generation), (0, 0, 0));
         }
     }
 }
