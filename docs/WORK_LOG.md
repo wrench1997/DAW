@@ -773,3 +773,75 @@ closure/fault limitation is unchanged. No DSP latency/dropout improvement is cla
 - Exact124 production-file hashes bind to87ceb06, helper `dca08353e3f23308d535a791c9fa2c89635ee683db29625fa8d2a3d0a988cbe8` and test `876dfe3105289120693a807374fca2361b338783b62c42d273d76bb92130743a`. Four default2048 delivery cases and fresh restore exit0. The fresh note starts atframe28, peak0.2264193892478943, controller0.8691863417625427 and component−6.27905654907227dB retained. Both changing cases preserve11/14 raw-core interval overruns; this remains correctness-only acceptance.
 - Packaging uses an exact52-path whitelist, pinned inventory bytes and every payload hash. Regressions reject missing/changed/extra/escaping/backslash paths and self-consistent rewritten inventories; the tree is pinned toLF on Windows. All historical QA trees and the separately delivered optimized244f622 appendix stay unchanged. Windows CI for the new publication is pending.
 - Receipt/package regressions now pass **215 Python tests**, including all four actual Unix descriptor tests. Actual package closure contains **435 inputs**; all new52 files retain reviewed bytes. No Rust production file changed after the complete source/native gates.
+
+## 2026-10-09 — Bounded parameter storage, checked admission and output-loss fence
+
+Separate parameter-only continuation from `48d3f970`; helper dispatch/wire, application/timing,
+event payload/container and processor-lease production sources are unchanged. Native transport
+changes are confined to the cfg(test) allocator-accounting helper.
+
+- Prepared stable COM queue wrappers and one total-point arena per container: input 8192 queues /
+  8192 points, output 4096 / 4096. Safe mutexes, borrowed interface returns and explicit COM
+  retention remain. A shared ordinal index plus an ordered populated-slot index retain first-seen
+  queue order and every equal-offset value without per-operation allocation or COM ownership churn.
+- Checked host admission now refuses the pending 4096 limit before controller mirroring. Every
+  point admission is checked before SDK Process; failed admission clears staged contents without
+  phantom native acknowledgment. Native acknowledgment still follows each actual SDK result.
+- Output write/storage failure becomes a separate sticky runtime fault, including ignored plugin
+  failures and reentrant getState writes. Process/SaveState refuse until a fresh instance; ordinary
+  stop/start/state/reconfigure cannot erase it. Invalid read probes do not invent delivery loss.
+- Constructor measurements: input 1,048,696 requested bytes / 8,198 allocations; output 524,408 /
+  4,102. These exclude two outer runtime COM wrappers, allocator metadata and RSS. The populated
+  arrays add 98,352 bytes versus the superseded dense-index version. Counted cold/high-water/reuse/
+  error regions allocate/free zero bytes. Retired queues' final plugin-owned Release remains an
+  explicitly separate lifetime/no-free boundary.
+
+Comparative evidence drove corrections before acceptance. Original linked-cursor random reads,
+lazy-index alternating rebuilds, linked random-insertion rank search, and dense empty-queue-offset
+updates all showed significant regressions. Their exact sources, raw results and the superseded
+`ee45bb1c` helper/native partial run are preserved; none is final acceptance. The accepted sparse
+version retains explicit read/check overhead and global populated-suffix movement costs rather
+than claiming universal speedup. Optimized 8192-point baseline→final medians: random insertion
+8.192→2.005 ms; non-final interleave 9.747→0.455 ms; random reads 0.0473→0.0666 ms; large populated
+single/multi suffix edits 0.657/0.744→1.293/1.678 ms. The previously unacceptable 8192-empty-queue /
+128-edit result falls from 1.218 ms to 0.004216 ms (baseline 0.006560 ms). Five-sample cold/reused,
+debug/release, 32/128/512/4096/8192-point and sparse cases use identical actual-value checksums.
+The guide records smaller-case slowdowns and remaining aggregate quadratic worst cases.
+
+Final source-linked gates: 339 available vendor tests, 26 doctests, 22 helper tests, 5 editor-wire
+and 2 transport-wire tests; root strict Clippy, vendor Clippy with the existing deprecated and
+intentional drain_collect exceptions; formatting/diff checks; 124 package tests, 79 Python smoke
+tests, 4 Unix descriptor tests and direct helper smoke. The one upstream SDK metadata fixture is
+still absent from the registry archive and explicitly filtered. The temporary vendor manifest
+points directly to production source with cpal-backend/process-isolation and unchanged dependency
+versions; this is not a claim that the omitted fixture or the original unavailable dev-dependency
+manifest ran. Initial test-fixture ordering/import and mechanical Clippy failures are retained.
+The cumulative vendor patch replays byte-for-byte against the original checksum-verified archive;
+package provenance changes are hash pins only.
+
+Genuine copied-helper regression passes all 12 Surge XT 1.3.4 fresh/used-active/used-stopped cases
+at 17/47/128/256 frames, plus Stochas 1.3.13 state/MIDI. A newly produced stopped native Surge
+edit/poll/save blob from the final sparse-helper run restores with normalized volume
+0.8691863417625427 and component volume −6.27905654907227 dB before/after first-note processing at
+all four profiles, without positive warmup. PCM is finite/nonzero; first nonzero samples in this
+run are 60/18/73/55, respectively. These are functional results, not latency qualification.
+
+Final copied helper: `a29e4942b5fe027e9891a28e5d7f7611d2c5b2f12ef5f283599d15c4278aee64`.
+Frozen Rust diff: `b77e86e385579a919961e1a9600dd4dd77f25d0b96fe08446070633ef27fedcd`.
+Independent source and comparative-cost review verifies all 41 source hashes with no blocker.
+Full evidence: the parameter-storage `validation-receipt.json`; matched
+comparisons: `parameter-comparison/populated/` within that QA directory. Earlier rejected results
+remain alongside it. Exact new native state: the retained native `surge-native-polled.state` (not distributed).
+
+The helper remains single-threaded and its historical 346.9 ms native-resize stall is unresolved.
+Locks, arbitrary plugin work, event ownership, data exchange/metering and whole-Process allocation/
+free behavior remain outside the parameter-storage guarantee. Capture still requires serialized
+main-thread administration. Legacy full-chain live-admin LoadState closure/fault behavior,
+Windows/macOS runtime, hardware and mixed-Wayland qualification are unchanged limitations.
+
+Final independent native acceptance on the sparse helper also passes the complete trusted fixture,
+same-XID/generation/geometry Surge rejection before detach, closed-used rejection/reopen, and
+Stochas used-instance empty reset then exact native-created row115/step4 cell restore/re-export and
+repaint (probability 20, velocity 127, length/offset 0). All windows close and Shutdown exits 0.
+Native receipt directory: the separately retained `parameter-storage-sparse` QA directory.
+The prior dense-index native run remains explicitly superseded and is not counted here.

@@ -59,6 +59,20 @@ pub enum Error {
     #[error("Plugin is not processing")]
     NotProcessing,
 
+    /// Host input could not enter the bounded parameter store. No SDK process call is made.
+    #[error("Input parameter changes were rejected by bounded storage")]
+    ParameterInputRejected,
+
+    /// Native delivery could not be admitted; the native channel retains its loss evidence.
+    #[error("Native parameter changes could not be admitted")]
+    NativeParameterAdmissionFailed,
+
+    /// Output parameter storage overflowed or became unusable. A fresh instance is required.
+    #[error(
+        "Output parameter storage failed; load a fresh plugin instance before processing or saving"
+    )]
+    ParameterOutputRejected,
+
     /// Other errors
     #[error("{0}")]
     Other(String),

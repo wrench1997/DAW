@@ -14,7 +14,10 @@ use crate::{
 };
 use crossbeam_queue::ArrayQueue;
 use std::ptr;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::thread::{self, ThreadId};
 use vst3::Steinberg::Vst::BusDirections_::*;
 use vst3::Steinberg::Vst::Event_::EventTypes_::*;
@@ -31,8 +34,8 @@ use super::{
         create_event_list, create_host_application, create_host_plug_frame,
         create_memory_stream_from_with_metadata, create_memory_stream_with_metadata,
         create_state_restore_stream, ComponentHandler, ConnectionPair, HostApplication,
-        HostEventList, HostPlugFrame, ParameterChanges, StreamStateType, MAX_EDITOR_FEEDBACK,
-        MAX_QUEUED_EVENTS,
+        HostEventList, HostPlugFrame, ParameterChanges, ParameterQueueLimits, StreamStateType,
+        MAX_EDITOR_FEEDBACK, MAX_QUEUED_EVENTS,
     },
     module_loader::{load_module, VstModule},
 };
@@ -223,6 +226,9 @@ struct ProcessorRuntime {
     // A positive processor call may activate deferred state even when it returns an error.
     // Zero-sample parameter flushes do not enter the characterized Surge sample loop.
     has_processed_audio: bool,
+    // A lossy/unusable output parameter store invalidates processing and capture until reload.
+    // Runtime-owned so buffer/state reconfiguration cannot erase the evidence.
+    parameter_output_fault: AtomicBool,
     sample_rate: f64,
     block_size: usize,
     /// Transport tempo (BPM) advertised in the host `ProcessContext`.
@@ -1590,6 +1596,7 @@ impl PluginImpl {
                 runtime: ProcessorRuntime {
                     is_processing: false,
                     has_processed_audio: false,
+                    parameter_output_fault: AtomicBool::new(false),
                     sample_rate: 44100.0,
                     block_size: 512,
                     tempo: 120.0,
@@ -1719,6 +1726,7 @@ impl PluginImpl {
     /// Discard prepared bus/sample storage before a mutation that can change its layout.
     /// A failed rebuild leaves no stale pointers or successful setup marker to reuse.
     fn invalidate_processing_setup(&mut self) {
+        self.runtime.observe_parameter_output_fault();
         self.runtime.process_data = None;
         self.control.applied_setup = None;
     }
@@ -2023,8 +2031,12 @@ impl PluginImpl {
                 process_context: std::mem::zeroed(),
                 process_context_requirements: self.runtime.process_context_requirements,
                 transport_tempo: self.runtime.tempo,
-                input_param_changes: ComWrapper::new(ParameterChanges::default()),
-                output_param_changes: ComWrapper::new(ParameterChanges::default()),
+                input_param_changes: ComWrapper::new(ParameterChanges::new(
+                    ParameterQueueLimits::INPUT,
+                )),
+                output_param_changes: ComWrapper::new(ParameterChanges::new(
+                    ParameterQueueLimits::OUTPUT,
+                )),
             });
 
             // Initialize process context
@@ -2268,7 +2280,7 @@ impl ProcessorRuntime {
         frames: usize,
         is_last: bool,
     ) -> Result<()> {
-        let result = if let Some(ref mut data) = self.process_data {
+        if let Some(ref mut data) = self.process_data {
             unsafe {
                 // Clear output events only - input events should be preserved for processing
                 self.output_events.clear();
@@ -2280,7 +2292,14 @@ impl ProcessorRuntime {
                 // Without this, addParameterData()/addPoint() would keep appending to queues
                 // from prior blocks, mixing stale points into new ones, growing point storage
                 // unbounded, and risking a reallocation on the audio thread long after warm-up.
-                data.output_param_changes.clear_all();
+                if data.output_param_changes.clear_all().is_err()
+                    || data.output_param_changes.failure().is_some()
+                {
+                    self.parameter_output_fault.store(true, Ordering::Release);
+                    let _ = data.input_param_changes.clear_all();
+                    self.input_events.clear();
+                    return Err(Error::ParameterOutputRejected);
+                }
 
                 // VST3 allows numSamples to vary up to the maximum given to setupProcessing; the
                 // caller's block may be shorter (BufferSize::Default gives variable sizes) or, if
@@ -2296,22 +2315,37 @@ impl ProcessorRuntime {
                 for pc in &self.pending_param_changes {
                     if let Some(off) = chunk_offset(pc.sample_offset, frame_offset, frames, is_last)
                     {
-                        data.input_param_changes.enqueue(pc.id, off, pc.value);
+                        if data
+                            .input_param_changes
+                            .try_enqueue(pc.id, off, pc.value)
+                            .is_err()
+                        {
+                            let _ = data.input_param_changes.clear_all();
+                            self.input_events.clear();
+                            return Err(Error::ParameterInputRejected);
+                        }
                     }
                 }
 
                 // Drain only the runtime-owned bounded native channel. Checked admission
                 // precedes the actual SDK call; no UI producer/display lock is touched here.
-                if let Err(error) = self.native_edits.stage(|edit| {
-                    data.input_param_changes
-                        .try_enqueue(edit.id, 0, edit.value)
-                        .is_ok()
-                }) {
-                    data.input_param_changes.clear_all();
+                if data.input_param_changes.failure().is_some() {
+                    let _ = data.input_param_changes.clear_all();
                     self.input_events.clear();
-                    return Err(Error::Other(format!(
-                        "native edit admission failed: {error:?}"
-                    )));
+                    return Err(Error::ParameterInputRejected);
+                }
+                if self
+                    .native_edits
+                    .stage(|edit| {
+                        data.input_param_changes
+                            .try_enqueue(edit.id, 0, edit.value)
+                            .is_ok()
+                    })
+                    .is_err()
+                {
+                    let _ = data.input_param_changes.clear_all();
+                    self.input_events.clear();
+                    return Err(Error::NativeParameterAdmissionFailed);
                 }
 
                 match buffers {
@@ -2383,17 +2417,24 @@ impl ProcessorRuntime {
                 self.input_events.clear();
                 // Clear the input parameter queue too, so this block's values don't
                 // re-stick on the next block.
-                data.input_param_changes.clear_all();
+                let _ = data.input_param_changes.clear_all();
 
                 // Processor-originated automation belongs to this block. Copy it into a
                 // bounded lock-free feedback queue, then clear it on both success and failure
                 // so stale points can never be re-reported.
                 let feedback = &self.output_param_feedback;
-                data.output_param_changes
+                let output_visit_failed = data
+                    .output_param_changes
                     .for_each_active_point(|id, _offset, value| {
                         feedback.force_push((id, value));
-                    });
-                data.output_param_changes.clear_all();
+                    })
+                    .is_err();
+                if output_visit_failed || data.output_param_changes.failure().is_some() {
+                    self.parameter_output_fault.store(true, Ordering::Release);
+                }
+                if data.output_param_changes.clear_all().is_err() {
+                    self.parameter_output_fault.store(true, Ordering::Release);
+                }
 
                 // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
                 // Drain the event list in place (no `mem::take`) and push each converted event
@@ -2411,7 +2452,11 @@ impl ProcessorRuntime {
                         .store(true, std::sync::atomic::Ordering::Release);
                 }
 
-                if process_result != kResultOk {
+                if self.parameter_output_fault.load(Ordering::Acquire) {
+                    // Input acknowledgment above still reflects the actual SDK result.
+                    // Output failure is separate, sticky evidence with diagnostic precedence.
+                    Err(Error::ParameterOutputRejected)
+                } else if process_result != kResultOk {
                     // Leave the caller's buffers as they were (the playback bridges pre-fill them
                     // with silence) rather than copying out whatever the failed call left behind.
                     Err(Error::ProcessFailed(process_result))
@@ -2444,9 +2489,7 @@ impl ProcessorRuntime {
             }
         } else {
             Err(Error::Other("Process data not initialized".to_string()))
-        };
-
-        result
+        }
     }
 
     /// Distribute the block's queued input events over its chunks and process each one.
@@ -2552,6 +2595,21 @@ impl ProcessorRuntime {
         )
     }
 
+    /// Promote container-side failures before capture, processing or buffer disposal.
+    /// Interior atomic state permits save_state(&self) to preserve reentrant COM evidence;
+    /// it does not authorize concurrent administrative operations or plugin ownership.
+    fn observe_parameter_output_fault(&self) -> bool {
+        if !self.parameter_output_fault.load(Ordering::Acquire)
+            && self
+                .process_data
+                .as_ref()
+                .is_some_and(|data| data.output_param_changes.failure().is_some())
+        {
+            self.parameter_output_fault.store(true, Ordering::Release);
+        }
+        self.parameter_output_fault.load(Ordering::Acquire)
+    }
+
     fn process_buffer_view(
         &mut self,
         processor: &mut ProcessorLease<'_>,
@@ -2559,6 +2617,9 @@ impl ProcessorRuntime {
         is_active: bool,
         buffers: &mut CallerAudioBuffers<'_>,
     ) -> Result<()> {
+        if self.observe_parameter_output_fault() {
+            return Err(Error::ParameterOutputRejected);
+        }
         if !is_active || !self.is_processing {
             return Err(Error::NotProcessing);
         }
@@ -2610,25 +2671,15 @@ impl PluginInternal for PluginImpl {
         value: f64,
         sample_offset: i32,
     ) -> Result<()> {
-        // Every route into the processor queue also updates the controller, so a value set
-        // through `AudioHandle`/`RtControl` (or a mapped MIDI controller) is reflected by the
-        // plugin's own editor, `get_parameter`, `format_parameter` and saved state — deferred
-        // to the control thread when it arrives from the audio callback.
-        self.mirror_parameter_to_controller(id, value);
+        // Refuse before mirroring: a rejected DSP point must not mutate the controller.
         if self.runtime.pending_param_changes.len() >= MAX_PENDING_PARAM_CHANGES {
-            // Only reachable when nothing is draining the queue (the plugin isn't
-            // processing), so the dropped change would have arrived as part of a stale flood
-            // anyway. The controller half above still ran, so the plugin's own display
-            // stays correct.
-            self.runtime.dropped_param_changes += 1;
-            log::warn!(
-                "dropping parameter change for {id}, queue full at \
-                     {MAX_PENDING_PARAM_CHANGES} (is the plugin processing?); \
-                     {} dropped so far",
-                self.runtime.dropped_param_changes
-            );
-            return Ok(());
+            self.runtime.dropped_param_changes =
+                self.runtime.dropped_param_changes.saturating_add(1);
+            return Err(Error::ParameterInputRejected);
         }
+        // Controller mirroring remains existing control/deferred behavior, outside the
+        // bounded parameter COM store's no-allocation claim.
+        self.mirror_parameter_to_controller(id, value);
         self.runtime.pending_param_changes.push(ParameterChange {
             id,
             value,
@@ -4396,6 +4447,9 @@ impl PluginInternal for PluginImpl {
     }
 
     fn save_state(&self) -> Result<Vec<u8>> {
+        if self.runtime.observe_parameter_output_fault() {
+            return Err(Error::ParameterOutputRejected);
+        }
         self.drain_deferred_controller_sync();
         let handler = self
             .control
@@ -4448,6 +4502,9 @@ impl PluginInternal for PluginImpl {
                 component: component_stream.to_vec(),
                 controller,
             })?;
+            if self.runtime.observe_parameter_output_fault() {
+                return Err(Error::ParameterOutputRejected);
+            }
             if handler.native_state_capture_revision()? != native_revision {
                 return Err(Error::Other("native state changed during capture".into()));
             }
@@ -4570,7 +4627,7 @@ impl PluginInternal for PluginImpl {
                     }
                 }
                 if let Some(process_data) = self.runtime.process_data.as_ref() {
-                    process_data.input_param_changes.clear_all();
+                    let _ = process_data.input_param_changes.clear_all();
                 }
                 *self
                     .control

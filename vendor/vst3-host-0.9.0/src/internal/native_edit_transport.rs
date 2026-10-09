@@ -455,7 +455,7 @@ impl Drop for NativeEditReceiver {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::{
         alloc::{GlobalAlloc, Layout, System},
@@ -471,6 +471,8 @@ mod tests {
         static COUNTING: Cell<bool> = const { Cell::new(false) };
         static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
         static DEALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+        static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
+        static FREED_BYTES: Cell<usize> = const { Cell::new(0) };
     }
 
     struct CountingAllocator;
@@ -481,12 +483,14 @@ mod tests {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             if COUNTING.try_with(Cell::get).unwrap_or(false) {
                 let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
+                let _ = ALLOCATED_BYTES.try_with(|count| count.set(count.get() + layout.size()));
             }
             unsafe { System.alloc(layout) }
         }
         unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
             if COUNTING.try_with(Cell::get).unwrap_or(false) {
                 let _ = DEALLOCATIONS.try_with(|count| count.set(count.get() + 1));
+                let _ = FREED_BYTES.try_with(|count| count.set(count.get() + layout.size()));
             }
             unsafe { System.dealloc(pointer, layout) }
         }
@@ -494,12 +498,14 @@ mod tests {
             if COUNTING.try_with(Cell::get).unwrap_or(false) {
                 let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
                 let _ = DEALLOCATIONS.try_with(|count| count.set(count.get() + 1));
+                let _ = ALLOCATED_BYTES.try_with(|count| count.set(count.get() + size));
+                let _ = FREED_BYTES.try_with(|count| count.set(count.get() + layout.size()));
             }
             unsafe { System.realloc(pointer, layout, size) }
         }
     }
 
-    fn allocation_free<T>(run: impl FnOnce() -> T) -> T {
+    pub(crate) fn allocation_free<T>(run: impl FnOnce() -> T) -> T {
         ALLOCATIONS.with(|count| count.set(0));
         DEALLOCATIONS.with(|count| count.set(0));
         COUNTING.with(|active| assert!(!active.replace(true)));
@@ -519,6 +525,41 @@ mod tests {
             "channel path freed memory"
         );
         result
+    }
+
+    /// Test-only constructor accounting; reports requested bytes, not allocator metadata/RSS.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) struct AllocationStats {
+        pub allocations: usize,
+        pub deallocations: usize,
+        pub allocated_bytes: usize,
+        pub freed_bytes: usize,
+    }
+
+    pub(crate) fn measure_allocations<T>(run: impl FnOnce() -> T) -> (T, AllocationStats) {
+        ALLOCATIONS.with(|count| count.set(0));
+        DEALLOCATIONS.with(|count| count.set(0));
+        ALLOCATED_BYTES.with(|count| count.set(0));
+        FREED_BYTES.with(|count| count.set(0));
+        COUNTING.with(|active| assert!(!active.replace(true)));
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                COUNTING.with(|active| active.set(false));
+            }
+        }
+        let reset = Reset;
+        let result = run();
+        drop(reset);
+        (
+            result,
+            AllocationStats {
+                allocations: ALLOCATIONS.with(Cell::get),
+                deallocations: DEALLOCATIONS.with(Cell::get),
+                allocated_bytes: ALLOCATED_BYTES.with(Cell::get),
+                freed_bytes: FREED_BYTES.with(Cell::get),
+            },
+        )
     }
 
     #[test]

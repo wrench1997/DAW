@@ -223,8 +223,9 @@ is added. `ComponentHandler` retains independent display/gesture logs and durabl
 status. Stopped display polling no longer steals processor edits needed by a later explicit
 zero-sample flush and SaveState. Display overflow is distinct from native delivery loss.
 
-`ParameterChanges::try_enqueue` reports admission failures, but its existing COM queue locks and
-dynamically sized storage remain. Successful Process acknowledges only that call's admitted
+At the transport checkpoint, `ParameterChanges::try_enqueue` reports admission failures while
+its COM queue locks and dynamically sized storage remain; the following parameter-storage section
+supersedes the dynamic-storage part of that boundary. Successful Process acknowledges only that call's admitted
 native batch; failure/abandonment cannot be hidden by later empty queues or successful calls.
 Capture checks submitted/applied, in-flight publication/process, sticky loss/exhaustion and dirty
 revision before/after state serialization. Ordinary empty failed Process does not invent loss.
@@ -240,3 +241,35 @@ Transport-only allocation tests and a blocked-producer/display independence fixt
 scoped. They do not prove whole-plugin allocation freedom, enable independent helper processing,
 or qualify native resize latency. See `docs/PLUGIN_PROCESSOR_DOMAINS.md` and executed receipts in
 `docs/WORK_LOG.md`; upstream archive/license/version/dependencies remain unchanged.
+
+## Prepared fixed-capacity parameter queues and total-point arenas
+
+The parameter portions of `src/internal/com_implementations.rs` now prepare stable COM queue
+wrappers and one shared total-point arena per container, with 8192 input queues/points and 4096
+output queues/points. Safe mutex synchronization and legal COM retention remain. Borrowed queue
+lookups do not addRef; a separately retained queue keeps its arena alive without a container
+backpointer or ownership cycle. Logical reset, checked insertion and COM point reads use prepared
+storage only. First-seen IDs and equal-offset repeated values retain their previous ordering.
+A shared ordinal-index cache provides direct indexed reads after bounded materialization.
+Binary upper-bound search selects stable insertion rank in a valid queue slice. Insertion shifts
+its affected ordinal suffix and adjusts later populated-queue offsets. A preallocated ordered
+populated-slot index skips empty queue offsets without changing public empty-queue order/count.
+First-point activation is checked before list mutation; rejected new host IDs restore recycled
+metadata/counts. Bounded costs and large-suffix layouts are measured rather than treated as
+real-time qualification. Dirty cache fallback remains bounded and cannot falsely become valid.
+
+`src/internal/plugin_impl.rs` selects explicit budgets, checks every host/native admission before
+SDK Process, and observes output write/storage failure even when the plugin ignores it. Successful
+SDK calls still acknowledge their admitted native batch before a separate output failure is
+reported. A runtime-owned output fault survives clear/rebuild/restore and blocks Process/SaveState
+until a fresh instance. Observation before/after getState also catches reentrant retained-queue
+failure. Pending-host overflow now rejects before controller mirroring instead of logging a drop
+and returning success. `src/error.rs` adds small allocation-free structured rejection variants.
+
+Storage tests cover ordering, bounds, cache invalidation, no-allocation first use/high-water/reuse,
+COM reference lifetime and poison/overflow. Extended domain tests cover checked admission, native
+acknowledgment, sticky output faults and state/lifecycle recovery limits. Only the cfg(test)
+allocator helper in `native_edit_transport.rs` changes; its production transport remains byte-
+identical. No event, helper, wire, application, timing or processor-lease behavior is changed.
+See the parameter-storage section of `docs/PLUGIN_PROCESSOR_DOMAINS.md` and executed receipts in
+`docs/WORK_LOG.md` for constructor memory, comparative cost and qualification limits.

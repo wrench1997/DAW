@@ -96,6 +96,29 @@
          HostCommand::CreateGui => gui_request(gui, true),
          HostCommand::CloseGui => gui_request(gui, false),
          HostCommand::Shutdown => HostResponse::Success {
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -59,6 +59,20 @@
+     #[error("Plugin is not processing")]
+     NotProcessing,
+ 
++    /// Host input could not enter the bounded parameter store. No SDK process call is made.
++    #[error("Input parameter changes were rejected by bounded storage")]
++    ParameterInputRejected,
++
++    /// Native delivery could not be admitted; the native channel retains its loss evidence.
++    #[error("Native parameter changes could not be admitted")]
++    NativeParameterAdmissionFailed,
++
++    /// Output parameter storage overflowed or became unusable. A fresh instance is required.
++    #[error(
++        "Output parameter storage failed; load a fresh plugin instance before processing or saving"
++    )]
++    ParameterOutputRejected,
++
+     /// Other errors
+     #[error("{0}")]
+     Other(String),
 --- a/src/host.rs
 +++ b/src/host.rs
 @@ -222,6 +222,41 @@
@@ -178,13 +201,21 @@
          assert_eq!(clamp_output_channels(0), 2);
 --- a/src/internal/com_implementations.rs
 +++ b/src/internal/com_implementations.rs
-@@ -1,5 +1,6 @@
+@@ -1,12 +1,13 @@
  //! Internal COM interface implementations for VST3
  
 +use super::native_edit_transport::{native_edit_channel, NativeEditReceiver, NativeEditSender};
  use crate::midi::{PluginEvent, PluginEventData, MAX_EVENT_PAYLOAD_BYTES, MAX_EVENT_TEXT_UNITS};
  use crate::plugin::StateContext;
  use std::collections::{HashMap, HashSet};
+ use std::ffi::CStr;
+ use std::os::raw::c_char;
+ use std::ptr;
+-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
++use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
+ use std::sync::{Arc, Mutex};
+ use std::thread::{self, ThreadId};
+ use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
 @@ -37,6 +38,8 @@
  pub struct HostApplication {
      progress: Mutex<ProgressState>,
@@ -842,10 +873,537 @@
                  log::error!("HostEventList: Failed to lock events for addEvent");
                  kResultFalse
              }
-@@ -2455,24 +2722,39 @@
-     /// rather than allocating, so this is allocation-free in steady state once the pool has
-     /// grown to the per-block working set.
-     pub fn enqueue(&self, id: u32, sample_offset: i32, value: f64) {
+@@ -2428,75 +2695,649 @@
+ }
+ 
+ // Parameter Changes implementation
++/// Explicit, per-container budgets. Points are shared by all queues, never multiplied
++/// by the queue count. Construction is control-side work, before the first block.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub struct ParameterQueueLimits {
++    pub max_queues: usize,
++    pub max_points: usize,
++}
++
++impl ParameterQueueLimits {
++    pub const INPUT: Self = Self {
++        max_queues: 8192,
++        max_points: 8192,
++    };
++    pub const OUTPUT: Self = Self {
++        max_queues: 4096,
++        max_points: 4096,
++    };
++}
++
++/// Small, nonallocating failures; presentation and logging belong outside callbacks.
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum ParameterStorageError {
++    QueueCapacity,
++    PointCapacity,
++    InvalidArgument,
++    InactiveQueue,
++    Poisoned,
++    InvalidState,
++}
++
++const NO_PARAMETER_NODE: usize = usize::MAX;
++
++#[derive(Clone, Copy)]
++struct ParameterPointNode {
++    offset: i32,
++    value: f64,
++    next: usize,
++}
++
++#[derive(Clone, Copy)]
++struct ParameterQueueSlot {
++    id: u32,
++    head: usize,
++    tail: usize,
++    count: usize,
++    cache_start: usize,
++}
++
++impl ParameterQueueSlot {
++    fn empty(id: u32) -> Self {
++        Self {
++            id,
++            head: NO_PARAMETER_NODE,
++            tail: NO_PARAMETER_NODE,
++            count: 0,
++            cache_start: NO_PARAMETER_NODE,
++        }
++    }
++}
++
++/// Only plain metadata/points live here. In particular, this arena must not own any
++/// queue wrappers: a legally AddRef-retained queue owns the arena without a cycle.
++struct ParameterArena {
++    queues: Box<[ParameterQueueSlot]>,
++    points: Box<[ParameterPointNode]>,
++    // One shared ordinal index, not one max-points array per queue.
++    ordinal_index: Box<[usize]>,
++    // Ordered registered slots with at least one accepted point. Empty queues stay
++    // registered/public, but never participate in ordinal-offset maintenance.
++    populated_slots: Box<[usize]>,
++    used_populated: usize,
++    cache_dirty: bool,
++    used_queues: usize,
++    used_points: usize,
++    failure: Option<ParameterStorageError>,
++}
++
++impl ParameterArena {
++    fn fail(&mut self, error: ParameterStorageError) -> ParameterStorageError {
++        if self.failure.is_none() {
++            self.failure = Some(error);
++        }
++        error
++    }
++
++    fn find_queue(&self, id: u32) -> Option<usize> {
++        self.queues[..self.used_queues]
++            .iter()
++            .position(|queue| queue.id == id)
++    }
++
++    // Call only after checking queue capacity and, for host admission, point capacity.
++    fn activate_queue(&mut self, id: u32) -> usize {
++        let slot = self.used_queues;
++        self.queues[slot] = ParameterQueueSlot::empty(id);
++        self.used_queues += 1;
++        // Empty queues have no ordinal slice; their cache_start is never read.
++        // Keep a dirty cache dirty without disturbing an already valid index.
++        slot
++    }
++
++    fn validate_counts(&mut self) -> Result<(), ParameterStorageError> {
++        if self.used_queues > self.queues.len()
++            || self.used_points > self.points.len()
++            || self.used_points > self.ordinal_index.len()
++            || self.used_populated > self.populated_slots.len()
++            || self.used_populated > self.used_queues
++            || self.used_populated > self.used_points
++        {
++            return Err(self.fail(ParameterStorageError::InvalidState));
++        }
++        Ok(())
++    }
++
++    fn cache_range(
++        &mut self,
++        queue: ParameterQueueSlot,
++    ) -> Result<(usize, usize), ParameterStorageError> {
++        let Some(end) = queue.cache_start.checked_add(queue.count) else {
++            return Err(self.fail(ParameterStorageError::InvalidState));
++        };
++        if end > self.used_points || end > self.ordinal_index.len() {
++            return Err(self.fail(ParameterStorageError::InvalidState));
++        }
++        Ok((queue.cache_start, end))
++    }
++
++    fn checked_node(&mut self, node: usize) -> Result<ParameterPointNode, ParameterStorageError> {
++        if node < self.used_points {
++            if let Some(point) = self.points.get(node) {
++                return Ok(*point);
++            }
++        }
++        Err(self.fail(ParameterStorageError::InvalidState))
++    }
++
++    fn cached_node(&mut self, position: usize) -> Result<usize, ParameterStorageError> {
++        if position < self.used_points {
++            if let Some(&node) = self.ordinal_index.get(position) {
++                if node < self.used_points && node < self.points.len() {
++                    return Ok(node);
++                }
++            }
++        }
++        Err(self.fail(ParameterStorageError::InvalidState))
++    }
++
++    fn populated_slot(&mut self, position: usize) -> Result<usize, ParameterStorageError> {
++        if position < self.used_populated {
++            if let Some(&slot) = self.populated_slots.get(position) {
++                if slot < self.used_queues {
++                    if let Some(queue) = self.queues.get(slot) {
++                        if queue.count != 0 {
++                            return Ok(slot);
++                        }
++                    }
++                }
++            }
++        }
++        Err(self.fail(ParameterStorageError::InvalidState))
++    }
++
++    fn populated_position(&mut self, slot: usize) -> Result<(usize, bool), ParameterStorageError> {
++        let mut low = 0;
++        let mut high = self.used_populated;
++        while low < high {
++            let middle = low + (high - low) / 2;
++            let candidate = self.populated_slot(middle)?;
++            if candidate < slot {
++                low = middle + 1;
++            } else {
++                high = middle;
++            }
++        }
++        if low != 0 && self.populated_slot(low - 1)? >= slot {
++            return Err(self.fail(ParameterStorageError::InvalidState));
++        }
++        let found = if low < self.used_populated {
++            let next = self.populated_slot(low)?;
++            if next < slot {
++                return Err(self.fail(ParameterStorageError::InvalidState));
++            }
++            next == slot
++        } else {
++            false
++        };
++        Ok((low, found))
++    }
++
++    fn insert_point(
++        &mut self,
++        slot: usize,
++        offset: i32,
++        value: f64,
++    ) -> Result<usize, ParameterStorageError> {
++        self.validate_counts()?;
++        if slot >= self.used_queues {
++            return Err(self.fail(ParameterStorageError::InactiveQueue));
++        }
++        if self.used_points == self.points.len() {
++            return Err(self.fail(ParameterStorageError::PointCapacity));
++        }
++        if self.used_points == self.ordinal_index.len() {
++            return Err(self.fail(ParameterStorageError::InvalidState));
++        }
++        let mut queue = self.queues[slot];
++        if queue.count > self.used_points {
++            return Err(self.fail(ParameterStorageError::InvalidState));
++        }
++        let (populated_position, populated) = self.populated_position(slot)?;
++        if populated != (queue.count != 0) {
++            return Err(self.fail(ParameterStorageError::InvalidState));
++        }
++        if !populated && self.used_populated == self.populated_slots.len() {
++            return Err(self.fail(ParameterStorageError::InvalidState));
++        }
++        if !self.cache_dirty {
++            if populated {
++                self.cache_range(queue)?;
++            } else {
++                // An empty queue's previous offset is deliberately unused. Derive
++                // its first slice from the next populated queue or the arena end.
++                queue.cache_start = if populated_position < self.used_populated {
++                    let next = self.populated_slot(populated_position)?;
++                    self.cache_range(self.queues[next])?.0
++                } else {
++                    self.used_points
++                };
++            }
++        }
++        let tail = if queue.count == 0 {
++            if queue.head != NO_PARAMETER_NODE || queue.tail != NO_PARAMETER_NODE {
++                return Err(self.fail(ParameterStorageError::InvalidState));
++            }
++            None
++        } else {
++            self.checked_node(queue.head)?;
++            Some(self.checked_node(queue.tail)?)
++        };
++        let (previous, next, index) = if let Some(tail) = tail {
++            if tail.next != NO_PARAMETER_NODE {
++                return Err(self.fail(ParameterStorageError::InvalidState));
++            }
++            if tail.offset <= offset {
++                // Dense, already ordered automation has constant-time rank lookup.
++                (queue.tail, NO_PARAMETER_NODE, queue.count)
++            } else if !self.cache_dirty {
++                // Upper bound on the valid ordinal slice: equal-offset arrivals stay
++                // before this new point. Search compares offsets only, never values.
++                let mut low = 0;
++                let mut high = queue.count;
++                while low < high {
++                    let middle = low + (high - low) / 2;
++                    let node = self.cached_node(queue.cache_start + middle)?;
++                    if self.checked_node(node)?.offset <= offset {
++                        low = middle + 1;
++                    } else {
++                        high = middle;
++                    }
++                }
++                let previous = if low == 0 {
++                    NO_PARAMETER_NODE
++                } else {
++                    self.cached_node(queue.cache_start + low - 1)?
++                };
++                // The tail fast path excludes low == count when the index is sound.
++                if low == queue.count {
++                    return Err(self.fail(ParameterStorageError::InvalidState));
++                }
++                let next = self.cached_node(queue.cache_start + low)?;
++                (previous, next, low)
++            } else {
++                let mut previous = NO_PARAMETER_NODE;
++                let mut next = queue.head;
++                let mut index = 0;
++                while next != NO_PARAMETER_NODE {
++                    if index == queue.count {
++                        return Err(self.fail(ParameterStorageError::InvalidState));
++                    }
++                    let point = self.checked_node(next)?;
++                    if point.offset > offset {
++                        break;
++                    }
++                    previous = next;
++                    next = point.next;
++                    index += 1;
++                }
++                (previous, next, index)
++            }
++        } else {
++            (NO_PARAMETER_NODE, NO_PARAMETER_NODE, 0)
++        };
++        if previous != NO_PARAMETER_NODE {
++            self.checked_node(previous)?;
++        }
++        if next != NO_PARAMETER_NODE {
++            self.checked_node(next)?;
++        }
++
++        let node = self.used_points;
++        // Validate all index movement and later metadata before changing either
++        // linked storage or the ordinal index. No full index scan is needed.
++        let position = if !self.cache_dirty {
++            let Some(position) = queue.cache_start.checked_add(index) else {
++                return Err(self.fail(ParameterStorageError::InvalidState));
++            };
++            let valid_move = position
++                .checked_add(1)
++                .and_then(|destination| {
++                    node.checked_sub(position).and_then(|length| {
++                        destination
++                            .checked_add(length)
++                            .map(|end| end <= self.ordinal_index.len())
++                    })
++                })
++                .unwrap_or(false);
++            if !valid_move || self.ordinal_index.get(position..node).is_none() {
++                return Err(self.fail(ParameterStorageError::InvalidState));
++            }
++            Some(position)
++        } else {
++            None
++        };
++
++        let later_start = populated_position + usize::from(populated);
++        let mut previous_slot = slot;
++        let mut expected_start = if !self.cache_dirty {
++            queue.cache_start + queue.count // The checked target range bounds this sum.
++        } else {
++            0
++        };
++        for later in later_start..self.used_populated {
++            let later_slot = self.populated_slot(later)?;
++            if later_slot <= previous_slot {
++                return Err(self.fail(ParameterStorageError::InvalidState));
++            }
++            previous_slot = later_slot;
++            if !self.cache_dirty {
++                let later_queue = self.queues[later_slot];
++                let (start, end) = self.cache_range(later_queue)?;
++                if start != expected_start || start.checked_add(1).is_none() {
++                    return Err(self.fail(ParameterStorageError::InvalidState));
++                }
++                expected_start = end;
++            }
++        }
++        if !self.cache_dirty && expected_start != self.used_points {
++            return Err(self.fail(ParameterStorageError::InvalidState));
++        }
++        if !populated {
++            let valid_move = populated_position
++                .checked_add(1)
++                .and_then(|destination| {
++                    self.used_populated
++                        .checked_sub(populated_position)
++                        .and_then(|length| {
++                            destination
++                                .checked_add(length)
++                                .map(|end| end <= self.populated_slots.len())
++                        })
++                })
++                .unwrap_or(false);
++            if !valid_move
++                || self
++                    .populated_slots
++                    .get(populated_position..self.used_populated)
++                    .is_none()
++            {
++                return Err(self.fail(ParameterStorageError::InvalidState));
++            }
++        }
++        let cache_start = queue.cache_start;
++
++        self.points[node] = ParameterPointNode {
++            offset,
++            value,
++            next,
++        };
++        self.used_points += 1;
++        if previous == NO_PARAMETER_NODE {
++            self.queues[slot].head = node;
++        } else {
++            self.points[previous].next = node;
++        }
++        let queue = &mut self.queues[slot];
++        if next == NO_PARAMETER_NODE {
++            queue.tail = node;
++        }
++        queue.count += 1;
++        if !populated && !self.cache_dirty {
++            queue.cache_start = cache_start;
++        }
++        if let Some(position) = position {
++            // Cost is O(total point suffix + later populated queues); empty queues
++            // are never walked or read here. Final populated tail appends move none.
++            self.ordinal_index.copy_within(position..node, position + 1);
++            self.ordinal_index[position] = node;
++            for later in later_start..self.used_populated {
++                self.queues[self.populated_slots[later]].cache_start += 1;
++            }
++        }
++        if !populated {
++            self.populated_slots.copy_within(
++                populated_position..self.used_populated,
++                populated_position + 1,
++            );
++            self.populated_slots[populated_position] = slot;
++            self.used_populated += 1;
++        }
++        // A dirty index stays dirty; its next valid read still rebuilds once.
++        Ok(index)
++    }
++
++    fn rebuild_index(&mut self) -> Result<(), ParameterStorageError> {
++        // Validate the bounded linked chains before changing any cached positions.
++        let mut total = 0_usize;
++        let mut previous_slot = None;
++        for populated in 0..self.used_populated {
++            let slot = self.populated_slot(populated)?;
++            if previous_slot.is_some_and(|previous| previous >= slot) {
++                return Err(self.fail(ParameterStorageError::InvalidState));
++            }
++            previous_slot = Some(slot);
++            let queue = self.queues[slot];
++            let Some(end) = total.checked_add(queue.count) else {
++                return Err(self.fail(ParameterStorageError::InvalidState));
++            };
++            if end > self.used_points || end > self.ordinal_index.len() {
++                return Err(self.fail(ParameterStorageError::InvalidState));
++            }
++            let mut node = queue.head;
++            let mut tail = NO_PARAMETER_NODE;
++            for _ in 0..queue.count {
++                let point = self.checked_node(node)?;
++                tail = node;
++                node = point.next;
++            }
++            if node != NO_PARAMETER_NODE || tail != queue.tail {
++                return Err(self.fail(ParameterStorageError::InvalidState));
++            }
++            total = end;
++        }
++        if total != self.used_points {
++            return Err(self.fail(ParameterStorageError::InvalidState));
++        }
++        let mut position = 0;
++        for populated in 0..self.used_populated {
++            let queue = &mut self.queues[self.populated_slots[populated]];
++            queue.cache_start = position;
++            let mut node = queue.head;
++            for _ in 0..queue.count {
++                self.ordinal_index[position] = node;
++                position += 1;
++                node = self.points[node].next;
++            }
++        }
++        self.cache_dirty = false;
++        Ok(())
++    }
++
++    fn point(&mut self, slot: usize, index: i32) -> Result<(i32, f64), ParameterStorageError> {
++        self.validate_counts()?;
++        if slot >= self.used_queues {
++            return Err(ParameterStorageError::InactiveQueue);
++        }
++        let queue = self.queues[slot];
++        if index < 0 || index as usize >= queue.count {
++            return Err(ParameterStorageError::InvalidArgument);
++        }
++        if self.cache_dirty {
++            self.rebuild_index()?;
++        }
++        // Ordinary valid reads check only this queue's range and selected node.
++        // They do not scan the array. A malformed cache fails closed, not by panic.
++        let (start, _) = self.cache_range(self.queues[slot])?;
++        let node = self.cached_node(start + index as usize)?;
++        let point = self.checked_node(node)?;
++        Ok((point.offset, point.value))
++    }
++}
++
++fn lock_parameter_arena(
++    arena: &Mutex<ParameterArena>,
++) -> Result<std::sync::MutexGuard<'_, ParameterArena>, ParameterStorageError> {
++    match arena.lock() {
++        Ok(guard) => Ok(guard),
++        Err(poison) => {
++            // Preserve the first failure, but never use potentially partial state.
++            // This guard is acquired once; no nested lock, panic, allocation or log.
++            poison.into_inner().fail(ParameterStorageError::Poisoned);
++            Err(ParameterStorageError::Poisoned)
++        }
++    }
++}
++
+ pub struct ParameterChanges {
+-    /// A pool of queue objects. Entries `[0, used)` are active this block; entries `[used, len)`
+-    /// are recycled — kept allocated and reused across blocks rather than dropped, so the
+-    /// steady-state audio path never allocates a `ComWrapper`. The pool only ever grows, bounded
+-    /// by the number of distinct parameters changed within a single block.
+-    pub queues: Mutex<Vec<ComWrapper<ParameterValueQueue>>>,
+-    /// Number of active queues this block (`<= queues.len()`). Mutated only under the `queues`
+-    /// lock, so the pair stays consistent.
+-    used: AtomicUsize,
++    // The owning wrappers never move or change after construction. SDK queue-return
++    // methods borrow their pointer, without cloning/dropping a COM reference.
++    queues: Box<[ComWrapper<ParameterValueQueue>]>,
++    arena: Arc<Mutex<ParameterArena>>,
+ }
+ 
+ impl Default for ParameterChanges {
+     fn default() -> Self {
+-        Self {
+-            queues: Mutex::new(Vec::new()),
+-            used: AtomicUsize::new(0),
+-        }
++        Self::new(ParameterQueueLimits::OUTPUT)
+     }
+ }
+ 
+ impl ParameterChanges {
+-    /// Host-side: queue a parameter change point for the next process block. The processor
+-    /// reads these from `inputParameterChanges` during `process()`. Points for the same id
+-    /// share one queue and are kept ordered by sample offset. Reuses a pooled queue object
+-    /// rather than allocating, so this is allocation-free in steady state once the pool has
+-    /// grown to the per-block working set.
+-    pub fn enqueue(&self, id: u32, sample_offset: i32, value: f64) {
 -        if let Ok(mut queues) = self.queues.lock() {
 -            let used = self.used.load(Ordering::Relaxed);
 -            // Merge into an already-active queue for this id (e.g. several offsets in one block).
@@ -864,46 +1422,388 @@
 -            }
 -            self.used.store(used + 1, Ordering::Relaxed);
 -        }
-+        let _ = self.try_enqueue(id, sample_offset, value);
+-    }
+-
+-    /// Forget all queued changes. Call after each `process()` block so values don't re-stick.
+-    /// Only resets the active count — the queue objects are retained for reuse (their points are
+-    /// cleared when a slot is recycled), so this allocates and drops nothing.
+-    pub fn clear_all(&self) {
+-        self.used.store(0, Ordering::Relaxed);
+-    }
+-
+-    /// Visit every point the plugin wrote into the active queues for this block.
+-    ///
+-    /// The callback runs while the small queue/point mutexes are held, so it must stay
+-    /// allocation-free and non-blocking. This is used immediately after `process()` to copy
+-    /// processor-originated automation into the host's bounded feedback queue.
+-    pub fn for_each_active_point(&self, mut f: impl FnMut(u32, i32, f64)) {
+-        let queues = self.queues.lock().unwrap_or_else(|p| p.into_inner());
+-        let used = self.used.load(Ordering::Relaxed).min(queues.len());
+-        for queue in &queues[..used] {
+-            let id = queue.param_id();
+-            let points = queue.points.lock().unwrap_or_else(|p| p.into_inner());
+-            for &(offset, value) in points.iter() {
+-                f(id, offset, value);
+-            }
+-        }
++    pub fn new(limits: ParameterQueueLimits) -> Self {
++        assert!(limits.max_queues <= i32::MAX as usize);
++        assert!(limits.max_points <= i32::MAX as usize);
++        let arena = Arc::new(Mutex::new(ParameterArena {
++            queues: vec![ParameterQueueSlot::empty(u32::MAX); limits.max_queues].into_boxed_slice(),
++            points: vec![
++                ParameterPointNode {
++                    offset: 0,
++                    value: 0.0,
++                    next: NO_PARAMETER_NODE
++                };
++                limits.max_points
++            ]
++            .into_boxed_slice(),
++            ordinal_index: vec![0; limits.max_points].into_boxed_slice(),
++            populated_slots: vec![0; limits.max_queues].into_boxed_slice(),
++            used_populated: 0,
++            cache_dirty: false,
++            used_queues: 0,
++            used_points: 0,
++            failure: None,
++        }));
++        let queues = (0..limits.max_queues)
++            .map(|slot| {
++                ComWrapper::new(ParameterValueQueue {
++                    slot,
++                    arena: Arc::clone(&arena),
++                })
++            })
++            .collect::<Vec<_>>()
++            .into_boxed_slice();
++        Self { queues, arena }
 +    }
 +
-+    /// Checked host admission. This still uses legacy COM queue locks and can grow storage;
-+    /// it is not a fixed-capacity/RT-safe replacement. Unlike `enqueue`, failure cannot be
-+    /// mistaken for native-edit delivery by the acknowledgment fence.
-+    pub fn try_enqueue(&self, id: u32, sample_offset: i32, value: f64) -> Result<(), ()> {
-+        let mut queues = self.queues.lock().map_err(|_| ())?;
-+        let used = self.used.load(Ordering::Relaxed);
-+        if used > queues.len() {
-+            return Err(());
++    /// Admit one host point atomically. A rejected new id never activates an empty
++    /// queue. No queue creation, allocator traffic or COM reference change occurs.
++    pub fn try_enqueue(
++        &self,
++        id: u32,
++        sample_offset: i32,
++        value: f64,
++    ) -> Result<(), ParameterStorageError> {
++        let mut arena = lock_parameter_arena(&self.arena)?;
++        arena.validate_counts()?;
++        if arena.used_points == arena.points.len() {
++            return Err(arena.fail(ParameterStorageError::PointCapacity));
 +        }
-+        if let Some(q) = queues[..used].iter().find(|q| q.param_id() == id) {
-+            return q.try_insert_point(sample_offset, value);
++        if let Some(slot) = arena.find_queue(id) {
++            return arena.insert_point(slot, sample_offset, value).map(|_| ());
 +        }
-+        if used < queues.len() {
-+            // A poisoned point lock must not activate an unpopulated queue.
-+            let q = &queues[used];
-+            let mut points = q.points.lock().map_err(|_| ())?;
-+            if points.capacity() == 0 {
-+                points.try_reserve(1).map_err(|_| ())?;
++        if arena.used_queues == arena.queues.len() {
++            return Err(arena.fail(ParameterStorageError::QueueCapacity));
++        }
++        let slot = arena.used_queues;
++        let recycled = arena.queues[slot];
++        arena.activate_queue(id);
++        match arena.insert_point(slot, sample_offset, value) {
++            Ok(_) => Ok(()),
++            Err(error) => {
++                // Point/list/index insertion performs all checks before mutation.
++                // Restore the exact inactive metadata too, not just its active count.
++                arena.used_queues = slot;
++                arena.queues[slot] = recycled;
++                Err(error)
 +            }
-+            points.clear();
-+            points.push((sample_offset, value));
-+            q.param_id.store(id, Ordering::Relaxed);
-+        } else {
-+            queues.try_reserve(1).map_err(|_| ())?;
-+            let q = ComWrapper::new(ParameterValueQueue::new(id));
-+            q.try_insert_point(sample_offset, value)?;
-+            queues.push(q);
 +        }
-+        self.used.store(used + 1, Ordering::Relaxed);
++    }
++
++    /// Logical reset only. Retained queues become inactive until their fixed slot is
++    /// reused. Accepted points, wrappers and buffers are neither dropped nor freed.
++    /// A sticky failure is deliberately never cleared by reset.
++    pub fn clear_all(&self) -> Result<(), ParameterStorageError> {
++        let mut arena = lock_parameter_arena(&self.arena)?;
++        arena.used_queues = 0;
++        arena.used_points = 0;
++        arena.used_populated = 0;
++        arena.cache_dirty = false;
 +        Ok(())
++    }
++
++    pub fn failure(&self) -> Option<ParameterStorageError> {
++        match self.arena.lock() {
++            Ok(arena) => arena.failure,
++            Err(poison) => {
++                let mut arena = poison.into_inner();
++                arena.fail(ParameterStorageError::Poisoned);
++                arena.failure
++            }
++        }
++    }
++
++    /// Callback runs under the one shared arena lock and must not re-enter this
++    /// container or allocate/block. Queues are visited in first-seen id order, then
++    /// points in ascending offset and equal-offset arrival order.
++    pub fn for_each_active_point(
++        &self,
++        mut f: impl FnMut(u32, i32, f64),
++    ) -> Result<(), ParameterStorageError> {
++        let mut arena = lock_parameter_arena(&self.arena)?;
++        arena.validate_counts()?;
++        let mut visited = 0;
++        for slot in 0..arena.used_queues {
++            let queue = arena.queues[slot];
++            if queue.count > arena.used_points {
++                return Err(arena.fail(ParameterStorageError::InvalidState));
++            }
++            let mut node = queue.head;
++            let mut tail = NO_PARAMETER_NODE;
++            for _ in 0..queue.count {
++                if visited == arena.used_points {
++                    return Err(arena.fail(ParameterStorageError::InvalidState));
++                }
++                let point = arena.checked_node(node)?;
++                f(queue.id, point.offset, point.value);
++                tail = node;
++                node = point.next;
++                visited += 1;
++            }
++            if node != NO_PARAMETER_NODE || tail != queue.tail {
++                return Err(arena.fail(ParameterStorageError::InvalidState));
++            }
++        }
++        if visited != arena.used_points {
++            return Err(arena.fail(ParameterStorageError::InvalidState));
++        }
++        Ok(())
++    }
++
++    #[cfg(test)]
++    pub(crate) fn poison_for_test(&self) {
++        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let _guard = self.arena.lock().unwrap();
++            panic!("controlled parameter arena poison");
++        }));
+     }
+ }
+ 
+@@ -2506,174 +3347,80 @@
+ 
+ impl IParameterChangesTrait for ParameterChanges {
+     unsafe fn getParameterCount(&self) -> i32 {
+-        match self.queues.lock() {
+-            Ok(_queues) => {
+-                // Only the active slots, not the recycled pool capacity.
+-                let count = self.used.load(Ordering::Relaxed) as i32;
+-                log::trace!(
+-                    "Internal ParameterChanges: getParameterCount returning {}",
+-                    count
+-                );
+-                count
+-            }
+-            Err(_) => {
+-                log::error!(
+-                    "Internal ParameterChanges: Failed to lock queues for getParameterCount"
+-                );
+-                0
+-            }
+-        }
++        let Ok(mut arena) = lock_parameter_arena(&self.arena) else {
++            return 0;
++        };
++        if arena.validate_counts().is_err() {
++            return 0;
++        }
++        arena.used_queues as i32
      }
  
-     /// Forget all queued changes. Call after each `process()` block so values don't re-stick.
-@@ -2665,14 +2947,15 @@
+     unsafe fn getParameterData(&self, index: i32) -> *mut IParamValueQueue {
+-        if index < 0 {
+-            log::warn!(
+-                "Internal ParameterChanges: getParameterData called with negative index: {}",
+-                index
+-            );
++        let Ok(mut arena) = lock_parameter_arena(&self.arena) else {
+             return ptr::null_mut();
+-        }
+-
+-        match self.queues.lock() {
+-            Ok(queues) => {
+-                let used = self.used.load(Ordering::Relaxed);
+-                if (index as usize) < used {
+-                    let queue = &queues[index as usize];
+-                    match queue.as_com_ref::<IParamValueQueue>() {
+-                        Some(ptr) => {
+-                            log::trace!("Internal ParameterChanges: getParameterData returning queue for index {}", index);
+-                            ptr.as_ptr()
+-                        }
+-                        None => {
+-                            log::error!("Internal ParameterChanges: Failed to convert queue to COM pointer for index {}", index);
+-                            ptr::null_mut()
+-                        }
+-                    }
+-                } else {
+-                    log::warn!("Internal ParameterChanges: getParameterData index {} out of bounds (count: {})", index, used);
+-                    ptr::null_mut()
+-                }
+-            }
+-            Err(_) => {
+-                log::error!(
+-                    "Internal ParameterChanges: Failed to lock queues for getParameterData"
+-                );
++        };
++        if arena.validate_counts().is_err() {
++            return ptr::null_mut();
++        }
++        if index < 0 || index as usize >= arena.used_queues {
++            return ptr::null_mut();
++        }
++        match self
++            .queues
++            .get(index as usize)
++            .and_then(|queue| queue.as_com_ref::<IParamValueQueue>())
++        {
++            Some(queue) => queue.as_ptr(),
++            None => {
++                arena.fail(ParameterStorageError::InvalidState);
+                 ptr::null_mut()
+             }
+         }
+     }
  
-     /// Insert a point keeping sample-offset order (safe host-side population, mirroring the
-     /// COM `addPoint`).
+     unsafe fn addParameterData(&self, id: *const u32, index: *mut i32) -> *mut IParamValueQueue {
++        if !index.is_null() {
++            *index = -1;
++        }
++        let Ok(mut arena) = lock_parameter_arena(&self.arena) else {
++            return ptr::null_mut();
++        };
+         if id.is_null() {
+-            log::warn!("Internal ParameterChanges: addParameterData called with null id pointer");
++            // Invalid writes imply an edit could not be represented. Unlike a read
++            // probe, this latches loss even if the plugin ignores the null return.
++            arena.fail(ParameterStorageError::InvalidArgument);
+             return ptr::null_mut();
+         }
+-
+-        let param_id = *id;
+-
+-        match self.queues.lock() {
+-            Ok(mut queues) => {
+-                let used = self.used.load(Ordering::Relaxed);
+-                // Reuse an already-active queue for this parameter if present.
+-                for (i, queue) in queues[..used].iter().enumerate() {
+-                    if queue.param_id() == param_id {
+-                        if !index.is_null() {
+-                            *index = i as i32;
+-                        }
+-                        log::trace!(
+-                            "Internal ParameterChanges: Found existing queue for parameter {}",
+-                            param_id
+-                        );
+-                        return queue
+-                            .as_com_ref::<IParamValueQueue>()
+-                            .map(|ptr| ptr.as_ptr())
+-                            .unwrap_or_else(|| {
+-                                log::error!("Internal ParameterChanges: Failed to convert existing queue to COM pointer");
+-                                ptr::null_mut()
+-                            });
+-                    }
+-                }
+-
+-                // Activate a slot: recycle a pooled queue if one exists, else grow once.
+-                if used == queues.len() {
+-                    queues.push(ComWrapper::new(ParameterValueQueue::new(param_id)));
+-                } else {
+-                    queues[used].reset(param_id);
+-                }
+-                let queue_ptr = queues[used]
+-                    .as_com_ref::<IParamValueQueue>()
+-                    .map(|ptr| ptr.as_ptr())
+-                    .unwrap_or_else(|| {
+-                        log::error!(
+-                            "Internal ParameterChanges: Failed to convert new queue to COM pointer"
+-                        );
+-                        ptr::null_mut()
+-                    });
+-
+-                if !index.is_null() {
+-                    *index = used as i32;
+-                }
+-
+-                self.used.store(used + 1, Ordering::Relaxed);
+-                log::trace!(
+-                    "Internal ParameterChanges: Activated queue for parameter {}, active count: {}",
+-                    param_id,
+-                    used + 1
+-                );
+-                queue_ptr
+-            }
+-            Err(_) => {
+-                log::error!(
+-                    "Internal ParameterChanges: Failed to lock queues for addParameterData"
+-                );
+-                ptr::null_mut()
+-            }
+-        }
+-    }
+-}
+-
+-// Parameter Value Queue implementation
++        if arena.validate_counts().is_err() {
++            return ptr::null_mut();
++        }
++        let id = *id;
++        let existing = arena.find_queue(id);
++        let slot = existing.unwrap_or(arena.used_queues);
++        if slot == arena.queues.len() {
++            arena.fail(ParameterStorageError::QueueCapacity);
++            return ptr::null_mut();
++        }
++        let Some(queue) = self.queues[slot].as_com_ref::<IParamValueQueue>() else {
++            arena.fail(ParameterStorageError::InvalidState);
++            return ptr::null_mut();
++        };
++        if existing.is_none() {
++            arena.activate_queue(id);
++        }
++        if !index.is_null() {
++            *index = slot as i32;
++        }
++        // Same borrowed return as the official SDK ParameterChanges implementation.
++        // A caller retaining this beyond the container must explicitly AddRef.
++        queue.as_ptr()
++    }
++}
++
+ pub struct ParameterValueQueue {
+-    // Atomic so a pooled queue can be re-targeted to a different parameter (see `reset`) without
+-    // dropping and reallocating the ComWrapper each block.
+-    pub param_id: AtomicU32,
+-    pub points: Mutex<Vec<(i32, f64)>>, // sample offset, value
+-}
+-
+-impl ParameterValueQueue {
+-    pub fn new(param_id: u32) -> Self {
+-        Self {
+-            param_id: AtomicU32::new(param_id),
+-            points: Mutex::new(Vec::new()),
+-        }
+-    }
+-
+-    /// This queue's current parameter id.
+-    pub fn param_id(&self) -> u32 {
+-        self.param_id.load(Ordering::Relaxed)
+-    }
+-
+-    /// Re-target a pooled queue to a new parameter, clearing its points in place (keeping the
+-    /// `points` Vec's capacity). Used when recycling a queue object for a different parameter so
+-    /// the steady-state path allocates nothing.
+-    fn reset(&self, param_id: u32) {
+-        self.param_id.store(param_id, Ordering::Relaxed);
+-        if let Ok(mut points) = self.points.lock() {
+-            points.clear();
+-        }
+-    }
+-
+-    /// Insert a point keeping sample-offset order (safe host-side population, mirroring the
+-    /// COM `addPoint`).
 -    fn insert_point(&self, sample_offset: i32, value: f64) {
 -        if let Ok(mut points) = self.points.lock() {
 -            let pos = points
@@ -912,22 +1812,108 @@
 -                .unwrap_or(points.len());
 -            points.insert(pos, (sample_offset, value));
 -        }
-+    fn try_insert_point(&self, sample_offset: i32, value: f64) -> Result<(), ()> {
-+        let mut points = self.points.lock().map_err(|_| ())?;
-+        points.try_reserve(1).map_err(|_| ())?;
-+        let pos = points
-+            .iter()
-+            .position(|(off, _)| *off > sample_offset)
-+            .unwrap_or(points.len());
-+        points.insert(pos, (sample_offset, value));
-+        Ok(())
+-    }
++    slot: usize,
++    arena: Arc<Mutex<ParameterArena>>,
+ }
+ 
+ impl Class for ParameterValueQueue {
+@@ -2682,50 +3429,57 @@
+ 
+ impl IParamValueQueueTrait for ParameterValueQueue {
+     unsafe fn getParameterId(&self) -> u32 {
+-        self.param_id.load(Ordering::Relaxed)
++        lock_parameter_arena(&self.arena)
++            .map(|arena| arena.queues[self.slot].id)
++            .unwrap_or(u32::MAX)
+     }
+ 
+     unsafe fn getPointCount(&self) -> i32 {
+-        // These run as COM FFI callbacks; a panic (e.g. from `.unwrap()` on a poisoned
+-        // lock) would unwind across the C++ boundary — UB. Recover the lock instead.
+-        self.points.lock().unwrap_or_else(|p| p.into_inner()).len() as i32
++        lock_parameter_arena(&self.arena)
++            .map(|arena| {
++                if self.slot < arena.used_queues {
++                    arena.queues[self.slot].count as i32
++                } else {
++                    0
++                }
++            })
++            .unwrap_or(0)
+     }
+ 
+     unsafe fn getPoint(&self, index: i32, sample_offset: *mut i32, value: *mut f64) -> i32 {
+-        if let Some((offset, val)) = self
+-            .points
+-            .lock()
+-            .unwrap_or_else(|p| p.into_inner())
+-            .get(index as usize)
+-        {
+-            if !sample_offset.is_null() {
+-                *sample_offset = *offset;
+-            }
+-            if !value.is_null() {
+-                *value = *val;
+-            }
+-            kResultOk
+-        } else {
+-            kResultFalse
++        let Ok(mut arena) = lock_parameter_arena(&self.arena) else {
++            return kResultFalse;
++        };
++        match arena.point(self.slot, index) {
++            Ok((offset, point_value)) => {
++                if !sample_offset.is_null() {
++                    *sample_offset = offset;
++                }
++                if !value.is_null() {
++                    *value = point_value;
++                }
++                kResultOk
++            }
++            Err(_) => kResultFalse,
+         }
+     }
+ 
+     unsafe fn addPoint(&self, sample_offset: i32, value: f64, index: *mut i32) -> i32 {
+-        let mut points = self.points.lock().unwrap_or_else(|p| p.into_inner());
+-
+-        // Find insertion point
+-        let insert_pos = points
+-            .iter()
+-            .position(|(offset, _)| *offset > sample_offset)
+-            .unwrap_or(points.len());
+-
+-        points.insert(insert_pos, (sample_offset, value));
+-
+         if !index.is_null() {
+-            *index = insert_pos as i32;
+-        }
+-
+-        kResultOk
++            *index = -1;
++        }
++        let Ok(mut arena) = lock_parameter_arena(&self.arena) else {
++            return kResultFalse;
++        };
++        match arena.insert_point(self.slot, sample_offset, value) {
++            Ok(position) => {
++                if !index.is_null() {
++                    *index = position as i32;
++                }
++                kResultOk
++            }
++            Err(_) => kResultFalse,
++        }
      }
  }
  
-@@ -2754,6 +3037,108 @@
+@@ -2753,6 +3507,108 @@
+ mod component_handler_tests {
      use super::*;
      use crate::plugin::{ContextMenuItem, HostNotification, ParameterEdit, ParameterEditKind};
- 
++
 +    #[test]
 +    fn native_dirty_revision_survives_all_feedback_drains() {
 +        let (handler, mut _native_edits) = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
@@ -1029,11 +2015,10 @@
 +        assert_eq!(received, [(7, 0.5)]);
 +        assert_eq!(handler.native_state_capture_revision().unwrap(), 1);
 +    }
-+
+ 
      struct TestContextMenuTarget {
          calls: Arc<Mutex<Vec<i32>>>,
-     }
-@@ -2786,7 +3171,7 @@
+@@ -2786,7 +3642,7 @@
  
      #[test]
      fn captures_begin_perform_end_in_order_and_drains() {
@@ -1042,7 +2027,7 @@
  
          // Drive a full gesture: mouse-down, two drag values, mouse-up.
          unsafe {
-@@ -2836,7 +3221,7 @@
+@@ -2836,7 +3692,7 @@
      /// `performEdit` (and one gesture event) per UI frame, for as long as the editor is open.
      #[test]
      fn editor_feedback_is_capped_when_the_host_never_polls() {
@@ -1051,7 +2036,7 @@
  
          // Simulate a very long drag: far more edits than the cap, never polled.
          unsafe {
-@@ -2865,7 +3250,7 @@
+@@ -2865,7 +3721,7 @@
  
      #[test]
      fn handler2_requests_are_ordered_and_report_backpressure() {
@@ -1060,7 +2045,7 @@
          unsafe {
              assert_eq!(handler.setDirty(1), kResultOk);
              assert_eq!(handler.requestOpenEditor(c"editor".as_ptr()), kResultOk);
-@@ -2899,7 +3284,7 @@
+@@ -2899,7 +3755,7 @@
  
      #[test]
      fn handler3_context_menu_preserves_items_and_executes_plugin_target() {
@@ -1069,7 +2054,7 @@
          let handler_wrapper = ComWrapper::new(handler);
          assert!(
              handler_wrapper.as_com_ref::<IComponentHandler3>().is_some(),
-@@ -2986,7 +3371,7 @@
+@@ -2986,7 +3842,7 @@
  
      #[test]
      fn handler3_rejects_invalid_views_and_releases_dismissed_targets() {
@@ -1078,7 +2063,7 @@
          assert!(unsafe { handler.createContextMenu(ptr::null_mut(), ptr::null()) }.is_null());
  
          let menu = unsafe {
-@@ -3011,7 +3396,7 @@
+@@ -3011,7 +3867,7 @@
  
      #[test]
      fn unit_handler_requests_are_ordered_and_preserve_whole_list_changes() {
@@ -1087,7 +2072,7 @@
          unsafe {
              assert_eq!(handler.notifyUnitSelection(7), kResultOk);
              assert_eq!(handler.notifyProgramListChange(11, 3), kResultOk);
-@@ -3046,7 +3431,7 @@
+@@ -3046,7 +3902,7 @@
      #[test]
      fn restart_flags_accumulate_until_drained() {
          use vst3::Steinberg::Vst::RestartFlags_ as Flags;
@@ -1096,18 +2081,1418 @@
          assert!(handler.take_restart_flags().is_empty());
  
          // Two separate restarts, e.g. a preset load followed by a mode switch.
-@@ -3697,7 +4082,9 @@
-             assert!(!queue_ptr.is_null());
-             assert!(index >= 0);
-             let queues = pc.queues.lock().unwrap();
--            queues[index as usize].insert_point(offset, value);
-+            queues[index as usize]
-+                .try_insert_point(offset, value)
+@@ -3637,129 +4493,1292 @@
+ #[cfg(test)]
+ mod parameter_changes_tests {
+     use super::*;
+-
+-    #[test]
+-    fn enqueue_groups_by_id_orders_by_offset_and_clears() {
+-        let pc = ParameterChanges::default();
+-        pc.enqueue(7, 64, 0.9);
+-        pc.enqueue(7, 0, 0.5); // earlier offset, same id → must sort before the 64 point
+-        pc.enqueue(3, 0, 0.1);
+-
+-        // Two distinct parameter ids → two queues; the processor reads this count.
+-        assert_eq!(unsafe { pc.getParameterCount() }, 2);
++    use crate::internal::native_edit_transport::tests::{allocation_free, measure_allocations};
++    use std::time::Instant;
++    use vst3::com_scrape_types::Unknown;
++
++    fn limits(max_queues: usize, max_points: usize) -> ParameterQueueLimits {
++        ParameterQueueLimits {
++            max_queues,
++            max_points,
++        }
++    }
++
++    fn points(changes: &ParameterChanges) -> Vec<(u32, i32, f64)> {
++        let mut points = Vec::new();
++        changes
++            .for_each_active_point(|id, offset, value| points.push((id, offset, value)))
++            .unwrap();
++        points
++    }
++
++    unsafe fn queue(changes: &ParameterChanges, slot: i32) -> ComRef<'_, IParamValueQueue> {
++        ComRef::from_raw(changes.getParameterData(slot)).unwrap()
++    }
++
++    #[test]
++    fn parameter_storage_derives_thread_safety_without_unsafe_impls() {
++        fn assert_send_sync<T: Send + Sync>() {}
++        assert_send_sync::<ParameterChanges>();
++        assert_send_sync::<ParameterValueQueue>();
++    }
++
++    #[test]
++    fn enqueue_groups_orders_preserves_ties_repetitions_and_clears() {
++        let changes = ParameterChanges::new(limits(3, 8));
++        allocation_free(|| {
++            changes.try_enqueue(7, 64, 0.9).unwrap();
++            changes.try_enqueue(7, 0, 0.5).unwrap();
++            changes.try_enqueue(3, 0, 0.1).unwrap();
++            changes.try_enqueue(7, 64, 0.1).unwrap();
++            changes.try_enqueue(7, 0, 0.5).unwrap();
++            assert_eq!(unsafe { changes.getParameterCount() }, 2);
++        });
++        assert_eq!(
++            points(&changes),
++            [
++                (7, 0, 0.5),
++                (7, 0, 0.5),
++                (7, 64, 0.9),
++                (7, 64, 0.1),
++                (3, 0, 0.1)
++            ]
++        );
++        allocation_free(|| {
++            changes.clear_all().unwrap();
++            assert_eq!(unsafe { changes.getParameterCount() }, 0);
++            changes
++                .for_each_active_point(|_, _, _| panic!("stale point"))
 +                .unwrap();
++            changes.try_enqueue(22, 3, 0.8).unwrap();
++        });
++        assert_eq!(points(&changes), [(22, 3, 0.8)]);
++        assert_eq!(changes.failure(), None);
++    }
++
++    #[test]
++    fn enqueue_with_nan_orders_by_offset_without_changing_value_bits() {
++        let changes = ParameterChanges::new(limits(1, 3));
++        let nan = f64::from_bits(0x7ff8_0000_0000_1234);
++        allocation_free(|| {
++            changes.try_enqueue(1, 128, nan).unwrap();
++            changes.try_enqueue(1, 0, 0.25).unwrap();
++            changes.try_enqueue(1, 64, nan).unwrap();
++            let queue = unsafe { queue(&changes, 0) };
++            for (i, offset, expected) in [(0, 0, 0.25), (1, 64, nan), (2, 128, nan)] {
++                let mut got_offset = -1;
++                let mut value = 0.0;
++                assert_eq!(
++                    unsafe { queue.getPoint(i, &mut got_offset, &mut value) },
++                    kResultOk
++                );
++                assert_eq!(got_offset, offset);
++                assert_eq!(value.to_bits(), expected.to_bits());
++            }
++        });
++    }
++
++    #[test]
++    fn cold_8192_distinct_ids_fit_input_without_allocation() {
++        let changes = ParameterChanges::new(ParameterQueueLimits::INPUT);
++        allocation_free(|| {
++            for id in 0..8192 {
++                changes.try_enqueue(id, 0, id as f64).unwrap();
++            }
++            assert_eq!(unsafe { changes.getParameterCount() }, 8192);
++            for slot in 0..8192 {
++                let queue = unsafe { queue(&changes, slot) };
++                assert_eq!(unsafe { queue.getParameterId() }, slot as u32);
++                assert_eq!(unsafe { queue.getPointCount() }, 1);
++                let mut value = 0.0;
++                assert_eq!(
++                    unsafe { queue.getPoint(0, ptr::null_mut(), &mut value) },
++                    kResultOk
++                );
++                assert_eq!(value, slot as f64);
++            }
++            assert_eq!(
++                changes.try_enqueue(9000, 0, 1.0),
++                Err(ParameterStorageError::PointCapacity)
++            );
++            assert_eq!(unsafe { changes.getParameterCount() }, 8192);
++            changes.clear_all().unwrap();
++            assert_eq!(
++                changes.failure(),
++                Some(ParameterStorageError::PointCapacity)
++            );
++            for id in 0..8192 {
++                changes.try_enqueue(20_000 + id, 3, 0.75).unwrap();
++            }
++            assert_eq!(unsafe { changes.getParameterCount() }, 8192);
++        });
++    }
++
++    #[test]
++    fn cold_dense_8192_curve_and_sequential_reads_do_not_allocate() {
++        let changes = ParameterChanges::new(ParameterQueueLimits::INPUT);
++        allocation_free(|| {
++            for i in 0..8192 {
++                changes.try_enqueue(42, i, i as f64).unwrap();
++            }
++            let queue = unsafe { queue(&changes, 0) };
++            assert_eq!(unsafe { queue.getPointCount() }, 8192);
++            for i in 0..8192 {
++                let mut offset = -1;
++                let mut value = -1.0;
++                assert_eq!(
++                    unsafe { queue.getPoint(i, &mut offset, &mut value) },
++                    kResultOk
++                );
++                assert_eq!((offset, value), (i, i as f64));
++            }
++            assert_eq!(
++                changes.try_enqueue(42, 8192, 1.0),
++                Err(ParameterStorageError::PointCapacity)
++            );
++            assert_eq!(unsafe { queue.getPointCount() }, 8192);
++        });
++    }
++
++    #[test]
++    fn input_combines_4096_host_and_4096_native_points_in_one_arena() {
++        let changes = ParameterChanges::new(ParameterQueueLimits::INPUT);
++        allocation_free(|| {
++            for id in 0..4096 {
++                changes.try_enqueue(id, 17, id as f64).unwrap();
++            }
++            for i in 0..4096 {
++                changes.try_enqueue(0, 0, i as f64).unwrap();
++            }
++            assert_eq!(unsafe { changes.getParameterCount() }, 4096);
++            let first = unsafe { queue(&changes, 0) };
++            assert_eq!(unsafe { first.getPointCount() }, 4097);
++            for i in 0..4096 {
++                let mut value = -1.0;
++                assert_eq!(
++                    unsafe { first.getPoint(i, ptr::null_mut(), &mut value) },
++                    kResultOk
++                );
++                assert_eq!(value, i as f64);
++            }
++            let mut offset = -1;
++            assert_eq!(
++                unsafe { first.getPoint(4096, &mut offset, ptr::null_mut()) },
++                kResultOk
++            );
++            assert_eq!(offset, 17);
++        });
++        assert_eq!(changes.failure(), None);
++    }
++
++    #[test]
++    fn output_4096_queue_and_shared_point_budget_rejects_next_write() {
++        let changes = ParameterChanges::new(ParameterQueueLimits::OUTPUT);
++        allocation_free(|| unsafe {
++            for id in 0..4096 {
++                let mut index = -1;
++                let ptr = changes.addParameterData(&id, &mut index);
++                assert!(!ptr.is_null());
++                assert_eq!(index, id as i32);
++                let queue = ComRef::from_raw(ptr).unwrap();
++                assert_eq!(queue.addPoint(0, id as f64, &mut index), kResultOk);
++                assert_eq!(index, 0);
++            }
++            let mut index = 10;
++            let first = queue(&changes, 0);
++            assert_eq!(first.addPoint(1, 0.5, &mut index), kResultFalse);
++            assert_eq!(index, -1);
++            assert_eq!(first.getPointCount(), 1);
++            assert!(changes.addParameterData(&9000, &mut index).is_null());
++            assert_eq!(index, -1);
++            assert_eq!(changes.getParameterCount(), 4096);
++            assert_eq!(
++                changes.failure(),
++                Some(ParameterStorageError::PointCapacity)
++            );
++        });
++    }
++
++    #[test]
++    fn failed_host_insert_never_activates_phantom_queue() {
++        let changes = ParameterChanges::new(limits(3, 1));
++        allocation_free(|| {
++            changes.try_enqueue(1, 0, 0.2).unwrap();
++            assert_eq!(
++                changes.try_enqueue(2, 0, 0.3),
++                Err(ParameterStorageError::PointCapacity)
++            );
++            assert_eq!(unsafe { changes.getParameterCount() }, 1);
++            assert_eq!(unsafe { queue(&changes, 0).getParameterId() }, 1);
++            changes.clear_all().unwrap();
++            assert_eq!(
++                changes.failure(),
++                Some(ParameterStorageError::PointCapacity)
++            );
++            changes.try_enqueue(2, 0, 0.3).unwrap();
++            assert_eq!(unsafe { changes.getParameterCount() }, 1);
++        });
++        assert_eq!(points(&changes), [(2, 0, 0.3)]);
++        let empty = ParameterChanges::new(limits(2, 0));
++        allocation_free(|| {
++            assert_eq!(
++                empty.try_enqueue(7, 0, 1.0),
++                Err(ParameterStorageError::PointCapacity)
++            );
++            assert_eq!(unsafe { empty.getParameterCount() }, 0);
++        });
++    }
++
++    #[test]
++    fn queue_capacity_and_empty_com_queue_admission_are_explicit() {
++        let changes = ParameterChanges::new(limits(2, 3));
++        allocation_free(|| unsafe {
++            let mut index = -1;
++            let first = changes.addParameterData(&7, &mut index);
++            assert_eq!(index, 0);
++            assert!(!first.is_null());
++            assert_eq!(ComRef::from_raw(first).unwrap().getPointCount(), 0);
++            assert_eq!(changes.addParameterData(&7, ptr::null_mut()), first);
++            changes.try_enqueue(3, 0, 1.0).unwrap();
++            assert_eq!(
++                changes.try_enqueue(9, 0, 0.1),
++                Err(ParameterStorageError::QueueCapacity)
++            );
++            assert!(changes.addParameterData(&9, &mut index).is_null());
++            assert_eq!(index, -1);
++            assert_eq!(changes.getParameterCount(), 2);
++            changes.try_enqueue(7, 0, 0.5).unwrap();
++            changes.try_enqueue(7, 0, 0.5).unwrap();
++            assert_eq!(
++                changes.failure(),
++                Some(ParameterStorageError::QueueCapacity)
++            );
++        });
++        assert_eq!(points(&changes), [(7, 0, 0.5), (7, 0, 0.5), (3, 0, 1.0)]);
++        let zero = ParameterChanges::new(limits(0, 0));
++        allocation_free(|| unsafe {
++            let mut index = 99;
++            assert!(zero.addParameterData(&7, &mut index).is_null());
++            assert_eq!(index, -1);
++            assert_eq!(zero.getParameterCount(), 0);
++            zero.clear_all().unwrap();
++            assert_eq!(zero.failure(), Some(ParameterStorageError::QueueCapacity));
++        });
++    }
++
++    #[test]
++    fn invalid_reads_and_optional_null_outputs_fail_without_sticky_loss() {
++        let changes = ParameterChanges::new(limits(1, 2));
++        allocation_free(|| unsafe {
++            assert!(changes.getParameterData(-1).is_null());
++            assert!(changes.getParameterData(0).is_null());
++            let raw = changes.addParameterData(&4, ptr::null_mut());
++            let queue = ComRef::from_raw(raw).unwrap();
++            assert_eq!(queue.addPoint(-4, 0.2, ptr::null_mut()), kResultOk);
++            assert_eq!(
++                queue.getPoint(0, ptr::null_mut(), ptr::null_mut()),
++                kResultOk
++            );
++            for index in [-1, 1, i32::MAX] {
++                let mut offset = 80;
++                let mut value = 90.0;
++                assert_eq!(queue.getPoint(index, &mut offset, &mut value), kResultFalse);
++                assert_eq!((offset, value), (80, 90.0));
++            }
++            assert!(changes.getParameterData(i32::MAX).is_null());
++            assert_eq!(changes.failure(), None);
++        });
++    }
++
++    #[test]
++    fn invalid_write_sets_failed_index_and_latches_without_panicking() {
++        let changes = ParameterChanges::new(limits(1, 2));
++        allocation_free(|| unsafe {
++            let mut index = 87;
++            assert!(changes.addParameterData(ptr::null(), &mut index).is_null());
++            assert_eq!(index, -1);
++            assert_eq!(changes.getParameterCount(), 0);
++            assert_eq!(
++                changes.failure(),
++                Some(ParameterStorageError::InvalidArgument)
++            );
++            changes.clear_all().unwrap();
++            assert_eq!(
++                changes.failure(),
++                Some(ParameterStorageError::InvalidArgument)
++            );
++        });
++    }
++
++    #[test]
++    fn alternating_reads_and_insertions_update_the_shared_index() {
++        let changes = ParameterChanges::new(limits(1, 16));
++        allocation_free(|| unsafe {
++            for offset in [0, 20, 40, 60] {
++                changes.try_enqueue(8, offset, offset as f64).unwrap();
++            }
++            let queue = queue(&changes, 0);
++            for index in [3, 0, 2, 1, 3, 3, 0] {
++                let mut offset = -1;
++                assert_eq!(
++                    queue.getPoint(index, &mut offset, ptr::null_mut()),
++                    kResultOk
++                );
++                assert_eq!(offset, index * 20);
++            }
++            let mut index = -1;
++            assert_eq!(
++                queue.getPoint(3, ptr::null_mut(), ptr::null_mut()),
++                kResultOk
++            );
++            assert_eq!(queue.addPoint(-10, -10.0, &mut index), kResultOk);
++            assert_eq!(index, 0);
++            assert_eq!(
++                queue.getPoint(2, ptr::null_mut(), ptr::null_mut()),
++                kResultOk
++            );
++            assert_eq!(queue.addPoint(20, 99.0, &mut index), kResultOk);
++            assert_eq!(index, 3);
++            assert_eq!(
++                queue.getPoint(4, ptr::null_mut(), ptr::null_mut()),
++                kResultOk
++            );
++            assert_eq!(queue.addPoint(80, 80.0, &mut index), kResultOk);
++            assert_eq!(index, 6);
++            for (index, (expected_offset, expected_value)) in [
++                (-10, -10.0),
++                (0, 0.0),
++                (20, 20.0),
++                (20, 99.0),
++                (40, 40.0),
++                (60, 60.0),
++                (80, 80.0),
++            ]
++            .into_iter()
++            .enumerate()
++            {
++                let mut offset = -1;
++                let mut value = -1.0;
++                assert_eq!(
++                    queue.getPoint(index as i32, &mut offset, &mut value),
++                    kResultOk
++                );
++                assert_eq!((offset, value), (expected_offset, expected_value));
++            }
++        });
++    }
++
++    #[test]
++    fn shared_index_tracks_multiqueue_interleaving_reset_and_retarget() {
++        let changes = ParameterChanges::new(limits(4, 8));
++        allocation_free(|| unsafe {
++            changes.try_enqueue(7, 20, 0.2).unwrap();
++            changes.try_enqueue(8, 30, 0.3).unwrap();
++            let first = queue(&changes, 0);
++            let second = queue(&changes, 1);
++            let mut offset = -1;
++            assert_eq!(second.getPoint(0, &mut offset, ptr::null_mut()), kResultOk);
++            assert_eq!(offset, 30);
++            assert!(!changes.arena.lock().unwrap().cache_dirty);
++            // Inserting in the first queue shifts the second queue's ordinal slice.
++            assert_eq!(first.addPoint(10, 0.1, ptr::null_mut()), kResultOk);
++            assert!(!changes.arena.lock().unwrap().cache_dirty);
++            assert_eq!(second.getPoint(0, &mut offset, ptr::null_mut()), kResultOk);
++            assert_eq!(offset, 30);
++            let third = changes.addParameterData(&9, ptr::null_mut());
++            let third = ComRef::from_raw(third).unwrap();
++            assert_eq!(third.addPoint(40, 0.4, ptr::null_mut()), kResultOk);
++            assert_eq!(second.addPoint(0, 0.0, ptr::null_mut()), kResultOk);
++            assert_eq!(third.getPoint(0, &mut offset, ptr::null_mut()), kResultOk);
++            assert_eq!(offset, 40);
++            assert_eq!(second.getPoint(0, &mut offset, ptr::null_mut()), kResultOk);
++            assert_eq!(offset, 0);
++            assert_eq!(first.getPoint(1, &mut offset, ptr::null_mut()), kResultOk);
++            assert_eq!(offset, 20);
++            changes.clear_all().unwrap();
++            assert_eq!(first.getPointCount(), 0);
++            assert_eq!(second.getPointCount(), 0);
++            changes.try_enqueue(100, 99, 0.9).unwrap();
++            changes.try_enqueue(101, 98, 0.8).unwrap();
++            assert_eq!(first.getParameterId(), 100);
++            assert_eq!(second.getParameterId(), 101);
++            assert_eq!(first.getPoint(0, &mut offset, ptr::null_mut()), kResultOk);
++            assert_eq!(offset, 99);
++            assert_eq!(second.getPoint(0, &mut offset, ptr::null_mut()), kResultOk);
++            assert_eq!(offset, 98);
++        });
++        assert_eq!(changes.failure(), None);
++    }
++
++    #[test]
++    fn invalid_read_probes_do_not_rebuild_shared_index() {
++        let changes = ParameterChanges::new(limits(2, 2));
++        allocation_free(|| unsafe {
++            let raw = changes.addParameterData(&7, ptr::null_mut());
++            let queue = ComRef::from_raw(raw).unwrap();
++            assert_eq!(
++                queue.getPoint(0, ptr::null_mut(), ptr::null_mut()),
++                kResultFalse
++            );
++            assert!(!changes.arena.lock().unwrap().cache_dirty);
++            changes.try_enqueue(7, 1, 0.1).unwrap();
++            changes.try_enqueue(7, 0, 0.0).unwrap();
++            // Exercise the supported dirty-state recovery path without relying on
++            // normal insertions, which now preserve a valid ordinal index.
++            changes.arena.lock().unwrap().cache_dirty = true;
++            for index in [-1, 2, i32::MAX] {
++                assert_eq!(
++                    queue.getPoint(index, ptr::null_mut(), ptr::null_mut()),
++                    kResultFalse
++                );
++                assert!(changes.arena.lock().unwrap().cache_dirty);
++            }
++            assert_eq!(
++                queue.getPoint(0, ptr::null_mut(), ptr::null_mut()),
++                kResultOk
++            );
++            assert!(!changes.arena.lock().unwrap().cache_dirty);
++            assert_eq!(changes.failure(), None);
++        });
++    }
++
++    #[test]
++    fn final_queue_tail_appends_extend_a_valid_index_at_small_and_max_budgets() {
++        for capacity in [32, 128, 512, 8192] {
++            let changes = ParameterChanges::new(limits(4, capacity));
++            allocation_free(|| unsafe {
++                let first = changes.addParameterData(&7, ptr::null_mut());
++                let first = ComRef::from_raw(first).unwrap();
++                assert!(!changes.arena.lock().unwrap().cache_dirty);
++                let mut checksum = 0.0;
++                for index in 0..capacity {
++                    assert_eq!(
++                        first.addPoint(index as i32, index as f64 * 0.5, ptr::null_mut()),
++                        kResultOk
++                    );
++                    assert!(!changes.arena.lock().unwrap().cache_dirty);
++                    let read = (index * 4051) % (index + 1);
++                    let mut offset = -1;
++                    let mut value = -1.0;
++                    assert_eq!(
++                        first.getPoint(read as i32, &mut offset, &mut value),
++                        kResultOk
++                    );
++                    assert_eq!((offset, value), (read as i32, read as f64 * 0.5));
++                    checksum += offset as f64 + value;
++                }
++                assert!(checksum > 0.0);
++                changes.clear_all().unwrap();
++                // Reuse with several queues. A new empty last queue keeps an already
++                // valid cache; its first and later tail appends extend that cache.
++                for id in 0..3 {
++                    changes.try_enqueue(id, 0, id as f64).unwrap();
++                }
++                let last = changes.addParameterData(&99, ptr::null_mut());
++                let last = ComRef::from_raw(last).unwrap();
++                for index in 0..capacity - 3 {
++                    assert_eq!(
++                        last.addPoint(index as i32, index as f64 * 0.5, ptr::null_mut()),
++                        kResultOk
++                    );
++                    assert!(!changes.arena.lock().unwrap().cache_dirty);
++                    let mut offset = -1;
++                    let mut value = -1.0;
++                    assert_eq!(
++                        last.getPoint(index as i32, &mut offset, &mut value),
++                        kResultOk
++                    );
++                    assert_eq!((offset, value), (index as i32, index as f64 * 0.5));
++                }
++                for slot in 0..3 {
++                    let queue = queue(&changes, slot);
++                    let mut value = -1.0;
++                    assert_eq!(queue.getPoint(0, ptr::null_mut(), &mut value), kResultOk);
++                    assert_eq!(value, slot as f64);
++                }
++            });
++            assert_eq!(changes.failure(), None);
++        }
++    }
++
++    #[test]
++    fn valid_index_tracks_all_insertions_and_dirty_state_is_preserved() {
++        let changes = ParameterChanges::new(limits(4, 12));
++        allocation_free(|| unsafe {
++            changes.try_enqueue(7, 2, 0.2).unwrap();
++            changes.try_enqueue(7, 2, 0.3).unwrap();
++            assert!(!changes.arena.lock().unwrap().cache_dirty);
++            changes.try_enqueue(7, 4, 0.4).unwrap();
++            changes.try_enqueue(7, 2, 0.5).unwrap(); // Equal-offset middle insertion.
++            assert!(!changes.arena.lock().unwrap().cache_dirty);
++            changes.arena.lock().unwrap().cache_dirty = true;
++            let new = changes.addParameterData(&8, ptr::null_mut());
++            let new = ComRef::from_raw(new).unwrap();
++            assert!(changes.arena.lock().unwrap().cache_dirty);
++            assert_eq!(new.addPoint(0, 0.6, ptr::null_mut()), kResultOk);
++            assert!(
++                changes.arena.lock().unwrap().cache_dirty,
++                "append must not bless an already dirty cache"
++            );
++            let first = queue(&changes, 0);
++            for (index, expected) in [(2, 0.2), (2, 0.3), (2, 0.5), (4, 0.4)]
++                .into_iter()
++                .enumerate()
++            {
++                let mut offset = -1;
++                let mut value = -1.0;
++                assert_eq!(
++                    first.getPoint(index as i32, &mut offset, &mut value),
++                    kResultOk
++                );
++                assert_eq!((offset, value), expected);
++            }
++            assert!(!changes.arena.lock().unwrap().cache_dirty);
++            // A non-final queue tail append shifts the later queue's ordinal slice
++            // while preserving validity of that slice's updated cache_start.
++            assert_eq!(first.addPoint(5, 0.7, ptr::null_mut()), kResultOk);
++            assert!(!changes.arena.lock().unwrap().cache_dirty);
++            let mut value = -1.0;
++            assert_eq!(new.getPoint(0, ptr::null_mut(), &mut value), kResultOk);
++            assert_eq!(value, 0.6);
++            assert!(!changes.arena.lock().unwrap().cache_dirty);
++            changes.clear_all().unwrap();
++            assert!(!changes.arena.lock().unwrap().cache_dirty);
++            changes.try_enqueue(9, 0, 1.0).unwrap();
++            assert!(!changes.arena.lock().unwrap().cache_dirty);
++            assert_eq!(first.getPoint(0, ptr::null_mut(), &mut value), kResultOk);
++            assert_eq!(value, 1.0);
++        });
++    }
++
++    #[test]
++    fn multiqueue_insertions_match_stable_oracle_through_capacity_reset_and_reuse() {
++        for capacity in [32, 128, 512, 8192] {
++            let changes = ParameterChanges::new(limits(8, capacity));
++            let mut oracle: Vec<(usize, i32, f64)> = Vec::with_capacity(capacity);
++            allocation_free(|| unsafe {
++                for round in 0..2 {
++                    changes.clear_all().unwrap();
++                    oracle.clear();
++                    // Include a permanently empty final queue, so every populated
++                    // queue must correctly shift some later queue slice metadata.
++                    for slot in 0..8 {
++                        assert!(!changes
++                            .addParameterData(&(100 + slot), ptr::null_mut())
++                            .is_null());
++                    }
++                    for arrival in 0..capacity {
++                        let slot = (arrival * 13) % 7;
++                        let offset = ((arrival * 4051 + round * 31) % 97) as i32 - 40;
++                        let value = (round * capacity + arrival) as f64;
++                        let rank = oracle
++                            .iter()
++                            .filter(|(old_slot, old_offset, _)| {
++                                *old_slot == slot && *old_offset <= offset
++                            })
++                            .count();
++                        let insertion = oracle
++                            .iter()
++                            .position(|(old_slot, old_offset, _)| {
++                                *old_slot > slot || (*old_slot == slot && *old_offset > offset)
++                            })
++                            .unwrap_or(oracle.len());
++                        oracle.insert(insertion, (slot, offset, value));
++                        let queue = queue(&changes, slot as i32);
++                        let mut index = -1;
++                        assert_eq!(queue.addPoint(offset, value, &mut index), kResultOk);
++                        assert_eq!(index as usize, rank);
++                        assert!(!changes.arena.lock().unwrap().cache_dirty);
++                        let count = queue.getPointCount() as usize;
++                        let read = (arrival * 4051) % count;
++                        let expected = oracle
++                            .iter()
++                            .filter(|(old_slot, _, _)| *old_slot == slot)
++                            .nth(read)
++                            .unwrap();
++                        let mut got_offset = -1;
++                        let mut got_value = -1.0;
++                        assert_eq!(
++                            queue.getPoint(read as i32, &mut got_offset, &mut got_value),
++                            kResultOk
++                        );
++                        assert_eq!((got_offset, got_value), (expected.1, expected.2));
++                    }
++                    let mut position = 0;
++                    changes
++                        .for_each_active_point(|id, offset, value| {
++                            let expected = oracle[position];
++                            assert_eq!(
++                                (id, offset, value),
++                                (100 + expected.0 as u32, expected.1, expected.2)
++                            );
++                            position += 1;
++                        })
++                        .unwrap();
++                    assert_eq!(position, capacity);
++                    let mut index = 99;
++                    let empty = queue(&changes, 7);
++                    assert_eq!(empty.addPoint(0, 9.0, &mut index), kResultFalse);
++                    assert_eq!(index, -1);
++                    assert_eq!(empty.getPointCount(), 0);
++                    assert_eq!(
++                        changes.failure(),
++                        Some(ParameterStorageError::PointCapacity)
++                    );
++                    // A failed full-budget insertion cannot shift any accepted index.
++                    let mut checksum = 0.0;
++                    for slot in 0..8 {
++                        let queue = queue(&changes, slot);
++                        for index in 0..queue.getPointCount() {
++                            let mut offset = -1;
++                            let mut value = -1.0;
++                            assert_eq!(queue.getPoint(index, &mut offset, &mut value), kResultOk);
++                            checksum += offset as f64 + value;
++                        }
++                    }
++                    assert_eq!(
++                        checksum,
++                        oracle
++                            .iter()
++                            .map(|(_, offset, value)| *offset as f64 + value)
++                            .sum::<f64>()
++                    );
++                }
++            });
++        }
++    }
++
++    #[test]
++    fn indexed_upper_bound_preserves_ties_and_extreme_offsets_in_valid_and_dirty_states() {
++        for dirty in [false, true] {
++            let changes = ParameterChanges::new(limits(2, 10));
++            allocation_free(|| unsafe {
++                let raw = changes.addParameterData(&7, ptr::null_mut());
++                let queue = ComRef::from_raw(raw).unwrap();
++                let arrivals = [
++                    (0, 0.0),
++                    (i32::MAX, 1.0),
++                    (i32::MIN, 2.0),
++                    (-1, 3.0),
++                    (0, 4.0),
++                    (i32::MIN, 5.0),
++                    (i32::MAX, 6.0),
++                    (-1, 7.0),
++                    (1, 8.0),
++                    (0, 9.0),
++                ];
++                let expected_ranks = [0, 1, 0, 1, 3, 1, 6, 3, 6, 6];
++                for ((offset, value), expected_rank) in arrivals.into_iter().zip(expected_ranks) {
++                    if dirty {
++                        changes.arena.lock().unwrap().cache_dirty = true;
++                    }
++                    let mut index = -1;
++                    assert_eq!(queue.addPoint(offset, value, &mut index), kResultOk);
++                    assert_eq!(index, expected_rank);
++                    assert_eq!(changes.arena.lock().unwrap().cache_dirty, dirty);
++                }
++                let expected = [
++                    (i32::MIN, 2.0),
++                    (i32::MIN, 5.0),
++                    (-1, 3.0),
++                    (-1, 7.0),
++                    (0, 0.0),
++                    (0, 4.0),
++                    (0, 9.0),
++                    (1, 8.0),
++                    (i32::MAX, 1.0),
++                    (i32::MAX, 6.0),
++                ];
++                for (index, point) in expected.into_iter().enumerate() {
++                    let mut offset = 0;
++                    let mut value = 0.0;
++                    assert_eq!(
++                        queue.getPoint(index as i32, &mut offset, &mut value),
++                        kResultOk
++                    );
++                    assert_eq!((offset, value), point);
++                }
++                assert!(!changes.arena.lock().unwrap().cache_dirty);
++                let mut index = 99;
++                assert_eq!(queue.addPoint(i32::MIN, 99.0, &mut index), kResultFalse);
++                assert_eq!(index, -1);
++                assert_eq!(queue.getPointCount(), 10);
++                assert!(!changes.arena.lock().unwrap().cache_dirty);
++                let empty = changes.addParameterData(&8, &mut index);
++                let empty = ComRef::from_raw(empty).unwrap();
++                assert_eq!(empty.getPointCount(), 0);
++                assert_eq!(empty.addPoint(0, 99.0, &mut index), kResultFalse);
++                assert_eq!(index, -1);
++            });
++        }
++    }
++
++    #[test]
++    fn corrupt_cache_ranges_and_nodes_fail_closed_before_insertion_mutation() {
++        for corruption in 0..5 {
++            let changes = ParameterChanges::new(limits(2, 8));
++            for offset in [10, 20, 30] {
++                changes.try_enqueue(7, offset, offset as f64).unwrap();
++            }
++            changes.try_enqueue(8, 0, 0.8).unwrap();
++            let first = unsafe { changes.getParameterData(0) };
++            {
++                let mut arena = changes.arena.lock().unwrap();
++                match corruption {
++                    0 => arena.queues[0].cache_start = usize::MAX,
++                    1 => arena.queues[0].cache_start = arena.used_points,
++                    2 => arena.ordinal_index[1] = usize::MAX,
++                    3 => arena.ordinal_index[1] = arena.used_points,
++                    _ => arena.queues[1].cache_start = usize::MAX,
++                }
++            }
++            allocation_free(|| unsafe {
++                let first = ComRef::from_raw(first).unwrap();
++                if corruption < 4 {
++                    let mut offset = 99;
++                    let mut value = 99.0;
++                    assert_eq!(first.getPoint(1, &mut offset, &mut value), kResultFalse);
++                    assert_eq!((offset, value), (99, 99.0));
++                }
++                let mut index = 99;
++                assert_eq!(first.addPoint(15, 0.15, &mut index), kResultFalse);
++                assert_eq!(index, -1);
++                assert_eq!(changes.failure(), Some(ParameterStorageError::InvalidState));
++                let arena = changes.arena.lock().unwrap();
++                assert_eq!(arena.used_points, 4);
++                assert_eq!(arena.used_queues, 2);
++                assert_eq!(arena.queues[0].count, 3);
++                assert_eq!(arena.queues[0].head, 0);
++                assert_eq!(arena.queues[0].tail, 2);
++                for node in 0..3 {
++                    assert_eq!(arena.points[node].offset, (node as i32 + 1) * 10);
++                    assert_eq!(arena.points[node].value, (node as f64 + 1.0) * 10.0);
++                    assert_eq!(
++                        arena.points[node].next,
++                        if node < 2 {
++                            node + 1
++                        } else {
++                            NO_PARAMETER_NODE
++                        }
++                    );
++                }
++            });
++            assert_eq!(
++                points(&changes),
++                [(7, 10, 10.0), (7, 20, 20.0), (7, 30, 30.0), (8, 0, 0.8)]
++            );
++        }
++    }
++
++    #[test]
++    fn corrupt_dirty_chain_is_rejected_before_index_rebuild_mutation() {
++        let changes = ParameterChanges::new(limits(1, 4));
++        changes.try_enqueue(7, 0, 0.0).unwrap();
++        changes.try_enqueue(7, 1, 0.1).unwrap();
++        let raw = unsafe { changes.getParameterData(0) };
+         {
+-            let queues = pc.queues.lock().unwrap();
+-            let q7 = queues.iter().find(|q| q.param_id() == 7).unwrap();
+-            assert_eq!(*q7.points.lock().unwrap(), vec![(0, 0.5), (64, 0.9)]);
+-            let q3 = queues.iter().find(|q| q.param_id() == 3).unwrap();
+-            assert_eq!(*q3.points.lock().unwrap(), vec![(0, 0.1)]);
+-        }
+-
+-        // After a block the host clears it so values don't re-stick.
+-        pc.clear_all();
+-        assert_eq!(unsafe { pc.getParameterCount() }, 0);
+-    }
+-
+-    #[test]
+-    fn active_points_can_be_drained_into_bounded_feedback_before_clear() {
+-        let pc = ParameterChanges::default();
+-        pc.enqueue(9, 31, 0.75);
+-        pc.enqueue(9, 2, 0.25);
+-        pc.enqueue(4, 0, 1.0);
+-        let mut seen = Vec::new();
+-        pc.for_each_active_point(|id, offset, value| seen.push((id, offset, value)));
+-        assert_eq!(seen, vec![(9, 2, 0.25), (9, 31, 0.75), (4, 0, 1.0)]);
+-        pc.clear_all();
+-        let mut after_clear = Vec::new();
+-        pc.for_each_active_point(|id, offset, value| after_clear.push((id, offset, value)));
+-        assert!(after_clear.is_empty());
+-    }
+-
+-    /// Regression test for the plugin-facing `addParameterData`/`addPoint` path used for
+-    /// `ProcessData::outputParameterChanges`. Per the VST3 docs, `outputParameterChanges`
+-    /// describes changes for the *current* processing block only, mirroring the reference
+-    /// `ParameterChanges` host helper's `clearQueue()`. Without calling `clear_all()` before
+-    /// each block (as `PluginImpl::process` now does), a plugin emitting output parameter
+-    /// points for the same id every block would keep finding its own queue "already active"
+-    /// (since `used` never resets) and keep appending points to it forever.
+-    #[test]
+-    fn output_queue_is_isolated_per_block_and_does_not_grow_when_cleared() {
+-        let pc = ParameterChanges::default();
+-
+-        // Simulate a plugin emitting one output point per block via the same `addParameterData`
+-        // activation path the real COM `IParameterChanges::addParameterData` call uses, then
+-        // insert the point directly into the returned slot's queue (equivalent to what the
+-        // plugin's `IParamValueQueue::addPoint` COM call would do on that same object).
+-        let emit_one_point = |pc: &ParameterChanges, id: u32, offset: i32, value: f64| {
+-            let mut index: i32 = -1;
+-            let queue_ptr =
+-                unsafe { pc.addParameterData(&id as *const u32, &mut index as *mut i32) };
+-            assert!(!queue_ptr.is_null());
+-            assert!(index >= 0);
+-            let queues = pc.queues.lock().unwrap();
+-            queues[index as usize].insert_point(offset, value);
++            let mut arena = changes.arena.lock().unwrap();
++            arena.cache_dirty = true;
++            arena.points[0].next = usize::MAX - 1;
++            arena.ordinal_index[0] = 3; // A sentinel proving no partial rebuild writes.
++        }
++        allocation_free(|| unsafe {
++            let queue = ComRef::from_raw(raw).unwrap();
++            assert_eq!(
++                queue.getPoint(0, ptr::null_mut(), ptr::null_mut()),
++                kResultFalse
++            );
++            assert_eq!(changes.failure(), Some(ParameterStorageError::InvalidState));
++            let arena = changes.arena.lock().unwrap();
++            assert!(arena.cache_dirty);
++            assert_eq!(arena.ordinal_index[0], 3);
++            assert_eq!(arena.used_points, 2);
++        });
++    }
++
++    #[test]
++    fn invalid_counts_and_linked_traversal_fail_closed_in_readers() {
++        let counts = ParameterChanges::new(limits(1, 2));
++        counts.try_enqueue(7, 0, 0.1).unwrap();
++        counts.arena.lock().unwrap().used_queues = 2;
++        allocation_free(|| unsafe {
++            assert_eq!(counts.getParameterCount(), 0);
++            assert!(counts.getParameterData(0).is_null());
++            assert_eq!(
++                counts.for_each_active_point(|_, _, _| panic!("invalid count visitor")),
++                Err(ParameterStorageError::InvalidState)
++            );
++            assert_eq!(counts.failure(), Some(ParameterStorageError::InvalidState));
++        });
++        let chain = ParameterChanges::new(limits(1, 2));
++        chain.try_enqueue(7, 0, 0.0).unwrap();
++        chain.try_enqueue(7, 1, 0.1).unwrap();
++        chain.arena.lock().unwrap().points[0].next = usize::MAX - 1;
++        allocation_free(|| {
++            let mut visited = 0;
++            assert_eq!(
++                chain.for_each_active_point(|_, _, _| visited += 1),
++                Err(ParameterStorageError::InvalidState)
++            );
++            assert_eq!(visited, 1);
++            assert_eq!(chain.failure(), Some(ParameterStorageError::InvalidState));
++        });
++    }
++
++    #[test]
++    fn sparse_first_points_follow_registered_order_and_ignore_empty_offsets() {
++        let changes = ParameterChanges::new(limits(8, 24));
++        let ids = [80, 10, 70, 20, 60, 30, 50, 40];
++        allocation_free(|| unsafe {
++            for round in 0..2 {
++                changes.clear_all().unwrap();
++                for id in ids {
++                    assert!(!changes
++                        .addParameterData(&(id + round * 100), ptr::null_mut())
++                        .is_null());
++                }
++                assert_eq!(changes.getParameterCount(), 8);
++                {
++                    let arena = changes.arena.lock().unwrap();
++                    assert_eq!(arena.used_populated, 0);
++                    assert!(arena
++                        .queues
++                        .iter()
++                        .all(|queue| queue.cache_start == NO_PARAMETER_NODE));
++                }
++                let mut expected_slots = [0_usize; 8];
++                for (step, slot) in [7_usize, 0, 5, 2, 6, 1, 4, 3].into_iter().enumerate() {
++                    let queue = queue(&changes, slot as i32);
++                    assert_eq!(queue.addPoint(10, slot as f64, ptr::null_mut()), kResultOk);
++                    expected_slots[step] = slot;
++                    expected_slots[..=step].sort_unstable();
++                    let arena = changes.arena.lock().unwrap();
++                    assert_eq!(arena.used_populated, step + 1);
++                    assert_eq!(&arena.populated_slots[..=step], &expected_slots[..=step]);
++                    for candidate in 0..8 {
++                        if !expected_slots[..=step].contains(&candidate) {
++                            assert_eq!(arena.queues[candidate].cache_start, NO_PARAMETER_NODE);
++                            assert_eq!(arena.queues[candidate].count, 0);
++                        }
++                    }
++                }
++                for slot in 0..8 {
++                    let queue = queue(&changes, slot);
++                    assert_eq!(queue.getParameterId(), ids[slot as usize] + round * 100);
++                    assert_eq!(
++                        queue.addPoint(0, slot as f64 + 0.25, ptr::null_mut()),
++                        kResultOk
++                    );
++                    assert_eq!(
++                        queue.addPoint(10, slot as f64 + 0.5, ptr::null_mut()),
++                        kResultOk
++                    );
++                }
++                let mut seen = 0;
++                changes
++                    .for_each_active_point(|id, offset, value| {
++                        let slot = seen / 3;
++                        assert_eq!(id, ids[slot] + round * 100);
++                        let expected = [
++                            (0, slot as f64 + 0.25),
++                            (10, slot as f64),
++                            (10, slot as f64 + 0.5),
++                        ][seen % 3];
++                        assert_eq!((offset, value), expected);
++                        seen += 1;
++                    })
++                    .unwrap();
++                assert_eq!(seen, 24);
++                let mut index = 99;
++                assert_eq!(
++                    queue(&changes, 0).addPoint(-1, 99.0, &mut index),
++                    kResultFalse
++                );
++                assert_eq!(index, -1);
++                assert_eq!(changes.arena.lock().unwrap().used_populated, 8);
++            }
++        });
++    }
++
++    #[test]
++    fn sparse_maximum_empty_queue_sets_admit_early_edits_without_allocating() {
++        for count in [4096, 8192] {
++            let changes = ParameterChanges::new(limits(count, count));
++            allocation_free(|| unsafe {
++                for slot in 0..count {
++                    assert!(!changes
++                        .addParameterData(&(slot as u32), ptr::null_mut())
++                        .is_null());
++                }
++                let first = queue(&changes, 0);
++                let mut checksum = 0.0;
++                for index in 0..128 {
++                    assert_eq!(
++                        first.addPoint(index, index as f64 * 0.5, ptr::null_mut()),
++                        kResultOk
++                    );
++                    let mut offset = -1;
++                    let mut value = -1.0;
++                    assert_eq!(first.getPoint(index, &mut offset, &mut value), kResultOk);
++                    checksum += offset as f64 + value;
++                }
++                assert_eq!(checksum, 1.5 * (127 * 128 / 2) as f64);
++                let arena = changes.arena.lock().unwrap();
++                assert_eq!(arena.used_queues, count);
++                assert_eq!(arena.used_populated, 1);
++                assert_eq!(arena.populated_slots[0], 0);
++                assert!(arena.queues[1..]
++                    .iter()
++                    .all(|queue| queue.count == 0 && queue.cache_start == NO_PARAMETER_NODE));
++            });
++        }
++    }
++
++    #[test]
++    fn sparse_corruption_rejects_before_any_point_index_or_list_mutation() {
++        for corruption in 0..6 {
++            let changes = ParameterChanges::new(limits(5, 8));
++            for id in 0..5 {
++                unsafe {
++                    changes.addParameterData(&id, ptr::null_mut());
++                }
++            }
++            for slot in [1, 3] {
++                unsafe {
++                    queue(&changes, slot).addPoint(0, slot as f64, ptr::null_mut());
++                }
++            }
++            {
++                let mut arena = changes.arena.lock().unwrap();
++                match corruption {
++                    0 => arena.populated_slots[1] = usize::MAX,
++                    1 => arena.populated_slots[1] = 4, // Registered, but empty.
++                    2 => arena.populated_slots[1] = 1, // Duplicate.
++                    3 => arena.populated_slots[..2].swap(0, 1), // Unsorted.
++                    4 => arena.used_populated = 1,     // Missing nonempty target.
++                    _ => arena.used_populated = 9,
++                }
++            }
++            allocation_free(|| unsafe {
++                let mut index = 99;
++                let slot = if corruption == 4 { 3 } else { 0 };
++                let queue = changes.queues[slot]
++                    .as_com_ref::<IParamValueQueue>()
++                    .unwrap();
++                assert_eq!(queue.addPoint(1, 99.0, &mut index), kResultFalse);
++                assert_eq!(index, -1);
++                assert_eq!(changes.failure(), Some(ParameterStorageError::InvalidState));
++                let arena = changes.arena.lock().unwrap();
++                assert_eq!(arena.used_points, 2);
++                assert_eq!(arena.used_queues, 5);
++                assert_eq!(arena.queues[0].count, 0);
++                assert_eq!(arena.queues[1].count, 1);
++                assert_eq!(arena.queues[3].count, 1);
++                assert_eq!(arena.ordinal_index[0], 0);
++                assert_eq!(arena.ordinal_index[1], 1);
++                assert_eq!((arena.points[0].value, arena.points[1].value), (1.0, 3.0));
++            });
++        }
++    }
++
++    #[test]
++    fn sparse_checked_host_failure_restores_exact_recycled_metadata() {
++        let changes = ParameterChanges::new(limits(3, 8));
++        for id in [70, 80, 90] {
++            changes.try_enqueue(id, 4, id as f64).unwrap();
++        }
++        let retained_slot = unsafe { changes.getParameterData(1) };
++        changes.clear_all().unwrap();
++        changes.try_enqueue(7, 0, 0.7).unwrap();
++        let before = {
++            let mut arena = changes.arena.lock().unwrap();
++            let before = arena.queues[1];
++            arena.populated_slots[0] = usize::MAX;
++            before
          };
+-
+-        // Block 1: plugin writes one point for parameter 42.
+-        emit_one_point(&pc, 42, 0, 0.1);
+-        assert_eq!(unsafe { pc.getParameterCount() }, 1);
+-        {
+-            let queues = pc.queues.lock().unwrap();
+-            let q = queues.iter().find(|q| q.param_id() == 42).unwrap();
+-            assert_eq!(*q.points.lock().unwrap(), vec![(0, 0.1)]);
+-        }
+-        let pool_len_after_block_1 = pc.queues.lock().unwrap().len();
+-
+-        // Host resets the queue for the next block, as `PluginImpl::process` now does
+-        // immediately before invoking the processor.
+-        pc.clear_all();
+-        assert_eq!(unsafe { pc.getParameterCount() }, 0);
+-
+-        // Block 2: plugin writes a different point for the same parameter id.
+-        emit_one_point(&pc, 42, 5, 0.9);
+-        assert_eq!(
+-            unsafe { pc.getParameterCount() },
+-            1,
+-            "clearing between blocks must not leave stale points visible or double-counted"
++        allocation_free(|| unsafe {
++            assert_eq!(
++                changes.try_enqueue(999, 0, 0.9),
++                Err(ParameterStorageError::InvalidState)
++            );
++            assert_eq!(changes.failure(), Some(ParameterStorageError::InvalidState));
++            assert_eq!(changes.getParameterCount(), 1);
++            assert_eq!(
++                ComRef::from_raw(retained_slot).unwrap().getParameterId(),
++                80
++            );
++            let arena = changes.arena.lock().unwrap();
++            let after = arena.queues[1];
++            assert_eq!(
++                (
++                    after.id,
++                    after.head,
++                    after.tail,
++                    after.count,
++                    after.cache_start
++                ),
++                (
++                    before.id,
++                    before.head,
++                    before.tail,
++                    before.count,
++                    before.cache_start
++                )
++            );
++            assert_eq!(arena.used_queues, 1);
++            assert_eq!(arena.used_points, 1);
++            assert_eq!(arena.used_populated, 1);
++            assert_eq!(arena.queues[0].id, 7);
++            assert_eq!(arena.queues[0].count, 1);
++            assert_eq!(arena.points[0].value, 0.7);
++            assert_eq!(arena.ordinal_index[0], 0);
++            assert_eq!(arena.populated_slots[0], usize::MAX);
++        });
++    }
++
++    #[test]
++    fn randomized_insertions_match_a_stable_sorted_oracle() {
++        let changes = ParameterChanges::new(limits(1, 512));
++        allocation_free(|| unsafe {
++            let raw = changes.addParameterData(&7, ptr::null_mut());
++            let queue = ComRef::from_raw(raw).unwrap();
++            let mut oracle = [(0_i32, 0.0_f64); 512];
++            for arrival in 0..512 {
++                let offset = ((arrival * 4051) % 97) as i32 - 40;
++                let value = arrival as f64;
++                let insertion = oracle[..arrival]
++                    .iter()
++                    .position(|(old, _)| *old > offset)
++                    .unwrap_or(arrival);
++                for index in (insertion..arrival).rev() {
++                    oracle[index + 1] = oracle[index];
++                }
++                oracle[insertion] = (offset, value);
++                let mut index = -1;
++                assert_eq!(queue.addPoint(offset, value, &mut index), kResultOk);
++                assert_eq!(index as usize, insertion);
++                // Read during construction to stress shared-index updates on every
++                // subsequent middle/head/tail insertion, not just after one edit.
++                let read = arrival / 2;
++                let mut got_offset = 0;
++                let mut got_value = 0.0;
++                assert_eq!(
++                    queue.getPoint(read as i32, &mut got_offset, &mut got_value),
++                    kResultOk
++                );
++                assert_eq!((got_offset, got_value), oracle[read]);
++            }
++            for (index, expected) in oracle.into_iter().enumerate() {
++                let mut offset = 0;
++                let mut value = 0.0;
++                assert_eq!(
++                    queue.getPoint(index as i32, &mut offset, &mut value),
++                    kResultOk
++                );
++                assert_eq!((offset, value), expected);
++            }
++        });
++    }
++
++    #[test]
++    fn reused_slots_have_stable_borrowed_pointers_and_fresh_points() {
++        let changes = ParameterChanges::new(limits(2, 2));
++        allocation_free(|| unsafe {
++            let first = changes.addParameterData(&7, ptr::null_mut());
++            for round in 0..128 {
++                let queue = ComRef::from_raw(first).unwrap();
++                assert_eq!(queue.addPoint(0, round as f64, ptr::null_mut()), kResultOk);
++                assert_eq!(queue.getPointCount(), 1);
++                assert_eq!(changes.getParameterData(0), first);
++                // Borrowed getter and add calls must not leak one reference per call.
++                assert_eq!(IParamValueQueue::add_ref(first), 2);
++                assert_eq!(IParamValueQueue::release(first), 1);
++                changes.clear_all().unwrap();
++                assert_eq!(queue.getPointCount(), 0);
++                assert_eq!(changes.getParameterCount(), 0);
++                assert_eq!(
++                    changes.addParameterData(&(100 + round), ptr::null_mut()),
++                    first
++                );
++                assert_eq!(queue.getPointCount(), 0);
++                assert_eq!(queue.getParameterId(), 100 + round);
++            }
++        });
++        assert_eq!(changes.failure(), None);
++    }
++
++    #[test]
++    fn retained_queue_and_qi_survive_parent_destruction_without_cycle() {
++        let changes = ParameterChanges::new(limits(2, 3));
++        let arena = Arc::downgrade(&changes.arena);
++        let raw = unsafe { changes.addParameterData(&7, ptr::null_mut()) };
++        let retained = unsafe {
++            // Explicit AddRef, unlike the borrowed return above.
++            assert_eq!(IParamValueQueue::add_ref(raw), 2);
++            ComPtr::from_raw(raw).unwrap()
++        };
++        unsafe {
++            assert_eq!(retained.addPoint(9, 0.75, ptr::null_mut()), kResultOk);
++        }
++        let unknown = retained.cast::<FUnknown>().unwrap();
++        let queried = unknown.cast::<IParamValueQueue>().unwrap();
++        assert_eq!(queried.as_ptr(), raw);
++        assert_eq!(retained.cast::<IParameterChanges>().map(|_| ()), None);
++        drop(changes);
++        assert!(arena.upgrade().is_some());
++        allocation_free(|| unsafe {
++            assert_eq!(retained.getParameterId(), 7);
++            assert_eq!(retained.getPointCount(), 1);
++            let mut value = 0.0;
++            assert_eq!(retained.getPoint(0, ptr::null_mut(), &mut value), kResultOk);
++            assert_eq!(value, 0.75);
++            assert_eq!(retained.addPoint(10, 0.9, ptr::null_mut()), kResultOk);
++            assert_eq!(queried.getPointCount(), 2);
++        });
++        drop(queried);
++        drop(unknown);
++        drop(retained);
++        assert!(
++            arena.upgrade().is_none(),
++            "retained queue must not form an ownership cycle"
+         );
+-        {
+-            let queues = pc.queues.lock().unwrap();
+-            let q = queues.iter().find(|q| q.param_id() == 42).unwrap();
++    }
++
++    #[test]
++    fn inactive_retained_queue_write_fails_without_touching_reused_points() {
++        let changes = ParameterChanges::new(limits(2, 3));
++        let first = unsafe { changes.addParameterData(&7, ptr::null_mut()) };
++        let second = unsafe { changes.addParameterData(&8, ptr::null_mut()) };
++        allocation_free(|| unsafe {
++            changes.clear_all().unwrap();
++            assert_eq!(changes.addParameterData(&9, ptr::null_mut()), first);
++            let stale = ComRef::from_raw(second).unwrap();
++            let mut index = 99;
++            assert_eq!(stale.addPoint(0, 1.0, &mut index), kResultFalse);
++            assert_eq!(index, -1);
++            assert_eq!(stale.getPointCount(), 0);
++            assert_eq!(changes.getParameterCount(), 1);
+             assert_eq!(
+-                *q.points.lock().unwrap(),
+-                vec![(5, 0.9)],
+-                "block 2 must only expose its own point, not block 1's stale value"
++                changes.failure(),
++                Some(ParameterStorageError::InactiveQueue)
+             );
+-        }
+-
+-        // The pool is reused (recycled), not grown, across blocks.
+-        assert_eq!(
+-            pc.queues.lock().unwrap().len(),
+-            pool_len_after_block_1,
+-            "clearing between blocks must reuse pooled queues rather than growing the pool"
+-        );
+-    }
+-
+-    #[test]
+-    fn enqueue_with_nan_value_orders_by_offset_without_panicking() {
+-        // The queue is ordered by `sample_offset` (an i32 — total order), never by the f64
+-        // value, so a NaN value can never reach a comparator and can never panic or corrupt
+-        // ordering. This pins that property: the points sort by offset and the NaN survives
+-        // verbatim in its offset slot.
+-        let pc = ParameterChanges::default();
+-        pc.enqueue(1, 128, f64::NAN);
+-        pc.enqueue(1, 0, 0.25);
+-        pc.enqueue(1, 64, f64::NAN);
+-
+-        let queues = pc.queues.lock().unwrap();
+-        let q = queues.iter().find(|q| q.param_id() == 1).unwrap();
+-        let points = q.points.lock().unwrap();
+-        let offsets: Vec<i32> = points.iter().map(|(off, _)| *off).collect();
+-        assert_eq!(offsets, vec![0, 64, 128]);
+-        // The finite point is intact and the two NaN-valued points are still NaN.
+-        assert_eq!(points[0].1, 0.25);
+-        assert!(points[1].1.is_nan());
+-        assert!(points[2].1.is_nan());
++            changes.try_enqueue(9, 0, 0.5).unwrap();
++        });
++        assert_eq!(points(&changes), [(9, 0, 0.5)]);
++    }
++
++    #[test]
++    fn poisoned_storage_fails_all_entry_points_without_callback_panics() {
++        let changes = ParameterChanges::new(limits(2, 2));
++        changes.try_enqueue(7, 0, 0.5).unwrap();
++        let raw = unsafe { changes.getParameterData(0) };
++        changes.poison_for_test();
++        allocation_free(|| unsafe {
++            let queue = ComRef::from_raw(raw).unwrap();
++            let mut index = 99;
++            assert_eq!(
++                changes.try_enqueue(8, 0, 0.1),
++                Err(ParameterStorageError::Poisoned)
++            );
++            assert_eq!(changes.clear_all(), Err(ParameterStorageError::Poisoned));
++            assert_eq!(
++                changes.for_each_active_point(|_, _, _| panic!("poisoned visitor")),
++                Err(ParameterStorageError::Poisoned)
++            );
++            assert_eq!(changes.getParameterCount(), 0);
++            assert!(changes.getParameterData(0).is_null());
++            assert!(changes.addParameterData(&8, &mut index).is_null());
++            assert_eq!(index, -1);
++            assert_eq!(queue.getParameterId(), u32::MAX);
++            assert_eq!(queue.getPointCount(), 0);
++            assert_eq!(
++                queue.getPoint(0, ptr::null_mut(), ptr::null_mut()),
++                kResultFalse
++            );
++            index = 99;
++            assert_eq!(queue.addPoint(0, 0.9, &mut index), kResultFalse);
++            assert_eq!(index, -1);
++            assert_eq!(changes.failure(), Some(ParameterStorageError::Poisoned));
++            assert_eq!(changes.failure(), Some(ParameterStorageError::Poisoned));
++        });
++    }
++
++    #[test]
++    fn constructor_allocations_are_linear_and_dense_timings_are_measured() {
++        for limits in [ParameterQueueLimits::INPUT, ParameterQueueLimits::OUTPUT] {
++            let (changes, stats) = measure_allocations(|| ParameterChanges::new(limits));
++            assert_eq!(stats.allocations, limits.max_queues + 6);
++            assert_eq!(stats.deallocations, 0);
++            assert_eq!(stats.freed_bytes, 0);
++            assert_eq!(changes.queues.len(), limits.max_queues);
++            {
++                let arena = changes.arena.lock().unwrap();
++                assert_eq!(arena.queues.len(), limits.max_queues);
++                assert_eq!(arena.points.len(), limits.max_points);
++                assert_eq!(arena.ordinal_index.len(), limits.max_points);
++                assert_eq!(arena.populated_slots.len(), limits.max_queues);
++            }
++            let start = Instant::now();
++            allocation_free(|| {
++                for index in 0..limits.max_points {
++                    changes.try_enqueue(7, index as i32, index as f64).unwrap();
++                }
++            });
++            let ascending_write = start.elapsed();
++            let start = Instant::now();
++            allocation_free(|| unsafe {
++                let queue = queue(&changes, 0);
++                for index in 0..limits.max_points {
++                    assert_eq!(
++                        queue.getPoint(index as i32, ptr::null_mut(), ptr::null_mut()),
++                        kResultOk
++                    );
++                }
++            });
++            let sequential_read = start.elapsed();
++            let start = Instant::now();
++            allocation_free(|| unsafe {
++                let queue = queue(&changes, 0);
++                // Odd multiplier gives a deterministic permutation for the power-of-two
++                // production budgets, and repeatedly jumps backwards through the curve.
++                for index in 0..limits.max_points {
++                    let index = (index * 4051) % limits.max_points;
++                    assert_eq!(
++                        queue.getPoint(index as i32, ptr::null_mut(), ptr::null_mut()),
++                        kResultOk
++                    );
++                }
++            });
++            let random_read = start.elapsed();
++            let start = Instant::now();
++            allocation_free(|| changes.clear_all().unwrap());
++            let reset = start.elapsed();
++            let start = Instant::now();
++            allocation_free(|| {
++                for index in (0..limits.max_points).rev() {
++                    changes.try_enqueue(7, index as i32, index as f64).unwrap();
++                }
++            });
++            let descending_write = start.elapsed();
++            allocation_free(|| changes.clear_all().unwrap());
++            let start = Instant::now();
++            allocation_free(|| {
++                for index in 0..limits.max_points {
++                    let offset = (index * 4051) % limits.max_points;
++                    changes.try_enqueue(7, offset as i32, index as f64).unwrap();
++                }
++            });
++            let random_write = start.elapsed();
++            allocation_free(|| changes.clear_all().unwrap());
++            let start = Instant::now();
++            allocation_free(|| {
++                for index in 0..limits.max_queues {
++                    changes.try_enqueue(index as u32, 0, index as f64).unwrap();
++                }
++            });
++            let distinct_id_write = start.elapsed();
++            eprintln!("parameter storage {:?}: allocations={}, requested_bytes={}, deallocations={}, queue_slot_bytes={}, point_node_bytes={}, ascending_write={:?}, descending_write={:?}, random_write={:?}, sequential_read={:?}, random_read={:?}, distinct_id_write={:?}, reset={:?}; profile={}, arch={}, os={}; observed test timings, not realtime latency guarantees", limits, stats.allocations, stats.allocated_bytes, stats.deallocations, std::mem::size_of::<ParameterQueueSlot>(), std::mem::size_of::<ParameterPointNode>(), ascending_write, descending_write, random_write, sequential_read, random_read, distinct_id_write, reset, if cfg!(debug_assertions) { "debug" } else { "optimized" }, std::env::consts::ARCH, std::env::consts::OS);
++        }
+     }
+ }
  
-         // Block 1: plugin writes one point for parameter 42.
-@@ -3958,3 +4345,344 @@
+@@ -3958,3 +5977,348 @@
          assert_eq!(read_attribute(&project, c"FilePathString"), None);
      }
  }
@@ -1418,20 +3803,24 @@
 +    use super::*;
 +
 +    #[test]
-+    fn checked_admission_refuses_poisoned_existing_or_recycled_point_storage() {
-+        for recycle in [false, true] {
-+            let changes = ParameterChanges::default();
++    fn checked_admission_refuses_poisoned_existing_or_reset_storage() {
++        for reset in [false, true] {
++            let changes = ParameterChanges::new(ParameterQueueLimits {
++                max_queues: 1,
++                max_points: 1,
++            });
 +            changes.try_enqueue(7, 0, 0.25).unwrap();
-+            let queue = changes.queues.lock().unwrap()[0].clone();
-+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-+                let _guard = queue.points.lock().unwrap();
-+                panic!("controlled point admission failure");
-+            }));
-+            if recycle {
-+                changes.clear_all();
++            if reset {
++                changes.clear_all().unwrap();
 +            }
-+            assert!(changes.try_enqueue(7, 0, 0.75).is_err());
-+            assert_eq!(changes.used.load(Ordering::Relaxed), usize::from(!recycle));
++            changes.poison_for_test();
++            crate::internal::native_edit_transport::tests::allocation_free(|| {
++                assert_eq!(
++                    changes.try_enqueue(7, 0, 0.75),
++                    Err(ParameterStorageError::Poisoned)
++                );
++                assert_eq!(changes.failure(), Some(ParameterStorageError::Poisoned));
++            });
 +        }
 +    }
 +
@@ -2093,7 +4482,7 @@
 +pub(crate) mod native_edit_transport;
 --- /dev/null
 +++ b/src/internal/native_edit_transport.rs
-@@ -0,0 +1,1182 @@
+@@ -0,0 +1,1223 @@
 +//! Bounded native-editor intent transport, separate from display notifications.
 +//!
 +//! Only the control-side producer uses a mutex, always with `try_lock`. The consumer
@@ -2551,7 +4940,7 @@
 +}
 +
 +#[cfg(test)]
-+mod tests {
++pub(crate) mod tests {
 +    use super::*;
 +    use std::{
 +        alloc::{GlobalAlloc, Layout, System},
@@ -2567,6 +4956,8 @@
 +        static COUNTING: Cell<bool> = const { Cell::new(false) };
 +        static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
 +        static DEALLOCATIONS: Cell<usize> = const { Cell::new(0) };
++        static ALLOCATED_BYTES: Cell<usize> = const { Cell::new(0) };
++        static FREED_BYTES: Cell<usize> = const { Cell::new(0) };
 +    }
 +
 +    struct CountingAllocator;
@@ -2577,12 +4968,14 @@
 +        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
 +            if COUNTING.try_with(Cell::get).unwrap_or(false) {
 +                let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
++                let _ = ALLOCATED_BYTES.try_with(|count| count.set(count.get() + layout.size()));
 +            }
 +            unsafe { System.alloc(layout) }
 +        }
 +        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
 +            if COUNTING.try_with(Cell::get).unwrap_or(false) {
 +                let _ = DEALLOCATIONS.try_with(|count| count.set(count.get() + 1));
++                let _ = FREED_BYTES.try_with(|count| count.set(count.get() + layout.size()));
 +            }
 +            unsafe { System.dealloc(pointer, layout) }
 +        }
@@ -2590,12 +4983,14 @@
 +            if COUNTING.try_with(Cell::get).unwrap_or(false) {
 +                let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
 +                let _ = DEALLOCATIONS.try_with(|count| count.set(count.get() + 1));
++                let _ = ALLOCATED_BYTES.try_with(|count| count.set(count.get() + size));
++                let _ = FREED_BYTES.try_with(|count| count.set(count.get() + layout.size()));
 +            }
 +            unsafe { System.realloc(pointer, layout, size) }
 +        }
 +    }
 +
-+    fn allocation_free<T>(run: impl FnOnce() -> T) -> T {
++    pub(crate) fn allocation_free<T>(run: impl FnOnce() -> T) -> T {
 +        ALLOCATIONS.with(|count| count.set(0));
 +        DEALLOCATIONS.with(|count| count.set(0));
 +        COUNTING.with(|active| assert!(!active.replace(true)));
@@ -2615,6 +5010,41 @@
 +            "channel path freed memory"
 +        );
 +        result
++    }
++
++    /// Test-only constructor accounting; reports requested bytes, not allocator metadata/RSS.
++    #[derive(Debug, Clone, Copy)]
++    pub(crate) struct AllocationStats {
++        pub allocations: usize,
++        pub deallocations: usize,
++        pub allocated_bytes: usize,
++        pub freed_bytes: usize,
++    }
++
++    pub(crate) fn measure_allocations<T>(run: impl FnOnce() -> T) -> (T, AllocationStats) {
++        ALLOCATIONS.with(|count| count.set(0));
++        DEALLOCATIONS.with(|count| count.set(0));
++        ALLOCATED_BYTES.with(|count| count.set(0));
++        FREED_BYTES.with(|count| count.set(0));
++        COUNTING.with(|active| assert!(!active.replace(true)));
++        struct Reset;
++        impl Drop for Reset {
++            fn drop(&mut self) {
++                COUNTING.with(|active| active.set(false));
++            }
++        }
++        let reset = Reset;
++        let result = run();
++        drop(reset);
++        (
++            result,
++            AllocationStats {
++                allocations: ALLOCATIONS.with(Cell::get),
++                deallocations: DEALLOCATIONS.with(Cell::get),
++                allocated_bytes: ALLOCATED_BYTES.with(Cell::get),
++                freed_bytes: FREED_BYTES.with(Cell::get),
++            },
++        )
 +    }
 +
 +    #[test]
@@ -3286,7 +5716,30 @@
  use crate::{
      audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
      error::{Error, Result},
-@@ -135,8 +137,22 @@
+@@ -12,7 +14,10 @@
+ };
+ use crossbeam_queue::ArrayQueue;
+ use std::ptr;
+-use std::sync::{Arc, Mutex};
++use std::sync::{
++    atomic::{AtomicBool, Ordering},
++    Arc, Mutex,
++};
+ use std::thread::{self, ThreadId};
+ use vst3::Steinberg::Vst::BusDirections_::*;
+ use vst3::Steinberg::Vst::Event_::EventTypes_::*;
+@@ -29,8 +34,8 @@
+         create_event_list, create_host_application, create_host_plug_frame,
+         create_memory_stream_from_with_metadata, create_memory_stream_with_metadata,
+         create_state_restore_stream, ComponentHandler, ConnectionPair, HostApplication,
+-        HostEventList, HostPlugFrame, ParameterChanges, StreamStateType, MAX_EDITOR_FEEDBACK,
+-        MAX_QUEUED_EVENTS,
++        HostEventList, HostPlugFrame, ParameterChanges, ParameterQueueLimits, StreamStateType,
++        MAX_EDITOR_FEEDBACK, MAX_QUEUED_EVENTS,
+     },
+     module_loader::{load_module, VstModule},
+ };
+@@ -135,8 +140,22 @@
      event_outputs: Vec<bool>,
  }
  
@@ -3310,7 +5763,7 @@
      // Core VST3 interfaces
      component: ComPtr<IComponent>,
      processor: ComPtr<IAudioProcessor>,
-@@ -146,19 +162,69 @@
+@@ -146,19 +165,72 @@
      /// `setComponentState` on top of it would double-apply and corrupt parameters.
      single_component: bool,
  
@@ -3382,12 +5835,15 @@
 +    // A positive processor call may activate deferred state even when it returns an error.
 +    // Zero-sample parameter flushes do not enter the characterized Surge sample loop.
 +    has_processed_audio: bool,
++    // A lossy/unusable output parameter store invalidates processing and capture until reload.
++    // Runtime-owned so buffer/state reconfiguration cannot erase the evidence.
++    parameter_output_fault: AtomicBool,
 +    sample_rate: f64,
 +    block_size: usize,
      /// Transport tempo (BPM) advertised in the host `ProcessContext`.
      tempo: f64,
      /// Time signature numerator advertised in the host `ProcessContext`.
-@@ -167,13 +233,12 @@
+@@ -167,13 +239,12 @@
      time_sig_denominator: i32,
      /// Whether the transport is playing (the `kPlaying` flag in `ProcessContext.state`).
      playing: bool,
@@ -3402,7 +5858,7 @@
      sample_size: ProcessingSampleSize,
      bus_activation: BusActivationState,
      /// Monotonic allocator for per-voice note ids (note_on); 0/-1 reserved for "unset".
-@@ -190,37 +255,23 @@
+@@ -190,37 +261,23 @@
      // the callback; `restartComponent` merely records invalidation flags atomically.
      midi_mapping_cache: MidiMappingCache,
      program_change_cache: Vec<ProgramChangeMapping>,
@@ -3442,7 +5898,7 @@
  
      // Event handling
      input_events: ComWrapper<HostEventList>,
-@@ -235,34 +286,37 @@
+@@ -235,34 +292,37 @@
      // audio thread can push without locking and a UI thread can drain concurrently; when full
      // the oldest event is dropped (bounded memory if the host never polls).
      output_events_owned: Arc<ArrayQueue<PluginEvent>>,
@@ -3508,7 +5964,7 @@
  }
  
  // Processing data structure
-@@ -284,6 +338,48 @@
+@@ -284,6 +344,48 @@
  enum CallerAudioBuffers<'a> {
      Flat(&'a mut AudioBuffers),
      Buses(&'a mut BusAudioBuffers),
@@ -3557,7 +6013,7 @@
  }
  
  impl CallerAudioBuffers<'_> {
-@@ -335,9 +431,9 @@
+@@ -335,9 +437,9 @@
  
  /// Per-bus channel pointers into the (audio-thread-owned) audio buffers.
  ///
@@ -3570,7 +6026,7 @@
  struct SendChannelPtrs<T>(Vec<Vec<*mut T>>);
  unsafe impl<T: Send> Send for SendChannelPtrs<T> {}
  
-@@ -905,7 +1001,7 @@
+@@ -905,7 +1007,7 @@
  
  impl PluginImpl {
      fn ensure_control_thread(&self, operation: &str) -> Result<()> {
@@ -3579,7 +6035,7 @@
              Ok(())
          } else {
              Err(Error::Other(format!(
-@@ -945,18 +1041,21 @@
+@@ -945,18 +1047,21 @@
          time_sig_numerator: i32,
          time_sig_denominator: i32,
      ) {
@@ -3607,7 +6063,7 @@
              data.transport_tempo = bpm;
              if process_context_needs(
                  data.process_context_requirements,
-@@ -971,9 +1070,13 @@
+@@ -971,9 +1076,13 @@
      /// processing is active (stored fields plus the live `ProcessContext`).
      #[allow(clippy::unnecessary_cast)]
      fn update_time_signature(&mut self, numerator: i32, denominator: i32) {
@@ -3624,7 +6080,7 @@
              if process_context_needs(
                  data.process_context_requirements,
                  IProcessContextRequirements_::Flags_::kNeedTimeSignature as u32,
-@@ -987,8 +1090,11 @@
+@@ -987,8 +1096,11 @@
      /// Toggle the transport playing state (`kPlaying`) for the **next** processed block, even
      /// while processing is active (stored field plus the live `ProcessContext.state`).
      fn update_playing(&mut self, playing: bool) {
@@ -3638,7 +6094,7 @@
              data.process_context.state =
                  process_context_state(data.process_context_requirements, playing);
          }
-@@ -998,36 +1104,23 @@
+@@ -998,36 +1110,23 @@
      /// load so `setupProcessing` (which runs at `start_processing`) uses the builder's settings
      /// rather than the internal defaults.
      pub fn set_audio_config(&mut self, sample_rate: f64, block_size: usize) {
@@ -3683,7 +6139,7 @@
              }
          }
          changes
-@@ -1042,7 +1135,7 @@
+@@ -1042,7 +1141,7 @@
      /// automation on real plugins. Log it and carry on; `log` skips the formatting entirely when
      /// the level is disabled.
      fn apply_controller_parameter(&self, id: u32, value: f64) {
@@ -3692,7 +6148,7 @@
              return;
          };
          let result = unsafe { controller.setParamNormalized(id, value) };
-@@ -1061,20 +1154,22 @@
+@@ -1061,20 +1160,22 @@
      /// service call. The queue drops its oldest entry when full: the newest value for a
      /// parameter is the one worth showing.
      fn mirror_parameter_to_controller(&self, id: u32, value: f64) {
@@ -3719,7 +6175,7 @@
              self.apply_controller_parameter(id, value);
          }
      }
-@@ -1083,32 +1178,37 @@
+@@ -1083,32 +1184,37 @@
      /// and apply parameter values queued for the controller from the same place. A no-op
      /// anywhere but the control thread; both halves are `IEditController` traffic.
      fn service_control_thread_caches(&mut self) {
@@ -3762,7 +6218,7 @@
              return;
          };
          unsafe {
-@@ -1132,12 +1232,12 @@
+@@ -1132,12 +1238,12 @@
                  }
              }
          }
@@ -3778,7 +6234,7 @@
              return;
          };
          let Some(unit_info) = controller.cast::<IUnitInfo>() else {
-@@ -1176,18 +1276,21 @@
+@@ -1176,18 +1282,21 @@
                      continue;
                  };
                  if *program_count > 0 {
@@ -3806,7 +6262,7 @@
              .iter()
              .copied()
              .find(|mapping| mapping.unit_id == unit_id)
-@@ -1227,6 +1330,9 @@
+@@ -1227,6 +1336,9 @@
              // (whether via `InitializedComponent` or `Drop for PluginImpl`) must complete before
              // the module unmaps.
              log::debug!("Step 1: Loading VST3 module...");
@@ -3816,7 +6272,7 @@
              let module = load_module(path)?;
              log::debug!("VST3 module loaded successfully");
  
-@@ -1248,7 +1354,8 @@
+@@ -1248,7 +1360,8 @@
  
              // Factory3 must receive the host context before any class is instantiated. Keep the
              // same context alive for the complete component/controller lifetime.
@@ -3826,7 +6282,7 @@
              let host_ctx = host_app.to_com_ptr::<IHostApplication>();
              let context = host_ctx
                  .as_ref()
-@@ -1336,8 +1443,8 @@
+@@ -1336,8 +1449,8 @@
              // Create component handler for parameter change notifications
              log::debug!("Step 8: Creating component handler...");
              let parameter_changes = Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK)));
@@ -3837,7 +6293,7 @@
              log::debug!("Component handler created");
  
              // Get or create controller (handles both single-component and separate controller)
-@@ -1478,60 +1585,69 @@
+@@ -1478,60 +1591,70 @@
              );
  
              let mut plugin = Self {
@@ -3894,6 +6350,7 @@
 +                runtime: ProcessorRuntime {
 +                    is_processing: false,
 +                    has_processed_audio: false,
++                    parameter_output_fault: AtomicBool::new(false),
 +                    sample_rate: 44100.0,
 +                    block_size: 512,
 +                    tempo: 120.0,
@@ -3956,7 +6413,7 @@
  
              // IMidiMapping and unit/program metadata are controller calls and therefore belong
              // here on the loading thread, never in process() or a playback command drain.
-@@ -1565,10 +1681,46 @@
+@@ -1565,10 +1688,47 @@
              log::info!(
                  "Has GUI: {}, Active: {}",
                  plugin.info.has_gui,
@@ -3999,12 +6456,13 @@
 +    /// Discard prepared bus/sample storage before a mutation that can change its layout.
 +    /// A failed rebuild leaves no stale pointers or successful setup marker to reuse.
 +    fn invalidate_processing_setup(&mut self) {
++        self.runtime.observe_parameter_output_fault();
 +        self.runtime.process_data = None;
 +        self.control.applied_setup = None;
      }
  
      /// Put the component into the active state (`IComponent::setActive(true)`).
-@@ -1582,23 +1734,23 @@
+@@ -1582,23 +1742,23 @@
                  "Failed to activate component: {result:#x}"
              )));
          }
@@ -4035,7 +6493,7 @@
          }
          result
      }
-@@ -1744,7 +1896,7 @@
+@@ -1744,7 +1904,7 @@
  
      /// Map the configured [`ProcessMode`](crate::plugin::ProcessMode) to the VST3 enum value.
      fn vst_process_mode(&self) -> i32 {
@@ -4044,7 +6502,7 @@
              crate::plugin::ProcessMode::Offline => ProcessModes_::kOffline as i32,
              crate::plugin::ProcessMode::Prefetch => ProcessModes_::kPrefetch as i32,
              crate::plugin::ProcessMode::Realtime => ProcessModes_::kRealtime as i32,
-@@ -1779,7 +1931,7 @@
+@@ -1779,7 +1939,7 @@
          let arrangements = self.bus_arrangements()?;
          let mut inputs: Vec<u64> = arrangements.inputs.iter().map(|a| a.raw()).collect();
          let mut outputs: Vec<u64> = arrangements.outputs.iter().map(|a| a.raw()).collect();
@@ -4053,7 +6511,7 @@
              inputs.as_mut_ptr(),
              inputs.len() as i32,
              outputs.as_mut_ptr(),
-@@ -1800,26 +1952,35 @@
+@@ -1800,26 +1960,35 @@
      /// The configuration currently baked into the plugin via `setupProcessing`.
      fn current_setup(&self) -> AppliedSetup {
          AppliedSetup {
@@ -4096,7 +6554,7 @@
              if result != kResultOk {
                  return Err(Error::InterfaceError(format!(
                      "Failed to setup processing: {:#x}",
-@@ -1829,7 +1990,7 @@
+@@ -1829,7 +1998,7 @@
  
              // Create process data
              self.create_process_data()?;
@@ -4105,7 +6563,7 @@
  
              Ok(())
          }
-@@ -1843,7 +2004,7 @@
+@@ -1843,7 +2012,7 @@
          unsafe {
              let mut data = Box::new(HostProcessData {
                  process_data: std::mem::zeroed(),
@@ -4114,16 +6572,22 @@
                      ProcessingSampleSize::F32 => HostSampleBuffers::F32(TypedSampleBuffers {
                          inputs: Vec::new(),
                          outputs: Vec::new(),
-@@ -1860,50 +2021,62 @@
+@@ -1860,50 +2029,66 @@
                  input_bus_buffers: Vec::new(),
                  output_bus_buffers: Vec::new(),
                  process_context: std::mem::zeroed(),
 -                process_context_requirements: self.process_context_requirements,
 -                transport_tempo: self.tempo,
+-                input_param_changes: ComWrapper::new(ParameterChanges::default()),
+-                output_param_changes: ComWrapper::new(ParameterChanges::default()),
 +                process_context_requirements: self.runtime.process_context_requirements,
 +                transport_tempo: self.runtime.tempo,
-                 input_param_changes: ComWrapper::new(ParameterChanges::default()),
-                 output_param_changes: ComWrapper::new(ParameterChanges::default()),
++                input_param_changes: ComWrapper::new(ParameterChanges::new(
++                    ParameterQueueLimits::INPUT,
++                )),
++                output_param_changes: ComWrapper::new(ParameterChanges::new(
++                    ParameterQueueLimits::OUTPUT,
++                )),
              });
  
              // Initialize process context
@@ -4192,7 +6656,7 @@
                  .output_events
                  .as_com_ref::<IEventList>()
                  .map(|ptr| ptr.as_ptr())
-@@ -1924,21 +2097,28 @@
+@@ -1924,21 +2109,28 @@
              // Prepare buffers
              self.prepare_buffers(&mut data)?;
  
@@ -4224,7 +6688,7 @@
                  .component
                  .getBusInfo(kAudio as i32, direction, bus_idx, &mut bus_info)
                  == kResultOk
-@@ -1949,6 +2129,7 @@
+@@ -1949,6 +2141,7 @@
              // Fall back to the processor's arrangement, whose set bits define its channels.
              let mut arrangement = 0u64;
              if self
@@ -4232,7 +6696,7 @@
                  .processor
                  .getBusArrangement(direction, bus_idx, &mut arrangement)
                  == kResultOk
-@@ -1976,11 +2157,11 @@
+@@ -1976,11 +2169,11 @@
          match &mut data.sample_buffers {
              HostSampleBuffers::F32(samples) => {
                  *samples = build_typed_sample_buffers(
@@ -4247,7 +6711,7 @@
                  );
                  for (bus, pointers) in data
                      .input_bus_buffers
-@@ -2007,11 +2188,11 @@
+@@ -2007,11 +2200,11 @@
              }
              HostSampleBuffers::F64(samples) => {
                  *samples = build_typed_sample_buffers(
@@ -4262,7 +6726,7 @@
                  );
                  for (bus, pointers) in data
                      .input_bus_buffers
-@@ -2061,7 +2242,15 @@
+@@ -2061,7 +2254,15 @@
      }
  }
  
@@ -4279,7 +6743,7 @@
      /// Process exactly `frames` samples starting at `frame_offset` within the caller's
      /// buffers. `frames` is always <= the configured `block_size`, which is what the plugin
      /// was set up to accept; `process` splits a larger caller block into successive chunks.
-@@ -2072,6 +2261,8 @@
+@@ -2072,12 +2273,14 @@
      /// past the end of the caller's block.
      fn process_chunk(
          &mut self,
@@ -4288,10 +6752,37 @@
          buffers: &mut CallerAudioBuffers<'_>,
          frame_offset: usize,
          frames: usize,
-@@ -2109,37 +2300,18 @@
-                     }
-                 }
+         is_last: bool,
+     ) -> Result<()> {
+-        let result = if let Some(ref mut data) = self.process_data {
++        if let Some(ref mut data) = self.process_data {
+             unsafe {
+                 // Clear output events only - input events should be preserved for processing
+                 self.output_events.clear();
+@@ -2089,7 +2292,14 @@
+                 // Without this, addParameterData()/addPoint() would keep appending to queues
+                 // from prior blocks, mixing stale points into new ones, growing point storage
+                 // unbounded, and risking a reallocation on the audio thread long after warm-up.
+-                data.output_param_changes.clear_all();
++                if data.output_param_changes.clear_all().is_err()
++                    || data.output_param_changes.failure().is_some()
++                {
++                    self.parameter_output_fault.store(true, Ordering::Release);
++                    let _ = data.input_param_changes.clear_all();
++                    self.input_events.clear();
++                    return Err(Error::ParameterOutputRejected);
++                }
  
+                 // VST3 allows numSamples to vary up to the maximum given to setupProcessing; the
+                 // caller's block may be shorter (BufferSize::Default gives variable sizes) or, if
+@@ -2105,41 +2315,37 @@
+                 for pc in &self.pending_param_changes {
+                     if let Some(off) = chunk_offset(pc.sample_offset, frame_offset, frames, is_last)
+                     {
+-                        data.input_param_changes.enqueue(pc.id, off, pc.value);
+-                    }
+-                }
+-
 -                // Route parameter edits the plugin's *own editor* reported via performEdit into
 -                // the processor too, so turning a knob in the plugin GUI affects the audio — not
 -                // just the host's display. (Some plugins relay editor→processor internally over
@@ -4321,24 +6812,41 @@
 -                            } else {
 -                                gui_changes.clear();
 -                            }
--                        }
--                    }
++                        if data
++                            .input_param_changes
++                            .try_enqueue(pc.id, off, pc.value)
++                            .is_err()
++                        {
++                            let _ = data.input_param_changes.clear_all();
++                            self.input_events.clear();
++                            return Err(Error::ParameterInputRejected);
+                         }
+                     }
++                }
++
 +                // Drain only the runtime-owned bounded native channel. Checked admission
 +                // precedes the actual SDK call; no UI producer/display lock is touched here.
-+                if let Err(error) = self.native_edits.stage(|edit| {
-+                    data.input_param_changes
-+                        .try_enqueue(edit.id, 0, edit.value)
-+                        .is_ok()
-+                }) {
-+                    data.input_param_changes.clear_all();
++                if data.input_param_changes.failure().is_some() {
++                    let _ = data.input_param_changes.clear_all();
 +                    self.input_events.clear();
-+                    return Err(Error::Other(format!(
-+                        "native edit admission failed: {error:?}"
-+                    )));
++                    return Err(Error::ParameterInputRejected);
++                }
++                if self
++                    .native_edits
++                    .stage(|edit| {
++                        data.input_param_changes
++                            .try_enqueue(edit.id, 0, edit.value)
++                            .is_ok()
++                    })
++                    .is_err()
++                {
++                    let _ = data.input_param_changes.clear_all();
++                    self.input_events.clear();
++                    return Err(Error::NativeParameterAdmissionFailed);
                  }
  
                  match buffers {
-@@ -2175,10 +2347,14 @@
+@@ -2175,10 +2381,14 @@
                  // A zero-sample flush carries events/parameter queues only. The VST3 process
                  // contract requires no audio buses or pointers for that call.
                  let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
@@ -4356,7 +6864,7 @@
  
                  // Everything from here to the output copy is per-block cleanup and MUST run even
                  // when the plugin reported failure. Returning early instead would leave this
-@@ -2194,8 +2370,13 @@
+@@ -2194,25 +2404,37 @@
                      &mut data.process_context,
                      data.process_context_requirements,
                      data.transport_tempo,
@@ -4370,22 +6878,69 @@
  
                  // Clear the staged input events AFTER processing, so the plugin got to see them
                  // and the next chunk starts from an empty list.
-@@ -2221,8 +2402,13 @@
+                 self.input_events.clear();
+                 // Clear the input parameter queue too, so this block's values don't
+                 // re-stick on the next block.
+-                data.input_param_changes.clear_all();
++                let _ = data.input_param_changes.clear_all();
+ 
+                 // Processor-originated automation belongs to this block. Copy it into a
+                 // bounded lock-free feedback queue, then clear it on both success and failure
+                 // so stale points can never be re-reported.
+                 let feedback = &self.output_param_feedback;
+-                data.output_param_changes
++                let output_visit_failed = data
++                    .output_param_changes
+                     .for_each_active_point(|id, _offset, value| {
+                         feedback.force_push((id, value));
+-                    });
+-                data.output_param_changes.clear_all();
++                    })
++                    .is_err();
++                if output_visit_failed || data.output_param_changes.failure().is_some() {
++                    self.parameter_output_fault.store(true, Ordering::Release);
++                }
++                if data.output_param_changes.clear_all().is_err() {
++                    self.parameter_output_fault.store(true, Ordering::Release);
++                }
+ 
+                 // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
+                 // Drain the event list in place (no `mem::take`) and push each converted event
+@@ -2221,11 +2443,20 @@
                  if !self.output_events.is_empty() {
                      let out = &self.output_events_owned;
                      self.output_events.drain_each(|event| {
 -                        out.force_push(event);
 +                        push_output_event(out, &self.output_events_lost, event);
                      });
-+                }
-+
+                 }
+ 
+-                if process_result != kResultOk {
 +                if self.output_events.take_loss() {
 +                    self.output_events_lost
 +                        .store(true, std::sync::atomic::Ordering::Release);
-                 }
++                }
++
++                if self.parameter_output_fault.load(Ordering::Acquire) {
++                    // Input acknowledgment above still reflects the actual SDK result.
++                    // Output failure is separate, sticky evidence with diagnostic precedence.
++                    Err(Error::ParameterOutputRejected)
++                } else if process_result != kResultOk {
+                     // Leave the caller's buffers as they were (the playback bridges pre-fill them
+                     // with silence) rather than copying out whatever the failed call left behind.
+                     Err(Error::ProcessFailed(process_result))
+@@ -2258,9 +2489,7 @@
+             }
+         } else {
+             Err(Error::Other("Process data not initialized".to_string()))
+-        };
+-
+-        result
++        }
+     }
  
-                 if process_result != kResultOk {
-@@ -2268,7 +2454,13 @@
+     /// Distribute the block's queued input events over its chunks and process each one.
+@@ -2268,7 +2497,13 @@
      /// `total` is the caller's block length, already known non-zero by the caller; the empty
      /// block is handled separately (some plugins use a zero-sample call to flush pending
      /// parameter changes).
@@ -4400,7 +6955,7 @@
          // `.max(1)`: a zero block size would make every chunk empty and never advance `offset`,
          // spinning forever on the audio thread. `Vst3HostBuilder::build` rejects 0, but
          // `block_size` is plain state and this loop must terminate regardless.
-@@ -2284,7 +2476,7 @@
+@@ -2284,7 +2519,7 @@
                  frames,
                  is_last,
              );
@@ -4409,12 +6964,27 @@
              offset += frames;
          }
          Ok(())
-@@ -2360,8 +2552,14 @@
+@@ -2360,8 +2595,32 @@
          )
      }
  
 -    fn process_buffer_view(&mut self, buffers: &mut CallerAudioBuffers<'_>) -> Result<()> {
 -        if !self.is_active || !self.is_processing {
++    /// Promote container-side failures before capture, processing or buffer disposal.
++    /// Interior atomic state permits save_state(&self) to preserve reentrant COM evidence;
++    /// it does not authorize concurrent administrative operations or plugin ownership.
++    fn observe_parameter_output_fault(&self) -> bool {
++        if !self.parameter_output_fault.load(Ordering::Acquire)
++            && self
++                .process_data
++                .as_ref()
++                .is_some_and(|data| data.output_param_changes.failure().is_some())
++        {
++            self.parameter_output_fault.store(true, Ordering::Release);
++        }
++        self.parameter_output_fault.load(Ordering::Acquire)
++    }
++
 +    fn process_buffer_view(
 +        &mut self,
 +        processor: &mut ProcessorLease<'_>,
@@ -4422,11 +6992,14 @@
 +        is_active: bool,
 +        buffers: &mut CallerAudioBuffers<'_>,
 +    ) -> Result<()> {
++        if self.observe_parameter_output_fault() {
++            return Err(Error::ParameterOutputRejected);
++        }
 +        if !is_active || !self.is_processing {
              return Err(Error::NotProcessing);
          }
  
-@@ -2371,9 +2569,9 @@
+@@ -2371,9 +2630,9 @@
  
          let result = if total == 0 {
              stage_chunk_events(&mut self.chunk_events, &self.input_events, 0, 0, true);
@@ -4438,7 +7011,7 @@
          };
  
          self.chunk_events.clear();
-@@ -2382,13 +2580,22 @@
+@@ -2382,13 +2641,22 @@
      }
  }
  
@@ -4462,33 +7035,43 @@
              return Err(Error::InterfaceError("No controller available".to_string()));
          }
          // VST3 requires both halves: the controller (for GUI/display/formatting) and the
-@@ -2408,21 +2615,21 @@
-         // plugin's own editor, `get_parameter`, `format_parameter` and saved state — deferred
-         // to the control thread when it arrives from the audio callback.
+@@ -2403,26 +2671,16 @@
+         value: f64,
+         sample_offset: i32,
+     ) -> Result<()> {
+-        // Every route into the processor queue also updates the controller, so a value set
+-        // through `AudioHandle`/`RtControl` (or a mapped MIDI controller) is reflected by the
+-        // plugin's own editor, `get_parameter`, `format_parameter` and saved state — deferred
+-        // to the control thread when it arrives from the audio callback.
++        // Refuse before mirroring: a rejected DSP point must not mutate the controller.
++        if self.runtime.pending_param_changes.len() >= MAX_PENDING_PARAM_CHANGES {
++            self.runtime.dropped_param_changes =
++                self.runtime.dropped_param_changes.saturating_add(1);
++            return Err(Error::ParameterInputRejected);
++        }
++        // Controller mirroring remains existing control/deferred behavior, outside the
++        // bounded parameter COM store's no-allocation claim.
          self.mirror_parameter_to_controller(id, value);
 -        if self.pending_param_changes.len() >= MAX_PENDING_PARAM_CHANGES {
-+        if self.runtime.pending_param_changes.len() >= MAX_PENDING_PARAM_CHANGES {
-             // Only reachable when nothing is draining the queue (the plugin isn't
-             // processing), so the dropped change would have arrived as part of a stale flood
-             // anyway. The controller half above still ran, so the plugin's own display
-             // stays correct.
+-            // Only reachable when nothing is draining the queue (the plugin isn't
+-            // processing), so the dropped change would have arrived as part of a stale flood
+-            // anyway. The controller half above still ran, so the plugin's own display
+-            // stays correct.
 -            self.dropped_param_changes += 1;
-+            self.runtime.dropped_param_changes += 1;
-             log::warn!(
-                 "dropping parameter change for {id}, queue full at \
-                      {MAX_PENDING_PARAM_CHANGES} (is the plugin processing?); \
-                      {} dropped so far",
+-            log::warn!(
+-                "dropping parameter change for {id}, queue full at \
+-                     {MAX_PENDING_PARAM_CHANGES} (is the plugin processing?); \
+-                     {} dropped so far",
 -                self.dropped_param_changes
-+                self.runtime.dropped_param_changes
-             );
-             return Ok(());
-         }
+-            );
+-            return Ok(());
+-        }
 -        self.pending_param_changes.push(ParameterChange {
 +        self.runtime.pending_param_changes.push(ParameterChange {
              id,
              value,
              sample_offset,
-@@ -2430,6 +2637,22 @@
+@@ -2430,6 +2688,22 @@
          Ok(())
      }
  
@@ -4511,7 +7094,7 @@
      fn set_tempo(&mut self, bpm: f64) -> Result<()> {
          self.update_tempo(bpm);
          Ok(())
-@@ -2447,7 +2670,7 @@
+@@ -2447,7 +2721,7 @@
  
      fn get_parameter(&self, id: u32) -> Result<f64> {
          self.drain_deferred_controller_sync();
@@ -4520,7 +7103,7 @@
              unsafe { Ok(controller.getParamNormalized(id)) }
          } else {
              Err(Error::InterfaceError("No controller available".to_string()))
-@@ -2458,7 +2681,7 @@
+@@ -2458,7 +2732,7 @@
          self.drain_deferred_controller_sync();
          let mut params = Vec::new();
  
@@ -4529,7 +7112,7 @@
              unsafe {
                  let count = controller.getParameterCount();
  
-@@ -2495,7 +2718,7 @@
+@@ -2495,7 +2769,7 @@
  
      fn format_parameter(&self, id: u32, normalized: f64) -> Result<String> {
          self.drain_deferred_controller_sync();
@@ -4538,7 +7121,7 @@
              unsafe {
                  let mut buf: String128 = std::mem::zeroed();
                  if controller.getParamStringByValue(id, normalized, &mut buf) == kResultOk {
-@@ -2515,38 +2738,37 @@
+@@ -2515,38 +2789,37 @@
      }
  
      fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
@@ -4592,7 +7175,7 @@
              return Err(e);
          }
  
-@@ -2558,20 +2780,20 @@
+@@ -2558,20 +2831,20 @@
                      result
                  )));
              }
@@ -4616,7 +7199,7 @@
                  Some(value)
                      if value == ePrefetchableSupport_::kIsNeverPrefetchable as u32
                          || value == ePrefetchableSupport_::kIsNotYetPrefetchable as u32 =>
-@@ -2587,19 +2809,18 @@
+@@ -2587,19 +2860,18 @@
              }
          }
          // VST3 requires the component inactive for setupProcessing; mirror reconfigure.
@@ -4641,7 +7224,7 @@
              return Err(e);
          }
  
-@@ -2611,7 +2832,7 @@
+@@ -2611,7 +2883,7 @@
                      result
                  )));
              }
@@ -4650,7 +7233,7 @@
          }
          Ok(())
      }
-@@ -2620,11 +2841,11 @@
+@@ -2620,11 +2892,11 @@
          use crate::audio::SpeakerArrangement;
          unsafe {
              let read = |dir: i32| -> Vec<SpeakerArrangement> {
@@ -4664,7 +7247,7 @@
                          SpeakerArrangement::from_raw(arr)
                      })
                      .collect()
-@@ -2641,7 +2862,7 @@
+@@ -2641,7 +2913,7 @@
          inputs: &[crate::audio::SpeakerArrangement],
          outputs: &[crate::audio::SpeakerArrangement],
      ) -> Result<()> {
@@ -4673,7 +7256,7 @@
              return Err(Error::Other(
                  "cannot set bus arrangements while processing".to_string(),
              ));
-@@ -2650,32 +2871,30 @@
+@@ -2650,32 +2922,30 @@
          let mut out_raw: Vec<u64> = outputs.iter().map(|a| a.raw()).collect();
          unsafe {
              // VST3 requires the component inactive for setBusArrangements + setupProcessing.
@@ -4715,7 +7298,7 @@
                  return Err(Error::InterfaceError(format!(
                      "setBusArrangements failed: {arrangement_result:#x}"
                  )));
-@@ -2691,7 +2910,7 @@
+@@ -2691,7 +2961,7 @@
                          result
                      )));
                  }
@@ -4724,7 +7307,7 @@
              }
          }
          Ok(())
-@@ -2705,7 +2924,7 @@
+@@ -2705,7 +2975,7 @@
          active: bool,
      ) -> Result<()> {
          use crate::audio::{BusDirection, MediaType};
@@ -4733,7 +7316,7 @@
              return Err(Error::Other(
                  "cannot activate a bus while processing".to_string(),
              ));
-@@ -2720,7 +2939,7 @@
+@@ -2720,7 +2990,7 @@
              BusDirection::Output => kOutput as i32,
          };
          unsafe {
@@ -4742,7 +7325,7 @@
              if bus_index < 0 || bus_index >= count {
                  return Err(Error::InvalidParameter(format!(
                      "bus index {bus_index} out of range for {media_type:?} {direction:?} \
-@@ -2728,35 +2947,35 @@
+@@ -2728,35 +2998,35 @@
                  )));
              }
  
@@ -4786,7 +7369,7 @@
                      self.create_process_data()
                  } else {
                      Ok(())
-@@ -2775,7 +2994,7 @@
+@@ -2775,7 +3045,7 @@
                          "Failed to reactivate after set_bus_active: {reactivate:#x}"
                      )));
                  }
@@ -4795,7 +7378,7 @@
              }
  
              update_result?;
-@@ -2806,10 +3025,10 @@
+@@ -2806,10 +3076,10 @@
                  } => {
                      let index = channel.as_index() as usize * 128 + note as usize;
                      let released = write_midi_note_on(&mut vst_event, channel, note, velocity);
@@ -4809,7 +7392,7 @@
                      };
                  }
                  MidiEvent::NoteOff {
-@@ -2818,8 +3037,8 @@
+@@ -2818,8 +3088,8 @@
                      velocity,
                  } => {
                      let index = channel.as_index() as usize * 128 + note as usize;
@@ -4820,7 +7403,7 @@
                      write_note_off_event(&mut vst_event, channel, note, velocity);
                  }
                  MidiEvent::ControlChange {
-@@ -2889,70 +3108,36 @@
+@@ -2889,70 +3159,36 @@
                  }
              }
  
@@ -4909,7 +7492,7 @@
      }
  
      fn has_editor(&self) -> bool {
-@@ -2963,12 +3148,12 @@
+@@ -2963,12 +3199,12 @@
  
          // An open editor is proof enough, and probing for a second view while one is attached
          // upsets plugins that assume a single live view.
@@ -4924,7 +7507,7 @@
              unsafe {
                  // Check if controller can create an editor view
                  let view_type = c"editor".as_ptr();
-@@ -2989,7 +3174,7 @@
+@@ -2989,7 +3225,7 @@
      }
  
      fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()> {
@@ -4933,7 +7516,7 @@
              return Err(Error::Other("Editor already open".to_string()));
          }
          if parent.is_null() {
-@@ -2998,7 +3183,22 @@
+@@ -2998,7 +3234,22 @@
              ));
          }
  
@@ -4957,7 +7540,7 @@
              unsafe {
                  // Create editor view
                  let view_type = c"editor".as_ptr();
-@@ -3025,9 +3225,13 @@
+@@ -3025,9 +3276,13 @@
  
                  // Hand the plugin an IPlugFrame (before attach, per the SDK) so it can
                  // request host-side resizes; requests land in `editor_resize`.
@@ -4974,7 +7557,7 @@
                  let frame_result = view.setFrame(frame.as_ptr());
                  if frame_result != kResultOk && frame_result != kResultTrue {
                      return Err(Error::Other(format!(
-@@ -3037,7 +3241,7 @@
+@@ -3037,7 +3292,7 @@
  
                  // Offer the current scale factor, but never let the answer decide whether the
                  // editor opens: a view that declines simply renders at its own scale.
@@ -4983,7 +7566,7 @@
  
                  // Platform-specific attachment
                  #[cfg(target_os = "macos")]
-@@ -3075,7 +3279,7 @@
+@@ -3075,7 +3330,7 @@
  
                  #[cfg(not(target_os = "android"))]
                  {
@@ -4992,7 +7575,7 @@
                      Ok(())
                  }
              }
-@@ -3086,7 +3290,7 @@
+@@ -3086,7 +3341,7 @@
  
      fn close_editor(&mut self) -> Result<()> {
          let mut close_error = None;
@@ -5001,7 +7584,7 @@
              unsafe {
                  let removed_result = view.removed();
                  // Break the view -> host-frame reference before releasing the view. The frame
-@@ -3109,63 +3313,29 @@
+@@ -3109,63 +3364,29 @@
          // `Plugin::service_run_loop` is public with no editor-open guard, a host driving it from
          // its frame loop would then dispatch straight into the removed view.
          #[cfg(target_os = "linux")]
@@ -5079,7 +7662,7 @@
              unsafe {
                  let mut view_rect = ViewRect {
                      left: 0,
-@@ -3180,7 +3350,7 @@
+@@ -3180,7 +3401,7 @@
              }
          }
  
@@ -5088,7 +7671,7 @@
              unsafe {
                  // Create a temporary view to get size
                  let view_type = c"editor".as_ptr();
-@@ -3220,11 +3390,11 @@
+@@ -3220,11 +3441,11 @@
  
      fn editor_can_resize(&self) -> bool {
          unsafe {
@@ -5102,7 +7685,7 @@
                  return false;
              };
              let view_ptr = controller.createView(c"editor".as_ptr());
-@@ -3242,6 +3412,7 @@
+@@ -3242,6 +3463,7 @@
              ));
          }
          let view = self
@@ -5110,7 +7693,7 @@
              .plugin_view
              .as_ref()
              .ok_or_else(|| Error::Other("Plugin editor is not open".to_string()))?;
-@@ -3314,11 +3485,11 @@
+@@ -3314,11 +3536,11 @@
                  "editor scale factor must be finite and greater than zero".to_string(),
              ));
          }
@@ -5124,7 +7707,7 @@
          Ok(supported)
      }
  
-@@ -3328,49 +3499,62 @@
+@@ -3328,49 +3550,62 @@
  
      fn take_parameter_edits(&mut self) -> Vec<crate::plugin::ParameterEdit> {
          self.service_control_thread_caches();
@@ -5193,7 +7776,7 @@
              .as_ref()
              .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?
              .dismiss_context_menu(menu_id)
-@@ -3378,6 +3562,7 @@
+@@ -3378,6 +3613,7 @@
  
      fn take_restart_flags(&mut self) -> crate::plugin::RestartFlags {
          let flags = self
@@ -5201,7 +7784,7 @@
              .component_handler
              .as_ref()
              .map(|h| h.take_restart_flags())
-@@ -3387,19 +3572,19 @@
+@@ -3387,19 +3623,19 @@
          // main-thread-domain controller calls (the MIDI map alone is buses × 16 × 130 of them).
          // So record what went stale and let the control thread rebuild.
          if bits & RestartFlags_::kMidiCCAssignmentChanged != 0 {
@@ -5225,7 +7808,7 @@
              return Err(Error::Other(
                  "restart requests must be serviced on the plugin control thread".to_string(),
              ));
-@@ -3411,37 +3596,39 @@
+@@ -3411,37 +3647,39 @@
          }
  
          unsafe {
@@ -5274,7 +7857,7 @@
                          self.negotiate_default_bus_arrangements()
                              .and_then(|()| self.setup_processing())
                      }
-@@ -3451,12 +3638,16 @@
+@@ -3451,12 +3689,16 @@
                  Ok(())
              };
  
@@ -5293,7 +7876,7 @@
                      Ok(())
                  } else {
                      Err(Error::Other(format!(
-@@ -3477,38 +3668,51 @@
+@@ -3477,38 +3719,51 @@
  
      fn take_output_events(&self) -> Vec<PluginEvent> {
          let mut out = Vec::new();
@@ -5352,7 +7935,7 @@
      }
  
      fn note_on(
-@@ -3518,18 +3722,19 @@
+@@ -3518,18 +3773,19 @@
          velocity: u8,
          sample_offset: i32,
      ) -> Result<crate::midi::NoteId> {
@@ -5378,7 +7961,7 @@
              .push((id, channel.as_index() as i16, note as i16));
          unsafe {
              let mut ev: Event = std::mem::zeroed();
-@@ -3541,7 +3746,7 @@
+@@ -3541,7 +3797,7 @@
              ev.__field0.noteOn.pitch = note as i16;
              ev.__field0.noteOn.velocity = velocity as f32 / 127.0;
              ev.__field0.noteOn.noteId = id;
@@ -5387,7 +7970,7 @@
          }
          Ok(crate::midi::NoteId(id))
      }
-@@ -3551,10 +3756,11 @@
+@@ -3551,10 +3807,11 @@
          // pitch 0 on channel 1, which any synth matching releases by pitch ignores — leaving the
          // real note sounding forever.
          let tracked = self
@@ -5400,7 +7983,7 @@
          unsafe {
              let mut ev: Event = std::mem::zeroed();
              ev.busIndex = 0;
-@@ -3567,7 +3773,7 @@
+@@ -3567,7 +3824,7 @@
                  ev.__field0.noteOff.pitch = pitch;
              }
              // A release velocity of 0 is the SDK's own default for "unspecified".
@@ -5409,7 +7992,7 @@
          }
          Ok(())
      }
-@@ -3588,7 +3794,7 @@
+@@ -3588,7 +3845,7 @@
              ev.__field0.noteExpressionValue.typeId = kind.type_id();
              ev.__field0.noteExpressionValue.noteId = id.0;
              ev.__field0.noteExpressionValue.value = value.clamp(0.0, 1.0);
@@ -5418,7 +8001,7 @@
          }
          Ok(())
      }
-@@ -3600,6 +3806,7 @@
+@@ -3600,6 +3857,7 @@
      ) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
          use crate::midi::{NoteExpressionInfo, NoteExpressionType};
          let Some(ctrl) = self
@@ -5426,7 +8009,7 @@
              .controller
              .as_ref()
              .and_then(|c| c.cast::<INoteExpressionController>())
-@@ -3635,12 +3842,13 @@
+@@ -3635,12 +3893,13 @@
  
      fn get_units(&self) -> Result<Vec<crate::plugin::PluginUnit>> {
          use crate::plugin::PluginUnit;
@@ -5441,7 +8024,7 @@
              .unit_cache
              .lock()
              .unwrap_or_else(|poison| poison.into_inner())
-@@ -3649,7 +3857,7 @@
+@@ -3649,7 +3908,7 @@
          {
              return Ok(units);
          }
@@ -5450,7 +8033,7 @@
              return Ok(Vec::new());
          };
          // IUnitInfo is optional; plugins without it (no units/program lists) return empty.
-@@ -3696,6 +3904,7 @@
+@@ -3696,6 +3955,7 @@
                  });
              }
              *self
@@ -5458,7 +8041,7 @@
                  .unit_cache
                  .lock()
                  .unwrap_or_else(|poison| poison.into_inner()) = Some(units.clone());
-@@ -3706,7 +3915,7 @@
+@@ -3706,7 +3966,7 @@
      fn select_program(&mut self, unit_id: i32, program_index: i32) -> Result<()> {
          self.service_control_thread_caches();
          if self.cached_program_change(unit_id).is_none()
@@ -5467,7 +8050,7 @@
          {
              self.refresh_program_change_cache();
          }
-@@ -3736,12 +3945,13 @@
+@@ -3736,12 +3996,13 @@
      }
  
      fn selected_unit(&self) -> Result<Option<i32>> {
@@ -5482,7 +8065,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3753,12 +3963,13 @@
+@@ -3753,12 +4014,13 @@
      }
  
      fn select_unit(&mut self, unit_id: i32) -> Result<()> {
@@ -5497,7 +8080,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3783,12 +3994,13 @@
+@@ -3783,12 +4045,13 @@
                  "program index must be non-negative, got {program_index}"
              )));
          }
@@ -5512,7 +8095,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3831,6 +4043,7 @@
+@@ -3831,6 +4094,7 @@
          }
          self.ensure_control_thread("program data read")?;
          let Some(data_interface) = self
@@ -5520,7 +8103,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IProgramListData>())
-@@ -3871,6 +4084,7 @@
+@@ -3871,6 +4135,7 @@
          self.ensure_stream_size(data)?;
          self.ensure_control_thread("program data restore")?;
          let data_interface = self
@@ -5528,7 +8111,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IProgramListData>())
-@@ -3895,6 +4109,7 @@
+@@ -3895,6 +4160,7 @@
                  data_interface.setProgramData(program_list_id, program_index, stream_ptr.as_ptr());
              if result == kResultOk {
                  *self
@@ -5536,7 +8119,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -3911,6 +4126,7 @@
+@@ -3911,6 +4177,7 @@
      fn get_unit_data(&self, unit_id: i32) -> Result<Option<Vec<u8>>> {
          self.ensure_control_thread("unit data read")?;
          let Some(data_interface) = self
@@ -5544,7 +8127,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitData>())
-@@ -3940,6 +4156,7 @@
+@@ -3940,6 +4207,7 @@
          self.ensure_stream_size(data)?;
          self.ensure_control_thread("unit data restore")?;
          let data_interface = self
@@ -5552,7 +8135,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitData>())
-@@ -3961,6 +4178,7 @@
+@@ -3961,6 +4229,7 @@
              let result = data_interface.setUnitData(unit_id, stream_ptr.as_ptr());
              if result == kResultOk {
                  *self
@@ -5560,7 +8143,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -3977,6 +4195,7 @@
+@@ -3977,6 +4246,7 @@
      fn begin_host_edit(&mut self, parameter_id: u32) -> Result<()> {
          self.ensure_control_thread("host edit begin")?;
          let editing = self
@@ -5568,7 +8151,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
-@@ -3992,6 +4211,7 @@
+@@ -3992,6 +4262,7 @@
      fn end_host_edit(&mut self, parameter_id: u32) -> Result<()> {
          self.ensure_control_thread("host edit end")?;
          let editing = self
@@ -5576,7 +8159,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
-@@ -4012,6 +4232,7 @@
+@@ -4012,6 +4283,7 @@
          }
          self.ensure_control_thread("MIDI learn notification")?;
          let midi_learn = self
@@ -5584,7 +8167,7 @@
              .controller
              .as_ref()
              .and_then(|edit_controller| edit_controller.cast::<IMidiLearn>())
-@@ -4026,6 +4247,7 @@
+@@ -4026,6 +4298,7 @@
          use crate::plugin::AutomationState;
          self.ensure_control_thread("automation state update")?;
          let automation = self
@@ -5592,7 +8175,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IAutomationState>())
-@@ -4052,6 +4274,7 @@
+@@ -4052,6 +4325,7 @@
          })?;
          self.ensure_control_thread("parameter id remapping")?;
          let Some(remapper) = self
@@ -5600,7 +8183,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IRemapParamID>())
-@@ -4076,7 +4299,7 @@
+@@ -4076,7 +4350,7 @@
  
      fn midi_panic(&mut self) -> Result<()> {
          // Release per-voice notes with their exact ids first.
@@ -5609,7 +8192,7 @@
              unsafe {
                  let mut event: Event = std::mem::zeroed();
                  event.busIndex = 0;
-@@ -4086,14 +4309,14 @@
+@@ -4086,14 +4360,14 @@
                  event.__field0.noteOff.noteId = note_id;
                  event.__field0.noteOff.channel = channel;
                  event.__field0.noteOff.pitch = pitch;
@@ -5630,7 +8213,7 @@
                  continue;
              }
              let channel = (index / 128) as i16;
-@@ -4107,9 +4330,9 @@
+@@ -4107,9 +4381,9 @@
                  event.__field0.noteOff.noteId = -1;
                  event.__field0.noteOff.channel = channel;
                  event.__field0.noteOff.pitch = pitch;
@@ -5643,7 +8226,7 @@
          }
  
          // Also route the standard panic controllers through IMidiMapping for plugins that
-@@ -4126,11 +4349,20 @@
+@@ -4126,11 +4400,20 @@
      }
  
      fn output_channel_count(&self) -> usize {
@@ -5665,7 +8248,7 @@
                      .bus_activation
                      .audio_outputs
                      .get(i as usize)
-@@ -4141,6 +4373,7 @@
+@@ -4141,6 +4424,7 @@
                  }
                  let mut info: BusInfo = std::mem::zeroed();
                  if self
@@ -5673,7 +8256,7 @@
                      .component
                      .getBusInfo(kAudio as i32, kOutput as i32, i, &mut info)
                      == kResultOk
-@@ -4149,6 +4382,7 @@
+@@ -4149,6 +4433,7 @@
                  } else {
                      let mut arrangement = 0u64;
                      if self
@@ -5681,9 +8264,13 @@
                          .processor
                          .getBusArrangement(kOutput as i32, i, &mut arrangement)
                          == kResultOk
-@@ -4163,13 +4397,19 @@
+@@ -4162,14 +4447,23 @@
+     }
  
      fn save_state(&self) -> Result<Vec<u8>> {
++        if self.runtime.observe_parameter_output_fault() {
++            return Err(Error::ParameterOutputRejected);
++        }
          self.drain_deferred_controller_sync();
 +        let handler = self
 +            .control
@@ -5702,7 +8289,7 @@
              if result != kResultOk {
                  return Err(Error::Other(format!(
                      "Plugin does not provide state (getState: {result:#x})"
-@@ -4180,8 +4420,11 @@
+@@ -4180,8 +4474,11 @@
              // its state returns the blob above a second time: the envelope would carry the same
              // bytes twice, the combined size cap would effectively halve, and `load_state` would
              // apply `setState` twice. `load_state` has the matching guard.
@@ -5716,7 +8303,7 @@
              {
                  let stream = create_memory_stream_with_metadata(None, StreamStateType::Project);
                  let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
-@@ -4201,56 +4444,79 @@
+@@ -4201,56 +4498,82 @@
                  None
              };
  
@@ -5727,6 +8314,9 @@
 -            })
 -        }
 +            })?;
++            if self.runtime.observe_parameter_output_fault() {
++                return Err(Error::ParameterOutputRejected);
++            }
 +            if handler.native_state_capture_revision()? != native_revision {
 +                return Err(Error::Other("native state changed during capture".into()));
 +            }
@@ -5811,7 +8401,7 @@
                          let stream =
                              create_state_restore_stream(snapshot.component.clone(), context);
                          let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
-@@ -4268,9 +4534,13 @@
+@@ -4268,9 +4591,13 @@
                      }
                  }
  
@@ -5828,12 +8418,13 @@
                      let stream = create_state_restore_stream(controller_state.clone(), context);
                      let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                          Error::InterfaceError("Failed to create controller state stream".into())
-@@ -4283,11 +4553,27 @@
+@@ -4283,11 +4610,27 @@
                      }
                  }
  
 -                self.pending_param_changes.clear();
 -                if let Some(process_data) = self.process_data.as_ref() {
+-                    process_data.input_param_changes.clear_all();
 +                self.runtime.pending_param_changes.clear();
 +                if let Some(handler) = self.control.component_handler.as_ref() {
 +                    // State is applied: explicitly supersede old native packets, including
@@ -5851,14 +8442,14 @@
 +                    }
 +                }
 +                if let Some(process_data) = self.runtime.process_data.as_ref() {
-                     process_data.input_param_changes.clear_all();
++                    let _ = process_data.input_param_changes.clear_all();
                  }
                  *self
 +                    .control
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -4297,17 +4583,25 @@
+@@ -4297,17 +4640,25 @@
              })();
  
              let restore_result = (|| -> Result<()> {
@@ -5886,7 +8477,7 @@
                  }
                  Ok(())
              })();
-@@ -4405,43 +4699,72 @@
+@@ -4405,43 +4756,72 @@
          // Rebuild the table here if a restart invalidated it off-thread; a no-op on the audio
          // thread, which must never make controller calls.
          self.service_control_thread_caches();
@@ -5985,7 +8576,7 @@
          })
      }
  
-@@ -4576,7 +4899,7 @@
+@@ -4576,7 +4956,7 @@
  /// still fail — and by then the plugin may have spawned threads and registered callbacks.
  /// Releasing its interfaces and unloading the module without `terminate()` leaves that code
  /// running inside memory the unload is about to unmap. This guard runs the same sequence
@@ -5994,7 +8585,7 @@
  ///
  /// It holds its own references (COM refcounts), so `load` keeps using the originals as it
  /// builds; the extra references are released when the guard drops either way.
-@@ -4617,8 +4940,10 @@
+@@ -4617,8 +4997,10 @@
          self.connection.take()
      }
  
@@ -6007,7 +8598,7 @@
          self.armed = false;
      }
  }
-@@ -4681,21 +5006,23 @@
+@@ -4681,21 +5063,23 @@
          let _ = PluginInternal::close_editor(self);
  
          let _ = self.stop_processing();
@@ -6038,7 +8629,7 @@
      }
  }
  
-@@ -4776,18 +5103,53 @@
+@@ -4776,18 +5160,53 @@
          .unwrap_or_default()
  }
  
@@ -6095,7 +8686,7 @@
      if process_context_needs(requirements, R::kNeedContinousTimeSamples as u32) {
          ctx.continousTimeSamples = ctx.continousTimeSamples.wrapping_add(frames);
      }
-@@ -4798,17 +5160,82 @@
+@@ -4798,17 +5217,82 @@
          let nanos = (frames as f64 * 1_000_000_000.0 / ctx.sampleRate).round() as i64;
          ctx.systemTime = ctx.systemTime.saturating_add(nanos);
      }
@@ -6182,7 +8773,7 @@
  
      fn buses(channels: &[i32]) -> Vec<AudioBusBuffers> {
          channels
-@@ -5053,7 +5480,7 @@
+@@ -5053,7 +5537,7 @@
          // One second of audio at 48 kHz in 512-sample blocks.
          let blocks = 48_000 / 512;
          for _ in 0..blocks {
@@ -6191,7 +8782,7 @@
          }
          let advanced = (blocks * 512) as i64;
          assert_eq!(ctx.projectTimeSamples, advanced);
-@@ -5448,3 +5875,69 @@
+@@ -5448,3 +5932,69 @@
          assert_eq!(calls.load(Ordering::SeqCst), 0);
      }
  }
@@ -6263,7 +8854,7 @@
 +mod domain_tests;
 --- /dev/null
 +++ b/src/internal/plugin_impl/domain_tests.rs
-@@ -0,0 +1,1631 @@
+@@ -0,0 +1,2078 @@
 +//! Synchronous ownership/lifecycle regression tests using real VST3 COM interfaces.
 +//! These mocks intentionally allocate and lock; these are not real-time-safety tests.
 +
@@ -6274,7 +8865,7 @@
 +use std::{
 +    ffi::c_void,
 +    mem::offset_of,
-+    sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
++    sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering},
 +};
 +use vst3::{
 +    com_scrape_types::{Header, InterfaceList, MakeHeader, Wrapper},
@@ -6420,6 +9011,11 @@
 +    capture_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 +    process_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 +    fail_state: AtomicBool,
++    no_alloc_process: AtomicBool,
++    realtime_calls: AtomicUsize,
++    realtime_points: AtomicUsize,
++    output_points: AtomicUsize,
++    last_mirrored: AtomicU64,
 +}
 +
 +impl Default for MockState {
@@ -6438,6 +9034,11 @@
 +            capture_callback: Mutex::new(None),
 +            process_callback: Mutex::new(None),
 +            fail_state: AtomicBool::new(false),
++            no_alloc_process: AtomicBool::new(false),
++            realtime_calls: AtomicUsize::new(0),
++            realtime_points: AtomicUsize::new(0),
++            output_points: AtomicUsize::new(0),
++            last_mirrored: AtomicU64::new(0),
 +        }
 +    }
 +}
@@ -6643,6 +9244,41 @@
 +        kResultOk
 +    }
 +    unsafe fn process(&self, data: *mut ProcessData) -> tresult {
++        if self.state.no_alloc_process.load(Ordering::Acquire) {
++            // Dedicated fixed-state processor path: no trace Vec, formatting or callback hook.
++            // Parameter operations alone are exercised with empty event/data-exchange lanes.
++            let data = &mut *data;
++            self.state.realtime_calls.fetch_add(1, Ordering::Relaxed);
++            let mut point_count = 0;
++            if let Some(changes) = vst3::ComRef::from_raw(data.inputParameterChanges) {
++                for index in 0..changes.getParameterCount() {
++                    let queue = vst3::ComRef::from_raw(changes.getParameterData(index)).unwrap();
++                    for point in 0..queue.getPointCount() {
++                        let (mut offset, mut value) = (0, 0.0);
++                        assert_eq!(queue.getPoint(point, &mut offset, &mut value), kResultOk);
++                        point_count += 1;
++                    }
++                }
++            }
++            self.state
++                .realtime_points
++                .store(point_count, Ordering::Release);
++            let output_count = self.state.output_points.load(Ordering::Acquire);
++            if output_count != 0 {
++                let output = vst3::ComRef::from_raw(data.outputParameterChanges).unwrap();
++                let queue =
++                    vst3::ComRef::from_raw(output.addParameterData(&77, ptr::null_mut())).unwrap();
++                for point in 0..output_count {
++                    // Deliberately ignore write failures, like an uncooperative plugin.
++                    let _ = queue.addPoint(point as i32, 0.5, ptr::null_mut());
++                }
++            }
++            return if self.state.fail_process.load(Ordering::Acquire) {
++                kResultFalse
++            } else {
++                kResultOk
++            };
++        }
 +        self.probe.record("process");
 +        if self.state.fail_process.load(Ordering::Acquire) {
 +            return kResultFalse;
@@ -6731,9 +9367,12 @@
 +        value
 +    }
 +    unsafe fn getParamNormalized(&self, _id: u32) -> f64 {
-+        0.0
++        f64::from_bits(self.state.last_mirrored.load(Ordering::Acquire))
 +    }
-+    unsafe fn setParamNormalized(&self, _id: u32, _value: f64) -> tresult {
++    unsafe fn setParamNormalized(&self, _id: u32, value: f64) -> tresult {
++        self.state
++            .last_mirrored
++            .store(value.to_bits(), Ordering::Release);
 +        kResultOk
 +    }
 +    unsafe fn setComponentHandler(&self, _handler: *mut IComponentHandler) -> tresult {
@@ -7013,6 +9652,7 @@
 +        runtime: ProcessorRuntime {
 +            is_processing: false,
 +            has_processed_audio: false,
++            parameter_output_fault: AtomicBool::new(false),
 +            sample_rate: 48000.0,
 +            block_size: 16,
 +            tempo: 120.0,
@@ -7870,10 +10510,7 @@
 +        .unwrap()
 +        .input_param_changes
 +        .clone();
-+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-+        let _guard = changes.queues.lock().unwrap();
-+        panic!("controlled parameter admission failure");
-+    }));
++    changes.poison_for_test();
 +    trace.clear();
 +    assert!(plugin
 +        .process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
@@ -7894,6 +10531,407 @@
 +            .applied,
 +        0
 +    );
++}
++
++#[test]
++fn cold_combined_4096_host_and_4096_native_parameter_points_do_not_allocate() {
++    use crate::internal::native_edit_transport::tests::allocation_free;
++    let trace = Trace::default();
++    let state = Arc::new(MockState::default());
++    state.no_alloc_process.store(true, Ordering::Release);
++    let mut plugin = plugin_fixture(&trace, &state);
++    plugin.start_processing().unwrap();
++    for id in 0..4096 {
++        plugin.set_parameter(id, 0.25).unwrap();
++    }
++    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
++    for id in 4096..8192 {
++        unsafe {
++            handler.performEdit(id, 0.75);
++        }
++    }
++    let mut buffers = AudioBuffers::new(0, 1, 0, 48000.0);
++    allocation_free(|| plugin.process(&mut buffers).unwrap());
++    assert_eq!(state.realtime_points.load(Ordering::Acquire), 8192);
++    assert_eq!(state.realtime_calls.load(Ordering::Acquire), 1);
++    assert_eq!(
++        (
++            handler.native_edits.snapshot().submitted,
++            handler.native_edits.snapshot().applied
++        ),
++        (4096, 4096)
++    );
++    assert!(plugin.runtime.pending_param_changes.is_empty());
++    // Reuse is also allocation-free, without any warm-up call preceding the first measurement.
++    allocation_free(|| plugin.process(&mut buffers).unwrap());
++    assert_eq!(state.realtime_points.load(Ordering::Acquire), 0);
++}
++
++#[test]
++fn full_pending_host_queue_rejects_before_controller_mirror_or_any_sdk_call() {
++    use crate::internal::native_edit_transport::tests::allocation_free;
++    let trace = Trace::default();
++    let state = Arc::new(MockState::default());
++    let mut plugin = plugin_fixture(&trace, &state);
++    plugin.start_processing().unwrap();
++    for id in 0..4096 {
++        plugin.set_parameter(id, 0.25).unwrap();
++    }
++    let native_before = plugin
++        .control
++        .component_handler
++        .as_ref()
++        .unwrap()
++        .native_edits
++        .snapshot();
++    plugin.runtime.dropped_param_changes = u64::MAX;
++    trace.clear();
++    allocation_free(|| {
++        assert!(matches!(
++            plugin.set_parameter(4096, 0.75),
++            Err(Error::ParameterInputRejected)
++        ))
++    });
++    assert_eq!(plugin.get_parameter(4096).unwrap(), 0.25);
++    assert_eq!(plugin.runtime.pending_param_changes.len(), 4096);
++    assert!(plugin
++        .runtime
++        .pending_param_changes
++        .iter()
++        .enumerate()
++        .all(|(index, point)| point.id == index as u32 && point.value == 0.25));
++    assert_eq!(plugin.runtime.dropped_param_changes, u64::MAX);
++    assert_eq!(
++        plugin
++            .control
++            .component_handler
++            .as_ref()
++            .unwrap()
++            .native_edits
++            .snapshot(),
++        native_before
++    );
++    assert!(!trace
++        .methods()
++        .iter()
++        .any(|(_, method)| *method == "process"));
++}
++
++#[test]
++fn output_overflow_is_allocation_free_sticky_and_separate_from_native_acknowledgment() {
++    use crate::internal::native_edit_transport::tests::allocation_free;
++    for sdk_fails in [false, true] {
++        let trace = Trace::default();
++        let state = Arc::new(MockState::default());
++        state.no_alloc_process.store(true, Ordering::Release);
++        state.output_points.store(4097, Ordering::Release);
++        state.fail_process.store(sdk_fails, Ordering::Release);
++        let mut plugin = plugin_fixture(&trace, &state);
++        plugin.start_processing().unwrap();
++        let handler = plugin.control.component_handler.as_ref().unwrap().clone();
++        unsafe {
++            handler.performEdit(7, 0.5);
++        }
++        let native_before = handler.native_edits.snapshot();
++        let mut buffers = AudioBuffers::new(0, 1, 0, 48000.0);
++        allocation_free(|| {
++            assert!(matches!(
++                plugin.process(&mut buffers),
++                Err(Error::ParameterOutputRejected)
++            ))
++        });
++        assert!(plugin
++            .runtime
++            .parameter_output_fault
++            .load(Ordering::Acquire));
++        let native_after = handler.native_edits.snapshot();
++        assert_eq!(native_after.applied, u64::from(!sdk_fails));
++        assert_eq!(native_after.lost, sdk_fails);
++        assert_eq!(native_after.dirty, native_before.dirty);
++        assert_eq!(native_after.generation, native_before.generation);
++        assert_eq!(state.realtime_calls.load(Ordering::Acquire), 1);
++        trace.clear();
++        allocation_free(|| {
++            assert!(matches!(
++                plugin.process(&mut buffers),
++                Err(Error::ParameterOutputRejected)
++            ));
++            assert!(matches!(
++                plugin.save_state(),
++                Err(Error::ParameterOutputRejected)
++            ));
++        });
++        assert_eq!(state.realtime_calls.load(Ordering::Acquire), 1);
++        assert!(trace.methods().is_empty());
++        // Administrative success is not recovery; the runtime fault survives all storage rebuilds.
++        state.fail_process.store(false, Ordering::Release);
++        state.output_points.store(0, Ordering::Release);
++        plugin.stop_processing().unwrap();
++        plugin.start_processing().unwrap();
++        plugin
++            .load_state_with_context(&[1], &StateContext::Project)
++            .unwrap();
++        plugin.stop_processing().unwrap();
++        plugin.reconfigure(44100.0, 32).unwrap();
++        plugin.start_processing().unwrap();
++        assert!(plugin
++            .runtime
++            .parameter_output_fault
++            .load(Ordering::Acquire));
++        trace.clear();
++        allocation_free(|| {
++            assert!(matches!(
++                plugin.process(&mut buffers),
++                Err(Error::ParameterOutputRejected)
++            ));
++            assert!(matches!(
++                plugin.save_state(),
++                Err(Error::ParameterOutputRejected)
++            ));
++        });
++        assert_eq!(state.realtime_calls.load(Ordering::Acquire), 1);
++        assert!(trace.methods().is_empty());
++        let fresh_state = Arc::new(MockState::default());
++        fresh_state.no_alloc_process.store(true, Ordering::Release);
++        let mut fresh = plugin_fixture(&Trace::default(), &fresh_state);
++        fresh.start_processing().unwrap();
++        assert!(fresh.process(&mut buffers).is_ok());
++        assert!(fresh.save_state().is_ok());
++    }
++}
++
++#[test]
++fn sdk_failure_without_output_loss_retains_raw_error_and_does_not_poison_empty_native_input() {
++    use crate::internal::native_edit_transport::tests::allocation_free;
++    let trace = Trace::default();
++    let state = Arc::new(MockState::default());
++    state.no_alloc_process.store(true, Ordering::Release);
++    state.fail_process.store(true, Ordering::Release);
++    let mut plugin = plugin_fixture(&trace, &state);
++    plugin.start_processing().unwrap();
++    let mut buffers = AudioBuffers::new(0, 1, 0, 48000.0);
++    allocation_free(|| {
++        assert!(
++            matches!(plugin.process(&mut buffers), Err(Error::ProcessFailed(value)) if value == kResultFalse)
++        )
++    });
++    assert!(!plugin
++        .runtime
++        .parameter_output_fault
++        .load(Ordering::Acquire));
++    assert!(
++        !plugin
++            .control
++            .component_handler
++            .as_ref()
++            .unwrap()
++            .native_edits
++            .snapshot()
++            .lost
++    );
++    assert!(plugin.save_state().is_ok());
++}
++
++#[test]
++fn failed_host_parameter_admission_clears_staged_values_and_events_without_sdk_or_native_ack() {
++    use crate::internal::native_edit_transport::tests::allocation_free;
++    let trace = Trace::default();
++    let state = Arc::new(MockState::default());
++    state.no_alloc_process.store(true, Ordering::Release);
++    let mut plugin = plugin_fixture(&trace, &state);
++    plugin.start_processing().unwrap();
++    let data = plugin.runtime.process_data.as_mut().unwrap();
++    data.input_param_changes = ComWrapper::new(ParameterChanges::new(ParameterQueueLimits {
++        max_queues: 1,
++        max_points: 1,
++    }));
++    data.process_data.inputParameterChanges = data
++        .input_param_changes
++        .as_com_ref::<IParameterChanges>()
++        .unwrap()
++        .as_ptr();
++    plugin.set_parameter(1, 0.25).unwrap();
++    plugin.set_parameter(2, 0.75).unwrap();
++    plugin.note_on(MidiChannel::Ch1, 60, 100, 0).unwrap();
++    unsafe {
++        plugin
++            .control
++            .component_handler
++            .as_ref()
++            .unwrap()
++            .performEdit(3, 0.5);
++    }
++    let before = plugin
++        .control
++        .component_handler
++        .as_ref()
++        .unwrap()
++        .native_edits
++        .snapshot();
++    let mut buffers = AudioBuffers::new(0, 1, 0, 48000.0);
++    // This call is outside the parameter-only measured region because event staging and
++    // owned event-container/payload work are explicitly outside this slice.
++    let result = plugin.process(&mut buffers);
++    assert!(matches!(result, Err(Error::ParameterInputRejected)));
++    assert!(plugin.runtime.pending_param_changes.is_empty());
++    assert!(plugin.runtime.input_events.is_empty());
++    assert_eq!(state.realtime_calls.load(Ordering::Acquire), 0);
++    assert_eq!(
++        plugin
++            .control
++            .component_handler
++            .as_ref()
++            .unwrap()
++            .native_edits
++            .snapshot(),
++        before
++    );
++    allocation_free(|| {
++        assert!(matches!(
++            plugin.process(&mut buffers),
++            Err(Error::ParameterInputRejected)
++        ))
++    });
++}
++
++#[test]
++fn native_capacity_admission_failure_has_no_sdk_call_and_never_acknowledges_partial_input() {
++    use crate::internal::native_edit_transport::tests::allocation_free;
++    let trace = Trace::default();
++    let state = Arc::new(MockState::default());
++    state.no_alloc_process.store(true, Ordering::Release);
++    let mut plugin = plugin_fixture(&trace, &state);
++    plugin.start_processing().unwrap();
++    let data = plugin.runtime.process_data.as_mut().unwrap();
++    data.input_param_changes = ComWrapper::new(ParameterChanges::new(ParameterQueueLimits {
++        max_queues: 2,
++        max_points: 1,
++    }));
++    data.process_data.inputParameterChanges = data
++        .input_param_changes
++        .as_com_ref::<IParameterChanges>()
++        .unwrap()
++        .as_ptr();
++    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
++    unsafe {
++        handler.performEdit(1, 0.25);
++        handler.performEdit(2, 0.75);
++    }
++    let before = handler.native_edits.snapshot();
++    let mut buffers = AudioBuffers::new(0, 1, 0, 48000.0);
++    allocation_free(|| {
++        assert!(matches!(
++            plugin.process(&mut buffers),
++            Err(Error::NativeParameterAdmissionFailed)
++        ))
++    });
++    assert_eq!(state.realtime_calls.load(Ordering::Acquire), 0);
++    let after = handler.native_edits.snapshot();
++    assert!(after.lost);
++    assert_eq!(after.applied, 0);
++    assert_eq!(after.generation, before.generation);
++    assert_eq!(after.dirty, before.dirty);
++    let input = &plugin
++        .runtime
++        .process_data
++        .as_ref()
++        .unwrap()
++        .input_param_changes;
++    assert_eq!(unsafe { input.getParameterCount() }, 0);
++    assert!(plugin.save_state().is_err());
++}
++
++#[test]
++fn reentrant_output_failure_during_capture_is_promoted_before_snapshot_returns() {
++    let trace = Trace::default();
++    let state = Arc::new(MockState::default());
++    let mut plugin = plugin_fixture(&trace, &state);
++    plugin.start_processing().unwrap();
++    let output = plugin
++        .runtime
++        .process_data
++        .as_ref()
++        .unwrap()
++        .output_param_changes
++        .clone();
++    *state.capture_callback.lock().unwrap() = Some(Box::new(move || {
++        // Simulate plugin use of the still-live output COM container during getState.
++        unsafe {
++            let queue =
++                vst3::ComRef::from_raw(output.addParameterData(&7, ptr::null_mut())).unwrap();
++            for point in 0..4097 {
++                let _ = queue.addPoint(point, 0.5, ptr::null_mut());
++            }
++        }
++    }));
++    assert!(matches!(
++        plugin.save_state(),
++        Err(Error::ParameterOutputRejected)
++    ));
++    assert!(plugin
++        .runtime
++        .parameter_output_fault
++        .load(Ordering::Acquire));
++    *state.capture_callback.lock().unwrap() = None;
++    assert!(matches!(
++        plugin.save_state(),
++        Err(Error::ParameterOutputRejected)
++    ));
++}
++
++#[test]
++fn unreported_output_failure_is_promoted_before_rebuild_or_event_staging() {
++    for operation in ["reconfigure", "state", "process"] {
++        let trace = Trace::default();
++        let state = Arc::new(MockState::default());
++        state.no_alloc_process.store(true, Ordering::Release);
++        let mut plugin = plugin_fixture(&trace, &state);
++        plugin.start_processing().unwrap();
++        let output = plugin
++            .runtime
++            .process_data
++            .as_ref()
++            .unwrap()
++            .output_param_changes
++            .clone();
++        for point in 0..4096 {
++            output.try_enqueue(7, point, 0.5).unwrap();
++        }
++        assert!(output.try_enqueue(7, 4096, 0.5).is_err());
++        assert!(!plugin
++            .runtime
++            .parameter_output_fault
++            .load(Ordering::Acquire));
++        plugin.note_on(MidiChannel::Ch1, 60, 100, 0).unwrap();
++        match operation {
++            "reconfigure" => {
++                plugin.stop_processing().unwrap();
++                plugin.reconfigure(44100.0, 32).unwrap();
++            }
++            "state" => plugin
++                .load_state_with_context(&[1], &StateContext::Project)
++                .unwrap(),
++            "process" => {
++                let mut buffers = AudioBuffers::new(0, 1, 0, 48000.0);
++                assert!(matches!(
++                    plugin.process(&mut buffers),
++                    Err(Error::ParameterOutputRejected)
++                ));
++                assert!(!plugin.runtime.input_events.is_empty());
++                assert!(plugin.runtime.chunk_events.is_empty());
++            }
++            _ => unreachable!(),
++        }
++        assert!(plugin
++            .runtime
++            .parameter_output_fault
++            .load(Ordering::Acquire));
++        assert!(matches!(
++            plugin.save_state(),
++            Err(Error::ParameterOutputRejected)
++        ));
++        assert_eq!(state.realtime_calls.load(Ordering::Acquire), 0);
++    }
 +}
 --- /dev/null
 +++ b/src/internal/processor_lease.rs

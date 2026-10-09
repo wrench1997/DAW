@@ -8,7 +8,7 @@ use super::*;
 use std::{
     ffi::c_void,
     mem::offset_of,
-    sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering},
 };
 use vst3::{
     com_scrape_types::{Header, InterfaceList, MakeHeader, Wrapper},
@@ -154,6 +154,11 @@ struct MockState {
     capture_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     process_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     fail_state: AtomicBool,
+    no_alloc_process: AtomicBool,
+    realtime_calls: AtomicUsize,
+    realtime_points: AtomicUsize,
+    output_points: AtomicUsize,
+    last_mirrored: AtomicU64,
 }
 
 impl Default for MockState {
@@ -172,6 +177,11 @@ impl Default for MockState {
             capture_callback: Mutex::new(None),
             process_callback: Mutex::new(None),
             fail_state: AtomicBool::new(false),
+            no_alloc_process: AtomicBool::new(false),
+            realtime_calls: AtomicUsize::new(0),
+            realtime_points: AtomicUsize::new(0),
+            output_points: AtomicUsize::new(0),
+            last_mirrored: AtomicU64::new(0),
         }
     }
 }
@@ -377,6 +387,41 @@ impl<const S: bool, const C: bool> IAudioProcessorTrait for MockPlugin<S, C> {
         kResultOk
     }
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
+        if self.state.no_alloc_process.load(Ordering::Acquire) {
+            // Dedicated fixed-state processor path: no trace Vec, formatting or callback hook.
+            // Parameter operations alone are exercised with empty event/data-exchange lanes.
+            let data = &mut *data;
+            self.state.realtime_calls.fetch_add(1, Ordering::Relaxed);
+            let mut point_count = 0;
+            if let Some(changes) = vst3::ComRef::from_raw(data.inputParameterChanges) {
+                for index in 0..changes.getParameterCount() {
+                    let queue = vst3::ComRef::from_raw(changes.getParameterData(index)).unwrap();
+                    for point in 0..queue.getPointCount() {
+                        let (mut offset, mut value) = (0, 0.0);
+                        assert_eq!(queue.getPoint(point, &mut offset, &mut value), kResultOk);
+                        point_count += 1;
+                    }
+                }
+            }
+            self.state
+                .realtime_points
+                .store(point_count, Ordering::Release);
+            let output_count = self.state.output_points.load(Ordering::Acquire);
+            if output_count != 0 {
+                let output = vst3::ComRef::from_raw(data.outputParameterChanges).unwrap();
+                let queue =
+                    vst3::ComRef::from_raw(output.addParameterData(&77, ptr::null_mut())).unwrap();
+                for point in 0..output_count {
+                    // Deliberately ignore write failures, like an uncooperative plugin.
+                    let _ = queue.addPoint(point as i32, 0.5, ptr::null_mut());
+                }
+            }
+            return if self.state.fail_process.load(Ordering::Acquire) {
+                kResultFalse
+            } else {
+                kResultOk
+            };
+        }
         self.probe.record("process");
         if self.state.fail_process.load(Ordering::Acquire) {
             return kResultFalse;
@@ -465,9 +510,12 @@ impl<const S: bool, const C: bool> IEditControllerTrait for MockPlugin<S, C> {
         value
     }
     unsafe fn getParamNormalized(&self, _id: u32) -> f64 {
-        0.0
+        f64::from_bits(self.state.last_mirrored.load(Ordering::Acquire))
     }
-    unsafe fn setParamNormalized(&self, _id: u32, _value: f64) -> tresult {
+    unsafe fn setParamNormalized(&self, _id: u32, value: f64) -> tresult {
+        self.state
+            .last_mirrored
+            .store(value.to_bits(), Ordering::Release);
         kResultOk
     }
     unsafe fn setComponentHandler(&self, _handler: *mut IComponentHandler) -> tresult {
@@ -747,6 +795,7 @@ fn plugin_fixture(trace: &Trace, state: &Arc<MockState>) -> PluginImpl {
         runtime: ProcessorRuntime {
             is_processing: false,
             has_processed_audio: false,
+            parameter_output_fault: AtomicBool::new(false),
             sample_rate: 48000.0,
             block_size: 16,
             tempo: 120.0,
@@ -1604,10 +1653,7 @@ fn native_checked_admission_failure_rejects_process_and_keeps_capture_uncertain(
         .unwrap()
         .input_param_changes
         .clone();
-    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = changes.queues.lock().unwrap();
-        panic!("controlled parameter admission failure");
-    }));
+    changes.poison_for_test();
     trace.clear();
     assert!(plugin
         .process(&mut AudioBuffers::new(0, 1, 0, 48000.0))
@@ -1628,4 +1674,405 @@ fn native_checked_admission_failure_rejects_process_and_keeps_capture_uncertain(
             .applied,
         0
     );
+}
+
+#[test]
+fn cold_combined_4096_host_and_4096_native_parameter_points_do_not_allocate() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    state.no_alloc_process.store(true, Ordering::Release);
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    for id in 0..4096 {
+        plugin.set_parameter(id, 0.25).unwrap();
+    }
+    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
+    for id in 4096..8192 {
+        unsafe {
+            handler.performEdit(id, 0.75);
+        }
+    }
+    let mut buffers = AudioBuffers::new(0, 1, 0, 48000.0);
+    allocation_free(|| plugin.process(&mut buffers).unwrap());
+    assert_eq!(state.realtime_points.load(Ordering::Acquire), 8192);
+    assert_eq!(state.realtime_calls.load(Ordering::Acquire), 1);
+    assert_eq!(
+        (
+            handler.native_edits.snapshot().submitted,
+            handler.native_edits.snapshot().applied
+        ),
+        (4096, 4096)
+    );
+    assert!(plugin.runtime.pending_param_changes.is_empty());
+    // Reuse is also allocation-free, without any warm-up call preceding the first measurement.
+    allocation_free(|| plugin.process(&mut buffers).unwrap());
+    assert_eq!(state.realtime_points.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn full_pending_host_queue_rejects_before_controller_mirror_or_any_sdk_call() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    for id in 0..4096 {
+        plugin.set_parameter(id, 0.25).unwrap();
+    }
+    let native_before = plugin
+        .control
+        .component_handler
+        .as_ref()
+        .unwrap()
+        .native_edits
+        .snapshot();
+    plugin.runtime.dropped_param_changes = u64::MAX;
+    trace.clear();
+    allocation_free(|| {
+        assert!(matches!(
+            plugin.set_parameter(4096, 0.75),
+            Err(Error::ParameterInputRejected)
+        ))
+    });
+    assert_eq!(plugin.get_parameter(4096).unwrap(), 0.25);
+    assert_eq!(plugin.runtime.pending_param_changes.len(), 4096);
+    assert!(plugin
+        .runtime
+        .pending_param_changes
+        .iter()
+        .enumerate()
+        .all(|(index, point)| point.id == index as u32 && point.value == 0.25));
+    assert_eq!(plugin.runtime.dropped_param_changes, u64::MAX);
+    assert_eq!(
+        plugin
+            .control
+            .component_handler
+            .as_ref()
+            .unwrap()
+            .native_edits
+            .snapshot(),
+        native_before
+    );
+    assert!(!trace
+        .methods()
+        .iter()
+        .any(|(_, method)| *method == "process"));
+}
+
+#[test]
+fn output_overflow_is_allocation_free_sticky_and_separate_from_native_acknowledgment() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    for sdk_fails in [false, true] {
+        let trace = Trace::default();
+        let state = Arc::new(MockState::default());
+        state.no_alloc_process.store(true, Ordering::Release);
+        state.output_points.store(4097, Ordering::Release);
+        state.fail_process.store(sdk_fails, Ordering::Release);
+        let mut plugin = plugin_fixture(&trace, &state);
+        plugin.start_processing().unwrap();
+        let handler = plugin.control.component_handler.as_ref().unwrap().clone();
+        unsafe {
+            handler.performEdit(7, 0.5);
+        }
+        let native_before = handler.native_edits.snapshot();
+        let mut buffers = AudioBuffers::new(0, 1, 0, 48000.0);
+        allocation_free(|| {
+            assert!(matches!(
+                plugin.process(&mut buffers),
+                Err(Error::ParameterOutputRejected)
+            ))
+        });
+        assert!(plugin
+            .runtime
+            .parameter_output_fault
+            .load(Ordering::Acquire));
+        let native_after = handler.native_edits.snapshot();
+        assert_eq!(native_after.applied, u64::from(!sdk_fails));
+        assert_eq!(native_after.lost, sdk_fails);
+        assert_eq!(native_after.dirty, native_before.dirty);
+        assert_eq!(native_after.generation, native_before.generation);
+        assert_eq!(state.realtime_calls.load(Ordering::Acquire), 1);
+        trace.clear();
+        allocation_free(|| {
+            assert!(matches!(
+                plugin.process(&mut buffers),
+                Err(Error::ParameterOutputRejected)
+            ));
+            assert!(matches!(
+                plugin.save_state(),
+                Err(Error::ParameterOutputRejected)
+            ));
+        });
+        assert_eq!(state.realtime_calls.load(Ordering::Acquire), 1);
+        assert!(trace.methods().is_empty());
+        // Administrative success is not recovery; the runtime fault survives all storage rebuilds.
+        state.fail_process.store(false, Ordering::Release);
+        state.output_points.store(0, Ordering::Release);
+        plugin.stop_processing().unwrap();
+        plugin.start_processing().unwrap();
+        plugin
+            .load_state_with_context(&[1], &StateContext::Project)
+            .unwrap();
+        plugin.stop_processing().unwrap();
+        plugin.reconfigure(44100.0, 32).unwrap();
+        plugin.start_processing().unwrap();
+        assert!(plugin
+            .runtime
+            .parameter_output_fault
+            .load(Ordering::Acquire));
+        trace.clear();
+        allocation_free(|| {
+            assert!(matches!(
+                plugin.process(&mut buffers),
+                Err(Error::ParameterOutputRejected)
+            ));
+            assert!(matches!(
+                plugin.save_state(),
+                Err(Error::ParameterOutputRejected)
+            ));
+        });
+        assert_eq!(state.realtime_calls.load(Ordering::Acquire), 1);
+        assert!(trace.methods().is_empty());
+        let fresh_state = Arc::new(MockState::default());
+        fresh_state.no_alloc_process.store(true, Ordering::Release);
+        let mut fresh = plugin_fixture(&Trace::default(), &fresh_state);
+        fresh.start_processing().unwrap();
+        assert!(fresh.process(&mut buffers).is_ok());
+        assert!(fresh.save_state().is_ok());
+    }
+}
+
+#[test]
+fn sdk_failure_without_output_loss_retains_raw_error_and_does_not_poison_empty_native_input() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    state.no_alloc_process.store(true, Ordering::Release);
+    state.fail_process.store(true, Ordering::Release);
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    let mut buffers = AudioBuffers::new(0, 1, 0, 48000.0);
+    allocation_free(|| {
+        assert!(
+            matches!(plugin.process(&mut buffers), Err(Error::ProcessFailed(value)) if value == kResultFalse)
+        )
+    });
+    assert!(!plugin
+        .runtime
+        .parameter_output_fault
+        .load(Ordering::Acquire));
+    assert!(
+        !plugin
+            .control
+            .component_handler
+            .as_ref()
+            .unwrap()
+            .native_edits
+            .snapshot()
+            .lost
+    );
+    assert!(plugin.save_state().is_ok());
+}
+
+#[test]
+fn failed_host_parameter_admission_clears_staged_values_and_events_without_sdk_or_native_ack() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    state.no_alloc_process.store(true, Ordering::Release);
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    let data = plugin.runtime.process_data.as_mut().unwrap();
+    data.input_param_changes = ComWrapper::new(ParameterChanges::new(ParameterQueueLimits {
+        max_queues: 1,
+        max_points: 1,
+    }));
+    data.process_data.inputParameterChanges = data
+        .input_param_changes
+        .as_com_ref::<IParameterChanges>()
+        .unwrap()
+        .as_ptr();
+    plugin.set_parameter(1, 0.25).unwrap();
+    plugin.set_parameter(2, 0.75).unwrap();
+    plugin.note_on(MidiChannel::Ch1, 60, 100, 0).unwrap();
+    unsafe {
+        plugin
+            .control
+            .component_handler
+            .as_ref()
+            .unwrap()
+            .performEdit(3, 0.5);
+    }
+    let before = plugin
+        .control
+        .component_handler
+        .as_ref()
+        .unwrap()
+        .native_edits
+        .snapshot();
+    let mut buffers = AudioBuffers::new(0, 1, 0, 48000.0);
+    // This call is outside the parameter-only measured region because event staging and
+    // owned event-container/payload work are explicitly outside this slice.
+    let result = plugin.process(&mut buffers);
+    assert!(matches!(result, Err(Error::ParameterInputRejected)));
+    assert!(plugin.runtime.pending_param_changes.is_empty());
+    assert!(plugin.runtime.input_events.is_empty());
+    assert_eq!(state.realtime_calls.load(Ordering::Acquire), 0);
+    assert_eq!(
+        plugin
+            .control
+            .component_handler
+            .as_ref()
+            .unwrap()
+            .native_edits
+            .snapshot(),
+        before
+    );
+    allocation_free(|| {
+        assert!(matches!(
+            plugin.process(&mut buffers),
+            Err(Error::ParameterInputRejected)
+        ))
+    });
+}
+
+#[test]
+fn native_capacity_admission_failure_has_no_sdk_call_and_never_acknowledges_partial_input() {
+    use crate::internal::native_edit_transport::tests::allocation_free;
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    state.no_alloc_process.store(true, Ordering::Release);
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    let data = plugin.runtime.process_data.as_mut().unwrap();
+    data.input_param_changes = ComWrapper::new(ParameterChanges::new(ParameterQueueLimits {
+        max_queues: 2,
+        max_points: 1,
+    }));
+    data.process_data.inputParameterChanges = data
+        .input_param_changes
+        .as_com_ref::<IParameterChanges>()
+        .unwrap()
+        .as_ptr();
+    let handler = plugin.control.component_handler.as_ref().unwrap().clone();
+    unsafe {
+        handler.performEdit(1, 0.25);
+        handler.performEdit(2, 0.75);
+    }
+    let before = handler.native_edits.snapshot();
+    let mut buffers = AudioBuffers::new(0, 1, 0, 48000.0);
+    allocation_free(|| {
+        assert!(matches!(
+            plugin.process(&mut buffers),
+            Err(Error::NativeParameterAdmissionFailed)
+        ))
+    });
+    assert_eq!(state.realtime_calls.load(Ordering::Acquire), 0);
+    let after = handler.native_edits.snapshot();
+    assert!(after.lost);
+    assert_eq!(after.applied, 0);
+    assert_eq!(after.generation, before.generation);
+    assert_eq!(after.dirty, before.dirty);
+    let input = &plugin
+        .runtime
+        .process_data
+        .as_ref()
+        .unwrap()
+        .input_param_changes;
+    assert_eq!(unsafe { input.getParameterCount() }, 0);
+    assert!(plugin.save_state().is_err());
+}
+
+#[test]
+fn reentrant_output_failure_during_capture_is_promoted_before_snapshot_returns() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    let output = plugin
+        .runtime
+        .process_data
+        .as_ref()
+        .unwrap()
+        .output_param_changes
+        .clone();
+    *state.capture_callback.lock().unwrap() = Some(Box::new(move || {
+        // Simulate plugin use of the still-live output COM container during getState.
+        unsafe {
+            let queue =
+                vst3::ComRef::from_raw(output.addParameterData(&7, ptr::null_mut())).unwrap();
+            for point in 0..4097 {
+                let _ = queue.addPoint(point, 0.5, ptr::null_mut());
+            }
+        }
+    }));
+    assert!(matches!(
+        plugin.save_state(),
+        Err(Error::ParameterOutputRejected)
+    ));
+    assert!(plugin
+        .runtime
+        .parameter_output_fault
+        .load(Ordering::Acquire));
+    *state.capture_callback.lock().unwrap() = None;
+    assert!(matches!(
+        plugin.save_state(),
+        Err(Error::ParameterOutputRejected)
+    ));
+}
+
+#[test]
+fn unreported_output_failure_is_promoted_before_rebuild_or_event_staging() {
+    for operation in ["reconfigure", "state", "process"] {
+        let trace = Trace::default();
+        let state = Arc::new(MockState::default());
+        state.no_alloc_process.store(true, Ordering::Release);
+        let mut plugin = plugin_fixture(&trace, &state);
+        plugin.start_processing().unwrap();
+        let output = plugin
+            .runtime
+            .process_data
+            .as_ref()
+            .unwrap()
+            .output_param_changes
+            .clone();
+        for point in 0..4096 {
+            output.try_enqueue(7, point, 0.5).unwrap();
+        }
+        assert!(output.try_enqueue(7, 4096, 0.5).is_err());
+        assert!(!plugin
+            .runtime
+            .parameter_output_fault
+            .load(Ordering::Acquire));
+        plugin.note_on(MidiChannel::Ch1, 60, 100, 0).unwrap();
+        match operation {
+            "reconfigure" => {
+                plugin.stop_processing().unwrap();
+                plugin.reconfigure(44100.0, 32).unwrap();
+            }
+            "state" => plugin
+                .load_state_with_context(&[1], &StateContext::Project)
+                .unwrap(),
+            "process" => {
+                let mut buffers = AudioBuffers::new(0, 1, 0, 48000.0);
+                assert!(matches!(
+                    plugin.process(&mut buffers),
+                    Err(Error::ParameterOutputRejected)
+                ));
+                assert!(!plugin.runtime.input_events.is_empty());
+                assert!(plugin.runtime.chunk_events.is_empty());
+            }
+            _ => unreachable!(),
+        }
+        assert!(plugin
+            .runtime
+            .parameter_output_fault
+            .load(Ordering::Acquire));
+        assert!(matches!(
+            plugin.save_state(),
+            Err(Error::ParameterOutputRejected)
+        ));
+        assert_eq!(state.realtime_calls.load(Ordering::Acquire), 0);
+    }
 }

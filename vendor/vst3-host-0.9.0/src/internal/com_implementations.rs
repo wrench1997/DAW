@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, ThreadId};
 use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, Steinberg::Vst::*, Steinberg::*};
@@ -2695,90 +2695,649 @@ pub fn create_event_list() -> ComWrapper<HostEventList> {
 }
 
 // Parameter Changes implementation
+/// Explicit, per-container budgets. Points are shared by all queues, never multiplied
+/// by the queue count. Construction is control-side work, before the first block.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ParameterQueueLimits {
+    pub max_queues: usize,
+    pub max_points: usize,
+}
+
+impl ParameterQueueLimits {
+    pub const INPUT: Self = Self {
+        max_queues: 8192,
+        max_points: 8192,
+    };
+    pub const OUTPUT: Self = Self {
+        max_queues: 4096,
+        max_points: 4096,
+    };
+}
+
+/// Small, nonallocating failures; presentation and logging belong outside callbacks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParameterStorageError {
+    QueueCapacity,
+    PointCapacity,
+    InvalidArgument,
+    InactiveQueue,
+    Poisoned,
+    InvalidState,
+}
+
+const NO_PARAMETER_NODE: usize = usize::MAX;
+
+#[derive(Clone, Copy)]
+struct ParameterPointNode {
+    offset: i32,
+    value: f64,
+    next: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ParameterQueueSlot {
+    id: u32,
+    head: usize,
+    tail: usize,
+    count: usize,
+    cache_start: usize,
+}
+
+impl ParameterQueueSlot {
+    fn empty(id: u32) -> Self {
+        Self {
+            id,
+            head: NO_PARAMETER_NODE,
+            tail: NO_PARAMETER_NODE,
+            count: 0,
+            cache_start: NO_PARAMETER_NODE,
+        }
+    }
+}
+
+/// Only plain metadata/points live here. In particular, this arena must not own any
+/// queue wrappers: a legally AddRef-retained queue owns the arena without a cycle.
+struct ParameterArena {
+    queues: Box<[ParameterQueueSlot]>,
+    points: Box<[ParameterPointNode]>,
+    // One shared ordinal index, not one max-points array per queue.
+    ordinal_index: Box<[usize]>,
+    // Ordered registered slots with at least one accepted point. Empty queues stay
+    // registered/public, but never participate in ordinal-offset maintenance.
+    populated_slots: Box<[usize]>,
+    used_populated: usize,
+    cache_dirty: bool,
+    used_queues: usize,
+    used_points: usize,
+    failure: Option<ParameterStorageError>,
+}
+
+impl ParameterArena {
+    fn fail(&mut self, error: ParameterStorageError) -> ParameterStorageError {
+        if self.failure.is_none() {
+            self.failure = Some(error);
+        }
+        error
+    }
+
+    fn find_queue(&self, id: u32) -> Option<usize> {
+        self.queues[..self.used_queues]
+            .iter()
+            .position(|queue| queue.id == id)
+    }
+
+    // Call only after checking queue capacity and, for host admission, point capacity.
+    fn activate_queue(&mut self, id: u32) -> usize {
+        let slot = self.used_queues;
+        self.queues[slot] = ParameterQueueSlot::empty(id);
+        self.used_queues += 1;
+        // Empty queues have no ordinal slice; their cache_start is never read.
+        // Keep a dirty cache dirty without disturbing an already valid index.
+        slot
+    }
+
+    fn validate_counts(&mut self) -> Result<(), ParameterStorageError> {
+        if self.used_queues > self.queues.len()
+            || self.used_points > self.points.len()
+            || self.used_points > self.ordinal_index.len()
+            || self.used_populated > self.populated_slots.len()
+            || self.used_populated > self.used_queues
+            || self.used_populated > self.used_points
+        {
+            return Err(self.fail(ParameterStorageError::InvalidState));
+        }
+        Ok(())
+    }
+
+    fn cache_range(
+        &mut self,
+        queue: ParameterQueueSlot,
+    ) -> Result<(usize, usize), ParameterStorageError> {
+        let Some(end) = queue.cache_start.checked_add(queue.count) else {
+            return Err(self.fail(ParameterStorageError::InvalidState));
+        };
+        if end > self.used_points || end > self.ordinal_index.len() {
+            return Err(self.fail(ParameterStorageError::InvalidState));
+        }
+        Ok((queue.cache_start, end))
+    }
+
+    fn checked_node(&mut self, node: usize) -> Result<ParameterPointNode, ParameterStorageError> {
+        if node < self.used_points {
+            if let Some(point) = self.points.get(node) {
+                return Ok(*point);
+            }
+        }
+        Err(self.fail(ParameterStorageError::InvalidState))
+    }
+
+    fn cached_node(&mut self, position: usize) -> Result<usize, ParameterStorageError> {
+        if position < self.used_points {
+            if let Some(&node) = self.ordinal_index.get(position) {
+                if node < self.used_points && node < self.points.len() {
+                    return Ok(node);
+                }
+            }
+        }
+        Err(self.fail(ParameterStorageError::InvalidState))
+    }
+
+    fn populated_slot(&mut self, position: usize) -> Result<usize, ParameterStorageError> {
+        if position < self.used_populated {
+            if let Some(&slot) = self.populated_slots.get(position) {
+                if slot < self.used_queues {
+                    if let Some(queue) = self.queues.get(slot) {
+                        if queue.count != 0 {
+                            return Ok(slot);
+                        }
+                    }
+                }
+            }
+        }
+        Err(self.fail(ParameterStorageError::InvalidState))
+    }
+
+    fn populated_position(&mut self, slot: usize) -> Result<(usize, bool), ParameterStorageError> {
+        let mut low = 0;
+        let mut high = self.used_populated;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let candidate = self.populated_slot(middle)?;
+            if candidate < slot {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        if low != 0 && self.populated_slot(low - 1)? >= slot {
+            return Err(self.fail(ParameterStorageError::InvalidState));
+        }
+        let found = if low < self.used_populated {
+            let next = self.populated_slot(low)?;
+            if next < slot {
+                return Err(self.fail(ParameterStorageError::InvalidState));
+            }
+            next == slot
+        } else {
+            false
+        };
+        Ok((low, found))
+    }
+
+    fn insert_point(
+        &mut self,
+        slot: usize,
+        offset: i32,
+        value: f64,
+    ) -> Result<usize, ParameterStorageError> {
+        self.validate_counts()?;
+        if slot >= self.used_queues {
+            return Err(self.fail(ParameterStorageError::InactiveQueue));
+        }
+        if self.used_points == self.points.len() {
+            return Err(self.fail(ParameterStorageError::PointCapacity));
+        }
+        if self.used_points == self.ordinal_index.len() {
+            return Err(self.fail(ParameterStorageError::InvalidState));
+        }
+        let mut queue = self.queues[slot];
+        if queue.count > self.used_points {
+            return Err(self.fail(ParameterStorageError::InvalidState));
+        }
+        let (populated_position, populated) = self.populated_position(slot)?;
+        if populated != (queue.count != 0) {
+            return Err(self.fail(ParameterStorageError::InvalidState));
+        }
+        if !populated && self.used_populated == self.populated_slots.len() {
+            return Err(self.fail(ParameterStorageError::InvalidState));
+        }
+        if !self.cache_dirty {
+            if populated {
+                self.cache_range(queue)?;
+            } else {
+                // An empty queue's previous offset is deliberately unused. Derive
+                // its first slice from the next populated queue or the arena end.
+                queue.cache_start = if populated_position < self.used_populated {
+                    let next = self.populated_slot(populated_position)?;
+                    self.cache_range(self.queues[next])?.0
+                } else {
+                    self.used_points
+                };
+            }
+        }
+        let tail = if queue.count == 0 {
+            if queue.head != NO_PARAMETER_NODE || queue.tail != NO_PARAMETER_NODE {
+                return Err(self.fail(ParameterStorageError::InvalidState));
+            }
+            None
+        } else {
+            self.checked_node(queue.head)?;
+            Some(self.checked_node(queue.tail)?)
+        };
+        let (previous, next, index) = if let Some(tail) = tail {
+            if tail.next != NO_PARAMETER_NODE {
+                return Err(self.fail(ParameterStorageError::InvalidState));
+            }
+            if tail.offset <= offset {
+                // Dense, already ordered automation has constant-time rank lookup.
+                (queue.tail, NO_PARAMETER_NODE, queue.count)
+            } else if !self.cache_dirty {
+                // Upper bound on the valid ordinal slice: equal-offset arrivals stay
+                // before this new point. Search compares offsets only, never values.
+                let mut low = 0;
+                let mut high = queue.count;
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    let node = self.cached_node(queue.cache_start + middle)?;
+                    if self.checked_node(node)?.offset <= offset {
+                        low = middle + 1;
+                    } else {
+                        high = middle;
+                    }
+                }
+                let previous = if low == 0 {
+                    NO_PARAMETER_NODE
+                } else {
+                    self.cached_node(queue.cache_start + low - 1)?
+                };
+                // The tail fast path excludes low == count when the index is sound.
+                if low == queue.count {
+                    return Err(self.fail(ParameterStorageError::InvalidState));
+                }
+                let next = self.cached_node(queue.cache_start + low)?;
+                (previous, next, low)
+            } else {
+                let mut previous = NO_PARAMETER_NODE;
+                let mut next = queue.head;
+                let mut index = 0;
+                while next != NO_PARAMETER_NODE {
+                    if index == queue.count {
+                        return Err(self.fail(ParameterStorageError::InvalidState));
+                    }
+                    let point = self.checked_node(next)?;
+                    if point.offset > offset {
+                        break;
+                    }
+                    previous = next;
+                    next = point.next;
+                    index += 1;
+                }
+                (previous, next, index)
+            }
+        } else {
+            (NO_PARAMETER_NODE, NO_PARAMETER_NODE, 0)
+        };
+        if previous != NO_PARAMETER_NODE {
+            self.checked_node(previous)?;
+        }
+        if next != NO_PARAMETER_NODE {
+            self.checked_node(next)?;
+        }
+
+        let node = self.used_points;
+        // Validate all index movement and later metadata before changing either
+        // linked storage or the ordinal index. No full index scan is needed.
+        let position = if !self.cache_dirty {
+            let Some(position) = queue.cache_start.checked_add(index) else {
+                return Err(self.fail(ParameterStorageError::InvalidState));
+            };
+            let valid_move = position
+                .checked_add(1)
+                .and_then(|destination| {
+                    node.checked_sub(position).and_then(|length| {
+                        destination
+                            .checked_add(length)
+                            .map(|end| end <= self.ordinal_index.len())
+                    })
+                })
+                .unwrap_or(false);
+            if !valid_move || self.ordinal_index.get(position..node).is_none() {
+                return Err(self.fail(ParameterStorageError::InvalidState));
+            }
+            Some(position)
+        } else {
+            None
+        };
+
+        let later_start = populated_position + usize::from(populated);
+        let mut previous_slot = slot;
+        let mut expected_start = if !self.cache_dirty {
+            queue.cache_start + queue.count // The checked target range bounds this sum.
+        } else {
+            0
+        };
+        for later in later_start..self.used_populated {
+            let later_slot = self.populated_slot(later)?;
+            if later_slot <= previous_slot {
+                return Err(self.fail(ParameterStorageError::InvalidState));
+            }
+            previous_slot = later_slot;
+            if !self.cache_dirty {
+                let later_queue = self.queues[later_slot];
+                let (start, end) = self.cache_range(later_queue)?;
+                if start != expected_start || start.checked_add(1).is_none() {
+                    return Err(self.fail(ParameterStorageError::InvalidState));
+                }
+                expected_start = end;
+            }
+        }
+        if !self.cache_dirty && expected_start != self.used_points {
+            return Err(self.fail(ParameterStorageError::InvalidState));
+        }
+        if !populated {
+            let valid_move = populated_position
+                .checked_add(1)
+                .and_then(|destination| {
+                    self.used_populated
+                        .checked_sub(populated_position)
+                        .and_then(|length| {
+                            destination
+                                .checked_add(length)
+                                .map(|end| end <= self.populated_slots.len())
+                        })
+                })
+                .unwrap_or(false);
+            if !valid_move
+                || self
+                    .populated_slots
+                    .get(populated_position..self.used_populated)
+                    .is_none()
+            {
+                return Err(self.fail(ParameterStorageError::InvalidState));
+            }
+        }
+        let cache_start = queue.cache_start;
+
+        self.points[node] = ParameterPointNode {
+            offset,
+            value,
+            next,
+        };
+        self.used_points += 1;
+        if previous == NO_PARAMETER_NODE {
+            self.queues[slot].head = node;
+        } else {
+            self.points[previous].next = node;
+        }
+        let queue = &mut self.queues[slot];
+        if next == NO_PARAMETER_NODE {
+            queue.tail = node;
+        }
+        queue.count += 1;
+        if !populated && !self.cache_dirty {
+            queue.cache_start = cache_start;
+        }
+        if let Some(position) = position {
+            // Cost is O(total point suffix + later populated queues); empty queues
+            // are never walked or read here. Final populated tail appends move none.
+            self.ordinal_index.copy_within(position..node, position + 1);
+            self.ordinal_index[position] = node;
+            for later in later_start..self.used_populated {
+                self.queues[self.populated_slots[later]].cache_start += 1;
+            }
+        }
+        if !populated {
+            self.populated_slots.copy_within(
+                populated_position..self.used_populated,
+                populated_position + 1,
+            );
+            self.populated_slots[populated_position] = slot;
+            self.used_populated += 1;
+        }
+        // A dirty index stays dirty; its next valid read still rebuilds once.
+        Ok(index)
+    }
+
+    fn rebuild_index(&mut self) -> Result<(), ParameterStorageError> {
+        // Validate the bounded linked chains before changing any cached positions.
+        let mut total = 0_usize;
+        let mut previous_slot = None;
+        for populated in 0..self.used_populated {
+            let slot = self.populated_slot(populated)?;
+            if previous_slot.is_some_and(|previous| previous >= slot) {
+                return Err(self.fail(ParameterStorageError::InvalidState));
+            }
+            previous_slot = Some(slot);
+            let queue = self.queues[slot];
+            let Some(end) = total.checked_add(queue.count) else {
+                return Err(self.fail(ParameterStorageError::InvalidState));
+            };
+            if end > self.used_points || end > self.ordinal_index.len() {
+                return Err(self.fail(ParameterStorageError::InvalidState));
+            }
+            let mut node = queue.head;
+            let mut tail = NO_PARAMETER_NODE;
+            for _ in 0..queue.count {
+                let point = self.checked_node(node)?;
+                tail = node;
+                node = point.next;
+            }
+            if node != NO_PARAMETER_NODE || tail != queue.tail {
+                return Err(self.fail(ParameterStorageError::InvalidState));
+            }
+            total = end;
+        }
+        if total != self.used_points {
+            return Err(self.fail(ParameterStorageError::InvalidState));
+        }
+        let mut position = 0;
+        for populated in 0..self.used_populated {
+            let queue = &mut self.queues[self.populated_slots[populated]];
+            queue.cache_start = position;
+            let mut node = queue.head;
+            for _ in 0..queue.count {
+                self.ordinal_index[position] = node;
+                position += 1;
+                node = self.points[node].next;
+            }
+        }
+        self.cache_dirty = false;
+        Ok(())
+    }
+
+    fn point(&mut self, slot: usize, index: i32) -> Result<(i32, f64), ParameterStorageError> {
+        self.validate_counts()?;
+        if slot >= self.used_queues {
+            return Err(ParameterStorageError::InactiveQueue);
+        }
+        let queue = self.queues[slot];
+        if index < 0 || index as usize >= queue.count {
+            return Err(ParameterStorageError::InvalidArgument);
+        }
+        if self.cache_dirty {
+            self.rebuild_index()?;
+        }
+        // Ordinary valid reads check only this queue's range and selected node.
+        // They do not scan the array. A malformed cache fails closed, not by panic.
+        let (start, _) = self.cache_range(self.queues[slot])?;
+        let node = self.cached_node(start + index as usize)?;
+        let point = self.checked_node(node)?;
+        Ok((point.offset, point.value))
+    }
+}
+
+fn lock_parameter_arena(
+    arena: &Mutex<ParameterArena>,
+) -> Result<std::sync::MutexGuard<'_, ParameterArena>, ParameterStorageError> {
+    match arena.lock() {
+        Ok(guard) => Ok(guard),
+        Err(poison) => {
+            // Preserve the first failure, but never use potentially partial state.
+            // This guard is acquired once; no nested lock, panic, allocation or log.
+            poison.into_inner().fail(ParameterStorageError::Poisoned);
+            Err(ParameterStorageError::Poisoned)
+        }
+    }
+}
+
 pub struct ParameterChanges {
-    /// A pool of queue objects. Entries `[0, used)` are active this block; entries `[used, len)`
-    /// are recycled — kept allocated and reused across blocks rather than dropped, so the
-    /// steady-state audio path never allocates a `ComWrapper`. The pool only ever grows, bounded
-    /// by the number of distinct parameters changed within a single block.
-    pub queues: Mutex<Vec<ComWrapper<ParameterValueQueue>>>,
-    /// Number of active queues this block (`<= queues.len()`). Mutated only under the `queues`
-    /// lock, so the pair stays consistent.
-    used: AtomicUsize,
+    // The owning wrappers never move or change after construction. SDK queue-return
+    // methods borrow their pointer, without cloning/dropping a COM reference.
+    queues: Box<[ComWrapper<ParameterValueQueue>]>,
+    arena: Arc<Mutex<ParameterArena>>,
 }
 
 impl Default for ParameterChanges {
     fn default() -> Self {
-        Self {
-            queues: Mutex::new(Vec::new()),
-            used: AtomicUsize::new(0),
-        }
+        Self::new(ParameterQueueLimits::OUTPUT)
     }
 }
 
 impl ParameterChanges {
-    /// Host-side: queue a parameter change point for the next process block. The processor
-    /// reads these from `inputParameterChanges` during `process()`. Points for the same id
-    /// share one queue and are kept ordered by sample offset. Reuses a pooled queue object
-    /// rather than allocating, so this is allocation-free in steady state once the pool has
-    /// grown to the per-block working set.
-    pub fn enqueue(&self, id: u32, sample_offset: i32, value: f64) {
-        let _ = self.try_enqueue(id, sample_offset, value);
+    pub fn new(limits: ParameterQueueLimits) -> Self {
+        assert!(limits.max_queues <= i32::MAX as usize);
+        assert!(limits.max_points <= i32::MAX as usize);
+        let arena = Arc::new(Mutex::new(ParameterArena {
+            queues: vec![ParameterQueueSlot::empty(u32::MAX); limits.max_queues].into_boxed_slice(),
+            points: vec![
+                ParameterPointNode {
+                    offset: 0,
+                    value: 0.0,
+                    next: NO_PARAMETER_NODE
+                };
+                limits.max_points
+            ]
+            .into_boxed_slice(),
+            ordinal_index: vec![0; limits.max_points].into_boxed_slice(),
+            populated_slots: vec![0; limits.max_queues].into_boxed_slice(),
+            used_populated: 0,
+            cache_dirty: false,
+            used_queues: 0,
+            used_points: 0,
+            failure: None,
+        }));
+        let queues = (0..limits.max_queues)
+            .map(|slot| {
+                ComWrapper::new(ParameterValueQueue {
+                    slot,
+                    arena: Arc::clone(&arena),
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self { queues, arena }
     }
 
-    /// Checked host admission. This still uses legacy COM queue locks and can grow storage;
-    /// it is not a fixed-capacity/RT-safe replacement. Unlike `enqueue`, failure cannot be
-    /// mistaken for native-edit delivery by the acknowledgment fence.
-    pub fn try_enqueue(&self, id: u32, sample_offset: i32, value: f64) -> Result<(), ()> {
-        let mut queues = self.queues.lock().map_err(|_| ())?;
-        let used = self.used.load(Ordering::Relaxed);
-        if used > queues.len() {
-            return Err(());
+    /// Admit one host point atomically. A rejected new id never activates an empty
+    /// queue. No queue creation, allocator traffic or COM reference change occurs.
+    pub fn try_enqueue(
+        &self,
+        id: u32,
+        sample_offset: i32,
+        value: f64,
+    ) -> Result<(), ParameterStorageError> {
+        let mut arena = lock_parameter_arena(&self.arena)?;
+        arena.validate_counts()?;
+        if arena.used_points == arena.points.len() {
+            return Err(arena.fail(ParameterStorageError::PointCapacity));
         }
-        if let Some(q) = queues[..used].iter().find(|q| q.param_id() == id) {
-            return q.try_insert_point(sample_offset, value);
+        if let Some(slot) = arena.find_queue(id) {
+            return arena.insert_point(slot, sample_offset, value).map(|_| ());
         }
-        if used < queues.len() {
-            // A poisoned point lock must not activate an unpopulated queue.
-            let q = &queues[used];
-            let mut points = q.points.lock().map_err(|_| ())?;
-            if points.capacity() == 0 {
-                points.try_reserve(1).map_err(|_| ())?;
+        if arena.used_queues == arena.queues.len() {
+            return Err(arena.fail(ParameterStorageError::QueueCapacity));
+        }
+        let slot = arena.used_queues;
+        let recycled = arena.queues[slot];
+        arena.activate_queue(id);
+        match arena.insert_point(slot, sample_offset, value) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // Point/list/index insertion performs all checks before mutation.
+                // Restore the exact inactive metadata too, not just its active count.
+                arena.used_queues = slot;
+                arena.queues[slot] = recycled;
+                Err(error)
             }
-            points.clear();
-            points.push((sample_offset, value));
-            q.param_id.store(id, Ordering::Relaxed);
-        } else {
-            queues.try_reserve(1).map_err(|_| ())?;
-            let q = ComWrapper::new(ParameterValueQueue::new(id));
-            q.try_insert_point(sample_offset, value)?;
-            queues.push(q);
         }
-        self.used.store(used + 1, Ordering::Relaxed);
+    }
+
+    /// Logical reset only. Retained queues become inactive until their fixed slot is
+    /// reused. Accepted points, wrappers and buffers are neither dropped nor freed.
+    /// A sticky failure is deliberately never cleared by reset.
+    pub fn clear_all(&self) -> Result<(), ParameterStorageError> {
+        let mut arena = lock_parameter_arena(&self.arena)?;
+        arena.used_queues = 0;
+        arena.used_points = 0;
+        arena.used_populated = 0;
+        arena.cache_dirty = false;
         Ok(())
     }
 
-    /// Forget all queued changes. Call after each `process()` block so values don't re-stick.
-    /// Only resets the active count — the queue objects are retained for reuse (their points are
-    /// cleared when a slot is recycled), so this allocates and drops nothing.
-    pub fn clear_all(&self) {
-        self.used.store(0, Ordering::Relaxed);
-    }
-
-    /// Visit every point the plugin wrote into the active queues for this block.
-    ///
-    /// The callback runs while the small queue/point mutexes are held, so it must stay
-    /// allocation-free and non-blocking. This is used immediately after `process()` to copy
-    /// processor-originated automation into the host's bounded feedback queue.
-    pub fn for_each_active_point(&self, mut f: impl FnMut(u32, i32, f64)) {
-        let queues = self.queues.lock().unwrap_or_else(|p| p.into_inner());
-        let used = self.used.load(Ordering::Relaxed).min(queues.len());
-        for queue in &queues[..used] {
-            let id = queue.param_id();
-            let points = queue.points.lock().unwrap_or_else(|p| p.into_inner());
-            for &(offset, value) in points.iter() {
-                f(id, offset, value);
+    pub fn failure(&self) -> Option<ParameterStorageError> {
+        match self.arena.lock() {
+            Ok(arena) => arena.failure,
+            Err(poison) => {
+                let mut arena = poison.into_inner();
+                arena.fail(ParameterStorageError::Poisoned);
+                arena.failure
             }
         }
+    }
+
+    /// Callback runs under the one shared arena lock and must not re-enter this
+    /// container or allocate/block. Queues are visited in first-seen id order, then
+    /// points in ascending offset and equal-offset arrival order.
+    pub fn for_each_active_point(
+        &self,
+        mut f: impl FnMut(u32, i32, f64),
+    ) -> Result<(), ParameterStorageError> {
+        let mut arena = lock_parameter_arena(&self.arena)?;
+        arena.validate_counts()?;
+        let mut visited = 0;
+        for slot in 0..arena.used_queues {
+            let queue = arena.queues[slot];
+            if queue.count > arena.used_points {
+                return Err(arena.fail(ParameterStorageError::InvalidState));
+            }
+            let mut node = queue.head;
+            let mut tail = NO_PARAMETER_NODE;
+            for _ in 0..queue.count {
+                if visited == arena.used_points {
+                    return Err(arena.fail(ParameterStorageError::InvalidState));
+                }
+                let point = arena.checked_node(node)?;
+                f(queue.id, point.offset, point.value);
+                tail = node;
+                node = point.next;
+                visited += 1;
+            }
+            if node != NO_PARAMETER_NODE || tail != queue.tail {
+                return Err(arena.fail(ParameterStorageError::InvalidState));
+            }
+        }
+        if visited != arena.used_points {
+            return Err(arena.fail(ParameterStorageError::InvalidState));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_for_test(&self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = self.arena.lock().unwrap();
+            panic!("controlled parameter arena poison");
+        }));
     }
 }
 
@@ -2788,175 +3347,80 @@ impl Class for ParameterChanges {
 
 impl IParameterChangesTrait for ParameterChanges {
     unsafe fn getParameterCount(&self) -> i32 {
-        match self.queues.lock() {
-            Ok(_queues) => {
-                // Only the active slots, not the recycled pool capacity.
-                let count = self.used.load(Ordering::Relaxed) as i32;
-                log::trace!(
-                    "Internal ParameterChanges: getParameterCount returning {}",
-                    count
-                );
-                count
-            }
-            Err(_) => {
-                log::error!(
-                    "Internal ParameterChanges: Failed to lock queues for getParameterCount"
-                );
-                0
-            }
+        let Ok(mut arena) = lock_parameter_arena(&self.arena) else {
+            return 0;
+        };
+        if arena.validate_counts().is_err() {
+            return 0;
         }
+        arena.used_queues as i32
     }
 
     unsafe fn getParameterData(&self, index: i32) -> *mut IParamValueQueue {
-        if index < 0 {
-            log::warn!(
-                "Internal ParameterChanges: getParameterData called with negative index: {}",
-                index
-            );
+        let Ok(mut arena) = lock_parameter_arena(&self.arena) else {
+            return ptr::null_mut();
+        };
+        if arena.validate_counts().is_err() {
             return ptr::null_mut();
         }
-
-        match self.queues.lock() {
-            Ok(queues) => {
-                let used = self.used.load(Ordering::Relaxed);
-                if (index as usize) < used {
-                    let queue = &queues[index as usize];
-                    match queue.as_com_ref::<IParamValueQueue>() {
-                        Some(ptr) => {
-                            log::trace!("Internal ParameterChanges: getParameterData returning queue for index {}", index);
-                            ptr.as_ptr()
-                        }
-                        None => {
-                            log::error!("Internal ParameterChanges: Failed to convert queue to COM pointer for index {}", index);
-                            ptr::null_mut()
-                        }
-                    }
-                } else {
-                    log::warn!("Internal ParameterChanges: getParameterData index {} out of bounds (count: {})", index, used);
-                    ptr::null_mut()
-                }
-            }
-            Err(_) => {
-                log::error!(
-                    "Internal ParameterChanges: Failed to lock queues for getParameterData"
-                );
+        if index < 0 || index as usize >= arena.used_queues {
+            return ptr::null_mut();
+        }
+        match self
+            .queues
+            .get(index as usize)
+            .and_then(|queue| queue.as_com_ref::<IParamValueQueue>())
+        {
+            Some(queue) => queue.as_ptr(),
+            None => {
+                arena.fail(ParameterStorageError::InvalidState);
                 ptr::null_mut()
             }
         }
     }
 
     unsafe fn addParameterData(&self, id: *const u32, index: *mut i32) -> *mut IParamValueQueue {
+        if !index.is_null() {
+            *index = -1;
+        }
+        let Ok(mut arena) = lock_parameter_arena(&self.arena) else {
+            return ptr::null_mut();
+        };
         if id.is_null() {
-            log::warn!("Internal ParameterChanges: addParameterData called with null id pointer");
+            // Invalid writes imply an edit could not be represented. Unlike a read
+            // probe, this latches loss even if the plugin ignores the null return.
+            arena.fail(ParameterStorageError::InvalidArgument);
             return ptr::null_mut();
         }
-
-        let param_id = *id;
-
-        match self.queues.lock() {
-            Ok(mut queues) => {
-                let used = self.used.load(Ordering::Relaxed);
-                // Reuse an already-active queue for this parameter if present.
-                for (i, queue) in queues[..used].iter().enumerate() {
-                    if queue.param_id() == param_id {
-                        if !index.is_null() {
-                            *index = i as i32;
-                        }
-                        log::trace!(
-                            "Internal ParameterChanges: Found existing queue for parameter {}",
-                            param_id
-                        );
-                        return queue
-                            .as_com_ref::<IParamValueQueue>()
-                            .map(|ptr| ptr.as_ptr())
-                            .unwrap_or_else(|| {
-                                log::error!("Internal ParameterChanges: Failed to convert existing queue to COM pointer");
-                                ptr::null_mut()
-                            });
-                    }
-                }
-
-                // Activate a slot: recycle a pooled queue if one exists, else grow once.
-                if used == queues.len() {
-                    queues.push(ComWrapper::new(ParameterValueQueue::new(param_id)));
-                } else {
-                    queues[used].reset(param_id);
-                }
-                let queue_ptr = queues[used]
-                    .as_com_ref::<IParamValueQueue>()
-                    .map(|ptr| ptr.as_ptr())
-                    .unwrap_or_else(|| {
-                        log::error!(
-                            "Internal ParameterChanges: Failed to convert new queue to COM pointer"
-                        );
-                        ptr::null_mut()
-                    });
-
-                if !index.is_null() {
-                    *index = used as i32;
-                }
-
-                self.used.store(used + 1, Ordering::Relaxed);
-                log::trace!(
-                    "Internal ParameterChanges: Activated queue for parameter {}, active count: {}",
-                    param_id,
-                    used + 1
-                );
-                queue_ptr
-            }
-            Err(_) => {
-                log::error!(
-                    "Internal ParameterChanges: Failed to lock queues for addParameterData"
-                );
-                ptr::null_mut()
-            }
+        if arena.validate_counts().is_err() {
+            return ptr::null_mut();
         }
+        let id = *id;
+        let existing = arena.find_queue(id);
+        let slot = existing.unwrap_or(arena.used_queues);
+        if slot == arena.queues.len() {
+            arena.fail(ParameterStorageError::QueueCapacity);
+            return ptr::null_mut();
+        }
+        let Some(queue) = self.queues[slot].as_com_ref::<IParamValueQueue>() else {
+            arena.fail(ParameterStorageError::InvalidState);
+            return ptr::null_mut();
+        };
+        if existing.is_none() {
+            arena.activate_queue(id);
+        }
+        if !index.is_null() {
+            *index = slot as i32;
+        }
+        // Same borrowed return as the official SDK ParameterChanges implementation.
+        // A caller retaining this beyond the container must explicitly AddRef.
+        queue.as_ptr()
     }
 }
 
-// Parameter Value Queue implementation
 pub struct ParameterValueQueue {
-    // Atomic so a pooled queue can be re-targeted to a different parameter (see `reset`) without
-    // dropping and reallocating the ComWrapper each block.
-    pub param_id: AtomicU32,
-    pub points: Mutex<Vec<(i32, f64)>>, // sample offset, value
-}
-
-impl ParameterValueQueue {
-    pub fn new(param_id: u32) -> Self {
-        Self {
-            param_id: AtomicU32::new(param_id),
-            points: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// This queue's current parameter id.
-    pub fn param_id(&self) -> u32 {
-        self.param_id.load(Ordering::Relaxed)
-    }
-
-    /// Re-target a pooled queue to a new parameter, clearing its points in place (keeping the
-    /// `points` Vec's capacity). Used when recycling a queue object for a different parameter so
-    /// the steady-state path allocates nothing.
-    fn reset(&self, param_id: u32) {
-        self.param_id.store(param_id, Ordering::Relaxed);
-        if let Ok(mut points) = self.points.lock() {
-            points.clear();
-        }
-    }
-
-    /// Insert a point keeping sample-offset order (safe host-side population, mirroring the
-    /// COM `addPoint`).
-    fn try_insert_point(&self, sample_offset: i32, value: f64) -> Result<(), ()> {
-        let mut points = self.points.lock().map_err(|_| ())?;
-        points.try_reserve(1).map_err(|_| ())?;
-        let pos = points
-            .iter()
-            .position(|(off, _)| *off > sample_offset)
-            .unwrap_or(points.len());
-        points.insert(pos, (sample_offset, value));
-        Ok(())
-    }
+    slot: usize,
+    arena: Arc<Mutex<ParameterArena>>,
 }
 
 impl Class for ParameterValueQueue {
@@ -2965,50 +3429,57 @@ impl Class for ParameterValueQueue {
 
 impl IParamValueQueueTrait for ParameterValueQueue {
     unsafe fn getParameterId(&self) -> u32 {
-        self.param_id.load(Ordering::Relaxed)
+        lock_parameter_arena(&self.arena)
+            .map(|arena| arena.queues[self.slot].id)
+            .unwrap_or(u32::MAX)
     }
 
     unsafe fn getPointCount(&self) -> i32 {
-        // These run as COM FFI callbacks; a panic (e.g. from `.unwrap()` on a poisoned
-        // lock) would unwind across the C++ boundary — UB. Recover the lock instead.
-        self.points.lock().unwrap_or_else(|p| p.into_inner()).len() as i32
+        lock_parameter_arena(&self.arena)
+            .map(|arena| {
+                if self.slot < arena.used_queues {
+                    arena.queues[self.slot].count as i32
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0)
     }
 
     unsafe fn getPoint(&self, index: i32, sample_offset: *mut i32, value: *mut f64) -> i32 {
-        if let Some((offset, val)) = self
-            .points
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(index as usize)
-        {
-            if !sample_offset.is_null() {
-                *sample_offset = *offset;
+        let Ok(mut arena) = lock_parameter_arena(&self.arena) else {
+            return kResultFalse;
+        };
+        match arena.point(self.slot, index) {
+            Ok((offset, point_value)) => {
+                if !sample_offset.is_null() {
+                    *sample_offset = offset;
+                }
+                if !value.is_null() {
+                    *value = point_value;
+                }
+                kResultOk
             }
-            if !value.is_null() {
-                *value = *val;
-            }
-            kResultOk
-        } else {
-            kResultFalse
+            Err(_) => kResultFalse,
         }
     }
 
     unsafe fn addPoint(&self, sample_offset: i32, value: f64, index: *mut i32) -> i32 {
-        let mut points = self.points.lock().unwrap_or_else(|p| p.into_inner());
-
-        // Find insertion point
-        let insert_pos = points
-            .iter()
-            .position(|(offset, _)| *offset > sample_offset)
-            .unwrap_or(points.len());
-
-        points.insert(insert_pos, (sample_offset, value));
-
         if !index.is_null() {
-            *index = insert_pos as i32;
+            *index = -1;
         }
-
-        kResultOk
+        let Ok(mut arena) = lock_parameter_arena(&self.arena) else {
+            return kResultFalse;
+        };
+        match arena.insert_point(self.slot, sample_offset, value) {
+            Ok(position) => {
+                if !index.is_null() {
+                    *index = position as i32;
+                }
+                kResultOk
+            }
+            Err(_) => kResultFalse,
+        }
     }
 }
 
@@ -4022,131 +4493,1292 @@ mod plug_frame_tests {
 #[cfg(test)]
 mod parameter_changes_tests {
     use super::*;
+    use crate::internal::native_edit_transport::tests::{allocation_free, measure_allocations};
+    use std::time::Instant;
+    use vst3::com_scrape_types::Unknown;
 
-    #[test]
-    fn enqueue_groups_by_id_orders_by_offset_and_clears() {
-        let pc = ParameterChanges::default();
-        pc.enqueue(7, 64, 0.9);
-        pc.enqueue(7, 0, 0.5); // earlier offset, same id → must sort before the 64 point
-        pc.enqueue(3, 0, 0.1);
-
-        // Two distinct parameter ids → two queues; the processor reads this count.
-        assert_eq!(unsafe { pc.getParameterCount() }, 2);
-        {
-            let queues = pc.queues.lock().unwrap();
-            let q7 = queues.iter().find(|q| q.param_id() == 7).unwrap();
-            assert_eq!(*q7.points.lock().unwrap(), vec![(0, 0.5), (64, 0.9)]);
-            let q3 = queues.iter().find(|q| q.param_id() == 3).unwrap();
-            assert_eq!(*q3.points.lock().unwrap(), vec![(0, 0.1)]);
+    fn limits(max_queues: usize, max_points: usize) -> ParameterQueueLimits {
+        ParameterQueueLimits {
+            max_queues,
+            max_points,
         }
+    }
 
-        // After a block the host clears it so values don't re-stick.
-        pc.clear_all();
-        assert_eq!(unsafe { pc.getParameterCount() }, 0);
+    fn points(changes: &ParameterChanges) -> Vec<(u32, i32, f64)> {
+        let mut points = Vec::new();
+        changes
+            .for_each_active_point(|id, offset, value| points.push((id, offset, value)))
+            .unwrap();
+        points
+    }
+
+    unsafe fn queue(changes: &ParameterChanges, slot: i32) -> ComRef<'_, IParamValueQueue> {
+        ComRef::from_raw(changes.getParameterData(slot)).unwrap()
     }
 
     #[test]
-    fn active_points_can_be_drained_into_bounded_feedback_before_clear() {
-        let pc = ParameterChanges::default();
-        pc.enqueue(9, 31, 0.75);
-        pc.enqueue(9, 2, 0.25);
-        pc.enqueue(4, 0, 1.0);
-        let mut seen = Vec::new();
-        pc.for_each_active_point(|id, offset, value| seen.push((id, offset, value)));
-        assert_eq!(seen, vec![(9, 2, 0.25), (9, 31, 0.75), (4, 0, 1.0)]);
-        pc.clear_all();
-        let mut after_clear = Vec::new();
-        pc.for_each_active_point(|id, offset, value| after_clear.push((id, offset, value)));
-        assert!(after_clear.is_empty());
+    fn parameter_storage_derives_thread_safety_without_unsafe_impls() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ParameterChanges>();
+        assert_send_sync::<ParameterValueQueue>();
     }
 
-    /// Regression test for the plugin-facing `addParameterData`/`addPoint` path used for
-    /// `ProcessData::outputParameterChanges`. Per the VST3 docs, `outputParameterChanges`
-    /// describes changes for the *current* processing block only, mirroring the reference
-    /// `ParameterChanges` host helper's `clearQueue()`. Without calling `clear_all()` before
-    /// each block (as `PluginImpl::process` now does), a plugin emitting output parameter
-    /// points for the same id every block would keep finding its own queue "already active"
-    /// (since `used` never resets) and keep appending points to it forever.
     #[test]
-    fn output_queue_is_isolated_per_block_and_does_not_grow_when_cleared() {
-        let pc = ParameterChanges::default();
-
-        // Simulate a plugin emitting one output point per block via the same `addParameterData`
-        // activation path the real COM `IParameterChanges::addParameterData` call uses, then
-        // insert the point directly into the returned slot's queue (equivalent to what the
-        // plugin's `IParamValueQueue::addPoint` COM call would do on that same object).
-        let emit_one_point = |pc: &ParameterChanges, id: u32, offset: i32, value: f64| {
-            let mut index: i32 = -1;
-            let queue_ptr =
-                unsafe { pc.addParameterData(&id as *const u32, &mut index as *mut i32) };
-            assert!(!queue_ptr.is_null());
-            assert!(index >= 0);
-            let queues = pc.queues.lock().unwrap();
-            queues[index as usize]
-                .try_insert_point(offset, value)
-                .unwrap();
-        };
-
-        // Block 1: plugin writes one point for parameter 42.
-        emit_one_point(&pc, 42, 0, 0.1);
-        assert_eq!(unsafe { pc.getParameterCount() }, 1);
-        {
-            let queues = pc.queues.lock().unwrap();
-            let q = queues.iter().find(|q| q.param_id() == 42).unwrap();
-            assert_eq!(*q.points.lock().unwrap(), vec![(0, 0.1)]);
-        }
-        let pool_len_after_block_1 = pc.queues.lock().unwrap().len();
-
-        // Host resets the queue for the next block, as `PluginImpl::process` now does
-        // immediately before invoking the processor.
-        pc.clear_all();
-        assert_eq!(unsafe { pc.getParameterCount() }, 0);
-
-        // Block 2: plugin writes a different point for the same parameter id.
-        emit_one_point(&pc, 42, 5, 0.9);
+    fn enqueue_groups_orders_preserves_ties_repetitions_and_clears() {
+        let changes = ParameterChanges::new(limits(3, 8));
+        allocation_free(|| {
+            changes.try_enqueue(7, 64, 0.9).unwrap();
+            changes.try_enqueue(7, 0, 0.5).unwrap();
+            changes.try_enqueue(3, 0, 0.1).unwrap();
+            changes.try_enqueue(7, 64, 0.1).unwrap();
+            changes.try_enqueue(7, 0, 0.5).unwrap();
+            assert_eq!(unsafe { changes.getParameterCount() }, 2);
+        });
         assert_eq!(
-            unsafe { pc.getParameterCount() },
-            1,
-            "clearing between blocks must not leave stale points visible or double-counted"
+            points(&changes),
+            [
+                (7, 0, 0.5),
+                (7, 0, 0.5),
+                (7, 64, 0.9),
+                (7, 64, 0.1),
+                (3, 0, 0.1)
+            ]
         );
-        {
-            let queues = pc.queues.lock().unwrap();
-            let q = queues.iter().find(|q| q.param_id() == 42).unwrap();
+        allocation_free(|| {
+            changes.clear_all().unwrap();
+            assert_eq!(unsafe { changes.getParameterCount() }, 0);
+            changes
+                .for_each_active_point(|_, _, _| panic!("stale point"))
+                .unwrap();
+            changes.try_enqueue(22, 3, 0.8).unwrap();
+        });
+        assert_eq!(points(&changes), [(22, 3, 0.8)]);
+        assert_eq!(changes.failure(), None);
+    }
+
+    #[test]
+    fn enqueue_with_nan_orders_by_offset_without_changing_value_bits() {
+        let changes = ParameterChanges::new(limits(1, 3));
+        let nan = f64::from_bits(0x7ff8_0000_0000_1234);
+        allocation_free(|| {
+            changes.try_enqueue(1, 128, nan).unwrap();
+            changes.try_enqueue(1, 0, 0.25).unwrap();
+            changes.try_enqueue(1, 64, nan).unwrap();
+            let queue = unsafe { queue(&changes, 0) };
+            for (i, offset, expected) in [(0, 0, 0.25), (1, 64, nan), (2, 128, nan)] {
+                let mut got_offset = -1;
+                let mut value = 0.0;
+                assert_eq!(
+                    unsafe { queue.getPoint(i, &mut got_offset, &mut value) },
+                    kResultOk
+                );
+                assert_eq!(got_offset, offset);
+                assert_eq!(value.to_bits(), expected.to_bits());
+            }
+        });
+    }
+
+    #[test]
+    fn cold_8192_distinct_ids_fit_input_without_allocation() {
+        let changes = ParameterChanges::new(ParameterQueueLimits::INPUT);
+        allocation_free(|| {
+            for id in 0..8192 {
+                changes.try_enqueue(id, 0, id as f64).unwrap();
+            }
+            assert_eq!(unsafe { changes.getParameterCount() }, 8192);
+            for slot in 0..8192 {
+                let queue = unsafe { queue(&changes, slot) };
+                assert_eq!(unsafe { queue.getParameterId() }, slot as u32);
+                assert_eq!(unsafe { queue.getPointCount() }, 1);
+                let mut value = 0.0;
+                assert_eq!(
+                    unsafe { queue.getPoint(0, ptr::null_mut(), &mut value) },
+                    kResultOk
+                );
+                assert_eq!(value, slot as f64);
+            }
             assert_eq!(
-                *q.points.lock().unwrap(),
-                vec![(5, 0.9)],
-                "block 2 must only expose its own point, not block 1's stale value"
+                changes.try_enqueue(9000, 0, 1.0),
+                Err(ParameterStorageError::PointCapacity)
+            );
+            assert_eq!(unsafe { changes.getParameterCount() }, 8192);
+            changes.clear_all().unwrap();
+            assert_eq!(
+                changes.failure(),
+                Some(ParameterStorageError::PointCapacity)
+            );
+            for id in 0..8192 {
+                changes.try_enqueue(20_000 + id, 3, 0.75).unwrap();
+            }
+            assert_eq!(unsafe { changes.getParameterCount() }, 8192);
+        });
+    }
+
+    #[test]
+    fn cold_dense_8192_curve_and_sequential_reads_do_not_allocate() {
+        let changes = ParameterChanges::new(ParameterQueueLimits::INPUT);
+        allocation_free(|| {
+            for i in 0..8192 {
+                changes.try_enqueue(42, i, i as f64).unwrap();
+            }
+            let queue = unsafe { queue(&changes, 0) };
+            assert_eq!(unsafe { queue.getPointCount() }, 8192);
+            for i in 0..8192 {
+                let mut offset = -1;
+                let mut value = -1.0;
+                assert_eq!(
+                    unsafe { queue.getPoint(i, &mut offset, &mut value) },
+                    kResultOk
+                );
+                assert_eq!((offset, value), (i, i as f64));
+            }
+            assert_eq!(
+                changes.try_enqueue(42, 8192, 1.0),
+                Err(ParameterStorageError::PointCapacity)
+            );
+            assert_eq!(unsafe { queue.getPointCount() }, 8192);
+        });
+    }
+
+    #[test]
+    fn input_combines_4096_host_and_4096_native_points_in_one_arena() {
+        let changes = ParameterChanges::new(ParameterQueueLimits::INPUT);
+        allocation_free(|| {
+            for id in 0..4096 {
+                changes.try_enqueue(id, 17, id as f64).unwrap();
+            }
+            for i in 0..4096 {
+                changes.try_enqueue(0, 0, i as f64).unwrap();
+            }
+            assert_eq!(unsafe { changes.getParameterCount() }, 4096);
+            let first = unsafe { queue(&changes, 0) };
+            assert_eq!(unsafe { first.getPointCount() }, 4097);
+            for i in 0..4096 {
+                let mut value = -1.0;
+                assert_eq!(
+                    unsafe { first.getPoint(i, ptr::null_mut(), &mut value) },
+                    kResultOk
+                );
+                assert_eq!(value, i as f64);
+            }
+            let mut offset = -1;
+            assert_eq!(
+                unsafe { first.getPoint(4096, &mut offset, ptr::null_mut()) },
+                kResultOk
+            );
+            assert_eq!(offset, 17);
+        });
+        assert_eq!(changes.failure(), None);
+    }
+
+    #[test]
+    fn output_4096_queue_and_shared_point_budget_rejects_next_write() {
+        let changes = ParameterChanges::new(ParameterQueueLimits::OUTPUT);
+        allocation_free(|| unsafe {
+            for id in 0..4096 {
+                let mut index = -1;
+                let ptr = changes.addParameterData(&id, &mut index);
+                assert!(!ptr.is_null());
+                assert_eq!(index, id as i32);
+                let queue = ComRef::from_raw(ptr).unwrap();
+                assert_eq!(queue.addPoint(0, id as f64, &mut index), kResultOk);
+                assert_eq!(index, 0);
+            }
+            let mut index = 10;
+            let first = queue(&changes, 0);
+            assert_eq!(first.addPoint(1, 0.5, &mut index), kResultFalse);
+            assert_eq!(index, -1);
+            assert_eq!(first.getPointCount(), 1);
+            assert!(changes.addParameterData(&9000, &mut index).is_null());
+            assert_eq!(index, -1);
+            assert_eq!(changes.getParameterCount(), 4096);
+            assert_eq!(
+                changes.failure(),
+                Some(ParameterStorageError::PointCapacity)
+            );
+        });
+    }
+
+    #[test]
+    fn failed_host_insert_never_activates_phantom_queue() {
+        let changes = ParameterChanges::new(limits(3, 1));
+        allocation_free(|| {
+            changes.try_enqueue(1, 0, 0.2).unwrap();
+            assert_eq!(
+                changes.try_enqueue(2, 0, 0.3),
+                Err(ParameterStorageError::PointCapacity)
+            );
+            assert_eq!(unsafe { changes.getParameterCount() }, 1);
+            assert_eq!(unsafe { queue(&changes, 0).getParameterId() }, 1);
+            changes.clear_all().unwrap();
+            assert_eq!(
+                changes.failure(),
+                Some(ParameterStorageError::PointCapacity)
+            );
+            changes.try_enqueue(2, 0, 0.3).unwrap();
+            assert_eq!(unsafe { changes.getParameterCount() }, 1);
+        });
+        assert_eq!(points(&changes), [(2, 0, 0.3)]);
+        let empty = ParameterChanges::new(limits(2, 0));
+        allocation_free(|| {
+            assert_eq!(
+                empty.try_enqueue(7, 0, 1.0),
+                Err(ParameterStorageError::PointCapacity)
+            );
+            assert_eq!(unsafe { empty.getParameterCount() }, 0);
+        });
+    }
+
+    #[test]
+    fn queue_capacity_and_empty_com_queue_admission_are_explicit() {
+        let changes = ParameterChanges::new(limits(2, 3));
+        allocation_free(|| unsafe {
+            let mut index = -1;
+            let first = changes.addParameterData(&7, &mut index);
+            assert_eq!(index, 0);
+            assert!(!first.is_null());
+            assert_eq!(ComRef::from_raw(first).unwrap().getPointCount(), 0);
+            assert_eq!(changes.addParameterData(&7, ptr::null_mut()), first);
+            changes.try_enqueue(3, 0, 1.0).unwrap();
+            assert_eq!(
+                changes.try_enqueue(9, 0, 0.1),
+                Err(ParameterStorageError::QueueCapacity)
+            );
+            assert!(changes.addParameterData(&9, &mut index).is_null());
+            assert_eq!(index, -1);
+            assert_eq!(changes.getParameterCount(), 2);
+            changes.try_enqueue(7, 0, 0.5).unwrap();
+            changes.try_enqueue(7, 0, 0.5).unwrap();
+            assert_eq!(
+                changes.failure(),
+                Some(ParameterStorageError::QueueCapacity)
+            );
+        });
+        assert_eq!(points(&changes), [(7, 0, 0.5), (7, 0, 0.5), (3, 0, 1.0)]);
+        let zero = ParameterChanges::new(limits(0, 0));
+        allocation_free(|| unsafe {
+            let mut index = 99;
+            assert!(zero.addParameterData(&7, &mut index).is_null());
+            assert_eq!(index, -1);
+            assert_eq!(zero.getParameterCount(), 0);
+            zero.clear_all().unwrap();
+            assert_eq!(zero.failure(), Some(ParameterStorageError::QueueCapacity));
+        });
+    }
+
+    #[test]
+    fn invalid_reads_and_optional_null_outputs_fail_without_sticky_loss() {
+        let changes = ParameterChanges::new(limits(1, 2));
+        allocation_free(|| unsafe {
+            assert!(changes.getParameterData(-1).is_null());
+            assert!(changes.getParameterData(0).is_null());
+            let raw = changes.addParameterData(&4, ptr::null_mut());
+            let queue = ComRef::from_raw(raw).unwrap();
+            assert_eq!(queue.addPoint(-4, 0.2, ptr::null_mut()), kResultOk);
+            assert_eq!(
+                queue.getPoint(0, ptr::null_mut(), ptr::null_mut()),
+                kResultOk
+            );
+            for index in [-1, 1, i32::MAX] {
+                let mut offset = 80;
+                let mut value = 90.0;
+                assert_eq!(queue.getPoint(index, &mut offset, &mut value), kResultFalse);
+                assert_eq!((offset, value), (80, 90.0));
+            }
+            assert!(changes.getParameterData(i32::MAX).is_null());
+            assert_eq!(changes.failure(), None);
+        });
+    }
+
+    #[test]
+    fn invalid_write_sets_failed_index_and_latches_without_panicking() {
+        let changes = ParameterChanges::new(limits(1, 2));
+        allocation_free(|| unsafe {
+            let mut index = 87;
+            assert!(changes.addParameterData(ptr::null(), &mut index).is_null());
+            assert_eq!(index, -1);
+            assert_eq!(changes.getParameterCount(), 0);
+            assert_eq!(
+                changes.failure(),
+                Some(ParameterStorageError::InvalidArgument)
+            );
+            changes.clear_all().unwrap();
+            assert_eq!(
+                changes.failure(),
+                Some(ParameterStorageError::InvalidArgument)
+            );
+        });
+    }
+
+    #[test]
+    fn alternating_reads_and_insertions_update_the_shared_index() {
+        let changes = ParameterChanges::new(limits(1, 16));
+        allocation_free(|| unsafe {
+            for offset in [0, 20, 40, 60] {
+                changes.try_enqueue(8, offset, offset as f64).unwrap();
+            }
+            let queue = queue(&changes, 0);
+            for index in [3, 0, 2, 1, 3, 3, 0] {
+                let mut offset = -1;
+                assert_eq!(
+                    queue.getPoint(index, &mut offset, ptr::null_mut()),
+                    kResultOk
+                );
+                assert_eq!(offset, index * 20);
+            }
+            let mut index = -1;
+            assert_eq!(
+                queue.getPoint(3, ptr::null_mut(), ptr::null_mut()),
+                kResultOk
+            );
+            assert_eq!(queue.addPoint(-10, -10.0, &mut index), kResultOk);
+            assert_eq!(index, 0);
+            assert_eq!(
+                queue.getPoint(2, ptr::null_mut(), ptr::null_mut()),
+                kResultOk
+            );
+            assert_eq!(queue.addPoint(20, 99.0, &mut index), kResultOk);
+            assert_eq!(index, 3);
+            assert_eq!(
+                queue.getPoint(4, ptr::null_mut(), ptr::null_mut()),
+                kResultOk
+            );
+            assert_eq!(queue.addPoint(80, 80.0, &mut index), kResultOk);
+            assert_eq!(index, 6);
+            for (index, (expected_offset, expected_value)) in [
+                (-10, -10.0),
+                (0, 0.0),
+                (20, 20.0),
+                (20, 99.0),
+                (40, 40.0),
+                (60, 60.0),
+                (80, 80.0),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut offset = -1;
+                let mut value = -1.0;
+                assert_eq!(
+                    queue.getPoint(index as i32, &mut offset, &mut value),
+                    kResultOk
+                );
+                assert_eq!((offset, value), (expected_offset, expected_value));
+            }
+        });
+    }
+
+    #[test]
+    fn shared_index_tracks_multiqueue_interleaving_reset_and_retarget() {
+        let changes = ParameterChanges::new(limits(4, 8));
+        allocation_free(|| unsafe {
+            changes.try_enqueue(7, 20, 0.2).unwrap();
+            changes.try_enqueue(8, 30, 0.3).unwrap();
+            let first = queue(&changes, 0);
+            let second = queue(&changes, 1);
+            let mut offset = -1;
+            assert_eq!(second.getPoint(0, &mut offset, ptr::null_mut()), kResultOk);
+            assert_eq!(offset, 30);
+            assert!(!changes.arena.lock().unwrap().cache_dirty);
+            // Inserting in the first queue shifts the second queue's ordinal slice.
+            assert_eq!(first.addPoint(10, 0.1, ptr::null_mut()), kResultOk);
+            assert!(!changes.arena.lock().unwrap().cache_dirty);
+            assert_eq!(second.getPoint(0, &mut offset, ptr::null_mut()), kResultOk);
+            assert_eq!(offset, 30);
+            let third = changes.addParameterData(&9, ptr::null_mut());
+            let third = ComRef::from_raw(third).unwrap();
+            assert_eq!(third.addPoint(40, 0.4, ptr::null_mut()), kResultOk);
+            assert_eq!(second.addPoint(0, 0.0, ptr::null_mut()), kResultOk);
+            assert_eq!(third.getPoint(0, &mut offset, ptr::null_mut()), kResultOk);
+            assert_eq!(offset, 40);
+            assert_eq!(second.getPoint(0, &mut offset, ptr::null_mut()), kResultOk);
+            assert_eq!(offset, 0);
+            assert_eq!(first.getPoint(1, &mut offset, ptr::null_mut()), kResultOk);
+            assert_eq!(offset, 20);
+            changes.clear_all().unwrap();
+            assert_eq!(first.getPointCount(), 0);
+            assert_eq!(second.getPointCount(), 0);
+            changes.try_enqueue(100, 99, 0.9).unwrap();
+            changes.try_enqueue(101, 98, 0.8).unwrap();
+            assert_eq!(first.getParameterId(), 100);
+            assert_eq!(second.getParameterId(), 101);
+            assert_eq!(first.getPoint(0, &mut offset, ptr::null_mut()), kResultOk);
+            assert_eq!(offset, 99);
+            assert_eq!(second.getPoint(0, &mut offset, ptr::null_mut()), kResultOk);
+            assert_eq!(offset, 98);
+        });
+        assert_eq!(changes.failure(), None);
+    }
+
+    #[test]
+    fn invalid_read_probes_do_not_rebuild_shared_index() {
+        let changes = ParameterChanges::new(limits(2, 2));
+        allocation_free(|| unsafe {
+            let raw = changes.addParameterData(&7, ptr::null_mut());
+            let queue = ComRef::from_raw(raw).unwrap();
+            assert_eq!(
+                queue.getPoint(0, ptr::null_mut(), ptr::null_mut()),
+                kResultFalse
+            );
+            assert!(!changes.arena.lock().unwrap().cache_dirty);
+            changes.try_enqueue(7, 1, 0.1).unwrap();
+            changes.try_enqueue(7, 0, 0.0).unwrap();
+            // Exercise the supported dirty-state recovery path without relying on
+            // normal insertions, which now preserve a valid ordinal index.
+            changes.arena.lock().unwrap().cache_dirty = true;
+            for index in [-1, 2, i32::MAX] {
+                assert_eq!(
+                    queue.getPoint(index, ptr::null_mut(), ptr::null_mut()),
+                    kResultFalse
+                );
+                assert!(changes.arena.lock().unwrap().cache_dirty);
+            }
+            assert_eq!(
+                queue.getPoint(0, ptr::null_mut(), ptr::null_mut()),
+                kResultOk
+            );
+            assert!(!changes.arena.lock().unwrap().cache_dirty);
+            assert_eq!(changes.failure(), None);
+        });
+    }
+
+    #[test]
+    fn final_queue_tail_appends_extend_a_valid_index_at_small_and_max_budgets() {
+        for capacity in [32, 128, 512, 8192] {
+            let changes = ParameterChanges::new(limits(4, capacity));
+            allocation_free(|| unsafe {
+                let first = changes.addParameterData(&7, ptr::null_mut());
+                let first = ComRef::from_raw(first).unwrap();
+                assert!(!changes.arena.lock().unwrap().cache_dirty);
+                let mut checksum = 0.0;
+                for index in 0..capacity {
+                    assert_eq!(
+                        first.addPoint(index as i32, index as f64 * 0.5, ptr::null_mut()),
+                        kResultOk
+                    );
+                    assert!(!changes.arena.lock().unwrap().cache_dirty);
+                    let read = (index * 4051) % (index + 1);
+                    let mut offset = -1;
+                    let mut value = -1.0;
+                    assert_eq!(
+                        first.getPoint(read as i32, &mut offset, &mut value),
+                        kResultOk
+                    );
+                    assert_eq!((offset, value), (read as i32, read as f64 * 0.5));
+                    checksum += offset as f64 + value;
+                }
+                assert!(checksum > 0.0);
+                changes.clear_all().unwrap();
+                // Reuse with several queues. A new empty last queue keeps an already
+                // valid cache; its first and later tail appends extend that cache.
+                for id in 0..3 {
+                    changes.try_enqueue(id, 0, id as f64).unwrap();
+                }
+                let last = changes.addParameterData(&99, ptr::null_mut());
+                let last = ComRef::from_raw(last).unwrap();
+                for index in 0..capacity - 3 {
+                    assert_eq!(
+                        last.addPoint(index as i32, index as f64 * 0.5, ptr::null_mut()),
+                        kResultOk
+                    );
+                    assert!(!changes.arena.lock().unwrap().cache_dirty);
+                    let mut offset = -1;
+                    let mut value = -1.0;
+                    assert_eq!(
+                        last.getPoint(index as i32, &mut offset, &mut value),
+                        kResultOk
+                    );
+                    assert_eq!((offset, value), (index as i32, index as f64 * 0.5));
+                }
+                for slot in 0..3 {
+                    let queue = queue(&changes, slot);
+                    let mut value = -1.0;
+                    assert_eq!(queue.getPoint(0, ptr::null_mut(), &mut value), kResultOk);
+                    assert_eq!(value, slot as f64);
+                }
+            });
+            assert_eq!(changes.failure(), None);
+        }
+    }
+
+    #[test]
+    fn valid_index_tracks_all_insertions_and_dirty_state_is_preserved() {
+        let changes = ParameterChanges::new(limits(4, 12));
+        allocation_free(|| unsafe {
+            changes.try_enqueue(7, 2, 0.2).unwrap();
+            changes.try_enqueue(7, 2, 0.3).unwrap();
+            assert!(!changes.arena.lock().unwrap().cache_dirty);
+            changes.try_enqueue(7, 4, 0.4).unwrap();
+            changes.try_enqueue(7, 2, 0.5).unwrap(); // Equal-offset middle insertion.
+            assert!(!changes.arena.lock().unwrap().cache_dirty);
+            changes.arena.lock().unwrap().cache_dirty = true;
+            let new = changes.addParameterData(&8, ptr::null_mut());
+            let new = ComRef::from_raw(new).unwrap();
+            assert!(changes.arena.lock().unwrap().cache_dirty);
+            assert_eq!(new.addPoint(0, 0.6, ptr::null_mut()), kResultOk);
+            assert!(
+                changes.arena.lock().unwrap().cache_dirty,
+                "append must not bless an already dirty cache"
+            );
+            let first = queue(&changes, 0);
+            for (index, expected) in [(2, 0.2), (2, 0.3), (2, 0.5), (4, 0.4)]
+                .into_iter()
+                .enumerate()
+            {
+                let mut offset = -1;
+                let mut value = -1.0;
+                assert_eq!(
+                    first.getPoint(index as i32, &mut offset, &mut value),
+                    kResultOk
+                );
+                assert_eq!((offset, value), expected);
+            }
+            assert!(!changes.arena.lock().unwrap().cache_dirty);
+            // A non-final queue tail append shifts the later queue's ordinal slice
+            // while preserving validity of that slice's updated cache_start.
+            assert_eq!(first.addPoint(5, 0.7, ptr::null_mut()), kResultOk);
+            assert!(!changes.arena.lock().unwrap().cache_dirty);
+            let mut value = -1.0;
+            assert_eq!(new.getPoint(0, ptr::null_mut(), &mut value), kResultOk);
+            assert_eq!(value, 0.6);
+            assert!(!changes.arena.lock().unwrap().cache_dirty);
+            changes.clear_all().unwrap();
+            assert!(!changes.arena.lock().unwrap().cache_dirty);
+            changes.try_enqueue(9, 0, 1.0).unwrap();
+            assert!(!changes.arena.lock().unwrap().cache_dirty);
+            assert_eq!(first.getPoint(0, ptr::null_mut(), &mut value), kResultOk);
+            assert_eq!(value, 1.0);
+        });
+    }
+
+    #[test]
+    fn multiqueue_insertions_match_stable_oracle_through_capacity_reset_and_reuse() {
+        for capacity in [32, 128, 512, 8192] {
+            let changes = ParameterChanges::new(limits(8, capacity));
+            let mut oracle: Vec<(usize, i32, f64)> = Vec::with_capacity(capacity);
+            allocation_free(|| unsafe {
+                for round in 0..2 {
+                    changes.clear_all().unwrap();
+                    oracle.clear();
+                    // Include a permanently empty final queue, so every populated
+                    // queue must correctly shift some later queue slice metadata.
+                    for slot in 0..8 {
+                        assert!(!changes
+                            .addParameterData(&(100 + slot), ptr::null_mut())
+                            .is_null());
+                    }
+                    for arrival in 0..capacity {
+                        let slot = (arrival * 13) % 7;
+                        let offset = ((arrival * 4051 + round * 31) % 97) as i32 - 40;
+                        let value = (round * capacity + arrival) as f64;
+                        let rank = oracle
+                            .iter()
+                            .filter(|(old_slot, old_offset, _)| {
+                                *old_slot == slot && *old_offset <= offset
+                            })
+                            .count();
+                        let insertion = oracle
+                            .iter()
+                            .position(|(old_slot, old_offset, _)| {
+                                *old_slot > slot || (*old_slot == slot && *old_offset > offset)
+                            })
+                            .unwrap_or(oracle.len());
+                        oracle.insert(insertion, (slot, offset, value));
+                        let queue = queue(&changes, slot as i32);
+                        let mut index = -1;
+                        assert_eq!(queue.addPoint(offset, value, &mut index), kResultOk);
+                        assert_eq!(index as usize, rank);
+                        assert!(!changes.arena.lock().unwrap().cache_dirty);
+                        let count = queue.getPointCount() as usize;
+                        let read = (arrival * 4051) % count;
+                        let expected = oracle
+                            .iter()
+                            .filter(|(old_slot, _, _)| *old_slot == slot)
+                            .nth(read)
+                            .unwrap();
+                        let mut got_offset = -1;
+                        let mut got_value = -1.0;
+                        assert_eq!(
+                            queue.getPoint(read as i32, &mut got_offset, &mut got_value),
+                            kResultOk
+                        );
+                        assert_eq!((got_offset, got_value), (expected.1, expected.2));
+                    }
+                    let mut position = 0;
+                    changes
+                        .for_each_active_point(|id, offset, value| {
+                            let expected = oracle[position];
+                            assert_eq!(
+                                (id, offset, value),
+                                (100 + expected.0 as u32, expected.1, expected.2)
+                            );
+                            position += 1;
+                        })
+                        .unwrap();
+                    assert_eq!(position, capacity);
+                    let mut index = 99;
+                    let empty = queue(&changes, 7);
+                    assert_eq!(empty.addPoint(0, 9.0, &mut index), kResultFalse);
+                    assert_eq!(index, -1);
+                    assert_eq!(empty.getPointCount(), 0);
+                    assert_eq!(
+                        changes.failure(),
+                        Some(ParameterStorageError::PointCapacity)
+                    );
+                    // A failed full-budget insertion cannot shift any accepted index.
+                    let mut checksum = 0.0;
+                    for slot in 0..8 {
+                        let queue = queue(&changes, slot);
+                        for index in 0..queue.getPointCount() {
+                            let mut offset = -1;
+                            let mut value = -1.0;
+                            assert_eq!(queue.getPoint(index, &mut offset, &mut value), kResultOk);
+                            checksum += offset as f64 + value;
+                        }
+                    }
+                    assert_eq!(
+                        checksum,
+                        oracle
+                            .iter()
+                            .map(|(_, offset, value)| *offset as f64 + value)
+                            .sum::<f64>()
+                    );
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn indexed_upper_bound_preserves_ties_and_extreme_offsets_in_valid_and_dirty_states() {
+        for dirty in [false, true] {
+            let changes = ParameterChanges::new(limits(2, 10));
+            allocation_free(|| unsafe {
+                let raw = changes.addParameterData(&7, ptr::null_mut());
+                let queue = ComRef::from_raw(raw).unwrap();
+                let arrivals = [
+                    (0, 0.0),
+                    (i32::MAX, 1.0),
+                    (i32::MIN, 2.0),
+                    (-1, 3.0),
+                    (0, 4.0),
+                    (i32::MIN, 5.0),
+                    (i32::MAX, 6.0),
+                    (-1, 7.0),
+                    (1, 8.0),
+                    (0, 9.0),
+                ];
+                let expected_ranks = [0, 1, 0, 1, 3, 1, 6, 3, 6, 6];
+                for ((offset, value), expected_rank) in arrivals.into_iter().zip(expected_ranks) {
+                    if dirty {
+                        changes.arena.lock().unwrap().cache_dirty = true;
+                    }
+                    let mut index = -1;
+                    assert_eq!(queue.addPoint(offset, value, &mut index), kResultOk);
+                    assert_eq!(index, expected_rank);
+                    assert_eq!(changes.arena.lock().unwrap().cache_dirty, dirty);
+                }
+                let expected = [
+                    (i32::MIN, 2.0),
+                    (i32::MIN, 5.0),
+                    (-1, 3.0),
+                    (-1, 7.0),
+                    (0, 0.0),
+                    (0, 4.0),
+                    (0, 9.0),
+                    (1, 8.0),
+                    (i32::MAX, 1.0),
+                    (i32::MAX, 6.0),
+                ];
+                for (index, point) in expected.into_iter().enumerate() {
+                    let mut offset = 0;
+                    let mut value = 0.0;
+                    assert_eq!(
+                        queue.getPoint(index as i32, &mut offset, &mut value),
+                        kResultOk
+                    );
+                    assert_eq!((offset, value), point);
+                }
+                assert!(!changes.arena.lock().unwrap().cache_dirty);
+                let mut index = 99;
+                assert_eq!(queue.addPoint(i32::MIN, 99.0, &mut index), kResultFalse);
+                assert_eq!(index, -1);
+                assert_eq!(queue.getPointCount(), 10);
+                assert!(!changes.arena.lock().unwrap().cache_dirty);
+                let empty = changes.addParameterData(&8, &mut index);
+                let empty = ComRef::from_raw(empty).unwrap();
+                assert_eq!(empty.getPointCount(), 0);
+                assert_eq!(empty.addPoint(0, 99.0, &mut index), kResultFalse);
+                assert_eq!(index, -1);
+            });
+        }
+    }
+
+    #[test]
+    fn corrupt_cache_ranges_and_nodes_fail_closed_before_insertion_mutation() {
+        for corruption in 0..5 {
+            let changes = ParameterChanges::new(limits(2, 8));
+            for offset in [10, 20, 30] {
+                changes.try_enqueue(7, offset, offset as f64).unwrap();
+            }
+            changes.try_enqueue(8, 0, 0.8).unwrap();
+            let first = unsafe { changes.getParameterData(0) };
+            {
+                let mut arena = changes.arena.lock().unwrap();
+                match corruption {
+                    0 => arena.queues[0].cache_start = usize::MAX,
+                    1 => arena.queues[0].cache_start = arena.used_points,
+                    2 => arena.ordinal_index[1] = usize::MAX,
+                    3 => arena.ordinal_index[1] = arena.used_points,
+                    _ => arena.queues[1].cache_start = usize::MAX,
+                }
+            }
+            allocation_free(|| unsafe {
+                let first = ComRef::from_raw(first).unwrap();
+                if corruption < 4 {
+                    let mut offset = 99;
+                    let mut value = 99.0;
+                    assert_eq!(first.getPoint(1, &mut offset, &mut value), kResultFalse);
+                    assert_eq!((offset, value), (99, 99.0));
+                }
+                let mut index = 99;
+                assert_eq!(first.addPoint(15, 0.15, &mut index), kResultFalse);
+                assert_eq!(index, -1);
+                assert_eq!(changes.failure(), Some(ParameterStorageError::InvalidState));
+                let arena = changes.arena.lock().unwrap();
+                assert_eq!(arena.used_points, 4);
+                assert_eq!(arena.used_queues, 2);
+                assert_eq!(arena.queues[0].count, 3);
+                assert_eq!(arena.queues[0].head, 0);
+                assert_eq!(arena.queues[0].tail, 2);
+                for node in 0..3 {
+                    assert_eq!(arena.points[node].offset, (node as i32 + 1) * 10);
+                    assert_eq!(arena.points[node].value, (node as f64 + 1.0) * 10.0);
+                    assert_eq!(
+                        arena.points[node].next,
+                        if node < 2 {
+                            node + 1
+                        } else {
+                            NO_PARAMETER_NODE
+                        }
+                    );
+                }
+            });
+            assert_eq!(
+                points(&changes),
+                [(7, 10, 10.0), (7, 20, 20.0), (7, 30, 30.0), (8, 0, 0.8)]
             );
         }
+    }
 
-        // The pool is reused (recycled), not grown, across blocks.
-        assert_eq!(
-            pc.queues.lock().unwrap().len(),
-            pool_len_after_block_1,
-            "clearing between blocks must reuse pooled queues rather than growing the pool"
+    #[test]
+    fn corrupt_dirty_chain_is_rejected_before_index_rebuild_mutation() {
+        let changes = ParameterChanges::new(limits(1, 4));
+        changes.try_enqueue(7, 0, 0.0).unwrap();
+        changes.try_enqueue(7, 1, 0.1).unwrap();
+        let raw = unsafe { changes.getParameterData(0) };
+        {
+            let mut arena = changes.arena.lock().unwrap();
+            arena.cache_dirty = true;
+            arena.points[0].next = usize::MAX - 1;
+            arena.ordinal_index[0] = 3; // A sentinel proving no partial rebuild writes.
+        }
+        allocation_free(|| unsafe {
+            let queue = ComRef::from_raw(raw).unwrap();
+            assert_eq!(
+                queue.getPoint(0, ptr::null_mut(), ptr::null_mut()),
+                kResultFalse
+            );
+            assert_eq!(changes.failure(), Some(ParameterStorageError::InvalidState));
+            let arena = changes.arena.lock().unwrap();
+            assert!(arena.cache_dirty);
+            assert_eq!(arena.ordinal_index[0], 3);
+            assert_eq!(arena.used_points, 2);
+        });
+    }
+
+    #[test]
+    fn invalid_counts_and_linked_traversal_fail_closed_in_readers() {
+        let counts = ParameterChanges::new(limits(1, 2));
+        counts.try_enqueue(7, 0, 0.1).unwrap();
+        counts.arena.lock().unwrap().used_queues = 2;
+        allocation_free(|| unsafe {
+            assert_eq!(counts.getParameterCount(), 0);
+            assert!(counts.getParameterData(0).is_null());
+            assert_eq!(
+                counts.for_each_active_point(|_, _, _| panic!("invalid count visitor")),
+                Err(ParameterStorageError::InvalidState)
+            );
+            assert_eq!(counts.failure(), Some(ParameterStorageError::InvalidState));
+        });
+        let chain = ParameterChanges::new(limits(1, 2));
+        chain.try_enqueue(7, 0, 0.0).unwrap();
+        chain.try_enqueue(7, 1, 0.1).unwrap();
+        chain.arena.lock().unwrap().points[0].next = usize::MAX - 1;
+        allocation_free(|| {
+            let mut visited = 0;
+            assert_eq!(
+                chain.for_each_active_point(|_, _, _| visited += 1),
+                Err(ParameterStorageError::InvalidState)
+            );
+            assert_eq!(visited, 1);
+            assert_eq!(chain.failure(), Some(ParameterStorageError::InvalidState));
+        });
+    }
+
+    #[test]
+    fn sparse_first_points_follow_registered_order_and_ignore_empty_offsets() {
+        let changes = ParameterChanges::new(limits(8, 24));
+        let ids = [80, 10, 70, 20, 60, 30, 50, 40];
+        allocation_free(|| unsafe {
+            for round in 0..2 {
+                changes.clear_all().unwrap();
+                for id in ids {
+                    assert!(!changes
+                        .addParameterData(&(id + round * 100), ptr::null_mut())
+                        .is_null());
+                }
+                assert_eq!(changes.getParameterCount(), 8);
+                {
+                    let arena = changes.arena.lock().unwrap();
+                    assert_eq!(arena.used_populated, 0);
+                    assert!(arena
+                        .queues
+                        .iter()
+                        .all(|queue| queue.cache_start == NO_PARAMETER_NODE));
+                }
+                let mut expected_slots = [0_usize; 8];
+                for (step, slot) in [7_usize, 0, 5, 2, 6, 1, 4, 3].into_iter().enumerate() {
+                    let queue = queue(&changes, slot as i32);
+                    assert_eq!(queue.addPoint(10, slot as f64, ptr::null_mut()), kResultOk);
+                    expected_slots[step] = slot;
+                    expected_slots[..=step].sort_unstable();
+                    let arena = changes.arena.lock().unwrap();
+                    assert_eq!(arena.used_populated, step + 1);
+                    assert_eq!(&arena.populated_slots[..=step], &expected_slots[..=step]);
+                    for candidate in 0..8 {
+                        if !expected_slots[..=step].contains(&candidate) {
+                            assert_eq!(arena.queues[candidate].cache_start, NO_PARAMETER_NODE);
+                            assert_eq!(arena.queues[candidate].count, 0);
+                        }
+                    }
+                }
+                for slot in 0..8 {
+                    let queue = queue(&changes, slot);
+                    assert_eq!(queue.getParameterId(), ids[slot as usize] + round * 100);
+                    assert_eq!(
+                        queue.addPoint(0, slot as f64 + 0.25, ptr::null_mut()),
+                        kResultOk
+                    );
+                    assert_eq!(
+                        queue.addPoint(10, slot as f64 + 0.5, ptr::null_mut()),
+                        kResultOk
+                    );
+                }
+                let mut seen = 0;
+                changes
+                    .for_each_active_point(|id, offset, value| {
+                        let slot = seen / 3;
+                        assert_eq!(id, ids[slot] + round * 100);
+                        let expected = [
+                            (0, slot as f64 + 0.25),
+                            (10, slot as f64),
+                            (10, slot as f64 + 0.5),
+                        ][seen % 3];
+                        assert_eq!((offset, value), expected);
+                        seen += 1;
+                    })
+                    .unwrap();
+                assert_eq!(seen, 24);
+                let mut index = 99;
+                assert_eq!(
+                    queue(&changes, 0).addPoint(-1, 99.0, &mut index),
+                    kResultFalse
+                );
+                assert_eq!(index, -1);
+                assert_eq!(changes.arena.lock().unwrap().used_populated, 8);
+            }
+        });
+    }
+
+    #[test]
+    fn sparse_maximum_empty_queue_sets_admit_early_edits_without_allocating() {
+        for count in [4096, 8192] {
+            let changes = ParameterChanges::new(limits(count, count));
+            allocation_free(|| unsafe {
+                for slot in 0..count {
+                    assert!(!changes
+                        .addParameterData(&(slot as u32), ptr::null_mut())
+                        .is_null());
+                }
+                let first = queue(&changes, 0);
+                let mut checksum = 0.0;
+                for index in 0..128 {
+                    assert_eq!(
+                        first.addPoint(index, index as f64 * 0.5, ptr::null_mut()),
+                        kResultOk
+                    );
+                    let mut offset = -1;
+                    let mut value = -1.0;
+                    assert_eq!(first.getPoint(index, &mut offset, &mut value), kResultOk);
+                    checksum += offset as f64 + value;
+                }
+                assert_eq!(checksum, 1.5 * (127 * 128 / 2) as f64);
+                let arena = changes.arena.lock().unwrap();
+                assert_eq!(arena.used_queues, count);
+                assert_eq!(arena.used_populated, 1);
+                assert_eq!(arena.populated_slots[0], 0);
+                assert!(arena.queues[1..]
+                    .iter()
+                    .all(|queue| queue.count == 0 && queue.cache_start == NO_PARAMETER_NODE));
+            });
+        }
+    }
+
+    #[test]
+    fn sparse_corruption_rejects_before_any_point_index_or_list_mutation() {
+        for corruption in 0..6 {
+            let changes = ParameterChanges::new(limits(5, 8));
+            for id in 0..5 {
+                unsafe {
+                    changes.addParameterData(&id, ptr::null_mut());
+                }
+            }
+            for slot in [1, 3] {
+                unsafe {
+                    queue(&changes, slot).addPoint(0, slot as f64, ptr::null_mut());
+                }
+            }
+            {
+                let mut arena = changes.arena.lock().unwrap();
+                match corruption {
+                    0 => arena.populated_slots[1] = usize::MAX,
+                    1 => arena.populated_slots[1] = 4, // Registered, but empty.
+                    2 => arena.populated_slots[1] = 1, // Duplicate.
+                    3 => arena.populated_slots[..2].swap(0, 1), // Unsorted.
+                    4 => arena.used_populated = 1,     // Missing nonempty target.
+                    _ => arena.used_populated = 9,
+                }
+            }
+            allocation_free(|| unsafe {
+                let mut index = 99;
+                let slot = if corruption == 4 { 3 } else { 0 };
+                let queue = changes.queues[slot]
+                    .as_com_ref::<IParamValueQueue>()
+                    .unwrap();
+                assert_eq!(queue.addPoint(1, 99.0, &mut index), kResultFalse);
+                assert_eq!(index, -1);
+                assert_eq!(changes.failure(), Some(ParameterStorageError::InvalidState));
+                let arena = changes.arena.lock().unwrap();
+                assert_eq!(arena.used_points, 2);
+                assert_eq!(arena.used_queues, 5);
+                assert_eq!(arena.queues[0].count, 0);
+                assert_eq!(arena.queues[1].count, 1);
+                assert_eq!(arena.queues[3].count, 1);
+                assert_eq!(arena.ordinal_index[0], 0);
+                assert_eq!(arena.ordinal_index[1], 1);
+                assert_eq!((arena.points[0].value, arena.points[1].value), (1.0, 3.0));
+            });
+        }
+    }
+
+    #[test]
+    fn sparse_checked_host_failure_restores_exact_recycled_metadata() {
+        let changes = ParameterChanges::new(limits(3, 8));
+        for id in [70, 80, 90] {
+            changes.try_enqueue(id, 4, id as f64).unwrap();
+        }
+        let retained_slot = unsafe { changes.getParameterData(1) };
+        changes.clear_all().unwrap();
+        changes.try_enqueue(7, 0, 0.7).unwrap();
+        let before = {
+            let mut arena = changes.arena.lock().unwrap();
+            let before = arena.queues[1];
+            arena.populated_slots[0] = usize::MAX;
+            before
+        };
+        allocation_free(|| unsafe {
+            assert_eq!(
+                changes.try_enqueue(999, 0, 0.9),
+                Err(ParameterStorageError::InvalidState)
+            );
+            assert_eq!(changes.failure(), Some(ParameterStorageError::InvalidState));
+            assert_eq!(changes.getParameterCount(), 1);
+            assert_eq!(
+                ComRef::from_raw(retained_slot).unwrap().getParameterId(),
+                80
+            );
+            let arena = changes.arena.lock().unwrap();
+            let after = arena.queues[1];
+            assert_eq!(
+                (
+                    after.id,
+                    after.head,
+                    after.tail,
+                    after.count,
+                    after.cache_start
+                ),
+                (
+                    before.id,
+                    before.head,
+                    before.tail,
+                    before.count,
+                    before.cache_start
+                )
+            );
+            assert_eq!(arena.used_queues, 1);
+            assert_eq!(arena.used_points, 1);
+            assert_eq!(arena.used_populated, 1);
+            assert_eq!(arena.queues[0].id, 7);
+            assert_eq!(arena.queues[0].count, 1);
+            assert_eq!(arena.points[0].value, 0.7);
+            assert_eq!(arena.ordinal_index[0], 0);
+            assert_eq!(arena.populated_slots[0], usize::MAX);
+        });
+    }
+
+    #[test]
+    fn randomized_insertions_match_a_stable_sorted_oracle() {
+        let changes = ParameterChanges::new(limits(1, 512));
+        allocation_free(|| unsafe {
+            let raw = changes.addParameterData(&7, ptr::null_mut());
+            let queue = ComRef::from_raw(raw).unwrap();
+            let mut oracle = [(0_i32, 0.0_f64); 512];
+            for arrival in 0..512 {
+                let offset = ((arrival * 4051) % 97) as i32 - 40;
+                let value = arrival as f64;
+                let insertion = oracle[..arrival]
+                    .iter()
+                    .position(|(old, _)| *old > offset)
+                    .unwrap_or(arrival);
+                for index in (insertion..arrival).rev() {
+                    oracle[index + 1] = oracle[index];
+                }
+                oracle[insertion] = (offset, value);
+                let mut index = -1;
+                assert_eq!(queue.addPoint(offset, value, &mut index), kResultOk);
+                assert_eq!(index as usize, insertion);
+                // Read during construction to stress shared-index updates on every
+                // subsequent middle/head/tail insertion, not just after one edit.
+                let read = arrival / 2;
+                let mut got_offset = 0;
+                let mut got_value = 0.0;
+                assert_eq!(
+                    queue.getPoint(read as i32, &mut got_offset, &mut got_value),
+                    kResultOk
+                );
+                assert_eq!((got_offset, got_value), oracle[read]);
+            }
+            for (index, expected) in oracle.into_iter().enumerate() {
+                let mut offset = 0;
+                let mut value = 0.0;
+                assert_eq!(
+                    queue.getPoint(index as i32, &mut offset, &mut value),
+                    kResultOk
+                );
+                assert_eq!((offset, value), expected);
+            }
+        });
+    }
+
+    #[test]
+    fn reused_slots_have_stable_borrowed_pointers_and_fresh_points() {
+        let changes = ParameterChanges::new(limits(2, 2));
+        allocation_free(|| unsafe {
+            let first = changes.addParameterData(&7, ptr::null_mut());
+            for round in 0..128 {
+                let queue = ComRef::from_raw(first).unwrap();
+                assert_eq!(queue.addPoint(0, round as f64, ptr::null_mut()), kResultOk);
+                assert_eq!(queue.getPointCount(), 1);
+                assert_eq!(changes.getParameterData(0), first);
+                // Borrowed getter and add calls must not leak one reference per call.
+                assert_eq!(IParamValueQueue::add_ref(first), 2);
+                assert_eq!(IParamValueQueue::release(first), 1);
+                changes.clear_all().unwrap();
+                assert_eq!(queue.getPointCount(), 0);
+                assert_eq!(changes.getParameterCount(), 0);
+                assert_eq!(
+                    changes.addParameterData(&(100 + round), ptr::null_mut()),
+                    first
+                );
+                assert_eq!(queue.getPointCount(), 0);
+                assert_eq!(queue.getParameterId(), 100 + round);
+            }
+        });
+        assert_eq!(changes.failure(), None);
+    }
+
+    #[test]
+    fn retained_queue_and_qi_survive_parent_destruction_without_cycle() {
+        let changes = ParameterChanges::new(limits(2, 3));
+        let arena = Arc::downgrade(&changes.arena);
+        let raw = unsafe { changes.addParameterData(&7, ptr::null_mut()) };
+        let retained = unsafe {
+            // Explicit AddRef, unlike the borrowed return above.
+            assert_eq!(IParamValueQueue::add_ref(raw), 2);
+            ComPtr::from_raw(raw).unwrap()
+        };
+        unsafe {
+            assert_eq!(retained.addPoint(9, 0.75, ptr::null_mut()), kResultOk);
+        }
+        let unknown = retained.cast::<FUnknown>().unwrap();
+        let queried = unknown.cast::<IParamValueQueue>().unwrap();
+        assert_eq!(queried.as_ptr(), raw);
+        assert_eq!(retained.cast::<IParameterChanges>().map(|_| ()), None);
+        drop(changes);
+        assert!(arena.upgrade().is_some());
+        allocation_free(|| unsafe {
+            assert_eq!(retained.getParameterId(), 7);
+            assert_eq!(retained.getPointCount(), 1);
+            let mut value = 0.0;
+            assert_eq!(retained.getPoint(0, ptr::null_mut(), &mut value), kResultOk);
+            assert_eq!(value, 0.75);
+            assert_eq!(retained.addPoint(10, 0.9, ptr::null_mut()), kResultOk);
+            assert_eq!(queried.getPointCount(), 2);
+        });
+        drop(queried);
+        drop(unknown);
+        drop(retained);
+        assert!(
+            arena.upgrade().is_none(),
+            "retained queue must not form an ownership cycle"
         );
     }
 
     #[test]
-    fn enqueue_with_nan_value_orders_by_offset_without_panicking() {
-        // The queue is ordered by `sample_offset` (an i32 — total order), never by the f64
-        // value, so a NaN value can never reach a comparator and can never panic or corrupt
-        // ordering. This pins that property: the points sort by offset and the NaN survives
-        // verbatim in its offset slot.
-        let pc = ParameterChanges::default();
-        pc.enqueue(1, 128, f64::NAN);
-        pc.enqueue(1, 0, 0.25);
-        pc.enqueue(1, 64, f64::NAN);
+    fn inactive_retained_queue_write_fails_without_touching_reused_points() {
+        let changes = ParameterChanges::new(limits(2, 3));
+        let first = unsafe { changes.addParameterData(&7, ptr::null_mut()) };
+        let second = unsafe { changes.addParameterData(&8, ptr::null_mut()) };
+        allocation_free(|| unsafe {
+            changes.clear_all().unwrap();
+            assert_eq!(changes.addParameterData(&9, ptr::null_mut()), first);
+            let stale = ComRef::from_raw(second).unwrap();
+            let mut index = 99;
+            assert_eq!(stale.addPoint(0, 1.0, &mut index), kResultFalse);
+            assert_eq!(index, -1);
+            assert_eq!(stale.getPointCount(), 0);
+            assert_eq!(changes.getParameterCount(), 1);
+            assert_eq!(
+                changes.failure(),
+                Some(ParameterStorageError::InactiveQueue)
+            );
+            changes.try_enqueue(9, 0, 0.5).unwrap();
+        });
+        assert_eq!(points(&changes), [(9, 0, 0.5)]);
+    }
 
-        let queues = pc.queues.lock().unwrap();
-        let q = queues.iter().find(|q| q.param_id() == 1).unwrap();
-        let points = q.points.lock().unwrap();
-        let offsets: Vec<i32> = points.iter().map(|(off, _)| *off).collect();
-        assert_eq!(offsets, vec![0, 64, 128]);
-        // The finite point is intact and the two NaN-valued points are still NaN.
-        assert_eq!(points[0].1, 0.25);
-        assert!(points[1].1.is_nan());
-        assert!(points[2].1.is_nan());
+    #[test]
+    fn poisoned_storage_fails_all_entry_points_without_callback_panics() {
+        let changes = ParameterChanges::new(limits(2, 2));
+        changes.try_enqueue(7, 0, 0.5).unwrap();
+        let raw = unsafe { changes.getParameterData(0) };
+        changes.poison_for_test();
+        allocation_free(|| unsafe {
+            let queue = ComRef::from_raw(raw).unwrap();
+            let mut index = 99;
+            assert_eq!(
+                changes.try_enqueue(8, 0, 0.1),
+                Err(ParameterStorageError::Poisoned)
+            );
+            assert_eq!(changes.clear_all(), Err(ParameterStorageError::Poisoned));
+            assert_eq!(
+                changes.for_each_active_point(|_, _, _| panic!("poisoned visitor")),
+                Err(ParameterStorageError::Poisoned)
+            );
+            assert_eq!(changes.getParameterCount(), 0);
+            assert!(changes.getParameterData(0).is_null());
+            assert!(changes.addParameterData(&8, &mut index).is_null());
+            assert_eq!(index, -1);
+            assert_eq!(queue.getParameterId(), u32::MAX);
+            assert_eq!(queue.getPointCount(), 0);
+            assert_eq!(
+                queue.getPoint(0, ptr::null_mut(), ptr::null_mut()),
+                kResultFalse
+            );
+            index = 99;
+            assert_eq!(queue.addPoint(0, 0.9, &mut index), kResultFalse);
+            assert_eq!(index, -1);
+            assert_eq!(changes.failure(), Some(ParameterStorageError::Poisoned));
+            assert_eq!(changes.failure(), Some(ParameterStorageError::Poisoned));
+        });
+    }
+
+    #[test]
+    fn constructor_allocations_are_linear_and_dense_timings_are_measured() {
+        for limits in [ParameterQueueLimits::INPUT, ParameterQueueLimits::OUTPUT] {
+            let (changes, stats) = measure_allocations(|| ParameterChanges::new(limits));
+            assert_eq!(stats.allocations, limits.max_queues + 6);
+            assert_eq!(stats.deallocations, 0);
+            assert_eq!(stats.freed_bytes, 0);
+            assert_eq!(changes.queues.len(), limits.max_queues);
+            {
+                let arena = changes.arena.lock().unwrap();
+                assert_eq!(arena.queues.len(), limits.max_queues);
+                assert_eq!(arena.points.len(), limits.max_points);
+                assert_eq!(arena.ordinal_index.len(), limits.max_points);
+                assert_eq!(arena.populated_slots.len(), limits.max_queues);
+            }
+            let start = Instant::now();
+            allocation_free(|| {
+                for index in 0..limits.max_points {
+                    changes.try_enqueue(7, index as i32, index as f64).unwrap();
+                }
+            });
+            let ascending_write = start.elapsed();
+            let start = Instant::now();
+            allocation_free(|| unsafe {
+                let queue = queue(&changes, 0);
+                for index in 0..limits.max_points {
+                    assert_eq!(
+                        queue.getPoint(index as i32, ptr::null_mut(), ptr::null_mut()),
+                        kResultOk
+                    );
+                }
+            });
+            let sequential_read = start.elapsed();
+            let start = Instant::now();
+            allocation_free(|| unsafe {
+                let queue = queue(&changes, 0);
+                // Odd multiplier gives a deterministic permutation for the power-of-two
+                // production budgets, and repeatedly jumps backwards through the curve.
+                for index in 0..limits.max_points {
+                    let index = (index * 4051) % limits.max_points;
+                    assert_eq!(
+                        queue.getPoint(index as i32, ptr::null_mut(), ptr::null_mut()),
+                        kResultOk
+                    );
+                }
+            });
+            let random_read = start.elapsed();
+            let start = Instant::now();
+            allocation_free(|| changes.clear_all().unwrap());
+            let reset = start.elapsed();
+            let start = Instant::now();
+            allocation_free(|| {
+                for index in (0..limits.max_points).rev() {
+                    changes.try_enqueue(7, index as i32, index as f64).unwrap();
+                }
+            });
+            let descending_write = start.elapsed();
+            allocation_free(|| changes.clear_all().unwrap());
+            let start = Instant::now();
+            allocation_free(|| {
+                for index in 0..limits.max_points {
+                    let offset = (index * 4051) % limits.max_points;
+                    changes.try_enqueue(7, offset as i32, index as f64).unwrap();
+                }
+            });
+            let random_write = start.elapsed();
+            allocation_free(|| changes.clear_all().unwrap());
+            let start = Instant::now();
+            allocation_free(|| {
+                for index in 0..limits.max_queues {
+                    changes.try_enqueue(index as u32, 0, index as f64).unwrap();
+                }
+            });
+            let distinct_id_write = start.elapsed();
+            eprintln!("parameter storage {:?}: allocations={}, requested_bytes={}, deallocations={}, queue_slot_bytes={}, point_node_bytes={}, ascending_write={:?}, descending_write={:?}, random_write={:?}, sequential_read={:?}, random_read={:?}, distinct_id_write={:?}, reset={:?}; profile={}, arch={}, os={}; observed test timings, not realtime latency guarantees", limits, stats.allocations, stats.allocated_bytes, stats.deallocations, std::mem::size_of::<ParameterQueueSlot>(), std::mem::size_of::<ParameterPointNode>(), ascending_write, descending_write, random_write, sequential_read, random_read, distinct_id_write, reset, if cfg!(debug_assertions) { "debug" } else { "optimized" }, std::env::consts::ARCH, std::env::consts::OS);
+        }
     }
 }
 
@@ -4652,20 +6284,24 @@ mod native_parameter_admission_tests {
     use super::*;
 
     #[test]
-    fn checked_admission_refuses_poisoned_existing_or_recycled_point_storage() {
-        for recycle in [false, true] {
-            let changes = ParameterChanges::default();
+    fn checked_admission_refuses_poisoned_existing_or_reset_storage() {
+        for reset in [false, true] {
+            let changes = ParameterChanges::new(ParameterQueueLimits {
+                max_queues: 1,
+                max_points: 1,
+            });
             changes.try_enqueue(7, 0, 0.25).unwrap();
-            let queue = changes.queues.lock().unwrap()[0].clone();
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _guard = queue.points.lock().unwrap();
-                panic!("controlled point admission failure");
-            }));
-            if recycle {
-                changes.clear_all();
+            if reset {
+                changes.clear_all().unwrap();
             }
-            assert!(changes.try_enqueue(7, 0, 0.75).is_err());
-            assert_eq!(changes.used.load(Ordering::Relaxed), usize::from(!recycle));
+            changes.poison_for_test();
+            crate::internal::native_edit_transport::tests::allocation_free(|| {
+                assert_eq!(
+                    changes.try_enqueue(7, 0, 0.75),
+                    Err(ParameterStorageError::Poisoned)
+                );
+                assert_eq!(changes.failure(), Some(ParameterStorageError::Poisoned));
+            });
         }
     }
 

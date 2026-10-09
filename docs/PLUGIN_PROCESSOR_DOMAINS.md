@@ -202,8 +202,9 @@ its own admission/acknowledgment unit. `ParameterChanges::try_enqueue` reports f
 admission. Only complete admission followed by a successful Process advances the applied
 watermark. Failed or abandoned staged values make delivery loss sticky for that instance; later
 empty or successful calls cannot erase the uncertainty. An unrelated failed call with no staged
-native values does not invent native delivery loss. Existing COM parameter/event storage can still
-allocate and lock, and data-exchange/metering remain separate future work.
+native values does not invent native delivery loss. At this transport-only checkpoint, COM
+parameter/event storage still allocated and locked; the parameter preparation below narrows that
+boundary. Event storage and data-exchange/metering remain separate future work.
 
 Display values and gesture polling are independent of DSP input. This intentionally fixes stopped
 polling: polling native values while stopped no longer consumes the pending processor edit or
@@ -258,3 +259,137 @@ performance matrix, device or realtime qualification. Older optimized results ke
 their original helper/source identity. New exact Windows CI remains required.
 
 The separately source-bound [new-helper correctness receipt](../qa/native_edit_regression/RESULT.md) retains all four default2048 delivery passes, fresh-state immediate-note proof, and the11/14 changing-callback debug interval overruns for87ceb06/helperdca08353. The historical optimized4fdfbc2/244f622 results are not reattributed to this helper.
+
+## Prepared bounded parameter COM storage
+
+The parameter-container slice prepares stable queue objects before processing. Input storage has
+8192 queue slots and 8192 **total** points, covering the existing 4096 pending host values plus
+4096 native values in one SDK call. Output storage has 4096 queue slots and 4096 total points.
+These are Citrus host policies, not VST3 SDK limits. No per-queue multiplication of the point
+budget is used.
+
+Each container owns a fixed boxed array of COM wrappers. Each queue holds a slot index and safe
+shared ownership of one mutex-protected arena; the arena does not own its queues. Returned queue
+pointers are borrowed from the container, as in the SDK hosting implementation. A plugin may
+explicitly AddRef/queryInterface/release them, and a retained queue keeps its arena alive even
+after the container is dropped. Lookup, insertion and logical reset neither create/drop queue
+objects nor allocate/free storage. Stable interface addresses survive block resets. Mutexes remain;
+no unsafe Send/Sync or concurrent plugin ownership is introduced.
+
+The first-seen parameter-ID order is retained, with one active queue per ID. Points are sorted by
+sample offset, preserving arrival order and every value at equal offsets. This deliberately retains
+Citrus's prior duplicate semantics rather than adopting the SDK sample helper's equal-offset
+replacement. Capacity checks precede mutation: rejected host insertion cannot leave an empty
+phantom queue. Invalid read indexes and null optional read outputs follow the COM failure contract
+without inventing delivery loss. Lossy write failures and unusable poisoned storage latch evidence
+which ordinary clear/reset cannot erase. FFI methods do not panic on poisoned locks.
+
+ID lookup is bounded linear search, as before. Points use one global linked-node arena with a tail
+append fast path, one shared ordinal-index array, and a preallocated ordered list of populated queue
+slots. This private list does not change public registered queue order/count, including empty
+queues. With a valid cache, binary upper-bound search
+finds a non-tail insertion rank, retaining equal-offset arrival order. A dirty cache uses the bounded
+linked search fallback. A valid index gives constant-time getPoint;
+a dirty index is rebuilt once in O(populated queues + points) on the next valid read. An insertion into a valid
+index shifts only the affected ordinal suffix and adjusts later populated queues' offsets, retaining
+validity. Binary search finds the target in the populated-slot list. Only later populated queues
+have their offsets updated; empty queue offsets are never used. The first accepted point inserts
+its slot into that list after all admission checks, deriving its start from the next populated
+queue or arena end. Rejected new-host-ID activation restores the prior inactive slot and count.
+Normal insertion costs O(log populated queues + rank search + point suffix + later populated
+queues); final-populated-queue tail append moves no suffix. Public empty queues therefore do not
+add per-point offset-update work. An already dirty cache stays dirty until materialized. Reset only
+updates logical metadata; it neither deallocates nor changes stable pointers. Mixed writes/reads and large-suffix layouts
+are measured explicitly and are not covered by a low-latency claim.
+
+### Admission, output faults and recovery
+
+Every host and native input insertion is checked before the actual SDK Process call. The host's
+4096-value pending limit is checked before controller mirroring, so overflow returns
+`ParameterInputRejected` without changing either controller or pending input. Its diagnostic
+counter saturates. A failure while preparing a call clears its partially staged parameter/event
+contents; the caller block's pending host values are consumed/dropped on return, as in existing
+failed-call cleanup. Native input is left pending if host admission failed before native staging;
+a partially admitted native batch instead records sticky native delivery loss. No failed admission
+invokes the plugin, acknowledges native input, or leaves staged points to replay.
+
+The SDK result alone determines whether that call's admitted native edits were applied. Output
+parameter overflow is separate evidence: even when a plugin ignores addPoint/addParameterData
+failure, Citrus returns `ParameterOutputRejected`, latches a runtime-owned fault and refuses later
+Process and SaveState. The fault is observed before staging, before/after state capture, and before
+old process storage is discarded; retained queue activity during getState cannot hide it. If the SDK
+also fails, output rejection takes diagnostic precedence while native acknowledgment still uses
+the failing SDK result. Ordinary invalid read probes do not cause this permanent fault.
+
+Stop/start, generic state restore and reconfiguration may still complete administratively, but
+cannot clear the output fault or restore Process/SaveState success. Recovery requires a **fresh
+plugin instance**. The exact Surge compatibility preflight keeps its existing precedence. Native
+generation, dirty revision, loss and applied watermarks are not reset to disguise output loss.
+Existing output feedback force-push behavior is unchanged.
+
+### Evidence boundary
+
+Counted regions begin before first use of cold prepared storage and include full capacity,
+8192 distinct IDs, dense curves, reuse, failure, explicit retained COM references, and a dedicated
+allocation-free processor mock admitting 4096 host plus 4096 native edits. The guarantee is about
+host parameter storage operations. Plugin work, events/payload ownership, controller mirroring,
+GUI feedback, metering, data exchange and lifecycle construction/destruction remain outside it.
+The helper remains single-threaded; the earlier measured native resize stall remains unresolved.
+
+The SDK ownership contract is visible in its [hosting implementation](https://raw.githubusercontent.com/steinbergmedia/vst3_public_sdk/master/source/vst/hosting/parameterchanges.cpp)
+and [parameter interfaces](https://raw.githubusercontent.com/steinbergmedia/vst3_pluginterfaces/master/vst/ivstparameterchanges.h).
+
+Prepared inner-container constructor accounting on Linux x86-64 (Rust 1.99.0, system allocator,
+per-thread counting, no allocator metadata/RSS): input requests 1,048,696 bytes in 8,198 allocations;
+output requests 524,408 bytes in 4,102 allocations. The sparse populated-slot arrays add 98,352
+bytes total versus the superseded dense-offset version (96 KiB arrays plus 48 bytes arena metadata). Each constructor makes no deallocations. These
+figures include the queue wrappers, shared arena and index, but exclude the runtime's two outer
+`ComWrapper<ParameterChanges>` allocations. Host construction/destruction is lifecycle work.
+A plugin's explicitly retained queue can extend an old arena's lifetime; its final Release may
+free that retired queue/arena on whichever thread the plugin uses. Balanced retain/release while
+the container owner still exists is measured allocation-free, but final retained-after-owner
+destruction is outside the measured region. Future worker ownership must account for retired
+objects; whole-Process no-free behavior across reconfiguration is unproven. All measured
+post-construction parameter operations, including cold first use and failures, allocate/free zero
+bytes. Comparative raw timings include the same counting/assertion instrumentation and must not
+be interpreted as audio deadlines.
+
+Matched comparisons use the unchanged `48d3f970` baseline and archived cursor/indexed drafts,
+five repetitions, identical value-producing workloads and checksums, cold and reused blocks, and
+32/128/512/4096/8192-point budgets. Small synthetic cases set queue/point limits to their case
+size; production budgets remain 8192/4096. On this AMD EPYC 9V74 x86-64 runner, Cargo test release
+(opt-level 3, debug info 0, default harness codegen; no claim of production release/LTO timing),
+selected 8192-point reused medians in milliseconds were:
+
+| Operation | Prior baseline | Final prepared storage |
+|---|---:|---:|
+| Ordered insertion | 9.699 | 0.180 |
+| Random insertion | 8.192 | 2.005 |
+| Random point reads | 0.0473 | 0.0666 |
+| Distinct-ID insertion | 24.543 | 21.218 |
+| Earlier-queue alternating insertion/read | 9.747 | 0.455 |
+| Large single later-populated-queue suffix edits | 0.657 | 1.293 |
+| Large multi-populated-queue suffix edits | 0.744 | 1.678 |
+
+The shared index trades small constant read/check overhead and global suffix movement for bounded
+storage. The last two rows explicitly retain a roughly 2.0–2.3x local slowdown at the stress limit;
+this is explained algorithmic cost, not a claim of universal speedup. At 512 points those suffix
+medians were 0.00557/0.00557 ms before and 0.00867/0.01192 ms after. Small workloads also
+retain constant overhead: 32 random insertions measured 0.000590→0.001392 ms and 128
+distinct-ID insertions 0.004196→0.008032 ms. Linear ID lookup still makes
+all-distinct-ID construction quadratic over the sequence; repeated suffix movement/populated
+metadata shifts also retain quadratic aggregate worst cases. Debug results, min/max ranges, cold
+allocation costs and rejected drafts are retained alongside the exact loops/source hashes in the
+parameter-comparison receipt. The rejected cursor draft's random reads and first index draft's
+alternating rebuild regressions were measured before correction, not removed from evidence.
+
+A separate sparse stress diagnostic precreates 4096/8192 registered queues, leaving all later
+queues empty, then measures early-queue edits independently of queue preparation. The rejected
+dense-offset candidate needed 1.218 ms for 8192 queues/128 edits in the optimized profile
+(23.865 ms debug). The populated-slot correction measures 0.004216 ms versus baseline
+0.006560 ms optimized, and 0.0602 ms versus 0.0460 ms debug. With 4096 queues/128 edits,
+optimized medians are 0.004186 ms versus 0.006130 ms baseline. Thirty-two-edit optimized
+cases retain small overhead: 4096 queues 0.001081→0.001473 ms; 8192 queues
+0.001412→0.001802 ms. These figures include real reads/checksums; construction, preparation,
+reset and empty-queue verification are separately measured. All superseded results remain
+in the comparison receipt.

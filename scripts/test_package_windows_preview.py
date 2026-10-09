@@ -988,7 +988,7 @@ class ProvenanceConstantsTests(unittest.TestCase):
         self.assertEqual(pkg.VENDOR_ARCHIVE_SHA256, "6ec579d54bd13b83c60c1fd8bb756cf234e36ccbfb4833ff756b417e64db7fea")
         self.assertEqual(pkg.VENDOR_COMMIT, "ed054908cfe057694d8cf037d0c39dfb5eb4c2ca")
         self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/LICENSE"], "a65a537295910b776a8b2edb2e7410c3b0e975ca6388994e032c4d1842b4952d")
-        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS.patch"], "2b73b9a00349135b5753ec8521e90a1b0de1142f28f0c47821c847cc3a5f2dda")
+        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS.patch"], "3222edbf3f98506ab97b593691b39796cdc0d9eead2e469a8802cf0d28a5f1e0")
 
 
 
