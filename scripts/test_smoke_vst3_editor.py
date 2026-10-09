@@ -1,6 +1,6 @@
 """Fake protocol/build-receipt regressions only; these never claim native Windows GUI QA."""
 
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
@@ -413,6 +413,163 @@ class ValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             with self.assertRaisesRegex(smoke.SmokeError, "Missing/invalid source-built fixture"):
                 smoke.verify_fixture(Path(temp), "editor")
+
+
+class NativeStageAggregationTests(unittest.TestCase):
+    def interaction_setup(self):
+        session = mock.Mock(spec=smoke.Session)
+        session.process = mock.Mock(pid=123)
+        session.process.poll.return_value = None
+        session.deadline = 100.0
+        session.parameter.side_effect = [1.0, 0.25]
+        session.native_revision.side_effect = [0, 2]
+        session.request.side_effect = [
+            {"ParameterEdits": {"edits": []}}, {"HostNotifications": {"notifications": []}},
+            {"ParameterEdits": {"edits": [
+                {"id": 0, "kind": "BeginGesture", "value": None},
+                {"id": 0, "kind": "ValueChange", "value": 0.25},
+                {"id": 0, "kind": "EndGesture", "value": None}]}},
+            {"HostNotifications": {"notifications": [{"DirtyChanged": True}]}},
+        ]
+        desktop = mock.Mock(spec=smoke.WindowsDesktop)
+        desktop.user = mock.Mock()
+        desktop.container.return_value = 10
+        desktop.windows.return_value = [20, 30]
+        desktop.pid.return_value = 123
+        desktop.class_name.side_effect = {10: smoke.CONTAINER_CLASS, 20: smoke.PANEL_CLASS, 30: "Button"}.__getitem__
+        desktop.size.side_effect = {10: (560, 400), 20: (560, 400), 30: (256, 48)}.__getitem__
+        desktop.user.GetParent.side_effect = {20: 10, 30: 20}.__getitem__
+        desktop.user.GetDlgItem.return_value = 30
+        desktop.text.side_effect = lambda hwnd: "Cutoff = 0.25 (edited)" if desktop.post.called else "Set Cutoff to 0.25"
+        desktop.wait.side_effect = lambda predicate, *args: self.assertTrue(predicate())
+        desktop.painted_pixels.side_effect = smoke.SmokeError("PrintWindow failed")
+        return session, desktop
+
+    def test_paint_failure_still_runs_revalidated_control_edit_but_never_passes(self):
+        session, desktop = self.interaction_setup()
+        reports = []
+        stages = smoke.AcceptanceStages(reports.append)
+        with stages.stage("native control"):
+            handles = smoke.assert_interaction(session, desktop, 10, stages)
+        self.assertEqual(handles, [10, 20, 30])
+        desktop.post.assert_called_once_with(30, 0x00F5)
+        self.assertEqual(desktop.user.GetDlgItem.call_count, 3)
+        desktop.user.GetDlgItem.assert_called_with(20, 4101)
+        self.assertEqual(stages.results["native control"], "PASS")
+        self.assertEqual(stages.results["native paint before edit"], "FAIL")
+        self.assertEqual(stages.results["native paint after edit"], "FAIL")
+        self.assertEqual(stages.results["native repaint change"], "SKIP")
+        with self.assertRaisesRegex(smoke.SmokeError, "Failed native acceptance stages"):
+            stages.finish(())
+
+    def test_changed_identity_after_failed_capture_blocks_native_click(self):
+        session, desktop = self.interaction_setup()
+        def failed_capture(hwnd):
+            desktop.pid.return_value = 999  # Simulate an HWND becoming unrelated during capture.
+            raise smoke.SmokeError("PrintWindow failed")
+        desktop.painted_pixels.side_effect = failed_capture
+        stages = smoke.AcceptanceStages(lambda message: None)
+        with self.assertRaisesRegex(smoke.SmokeError, "container identity/geometry changed"):
+            smoke.assert_interaction(session, desktop, 10, stages)
+        desktop.post.assert_not_called()
+
+    def test_wrong_button_parent_or_geometry_is_never_clicked(self):
+        for wrong in ("parent", "geometry", "control_id"):
+            with self.subTest(wrong=wrong):
+                session, desktop = self.interaction_setup()
+                if wrong == "parent":
+                    desktop.user.GetParent.side_effect = {20: 10, 30: 99}.__getitem__
+                elif wrong == "geometry":
+                    desktop.size.side_effect = {10: (560, 400), 20: (560, 400), 30: (1, 1)}.__getitem__
+                else:
+                    desktop.user.GetDlgItem.return_value = None
+                with self.assertRaises(smoke.SmokeError):
+                    smoke.assert_interaction(session, desktop, 10, smoke.AcceptanceStages(lambda message: None))
+                desktop.post.assert_not_called()
+                desktop.painted_pixels.assert_not_called()
+
+    def test_main_returns_failure_for_aggregated_paint_failure_not_unsupported(self):
+        with tempfile.TemporaryDirectory() as temp:
+            helper = Path(temp) / "helper"
+            helper.write_bytes(b"fixture placeholder")
+            with mock.patch.object(smoke, "WindowsDesktop"), \
+                 mock.patch.object(smoke, "verify_fixture"), \
+                 mock.patch.object(smoke, "exercise_lifecycle", side_effect=smoke.SmokeError("Failed native acceptance stages: paint")), \
+                 redirect_stderr(io.StringIO()) as stderr, redirect_stdout(io.StringIO()) as stdout:
+                self.assertEqual(smoke.main(["--helper", str(helper)]), 1)
+            self.assertIn("EDITOR ACCEPTANCE FAILED", stderr.getvalue())
+            self.assertNotIn("UNSUPPORTED", stderr.getvalue())
+            self.assertNotIn("ACCEPTANCE OK", stdout.getvalue())
+
+    def test_skipped_stage_can_never_produce_overall_acceptance(self):
+        stages = smoke.AcceptanceStages(lambda message: None)
+        with self.assertRaisesRegex(smoke.SmokeError, "unverified/skipped"):
+            stages.finish(("never reached",))
+
+    def test_lifecycle_and_state_continue_after_paint_failure_with_overall_failure(self):
+        sessions = []
+        current = [None]
+        class FakeSession:
+            def __init__(self, command, timeout):
+                self.opened, self.loaded, self.has_editor = False, False, True
+                self.generation, self.owner, self.deadline = 0, None, 100.0
+                self.process = mock.Mock(pid=123)
+                self.finished = None
+                sessions.append(self)
+                current[0] = self
+            def __enter__(self): return self
+            def __exit__(self, *unused): return False
+            def load(self, path, has_editor=True):
+                self.loaded, self.has_editor, self.opened = True, has_editor, False
+            def editor(self, command, **expected):
+                if isinstance(command, dict):
+                    if not self.opened: self.generation += 1
+                    self.opened, self.owner = True, command["Open"]["owner"]
+                elif command == "Close": self.opened = False
+                state = dict(supported=True, has_editor=self.loaded and self.has_editor, open=self.opened,
+                             width=560 if self.opened else 0, height=400 if self.opened else 0,
+                             generation=self.generation)
+                return smoke.state_response({"EditorState": {"state": state}}, **expected)
+            def request(self, command):
+                if command == "UnloadPlugin":
+                    self.loaded = self.opened = False
+                    return {"Success": {"message": "unloaded"}}
+                message = "No plugin loaded" if not self.loaded else "does not have a GUI editor" if not self.has_editor else "not open or invalid owner"
+                return {"Error": {"message": message}}
+            def parameter(self, param_id): return float(self.opened)
+            def assert_stdout_rerouted(self): pass
+            def finish(self, mode="Shutdown"):
+                self.finished, self.opened = mode, False
+        desktop = mock.Mock(spec=smoke.WindowsDesktop)
+        desktop.owner.side_effect = [{"window": 1, "process_id": 2}, {"window": 3, "process_id": 2}]
+        def destroy(owner):
+            if current[0].owner == owner: current[0].opened = False
+        desktop.destroy_owner.side_effect = destroy
+        desktop.container.return_value = 10
+        desktop.windows.return_value = []
+        desktop.focused_within.return_value = True
+        desktop.wait.side_effect = lambda predicate, *args: self.assertTrue(predicate())
+        desktop.post.side_effect = lambda *unused: setattr(current[0], "opened", False)
+        def interaction(session, desktop, hwnd, stages):
+            stages.attempt("native paint before edit", lambda: smoke.require(False, "PrintWindow failed"))
+            stages.attempt("native paint after edit", lambda: smoke.require(False, "PrintWindow failed"))
+            stages.skip("native repaint change", "pixels unavailable")
+            return [10, 20, 30]
+        reports = []
+        with mock.patch.object(smoke, "Session", FakeSession), \
+             mock.patch.object(smoke, "assert_handshake", side_effect=lambda session, desktop: (session.editor("Query"), 10)), \
+             mock.patch.object(smoke, "assert_interaction", side_effect=interaction), \
+             mock.patch.object(smoke, "verified_fixture_button", return_value=[10, 20, 30]) as identity, \
+             mock.patch.object(smoke, "assert_state_roundtrip", side_effect=lambda session, *unused: session.editor("Close")) as state:
+            with self.assertRaisesRegex(smoke.SmokeError, "Failed native acceptance stages"):
+                smoke.exercise_lifecycle(["fake"], Path("fixture"), Path("no-editor"), desktop, report=reports.append)
+        state.assert_called_once()
+        identity.assert_called_once()  # Fresh validation before title-bar close, too.
+        self.assertIn("PASS native stopped-edit state round-trip", reports)
+        self.assertIn("PASS native lifecycle cleanup", reports)
+        self.assertEqual([session.finished for session in sessions], ["Shutdown", "Shutdown", "EOF", "crash"])
+        for ending in ("Shutdown", "EOF", "crash"):
+            self.assertIn(f"PASS process cleanup {ending}", reports)
 
 
 class PaintDiagnosticTests(unittest.TestCase):

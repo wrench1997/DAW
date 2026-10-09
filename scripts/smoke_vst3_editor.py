@@ -5,6 +5,7 @@ import argparse
 import base64
 import binascii
 from collections import deque
+from contextlib import contextmanager
 import ctypes
 import hashlib
 import json
@@ -33,6 +34,47 @@ STDOUT_MARKERS = frozenset(f"CITRUS_FIXTURE_STDOUT_{route}" for route in ("RUST"
 
 class UnsupportedDesktop(SmokeError):
     """No interactive Windows desktop: explicitly not a passed acceptance gate."""
+
+
+class AcceptanceStages:
+    """Record bounded independent evidence without converting any failure into a pass."""
+
+    def __init__(self, report=print):
+        self.report = report
+        self.results = {}
+
+    @contextmanager
+    def stage(self, name):
+        try:
+            yield
+        except (SmokeError, OSError) as error:
+            self.results[name] = "FAIL"
+            self.report(f"FAIL {name}: {error}")
+            raise
+        else:
+            self.results[name] = "PASS"
+            self.report(f"PASS {name}")
+
+    def attempt(self, name, action):
+        try:
+            with self.stage(name):
+                value = action()
+            return True, value
+        except (SmokeError, OSError):
+            return False, None
+
+    def skip(self, name, reason):
+        self.results[name] = "SKIP"
+        self.report(f"SKIP {name}: {reason}")
+
+    def finish(self, expected):
+        for name in expected:
+            if name not in self.results:
+                self.skip(name, "a required earlier stage failed; dependent actions were not attempted")
+        failures = [name for name, result in self.results.items() if result == "FAIL"]
+        require(not failures, "Failed native acceptance stages: " + "; ".join(failures))
+        require(all(result == "PASS" for result in self.results.values()),
+                "Native acceptance contains unverified/skipped stages")
 
 
 def require(condition, message):
@@ -601,25 +643,47 @@ def assert_handshake(session, desktop):
     return state, hwnd
 
 
-def assert_interaction(session, desktop, hwnd):
+def verified_fixture_button(session, desktop, hwnd, expected=None):
+    """Validate the live trusted hierarchy afresh before sending native control events."""
+    require(session.process.poll() is None and desktop.container(session) == hwnd
+            and desktop.pid(hwnd) == session.process.pid
+            and desktop.user.IsWindow(hwnd) and desktop.user.IsWindowVisible(hwnd)
+            and desktop.class_name(hwnd) == CONTAINER_CLASS and desktop.size(hwnd) == (560, 400),
+            "Native fixture container identity/geometry changed")
     children = desktop.windows(session.process.pid, hwnd)
     panels = [child for child in children if desktop.class_name(child) == PANEL_CLASS]
     require(len(panels) == 1, f"Expected one native fixture panel, got {panels}")
     panel = panels[0]
-    require(desktop.user.GetParent(panel) == hwnd and desktop.size(panel) == (560, 400),
+    require(desktop.pid(panel) == session.process.pid and desktop.user.IsWindow(panel)
+            and desktop.user.IsWindowVisible(panel) and desktop.user.GetParent(panel) == hwnd
+            and desktop.size(panel) == (560, 400),
             "Plugin child is not correctly attached/resized inside helper container")
     button = desktop.user.GetDlgItem(panel, 4101)
-    require(button and desktop.pid(button) == session.process.pid
+    require(button and desktop.user.IsWindow(button) and desktop.pid(button) == session.process.pid
             and desktop.class_name(button).lower() == "button"
-            and desktop.user.IsWindowVisible(button), "Real native fixture button is missing/invisible")
+            and desktop.user.GetParent(button) == panel and desktop.user.IsChild(hwnd, button)
+            and desktop.size(button) == (256, 48) and desktop.user.IsWindowVisible(button),
+            "Real native fixture button identity/geometry is missing or changed")
+    handles = [hwnd, panel, button]
+    require(expected is None or handles == expected, "Native fixture HWND hierarchy changed before event")
+    return handles
+
+
+def assert_interaction(session, desktop, hwnd, stages):
+    handles = verified_fixture_button(session, desktop, hwnd)
+    button = handles[-1]
     require(desktop.text(button) == "Set Cutoff to 0.25", "Unexpected native fixture caption")
-    before = desktop.painted_pixels(button)
+    before_ok, before = stages.attempt("native paint before edit", lambda: desktop.painted_pixels(button))
     require(session.parameter(0) == 1.0, "Fixture did not start at default Cutoff")
     revision = session.native_revision()
     require(response_payload(session.request("TakeParameterEdits"), "ParameterEdits").get("edits") == [],
             "Unexpected pre-click parameter gestures")
     require(response_payload(session.request("TakeHostNotifications"), "HostNotifications").get("notifications") == [],
             "Unexpected pre-click host notifications")
+    # A failed/timed-out pixel capture does not authorize using a stale HWND.
+    # Recheck PID, class, ancestry, control ID and exact client sizes immediately
+    # before BM_CLICK, even when the earlier capture succeeded.
+    verified_fixture_button(session, desktop, hwnd, expected=handles)
     desktop.post(button, 0x00F5)  # BM_CLICK; delivered by real helper GUI message pump.
     desktop.wait(lambda: desktop.text(button) == "Cutoff = 0.25 (edited)", session.deadline,
                  "native button interaction")
@@ -635,8 +699,13 @@ def assert_interaction(session, desktop, hwnd):
     notifications = response_payload(session.request("TakeHostNotifications"), "HostNotifications").get("notifications")
     require(notifications == [{"DirtyChanged": True}], f"Missing native DirtyChanged(true): {notifications!r}")
     require(session.native_revision() > revision, "Native dirty revision did not survive feedback draining")
-    require(desktop.painted_pixels(button) != before, "Native edited caption did not repaint")
-    return [hwnd, panel, button]
+    verified_fixture_button(session, desktop, hwnd, expected=handles)
+    after_ok, after = stages.attempt("native paint after edit", lambda: desktop.painted_pixels(button))
+    if before_ok and after_ok:
+        stages.attempt("native repaint change", lambda: require(after != before, "Native edited caption did not repaint"))
+    else:
+        stages.skip("native repaint change", "baseline or edited pixels unavailable; no repaint claim")
+    return handles
 
 
 def assert_state_roundtrip(session, desktop, fixture, handles):
@@ -659,88 +728,108 @@ def assert_state_roundtrip(session, desktop, fixture, handles):
 
 
 def exercise_lifecycle(command, fixture, no_editor, desktop, timeout=60.0, report=print):
-    """The real acceptance path; never invoked with a fake desktop by the CLI."""
-    with Session(command, timeout) as session:
-        owner = desktop.owner()
-        session.editor("Query", supported=True, has_editor=False, open=False)
-        error_response(session.request({"Editor": {"command": {"Open": {"owner": None}}}}), "No plugin loaded")
-        session.load(fixture)
-        session.editor("Query", supported=True, has_editor=True, open=False)
-        error_response(session.request({"Editor": {"command": "Focus"}}), "not open")
-        for invalid in ({"window": 0, "process_id": os.getpid()},
-                        {"window": owner["window"], "process_id": 0}):
-            error_response(session.request({"Editor": {"command": {"Open": {"owner": invalid}}}}))
-        session.editor({"Open": {"owner": owner}}, supported=True, has_editor=True, open=True)
-        session.assert_stdout_rerouted()
-        report("PASS protocol isolation: fixture Rust, Win32 and CRT stdout reached stderr; valid fake replies did not pollute IPC")
-        state, hwnd = assert_handshake(session, desktop)
-        report("PASS lifecycle: attached, exact 560x400 resize, DPI scale, real helper container")
-        handles = assert_interaction(session, desktop, hwnd)
-        report("PASS native UI: painted button, real click, parameter 0.25, ordered gesture, DirtyChanged(true)")
-        for _ in range(3):
-            same = session.editor({"Open": {"owner": owner}}, open=True)
-            require(same == state, "Repeated Open changed editor state/generation")
-            require(session.editor("Focus", open=True) == state, "Focus changed editor state/generation")
-            desktop.wait(lambda: desktop.focused_within(hwnd), session.deadline, "helper keyboard focus")
-            require(desktop.container(session) == hwnd, "Repeated Open replaced native container")
-        other = desktop.owner()
-        error_response(session.request({"Editor": {"command": {"Open": {"owner": other}}}}))
-        require(session.editor("Query") == state, "Rejected owner change modified editor state")
-        desktop.destroy_owner(other)
-        assert_state_roundtrip(session, desktop, fixture, handles)
-        report("PASS state: stopped native edit captured after detach, restored into fresh instance, component/controller bytes preserved")
-        session.editor({"Open": {"owner": owner}}, open=True)
-        state, hwnd = assert_handshake(session, desktop)
-        handles = [hwnd] + desktop.windows(session.process.pid, hwnd)
-        for _ in range(3):
-            session.editor("Close", open=False, has_editor=True)
-            desktop.gone(handles, session.deadline)
-            require(session.parameter(1000) == 0.0, "Closed editor did not detach plugin view")
-            closed = session.editor("Close", open=False)
-            require(session.editor("Close") == closed, "Repeated Close changed closed state")
-            session.editor({"Open": {"owner": owner}}, open=True)
-            reopened, hwnd = assert_handshake(session, desktop)
-            require(reopened["generation"] > state["generation"], "Reopen did not advance generation")
-            state, handles = reopened, [hwnd] + desktop.windows(session.process.pid, hwnd)
-        desktop.post(hwnd, 0x0010)  # WM_CLOSE, same path as the native title-bar close button.
-        desktop.wait(lambda: not session.editor("Query")["open"], session.deadline, "title-bar close")
-        desktop.gone(handles, session.deadline)
-        require(session.parameter(1000) == 0, "Title-bar close did not detach")
-        session.editor({"Open": {"owner": owner}}, open=True)
-        _, hwnd = assert_handshake(session, desktop)
-        handles = [hwnd] + desktop.windows(session.process.pid, hwnd)
-        desktop.destroy_owner(owner)
-        desktop.wait(lambda: not session.editor("Query")["open"], session.deadline, "logical owner loss")
-        desktop.gone(handles, session.deadline)
-        require(session.parameter(1000) == 0, "Owner loss did not detach")
-        session.editor({"Open": {"owner": None}}, open=True)
-        _, hwnd = assert_handshake(session, desktop)
-        handles = [hwnd] + desktop.windows(session.process.pid, hwnd)
-        response_payload(session.request("UnloadPlugin"), "Success")
-        desktop.gone(handles, session.deadline)
-        session.editor("Query", has_editor=False, open=False)
-        session.load(fixture)
-        session.editor({"Open": {"owner": None}}, open=True)
-        _, hwnd = assert_handshake(session, desktop)
-        handles = [hwnd] + desktop.windows(session.process.pid, hwnd)
-        session.load(no_editor, has_editor=False)  # Reload while an editor is still open.
-        desktop.gone(handles, session.deadline)
-        session.editor("Query", supported=True, has_editor=False, open=False)
-        error_response(session.request({"Editor": {"command": {"Open": {"owner": None}}}}),
-                       "does not have a GUI editor")
-        session.editor("Close", open=False)
-        session.finish()
-        report("PASS lifecycle cleanup: repeated actions, title-bar close, invalid owners, owner loss, unload/reload, no-editor")
+    """Real acceptance with failed paint retained and independent evidence completed."""
+    stages = AcceptanceStages(report)
+    expected = (
+        "protocol stdout isolation (Rust/Win32/CRT)", "native attach/resize/DPI",
+        "native paint before edit", "native control interaction/gesture/dirty feedback",
+        "native paint after edit", "native repaint change", "repeat focus and owner rejection",
+        "native stopped-edit state round-trip", "native lifecycle cleanup", "helper session completion",
+        "process cleanup Shutdown", "process cleanup EOF", "process cleanup crash",
+    )
+    try:
+        with stages.stage("helper session completion"):
+            with Session(command, timeout) as session:
+                with stages.stage('protocol stdout isolation (Rust/Win32/CRT)'):
+                    owner = desktop.owner()
+                    session.editor("Query", supported=True, has_editor=False, open=False)
+                    error_response(session.request({"Editor": {"command": {"Open": {"owner": None}}}}), "No plugin loaded")
+                    session.load(fixture)
+                    session.editor("Query", supported=True, has_editor=True, open=False)
+                    error_response(session.request({"Editor": {"command": "Focus"}}), "not open")
+                    for invalid in ({"window": 0, "process_id": os.getpid()},
+                                    {"window": owner["window"], "process_id": 0}):
+                        error_response(session.request({"Editor": {"command": {"Open": {"owner": invalid}}}}))
+                    session.editor({"Open": {"owner": owner}}, supported=True, has_editor=True, open=True)
+                    session.assert_stdout_rerouted()
+                with stages.stage('native attach/resize/DPI'):
+                    state, hwnd = assert_handshake(session, desktop)
+                with stages.stage('native control interaction/gesture/dirty feedback'):
+                    handles = assert_interaction(session, desktop, hwnd, stages)
+                with stages.stage('repeat focus and owner rejection'):
+                    for _ in range(3):
+                        same = session.editor({"Open": {"owner": owner}}, open=True)
+                        require(same == state, "Repeated Open changed editor state/generation")
+                        require(session.editor("Focus", open=True) == state, "Focus changed editor state/generation")
+                        desktop.wait(lambda: desktop.focused_within(hwnd), session.deadline, "helper keyboard focus")
+                        require(desktop.container(session) == hwnd, "Repeated Open replaced native container")
+                    other = desktop.owner()
+                    error_response(session.request({"Editor": {"command": {"Open": {"owner": other}}}}))
+                    require(session.editor("Query") == state, "Rejected owner change modified editor state")
+                    desktop.destroy_owner(other)
+                with stages.stage('native stopped-edit state round-trip'):
+                    assert_state_roundtrip(session, desktop, fixture, handles)
+                with stages.stage('native lifecycle cleanup'):
+                    session.editor({"Open": {"owner": owner}}, open=True)
+                    state, hwnd = assert_handshake(session, desktop)
+                    handles = [hwnd] + desktop.windows(session.process.pid, hwnd)
+                    for _ in range(3):
+                        session.editor("Close", open=False, has_editor=True)
+                        desktop.gone(handles, session.deadline)
+                        require(session.parameter(1000) == 0.0, "Closed editor did not detach plugin view")
+                        closed = session.editor("Close", open=False)
+                        require(session.editor("Close") == closed, "Repeated Close changed closed state")
+                        session.editor({"Open": {"owner": owner}}, open=True)
+                        reopened, hwnd = assert_handshake(session, desktop)
+                        require(reopened["generation"] > state["generation"], "Reopen did not advance generation")
+                        state, handles = reopened, [hwnd] + desktop.windows(session.process.pid, hwnd)
+                    verified_fixture_button(session, desktop, hwnd)
+                    desktop.post(hwnd, 0x0010)  # WM_CLOSE, same path as the native title-bar close button.
+                    desktop.wait(lambda: not session.editor("Query")["open"], session.deadline, "title-bar close")
+                    desktop.gone(handles, session.deadline)
+                    require(session.parameter(1000) == 0, "Title-bar close did not detach")
+                    session.editor({"Open": {"owner": owner}}, open=True)
+                    _, hwnd = assert_handshake(session, desktop)
+                    handles = [hwnd] + desktop.windows(session.process.pid, hwnd)
+                    desktop.destroy_owner(owner)
+                    desktop.wait(lambda: not session.editor("Query")["open"], session.deadline, "logical owner loss")
+                    desktop.gone(handles, session.deadline)
+                    require(session.parameter(1000) == 0, "Owner loss did not detach")
+                    session.editor({"Open": {"owner": None}}, open=True)
+                    _, hwnd = assert_handshake(session, desktop)
+                    handles = [hwnd] + desktop.windows(session.process.pid, hwnd)
+                    response_payload(session.request("UnloadPlugin"), "Success")
+                    desktop.gone(handles, session.deadline)
+                    session.editor("Query", has_editor=False, open=False)
+                    session.load(fixture)
+                    session.editor({"Open": {"owner": None}}, open=True)
+                    _, hwnd = assert_handshake(session, desktop)
+                    handles = [hwnd] + desktop.windows(session.process.pid, hwnd)
+                    session.load(no_editor, has_editor=False)  # Reload while an editor is still open.
+                    desktop.gone(handles, session.deadline)
+                    session.editor("Query", supported=True, has_editor=False, open=False)
+                    error_response(session.request({"Editor": {"command": {"Open": {"owner": None}}}}),
+                                   "does not have a GUI editor")
+                    session.editor("Close", open=False)
+                    session.finish()
+    except (SmokeError, OSError):
+        # Any non-paint failure aborts dependent operations in this session.
+        # The context manager still kills/reaps the helper before fresh sessions.
+        pass
     for ending in ("Shutdown", "EOF", "crash"):
-        with Session(command, timeout) as session:
-            session.load(fixture)
-            session.editor({"Open": {"owner": None}}, open=True)
-            _, hwnd = assert_handshake(session, desktop)
-            handles = [hwnd] + desktop.windows(session.process.pid, hwnd)
-            session.finish(ending)
-            desktop.gone(handles, session.deadline)
-            require(not desktop.windows(session.process.pid), f"Helper native windows leaked after {ending}")
-            report(f"PASS process cleanup: {ending}; observed helper HWNDs destroyed")
+        try:
+            with stages.stage(f"process cleanup {ending}"):
+                with Session(command, timeout) as session:
+                    session.load(fixture)
+                    session.editor({"Open": {"owner": None}}, open=True)
+                    _, hwnd = assert_handshake(session, desktop)
+                    handles = [hwnd] + desktop.windows(session.process.pid, hwnd)
+                    session.finish(ending)
+                    desktop.gone(handles, session.deadline)
+                    require(not desktop.windows(session.process.pid), f"Helper native windows leaked after {ending}")
+        except (SmokeError, OSError):
+            pass
+    stages.finish(expected)
 
 
 def main(argv=None):
