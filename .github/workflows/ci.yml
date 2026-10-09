@@ -49,5 +49,17 @@ jobs:
       - name: Build application and VST3 helper
         run: cargo +stable-x86_64-pc-windows-msvc build --locked --all-features --bins
 
+      # Python is supplied by the hosted Windows runner and used only for QA.
+      - name: Record smoke harness interpreter
+        run: python --version
+
+      - name: Test helper smoke harness
+        timeout-minutes: 2
+        run: python -B -m unittest discover -s scripts -p "test_smoke_vst3_helper.py" -v
+
+      - name: Smoke test built VST3 helper protocol
+        timeout-minutes: 1
+        run: python -B scripts/smoke_vst3_helper.py target/debug/vst3-host-helper.exe --timeout 5
+
       - name: Check internal-only feature configuration
         run: cargo +stable-x86_64-pc-windows-msvc check --locked --no-default-features --all-targets
