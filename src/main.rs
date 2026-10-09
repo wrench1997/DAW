@@ -31,6 +31,7 @@ pub mod plugin_parameter_editor;
 mod plugins;
 mod project_media;
 pub mod recording;
+mod sample_browser;
 mod settings_ui;
 pub mod tempo_map;
 mod theme;

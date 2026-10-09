@@ -6,7 +6,7 @@
 //! interleaved `f32`; integer PCM is normalized and float input is clamped to the
 //! normalized `[-1.0, 1.0]` range after non-finite values are rejected.
 
-use std::{fs, path::Path};
+use std::{fs, io::Read, path::Path};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -153,10 +153,24 @@ pub fn read_wav_with_limits(path: impl AsRef<Path>, limits: WavReadLimits) -> Re
             limits.max_file_bytes
         );
     }
-    let bytes =
-        fs::read(path).with_context(|| format!("Unable to read WAV asset '{}'", path.display()))?;
+    let file = fs::File::open(path)
+        .with_context(|| format!("Unable to read WAV asset '{}'", path.display()))?;
+    // The file may grow after metadata inspection. Bound the read itself, not only its preflight.
+    let bytes = read_bounded_wav_bytes(file, limits.max_file_bytes)
+        .with_context(|| format!("Unable to read WAV asset '{}'", path.display()))?;
     decode_wav_with_limits(&bytes, limits)
         .with_context(|| format!("Invalid WAV asset '{}'", path.display()))
+}
+
+fn read_bounded_wav_bytes(mut reader: impl Read, max_bytes: u64) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.by_ref().take(max_bytes).read_to_end(&mut bytes)?;
+    // Keep the overflow probe out of the Vec so one extra byte cannot double a large allocation.
+    match reader.read_exact(&mut [0_u8; 1]) {
+        Ok(()) => bail!("WAV source grew beyond the configured {max_bytes} byte limit"),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(bytes),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Decodes WAV bytes using conservative commercial-project limits.
@@ -859,6 +873,27 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("exceeding")
+        );
+    }
+
+    #[test]
+    fn bounded_file_read_rejects_growing_source_without_reading_past_limit_probe() {
+        use std::{cell::Cell, rc::Rc};
+        struct GrowingSource(Rc<Cell<usize>>);
+        impl Read for GrowingSource {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                buffer.fill(0);
+                self.0.set(self.0.get() + buffer.len());
+                Ok(buffer.len())
+            }
+        }
+        let read = Rc::new(Cell::new(0));
+        let error = read_bounded_wav_bytes(GrowingSource(Rc::clone(&read)), 64).unwrap_err();
+        assert!(error.to_string().contains("byte limit"));
+        assert_eq!(read.get(), 65);
+        assert_eq!(
+            read_bounded_wav_bytes(&[1_u8; 64][..], 64).unwrap().len(),
+            64
         );
     }
 

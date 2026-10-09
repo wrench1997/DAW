@@ -4,7 +4,7 @@ use super::*;
 use crate::project_media::{MediaIdentity, PreparedMediaRelink};
 
 impl CitrusApp {
-    fn project_media_actions_available(&self) -> bool {
+    pub(super) fn project_media_actions_available(&self) -> bool {
         self.project_lifecycle.is_idle()
             && !self.project_lifecycle_barriers_active()
             && self.audio_import_receiver.is_none()

@@ -101,6 +101,7 @@ Compiled PAT and SONG notes are scheduled from authoritative Timeline frames on 
 
 ### MIDI, media, and recording
 
+- [Local WAV browser](docs/LOCAL_SAMPLE_BROWSER.md): explicitly chosen folders, bounded one-level listing, current-folder search, Up/Refresh/Cancel and validated Import to Playlist with one-step undo; hardcoded Sounds items and the synthetic preview are removed. Audible Browser audition remains unimplemented.
 - Standard MIDI File format 0 and format 1 import/export with PPQ timing
 - Backend-independent realtime MIDI 1.0 core for bounded channel-message validation, integer timestamp mapping, overload coalescing, panic signaling, and fixed-capacity note pairing
 - Windows `midir` 0.11/WinMM port enumeration and hot-plug refresh, with one selected input connection routed through its dedicated bounded SPSC to one callback-confirmed one-slot Generator. The route is stamped with exact project, endpoint, instance, and slot identity; install/remove receipts are exact, receivers retire off the callback, and disconnect, replacement, transport-epoch, or overload cleanup drives CC123/all-notes-off safety

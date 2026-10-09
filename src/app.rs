@@ -1,4 +1,6 @@
+mod audio_import;
 mod project_media_ui;
+mod sample_browser_ui;
 
 use std::{
     collections::{HashMap, HashSet, hash_map::DefaultHasher},
@@ -1233,11 +1235,6 @@ fn publish_audio_transport_loop(
     }
 }
 
-type BrowserSection = (
-    &'static str,
-    &'static [(&'static str, &'static str)],
-    Color32,
-);
 type AudioImportResult = Result<(u64, PathBuf, wav::WavAsset, f32, usize), (u64, String)>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4699,7 +4696,7 @@ pub struct CitrusApp {
     settings_page: SettingsPage,
     browser_tab: BrowserTab,
     browser_search: String,
-    browser_sections: [bool; 5],
+    sample_browser: crate::sample_browser::SampleBrowser,
     show_plugins: bool,
     plugin_parameter_editor: Option<PluginParameterEditorWindow>,
     next_plugin_parameter_request_id: u64,
@@ -4715,6 +4712,7 @@ pub struct CitrusApp {
     export_error: Option<String>,
     export_dialog: export_ui::ExportDialog,
     audio_import_receiver: Option<Receiver<AudioImportResult>>,
+    audio_import_error: Option<String>,
     project_media: ProjectMediaManager,
     audio_asset_sender: Sender<AudioAssetLoadResult>,
     audio_asset_receiver: Receiver<AudioAssetLoadResult>,
@@ -4996,7 +4994,7 @@ impl CitrusApp {
                 settings_page: SettingsPage::Audio,
                 browser_tab: BrowserTab::Sounds,
                 browser_search: String::new(),
-                browser_sections: [true, true, false, true, false],
+                sample_browser: crate::sample_browser::SampleBrowser::default(),
                 show_plugins: false,
                 plugin_parameter_editor: None,
                 next_plugin_parameter_request_id: 1,
@@ -5012,6 +5010,7 @@ impl CitrusApp {
                 export_error: None,
                 export_dialog: export_ui::ExportDialog::default(),
                 audio_import_receiver: None,
+                audio_import_error: None,
                 project_media: ProjectMediaManager::default(),
                 audio_asset_sender,
                 audio_asset_receiver,
@@ -14667,14 +14666,22 @@ impl CitrusApp {
                     icons::paint_icon(ui.painter(), icon_rect, StudioIcon::Search, theme::MUTED);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.browser_search)
-                            .hint_text("Search library…")
+                            .hint_text(if self.browser_tab == BrowserTab::Sounds {
+                                "Filter listed names…"
+                            } else {
+                                "Search library…"
+                            })
                             .desired_width(f32::INFINITY),
                     );
                 });
                 ui.add_space(6.0);
 
-                let preview_height = 112.0;
-                let list_height = (ui.available_height() - preview_height - 7.0).max(60.0);
+                let footer_height = if self.browser_tab == BrowserTab::Sounds {
+                    174.0
+                } else {
+                    64.0
+                };
+                let list_height = (ui.available_height() - footer_height - 7.0).max(60.0);
                 ui.allocate_ui_with_layout(
                     Vec2::new(ui.available_width(), list_height),
                     Layout::top_down(Align::Min),
@@ -14696,109 +14703,9 @@ impl CitrusApp {
                     .inner_margin(egui::Margin::same(9))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("PREVIEW").size(8.0).color(theme::MUTED));
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.label(
-                                    RichText::new("-∞ dB")
-                                        .monospace()
-                                        .size(8.0)
-                                        .color(theme::MUTED),
-                                );
-                            });
-                        });
-                        draw_preview_wave(ui);
-                        ui.horizontal(|ui| {
-                            let icon_rect =
-                                ui.allocate_exact_size(Vec2::splat(13.0), Sense::hover()).0;
-                            icons::paint_icon(
-                                ui.painter(),
-                                icon_rect,
-                                StudioIcon::Play,
-                                theme::ORANGE,
-                            );
-                            ui.label(RichText::new("Select an item to audition").size(9.5));
-                        });
+                        self.browser_selection(ui);
                     });
             });
-    }
-
-    fn browser_sounds(&mut self, ui: &mut egui::Ui) {
-        let sections: [BrowserSection; 5] = [
-            (
-                "FAVORITES",
-                &[
-                    ("Citrus Keys", "INST"),
-                    ("Warm Tape", "FX"),
-                    ("Space Verb", "FX"),
-                ],
-                theme::AMBER,
-            ),
-            (
-                "DRUMS",
-                &[
-                    ("Orchard Kick 01", "ONE SHOT"),
-                    ("Velvet Clap", "ONE SHOT"),
-                    ("Glass Hat", "ONE SHOT"),
-                ],
-                theme::ORANGE,
-            ),
-            (
-                "INSTRUMENTS",
-                &[
-                    ("Neon Keys", "PRESET"),
-                    ("Sub Orchard", "PRESET"),
-                    ("Night Pluck", "PRESET"),
-                ],
-                theme::GREEN,
-            ),
-            (
-                "LOOPS & TEXTURES",
-                &[
-                    ("Night Drive 128", "LOOP"),
-                    ("Rain Glass", "TEXTURE"),
-                    ("Tape Garden", "LOOP"),
-                ],
-                theme::BLUE,
-            ),
-            (
-                "RECORDED",
-                &[("Vocal take 01", "AUDIO"), ("Resample 04", "AUDIO")],
-                theme::RED,
-            ),
-        ];
-        let query = self.browser_search.to_lowercase();
-        for (index, (title, items, color)) in sections.iter().enumerate() {
-            let visible = query.is_empty()
-                || title.to_lowercase().contains(&query)
-                || items
-                    .iter()
-                    .any(|(name, _)| name.to_lowercase().contains(&query));
-            if !visible {
-                continue;
-            }
-            let expanded = self.browser_sections[index] || !query.is_empty();
-            let header = ui.add_sized(
-                [ui.available_width(), 28.0],
-                egui::Button::new(
-                    RichText::new(format!("{}  {title}", if expanded { "−" } else { "+" }))
-                        .strong()
-                        .size(9.0),
-                )
-                .frame(false),
-            );
-            if header.clicked() {
-                self.browser_sections[index] = !self.browser_sections[index];
-            }
-            if expanded {
-                for (name, tag) in *items {
-                    if !query.is_empty() && !name.to_lowercase().contains(&query) {
-                        continue;
-                    }
-                    library_row(ui, name, tag, *color);
-                }
-            }
-        }
     }
 
     fn open_plugin_picker(&mut self, target: PluginPickerTarget) {
@@ -16443,6 +16350,14 @@ impl CitrusApp {
         else {
             return;
         };
+        self.start_audio_import_path(path);
+    }
+
+    fn start_audio_import_path(&mut self, path: PathBuf) {
+        if self.audio_import_receiver.is_some() {
+            return;
+        }
+        self.audio_import_error = None;
         let start = self.beat_position;
         let track = self
             .selected_clip
@@ -16456,21 +16371,47 @@ impl CitrusApp {
             .unwrap_or(4);
         let (sender, receiver) = mpsc::channel();
         let project_session = self.audio_asset_generation;
-        std::thread::spawn(move || {
-            let result = wav::read_wav(&path)
-                .map(|asset| (project_session, path, asset, start, track))
-                .map_err(|error| (project_session, error.to_string()));
-            let _ = sender.send(result);
-        });
-        self.audio_import_receiver = Some(receiver);
-        self.notify("Validating and decoding WAV in the background…".into());
+        match std::thread::Builder::new()
+            .name("wav-import".into())
+            .spawn(move || {
+                let result = audio_import::decode_audio_import(project_session, path, start, track);
+                let _ = sender.send(result);
+            }) {
+            Ok(_) => {
+                self.audio_import_receiver = Some(receiver);
+                self.notify("Validating and decoding WAV in the background…".into());
+            }
+            Err(error) => {
+                self.report_audio_import_error(format!("Cannot start WAV import: {error}"))
+            }
+        }
+    }
+
+    fn report_audio_import_error(&mut self, error: String) {
+        self.audio_import_error = Some(error.clone());
+        self.notify(error);
     }
 
     fn poll_audio_import(&mut self) {
         let Some(receiver) = &self.audio_import_receiver else {
             return;
         };
-        match receiver.try_recv() {
+        // Leave the single completed result queued while a preview/gesture owns a Project
+        // snapshot. Applying it then would let Cancel restore an older Project over the import.
+        let barriers = audio_import::AudioImportCommitBarriers {
+            project_transition: !self.project_lifecycle.is_idle()
+                || self.deferred_project_intent_after_midi.is_some()
+                || self.deferred_recovery_project_after_midi.is_some(),
+            save_or_recording: self.project_lifecycle_barriers_active(),
+            piano_transform: self.piano_roll_transform.is_some(),
+            playlist_gesture: self.playlist_gesture_before.is_some(),
+            piano_gesture: self.piano_roll_gesture_before.is_some(),
+            other_project_dialog: self.project_media.open
+                || self.recovery_available
+                || self.pending_midi_import.is_some()
+                || self.pending_midi_export.is_some(),
+        };
+        match audio_import::poll_import_result(receiver, barriers) {
             Ok(Ok((project_session, path, asset, start, track))) => {
                 self.audio_import_receiver = None;
                 if audio_asset_load_is_current(project_session, self.audio_asset_generation) {
@@ -16480,12 +16421,12 @@ impl CitrusApp {
             Ok(Err((project_session, error))) => {
                 self.audio_import_receiver = None;
                 if audio_asset_load_is_current(project_session, self.audio_asset_generation) {
-                    self.notify(format!("Audio import failed: {error}"));
+                    self.report_audio_import_error(format!("Audio import failed: {error}"));
                 }
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.audio_import_receiver = None;
-                self.notify("Audio import worker stopped unexpectedly".into());
+                self.report_audio_import_error("Audio import worker stopped unexpectedly".into());
             }
             Err(mpsc::TryRecvError::Empty) => {}
         }
@@ -16499,75 +16440,35 @@ impl CitrusApp {
         track: usize,
     ) {
         let metadata = asset.metadata.clone();
-        let waveform_peaks = build_waveform_peaks(&asset.samples, metadata.channels, 256);
-        let asset_id = self
-            .project
-            .audio_assets
-            .iter()
-            .map(|asset| asset.id)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let clip_id = self
-            .project
-            .clips
-            .iter()
-            .map(|clip| clip.id)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let name = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .unwrap_or("Imported audio.wav")
-            .to_owned();
-        let length = (metadata.duration_seconds as f32 * self.effective_tempo / 60.0)
-            .max(self.snap.max(0.0625));
-        self.project.audio_assets.push(AudioAsset {
-            id: asset_id,
-            name: name.clone(),
-            path: path.clone(),
-            sample_rate: metadata.sample_rate,
-            channels: metadata.channels,
-            bits_per_sample: metadata.bits_per_sample,
-            frames: metadata.frames,
-            waveform_peaks,
-        });
-        self.project.clips.push(crate::model::Clip {
-            id: clip_id,
-            track,
+        let prepared = match audio_import::prepare_audio_import(
+            &self.project,
+            &path,
+            &asset,
             start,
-            length,
-            name,
-            color: [255, 207, 99],
-            kind: ClipKind::Audio,
-            group_id: None,
-            pattern_id: self.project.active_pattern().id,
-            automation_id: None,
-            audio_asset_id: Some(asset_id),
-            source_offset: 0.0,
-            audio_source_offset_frame: Some(0),
-            audio_source_reference: None,
-            audio_length_reference: None,
-            fade_in_reference: None,
-            fade_out_reference: None,
-            gain: 1.0,
-            fade_in: 0.0,
-            fade_out: 0.0,
-            muted: false,
-        });
-        if let Some(mixer_track_id) = self
-            .project
-            .mixer_track_id_at_runtime_slot(track.saturating_add(1).min(31))
-        {
-            self.project
-                .audio_clip_mixer_destinations
-                .push(AudioClipMixerDestination {
-                    clip_id,
-                    mixer_track_id,
-                });
+            track,
+            self.effective_tempo,
+            self.snap,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.report_audio_import_error(format!("Audio import failed: {error}"));
+                return;
+            }
+        };
+        let (asset_id, clip_id) = (prepared.asset_id, prepared.clip_id);
+        if !commit_explicit_project_history_transaction(
+            &mut self.project,
+            &mut self.history_snapshot,
+            &mut self.history_fingerprint,
+            &mut self.undo_stack,
+            &mut self.redo_stack,
+            &mut self.dirty,
+            prepared.project,
+        ) {
+            self.report_audio_import_error("Audio import made no project change".into());
+            return;
         }
-        self.project.song_length_beats = self.project.song_length_beats.max(start + length);
+        self.sync_history_observer();
         self.select_playlist_clip_only(clip_id);
         self.view = StudioView::Playlist;
         self.dirty = true;
@@ -17453,6 +17354,10 @@ impl eframe::App for CitrusApp {
         self.poll_plugin_scan();
         self.poll_export();
         self.poll_audio_import();
+        self.sample_browser.poll();
+        if self.sample_browser.busy() || self.audio_import_receiver.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         self.poll_audio_asset_loads();
         self.poll_project_media(&ctx);
         self.drive_audio_asset_clear();
@@ -17814,21 +17719,6 @@ fn draw_mini_wave(ui: &mut egui::Ui) {
                 Pos2::new(x, rect.center().y + h / 2.0),
             ],
             Stroke::new(1.0, theme::GREEN),
-        );
-    }
-}
-
-fn draw_preview_wave(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 35.0), Sense::hover());
-    for i in 0..42 {
-        let x = egui::lerp(rect.x_range(), i as f32 / 41.0);
-        let h = 4.0 + ((i * 19) % 28) as f32;
-        ui.painter().line_segment(
-            [
-                Pos2::new(x, rect.center().y - h / 2.0),
-                Pos2::new(x, rect.center().y + h / 2.0),
-            ],
-            Stroke::new(1.2, theme::ORANGE.gamma_multiply(0.7)),
         );
     }
 }
