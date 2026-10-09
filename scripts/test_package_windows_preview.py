@@ -222,7 +222,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn("docs/PROJECT_MEDIA.md", info["source_documents"])
 
     def test_optional_feature_guides_are_packaged_together(self):
-        for path in ("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md", "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md", "docs/LOCAL_SAMPLE_BROWSER.md", "docs/HEADLESS_UI_QA.md", "docs/FL_INSPIRED_NATIVE_THEME.md", "docs/MULTIWINDOW_WORKSPACE.md", "docs/COMPACT_WORKSPACE.md", "docs/PIANO_KEYBOARD_EDITING.md", "docs/PIANO_MOUSE_WORKFLOW.md", "docs/PIANO_NOTE_EXPRESSION.md", "docs/PIANO_RANGES_AND_SNAP.md", "docs/VST3_SCANNING.md", "docs/REAL_VST3_VALIDATION.md", "docs/PLUGIN_MIDI_ROUTING.md", "docs/PLUGIN_MIDI_ROUTE_VALIDATION.md"):
+        for path in ("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md", "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md", "docs/LOCAL_SAMPLE_BROWSER.md", "docs/HEADLESS_UI_QA.md", "docs/FL_INSPIRED_NATIVE_THEME.md", "docs/MULTIWINDOW_WORKSPACE.md", "docs/COMPACT_WORKSPACE.md", "docs/PIANO_KEYBOARD_EDITING.md", "docs/PIANO_MOUSE_WORKFLOW.md", "docs/PIANO_NOTE_EXPRESSION.md", "docs/PIANO_RANGES_AND_SNAP.md", "docs/VST3_SCANNING.md", "docs/REAL_VST3_VALIDATION.md", "docs/PLUGIN_MIDI_ROUTING.md", "docs/PLUGIN_MIDI_ROUTE_VALIDATION.md", "docs/LINUX_VST3_EDITORS.md", "docs/LINUX_VST3_EDITOR_VALIDATION.md", "docs/METRONOME.md"):
             (self.repo / path).write_text("[README](../README.md)\n")
         (self.repo / "README.md").write_text(
             "[Media](docs/PROJECT_MEDIA.md) [Export](docs/OFFLINE_EXPORT_WORKFLOW.md) "
@@ -230,7 +230,7 @@ class PackageTests(unittest.TestCase):
             "[Meters](docs/MIXER_METERING.md) [Samples](docs/LOCAL_SAMPLE_BROWSER.md) "
             "[UI QA](docs/HEADLESS_UI_QA.md) [Native theme](docs/FL_INSPIRED_NATIVE_THEME.md) "
             "[Workspace](docs/MULTIWINDOW_WORKSPACE.md) [Compact](docs/COMPACT_WORKSPACE.md) "
-            "[Piano keys](docs/PIANO_KEYBOARD_EDITING.md) [Piano mouse](docs/PIANO_MOUSE_WORKFLOW.md) [Expression](docs/PIANO_NOTE_EXPRESSION.md) [Piano ranges](docs/PIANO_RANGES_AND_SNAP.md) [Scanner](docs/VST3_SCANNING.md) [Real VST3 QA](docs/REAL_VST3_VALIDATION.md) [MIDI routing](docs/PLUGIN_MIDI_ROUTING.md) [Route QA](docs/PLUGIN_MIDI_ROUTE_VALIDATION.md)\n"
+            "[Piano keys](docs/PIANO_KEYBOARD_EDITING.md) [Piano mouse](docs/PIANO_MOUSE_WORKFLOW.md) [Expression](docs/PIANO_NOTE_EXPRESSION.md) [Piano ranges](docs/PIANO_RANGES_AND_SNAP.md) [Scanner](docs/VST3_SCANNING.md) [Real VST3 QA](docs/REAL_VST3_VALIDATION.md) [MIDI routing](docs/PLUGIN_MIDI_ROUTING.md) [Route QA](docs/PLUGIN_MIDI_ROUTE_VALIDATION.md) [Linux editors](docs/LINUX_VST3_EDITORS.md) [Linux editor QA](docs/LINUX_VST3_EDITOR_VALIDATION.md) [Metronome](docs/METRONOME.md)\n"
         )
         archive = self.create()
         info = pkg.verify_package(archive)
@@ -252,6 +252,9 @@ class PackageTests(unittest.TestCase):
         self.assertIn("docs/REAL_VST3_VALIDATION.md", info["source_documents"])
         self.assertIn("docs/PLUGIN_MIDI_ROUTING.md", info["source_documents"])
         self.assertIn("docs/PLUGIN_MIDI_ROUTE_VALIDATION.md", info["source_documents"])
+        self.assertIn("docs/LINUX_VST3_EDITORS.md", info["source_documents"])
+        self.assertIn("docs/LINUX_VST3_EDITOR_VALIDATION.md", info["source_documents"])
+        self.assertIn("docs/METRONOME.md", info["source_documents"])
 
     def real_vst3_qa_payload(self):
         source = Path(__file__).resolve().parents[1]

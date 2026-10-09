@@ -1,12 +1,12 @@
 # 当前开发状态
 
-最后更新：2026-10-09 10:45 UTC。以当前源码、集成状态和实际执行结果为准。
+最后更新：2026-10-09 10:57 UTC。以当前源码、集成状态和实际执行结果为准。
 
 ## 当前目标与状态
 
 Citrus Studio 0.5.0-alpha.1 是 clean-room Rust DAW 开发版，尚未达到完整 FL-class 商用品质。Linux 优先开发与验证，Windows 持续检查兼容性。当前产品目标仍是「做一首歌 → 无损编辑 → 保存 → 找回缺失媒体 → 导出 → 重新打开」。
 
-- **当前 Linux 已验证源码：`5e8ff0f622077e6a3817dce122f03ec6e33c1ab1`。** Reviewed MIDI routing `e54a6e4` 与验收文档 `9f4a64b` 已集成，src/Cargo/vendor/tests 保持精确一致；完整 all-feature/all-target 为 **1131 application +15 helper +5 editor protocol +2 transport protocol**，no-default 为 **1127 application**，零失败/忽略；fmt、两套严格 Clippy、app/helper build、实际 helper smoke、Windows MSVC source cross-check 和 **187 Python tests** 通过，默认栈。新 Windows 执行结果须单独取得。
+- **当前 Linux 已验证源码：`fcf57b0e417cc18d7649577c68ef031d026bc6d5`。** Reviewed Linux native-editor `d4e4cd4` + `88c498c`、metronome `7be79ad` 已与路由整合；完整 all-feature/all-target 为 **1137 application +21 helper +5 editor protocol +2 transport protocol**，no-default 为 **1133 application**，零失败/忽略；fmt、两套严格 Clippy、app/helper build、实际 helper smoke、Windows MSVC source cross-check 和 **194 Python tests** 通过，包含四项真实 Unix helper descriptor 检查。另有七项 vendor run-loop 和一项 closed-stdout 测试通过，默认栈。新 Windows 执行结果须单独取得。
 - **真实 Mixer 电平表已集成：** `21989d0` + `ad565d7`，读取实际 post-fader stereo 图缓冲；Master 在 tanh 保护前测量，显示 dBFS、hold、CLIP/fault。稳定 track ID/graph/epoch 防错位，排队峰值、超时失效、点击 reset 和暂停时 live-MIDI 路径均有回归。已移除 UI 假 sine 动画。详见 [MIXER_METERING](docs/MIXER_METERING.md)。
 - **最新 Windows 源码/包 checkpoint：`9782e62a3d92b939476727ff6bbff7a3d3e7c42f`。** [Quality 37914386973](https://github.com/wrench1997/DAW/actions/runs/37914386973) 通过 **1102 application +13 helper +5 protocol Rust tests**、14 helper /61 editor Python tests 和全部源码门禁。Trusted fixture 的 interaction、dirty/state round-trip、focus/owner/lifecycle 与进程清理通过。前后 native paint 捕获失败、repaint comparison 跳过，整个 quality 仍失败；物理输入、真实 DPI/广泛厂商 GUI/设备验收未完成。
 - **最新完整 Preview 已通过。** 同一 `9782e62` 的 [Run 37914387094](https://github.com/wrench1997/DAW/actions/runs/37914387094) 通过 177 Python tests、上述 Rust tests、optimized static-CRT 构建、严格 vendor/license/PE/ZIP/hash 与隔离 PATH 的实际解压 helper smoke。上传跳过、artifacts 为0。Routing 新候选须独立执行 Windows 门禁；固定 gnullvm Release、原生桌面/设备和干净系统验收仍独立。
@@ -14,8 +14,8 @@ Citrus Studio 0.5.0-alpha.1 是 clean-room Rust DAW 开发版，尚未达到完�
 
 ## 已执行的验证与边界
 
-- Linux `cargo test --offline --locked --all-features --all-targets`：**1131 application +15 helper +5 editor protocol +2 transport protocol passed**；`--no-default-features --all-targets`：**1127 application passed**，均零失败/忽略。fmt、两套严格 Clippy 与 all-feature app/helper build 通过。依赖内部已有一处 upstream deprecated warning，未放宽项目 Clippy。
-- 精确合并源码的完整真实 app UI rerun：**107 harness entries 通过**（106 个 production-input flows + opt-in benchmark entry），输出 **45 个真实 Vulkan 画面**，PNG 与 readback RGB 完全相同。新实际 UI 回归通过 dropdown 选择 255、0 和 Off、history、停止时编辑限制与 source audio-monitor mute；已检查 Inspector pixels。所有此前 Piano、workspace、import/modal/native Inspector 流程均执行；未启用 benchmark timing。
+- Linux `cargo test --offline --locked --all-features --all-targets`：**1137 application +21 helper +5 editor protocol +2 transport protocol passed**；`--no-default-features --all-targets`：**1133 application passed**，均零失败/忽略。fmt、两套严格 Clippy 与 all-feature app/helper build 通过。依赖内部已有一处 upstream deprecated warning，未放宽项目 Clippy。
+- 精确合并源码的完整真实 app UI rerun：**108 harness entries 通过**（107 个 production-input flows + opt-in benchmark entry），输出 **46 个真实 Vulkan 画面**，PNG 与 readback RGB 完全相同。新节拍器的重复 pointer 开关、偏好重开、offline export/Project/history 边界与窄 toolbar 回归均运行；已检查 CLICK ON 与 minimum Playlist pixels。之前 MIDI ports、Piano、workspace、import/modal/native Inspector 流程均执行；未启用 benchmark timing。
 - 为实现严格 Linux 门禁，将仅 Windows backend 与测试使用的 MIDI helper 用 `cfg(any(windows, test))` 编译，并把 BTreeMap import 移到 Windows 模块。没有关闭 warning、删除测试或改动 Windows backend 行为；Linux 物理 MIDI backend 仍未实现。
 - Windows 历史完整门禁使用 Windows Server 2025 / MSVC / Rust 1.99，包含 all-features app/helper、严格 Clippy、helper smoke 和 no-default all-target check；测试数量按平台/feature 分别记录，不能互相代替。
 - 普通 helper smoke 只证实 JSON 协议、错误恢复、Shutdown/子进程回收；不加载真实插件。另有仅加载仓库 MIT 源构建 fixture 的 Windows native lifecycle/state/stdout harness，执行结果独立记录；Linux 返回 77（UNSUPPORTED / NOT VERIFIED）。Python 是开发验证工具，不是应用运行依赖。
@@ -23,12 +23,13 @@ Citrus Studio 0.5.0-alpha.1 是 clean-room Rust DAW 开发版，尚未达到完�
 
 ## 当前源码已经具备什么
 
-- [Windows VST3 native editors](docs/NATIVE_VST3_EDITORS.md)：helper-owned HWND、Open/Close、真实状态与 dirty revision、停播时 detach/flush 后保存状态和已有 parameter bases 的精确保留已接线，并通过 trusted Windows MIT fixture 的实际 stopped-state round-trip。自动化关联实例禁止 native Open，generic editing 与项目快照/拓扑冲突保留明确屏障；Linux/VST2 native editors 不支持。Paint 仍失败，真实 vendor/hardware GUI 独立待验收。
+- [Native VST3 editors](docs/NATIVE_VST3_EDITORS.md)：Windows helper-owned HWND 与新 [Linux standalone X11/XWayland-compatible windows](docs/LINUX_VST3_EDITORS.md) 共享停播 detach/flush、exact state/base capture、dirty revision 和 snapshot/automation guards。Linux trusted fixture 与真实 Surge/Stochas painted input/state restore 已通过；新构建 helper 的 SHA-256 与该 GUI QA 二进制完全相同。Surge 同时返回有限非零 PCM，但 resize 发生 **346.9ms processing-request stall**，没有通过 realtime continuity；详见 [native QA](docs/LINUX_VST3_EDITOR_VALIDATION.md)。Windows paint 仍失败，VST2/自动化实例 native Open 不支持，混合 Wayland、DPI 与硬件独立待验收。
 - 新发现并修复旧 Browser 基线中的并发问题：MIDI teardown 后排队的 generator 全 Project 候选可能覆盖刚完成的 WAV 导入。现由 import/native Open 共用 project snapshot-transition predicate；实际 app 回归覆盖成功/失败 replacement 和导入独立 Undo，消费结果后仍保留 generation/session 检查。此问题在本轮集成审查发现，不冒充早先已验证。
 
 - [FL-inspired 视觉](docs/FL_INSPIRED_NATIVE_THEME.md) 与[多窗口工作区](docs/MULTIWINDOW_WORKSPACE.md)：四个真实 editor 同时存在，拖移/缩放、关闭重开、Arrange/Cascade、最大化/还原、layout/focus/stacking 持久化已接线。新 [compact refinement](docs/COMPACT_WORKSPACE.md) 降低 chrome/row 密度、修复 reset geometry 并提供 release-only 边缘对齐；Piano 增加当前 session 的 select-all/Copy/Cut/Paste、typed bounded validation 和单步 Undo，文本框继续独占文字剪贴板。原生 OS clipboard round-trip、跨 DAW/MIDI interchange 和 OS-detached editors 仍未实现或未验收。
 
 - 本地素材浏览器：SOUNDS 已替换硬编码假条目/假预览，增加显式文件夹选择、有界单层 WAV 列表、搜索、Up/Refresh/Cancel 和复用真实 decoder 的 Playlist 导入；成功导入独立 Undo。实现与验收边界见 [Local sample browser](docs/LOCAL_SAMPLE_BROWSER.md)，最终集成源码 Linux no-default/all-target **901 项通过**，fmt、严格 Clippy 和 debug build 通过；该 Browser checkpoint 已通过 Windows 900 项测试；不宣称 audition、GUI/设备验收或完整素材库完成。
+- [播放节拍器](docs/METRONOME.md)：Record 旁 CLICK OFF/ON，旧偏好与新安装默认 Off；独立 app preference，不改变 Project/history/dirty。callback 原子开关停止新 click 并清除活动 envelope，保留 transport phase；已进入 PDC/FX/device 的声音可继续衰减。离线 WAV 不包含 click，实时 Master Capture 包含启用时实际渲染的 click；设备恢复/实听仍独立待验收。
 - 当前创作重点：[Piano keyboard](docs/PIANO_KEYBOARD_EDITING.md) 支持 Ctrl/Cmd+D deselect、Ctrl/Cmd+B phrase repeat、移动/半音/八度、quick quantize、discard length、ghost toggle；[Piano mouse](docs/PIANO_MOUSE_WORKFLOW.md) 支持按下即 Draw、临时 Ctrl selection、Shift clone、按键时序轴锁与 Draw length、继承触碰音符长度。active Channel/group、ghost exclusion、有限值/全局 ID/bounds 与按手势 Undo 均受保护。发现并修复旧流程中 held-pointer Undo/Redo 可能弹出更早 history 的风险；production undo()/redo() 在 release 前阻止操作。新 [Note expression](docs/PIANO_NOTE_EXPRESSION.md) 支持 Alt+wheel / Ctrl+Alt+wheel 相对力度与细调，边界采用共同 delta 保留强弱差；Inspector 与双击共享一套 draft-only 属性窗，单音已有模型字段、多音相对 pitch/velocity、Reset/Cancel/单步 Apply。Imported timing、frozen targets、stale identity、wheel tail、press-time modifier 和 modal/save/import 屏障均有回归；新 [Range/snap](docs/PIANO_RANGES_AND_SNAP.md) 支持独立 ruler edit range、range-width repeat、Off/fine/triplet local snap；paste 统一使用 viewport 左边所在四拍小节，不依赖 PAT/SONG playhead。窄 Piano 的 NOTE EDIT / SCALE 菜单保留 480×420 minimum 的 note/velocity 空间。Range 不写 Project/history，也不是 playback loop。
 - 编辑：Pattern/Piano Roll、Playlist 分组、Slip、Fade/Crossfade、手势 Undo/Redo 已接线。`playlist::create_audio_crossfade` 支持同轨、非嵌套重叠的两条 Audio Clips；`clip_fade.rs` 的等功率 envelope 由实时与离线路径复用。
 - 保存/恢复：blank project、Save/Save As、New/Open/Quit 未保存变更保护、插件状态屏障、同步后原子替换、autosave 和恢复/丢弃对话框已存在。不能把本轮媒体恢复工作描述成首次加入自动保存。

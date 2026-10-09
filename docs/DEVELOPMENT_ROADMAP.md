@@ -1,12 +1,12 @@
 # Development roadmap
 
-Updated: 2026-10-09 10:45 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-09 10:57 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
 - Development branch: `ci/windows-reliability-20261009`. Last fully validated Windows checkpoint: **`53494d518bfc4bad7304f25c127491a0c67d7cd8`**, including Browser, measured meters, v11 split fidelity, WAV/media/export controls and responsive UI QA. [Quality 37886481852](https://github.com/wrench1997/DAW/actions/runs/37886481852) passed **909 Rust tests**, 14 helper-harness tests and actual helper smoke. [Preview 37886481857](https://github.com/wrench1997/DAW/actions/runs/37886481857) passed optimized static-CRT builds, 57 Python tests, PE/import audit, ZIP/hash checks and extracted-helper smoke; no artifact upload.
 - Application **0.5.0-alpha.1** uses Project **v12**. v10/v11 inputs load with ports Off and source audio monitoring enabled; new saves need a v12 build. Preserve original projects before evaluation.
-- Current routing-integrated source **`5e8ff0f622077e6a3817dce122f03ec6e33c1ab1`** passes Linux **1,131 app +15 helper +5 editor protocol +2 transport protocol all-feature tests**, **1,127 no-default app tests**, fmt, both strict Clippy modes, app/helper build, ordinary helper smoke, Windows source cross-check and **187 Python tests** on default stack. Runtime/Cargo/vendor/tests exactly match reviewed `e54a6e4`; the 117-file real-plugin source binding also matches. New Windows execution remains required. Full current UI evidence is in [UI QA](HEADLESS_UI_QA.md).
+- Current Linux-editor/metronome integrated source **`fcf57b0e417cc18d7649577c68ef031d026bc6d5`** passes Linux **1,137 app +21 helper +5 editor protocol +2 transport protocol all-feature tests**, **1,133 no-default app tests**, fmt, both strict Clippy modes, build, ordinary helper smoke, Windows source cross-check and **194 Python tests** including four live descriptor checks. Seven vendor run-loop tests and one closed-stdout regression also pass. The helper is byte-identical to the native GUI-tested binary; metronome only changes app/audio behavior. New Windows execution remains required. Full current UI evidence is in [UI QA](HEADLESS_UI_QA.md).
 - At **`9782e62`**, Windows source gates passed 1,102 app +13 helper +5 protocol tests and [preview 37914387094](https://github.com/wrench1997/DAW/actions/runs/37914387094) passed the full optimized/provenance/package/extracted-helper lane with 177 Python tests, upload disabled. [Quality 37914386973](https://github.com/wrench1997/DAW/actions/runs/37914386973) passes trusted native stopped-state restore, interaction/lifecycle/protocol checks, but native paint still FAILS and repaint comparison is SKIP. Overall quality remains failed; wider physical-input/vendor/hardware acceptance remains open.
 - The integrated [simultaneous workspace](MULTIWINDOW_WORKSPACE.md) is a real shared-project, internal-window implementation. The latest requested [compact refinement](COMPACT_WORKSPACE.md) keeps useful task density, persistent migration, continuous held gestures and bounded release snapping; controlled unoptimized CPU comparisons do not establish a general speedup or displayed FPS. Focused Piano session-local note clipboard now has bounded data, semantic input/text isolation and explicit Undo. Offscreen frames validate app paint/layout rather than cloud X11 presentation, OS-detached editors, device audio or native VST3 editor paint.
 - Evidence levels stay distinct: **implemented/source-inspected**; **executed code tests** at an exact revision; **GUI/device scenario passed** with artifacts; **release candidate accepted** on the intended package; **commercial maturity** from broader workflow, compatibility and sustained-use coverage. None implies the next.
@@ -47,6 +47,17 @@ reactivation and overload/release safety. This is intentionally conservative:
 loop, stopped live chain or Harmony Blueprint qualification. The retained concurrent
 source-loss negative is unresolved, the old Off path has misses and a measured debug
 callback exceeds its period. Low-latency device acceptance remains a distinct gap.
+
+## Current Linux editor and metronome slice
+
+[Standalone Linux VST3 editors](LINUX_VST3_EDITORS.md) use the helper's X11 container,
+main-thread factory/frame run loop and existing state/snapshot guards. Actual fixture,
+Surge and Stochas paint/input/state restoration passed on Xfce/X11. [Native evidence](LINUX_VST3_EDITOR_VALIDATION.md)
+retains a 346.9 ms resize processing-request stall: functional native UI is established,
+realtime continuity is not. Mixed Wayland/XWayland, hardware and fractional DPI remain open.
+The separate [metronome control](METRONOME.md) defaults Off, persists without dirty/history
+changes, clears the active click source with a callback atomic and retains existing
+buffer/FX drain semantics. It does not fix general plugin scheduling or native GUI stalls.
 
 ## P0 / M1 — Edit a song without changing its meaning
 
@@ -125,7 +136,7 @@ The [local WAV Browser](LOCAL_SAMPLE_BROWSER.md) is integrated from reviewed sou
 
 ## P1 — Restricted Windows VST3 native-editor workflow
 
-[Native editor controls](NATIVE_VST3_EDITORS.md), helper-owned lifecycle and exact dirty/state/base capture are integrated. Automated instances are deliberately excluded; generic parameter/automation workflows remain available. Shared project-snapshot barriers prevent native Open and queued import from crossing replacement snapshots. Windows source-built MIT fixture execution now validates attach/resize/events/close/reopen, exact stopped-state round-trip and protocol stdout isolation on the production helper. Native paint remains failed, so complete native acceptance is still open. Fixtures are bounded test inputs, not broad vendor compatibility evidence. Linux native editors, physical input/DPI/audio/vendor testing and native gesture automation remain open.
+[Native editor controls](NATIVE_VST3_EDITORS.md), helper-owned lifecycle and exact dirty/state/base capture are integrated. Automated instances are deliberately excluded; generic parameter/automation workflows remain available. Shared project-snapshot barriers prevent native Open and queued import from crossing replacement snapshots. Windows source-built MIT fixture execution now validates attach/resize/events/close/reopen, exact stopped-state round-trip and protocol stdout isolation on the production helper. Windows native paint remains failed, so complete Windows native acceptance is still open. Fixtures are bounded test inputs, not broad vendor compatibility evidence. Linux standalone native paint/input/state is now functionally verified with the fixture and Surge/Stochas, with a material resize processing stall; mixed Wayland, broader physical input/DPI/audio/vendor coverage and native gesture automation remain open.
 
 ## Independent real-plugin usability and routing work
 

@@ -85,3 +85,23 @@ Still unverified: an actual Wayland DAW plus XWayland plugin session, compositor
 activation behavior, per-output/fractional DPI transitions, physical audio devices and
 sustained realtime playback under native GUI stress. This is standalone native UI/state
 functional acceptance on X11, with a concrete processing-stall limitation.
+
+
+## Integration identity and fresh source gates
+
+The combined app at `fcf57b0e417cc18d7649577c68ef031d026bc6d5` adds the separately
+reviewed metronome to this native-editor source. Cargo, plugin runtime, helper,
+vendor and fixture bytes still match `88c498c58794c8c7407149dac3a9629cd78bacae`.
+The fresh helper build is **byte-identical** to the above `9cc00c81…` GUI-tested
+executable. This preserves its exact component evidence without claiming a second
+native GUI run or validating the changed app's desktop/device behavior.
+
+Fresh integration passes 1,137 app +21 helper +5 editor protocol +2 transport
+protocol all-feature tests, 1,133 no-default tests, fmt, both strict Clippy modes,
+app/helper build, ordinary helper smoke and Windows MSVC source cross-check.
+All 194 Python tests pass, including four real descriptor-isolation cases against
+that fresh helper. Seven vendor run-loop and one closed-stdout regression were
+rerun from actual vendored source using an external test manifest, leaving original
+upstream manifests unchanged. The verified registry archive plus pinned patch
+reconstructs all 41 upstream files; original license/manifests remain byte-identical.
+Windows native execution and optimized packaging remain new-candidate CI gates.

@@ -194,7 +194,7 @@ or outside this slice. Full raw receipts, hashes and the source-only native harn
 are preserved with the independent real-VST3 validation deliverable.
 
 
-### Integrated source and portable evidence
+### Historical routing checkpoint and portable evidence
 
 Reviewed implementation `e54a6e49fe02b78ff299ce56dddd781925f7fe3c` plus acceptance
 docs `9f4a64b3ea10d4eec4eb451d51a67eea15a36c51` integrate as `5e8ff0f`. All
@@ -204,5 +204,6 @@ gates pass 1,131 app +15 helper +5 editor protocol +2 transport protocol tests,
 smoke, Windows source cross-check and 187 Python tests. Exact Windows execution
 remains a separate candidate gate. The [portable real-plugin receipt guide](PLUGIN_MIDI_ROUTE_VALIDATION.md)
 contains five-test results, all negative observations, import provenance and a
-plugin-free integrity/source-byte verifier. Linux native editors and a metronome
-toggle are separate changes and are not part of this checkpoint.
+plugin-free integrity/source-byte verifier. The later [Linux native editor](LINUX_VST3_EDITORS.md)
+and [metronome](METRONOME.md) slices are integrated separately; they do not reattribute
+these historical measurements to new app/audio/helper source.

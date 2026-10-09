@@ -331,3 +331,15 @@ and inspects the resulting Inspector image. Runtime capability is test-supplied;
 this UI flow does not load a plugin or claim a native plugin window. The separate
 [real production graph receipt](PLUGIN_MIDI_ROUTE_VALIDATION.md) owns plugin DSP/MIDI
 acceptance. All preceding pointer/modal/import/editor regressions run together.
+
+
+## Combined Linux-editor and metronome checkpoint
+
+Exact source `fcf57b0e417cc18d7649577c68ef031d026bc6d5` passes **108 complete harness
+entries**: 107 actual-input flows plus the opt-in benchmark with timing disabled.
+The exact tested no-default binary produced **46 genuine Vulkan frames**, with
+RGB-identical PNG conversion. The metronome-enabled and minimum Playlist/Mixer
+layouts were checked, together with all prior MIDI-port, Piano, workspace,
+Inspector/import and modal ownership flows. This harness does not open a vendor
+window: independent exact-helper Linux native GUI results are separately scoped
+in [native validation](LINUX_VST3_EDITOR_VALIDATION.md).

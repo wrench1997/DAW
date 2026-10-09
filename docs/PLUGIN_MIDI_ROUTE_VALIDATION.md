@@ -58,7 +58,7 @@ compiled probe or generated WAV are redistributed.
 
 The old Master-only release assertion was confounded by the host metronome. The
 corrected test observes the already-rendered instrument track; its prior failure
-and separate waveform explanation remain preserved. The metronome toggle is a
-separate feature, not silently included in this routing checkpoint. Historical
+and separate waveform explanation remain preserved. The later [metronome toggle](METRONOME.md) is a
+separate feature; these preserved measurements predate it. Historical
 [helper-only and scanner evidence](REAL_VST3_VALIDATION.md) retains its original
 scope rather than being relabeled as production routing acceptance.

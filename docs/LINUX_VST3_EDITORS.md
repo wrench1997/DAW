@@ -76,7 +76,8 @@ protects accidental logging, not hostile code in a native plugin.
 ## Verification boundaries
 
 The source-built Linux fixture and invocation are documented in
-[the fixture README](../tests/fixtures/vst3-editor/README.md). Missing display or
+the source checkout's `tests/fixtures/vst3-editor/README.md`. The developer-only
+fixture is excluded from runtime preview packages. Missing display or
 interactive opt-in is an explicit exit-77 unsupported result, never GUI acceptance.
 
 Keep evidence distinct:
