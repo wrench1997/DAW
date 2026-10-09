@@ -121,24 +121,72 @@ If a saved project has an unsupported/inconsistent port graph, loading disables 
 input ports safely and reports the exact reason; unrelated musical content remains.
 Runtime capability checks still run again after reopening and loading the devices.
 
-## Verification status
+## Verified source checkpoint
 
-Current focused implementation checks include deterministic generated-event/audio
-alignment at offsets 0/1/127 across callbacks 1/31/64/127/128/255/256/512/2048, with
-worker progress allowed **only between callbacks**; partial-quantum transport context
-and epoch reset; Off versus port 0; stable fan-out/reordering; graph/automation rejection;
-and persisted defaults/round-trip. These are not physical device or native GUI proof.
+Implementation source: `e54a6e49fe02b78ff299ce56dddd781925f7fe3c` (Linux).
+The following results belong to this exact code, not to a future combined build:
 
-Final production graph, headless UI, real Stochas/Surge and aggregate gate results are
-recorded with the reviewed source checkpoint; do not infer their completion from this
-implementation description. Controlled or paced Linux helper tests are distinct from
-physical audio-device realtime acceptance and from Windows/macOS Harmony acceptance.
-A concurrent-build paced run also observed a 2,048-frame source deadline loss;
-its failure receipt is retained. A large lookahead is not an unlimited CPU-overload
-guarantee. Active-route acceptance checks exact output counts and safety telemetry,
-not just a nonzero audio peak.
+- **1,131 application + 15 helper + 5 editor-protocol + 2 transport-protocol tests**
+  passed with all features; **1,127 application tests** passed without default
+  plugin features. The 13 production-worker routing cases cover fan-out, reverse
+  endpoint order, monitor mute, exclusive input, overflow/fault cleanup, bypassed
+  FX, unused output MIDI, oversized callbacks and fresh-epoch recovery.
+- Deterministic generated-event/audio alignment at offsets 0/1/127 across callbacks
+  1/31/64/127/128/255/256/512/2048, with worker progress allowed only between callbacks;
+  partial-quantum transport, same-epoch safety retention, Off versus 0, save/load and
+  incompatible-automation rejection are covered.
+- Both strict Clippy configurations, formatting, app/helper build, helper protocol
+  smoke, Windows MSVC **source check**, and 167 Python checks passed. This is not a
+  Windows execution or package-release result.
+- Actual headless Inspector input selected 1, scrolled to 255 and back to 0, selected
+  Off, cleared an unavailable Input to Off and changed independent audio-monitor
+  mute. The 1498×1248 offscreen Vulkan image was inspected; PNG RGB matched readback
+  exactly. No native plugin window, OS audio device or physical input was involved.
+
+### Genuine Linux VST3 acceptance
+
+The exact source also passed **5/5 independent real-plugin tests** using official
+Stochas 1.3.13, Surge XT 1.3.4 and Surge XT Effects 1.3.4. These use the production
+DspState/Timeline/PluginChain/helper path and a paced offline callback driver, with
+no wait inside a callback. They do not establish physical audio-device performance.
+
+- Active Stochas-to-Surge routing passed callbacks 128/256/512/2048 at 120 BPM and
+  512 at 60 BPM. Each two-second endpoint run submitted 750 Q128 blocks and consumed
+  734 exact plugin blocks plus 16 startup blocks, with zero additional fallback,
+  missed deadlines, queue gaps or latency drift in the final quiet run. MIDI spacing
+  followed actual tempo and the first source output arrived at frame 2176.
+- Surge Effects initially changed latency from 0 to 32 frames. The old graph stopped
+  safely. Stopped fresh-epoch reactivation rebuilt PDC and restored the real FX path
+  with 750 submissions/734 exact outputs/16 startup blocks per endpoint and no new
+  drift or misses. The source-to-synth-to-FX bridge minimum is 6528 frames plus that
+  32-frame plugin latency; this is intentionally high latency.
+- Stop/seek and a genuine blank-source restart produced no new routed notes. The
+  isolated Surge bus became exactly silent after its short release. Single held-note
+  and overlapping C4/C/E/G retrigger/chord cleanup also became exactly silent.
+- Deliberately unpaced 2048-frame callbacks caused a real sink deadline miss after
+  three callbacks. The published fault count became 1 and subsequent output was
+  exactly silent. Stop/new epoch cleared the fault and restored 375 submitted blocks,
+  359 exact outputs plus 16 startup blocks per endpoint, with no new missed deadline.
+
+### Retained limitations and negative observations
+
+**K16 routed-mode acceptance does not qualify the old Off-mode bridge.** The final
+paced Off baseline had 15 sink and 10 source deadline misses at callback 128. Its
+instrument output remained silent as expected, and every fallback was recorded;
+that case is functional routing-Off/accounting evidence, not a realtime pass.
+
+A prior concurrent-build run lost a source output batch at callback 2048. Its exact
+cause was not captured before the assertion; the negative receipt is retained.
+The same copied binary passed the quiet comparison. The separately instrumented
+unpaced overload above verifies deadline cleanup/recovery, but cannot retroactively
+prove the original loss's cause. There is no unlimited CPU-overload guarantee.
 
 Native no-note checks isolate the instrument bus: this build's existing Master
 metronome produces playback clicks even when the instrument is silent. Its peak
-must not be misreported as an unreleased plugin voice. A metronome control is a
-separate follow-up, not part of MIDI routing.
+must not be misreported as an unreleased plugin voice. A metronome control and a
+callback-safe general bridge are separate follow-ups.
+
+Harmony Blueprint, Windows/macOS execution, physical speakers/devices, native
+plugin UI, seamless loops and stopped live multi-plugin audition remain unverified
+or outside this slice. Full raw receipts, hashes and the source-only native harness
+are preserved with the independent real-VST3 validation deliverable.
