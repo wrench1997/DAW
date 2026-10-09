@@ -1,0 +1,115 @@
+
+// Independent acceptance harness only. Every backend below is a genuine installed
+// Stochas/Surge binary through PluginChain::spawn_identified. No mock factory is used.
+fn native_root() -> PathBuf { std::env::var_os("VST3_VALIDATION_ROOT").map(PathBuf::from).unwrap_or_else(||PathBuf::from("__VST3_VALIDATION_ROOT__")) }
+fn native_chain(instance:u64,bundle:&str,state:Vec<u8>) -> PluginChain {
+    let root=native_root();
+    let descriptor=crate::plugins::PluginDescriptor {
+        id:format!("native-validation:{bundle}"), name:bundle.into(),vendor:"Surge Synth Team".into(),
+        path:root.join("plugins").join(bundle),format:crate::plugins::PluginFormat::Vst3,
+        category:String::new(),is_instrument:bundle!="Surge XT Effects.vst3",verified:false,
+        vst3_metadata:None,scan_error:None,
+    };
+    let mut spec=crate::plugins::plugin_runtime::PluginLoadSpec::from_descriptor(descriptor);
+    spec.vst3_helper_path=Some(root.join("route-acceptance/bin/vst3-host-helper"));spec.initial_state=state;
+    let mut chain=PluginChain::spawn_identified(vec![(instance,spec)],PluginPrepareConfig{sample_rate:48000.0,max_block_frames:128}).unwrap();
+    let deadline=Instant::now()+Duration::from_secs(30);
+    loop {
+        if let Some(event)=chain.control.try_next_event(){match event {
+            crate::plugins::plugin_runtime::RuntimeEvent::SlotReady{..}=>{println!("native ready {event:?}");break},
+            crate::plugins::plugin_runtime::RuntimeEvent::SlotFault{..}=>panic!("native plugin load failed: {event:?}"),_=>{}
+        }}
+        assert!(Instant::now()<deadline,"native plugin load deadline");thread::sleep(Duration::from_millis(1));
+    }
+    while !chain.control.plugin_latency_snapshot().is_some_and(|s|s.slot_is_active(0)) {
+        assert!(Instant::now()<deadline,"native active latency snapshot deadline");thread::sleep(Duration::from_millis(1));
+    }
+    chain
+}
+fn native_project(bpm:f32,with_fx:bool,routed:bool)->Project {
+    let mut project=midi_route_project(true,false);project.tempo=bpm;project.song_length_beats=32.;
+    if !with_fx {project.mixer_insert_slots.clear();project.plugin_instances.retain(|p|p.id!=INSERT_INSTANCE);}
+    if !routed {for p in &mut project.plugin_instances{p.midi_ports=crate::plugin_midi_routing::PluginMidiPorts::default();}}
+    for p in &mut project.plugin_instances {
+        let (bundle,uid)=match p.id {
+            SOURCE_INSTANCE=>("Stochas.vst3","ABCDEF019182FAEB70726F6A53746F63"),
+            SINK_INSTANCE=>("Surge XT.vst3","ABCDEF019182FAEB566D624153675854"),
+            _=>("Surge XT Effects.vst3","ABCDEF019182FAEB566D624153465854"),
+        };p.path=native_root().join("plugins").join(bundle);p.uid=uid.into();p.name=bundle.into();p.vendor="Surge Synth Team".into();
+    }
+    project
+}
+fn native_wav(name:&str,audio:&[[f32;2]]) {
+    use std::io::Write;
+    let mut f=std::fs::File::create(native_root().join("route-acceptance/receipts").join(name)).unwrap();
+    let bytes=(audio.len()*4) as u32;f.write_all(b"RIFF").unwrap();f.write_all(&(36+bytes).to_le_bytes()).unwrap();f.write_all(b"WAVEfmt ").unwrap();f.write_all(&16u32.to_le_bytes()).unwrap();f.write_all(&1u16.to_le_bytes()).unwrap();f.write_all(&2u16.to_le_bytes()).unwrap();f.write_all(&48000u32.to_le_bytes()).unwrap();f.write_all(&192000u32.to_le_bytes()).unwrap();f.write_all(&4u16.to_le_bytes()).unwrap();f.write_all(&16u16.to_le_bytes()).unwrap();f.write_all(b"data").unwrap();f.write_all(&bytes.to_le_bytes()).unwrap();
+    for frame in audio {for sample in frame {f.write_all(&((sample.clamp(-1.,1.)*32767.)as i16).to_le_bytes()).unwrap();}}
+}
+impl NativeGraphFixture {
+    // No waits inside or between sub-quanta of this callback; only the caller paces
+    // the device-callback boundary. PluginChain worker threads remain asynchronous.
+    fn render_native_callback(&mut self,frames:usize)->(Vec<[f32;2]>,Vec<(u64,[u8;3])>) {
+        let base=self.transport.device_frame;let mut output=Vec::with_capacity(frames);
+        self.dsp.set_device_frame(base);
+        self.dsp.set_callback_transport_boundary(MidiRecordClockAnchor{device_frame:base,timeline_frame:self.transport.timeline_frame,transport_epoch:self.transport.epoch,loop_count:self.transport.loop_count},self.transport.request.playing);
+        let callback_started=Instant::now();
+        render_transport_chunk(&mut self.dsp,&self.status,&self.mailbox,&mut self.transport,frames,|_,block|output.extend_from_slice(block));
+        self.callback_max_runtime_us=self.callback_max_runtime_us.max(callback_started.elapsed().as_micros());
+        assert!(frames<=MAX_MIXER_BLOCK_FRAMES);
+        if self.dsp.meter_graph_rendered { self.sink_audio.extend_from_slice(&self.dsp.track_block[2*MAX_MIXER_BLOCK_FRAMES..2*MAX_MIXER_BLOCK_FRAMES+frames]); }
+        else {self.sink_audio.extend(std::iter::repeat_n([0.;2],frames));}
+        let source=self.dsp.find_generator_slot(SOURCE_CHANNEL).unwrap();let batch=self.dsp.generator_endpoints[source].as_ref().unwrap().endpoint.adapter.midi_output();
+        if self.check_source_output && batch.lost {
+            let report=serde_json::json!({"device_frame":base,"frames":frames,"epoch":self.transport.epoch,"source_midi_len":batch.len,"source_audio_lost":batch.audio_lost,"route_fault":self.dsp.midi_route_faulted,"published_faulted_destinations":self.status.plugin_midi_faulted_destinations.load(Ordering::Relaxed),"worker_stats":self.controls.iter().map(|c|format!("{:?}",c.stats())).collect::<Vec<_>>(),"adapter_stats":self.dsp.generator_endpoints.iter().flatten().map(|s|format!("{:?}",s.endpoint.stats())).collect::<Vec<_>>()});
+            println!("NATIVE_UNEXPECTED_MIDI_LOSS {report}");std::fs::write(native_root().join("route-acceptance/receipts/unexpected-midi-loss.json"),serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+            panic!("source MIDI batch lost");
+        }
+        let events=batch.events[..batch.len].iter().map(|e|(base+u64::from(e.message.sample_offset),e.message.data)).collect();
+        (output,events)
+    }
+    fn render_native_paced(&mut self,frames:usize,partition:usize)->(Vec<[f32;2]>,Vec<(u64,[u8;3])>,u128) {
+        let mut output=Vec::with_capacity(frames);let mut events=Vec::new();let mut deadline=Instant::now();let mut max_late=0;let mut callbacks=0;
+        while output.len()<frames {
+            let n=partition.min(frames-output.len());let (a,e)=self.render_native_callback(n);output.extend(a);events.extend(e);callbacks+=1;
+            deadline+=Duration::from_secs_f64(n as f64/48000.0);
+            // Bounded positive jitter once per seven callbacks, with no worker polling.
+            let target=deadline+if callbacks%7==0 {Duration::from_micros(300)}else{Duration::ZERO};
+            let now=Instant::now();if target>now {thread::sleep(target-now)}else{max_late=max_late.max((now-target).as_micros());}
+        }
+        self.wait_workers();(output,events,max_late)
+    }
+}
+#[test]
+fn native_vst3_routed_graph_acceptance() {
+    let mut reports=Vec::new();
+    for (bpm,partition,with_fx,routed) in [(120.,128,false,true),(120.,256,false,true),(120.,512,false,true),(120.,2048,false,true),(60.,512,false,true),(120.,128,false,false),(120.,512,true,true)] {
+        if with_fx && std::env::var_os("NATIVE_SKIP_FX").is_some(){continue;}
+        let label=format!("bpm{}_cb{}_fx{}_route{}",bpm as u32,partition,with_fx,routed);
+        if let Ok(filter)=std::env::var("NATIVE_ROUTE_CASE") {if !label.contains(&filter){continue;}}
+        let mut f=NativeGraphFixture::new_native(native_project(bpm,with_fx,routed),true,with_fx);f.activate(2,0);
+        let (audio,events,max_late)=f.render_native_paced(96000,partition);println!("NATIVE_CASE_FINISHED {label} routefault={} executionfail={} stats={:?}",f.dsp.midi_route_faulted,f.dsp.timeline_execution_failures,f.controls.iter().map(|c|c.stats()).collect::<Vec<_>>());
+        if f.dsp.midi_route_faulted!=0 || f.dsp.timeline_execution_failures!=0 {
+            native_wav(&format!("faulted-{label}.wav"),&audio);
+            let failure=serde_json::json!({"case":label,"route_fault":f.dsp.midi_route_faulted,"timeline_execution_failures":f.dsp.timeline_execution_failures,"worker_stats":f.controls.iter().map(|c|format!("{:?}",c.stats())).collect::<Vec<_>>(),"adapter_stats":f.dsp.generator_endpoints.iter().flatten().map(|s|format!("{:?}",s.endpoint.stats())).chain(f.dsp.insert_endpoints.iter().flatten().map(|s|format!("{:?}",s.endpoint.stats()))).collect::<Vec<_>>()});
+            std::fs::write(native_root().join("route-acceptance/receipts").join(format!("failure-{label}.json")),serde_json::to_vec_pretty(&failure).unwrap()).unwrap();
+        }
+        if routed {f.assert_clean();}else{
+            assert_eq!(f.dsp.midi_route_faulted,0);assert_eq!(f.dsp.timeline_execution_failures,0);
+            for c in &f.controls {let a=c.stats();assert_eq!(a.faults,0);assert_eq!(a.latency_drift_blocks,0);assert_eq!(a.input_overflows,0);assert_eq!(a.output_overflows,0);}
+        }
+        let peak=audio.iter().flatten().fold(0f32,|p,x|{assert!(x.is_finite());p.max(x.abs())});let energy:f64=audio.iter().flatten().map(|x|f64::from(*x)*f64::from(*x)).sum();let rms=(energy/(audio.len()*2)as f64).sqrt();
+        let first=audio.iter().position(|a|a[0].abs().max(a[1].abs())>1e-6);
+        let onsets:Vec<_>=events.iter().filter(|(_,d)|d[0]&0xf0==0x90&&d[2]>0).copied().collect();
+        if routed {
+            assert!(rms>0.001,"no genuine routed instrument audio {label}: {rms}");assert!(onsets.len()>=6,"no real source notes {label}");
+            assert_eq!(onsets.iter().take(4).map(|(_,d)|d[1]).collect::<Vec<_>>(),vec![60,64,67,60]);
+            let period=48000.*60./f64::from(bpm)/4.;for pair in onsets.windows(2).skip(1) {assert!(((pair[1].0-pair[0].0)as f64-period).abs()<=1.0,"wrong MIDI tempo {label}: {pair:?}");}
+            let minimum=2176*(if with_fx{3}else{2});assert!(first.unwrap()>=minimum,"audio appeared before routed bridge");assert!(first.unwrap()<minimum+512,"unexpected route onset {label}: {first:?}");
+        } else {assert!(f.sink_audio.iter().flatten().all(|x|*x==0.0),"MIDI port Off sink baseline should be silent; master includes metronome");}
+        let mut adapter_receipts=Vec::new();
+        for (name,endpoint) in f.dsp.generator_endpoints.iter().flatten().map(|s|(format!("generator-{}",s.channel_id),&s.endpoint)).chain(f.dsp.insert_endpoints.iter().enumerate().filter_map(|(i,s)|s.as_ref().map(|s|(format!("insert-{i}"),&s.endpoint)))) {
+            let a=endpoint.stats();let expected_startup=if routed{16}else{1};
+            let legacy_misses=if routed{0}else{f.controls[adapter_receipts.len()].stats().deadline_misses};
+            assert_eq!(a.completed_quanta,96000/128,"{label} {name} quantum count");
+            assert_eq!(a.submitted_quanta,a.completed_quanta,"{label} {name} submissions");
+            assert_eq!(a.delayed_dry_quanta,expected_startup+legacy_misses,"{label} {name} nonstartup fallback");

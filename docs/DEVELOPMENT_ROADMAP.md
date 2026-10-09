@@ -1,6 +1,6 @@
 # Development roadmap
 
-Updated: 2026-10-09 12:30 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-09 12:52 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
@@ -11,7 +11,7 @@ Updated: 2026-10-09 12:30 UTC. Current priorities are detailed Piano composition
 - The integrated [simultaneous workspace](MULTIWINDOW_WORKSPACE.md) is a real shared-project, internal-window implementation. The latest requested [compact refinement](COMPACT_WORKSPACE.md) keeps useful task density, persistent migration, continuous held gestures and bounded release snapping; controlled unoptimized CPU comparisons do not establish a general speedup or displayed FPS. Focused Piano session-local note clipboard now has bounded data, semantic input/text isolation and explicit Undo. Offscreen frames validate app paint/layout rather than cloud X11 presentation, OS-detached editors, device audio or native VST3 editor paint.
 - Evidence levels stay distinct: **implemented/source-inspected**; **executed code tests** at an exact revision; **GUI/device scenario passed** with artifacts; **release candidate accepted** on the intended package; **commercial maturity** from broader workflow, compatibility and sustained-use coverage. None implies the next.
 
-- Follow-on guarded state source **`60134a5`** is locally integrated from reviewed `c056dc5`. It rejects used/editor-opened exact Surge XT 1.3.4 before helper detachment or mutation, with fresh-instance/native rejection evidence. Combined gates and new Windows execution are pending. The [state report](PLUGIN_STATE_RESTORE_LIMITS.md) retains previous failures, the legacy Admin caller limitation and absence of silent settlement. Callback timing changes are excluded.
+- Follow-on guarded state source **`60134a5`** is locally integrated from reviewed `c056dc5`. It rejects used/editor-opened exact Surge XT 1.3.4 before helper detachment or mutation, with fresh-instance/native rejection evidence. Combined gates and new Windows execution are pending. The [state report](PLUGIN_STATE_RESTORE_LIMITS.md) retains previous failures, the legacy Admin caller limitation and absence of silent settlement. It now combines with reviewed timing source at **4fdfbc2**, whose fresh aggregate gates now pass1,170 app +22 helper +5 editor protocol +2 transport protocol,1,166 core,207 Python,276 available vendor tests (one named missing-fixture exclusion),26 doctests, both strict Clippy modes and both MSVC source profiles. Combined default2048 four-case delivery and fresh-state checks now pass; new Windows execution remains pending.
 
 ## Current product priority — detailed Piano melody composition
 
@@ -43,12 +43,20 @@ MIDI interchange, playback-range looping and broader commercial workflow remain 
 exclusive-input instruments during constant-tempo playback, with stopped-only route
 edits, endpoint/epoch attestation, bounded event quotas and latched failure cleanup.
 The [separate source-pinned real-plugin receipt](PLUGIN_MIDI_ROUTE_VALIDATION.md)
-passes five production-graph tests with Stochas/Surge/Effects, including latency
-reactivation and overload/release safety. This is intentionally conservative:
-4,352 bridge frames /90.667 ms minimum for source plus synth at 48 kHz; no seamless
+passed five historical e54a6e4 graph tests with Stochas/Surge/Effects, including
+latency reactivation and overload/release safety. That historical plan used
+4,352 bridge frames /90.667 ms for source plus synth at48kHz; no seamless
 loop, stopped live chain or Harmony Blueprint qualification. The retained concurrent
 source-loss negative is unresolved, the old Off path has misses and a measured debug
-callback exceeds its period. Low-latency device acceptance remains a distinct gap.
+callback exceeds its period. The new [common timing plan](PLUGIN_TIMING.md) uses
+explicit callback ceiling B: default2048 adds2432 frames per physical worker at48kHz,
+or4864 frames /101.3ms for source plus synth, before reported/downstream latency.
+Settings marks128/256/512 Experimental. Prior exact timing-only debug runs passed
+13/16 quiet and10/16 under controlled four-thread load; all four2048 combinations
+passed both with real stopped Retry and coherent PDC/events, while smaller-profile
+deadlines and longer cleanup/retry negatives remain. Callback admission, visible
+faults and stopped configuration/state transactions improve correctness, not helper
+GUI/DSP isolation or established low-latency/device reliability.
 
 ## Current Linux editor and metronome slice
 
@@ -74,7 +82,9 @@ Later component volume is correct; no permanent-volume-loss claim is warranted.
 Content/container sizing, native resize stalls and general state consistency remain
 open. The follow-on exact-class/version guard refuses used/editor-opened loads
 before helper mutation or detachment. It does not make reused restoration succeed;
-stronger replacement retention and actual concurrent processing remain separate work.
+the newly integrated timing configuration path adds tagged live-state capture and
+prevalidated replacement retention. Exact combined verification is pending; helper
+GUI/DSP concurrent processing remains separate work.
 
 ## P0 / M1 — Edit a song without changing its meaning
 

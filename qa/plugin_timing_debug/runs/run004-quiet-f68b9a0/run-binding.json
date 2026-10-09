@@ -1,0 +1,10 @@
+{
+  "started_utc": "2026-10-09T12:34:44.377342+00:00",
+  "test_sha256": "a194982749533b6a1f1f0a98d62da2714e788bb52e291f6e38db88bff7c5df37",
+  "helper_sha256": "9cc00c81f07dc88c7514c8fb2b016cd1f080803fefbb281e76cc43b0a16a3ffd",
+  "source_manifest_sha256": "f8275d4e18a8b85342efd2269b6192ffe9b088f08852307fe1060b231c96bda3",
+  "source_commit": "f68b9a0210e95f1d26ec3c67ca0e389bcdfa798b",
+  "profile_filter": null,
+  "cpu_load_threads": "0",
+  "declared_environment": "Coordinated CPU-quiet window; callback owner aggregate tests complete, integration builds paused, native GUI tests complete; 48k monotonic paced callbacks with 300us perturbation every seventh callback"
+}

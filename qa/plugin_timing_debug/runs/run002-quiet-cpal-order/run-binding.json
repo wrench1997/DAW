@@ -1,0 +1,10 @@
+{
+  "started_utc": "2026-10-09T12:12:21.381572+00:00",
+  "test_sha256": "25c118b94baf88020e5cddc9d01f67d07fc789fd9c61bde87e0fd8f8a9ab5d96",
+  "helper_sha256": "9cc00c81f07dc88c7514c8fb2b016cd1f080803fefbb281e76cc43b0a16a3ffd",
+  "source_manifest_sha256": "0ad560a4c27437f7303c3d53b2b8fec55ce304d026d7d1d03b89f450ddaf4c86",
+  "source_commit": "f164e91fb989f0475d4d6038fbe7fd8008b1cd49",
+  "profile_filter": null,
+  "cpu_load_threads": "0",
+  "declared_environment": "Quiet window retained by root; all cooperating build/test/GUI workers paused. Corrected full CPAL pre-admission PDC/activation order."
+}

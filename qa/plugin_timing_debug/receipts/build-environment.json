@@ -1,0 +1,18 @@
+{
+  "rustc_verbose_version": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+  "selected_environment": {
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_TARGET_DIR": "__CARGO_TARGET_DIR__",
+    "PKG_CONFIG_PATH": "__ALSA_PKG_CONFIG_PATH__",
+    "LIBRARY_PATH": "__LINKER_LIBRARY_PATH__",
+    "TMPDIR": "__BUILD_TMPDIR__"
+  },
+  "cargo_flags": [
+    "--offline",
+    "--locked",
+    "--all-features"
+  ],
+  "scope": "source-linked test binary plus actual production helper"
+}

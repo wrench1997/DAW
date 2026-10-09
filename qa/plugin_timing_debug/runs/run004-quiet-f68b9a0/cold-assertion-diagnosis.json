@@ -1,0 +1,6 @@
+{
+  "source_commit": "f68b9a0210e95f1d26ec3c67ca0e389bcdfa798b",
+  "production_late_drift_fix": "PASS: all B2048 cold cases latch LatencyDrift at FX13003 epoch2 sequence0. No submission is necessary to classify the changed coherent native latency identity.",
+  "harness_setup_correction": "Cold fence assertion must inspect coherent native snapshot total_plugin_latency_samples==32, not worker stats.latency_samples==K*128+32. The latter includes lookahead only after worker consumes an audio block. No audio block is submitted in the newly correct early-fault case.",
+  "scope": "This correction changes only cold setup expectations. Real paced DeadlineMiss outcomes remain failed."
+}

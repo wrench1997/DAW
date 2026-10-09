@@ -1,0 +1,7 @@
+{
+  "/sys/fs/cgroup/cpu.max": "[Errno 2] No such file or directory: '/sys/fs/cgroup/cpu.max'",
+  "/sys/fs/cgroup/cpu.stat": "[Errno 2] No such file or directory: '/sys/fs/cgroup/cpu.stat'",
+  "/sys/fs/cgroup/memory.max": "[Errno 2] No such file or directory: '/sys/fs/cgroup/memory.max'",
+  "/sys/fs/cgroup/memory.current": "[Errno 2] No such file or directory: '/sys/fs/cgroup/memory.current'",
+  "/proc/loadavg": "0.53 1.19 1.34 1/654 10"
+}

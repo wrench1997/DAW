@@ -1,0 +1,21 @@
+{
+  "after_component_volume": "<volume type=\"2\" value=\"-6.27905654907227\" />",
+  "before_component_volume": "<volume type=\"2\" value=\"-6.27905654907227\" />",
+  "case": "fresh Surge loaded with captured UI state before first Process",
+  "controller_after": 0.8691863417625427,
+  "controller_before": 0.8691863417625427,
+  "expected_normalized": 0.8691863417625427,
+  "first_nonzero": 16,
+  "first_note_frames": 1024,
+  "first_note_peak": 0.21964623034000397,
+  "input_component_volume": "<volume type=\"2\" value=\"-6.27905654907227\" />",
+  "input_state_sha256": "104bc8ab0945eda2b2873ac43da12dfff67f1e4cbb4863b6827a220740d35a42",
+  "one_note_on_only": [
+    144,
+    60,
+    100
+  ],
+  "parameter_id": 1336600346,
+  "scope": "actual production PluginChain/backend state and first-note proof, not a paced graph or GUI test",
+  "worker_stats": "BridgeStats { current_epoch: 1, epoch_resets: 0, worker_epoch_resets: 0, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 0, reset_faults: 0, callback_sequences: 8, submitted: 8, completed: 8, input_overflows: 0, input_gaps: 0, deadline_misses: 0, output_overflows: 0, output_loss_epoch: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 128, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }"
+}

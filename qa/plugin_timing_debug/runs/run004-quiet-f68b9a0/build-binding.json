@@ -1,0 +1,8 @@
+{
+  "source_manifest_sha256": "f8275d4e18a8b85342efd2269b6192ffe9b088f08852307fe1060b231c96bda3",
+  "build_script_sha256": "7b40f958fabad2b5c30c58c587c5cdaa0c6a7b05aed3b12c3c16b9711df6e973",
+  "binaries": {
+    "native-route-tests": "a194982749533b6a1f1f0a98d62da2714e788bb52e291f6e38db88bff7c5df37",
+    "vst3-host-helper": "9cc00c81f07dc88c7514c8fb2b016cd1f080803fefbb281e76cc43b0a16a3ffd"
+  }
+}

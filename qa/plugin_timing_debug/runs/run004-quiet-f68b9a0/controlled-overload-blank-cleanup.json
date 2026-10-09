@@ -1,0 +1,157 @@
+{
+  "case": "overload cleanup with genuinely blank source",
+  "diagnostic": {
+    "adapter_stats": [
+      "FixedQuantumStats { callbacks: 272, callback_frames: 139008, completed_quanta: 1086, submitted_quanta: 1085, bridge_gaps: 1, plugin_output_quanta: 1069, delayed_dry_quanta: 17, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 17, unaligned_delayed_dry_samples: 2176, startup_silence_frames: 2816, epoch_resets: 5, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 640, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 54, frame_events_staged: 54, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+      "FixedQuantumStats { callbacks: 272, callback_frames: 139008, completed_quanta: 1086, submitted_quanta: 1085, bridge_gaps: 1, plugin_output_quanta: 1069, delayed_dry_quanta: 17, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 17, unaligned_delayed_dry_samples: 2176, startup_silence_frames: 2816, epoch_resets: 5, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 640, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 48, frame_events_staged: 48, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }",
+      "FixedQuantumStats { callbacks: 272, callback_frames: 139008, completed_quanta: 1086, submitted_quanta: 1085, bridge_gaps: 1, plugin_output_quanta: 1069, delayed_dry_quanta: 17, latency_drift_quanta: 0, latency_drift_frames: 0, unaligned_delayed_dry_quanta: 17, unaligned_delayed_dry_samples: 2176, startup_silence_frames: 2816, epoch_resets: 5, partial_input_frames_discarded: 0, output_frames_discarded_on_reset: 640, output_underflow_frames: 0, output_overflow_frames: 0, frame_events_received: 48, frame_events_staged: 48, frame_event_overflows: 0, invalid_frame_events: 0, endpoint_event_rejections: 0, events_dropped_on_gap: 0, events_dropped_on_epoch: 0, parameter_events_quantized_to_block_start: 0, non_finite_input_samples: 0, non_finite_output_samples: 0, invalid_callbacks: 0 }"
+    ],
+    "binding_exact": false,
+    "callback_runtime_max_us": 7471,
+    "captured_generator_identities": [
+      "MixerGraphGeneratorLatencyIdentity { endpoint_index: 0, runtime_slot: 2, channel_id: 22, endpoint_id: 12002, plugin_instance_id: 2002, snapshot: PluginEndpointSnapshot { manifest: PluginEndpointManifest { slot_count: 1, instance_ids: [Some(2002), None, None, None, None, None, None, None, None, None], identified: true }, latency: PluginLatencySnapshot { revision: 1, active_mask: 1, slot_latency_samples: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], total_plugin_latency_samples: 0, tail_samples: 96000 } } }",
+      "MixerGraphGeneratorLatencyIdentity { endpoint_index: 1, runtime_slot: 1, channel_id: 11, endpoint_id: 11001, plugin_instance_id: 1001, snapshot: PluginEndpointSnapshot { manifest: PluginEndpointManifest { slot_count: 1, instance_ids: [Some(1001), None, None, None, None, None, None, None, None, None], identified: true }, latency: PluginLatencySnapshot { revision: 1, active_mask: 1, slot_latency_samples: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], total_plugin_latency_samples: 0, tail_samples: 0 } } }"
+    ],
+    "captured_insert_identities": [
+      "MixerGraphInsertLatencyIdentity { runtime_slot: 2, endpoint_id: 13003, snapshot: PluginEndpointSnapshot { manifest: PluginEndpointManifest { slot_count: 1, instance_ids: [Some(3003), None, None, None, None, None, None, None, None, None], identified: true }, latency: PluginLatencySnapshot { revision: 2, active_mask: 1, slot_latency_samples: [32, 0, 0, 0, 0, 0, 0, 0, 0, 0], total_plugin_latency_samples: 32, tail_samples: 96000 } } }"
+    ],
+    "deadline_misses": 3,
+    "epoch": 6,
+    "fault": {
+      "callback_budget_frames": 512,
+      "endpoint_id": 12002,
+      "epoch": 6,
+      "expected_sequence": 950,
+      "lookahead_quanta": 6,
+      "raw_callback_frames": 512,
+      "reason": "DeadlineMiss",
+      "timing_revision": 4
+    },
+    "fault_count": 3,
+    "health": "Faulted",
+    "input_losses": 0,
+    "mixer_graph_identity": "Some(MixerGraphBindingIdentity { revision: 71, epoch: 6, fingerprint: 14424774209552329278 })",
+    "output_losses": 0,
+    "paced_callbacks": 401,
+    "paced_start_lateness_max_us": 501,
+    "pdc_samples": 2720,
+    "playing": false,
+    "plugin_topology_replan_pending": false,
+    "plugin_topology_revision": 0,
+    "prepared_plan": {
+      "bridge_latency_frames": 896,
+      "budget": 512,
+      "guard_quanta": 2,
+      "lookahead_quanta": 6,
+      "revision": 4,
+      "sample_rate": 48000
+    },
+    "processing": "PluginProcessingSnapshot { plan: PreparedPluginTimingPlan { revision: 4, sample_rate: 48000, callback_budget_frames: 512, guard_quanta: 2, lookahead_quanta: 6, bridge_latency_frames: 896 }, health: Faulted, fault: Some(PluginProcessingFault { endpoint_id: 12002, epoch: 6, expected_sequence: 950, raw_callback_frames: 512, callback_budget_frames: 512, lookahead_quanta: 6, timing_revision: 4, reason: DeadlineMiss }), fault_count: 3, recovered_count: 2, deadline_misses: 3, input_losses: 0, output_losses: 0 }",
+    "processing_suspended": true,
+    "published_processing": "PluginProcessingSnapshot { plan: PreparedPluginTimingPlan { revision: 4, sample_rate: 48000, callback_budget_frames: 512, guard_quanta: 2, lookahead_quanta: 6, bridge_latency_frames: 896 }, health: Faulted, fault: Some(PluginProcessingFault { endpoint_id: 12002, epoch: 6, expected_sequence: 950, raw_callback_frames: 512, callback_budget_frames: 512, lookahead_quanta: 6, timing_revision: 4, reason: DeadlineMiss }), fault_count: 3, recovered_count: 2, deadline_misses: 3, input_losses: 0, output_losses: 0 }",
+    "recovered_count": 2,
+    "requested_timing_revision": 4,
+    "timeline_channel_epoch": null,
+    "timeline_channel_revision": null,
+    "timeline_execution_failures": 3,
+    "timeline_runtime_epoch": 6,
+    "timeline_runtime_revision": 71,
+    "timing": "PreparedPluginTimingPlan { revision: 4, sample_rate: 48000, callback_budget_frames: 512, guard_quanta: 2, lookahead_quanta: 6, bridge_latency_frames: 896 }",
+    "transport_epoch": 6,
+    "worker_latency_snapshots": [
+      "Some(PluginLatencySnapshot { revision: 1, active_mask: 1, slot_latency_samples: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], total_plugin_latency_samples: 0, tail_samples: 96000 })",
+      "Some(PluginLatencySnapshot { revision: 1, active_mask: 1, slot_latency_samples: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0], total_plugin_latency_samples: 0, tail_samples: 0 })",
+      "Some(PluginLatencySnapshot { revision: 2, active_mask: 1, slot_latency_samples: [32, 0, 0, 0, 0, 0, 0, 0, 0, 0], total_plugin_latency_samples: 32, tail_samples: 96000 })"
+    ],
+    "worker_stats": [
+      "BridgeStats { current_epoch: 6, epoch_resets: 5, worker_epoch_resets: 5, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 10, reset_faults: 0, callback_sequences: 1085, submitted: 1085, completed: 1085, input_overflows: 0, input_gaps: 0, deadline_misses: 1, output_overflows: 0, output_loss_epoch: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 768, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }",
+      "BridgeStats { current_epoch: 6, epoch_resets: 5, worker_epoch_resets: 5, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 10, reset_faults: 0, callback_sequences: 1085, submitted: 1085, completed: 1085, input_overflows: 0, input_gaps: 0, deadline_misses: 1, output_overflows: 0, output_loss_epoch: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 0, latency_drift_outputs: 0, latency_samples: 768, tail_samples: 0, detached_workers: 0, shutdown_timeouts: 0, stopped: false }",
+      "BridgeStats { current_epoch: 6, epoch_resets: 5, worker_epoch_resets: 5, dropped_old_epoch_inputs: 0, dropped_old_epoch_outputs: 10, reset_faults: 0, callback_sequences: 1085, submitted: 1085, completed: 1085, input_overflows: 0, input_gaps: 0, deadline_misses: 1, output_overflows: 0, output_loss_epoch: 0, output_too_small: 0, frame_mismatches: 0, stale_outputs: 0, future_outputs_held: 0, future_output_overflows: 0, rt_overflows: 0, inline_event_overflows: 0, dropped_rt_events: 0, admin_overflows: 0, event_overflows: 0, faults: 0, latency_drift_blocks: 4, latency_drift_outputs: 0, latency_samples: 800, tail_samples: 96000, detached_workers: 0, shutdown_timeouts: 0, stopped: false }"
+    ]
+  },
+  "last_second_sink_peak": 0.0,
+  "observation_seconds": 4,
+  "quarter_second_sink_stats": [
+    {
+      "peak": 0.1330401450395584,
+      "quarter_second": 0,
+      "rms": 0.03298025774131888
+    },
+    {
+      "peak": 0.12935562431812286,
+      "quarter_second": 1,
+      "rms": 0.014255430401520027
+    },
+    {
+      "peak": 0.017413273453712463,
+      "quarter_second": 2,
+      "rms": 0.0017597407984041927
+    },
+    {
+      "peak": 0.002126353560015559,
+      "quarter_second": 3,
+      "rms": 0.0002183757222425091
+    },
+    {
+      "peak": 0.00023964943829923868,
+      "quarter_second": 4,
+      "rms": 0.000027172759823041115
+    },
+    {
+      "peak": 0.0000250243265327299,
+      "quarter_second": 5,
+      "rms": 3.3892608950444138e-6
+    },
+    {
+      "peak": 2.7685694021784e-6,
+      "quarter_second": 6,
+      "rms": 4.237680993701265e-7
+    },
+    {
+      "peak": 3.8933475821067987e-7,
+      "quarter_second": 7,
+      "rms": 5.3069946109609426e-8
+    },
+    {
+      "peak": 5.073850672943081e-8,
+      "quarter_second": 8,
+      "rms": 6.64515267339008e-9
+    },
+    {
+      "peak": 6.271799080082019e-9,
+      "quarter_second": 9,
+      "rms": 8.305373432067099e-10
+    },
+    {
+      "peak": 7.112923583463271e-10,
+      "quarter_second": 10,
+      "rms": 1.0055968813865052e-10
+    },
+    {
+      "peak": 0.0,
+      "quarter_second": 11,
+      "rms": 0.0
+    },
+    {
+      "peak": 0.0,
+      "quarter_second": 12,
+      "rms": 0.0
+    },
+    {
+      "peak": 0.0,
+      "quarter_second": 13,
+      "rms": 0.0
+    },
+    {
+      "peak": 0.0,
+      "quarter_second": 14,
+      "rms": 0.0
+    },
+    {
+      "peak": 0.0,
+      "quarter_second": 15,
+      "rms": 0.0
+    }
+  ],
+  "source_event_count": 0
+}

@@ -1,0 +1,7 @@
+{
+  "source_commit": "f164e91fb989f0475d4d6038fbe7fd8008b1cd49",
+  "raw_log_sha256": "8948726a2ce588b8e60e501935b5582a22dc8fc0c14b18e92fe304410a664d64",
+  "scope": "Trace-only diagnostic; read-only added fields; possible concurrent GUI regression; not paced quiet acceptance",
+  "observed": "All four B2048 cases have native FX latency0 at readiness/afteractivation, revision1. After first rawcallback it is32/revision2; timeline execution failure1 clears channelrevision/epoch, suspensiontrue, topologypendingfalse, pluginfaultnull, healthPriming; allendpoint submissions0.",
+  "conclusion": "Actual source-level missed fault classification produces indefinite silent suspension; not a measured worker deadline failure."
+}

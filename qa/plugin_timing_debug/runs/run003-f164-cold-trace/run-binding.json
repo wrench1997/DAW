@@ -1,0 +1,10 @@
+{
+  "started_utc": "2026-10-09T12:19:51.265379+00:00",
+  "test_sha256": "d8385f92c3dc89bbd3d89b8f228deff6927ed52e674691c12953946eb5922321",
+  "helper_sha256": "9cc00c81f07dc88c7514c8fb2b016cd1f080803fefbb281e76cc43b0a16a3ffd",
+  "source_manifest_sha256": "4ffc73ac699c88beb3511bc4a90c214265277bec0080ee5c19b85b5e4652793f",
+  "source_commit": "f164e91fb989f0475d4d6038fbe7fd8008b1cd49",
+  "profile_filter": "b2048",
+  "cpu_load_threads": "0",
+  "declared_environment": "Trace-only diagnostic; concurrent native GUI regression permitted; not quiet timing acceptance"
+}

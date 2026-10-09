@@ -1,0 +1,10 @@
+{
+  "started_utc": "2026-10-09T12:38:17.836826+00:00",
+  "test_sha256": "7a980134d7619611132a3c4f77fe1319317195659896d140291c966ab53b5954",
+  "helper_sha256": "9cc00c81f07dc88c7514c8fb2b016cd1f080803fefbb281e76cc43b0a16a3ffd",
+  "source_manifest_sha256": "1431fad67338e6965a472a529f682c34da9cce2a860d1d336e641f6782eeb3ef",
+  "source_commit": "f68b9a0210e95f1d26ec3c67ca0e389bcdfa798b",
+  "profile_filter": null,
+  "cpu_load_threads": "4",
+  "declared_environment": "Same binary as run005; four bounded numerical CPU workers for1.1seconds during each measured1second segment; no other scheduled build/GUI work; unoptimized source-linked profile"
+}

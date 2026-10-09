@@ -166,3 +166,38 @@ preserved the immediate first note and captured volume after actual processing;
 this does not validate live restore into an already-used instance. Native editor
 serialization, physical-device performance and optimized-release behavior remain
 unqualified. The full raw receipts retain source/build and helper/harness hashes.
+
+
+The [historical debug receipt tree](../qa/plugin_timing_debug/RESULT.md) preserves
+all six attempts, exact per-case measurements, build/helper/source identities and
+path-only normalization custody. Its pinned publication inventory is validated
+during package creation and extraction. These f164/f68 results used the earlier
+helper and are not silently reattributed to the later ownership/Surge-guard helper.
+Combined-source and optimized measurements must be recorded separately.
+
+
+### Combined ownership/guard helper check
+
+Exact combined runtime **4fdfbc2ea5c828fd9c329f31e9be203810fa62c7** is bound to123
+production source files. Its matched preallocated debug harness SHA256 is
+`d38e6a2b1d2f323a7fda9d1e36addbc9849b0e119b3f424d1391f8a80695608f` and helper is
+`9dd18d74783e2ed13e947008d4dc4d5b2bdc0032948680c1cac678daed9aae60`.
+The [separate combined summary](../qa/plugin_timing_combined/README.md) preserves
+the exact original generated JSON and raw-record hashes; it is not the old matrix
+or a complete new reproduction-harness distribution.
+
+All four B2048 ordinary/routed × fixed/changing delivery cases passed actual native
+FX0→32 latency fencing, stopped Retry/new revision/epoch, exact PDC/events and375
+completed blocks per endpoint (357 exact +18 startup). PDC is4896 ordinary and7328
+routed frames with one downstream FX worker. Fresh restored Surge immediately
+played its first note with exact controller/component volume (sample60, peak
+0.2113886625 over1024frames). Matched B128 had two PASS and two FX DeadlineMiss
+failures; both fixed cases failed (sequence151 ordinary,1 routed). No capture
+overflow occurred.
+
+These are **delivery/state results**, not interval qualification. The two passing
+B2048 changing cases still recorded14 callback-core interval overruns each; B128
+changing cases recorded18/24. Preallocated capture separates capture cost and
+outer scheduling, but the wrapper and builds are still unoptimized. Release
+qualification is a separate ongoing experiment. No smaller-profile reliability,
+dropout-free operation, physical device or native-GUI continuity is established.

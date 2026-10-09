@@ -1,9 +1,11 @@
 # Linux native-editor functional preview validation
 
-Current ownership-preparation regression is **partial**: fixture and fresh-instance
+Historical ownership-preparation regression is **partial**: fixture and fresh-instance
 vendor paths pass, while reused Surge first-note/getter consistency and native
 content/container sizing fail on old and new helpers. See the [current state limits](PLUGIN_STATE_RESTORE_LIMITS.md).
-The measurements below retain their original source/helper identity; they are not
+The later exact Surge1.3.4 guard refuses used/editor-opened loads before helper
+closure/mutation; fresh/rejected-load checks below are separate from successful
+reused restoration. The measurements below retain their original source/helper identity; they are not
 silently reattributed to the newer ownership implementation.
 
 2026-10-09 UTC. This records the integrated production helper on the frozen MIDI-routing

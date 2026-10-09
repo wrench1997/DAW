@@ -1,0 +1,13 @@
+{
+  "classification": "harness control-flow omission; not a measured endpoint deadline qualification failure",
+  "omission": "pre-admission refresh_pdc_plan and activation steps from production CPAL wrapper were absent",
+  "evidence": "after native FX latency0\u219232, most cases stopped progressing with0or1submitted block and no latched fault; every original counter/log is retained",
+  "raw_log_sha256": "5b8f6f68ebe1ec2455960f52c2dda032ec7b4312b63ce804332b1fd59f28c5d5",
+  "production_source_commit": "f164e91fb989f0475d4d6038fbe7fd8008b1cd49",
+  "production_source_references": [
+    "src/audio.rs:3170-3200",
+    "src/audio.rs:8546-8563"
+  ],
+  "correction": "mirror production raw-callback ordering; allow actual EndpointChanged or LatencyDrift fence only when genuine FX worker publishes K*128+32 latency",
+  "independent_pass": "fresh-restored-surge.json remains a valid direct production PluginChain first-note and state proof"
+}

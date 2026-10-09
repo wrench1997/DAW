@@ -15,9 +15,10 @@ The helper checks before editor closure, and the in-process implementation check
 before component/controller calls, lifecycle changes or queue/state mutation. It
 returns an actionable fresh-instance error. The normal App paths use fresh plugin
 instances. A safe replacement transaction must restore before playback/native
-interaction and retain the old instance until candidate success; a stronger
-transactional-retention handshake is separate pending work, not established by
-this guard or the published App checkpoint. No hidden processing, sleep,
+interaction and retain the old instance until candidate success. The subsequently
+integrated [timing configuration path](PLUGIN_TIMING.md) adds tagged state capture
+and prevalidated replacement retention; that is distinct from this helper guard
+and from the published5befb51 App. Fresh combined source and default2048/fresh-state checks pass; new Windows execution remains pending. No hidden processing, sleep,
 settlement retry, generic completion fence or helper ownership swap is implemented.
 The legacy public `PluginChainControl::load_state` closes its native editor before
 backend LoadState and faults its slot when the backend rejects that call. The current App does not call it;
@@ -40,8 +41,11 @@ preset worker can delay actual patch application even when Process succeeds.
 It is not safe to treat a fixed block count as completion. The original positive
 and negative traces remain historical evidence. No general reused-state recovery,
 latency improvement, physical-device, Windows/macOS native or broad vendor
-compatibility acceptance is claimed. Combined source gates for this integration
-are pending; source-slice results are recorded in the work log.
+compatibility acceptance is claimed. Combined4fdfbc2 source gates and bounded fresh-state/default2048 checks pass. The combined fresh
+first note is nonzero at sample60 (peak0.2113886625 over1024frames); controller
+0.8691863417625427 and component−6.27905654907227dB remain exact. This is still a
+fresh-instance test, not successful reused restoration. New Windows execution
+remains separate; exact results are in the work log.
 
 ## Historical ownership-preparation scope and identity
 

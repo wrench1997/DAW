@@ -1,0 +1,167 @@
+{
+  "scope": "Read-only publication checks; no tests rerun and no historical receipts rewritten.",
+  "runs": [
+    {
+      "run": "run001-quiet-f164",
+      "source_commit": "f164e91fb989f0475d4d6038fbe7fd8008b1cd49",
+      "source_manifest_hash_matches_binding": true,
+      "executable_hashes_match_attribution": true,
+      "raw_log_hash_matches_index": true,
+      "harness_source_present": false,
+      "harness_source_hash_matches_manifest": null,
+      "snapshot_builder_present": false,
+      "snapshot_builder_hash_matches_manifest": null,
+      "test_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "helper_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": false
+      }
+    },
+    {
+      "run": "run002-quiet-cpal-order",
+      "source_commit": "f164e91fb989f0475d4d6038fbe7fd8008b1cd49",
+      "source_manifest_hash_matches_binding": true,
+      "executable_hashes_match_attribution": true,
+      "raw_log_hash_matches_index": true,
+      "harness_source_present": true,
+      "harness_source_hash_matches_manifest": true,
+      "snapshot_builder_present": false,
+      "snapshot_builder_hash_matches_manifest": null,
+      "test_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "helper_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": false
+      }
+    },
+    {
+      "run": "run003-f164-cold-trace",
+      "source_commit": "f164e91fb989f0475d4d6038fbe7fd8008b1cd49",
+      "source_manifest_hash_matches_binding": true,
+      "executable_hashes_match_attribution": true,
+      "raw_log_hash_matches_index": true,
+      "harness_source_present": true,
+      "harness_source_hash_matches_manifest": true,
+      "snapshot_builder_present": false,
+      "snapshot_builder_hash_matches_manifest": null,
+      "test_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "helper_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": false
+      }
+    },
+    {
+      "run": "run004-quiet-f68b9a0",
+      "source_commit": "f68b9a0210e95f1d26ec3c67ca0e389bcdfa798b",
+      "source_manifest_hash_matches_binding": true,
+      "executable_hashes_match_attribution": true,
+      "raw_log_hash_matches_index": true,
+      "harness_source_present": true,
+      "harness_source_hash_matches_manifest": true,
+      "snapshot_builder_present": true,
+      "snapshot_builder_hash_matches_manifest": true,
+      "test_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "helper_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": false
+      }
+    },
+    {
+      "run": "run005-quiet-native-latency",
+      "source_commit": "f68b9a0210e95f1d26ec3c67ca0e389bcdfa798b",
+      "source_manifest_hash_matches_binding": true,
+      "executable_hashes_match_attribution": true,
+      "raw_log_hash_matches_index": true,
+      "harness_source_present": true,
+      "harness_source_hash_matches_manifest": true,
+      "snapshot_builder_present": true,
+      "snapshot_builder_hash_matches_manifest": true,
+      "test_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "helper_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": false
+      }
+    },
+    {
+      "run": "run006-cpu4-native-latency",
+      "source_commit": "f68b9a0210e95f1d26ec3c67ca0e389bcdfa798b",
+      "source_manifest_hash_matches_binding": true,
+      "executable_hashes_match_attribution": true,
+      "raw_log_hash_matches_index": true,
+      "harness_source_present": true,
+      "harness_source_hash_matches_manifest": true,
+      "snapshot_builder_present": true,
+      "snapshot_builder_hash_matches_manifest": true,
+      "test_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": true
+      },
+      "helper_profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": false
+      }
+    }
+  ],
+  "frozen_source_checks": [
+    {
+      "source_commit": "f164e91fb989f0475d4d6038fbe7fd8008b1cd49",
+      "verified_frozen_source_files": 121,
+      "all_hashes_match": true
+    },
+    {
+      "source_commit": "f68b9a0210e95f1d26ec3c67ca0e389bcdfa798b",
+      "verified_frozen_source_files": 121,
+      "all_hashes_match": true
+    }
+  ]
+}

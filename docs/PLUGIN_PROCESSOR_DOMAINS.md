@@ -162,8 +162,10 @@ cross-platform/build completeness claim.
   dispatchers share the local preflight; the in-process implementation repeats it authoritatively.
 - A caller must prepare a fresh candidate, restore its authoritative blob before playback/native
   interaction, and retain the old instance until candidate success. This is a requirement for
-  safe transactional replacement, not a stronger retention handshake established by the current
-  App or this guard. There is no new helper-side ownership swap or wire command.
+  safe transactional replacement, not a handshake added by this helper guard. The later
+  [timing configuration path](PLUGIN_TIMING.md) adds tagged capture and prevalidated replacement
+  retention at the App/worker level; combined verification is separate. There is no new
+  helper-side ownership swap or wire command.
 - The current App's normal configuration/reopen/restore path already uses fresh candidates. The
   legacy public `PluginChainControl::load_state` path still closes its native editor and faults its
   slot when the backend rejects a load; it is not called by the current App and is not changed here.

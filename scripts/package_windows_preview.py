@@ -129,6 +129,267 @@ MIDI_ROUTE_QA_FILES = frozenset((
     "qa/plugin_midi_route/verify_metronome.py",
     "qa/plugin_midi_route/verify_receipts.py",
 ))
+TIMING_DEBUG_QA_ROOT = "qa/plugin_timing_debug/"
+TIMING_DEBUG_QA_FILES = frozenset((
+    "qa/plugin_timing_debug/INVENTORY.json",
+    "qa/plugin_timing_debug/INVENTORY.md",
+    "qa/plugin_timing_debug/LICENSE",
+    "qa/plugin_timing_debug/NORMALIZATION.md",
+    "qa/plugin_timing_debug/ORIGINAL_README.md",
+    "qa/plugin_timing_debug/PROVENANCE_CHECKS.json",
+    "qa/plugin_timing_debug/PUBLICATION_SHA256SUMS",
+    "qa/plugin_timing_debug/REPRODUCE.md",
+    "qa/plugin_timing_debug/RESULT.md",
+    "qa/plugin_timing_debug/build_and_copy.py",
+    "qa/plugin_timing_debug/historical-reference/previous-reference.txt",
+    "qa/plugin_timing_debug/native_timing_tests.rs",
+    "qa/plugin_timing_debug/preflight-18478d2/executable-attribution.json",
+    "qa/plugin_timing_debug/preflight-18478d2/source-snapshot.json",
+    "qa/plugin_timing_debug/prepare_snapshot.py",
+    "qa/plugin_timing_debug/receipts/build-binding.json",
+    "qa/plugin_timing_debug/receipts/build-environment.json",
+    "qa/plugin_timing_debug/receipts/executable-attribution.json",
+    "qa/plugin_timing_debug/receipts/git-object-verification.json",
+    "qa/plugin_timing_debug/receipts/helper-build.jsonl",
+    "qa/plugin_timing_debug/receipts/helper-build.stderr",
+    "qa/plugin_timing_debug/receipts/native-build.jsonl",
+    "qa/plugin_timing_debug/receipts/native-build.stderr",
+    "qa/plugin_timing_debug/receipts/plugin-provenance.json",
+    "qa/plugin_timing_debug/receipts/run-index.json",
+    "qa/plugin_timing_debug/receipts/source-snapshot.json",
+    "qa/plugin_timing_debug/receipts/status.json",
+    "qa/plugin_timing_debug/run_profiles.sh",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/admission-b128-cold.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/admission-b512-cold.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b128_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b128_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b128_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b128_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b2048_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b2048_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b2048_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b2048_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b256_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b256_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b256_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b256_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b512_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b512_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b512_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/b512_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/executable-attribution.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/exit-status.txt",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/fresh-restored-surge.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/raw.log",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/run-binding.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/setup-diagnosis.json",
+    "qa/plugin_timing_debug/runs/run001-quiet-f164/source-snapshot.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/admission-b128-cold.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/admission-b128.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/admission-b512-cold.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b128_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b128_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b128_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b128_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b2048_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b2048_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b2048_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b2048_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b256_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b256_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b256_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b256_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b512_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b512_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b512_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/b512_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/controlled-overload-before-retry.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/controlled-overload-blank-cleanup.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/executable-attribution.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/exit-status.txt",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/fresh-restored-surge.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/native_timing_tests.rs",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/raw.log",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/run-binding.json",
+    "qa/plugin_timing_debug/runs/run002-quiet-cpal-order/source-snapshot.json",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/b2048_routedfalse_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/b2048_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/b2048_routedfalse_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/b2048_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/b2048_routedtrue_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/b2048_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/b2048_routedtrue_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/b2048_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/diagnosis.json",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/executable-attribution.json",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/exit-status.txt",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/native_timing_tests.rs",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/raw.log",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/run-binding.json",
+    "qa/plugin_timing_debug/runs/run003-f164-cold-trace/source-snapshot.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/admission-b128-cold.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/admission-b128.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/admission-b2048-cold.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/admission-b256-cold.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/admission-b256.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/admission-b512-cold.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/admission-b512.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b128_routedfalse_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b128_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b128_routedfalse_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b128_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b128_routedtrue_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b128_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b128_routedtrue_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b128_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b2048_routedfalse_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b2048_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b2048_routedfalse_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b2048_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b2048_routedtrue_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b2048_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b2048_routedtrue_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b2048_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b256_routedfalse_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b256_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b256_routedfalse_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b256_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b256_routedtrue_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b256_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b256_routedtrue_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b256_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b512_routedfalse_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b512_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b512_routedfalse_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b512_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b512_routedtrue_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b512_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b512_routedtrue_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/b512_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/build-binding.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/build_and_copy.py",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/cold-assertion-diagnosis.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/controlled-overload-before-retry.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/controlled-overload-blank-cleanup.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/executable-attribution.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/exit-status.txt",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/fresh-restored-surge.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/host-resources-after.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/host-resources-before.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/native_timing_tests.rs",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/prepare_snapshot.py",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/raw.log",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/run-binding.json",
+    "qa/plugin_timing_debug/runs/run004-quiet-f68b9a0/source-snapshot.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/admission-b128-cold.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/admission-b128.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/admission-b2048-cold.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/admission-b2048.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/admission-b256-cold.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/admission-b256.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/admission-b512-cold.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/admission-b512.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b128_routedfalse_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b128_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b128_routedfalse_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b128_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b128_routedtrue_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b128_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b128_routedtrue_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b128_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b2048_routedfalse_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b2048_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b2048_routedfalse_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b2048_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b2048_routedtrue_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b2048_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b2048_routedtrue_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b2048_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b256_routedfalse_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b256_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b256_routedfalse_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b256_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b256_routedtrue_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b256_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b256_routedtrue_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b256_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b512_routedfalse_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b512_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b512_routedfalse_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b512_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b512_routedtrue_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b512_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b512_routedtrue_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/b512_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/build-binding.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/build_and_copy.py",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/controlled-overload-before-retry.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/controlled-overload-blank-cleanup.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/controlled-overload-recovery.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/executable-attribution.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/exit-status.txt",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/fresh-restored-surge.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/host-resources-after.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/host-resources-before.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/native_timing_tests.rs",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/prepare_snapshot.py",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/raw.log",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/run-binding.json",
+    "qa/plugin_timing_debug/runs/run005-quiet-native-latency/source-snapshot.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b128_routedfalse_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b128_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b128_routedfalse_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b128_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b128_routedtrue_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b128_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b128_routedtrue_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b128_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b2048_routedfalse_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b2048_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b2048_routedfalse_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b2048_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b2048_routedtrue_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b2048_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b2048_routedtrue_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b2048_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b256_routedfalse_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b256_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b256_routedfalse_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b256_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b256_routedtrue_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b256_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b256_routedtrue_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b256_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b512_routedfalse_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b512_routedfalse_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b512_routedfalse_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b512_routedfalse_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b512_routedtrue_changingfalse-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b512_routedtrue_changingfalse.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b512_routedtrue_changingtrue-cold-trace.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/b512_routedtrue_changingtrue.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/build-binding.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/build_and_copy.py",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/executable-attribution.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/exit-status.txt",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/host-resources-after.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/host-resources-before.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/native_timing_tests.rs",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/prepare_snapshot.py",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/raw.log",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/run-binding.json",
+    "qa/plugin_timing_debug/runs/run006-cpu4-native-latency/source-snapshot.json",
+    "qa/plugin_timing_debug/summarize_runs.py",
+    "qa/plugin_timing_debug/verify_publication.py",
+))
+TIMING_DEBUG_INVENTORY_SHA256 = "4dc1d40b8e98fa092913eabb06e313077322d4465a322c7780daaacb24f65caa"
+TIMING_COMBINED_QA_ROOT = "qa/plugin_timing_combined/"
+TIMING_COMBINED_QA_FILES = frozenset((
+    "qa/plugin_timing_combined/CONTENTS-SHA256.txt",
+    "qa/plugin_timing_combined/README.md",
+    "qa/plugin_timing_combined/summary.json",
+))
+TIMING_COMBINED_INVENTORY_SHA256 = "942e22d6d6e9d75c163d88023823011adec12ed529d401de0c84820dd34bf96d"
 # Explicitly reviewed documentation that may land on an independent branch.
 OPTIONAL_SOURCE_FILES = frozenset((
     "docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md",
@@ -139,9 +400,9 @@ OPTIONAL_SOURCE_FILES = frozenset((
     "docs/PIANO_NOTE_EXPRESSION.md", "docs/PIANO_RANGES_AND_SNAP.md",
     "docs/VST3_SCANNING.md", "docs/REAL_VST3_VALIDATION.md",
     "docs/PLUGIN_MIDI_ROUTING.md", "docs/PLUGIN_MIDI_ROUTE_VALIDATION.md",
-    "docs/PLUGIN_PROCESSOR_DOMAINS.md", "docs/PLUGIN_STATE_RESTORE_LIMITS.md",
+    "docs/PLUGIN_PROCESSOR_DOMAINS.md", "docs/PLUGIN_STATE_RESTORE_LIMITS.md", "docs/PLUGIN_TIMING.md",
     "docs/LINUX_VST3_EDITORS.md", "docs/LINUX_VST3_EDITOR_VALIDATION.md", "docs/METRONOME.md",
-)) | REAL_VST3_QA_FILES | MIDI_ROUTE_QA_FILES
+)) | REAL_VST3_QA_FILES | MIDI_ROUTE_QA_FILES | TIMING_DEBUG_QA_FILES | TIMING_COMBINED_QA_FILES
 GENERATED_FILES = ("START_HERE_PREVIEW.txt", "BUILD_PROVENANCE.json", "DEPENDENCIES.json")
 PAYLOAD_FILES = frozenset(BINARIES + SOURCE_FILES + GENERATED_FILES)
 PACKAGE_FILES = PAYLOAD_FILES | {"SHA256SUMS.txt"}
@@ -524,6 +785,42 @@ def validate_midi_route_qa(payload):
     require(payload[inventory] == expected, "MIDI route QA inventory/hash mismatch")
 
 
+def validate_timing_debug_qa(payload):
+    """Keep historical debug failures and source attribution byte-exact, never execute plugins."""
+    present = set(payload) & TIMING_DEBUG_QA_FILES
+    unexpected = {name for name in payload if name.startswith(TIMING_DEBUG_QA_ROOT)} - TIMING_DEBUG_QA_FILES
+    require(not unexpected, "Unexpected timing debug QA path")
+    if not present:
+        return
+    require(present == TIMING_DEBUG_QA_FILES, "Incomplete timing debug QA source bundle")
+    inventory = TIMING_DEBUG_QA_ROOT + "PUBLICATION_SHA256SUMS"
+    require(digest(payload[inventory]) == TIMING_DEBUG_INVENTORY_SHA256,
+            "Timing debug QA pinned inventory/hash mismatch")
+    expected = "".join(
+        f"{digest(payload[path])}  {path.removeprefix(TIMING_DEBUG_QA_ROOT)}\n"
+        for path in sorted(TIMING_DEBUG_QA_FILES - {inventory})
+    ).encode("utf-8")
+    require(payload[inventory] == expected, "Timing debug QA inventory/hash mismatch")
+
+
+def validate_timing_combined_qa(payload):
+    """Validate the distinct exact combined-helper summary without relabeling historical runs."""
+    present = set(payload) & TIMING_COMBINED_QA_FILES
+    unexpected = {name for name in payload if name.startswith(TIMING_COMBINED_QA_ROOT)} - TIMING_COMBINED_QA_FILES
+    require(not unexpected, "Unexpected timing combined QA path")
+    if not present:
+        return
+    require(present == TIMING_COMBINED_QA_FILES, "Incomplete timing combined QA source bundle")
+    inventory = TIMING_COMBINED_QA_ROOT + "CONTENTS-SHA256.txt"
+    require(digest(payload[inventory]) == TIMING_COMBINED_INVENTORY_SHA256,
+            "Timing combined QA pinned inventory/hash mismatch")
+    expected = "".join(
+        f"{digest(payload[path])}  {path.removeprefix(TIMING_COMBINED_QA_ROOT)}\n"
+        for path in sorted(TIMING_COMBINED_QA_FILES - {inventory})
+    ).encode("utf-8")
+    require(payload[inventory] == expected, "Timing combined QA inventory/hash mismatch")
+
+
 def create_package(repo, binaries, metadata, build_info, output):
     validate_build_info(build_info)
     manifest = tomllib.loads(read_input(repo / "Cargo.toml").decode())
@@ -576,6 +873,8 @@ def create_package(repo, binaries, metadata, build_info, output):
     check_document_links(payload)
     validate_real_vst3_qa(payload)
     validate_midi_route_qa(payload)
+    validate_timing_debug_qa(payload)
+    validate_timing_combined_qa(payload)
     payload["SHA256SUMS.txt"] = "".join(f"{digest(payload[p])}  {p}\n" for p in sorted(payload)).encode("ascii")
     output.mkdir(parents=True, exist_ok=True)
     epoch = max(315532800, min(build_info["source_epoch"], 4354819198))
@@ -630,6 +929,8 @@ def verify_package(path, extract_to=None):
     check_document_links(payload)
     validate_real_vst3_qa(payload)
     validate_midi_route_qa(payload)
+    validate_timing_debug_qa(payload)
+    validate_timing_combined_qa(payload)
     for binary in BINARIES:
         require(inspect_pe(payload[binary]) == info["pe_audit"][binary], "PE audit/provenance mismatch")
     inventory = json.loads(payload["DEPENDENCIES.json"])

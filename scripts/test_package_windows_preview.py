@@ -222,7 +222,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn("docs/PROJECT_MEDIA.md", info["source_documents"])
 
     def test_optional_feature_guides_are_packaged_together(self):
-        for path in ("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md", "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md", "docs/LOCAL_SAMPLE_BROWSER.md", "docs/HEADLESS_UI_QA.md", "docs/FL_INSPIRED_NATIVE_THEME.md", "docs/MULTIWINDOW_WORKSPACE.md", "docs/COMPACT_WORKSPACE.md", "docs/PIANO_KEYBOARD_EDITING.md", "docs/PIANO_MOUSE_WORKFLOW.md", "docs/PIANO_NOTE_EXPRESSION.md", "docs/PIANO_RANGES_AND_SNAP.md", "docs/VST3_SCANNING.md", "docs/REAL_VST3_VALIDATION.md", "docs/PLUGIN_MIDI_ROUTING.md", "docs/PLUGIN_MIDI_ROUTE_VALIDATION.md", "docs/LINUX_VST3_EDITORS.md", "docs/LINUX_VST3_EDITOR_VALIDATION.md", "docs/METRONOME.md", "docs/PLUGIN_PROCESSOR_DOMAINS.md", "docs/PLUGIN_STATE_RESTORE_LIMITS.md"):
+        for path in ("docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md", "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md", "docs/LOCAL_SAMPLE_BROWSER.md", "docs/HEADLESS_UI_QA.md", "docs/FL_INSPIRED_NATIVE_THEME.md", "docs/MULTIWINDOW_WORKSPACE.md", "docs/COMPACT_WORKSPACE.md", "docs/PIANO_KEYBOARD_EDITING.md", "docs/PIANO_MOUSE_WORKFLOW.md", "docs/PIANO_NOTE_EXPRESSION.md", "docs/PIANO_RANGES_AND_SNAP.md", "docs/VST3_SCANNING.md", "docs/REAL_VST3_VALIDATION.md", "docs/PLUGIN_MIDI_ROUTING.md", "docs/PLUGIN_MIDI_ROUTE_VALIDATION.md", "docs/LINUX_VST3_EDITORS.md", "docs/LINUX_VST3_EDITOR_VALIDATION.md", "docs/METRONOME.md", "docs/PLUGIN_PROCESSOR_DOMAINS.md", "docs/PLUGIN_STATE_RESTORE_LIMITS.md", "docs/PLUGIN_TIMING.md"):
             (self.repo / path).write_text("[README](../README.md)\n")
         (self.repo / "README.md").write_text(
             "[Media](docs/PROJECT_MEDIA.md) [Export](docs/OFFLINE_EXPORT_WORKFLOW.md) "
@@ -230,7 +230,7 @@ class PackageTests(unittest.TestCase):
             "[Meters](docs/MIXER_METERING.md) [Samples](docs/LOCAL_SAMPLE_BROWSER.md) "
             "[UI QA](docs/HEADLESS_UI_QA.md) [Native theme](docs/FL_INSPIRED_NATIVE_THEME.md) "
             "[Workspace](docs/MULTIWINDOW_WORKSPACE.md) [Compact](docs/COMPACT_WORKSPACE.md) "
-            "[Piano keys](docs/PIANO_KEYBOARD_EDITING.md) [Piano mouse](docs/PIANO_MOUSE_WORKFLOW.md) [Expression](docs/PIANO_NOTE_EXPRESSION.md) [Piano ranges](docs/PIANO_RANGES_AND_SNAP.md) [Scanner](docs/VST3_SCANNING.md) [Real VST3 QA](docs/REAL_VST3_VALIDATION.md) [MIDI routing](docs/PLUGIN_MIDI_ROUTING.md) [Route QA](docs/PLUGIN_MIDI_ROUTE_VALIDATION.md) [Linux editors](docs/LINUX_VST3_EDITORS.md) [Linux editor QA](docs/LINUX_VST3_EDITOR_VALIDATION.md) [Metronome](docs/METRONOME.md) [Processor ownership](docs/PLUGIN_PROCESSOR_DOMAINS.md) [State limits](docs/PLUGIN_STATE_RESTORE_LIMITS.md)\n"
+            "[Piano keys](docs/PIANO_KEYBOARD_EDITING.md) [Piano mouse](docs/PIANO_MOUSE_WORKFLOW.md) [Expression](docs/PIANO_NOTE_EXPRESSION.md) [Piano ranges](docs/PIANO_RANGES_AND_SNAP.md) [Scanner](docs/VST3_SCANNING.md) [Real VST3 QA](docs/REAL_VST3_VALIDATION.md) [MIDI routing](docs/PLUGIN_MIDI_ROUTING.md) [Route QA](docs/PLUGIN_MIDI_ROUTE_VALIDATION.md) [Linux editors](docs/LINUX_VST3_EDITORS.md) [Linux editor QA](docs/LINUX_VST3_EDITOR_VALIDATION.md) [Metronome](docs/METRONOME.md) [Processor ownership](docs/PLUGIN_PROCESSOR_DOMAINS.md) [State limits](docs/PLUGIN_STATE_RESTORE_LIMITS.md) [Plugin timing](docs/PLUGIN_TIMING.md)\n"
         )
         archive = self.create()
         info = pkg.verify_package(archive)
@@ -257,6 +257,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn("docs/METRONOME.md", info["source_documents"])
         self.assertIn("docs/PLUGIN_PROCESSOR_DOMAINS.md", info["source_documents"])
         self.assertIn("docs/PLUGIN_STATE_RESTORE_LIMITS.md", info["source_documents"])
+        self.assertIn("docs/PLUGIN_TIMING.md", info["source_documents"])
 
     def real_vst3_qa_payload(self):
         source = Path(__file__).resolve().parents[1]
@@ -364,6 +365,94 @@ class PackageTests(unittest.TestCase):
                 payload[name] = original + addition
                 with self.assertRaisesRegex(pkg.PackageError, "inventory/hash mismatch"):
                     pkg.validate_midi_route_qa(payload)
+
+    def timing_debug_qa_payload(self):
+        source = Path(__file__).resolve().parents[1]
+        return {name: (source / name).read_bytes() for name in pkg.TIMING_DEBUG_QA_FILES}
+
+    def test_timing_debug_receipts_are_complete_and_packaged(self):
+        payload = self.timing_debug_qa_payload()
+        pkg.validate_timing_debug_qa(payload)
+        for name, data in payload.items():
+            destination = self.repo / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        info = pkg.verify_package(self.create())
+        self.assertTrue(pkg.TIMING_DEBUG_QA_FILES <= set(info["source_documents"]))
+
+    def test_timing_debug_receipts_reject_missing_changed_or_extra_payload(self):
+        payload = self.timing_debug_qa_payload()
+        name = pkg.TIMING_DEBUG_QA_ROOT + "RESULT.md"
+        original = payload.pop(name)
+        with self.assertRaisesRegex(pkg.PackageError, "Incomplete timing debug"):
+            pkg.validate_timing_debug_qa(payload)
+        payload[name] = original + b"changed outcome\n"
+        with self.assertRaisesRegex(pkg.PackageError, "inventory/hash mismatch"):
+            pkg.validate_timing_debug_qa(payload)
+        payload[name] = original
+        payload[pkg.TIMING_DEBUG_QA_ROOT + "undeclared.txt"] = b"extra"
+        with self.assertRaisesRegex(pkg.PackageError, "Unexpected timing debug"):
+            pkg.validate_timing_debug_qa(payload)
+
+    def test_timing_debug_receipts_reject_rewritten_or_escaping_inventory(self):
+        payload = self.timing_debug_qa_payload()
+        name = pkg.TIMING_DEBUG_QA_ROOT + "PUBLICATION_SHA256SUMS"
+        original = payload[name]
+        for addition in (original.splitlines(keepends=True)[0],
+                         b"0" * 64 + b"  ../escape.txt\n",
+                         b"0" * 64 + b"  runs\\bad.txt\n"):
+            with self.subTest(addition=addition):
+                payload[name] = original + addition
+                with self.assertRaisesRegex(pkg.PackageError, "pinned inventory/hash mismatch"):
+                    pkg.validate_timing_debug_qa(payload)
+        # Even a self-consistent edited report and rewritten inventory are not the reviewed receipt.
+        payload[name] = original
+        report = pkg.TIMING_DEBUG_QA_ROOT + "RESULT.md"
+        old_digest = pkg.digest(payload[report]).encode()
+        payload[report] += b"changed outcome\n"
+        payload[name] = original.replace(old_digest, pkg.digest(payload[report]).encode())
+        with self.assertRaisesRegex(pkg.PackageError, "pinned inventory/hash mismatch"):
+            pkg.validate_timing_debug_qa(payload)
+
+    def test_timing_debug_publication_verifier_and_lf_policy(self):
+        source = Path(__file__).resolve().parents[1]
+        self.assertIn("/qa/plugin_timing_debug/** text eol=lf", (source / ".gitattributes").read_text())
+        result = subprocess.run(
+            [sys.executable, "-B", str(source / "qa/plugin_timing_debug/verify_publication.py")],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("PASS: 249 hashed files", result.stdout)
+
+    def test_timing_combined_receipt_is_distinct_complete_and_packaged(self):
+        source = Path(__file__).resolve().parents[1]
+        payload = {name: (source / name).read_bytes() for name in pkg.TIMING_COMBINED_QA_FILES}
+        pkg.validate_timing_combined_qa(payload)
+        self.assertFalse(pkg.TIMING_COMBINED_QA_FILES & pkg.TIMING_DEBUG_QA_FILES)
+        for name, data in payload.items():
+            destination = self.repo / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        info = pkg.verify_package(self.create())
+        self.assertTrue(pkg.TIMING_COMBINED_QA_FILES <= set(info["source_documents"]))
+
+    def test_timing_combined_receipt_rejects_missing_changed_extra_or_inventory_rewrite(self):
+        source = Path(__file__).resolve().parents[1]
+        original = {name: (source / name).read_bytes() for name in pkg.TIMING_COMBINED_QA_FILES}
+        name = pkg.TIMING_COMBINED_QA_ROOT + "summary.json"
+        payload = dict(original); del payload[name]
+        with self.assertRaisesRegex(pkg.PackageError, "Incomplete timing combined"):
+            pkg.validate_timing_combined_qa(payload)
+        payload = dict(original); payload[name] += b"changed"
+        with self.assertRaisesRegex(pkg.PackageError, "inventory/hash mismatch"):
+            pkg.validate_timing_combined_qa(payload)
+        payload = dict(original); payload[pkg.TIMING_COMBINED_QA_ROOT + "../escape"] = b"changed"
+        with self.assertRaisesRegex(pkg.PackageError, "Unexpected timing combined"):
+            pkg.validate_timing_combined_qa(payload)
+        payload = dict(original)
+        payload[pkg.TIMING_COMBINED_QA_ROOT + "CONTENTS-SHA256.txt"] += b"extra"
+        with self.assertRaisesRegex(pkg.PackageError, "pinned inventory/hash mismatch"):
+            pkg.validate_timing_combined_qa(payload)
 
     def test_prerelease_package_version_is_preserved(self):
         for name in ("Cargo.toml", "Cargo.lock"):
