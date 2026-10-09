@@ -24,7 +24,7 @@ from smoke_vst3_helper import (
 )
 
 FIXTURE_ROOT = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "vst3-editor"
-SOURCE_FILES = ("Cargo.toml", "Cargo.lock", "LICENSE", "src/lib.rs", "src/native_windows.rs")
+SOURCE_FILES = ("Cargo.toml", "Cargo.lock", "LICENSE", "src/lib.rs", "src/native_windows.rs", "src/native_linux.rs")
 UPSTREAM_COMMIT = "ed054908cfe057694d8cf037d0c39dfb5eb4c2ca"
 CONTAINER_CLASS = "CitrusVst3EditorContainerV1"
 PANEL_CLASS = "CitrusVst3FixturePanelV1"

@@ -36,8 +36,9 @@
 //! stream, no controller half, applied exactly once) is verifiable end to end.
 //!
 //! The dual synth's controller also implements a real `IPlugView` with a Windows native
-//! panel/button added by Citrus (see PROVENANCE.md). Other platforms exercise only the
-//! embedding protocol: platform-type negotiation, attach/remove tracking, `getSize`/`onSize`,
+//! panel/button added by Citrus (see PROVENANCE.md). Linux has an XEmbed child with a
+//! real clickable control and host-driven factory/frame fd and timer probes. Other platforms
+//! exercise only the embedding protocol: platform-type negotiation, attach/remove tracking, `getSize`/`onSize`,
 //! `checkSizeConstraint` clamping and `IPlugViewContentScaleSupport`. Right after it is
 //! attached it asks the host to resize it once through `IPlugFrame::resizeView`, which closes
 //! the loop on the host's resize chain. What the view saw — and what the host said about the
@@ -62,6 +63,8 @@ use std::sync::{Arc, Mutex};
 
 use vst3::{uid, Class, ComRef, ComWrapper, Steinberg::Vst::*, Steinberg::*};
 
+#[cfg(target_os = "linux")]
+mod native_linux;
 #[cfg(target_os = "windows")]
 mod native_windows;
 
@@ -1489,7 +1492,7 @@ impl IProcessContextRequirementsTrait for TestSynthProcessor {
 
 /// A minimal but protocol-complete `IPlugView`.
 ///
-/// On Windows this additionally owns a real native panel and clickable parameter control.
+/// Windows and Linux additionally own a real native panel and clickable parameter control.
 /// Other platforms retain the upstream lifecycle-only behavior; they do not validate drawing.
 struct TestPlugView {
     probe: Arc<EditorProbe>,
@@ -1505,7 +1508,9 @@ struct TestPlugView {
     self_resize_done: AtomicBool,
     #[cfg(target_os = "windows")]
     native: Mutex<Option<native_windows::NativeWindow>>,
-    #[cfg(target_os = "windows")]
+    #[cfg(target_os = "linux")]
+    native_linux: Mutex<Option<native_linux::NativeWindow>>,
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     edit: NativeEditState,
 }
 
@@ -1523,7 +1528,9 @@ impl TestPlugView {
             self_resize_done: AtomicBool::new(false),
             #[cfg(target_os = "windows")]
             native: Mutex::new(None),
-            #[cfg(target_os = "windows")]
+            #[cfg(target_os = "linux")]
+            native_linux: Mutex::new(None),
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
             edit: _edit,
         }
     }
@@ -1590,6 +1597,24 @@ impl IPlugViewTrait for TestPlugView {
             };
             *native = Some(window);
         }
+        #[cfg(target_os = "linux")]
+        {
+            let mut native = self.native_linux.lock().unwrap_or_else(|p| p.into_inner());
+            if native.is_some() {
+                return kResultFalse;
+            }
+            let frame = self.frame.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            let Some(frame) = frame else {
+                return kResultFalse;
+            };
+            let size = *self.size.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(window) =
+                native_linux::NativeWindow::attach(parent, size, self.edit.clone(), &frame)
+            else {
+                return kResultFalse;
+            };
+            *native = Some(window);
+        }
         self.probe.attached.store(true, Ordering::Release);
         self.request_host_resize();
         kResultOk
@@ -1598,6 +1623,13 @@ impl IPlugViewTrait for TestPlugView {
     unsafe fn removed(&self) -> tresult {
         #[cfg(target_os = "windows")]
         drop(self.native.lock().unwrap_or_else(|p| p.into_inner()).take());
+        #[cfg(target_os = "linux")]
+        drop(
+            self.native_linux
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take(),
+        );
         self.probe.attached.store(false, Ordering::Release);
         kResultOk
     }
@@ -1636,6 +1668,15 @@ impl IPlugViewTrait for TestPlugView {
         }
         *self.size.lock().unwrap_or_else(|p| p.into_inner()) = (width, height);
         self.probe.record_size(width, height);
+        #[cfg(target_os = "linux")]
+        if let Some(native) = self
+            .native_linux
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            native.resize(width, height);
+        }
         #[cfg(target_os = "windows")]
         if let Some(native) = self
             .native
@@ -1689,7 +1730,7 @@ impl IPlugViewContentScaleSupportTrait for TestPlugView {
 
 /// Shared only by this fixture's controller and its native editor.
 #[derive(Clone)]
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
 struct NativeEditState {
     values: Arc<Mutex<[f64; PARAM_COUNT as usize]>>,
     revision: Arc<Mutex<u32>>,
@@ -1755,13 +1796,27 @@ impl TestSynthController {
 
 /// The read-only instrumentation parameters the dual synth's controller publishes, in the order
 /// `getParameterInfo` reports them (right after the [`PARAM_COUNT`] synth parameters).
-const PROBE_PARAMS: [(u32, &str); 6] = [
+const PROBE_PARAMS: &[(u32, &str)] = &[
     (EDITOR_ATTACHED_PARAM_ID, "Editor Attached"),
     (EDITOR_WIDTH_PARAM_ID, "Editor Width"),
     (EDITOR_HEIGHT_PARAM_ID, "Editor Height"),
     (EDITOR_SCALE_PARAM_ID, "Editor Scale"),
     (STATE_TYPE_PARAM_ID, "State Type Seen"),
     (STATE_PATH_PARAM_ID, "State Path Seen"),
+    #[cfg(target_os = "linux")]
+    (1020, "Factory FD Calls"),
+    #[cfg(target_os = "linux")]
+    (1021, "Factory Timer Calls"),
+    #[cfg(target_os = "linux")]
+    (1022, "Frame FD Calls"),
+    #[cfg(target_os = "linux")]
+    (1023, "Frame Timer Calls"),
+    #[cfg(target_os = "linux")]
+    (1024, "Native Key Press"),
+    #[cfg(target_os = "linux")]
+    (1025, "Native Key Release"),
+    #[cfg(target_os = "linux")]
+    (1026, "Native Mouse Press"),
 ];
 
 /// Total parameter count the dual synth's controller reports.
@@ -1883,6 +1938,10 @@ impl IEditControllerTrait for TestSynthController {
         v
     }
     unsafe fn getParamNormalized(&self, id: u32) -> f64 {
+        #[cfg(target_os = "linux")]
+        if let Some(value) = native_linux::probe(id) {
+            return value;
+        }
         if let Some(value) = self.editor.parameter(id) {
             return value;
         }
@@ -2388,10 +2447,58 @@ impl IPluginCompatibilityTrait for TestSynthCompatibility {
     }
 }
 
-struct Factory;
+#[derive(Default)]
+struct Factory {
+    #[cfg(target_os = "linux")]
+    run_loop_probe: Mutex<Option<native_linux::FactoryProbe>>,
+}
 
 impl Class for Factory {
+    #[cfg(not(target_os = "linux"))]
     type Interfaces = (IPluginFactory,);
+    #[cfg(target_os = "linux")]
+    type Interfaces = (IPluginFactory3,);
+}
+
+#[cfg(target_os = "linux")]
+impl IPluginFactory2Trait for Factory {
+    unsafe fn getClassInfo2(&self, index: i32, info: *mut PClassInfo2) -> tresult {
+        let Some(info) = info.as_mut() else {
+            return kInvalidArgument;
+        };
+        let mut basic: PClassInfo = std::mem::zeroed();
+        let result = self.getClassInfo(index, &mut basic);
+        if result != kResultOk {
+            return result;
+        }
+        *info = std::mem::zeroed();
+        info.cid = basic.cid;
+        info.cardinality = basic.cardinality;
+        info.category = basic.category;
+        info.name = basic.name;
+        copy_cstring("Instrument|Synth", &mut info.subCategories);
+        kResultOk
+    }
+}
+#[cfg(target_os = "linux")]
+impl IPluginFactory3Trait for Factory {
+    unsafe fn getClassInfoUnicode(&self, _index: i32, _info: *mut PClassInfoW) -> tresult {
+        kNotImplemented
+    }
+    unsafe fn setHostContext(&self, context: *mut FUnknown) -> tresult {
+        let mut probe = self.run_loop_probe.lock().unwrap();
+        *probe = None;
+        if context.is_null() {
+            return kResultOk;
+        }
+        *probe = native_linux::FactoryProbe::new(context);
+        if probe.is_some() {
+            kResultOk
+        } else {
+            eprintln!("CITRUS_LINUX_FACTORY_RUNLOOP_MISSING");
+            kResultFalse
+        }
+    }
 }
 
 impl IPluginFactoryTrait for Factory {
@@ -2495,7 +2602,7 @@ impl IPluginFactoryTrait for Factory {
 
 #[no_mangle]
 extern "system" fn GetPluginFactory() -> *mut IPluginFactory {
-    ComWrapper::new(Factory)
+    ComWrapper::new(Factory::default())
         .to_com_ptr::<IPluginFactory>()
         .unwrap()
         .into_raw()

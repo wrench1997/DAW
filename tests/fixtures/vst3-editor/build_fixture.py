@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parent
-SOURCE_FILES = ("Cargo.toml", "Cargo.lock", "LICENSE", "src/lib.rs", "src/native_windows.rs")
+SOURCE_FILES = ("Cargo.toml", "Cargo.lock", "LICENSE", "src/lib.rs", "src/native_windows.rs", "src/native_linux.rs")
 UPSTREAM_COMMIT = "ed054908cfe057694d8cf037d0c39dfb5eb4c2ca"
 
 
@@ -22,10 +22,11 @@ def sha256(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", default="x86_64-pc-windows-msvc", choices=(
-        "x86_64-pc-windows-msvc", "x86_64-pc-windows-gnullvm", "x86_64-pc-windows-gnu"))
+        "x86_64-pc-windows-msvc", "x86_64-pc-windows-gnullvm", "x86_64-pc-windows-gnu", "x86_64-unknown-linux-gnu"))
     args = parser.parse_args()
-    if os.name != "nt":
-        parser.error("build the acceptance bundles on Windows with an already installed Rust target")
+    linux = args.target == "x86_64-unknown-linux-gnu"
+    if (linux and not sys.platform.startswith("linux")) or (not linux and os.name != "nt"):
+        parser.error("build on the target platform with an already installed Rust toolchain")
     target = ROOT / "target"
     # The lockfile is checked in. Cargo may fetch its normal official registry dependencies;
     # this script does not fetch or install a VST3 binary or any toolchain.
@@ -35,9 +36,9 @@ def main():
         if variant == "no-editor":
             command.extend(("--features", "no-editor"))
         subprocess.run(command, check=True)
-        binary = target / "build" / args.target / "release" / "citrus_vst3_editor_fixture.dll"
+        binary = target / "build" / args.target / "release" / ("libcitrus_vst3_editor_fixture.so" if linux else "citrus_vst3_editor_fixture.dll")
         bundle = target / "bundles" / f"{name}.vst3"
-        destination = bundle / "Contents" / "x86_64-win" / f"{name}.vst3"
+        destination = bundle / "Contents" / ("x86_64-linux" if linux else "x86_64-win") / (f"{name}.so" if linux else f"{name}.vst3")
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(binary, destination)
         receipt = {

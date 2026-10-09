@@ -61,3 +61,31 @@ caption changes. This validates application-rendered control output rather than 
 blank view or the mere existence of an HWND. It is not an on-screen screenshot or
 a substitute for human visual review. Focus checks inspect the helper thread's
 keyboard-focus HWND; they do not demand or bypass foreground-stealing permission.
+
+
+## Linux standalone editor acceptance
+
+Use an existing X11 desktop or a compositor-provided XWayland DISPLAY. This test
+never starts a display server and does not require changing the DAW renderer.
+Build on x86_64 Linux with the installed Rust target and normal XCB development
+link library. No downloaded VST3 fixture or vendor SDK is used.
+
+```sh
+cargo build --locked --bin vst3-host-helper
+python3 tests/fixtures/vst3-editor/build_fixture.py --target x86_64-unknown-linux-gnu
+python3 scripts/smoke_vst3_editor_linux.py --helper target/debug/vst3-host-helper --interactive
+```
+
+Follow the real-window prompts: click the button, switch focus away/back, move
+the pointer outside the plugin, press/release Space, and close from the titlebar.
+The source-built probes must observe actual mouse and both key transitions;
+factory/frame fd callbacks and timers must run on the creating thread. State must
+survive replacement and restore; closing must stop frame timers while factory
+timers continue. Repeated Open/Close, no-editor rejection, EOF, Shutdown and forced
+helper termination are also covered. Keep real before/after screenshots separately
+for visual paint review. The script does not synthesize desktop input or claim to
+observe pixels. Missing DISPLAY or omitted --interactive returns 77, not a pass.
+
+Linux and Windows acceptance remain separate. A Linux fixture success is neither
+real-plugin compatibility nor proof of a Wayland DAW and XWayland plugin working
+together. Per-output/fractional scaling and long audio-load tests remain distinct.

@@ -19,7 +19,7 @@ Original upstream source SHA-256 values, before Citrus modifications:
 Citrus modifications:
 
 1. Standalone developer-only package/workspace, `publish = false`, pinned official
-   registry `vst3 = 0.3.0` and Windows-only `winapi = 0.3.9`.
+   registry `vst3 = 0.3.0`, Windows-only `winapi = 0.3.9`, and Linux-only `xcb = 1.7.0`.
 2. `no-editor` feature makes the default audio class's `createView` return null.
 3. Windows `IPlugView` owns a native panel and a standard, visible Win32 button.
    The button sets Cutoff parameter 0 to exactly 0.25 and publishes the normal
@@ -35,6 +35,17 @@ Citrus modifications:
    Rust, direct Win32 standard-handle writes, and the target C runtime. The harness
    requires all three markers on stderr and unaffected real protocol replies. This
    checks accidental stdout routing, not isolation against a hostile native plugin.
+
+8. Linux `IPlugView` owns an XEmbed child drawn with XCB. Its input and paint event
+   handler and timer run exclusively through the host's `IPlugFrame::IRunLoop`.
+   The factory additionally registers a real socket fd and timer through the
+   `IPluginFactory3` host context, which must survive editor close. Read-only
+   Linux probes 1020–1026 report factory/frame fd/timer and key-press/key-release/
+   mouse-press counts divided by 1,000,000; original probe IDs remain unchanged.
+9. Linux attach deliberately emits fake JSON replies through Rust stdout, direct
+   POSIX `write(1, ...)`, and C stdio. Successful editor commands and stderr markers
+   verify that none becomes an actual protocol reply. Both platform harnesses
+   include the Linux source file in their exact build receipts.
 
 The original fixture is lifecycle-complete but draws nothing. The lifecycle
 assertions and the Citrus-added native drawing/interaction assertions are separate
