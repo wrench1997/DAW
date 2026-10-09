@@ -269,3 +269,28 @@ Append-only from 2026-10-08 UTC. Timestamps use UTC. Source inspection, executed
 - `1fb0860` aggregates independent native acceptance evidence without weakening paint. Each stage reports PASS/FAIL/SKIP; any failure/skip keeps overall failure. Fresh trusted HWND/PID/class/ancestry/control-ID/geometry validation precedes native events. A non-paint prerequisite failure stops dependent actions; fresh-helper Shutdown/EOF/crash checks remain bounded. New state/lifecycle outcomes await actual Windows execution. No speculative driver/security changes or arbitrary vendor inputs.
 - Current full Python discovery passes **163 tests**. The new visual guide is added explicitly to the package allowlist and joint link regression, without broad directory copying. All 23 packaged document/provenance inputs have closed relative links. Runtime Rust/Cargo/vendor source is unchanged after the final Rust/UI gates; follow-up changes are Python/docs only. New Windows runs for this visual/inspector/aggregate candidate are still required.
 - The user also explicitly requested simultaneous FL-style editor windows. That shared-project internal floating-workspace work is proceeding separately and is not included or claimed in this checkpoint. Native OS window detach remains a separate capability. No main merge, Release, binary upload or commercial-ready claim.
+
+## 2026-10-09 — Simultaneous internal editor windows
+
+Implemented the production multiwindow workspace: Playlist, Channel Rack, Piano Roll
+and Mixer open together, with movable/resizable/closable window chrome, F5/F6/F7/F9
+show-and-focus, persisted versioned geometry/stacking/visibility/focus, offscreen
+recovery, Arrange/Cascade and maximize/restore. A single Project, transport, audio
+engine, plug-in runtime and history remain authoritative. Explicit editor context
+prevents a focused Piano toolbar from changing Playlist tool/snap bindings.
+
+Actual input regressions cover title/edge interactions without musical edits,
+first-press background Mixer controls, shared channel/Pattern updates, active-editor
+Delete/Duplicate plus global Undo, text-field isolation, interrupted note/clip
+body/resize gestures, modal z-order and modal-owned drags, layout restore and
+hidden-editor safety. The native plug-in lifecycle and shared save/import/transition
+guards remain intact. Window sizing probes no longer reset the Piano pitch origin.
+
+Final isolated-source gates: 954 app +14 helper +5 protocol all-feature tests; 952
+no-default tests; both strict Clippy modes; format; all-bin build; Windows MSVC
+no-default/all-target cross-check; 20 actual UI flows and27 Vulkan offscreen frames.
+PNG conversion is RGB-identical. Independent source review has no outstanding
+high-priority findings. Detailed controls and acceptance boundaries are documented
+in `docs/MULTIWINDOW_WORKSPACE.md`. This implements internal native-app windows,
+not detached OS editor windows, and does not establish physical hardware or native
+Windows desktop acceptance. No publication was performed from this worktree.

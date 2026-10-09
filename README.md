@@ -42,7 +42,7 @@ Useful shortcuts:
 - `L`: switch PAT (current Pattern loop) and SONG (Playlist arrangement) playback
 - `Escape`: stop
 - Playlist `P`, `B`, `D`, `T`, `C`, `S`, `E`: Draw, Paint, Delete, Mute, Slice, Slip Edit, and Select; `1` to `4` remain aliases for Select, Draw, Slice, and Mute
-- `F5`, `F6`, `F7`, `F9`: Playlist, Channel Rack, Piano Roll, and Mixer
+- `F5`, `F6`, `F7`, `F9`: show and focus Playlist, Channel Rack, Piano Roll, and Mixer
 - `Ctrl+O`, `Ctrl+S`: open and save
 - `Ctrl+Z`, `Ctrl+Y`: undo and redo
 - `Ctrl+D`, `Delete`: duplicate and delete the current Playlist or Piano Roll selection
@@ -54,6 +54,7 @@ Useful shortcuts:
 
 ### Editing and navigation
 
+- [Simultaneous editor windows](docs/MULTIWINDOW_WORKSPACE.md): move/resize/hide Playlist, Channel Rack, Piano Roll and Mixer independently inside the native app, with saved layout, focus-aware editing, shared project/Undo and maximize/restore; detached OS editor windows remain unimplemented
 - Playlist horizontal and vertical scrolling, pointer-anchored time/track zoom, and viewport-culling across all 32 tracks and the complete configured song length
 - Pattern, audio, and automation Clip modifier-click/marquee selection, Draw/Paint placement, group-aware movement and resizing, snapping with `Alt` bypass, splitting, muting, duplication, and deletion
 - Playlist `S` Slip Edit moves Pattern, Audio, and Automation source content without moving Clip edges; Pattern phase reaches both realtime Timeline playback and offline export, Audio uses native asset-frame bounds, and visible Pattern ticks, waveform ranges, and automation curves follow the source offset

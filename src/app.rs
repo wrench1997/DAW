@@ -5,6 +5,7 @@ mod headless_ui_capture;
 mod headless_ui_tests;
 mod project_media_ui;
 mod sample_browser_ui;
+mod workspace;
 
 use std::{
     collections::{HashMap, HashSet, hash_map::DefaultHasher},
@@ -4650,7 +4651,7 @@ struct PianoNoteResizeGesture {
 
 pub struct CitrusApp {
     project: Project,
-    view: StudioView,
+    workspace: workspace::Workspace,
     transport_mode: TransportMode,
     transport_mode_dirty: bool,
     playing: bool,
@@ -4972,7 +4973,7 @@ impl CitrusApp {
             Box::new_uninit(),
             Self {
                 project,
-                view: StudioView::Playlist,
+                workspace: workspace::Workspace::load(cc.storage),
                 transport_mode,
                 transport_mode_dirty: false,
                 playing: false,
@@ -10049,6 +10050,7 @@ impl CitrusApp {
             self.notify("Undo is unavailable while plug-in state is being saved".into());
             return;
         }
+        self.flush_pending_editor_history();
         let Some(previous) = self.undo_stack.pop() else {
             self.notify("Nothing to undo".into());
             return;
@@ -10225,7 +10227,7 @@ impl CitrusApp {
                 });
         }
         self.select_playlist_clip_only(clip_id);
-        self.view = StudioView::Playlist;
+        self.focus_editor(StudioView::Playlist);
         self.notify("Created an editable automation clip".into());
     }
 
@@ -10277,7 +10279,7 @@ impl CitrusApp {
         )
         .expect("a complete MIDI candidate always commits");
         self.select_playlist_clip_only(commit.clip_id);
-        self.view = StudioView::Playlist;
+        self.focus_editor(StudioView::Playlist);
         self.sync_history_observer();
         self.automation_evaluator.reset();
         self.notify(format!(
@@ -10493,7 +10495,10 @@ impl CitrusApp {
     }
 
     fn duplicate_selection(&mut self) {
-        match self.view {
+        if !self.workspace.windows[workspace::index(self.workspace.focused)].visible {
+            return;
+        }
+        match self.workspace.focused {
             StudioView::Playlist => {
                 let selected = expand_clip_group_selection(
                     &self.project.clips,
@@ -10633,7 +10638,9 @@ impl CitrusApp {
                     &selection_ids,
                     self.piano_roll_state.local_snap.max(0.05),
                 ) {
-                    self.project.active_pattern_mut().notes = candidate.notes;
+                    let mut project = self.project.clone();
+                    project.active_pattern_mut().notes = candidate.notes;
+                    self.commit_editor_project(project);
                     self.piano_roll_state.selection_ids = candidate.selection_ids;
                 }
             }
@@ -11176,7 +11183,10 @@ impl CitrusApp {
     }
 
     fn delete_selection(&mut self) {
-        match self.view {
+        if !self.workspace.windows[workspace::index(self.workspace.focused)].visible {
+            return;
+        }
+        match self.workspace.focused {
             StudioView::Playlist => {
                 let selected = expand_clip_group_selection(
                     &self.project.clips,
@@ -11220,11 +11230,13 @@ impl CitrusApp {
                     &self.piano_roll_state.selection_ids,
                     self.piano_roll_state.grouping_enabled,
                 );
-                self.project
+                let mut candidate = self.project.clone();
+                candidate
                     .active_pattern_mut()
                     .notes
                     .retain(|note| !selected.contains(&note.id));
-                normalize_piano_note_groups(&mut self.project.active_pattern_mut().notes);
+                normalize_piano_note_groups(&mut candidate.active_pattern_mut().notes);
+                self.commit_editor_project(candidate);
                 self.piano_roll_state.clear_selection();
             }
             StudioView::ChannelRack | StudioView::Mixer => {}
@@ -11763,7 +11775,7 @@ impl CitrusApp {
             .song_length_beats
             .max(self.recording_started_beat + duration_beats);
         self.select_playlist_clip_only(clip_id);
-        self.view = StudioView::Playlist;
+        self.focus_editor(StudioView::Playlist);
         self.dirty = true;
         if !notify_and_load {
             return;
@@ -11859,11 +11871,27 @@ impl CitrusApp {
     }
 
     fn apply_shortcut_action(&mut self, action: ShortcutAction) {
+        if !self.workspace.windows[workspace::index(self.workspace.focused)].visible
+            && matches!(
+                action,
+                ShortcutAction::TogglePlaylistFades
+                    | ShortcutAction::Duplicate
+                    | ShortcutAction::Delete
+                    | ShortcutAction::Tool(_)
+                    | ShortcutAction::PianoTool(_)
+                    | ShortcutAction::PianoTransform(_)
+                    | ShortcutAction::QuickLegato
+                    | ShortcutAction::GroupPianoNotes
+                    | ShortcutAction::UngroupPianoNotes
+            )
+        {
+            return;
+        }
         match action {
             ShortcutAction::TogglePlay => self.toggle_play(),
             ShortcutAction::ToggleTransportMode => self.toggle_transport_mode(),
             ShortcutAction::TogglePlaylistFades => {
-                if self.view == StudioView::Playlist {
+                if self.workspace.focused == StudioView::Playlist {
                     self.show_playlist_fades = !self.show_playlist_fades;
                 }
             }
@@ -11876,16 +11904,16 @@ impl CitrusApp {
             ShortcutAction::Duplicate => self.duplicate_selection(),
             ShortcutAction::Delete => self.delete_selection(),
             ShortcutAction::ToggleSettings => self.show_settings = !self.show_settings,
-            ShortcutAction::View(view) => self.view = view,
+            ShortcutAction::View(view) => self.focus_editor(view),
             ShortcutAction::Tool(tool) => {
-                if self.view == StudioView::Playlist {
+                if self.workspace.focused == StudioView::Playlist {
                     self.tool_mode = tool;
                 }
             }
             ShortcutAction::PianoTool(tool) => {
-                if self.view == StudioView::PianoRoll {
+                if self.workspace.focused == StudioView::PianoRoll {
                     self.piano_roll_state.tool = tool;
-                } else if self.view == StudioView::Playlist {
+                } else if self.workspace.focused == StudioView::Playlist {
                     self.tool_mode = match tool {
                         PianoRollTool::Draw => ToolMode::Draw,
                         PianoRollTool::Paint => ToolMode::Paint,
@@ -11898,26 +11926,26 @@ impl CitrusApp {
                 }
             }
             ShortcutAction::PianoTransform(kind) => {
-                if self.view == StudioView::PianoRoll {
+                if self.workspace.focused == StudioView::PianoRoll {
                     self.begin_piano_roll_transform(kind);
                 }
             }
             ShortcutAction::QuickLegato => {
-                if self.view == StudioView::PianoRoll {
+                if self.workspace.focused == StudioView::PianoRoll {
                     self.quick_legato_piano_roll();
                 }
             }
             ShortcutAction::GroupPianoNotes => {
-                if self.view == StudioView::PianoRoll {
+                if self.workspace.focused == StudioView::PianoRoll {
                     self.group_piano_roll_selection();
-                } else if self.view == StudioView::Playlist {
+                } else if self.workspace.focused == StudioView::Playlist {
                     self.group_playlist_selection();
                 }
             }
             ShortcutAction::UngroupPianoNotes => {
-                if self.view == StudioView::PianoRoll {
+                if self.workspace.focused == StudioView::PianoRoll {
                     self.ungroup_piano_roll_selection();
-                } else if self.view == StudioView::Playlist {
+                } else if self.workspace.focused == StudioView::Playlist {
                     self.ungroup_playlist_selection();
                 }
             }
@@ -12093,7 +12121,9 @@ impl CitrusApp {
         {
             self.last_step = usize::MAX;
         }
-        if self.view == StudioView::Playlist {
+        if self.workspace.windows[workspace::index(StudioView::Playlist)].visible
+            && (!self.workspace.maximized || self.workspace.focused == StudioView::Playlist)
+        {
             let beat = f64::from(self.beat_position.clamp(0.0, song_length));
             let (view_start, view_end) = self.playlist_viewport.x.visible_range();
             if beat < view_start || beat >= view_end {
@@ -13897,7 +13927,6 @@ impl CitrusApp {
         let selected_channel = initial_selected_channel_index(&project);
         self.project = project;
         self.saved_path = saved_path;
-        self.view = StudioView::Playlist;
         self.selected_channel = selected_channel;
         self.selected_mixer = 0;
         self.clear_playlist_selection();
@@ -13928,6 +13957,8 @@ impl CitrusApp {
         self.redo_stack.clear();
         self.automation_evaluator.reset();
         self.sync_history_observer();
+        // Activate the destination only after old-project gestures/history are gone.
+        self.focus_editor(StudioView::Playlist);
         if dirty {
             self.project_fingerprint = project_fingerprint(&self.project);
             self.dirty = true;
@@ -14483,42 +14514,29 @@ impl CitrusApp {
                             self.delete_selection();
                         }
                         ui.separator();
-                        ui.selectable_value(
-                            &mut self.tool_mode,
-                            ToolMode::Select,
-                            "Select tool       E / 1",
-                        );
-                        ui.selectable_value(
-                            &mut self.tool_mode,
-                            ToolMode::Draw,
-                            "Draw tool         P / 2",
-                        );
-                        ui.selectable_value(
-                            &mut self.tool_mode,
-                            ToolMode::Paint,
-                            "Paint tool        B",
-                        );
-                        ui.selectable_value(
-                            &mut self.tool_mode,
-                            ToolMode::Delete,
-                            "Delete tool       D",
-                        );
-                        ui.selectable_value(
-                            &mut self.tool_mode,
-                            ToolMode::Slice,
-                            "Slice tool        C / 3",
-                        );
-                        ui.selectable_value(
-                            &mut self.tool_mode,
-                            ToolMode::Slip,
-                            "Slip edit tool    S",
-                        );
-                        ui.selectable_value(
-                            &mut self.tool_mode,
-                            ToolMode::Mute,
-                            "Mute tool         T / 4",
-                        );
-                        if self.view == StudioView::Playlist {
+                        let piano = self.workspace.focused == StudioView::PianoRoll;
+                        let has_tools = self.workspace.windows[workspace::index(self.workspace.focused)].visible
+                            && (piano || self.workspace.focused == StudioView::Playlist);
+                        ui.add_enabled_ui(has_tools, |ui| {
+                            for (tool, piano_tool, label) in [
+                                (ToolMode::Select, PianoRollTool::Select, "Select tool       E / 1"),
+                                (ToolMode::Draw, PianoRollTool::Draw, "Draw tool         P / 2"),
+                                (ToolMode::Paint, PianoRollTool::Paint, "Paint tool        B"),
+                                (ToolMode::Delete, PianoRollTool::Delete, "Delete tool       D"),
+                                (ToolMode::Slice, PianoRollTool::Slice, "Slice tool        C / 3"),
+                                (ToolMode::Mute, PianoRollTool::Mute, "Mute tool         T / 4"),
+                            ] {
+                                let selected = if piano { self.piano_roll_state.tool == piano_tool } else { self.tool_mode == tool };
+                                if ui.selectable_label(selected, label).clicked() {
+                                    self.apply_shortcut_action(ShortcutAction::PianoTool(piano_tool));
+                                }
+                            }
+                            if !piano && ui.selectable_label(self.tool_mode == ToolMode::Slip, "Slip edit tool    S").clicked() {
+                                self.apply_shortcut_action(ShortcutAction::Tool(ToolMode::Slip));
+                            }
+                        });
+                        if self.workspace.focused == StudioView::Playlist
+                            && self.workspace.windows[workspace::index(StudioView::Playlist)].visible {
                             ui.separator();
                             if ui.button("Group Clips       Shift+G").clicked() {
                                 ui.close();
@@ -14540,6 +14558,8 @@ impl CitrusApp {
                     ui.menu_button(RichText::new("VIEW").size(10.0), |ui| {
                         ui.checkbox(&mut self.show_browser, "Browser");
                         ui.checkbox(&mut self.show_inspector, "Inspector");
+                        ui.separator();
+                        self.workspace_view_menu(ui);
                     });
                     ui.menu_button(RichText::new("OPTIONS").size(10.0), |ui| {
                         if ui.button("Audio & plugin settings…").clicked() {
@@ -14671,7 +14691,7 @@ impl CitrusApp {
                         self.set_transport_mode(mode);
                     }
                     if let Some(view) = requested_transport_view {
-                        self.view = view;
+                        self.focus_editor(view);
                     }
                     let active_pattern_name = self
                         .project
@@ -14769,9 +14789,9 @@ impl CitrusApp {
             ("PIANO", StudioView::PianoRoll, "F7", StudioIcon::Piano),
             ("MIXER", StudioView::Mixer, "F9", StudioIcon::Mixer),
         ] {
-            let selected = self.view == view;
+            let selected = self.workspace.focused == view;
             if navigation_button(ui, icon, label, key, selected).clicked() {
-                self.view = view;
+                self.focus_editor(view);
             }
         }
 
@@ -15500,7 +15520,7 @@ impl CitrusApp {
                     });
                 });
                 ui.add_space(8.0);
-                egui::ScrollArea::vertical().show(ui, |ui| match self.view {
+                egui::ScrollArea::vertical().show(ui, |ui| match self.workspace.focused {
                     StudioView::Playlist => self.clip_inspector(ui),
                     StudioView::ChannelRack => self.channel_inspector(ui),
                     StudioView::PianoRoll => self.note_inspector(ui),
@@ -16946,7 +16966,7 @@ impl CitrusApp {
         }
         self.sync_history_observer();
         self.select_playlist_clip_only(clip_id);
-        self.view = StudioView::Playlist;
+        self.focus_editor(StudioView::Playlist);
         self.dirty = true;
         self.register_audio_asset(asset_id, asset);
         self.notify(format!(
@@ -17427,7 +17447,7 @@ impl CitrusApp {
             Err(MidiExportRoutingIssue::UnresolvedNotes(note_ids)) => {
                 let note_count = note_ids.len();
                 self.piano_roll_state.selection_ids = note_ids.into_iter().collect();
-                self.view = StudioView::PianoRoll;
+                self.focus_editor(StudioView::PianoRoll);
                 self.notify(format!(
                     "MIDI export blocked: assign {} highlighted note(s) to a valid Channel Rack channel",
                     note_count
@@ -17497,7 +17517,7 @@ impl CitrusApp {
                 self.pending_midi_import = None;
                 self.project.tempo = self.project.tempo.clamp(20.0, 400.0);
                 self.effective_tempo = self.project.tempo;
-                self.view = StudioView::PianoRoll;
+                self.focus_editor(StudioView::PianoRoll);
                 self.dirty = true;
                 self.notify(format!(
                     "Imported {} notes from {} (SMF {}, {} PPQ, {:.2} BPM)",
@@ -17897,12 +17917,7 @@ impl eframe::App for CitrusApp {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::BG))
-            .show(ui, |ui| match self.view {
-                StudioView::Playlist => self.playlist(ui),
-                StudioView::ChannelRack => self.channel_rack(ui),
-                StudioView::PianoRoll => self.piano_roll(ui),
-                StudioView::Mixer => self.mixer(ui),
-            });
+            .show(ui, |ui| self.editor_workspace(ui));
 
         let exclusive_project_modal =
             self.project_lifecycle.is_modal() || self.recovery_available || self.project_media.open;
@@ -17983,7 +17998,8 @@ impl eframe::App for CitrusApp {
         }
         if (self.audio_preferences_dirty
             || self.piano_roll_preferences_dirty
-            || self.transport_mode_dirty)
+            || self.transport_mode_dirty
+            || (self.workspace.dirty && !ctx.input(|input| input.pointer.any_down())))
             && let Some(storage) = frame.storage_mut()
         {
             if self.audio_preferences_dirty {
@@ -17995,6 +18011,8 @@ impl eframe::App for CitrusApp {
             if self.transport_mode_dirty {
                 persist_transport_mode(storage, self.transport_mode);
             }
+            self.workspace.save(storage);
+            self.workspace.dirty = false;
             storage.flush();
             self.audio_preferences_dirty = false;
             self.piano_roll_preferences_dirty = false;
@@ -18003,6 +18021,8 @@ impl eframe::App for CitrusApp {
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.workspace.save(storage);
+        self.workspace.dirty = false;
         persist_audio_preferences(storage, &self.audio_preferences);
         persist_piano_roll_preferences(storage, &self.piano_roll_state.preferences());
         persist_transport_mode(storage, self.transport_mode);
@@ -18230,7 +18250,13 @@ fn piano_transform_grid_label(value: f32) -> String {
 }
 
 impl CitrusApp {
-    fn workspace_header(&mut self, ui: &mut egui::Ui, title: &str, subtitle: &str) {
+    fn workspace_header(
+        &mut self,
+        ui: &mut egui::Ui,
+        view: StudioView,
+        title: &str,
+        subtitle: &str,
+    ) {
         let mut piano_transform_request = None;
         let mut piano_group_request = None;
         let mut playlist_group_request = None;
@@ -18249,8 +18275,9 @@ impl CitrusApp {
                             .color(theme::TEXT),
                     );
                     ui.label(RichText::new(subtitle).size(9.0).color(theme::MUTED));
+                    if matches!(view, StudioView::Playlist | StudioView::PianoRoll) {
                     ui.separator();
-                    if self.view == StudioView::PianoRoll {
+                    if view == StudioView::PianoRoll {
                         for (mode, icon, hint) in [
                             (PianoRollTool::Draw, StudioIcon::Pencil, "Draw — P"),
                             (PianoRollTool::Paint, StudioIcon::Paint, "Paint — B"),
@@ -18359,7 +18386,7 @@ impl CitrusApp {
                                 .size(8.0)
                                 .color(theme::MUTED),
                         );
-                        if self.view == StudioView::Playlist {
+                        if view == StudioView::Playlist {
                             if icons::icon_button(
                                 ui,
                                 StudioIcon::Fade,
@@ -18422,7 +18449,7 @@ impl CitrusApp {
                     ui.allocate_ui_with_layout(
                         Vec2::new((ui.available_size_before_wrap().x - ui.spacing().item_spacing.x).max(196.0), 28.0),
                         Layout::right_to_left(Align::Center), |ui| {
-                        let snap = if self.view == StudioView::PianoRoll {
+                        let snap = if view == StudioView::PianoRoll {
                             &mut self.piano_roll_state.local_snap
                         } else {
                             &mut self.snap
@@ -18454,6 +18481,7 @@ impl CitrusApp {
                             theme::MUTED,
                         );
                     });
+                    }
                 });
             });
         if let Some(kind) = piano_transform_request {
@@ -18574,7 +18602,7 @@ impl CitrusApp {
             (self.project.song_length_beats / 4.0).ceil() as usize,
             self.project.active_pattern().name
         );
-        self.workspace_header(ui, "PLAYLIST", &playlist_subtitle);
+        self.workspace_header(ui, StudioView::Playlist, "PLAYLIST", &playlist_subtitle);
         self.playlist_navigation(ui);
         let available = ui.available_rect_before_wrap();
         let track_header = 132.0;
@@ -19932,7 +19960,7 @@ impl CitrusApp {
             self.project.active_pattern().name,
             self.project.active_pattern().length_steps
         );
-        self.workspace_header(ui, "CHANNEL RACK", &pattern_label);
+        self.workspace_header(ui, StudioView::ChannelRack, "CHANNEL RACK", &pattern_label);
         let step_width = ((ui.available_width() - 420.0) / 16.0).clamp(31.0, 76.0);
         let active_step = if self.playing {
             self.last_step
@@ -20057,6 +20085,13 @@ impl CitrusApp {
                                     let size = Vec2::new(step_width, 27.0);
                                     let (rect, response) =
                                         ui.allocate_exact_size(size, Sense::click());
+                                    response.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::WidgetType::Button,
+                                            ui.is_enabled(),
+                                            format!("{} step {}", channel.name, step + 1),
+                                        )
+                                    });
                                     let fill = if on {
                                         theme::color(channel.color)
                                     } else if step % 4 == 0 {
@@ -20152,7 +20187,7 @@ impl CitrusApp {
             .map(|channel| channel.name.as_str())
             .unwrap_or("Unassigned");
         let piano_subtitle = format!("{} — {}", channel_name, self.project.active_pattern().name);
-        self.workspace_header(ui, "PIANO ROLL", &piano_subtitle);
+        self.workspace_header(ui, StudioView::PianoRoll, "PIANO ROLL", &piano_subtitle);
         let selected_note_count = self.piano_roll_state.selection_ids.len();
         let unassigned_count = self
             .project
@@ -20180,7 +20215,7 @@ impl CitrusApp {
             .selected_channel
             .min(channel_choices.len().saturating_sub(1));
         let mut target_channel_changed = false;
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("TARGET").size(9.0).color(theme::MUTED));
             egui::ComboBox::from_id_salt("piano-target-channel")
                 .width(160.0)
@@ -20886,7 +20921,8 @@ impl CitrusApp {
             {
                 project_gesture_stopped = true;
             }
-            let resize_started = resize_response.is_pointer_button_down_on()
+            let resize_started = ui.is_enabled()
+                && resize_response.is_pointer_button_down_on()
                 && ui.ctx().data(|data| {
                     data.get_temp::<PianoNoteResizeGesture>(resize_gesture_key)
                         .is_none()
@@ -20923,6 +20959,7 @@ impl CitrusApp {
             if active_resize
                 .as_ref()
                 .is_some_and(|drag| drag.note_id == note.id)
+                && ui.is_enabled()
                 && (primary_down || primary_released)
                 && let Some(pointer) = pointer_position
                 && let Some(drag) = active_resize.as_ref()
@@ -21902,7 +21939,7 @@ impl CitrusApp {
 
     fn mixer(&mut self, ui: &mut egui::Ui) {
         crate::mixer_meter_ui::request_meter_repaint(ui.ctx());
-        self.workspace_header(ui, "MIXER", "Insert routing & effects");
+        self.workspace_header(ui, StudioView::Mixer, "MIXER", "Insert routing & effects");
         let active = if self
             .project
             .mixer_track_id_at_runtime_slot(self.selected_mixer)
@@ -21916,7 +21953,7 @@ impl CitrusApp {
             .project
             .mixer_track_id_at_runtime_slot(active)
             .unwrap_or(MASTER_MIXER_TRACK_ID);
-        let mixer_height = ui.available_height().max(340.0);
+        let mixer_height = ui.available_height().max(260.0);
         let mixer_track_width =
             ((ui.available_width() - 196.0) / self.project.mixer_tracks.len().max(1) as f32 - 14.0)
                 .clamp(62.0, 88.0);
@@ -22653,7 +22690,7 @@ impl CitrusApp {
         ) {
             Ok(selection) => {
                 self.select_playlist_clip_only(selection.clip_id);
-                self.view = StudioView::Playlist;
+                self.focus_editor(StudioView::Playlist);
                 self.notify(if selection.created_lane {
                     "Created plug-in parameter automation".into()
                 } else if selection.created_clip {

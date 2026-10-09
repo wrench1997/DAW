@@ -18,10 +18,21 @@ struct UiHarness {
 
 impl UiHarness {
     fn new() -> Self {
+        Self::with_storage(None, true)
+    }
+
+    fn with_storage(storage: Option<&dyn eframe::Storage>, maximized_baseline: bool) -> Self {
         let ctx = egui::Context::default();
         ctx.enable_accesskit();
-        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
-        let app = CitrusApp::new_boxed_with_services(&cc, false);
+        let mut cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        cc.storage = storage;
+        let mut app = CitrusApp::new_boxed_with_services(&cc, false);
+        // These pre-existing app-flow checks exercise the supported maximized editor layout.
+        // Dedicated multiwindow tests below exercise the default floating workspace.
+        if maximized_baseline {
+            app.workspace.maximized = true;
+            app.focus_editor(StudioView::Playlist);
+        }
         assert!(app.audio.is_none());
         assert!(app.autosave_path.is_none());
         assert!(app.plugin_cache_path.is_none());
@@ -182,7 +193,7 @@ fn full_app_settings_navigation_and_shortcut_dismissal() {
         (egui::Key::F5, StudioView::Playlist),
     ] {
         ui.key(key, egui::Modifiers::NONE);
-        assert_eq!(ui.app.view, view);
+        assert_eq!(ui.app.workspace.focused, view);
         if view == StudioView::Mixer {
             ui.capture("mixer");
         }
@@ -203,7 +214,7 @@ fn full_app_settings_navigation_and_shortcut_dismissal() {
     }
     ui.key(egui::Key::F9, egui::Modifiers::NONE);
     assert_eq!(
-        ui.app.view,
+        ui.app.workspace.focused,
         StudioView::Playlist,
         "settings must own shortcuts"
     );
@@ -227,7 +238,7 @@ fn full_app_export_review_back_close_and_escape_preserve_project() {
     assert!(!ui.button("Back").is_disabled());
     ui.capture("export-review");
     ui.key(egui::Key::F9, egui::Modifiers::NONE);
-    assert_eq!(ui.app.view, StudioView::Playlist);
+    assert_eq!(ui.app.workspace.focused, StudioView::Playlist);
     ui.click("Back");
     assert_eq!(
         ui.button(crate::export_options::WavLevelPolicy::PreserveLevel.label())
@@ -257,7 +268,7 @@ fn full_app_media_modal_close_escape_and_reopen() {
     assert!(ui.app.project_media.open);
     ui.capture("project-media");
     ui.key(egui::Key::F9, egui::Modifiers::NONE);
-    assert_eq!(ui.app.view, StudioView::Playlist);
+    assert_eq!(ui.app.workspace.focused, StudioView::Playlist);
     ui.click("Close");
     assert!(!ui.app.project_media.open);
     ui.menu("Project media / relink…");
@@ -431,7 +442,7 @@ fn full_app_browser_search_focus_and_refresh_selection_are_real_ui_events() {
     assert!(ui.button("Import to Playlist").is_disabled());
     ui.key(egui::Key::F9, egui::Modifiers::NONE);
     assert_eq!(
-        ui.app.view,
+        ui.app.workspace.focused,
         StudioView::Playlist,
         "the text editor must own shortcuts"
     );
@@ -542,7 +553,7 @@ fn full_app_responsive_toolbars_keep_navigation_plugins_group_and_snap_separate(
             ui.capture("playlist-minimum-window");
         }
         ui.click("MIXER");
-        assert_eq!(ui.app.view, StudioView::Mixer);
+        assert_eq!(ui.app.workspace.focused, StudioView::Mixer);
         if width == 1080.0 {
             ui.capture("mixer-minimum-window");
         }
@@ -551,7 +562,7 @@ fn full_app_responsive_toolbars_keep_navigation_plugins_group_and_snap_separate(
         ui.key(egui::Key::Escape, egui::Modifiers::NONE);
         assert!(!ui.app.show_plugins);
         ui.click("PLAYLIST");
-        assert_eq!(ui.app.view, StudioView::Playlist);
+        assert_eq!(ui.app.workspace.focused, StudioView::Playlist);
         ui.click("GROUP v");
         assert!(egui::Popup::is_any_open(&ui.ctx));
         ui.key(egui::Key::Escape, egui::Modifiers::NONE);
@@ -763,7 +774,7 @@ fn full_app_native_inspector_actions_fit_narrow_and_wide_panels() {
     for width in [240.0, 340.0] {
         for view in [StudioView::ChannelRack, StudioView::Mixer] {
             let mut ui = UiHarness::new();
-            ui.app.view = view;
+            ui.app.focus_editor(view);
             ui.app.selected_channel = 0;
             ui.app.selected_mixer = 1;
             let target = if view == StudioView::ChannelRack {
@@ -922,4 +933,632 @@ fn full_app_native_inspector_actions_fit_narrow_and_wide_panels() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[derive(Default)]
+struct WorkspaceTestStorage(HashMap<String, String>);
+impl eframe::Storage for WorkspaceTestStorage {
+    fn get_string(&self, key: &str) -> Option<String> {
+        self.0.get(key).cloned()
+    }
+    fn set_string(&mut self, key: &str, value: String) {
+        self.0.insert(key.into(), value);
+    }
+    fn remove_string(&mut self, key: &str) {
+        self.0.remove(key);
+    }
+    fn flush(&mut self) {}
+}
+
+impl UiHarness {
+    fn floating() -> Self {
+        let mut ui = Self::with_storage(None, false);
+        ui.size = Vec2::new(1920.0, 1080.0);
+        ui.app.workspace = workspace::Workspace::default();
+        ui.settle();
+        ui
+    }
+
+    fn editor_rect(&self, view: StudioView) -> Rect {
+        self.ctx
+            .memory(|memory| memory.area_rect(workspace::window_id(view)))
+            .unwrap()
+    }
+
+    fn drag_pointer(&mut self, origin: Pos2, delta: Vec2) {
+        self.run(mixer_pointer_button(origin, true));
+        for step in 1..=6 {
+            self.run(vec![egui::Event::PointerMoved(
+                origin + delta * (step as f32 / 6.0),
+            )]);
+        }
+        self.run(mixer_pointer_button(origin + delta, false));
+        self.settle();
+    }
+
+    fn close_editor_by_pointer(&mut self, view: StudioView) {
+        let rect = self.editor_rect(view);
+        let node = self
+            .nodes
+            .iter()
+            .find(|node| {
+                node.label() == Some("Close window")
+                    && node.bounds().is_some_and(|bounds| {
+                        rect.contains(Pos2::new(
+                            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+                        ))
+                    })
+            })
+            .expect("editor close button must be accessible");
+        let bounds = node.bounds().unwrap();
+        self.click_pos(Pos2::new(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        ));
+    }
+}
+
+#[test]
+fn floating_workspace_drag_resize_close_reopen_and_layout_storage() {
+    let mut ui = UiHarness::floating();
+    let project = project_fingerprint(&ui.app.project);
+    let selection = (
+        ui.app.selected_channel,
+        ui.app.selected_clip,
+        ui.app.selected_mixer,
+    );
+    assert!(ui.app.workspace.windows.iter().all(|window| window.visible));
+    for view in workspace::EDITORS {
+        assert!(ui.editor_rect(view).is_positive());
+    }
+    assert!(
+        ui.app.piano_viewport.y.origin() > 20.0,
+        "window sizing must preserve the initial musical pitch region: {:?}",
+        ui.app.piano_viewport.y
+    );
+    ui.capture("multiwindow-workspace");
+
+    ui.key(egui::Key::F5, egui::Modifiers::NONE);
+    let before = ui.editor_rect(StudioView::Playlist);
+    let title = before.left_top() + Vec2::new(110.0, 13.0);
+    ui.drag_pointer(title, Vec2::new(42.0, 35.0));
+    let moved = ui.editor_rect(StudioView::Playlist);
+    assert!(
+        moved.left() > before.left() + 20.0,
+        "title-bar drag must move the real window: {before:?} -> {moved:?}"
+    );
+    assert!(moved.top() > before.top() + 20.0);
+    ui.drag_pointer(
+        moved.right_bottom() - Vec2::splat(2.0),
+        Vec2::new(-90.0, -45.0),
+    );
+    let resized = ui.editor_rect(StudioView::Playlist);
+    assert!(
+        resized.width() < moved.width() - 40.0,
+        "resize must shrink the real window: {moved:?} -> {resized:?}"
+    );
+    assert_eq!(
+        project_fingerprint(&ui.app.project),
+        project,
+        "window chrome must never edit clips or notes beneath it"
+    );
+    assert_eq!(
+        (
+            ui.app.selected_channel,
+            ui.app.selected_clip,
+            ui.app.selected_mixer
+        ),
+        selection
+    );
+    assert!(ui.app.undo_stack.is_empty());
+
+    ui.close_editor_by_pointer(StudioView::Playlist);
+    assert!(!ui.app.workspace.windows[workspace::index(StudioView::Playlist)].visible);
+    assert_eq!(project_fingerprint(&ui.app.project), project);
+    ui.key(egui::Key::F5, egui::Modifiers::NONE);
+    assert!(ui.app.workspace.windows[workspace::index(StudioView::Playlist)].visible);
+    assert_eq!(ui.app.workspace.focused, StudioView::Playlist);
+    assert!((ui.editor_rect(StudioView::Playlist).width() - resized.width()).abs() < 2.0);
+    ui.click("Maximize editor");
+    assert!(ui.app.workspace.maximized);
+    ui.click("Restore windows");
+    assert!(!ui.app.workspace.maximized);
+    ui.capture("multiwindow-moved-resized");
+
+    let mut storage = WorkspaceTestStorage::default();
+    ui.app.save(&mut storage);
+    let windows = ui.app.workspace.windows;
+    let order = ui.app.workspace.order;
+    let mut restored = UiHarness::with_storage(Some(&storage), false);
+    restored.size = ui.size;
+    // Initial test viewport was smaller. Reload the persisted geometry at the matching size.
+    restored.app.workspace = workspace::Workspace::load(Some(&storage));
+    restored.settle();
+    assert_eq!(restored.app.workspace.focused, StudioView::Playlist);
+    assert_eq!(restored.app.workspace.order, order);
+    for view in workspace::EDITORS {
+        let expected = windows[workspace::index(view)].rect.unwrap();
+        let actual = restored.app.workspace.windows[workspace::index(view)]
+            .rect
+            .unwrap();
+        assert!(
+            (actual.min - expected.min).length() < 2.0,
+            "{view:?}: {actual:?} vs {expected:?}"
+        );
+        assert!((actual.size() - expected.size()).length() < 2.0);
+    }
+    restored.size = Vec2::new(1080.0, 680.0);
+    restored.settle();
+    let viewport = restored.ctx.content_rect();
+    for view in workspace::EDITORS {
+        assert!(
+            viewport.contains_rect(restored.editor_rect(view)),
+            "{view:?} must remain on screen after resize"
+        );
+    }
+    restored.capture("multiwindow-minimum-window");
+}
+
+#[test]
+fn floating_workspace_focus_routes_supported_edits_and_shared_undo_once() {
+    let mut ui = UiHarness::floating();
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..Default::default()
+    };
+    let clip_id = ui.app.project.clips[0].id;
+    let note_id = ui.app.project.active_pattern().notes[0].id;
+    ui.app.playlist_selection_ids.insert(clip_id);
+    ui.app.selected_clip = Some(clip_id);
+    ui.app.piano_roll_state.selection_ids.insert(note_id);
+    let clips = ui.app.project.clips.len();
+    let notes = ui.app.project.active_pattern().notes.len();
+
+    ui.key(egui::Key::F9, egui::Modifiers::NONE);
+    let mixer = ui.editor_rect(StudioView::Mixer);
+    ui.click_pos(mixer.left_top() + Vec2::new(100.0, 13.0));
+    ui.key(egui::Key::Delete, egui::Modifiers::NONE);
+    ui.key(egui::Key::D, command);
+    assert_eq!(ui.app.project.clips.len(), clips);
+    assert_eq!(ui.app.project.active_pattern().notes.len(), notes);
+    assert!(ui.app.playlist_selection_ids.contains(&clip_id));
+    assert!(ui.app.piano_roll_state.selection_ids.contains(&note_id));
+
+    ui.key(egui::Key::F7, egui::Modifiers::NONE);
+    ui.key(egui::Key::D, command);
+    assert_eq!(ui.app.project.active_pattern().notes.len(), notes + 1);
+    assert_eq!(ui.app.project.clips.len(), clips);
+    ui.key(egui::Key::Z, command);
+    assert_eq!(ui.app.project.active_pattern().notes.len(), notes);
+    ui.app.piano_roll_state.selection_ids.insert(note_id);
+    ui.key(egui::Key::Delete, egui::Modifiers::NONE);
+    assert_eq!(ui.app.project.active_pattern().notes.len(), notes - 1);
+    assert_eq!(ui.app.project.clips.len(), clips);
+    ui.key(egui::Key::Z, command);
+    assert_eq!(ui.app.project.active_pattern().notes.len(), notes);
+
+    ui.key(egui::Key::F5, egui::Modifiers::NONE);
+    ui.app.playlist_selection_ids.insert(clip_id);
+    ui.key(egui::Key::D, command);
+    assert_eq!(ui.app.project.clips.len(), clips + 1);
+    assert_eq!(ui.app.project.active_pattern().notes.len(), notes);
+    ui.key(egui::Key::Z, command);
+    assert_eq!(ui.app.project.clips.len(), clips);
+    ui.app.playlist_selection_ids.insert(clip_id);
+    ui.key(egui::Key::Delete, egui::Modifiers::NONE);
+    assert_eq!(ui.app.project.clips.len(), clips - 1);
+    ui.key(egui::Key::F9, egui::Modifiers::NONE);
+    ui.key(egui::Key::Z, command);
+    assert_eq!(
+        ui.app.project.clips.len(),
+        clips,
+        "Undo is one shared project history even when Mixer owns focus"
+    );
+
+    for view in [StudioView::Playlist, StudioView::PianoRoll] {
+        ui.app.focus_editor(view);
+        ui.settle();
+        let before = project_fingerprint(&ui.app.project);
+        for key in [egui::Key::A, egui::Key::C, egui::Key::X, egui::Key::V] {
+            ui.key(key, command);
+        }
+        ui.run(vec![
+            egui::Event::Copy,
+            egui::Event::Cut,
+            egui::Event::Paste("unrelated text".into()),
+        ]);
+        assert_eq!(
+            project_fingerprint(&ui.app.project),
+            before,
+            "unsupported canvas clipboard/select-all chords remain no-ops"
+        );
+    }
+}
+
+#[test]
+fn floating_workspace_shared_channel_edit_and_modal_text_isolation() {
+    let mut ui = UiHarness::floating();
+    ui.key(egui::Key::F6, egui::Modifiers::NONE);
+    let channel_name = ui.app.project.channels[1].name.clone();
+    ui.click(&channel_name);
+    assert_eq!(ui.app.selected_channel, 1);
+    ui.settle();
+    let output = ui.run(Vec::new());
+    fn contains_text(shape: &egui::Shape, expected: &str) -> bool {
+        match shape {
+            egui::Shape::Text(text) => text.galley.text().contains(expected),
+            egui::Shape::Vec(shapes) => shapes.iter().any(|shape| contains_text(shape, expected)),
+            _ => false,
+        }
+    }
+    assert!(
+        output
+            .shapes
+            .iter()
+            .any(|shape| contains_text(&shape.shape, &format!("{} —", channel_name))),
+        "the simultaneously painted Piano editor must show the shared Rack channel selection"
+    );
+    let step_before = ui.app.project.active_pattern().channel_steps[1][0];
+    let notes_before = serde_json::to_string(&ui.app.project.active_pattern().notes).unwrap();
+    ui.click(&format!("{} step 1", channel_name));
+    assert_eq!(
+        ui.app.project.active_pattern().channel_steps[1][0],
+        !step_before
+    );
+    assert_eq!(
+        serde_json::to_string(&ui.app.project.active_pattern().notes).unwrap(),
+        notes_before
+    );
+    ui.capture("multiwindow-shared-pattern-edit");
+    let before = project_fingerprint(&ui.app.project);
+    ui.key(egui::Key::F10, egui::Modifiers::NONE);
+    assert!(ui.app.show_settings);
+    let focus = ui.app.workspace.focused;
+    ui.key(egui::Key::F5, egui::Modifiers::NONE);
+    ui.key(egui::Key::Delete, egui::Modifiers::NONE);
+    assert_eq!(ui.app.workspace.focused, focus);
+    let rack_rect = ui.editor_rect(StudioView::ChannelRack);
+    ui.click_pos(rack_rect.left_top() + Vec2::new(110.0, 13.0));
+    assert_eq!(ui.app.workspace.focused, focus);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+    assert!(!ui.app.show_settings);
+
+    let fields: Vec<_> = ui
+        .nodes
+        .iter()
+        .filter(|node| node.role() == Role::TextInput)
+        .collect();
+    let field = fields
+        .iter()
+        .find(|node| node.bounds().is_some_and(|bounds| bounds.x0 < 220.0))
+        .unwrap();
+    let bounds = field.bounds().unwrap();
+    ui.click_pos(Pos2::new(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    ));
+    ui.run(vec![egui::Event::Text("browser test".into())]);
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..Default::default()
+    };
+    ui.key(egui::Key::A, command);
+    ui.run(vec![egui::Event::Copy]);
+    ui.run(vec![egui::Event::Cut]);
+    assert!(ui.app.browser_search.is_empty());
+    ui.run(vec![egui::Event::Paste("new filter".into())]);
+    assert_eq!(ui.app.browser_search, "new filter");
+    ui.key(egui::Key::F7, egui::Modifiers::NONE);
+    ui.key(egui::Key::Delete, egui::Modifiers::NONE);
+    assert_eq!(ui.app.workspace.focused, focus);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+}
+
+#[test]
+fn floating_workspace_all_hidden_keeps_project_and_reopens_keyboard_target() {
+    let mut ui = UiHarness::floating();
+    let clip_id = ui.app.project.clips[0].id;
+    ui.app.playlist_selection_ids.insert(clip_id);
+    let before = project_fingerprint(&ui.app.project);
+    for _ in 0..4 {
+        ui.click("Hide editor");
+    }
+    assert!(
+        ui.app
+            .workspace
+            .windows
+            .iter()
+            .all(|window| !window.visible)
+    );
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..Default::default()
+    };
+    ui.key(egui::Key::Delete, egui::Modifiers::NONE);
+    ui.key(egui::Key::D, command);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    ui.key(egui::Key::F5, egui::Modifiers::NONE);
+    assert!(ui.app.workspace.windows[workspace::index(StudioView::Playlist)].visible);
+    assert_eq!(ui.app.workspace.focused, StudioView::Playlist);
+    let clips = ui.app.project.clips.len();
+    ui.key(egui::Key::Delete, egui::Modifiers::NONE);
+    assert_eq!(ui.app.project.clips.len(), clips - 1);
+}
+
+#[test]
+fn floating_workspace_actual_stacking_survives_restore_and_blocked_clicks() {
+    let mut ui = UiHarness::floating();
+    ui.key(egui::Key::F7, egui::Modifiers::NONE);
+    ui.click("Maximize editor");
+    ui.key(egui::Key::F5, egui::Modifiers::NONE);
+    ui.click("Restore windows");
+    for _ in 0..8 {
+        ui.run(Vec::new());
+    }
+    let layers = ui
+        .ctx
+        .memory(|memory| memory.layer_ids().collect::<Vec<_>>());
+    let editor_layers: Vec<_> = layers
+        .into_iter()
+        .filter_map(|layer| {
+            workspace::EDITORS
+                .into_iter()
+                .find(|view| layer.id == workspace::window_id(*view))
+        })
+        .collect();
+    assert_eq!(editor_layers, ui.app.workspace.order);
+    let overlap = ui
+        .editor_rect(StudioView::Playlist)
+        .intersect(ui.editor_rect(StudioView::PianoRoll));
+    assert!(overlap.is_positive());
+    assert_eq!(
+        ui.ctx.layer_id_at(overlap.center()).unwrap().id,
+        workspace::window_id(StudioView::Playlist)
+    );
+    ui.click("Arrange windows");
+    for _ in 0..8 {
+        ui.run(Vec::new());
+    }
+    let overlap = ui
+        .editor_rect(StudioView::Mixer)
+        .intersect(ui.editor_rect(StudioView::PianoRoll));
+    assert_eq!(
+        ui.ctx.layer_id_at(overlap.center()).unwrap().id,
+        workspace::window_id(StudioView::PianoRoll)
+    );
+
+    ui.key(egui::Key::F10, egui::Modifiers::NONE);
+    let settings_layer = ui
+        .ctx
+        .top_layer_id()
+        .expect("the Settings window must have a layer");
+    let settings_id = settings_layer.id;
+    let settings = ui
+        .ctx
+        .memory(|memory| memory.area_rect(settings_id))
+        .unwrap();
+    let editor = ui.editor_rect(StudioView::Playlist);
+    let exposed = editor.left_top() + Vec2::new(35.0, 12.0);
+    assert!(!settings.contains(exposed));
+    ui.click_pos(exposed);
+    assert_eq!(
+        ui.ctx.layer_id_at(settings.center()).unwrap().id,
+        settings_id,
+        "a disabled editor must not cover the active Settings dialog"
+    );
+    assert!(ui.app.show_settings);
+    let title = settings.left_top() + Vec2::new(140.0, 15.0);
+    ui.drag_pointer(title, Vec2::new(32.0, 24.0));
+    let moved = ui
+        .ctx
+        .memory(|memory| memory.area_rect(settings_id))
+        .unwrap();
+    assert!(
+        (moved.min - settings.min).length() > 20.0,
+        "an already open Settings window must retain its own pointer dragging"
+    );
+}
+
+#[test]
+fn floating_workspace_unfocused_resize_and_knob_drag_work_on_first_press() {
+    let mut ui = UiHarness::floating();
+    for _ in 0..8 {
+        ui.run(Vec::new());
+    }
+    assert_eq!(ui.app.workspace.focused, StudioView::PianoRoll);
+    let before = ui.editor_rect(StudioView::Mixer);
+    let origin = before.left_bottom() + Vec2::new(2.0, -2.0);
+    assert_eq!(
+        ui.ctx.layer_id_at(origin).unwrap().id,
+        workspace::window_id(StudioView::Mixer)
+    );
+    ui.drag_pointer(origin, Vec2::new(48.0, -36.0));
+    let after = ui.editor_rect(StudioView::Mixer);
+    assert!(
+        after.width() < before.width() - 25.0,
+        "first drag on an unfocused resize edge must work: {before:?} -> {after:?}"
+    );
+    assert_eq!(ui.app.workspace.focused, StudioView::Mixer);
+    ui.key(egui::Key::F7, egui::Modifiers::NONE);
+    let mixer = ui.editor_rect(StudioView::Mixer);
+    let node = ui
+        .nodes
+        .iter()
+        .find(|node| {
+            node.label() == Some("Pan")
+                && node.bounds().is_some_and(|bounds| {
+                    let pos = Pos2::new(
+                        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+                    );
+                    mixer.contains(pos)
+                        && ui.ctx.layer_id_at(pos).is_some_and(|layer| {
+                            layer.id == workspace::window_id(StudioView::Mixer)
+                        })
+                })
+        })
+        .unwrap();
+    let bounds = node.bounds().unwrap();
+    let pos = Pos2::new(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    );
+    let pans: Vec<_> = ui
+        .app
+        .project
+        .mixer_tracks
+        .iter()
+        .map(|track| track.pan)
+        .collect();
+    ui.drag_pointer(pos, Vec2::new(0.0, -24.0));
+    assert_eq!(ui.app.workspace.focused, StudioView::Mixer);
+    let after: Vec<_> = ui
+        .app
+        .project
+        .mixer_tracks
+        .iter()
+        .map(|track| track.pan)
+        .collect();
+    assert_ne!(
+        pans, after,
+        "first press and drag in an unfocused Mixer must update the actual knob"
+    );
+}
+
+#[test]
+fn floating_workspace_interrupts_real_editor_drags_until_release() {
+    for (view, resize, modal) in [
+        (StudioView::PianoRoll, false, false),
+        (StudioView::PianoRoll, true, false),
+        (StudioView::PianoRoll, true, true),
+        (StudioView::Playlist, false, false),
+        (StudioView::Playlist, false, true),
+    ] {
+        let mut ui = UiHarness::floating();
+        ui.app.focus_editor(view);
+        ui.settle();
+        let ids: Vec<Id> = if view == StudioView::PianoRoll {
+            ui.app
+                .project
+                .active_pattern()
+                .notes
+                .iter()
+                .map(|note| {
+                    let id = Id::new(("piano-note", note.id));
+                    if resize { id.with("resize") } else { id }
+                })
+                .collect()
+        } else {
+            ui.app
+                .project
+                .clips
+                .iter()
+                .map(|clip| Id::new(("playlist-clip", clip.id)))
+                .collect()
+        };
+        let response = ids
+            .into_iter()
+            .filter_map(|id| ui.ctx.read_response(id))
+            .find(|response| {
+                response.rect.width() > 3.0
+                    && ui
+                        .ctx
+                        .layer_id_at(response.rect.center())
+                        .is_some_and(|layer| layer.id == workspace::window_id(view))
+            })
+            .expect("a visible real clip/note gesture target");
+        let origin = response.rect.center();
+        ui.run(mixer_pointer_button(origin, true));
+        ui.run(vec![egui::Event::PointerMoved(
+            origin + Vec2::new(38.0, 0.0),
+        )]);
+        ui.run(vec![egui::Event::PointerMoved(
+            origin + Vec2::new(50.0, 0.0),
+        )]);
+        assert!(
+            ui.app.playlist_gesture_before.is_some() || ui.app.piano_roll_gesture_before.is_some(),
+            "real {view:?} drag must begin before interruption (resize={resize})"
+        );
+        if modal {
+            ui.key(egui::Key::F10, egui::Modifiers::NONE);
+            assert!(ui.app.show_settings);
+            ui.key(egui::Key::F10, egui::Modifiers::NONE);
+            assert!(!ui.app.show_settings);
+        } else {
+            ui.key(egui::Key::F9, egui::Modifiers::NONE);
+            assert_eq!(ui.app.workspace.focused, StudioView::Mixer);
+        }
+        let interrupted = project_fingerprint(&ui.app.project);
+        ui.run(vec![egui::Event::PointerMoved(
+            origin + Vec2::new(130.0, 0.0),
+        )]);
+        ui.run(vec![egui::Event::PointerMoved(
+            origin + Vec2::new(150.0, 0.0),
+        )]);
+        assert_eq!(
+            project_fingerprint(&ui.app.project),
+            interrupted,
+            "interrupted {view:?} drag must not resume (resize={resize}, modal={modal})"
+        );
+        assert!(ui.app.playlist_gesture_before.is_none());
+        assert!(ui.app.piano_roll_gesture_before.is_none());
+        ui.run(mixer_pointer_button(origin + Vec2::new(150.0, 0.0), false));
+        ui.settle();
+        assert_eq!(project_fingerprint(&ui.app.project), interrupted);
+        assert!(!ui.app.project_snapshot_transition_pending());
+    }
+}
+
+#[test]
+fn floating_workspace_hide_separates_rack_and_mixer_undo_transactions() {
+    let mut ui = UiHarness::floating();
+    let original = project_fingerprint(&ui.app.project);
+    ui.key(egui::Key::F6, egui::Modifiers::NONE);
+    let channel = ui.app.project.channels[0].name.clone();
+    ui.click(&format!("{} step 1", channel));
+    let rack_edit = project_fingerprint(&ui.app.project);
+    assert_ne!(rack_edit, original);
+    ui.click("Hide editor");
+    ui.key(egui::Key::F9, egui::Modifiers::NONE);
+    let mixer = ui.editor_rect(StudioView::Mixer);
+    let node = ui
+        .nodes
+        .iter()
+        .find(|node| {
+            node.label() == Some("Pan")
+                && node.bounds().is_some_and(|bounds| {
+                    mixer.contains(Pos2::new(
+                        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+                    ))
+                })
+        })
+        .unwrap();
+    let bounds = node.bounds().unwrap();
+    ui.drag_pointer(
+        Pos2::new(
+            ((bounds.x0 + bounds.x1) / 2.0) as f32,
+            ((bounds.y0 + bounds.y1) / 2.0) as f32,
+        ),
+        Vec2::new(0.0, -24.0),
+    );
+    assert_ne!(project_fingerprint(&ui.app.project), rack_edit);
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..Default::default()
+    };
+    ui.key(egui::Key::Z, command);
+    assert_eq!(
+        project_fingerprint(&ui.app.project),
+        rack_edit,
+        "first Undo must preserve the earlier Rack edit"
+    );
+    ui.key(egui::Key::Z, command);
+    assert_eq!(project_fingerprint(&ui.app.project), original);
 }

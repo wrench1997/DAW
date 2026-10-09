@@ -194,3 +194,14 @@ The final combined capture rerun passes 12 actual-app tests and generates 23 gen
 frames; every PPM-to-PNG conversion is checked for identical RGB pixels. Independent
 integration review confirms native command/ownership and shared import-transition guards
 are unchanged. This still does not establish native desktop/plugin or hardware acceptance.
+
+## Simultaneous native editor workspace
+
+The app now defaults to four simultaneous internal editor windows. The earlier
+single-editor flow tests explicitly use the supported maximized layout; new tests
+exercise the production floating default. [MULTIWINDOW_WORKSPACE.md](MULTIWINDOW_WORKSPACE.md)
+describes the real pointer/keyboard, interrupted-gesture, modal stacking, shared
+history, persistence and small-window coverage. Optional Vulkan capture includes
+`multiwindow-workspace`, `multiwindow-moved-resized`, `multiwindow-shared-pattern-edit`
+and `multiwindow-minimum-window`. These are genuine offscreen application renders,
+not native desktop screenshots or detached OS-window evidence.
