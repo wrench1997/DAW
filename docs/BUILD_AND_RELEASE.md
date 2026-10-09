@@ -8,7 +8,7 @@
 
 ## 当前验证状态（2026-10-09）
 
-本页记录固定 gnullvm 发布流程，不能当作当前 prerelease 的发布验收。最新终态 `9782e62` 的 [MSVC preview](https://github.com/wrench1997/DAW/actions/runs/37914387094) 完整通过：177 Python tests、1102 app +13 helper +5 protocol Rust tests、optimized static-CRT 构建、MIT/vendor provenance、PE/ZIP/hash 与解压 helper smoke；上传关闭、artifact 为0。[Quality](https://github.com/wrench1997/DAW/actions/runs/37914386973) 源码门禁和真实 MIT fixture 的 state/interaction/lifecycle 通过，但 native paint 前后捕获失败、repaint comparison 跳过，整个 quality 仍失败。新 Linux native-editor/metronome 源码 `fcf57b0` 已通过 Linux 1137 app +21 helper +5 editor protocol +2 transport protocol /1133 core 与194 Python（四项真实 Unix descriptor 检查在内），必须重新执行 Windows 门禁。0.5.0-alpha.1 加载 v10/v11、保存 v12，旧项目的 MIDI ports 默认 Off；先备份旧项目。独立 [MSVC preview](WINDOWS_PREVIEW.md) 不替代固定 Release 或干净系统验收。
+本页记录固定 gnullvm 发布流程，不能当作当前 prerelease 的发布验收。最新终态 `9782e62` 的 [MSVC preview](https://github.com/wrench1997/DAW/actions/runs/37914387094) 完整通过：177 Python tests、1102 app +13 helper +5 protocol Rust tests、optimized static-CRT 构建、MIT/vendor provenance、PE/ZIP/hash 与解压 helper smoke；上传关闭、artifact 为0。[Quality](https://github.com/wrench1997/DAW/actions/runs/37914386973) 源码门禁和真实 MIT fixture 的 state/interaction/lifecycle 通过，但 native paint 前后捕获失败、repaint comparison 跳过，整个 quality 仍失败。新 Linux native-editor/metronome 源码 `fcf57b0` 已通过 Linux 1137 app +21 helper +5 editor protocol +2 transport protocol /1133 core 与195 Python（四项真实 Unix descriptor 检查在内），必须重新执行 Windows 门禁。0.5.0-alpha.1 加载 v10/v11、保存 v12，旧项目的 MIDI ports 默认 Off；先备份旧项目。独立 [MSVC preview](WINDOWS_PREVIEW.md) 不替代固定 Release 或干净系统验收。
 
 下文 `$Version` 和目录名的 0.4.0 是历史示例；构建当前候选时必须使用 `Cargo.toml` 的实际版本 `0.5.0-alpha.1`，不得把新 v12 构建标成旧 0.4.0。Rust/LLVM-MinGW 固定工具链及三文件发布契约不变。
 

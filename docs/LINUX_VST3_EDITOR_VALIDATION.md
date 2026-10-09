@@ -99,7 +99,7 @@ native GUI run or validating the changed app's desktop/device behavior.
 Fresh integration passes 1,137 app +21 helper +5 editor protocol +2 transport
 protocol all-feature tests, 1,133 no-default tests, fmt, both strict Clippy modes,
 app/helper build, ordinary helper smoke and Windows MSVC source cross-check.
-All 194 Python tests pass, including four real descriptor-isolation cases against
+All 195 Python tests pass, including four real descriptor-isolation cases against
 that fresh helper. Seven vendor run-loop and one closed-stdout regression were
 rerun from actual vendored source using an external test manifest, leaving original
 upstream manifests unchanged. The verified registry archive plus pinned patch

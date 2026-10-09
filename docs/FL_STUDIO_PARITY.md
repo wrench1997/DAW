@@ -11,7 +11,7 @@ Status terms:
 
 ## 0.4 implementation progress
 
-Evidence note (2026-10-09): combined source `fcf57b0` passes 1,137 app +21 helper +5 editor protocol +2 transport protocol Linux all-feature tests, 1,133 no-default tests, strict gates, Windows source cross-check and 194 Python tests including four live descriptor checks. Seven vendor run-loop plus one closed-stdout tests pass. Fresh helper bytes match the native GUI-tested helper. Prior `9782e62` passes Windows source/preview gates but retains failed native paint. [Production routing receipts](PLUGIN_MIDI_ROUTE_VALIDATION.md) retain their historical exact e54a6e4 source; [Linux native editor evidence](LINUX_VST3_EDITOR_VALIDATION.md) establishes functional paint/input/state with a 346.9ms resize processing stall, not realtime or hardware qualification.
+Evidence note (2026-10-09): combined source `fcf57b0` passes 1,137 app +21 helper +5 editor protocol +2 transport protocol Linux all-feature tests, 1,133 no-default tests, strict gates, Windows source cross-check and 195 Python tests including four live descriptor checks. Seven vendor run-loop plus one closed-stdout tests pass. Fresh helper bytes match the native GUI-tested helper. Prior `9782e62` passes Windows source/preview gates but retains failed native paint. [Production routing receipts](PLUGIN_MIDI_ROUTE_VALIDATION.md) retain their historical exact e54a6e4 source; [Linux native editor evidence](LINUX_VST3_EDITOR_VALIDATION.md) establishes functional paint/input/state with a 346.9ms resize processing stall, not realtime or hardware qualification.
 
 | Area | Current 0.4 state | Status |
 |---|---|---|
