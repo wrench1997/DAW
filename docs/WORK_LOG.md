@@ -84,3 +84,17 @@ Append-only from 2026-10-08 UTC. Timestamps use UTC. Source inspection, executed
 - Clippy with `-D warnings` **failed** on nine unique source findings: one deprecated atomic `fetch_update` (audio_device), seven constant-size `chunks_exact` calls (model 1, plugin_runtime 1, wav 4, export tests 1), and one complex test mutator type (model). All-bin build and no-default-features check were skipped.
 - Replaced the atomic operation with the equivalent compare-exchange retry loop, retaining Release success / Relaxed failure ordering and compatibility with the documented Rust 1.97.1 release toolchain. Switched fixed-size slices to `as_chunks` and introduced a local test mutator type alias. No lint suppression, MSRV increase, release-toolchain change or workflow gate weakening.
 - Local formatter and `git diff --check` passed after these changes. Fresh Windows tests, Clippy and remaining gates will run on the new commit. Real GUI/audio/VST/release acceptance is still outstanding.
+
+## 2026-10-09 02:01 UTC — All Windows development gates passed
+
+- Verified source commit: `122596ae37e23be4420db1766aff88019d231b3c`. [Run 37871876943](https://github.com/wrench1997/DAW/actions/runs/37871876943), job `113631600450`, completed successfully on Windows Server 2025 / x86_64-pc-windows-msvc with Rust/Cargo 1.99.0.
+- Exact successful commands (each uses `+stable-x86_64-pc-windows-msvc`):
+  - `cargo fmt --all -- --check`
+  - `cargo test --locked --all-features --all-targets`: **775 passed, 0 failed, 0 ignored**; VST3 helper target: 0 tests.
+  - `cargo clippy --locked --all-features --all-targets -- -D warnings`
+  - `cargo build --locked --all-features --bins`: application and VST3 helper debug binaries built.
+  - `cargo check --locked --no-default-features --all-targets`
+- Cargo.lock remains unchanged, SHA256 `38d9767b7b618608e2e4ecc91e662b2048a64ea332acaefe338feb0b2189c338`. No project compiler/lint warnings in this passing run. GitHub emitted a nonblocking action-runtime deprecation notice for checkout v4.
+- Independent static review found no blocker in the atomic update or slice changes: retry ordering and byte-decoding/remainder behavior are preserved. `as_chunks` predates the documented Rust 1.97.1 release toolchain; the explicit CAS loop preserves existing atomic semantics without changing the release recipe.
+- This final validation-summary follow-up changes documentation only; its source, Cargo inputs and workflow are identical to the tested commit. Subsequent branch runs are visible in [GitHub Actions](https://github.com/wrench1997/DAW/actions); an additional documentation-only run does not replace the source-validation evidence above.
+- Windows GUI/device/VST testing, helper protocol smoke, pinned gnullvm Release build, packaging and clean-system launch were **not run** in this CI. No merge into main, release, deployment or binary artifact publication was performed. Linux compilation remains blocked at the ALSA native dependency before project compilation. The known split-fade envelope gap remains open.

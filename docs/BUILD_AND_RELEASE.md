@@ -6,13 +6,13 @@
 
 本流程锁定 Cargo.lock、Rust 工具链、LLVM-MinGW 版本、feature 集与发布文件白名单。它使发布输入和步骤可追溯；除非已在独立干净环境中比较结果，否则不要宣称不同机器上的输出逐字节完全相同。最终发布身份以签名后的 SHA-256 为准。
 
-## 当前会话验证状态（2026-10-08）
+## 当前验证状态（2026-10-09）
 
-本页是 Windows 发布流程和历史工具链记录，不代表当前版本已完成发布验收。本次本地基线命令因缺少 Cargo 退出 127，测试没有执行；开发质量门禁改用 GitHub Actions Windows MSVC。后续实际命令、版本、退出状态和测试数写入 `WORK_LOG.md`。历史版本仍须通过下载、工具输出及目标平台验证后才能称为本次已验证；不可把源码中的测试标记数当作通过数。
+本页是 Windows 发布流程和历史工具链记录，不代表当前版本已完成发布验收。源码提交 `122596ae37e23be4420db1766aff88019d231b3c` 已通过 [Windows MSVC 开发 CI](https://github.com/wrench1997/DAW/actions/runs/37871876943)：775 项测试及全部开发门禁通过。以下固定 gnullvm Release 流程尚未在本轮执行；不能用 MSVC debug 构建替代发布验收。完整命令与历史失败见 `WORK_LOG.md`。
 
 ## 开发 CI（独立分支验证）
 
-`.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；第二次运行已通过 fmt 和 775 项测试，Clippy 修正与后续完整门禁结果记录于 `WORK_LOG.md`。工作流可运行不等于 Rust 构建通过。它不替代下述历史固定 gnullvm 发布流程、helper smoke、干净 Windows 实机验收与打包校验。
+`.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；第三次运行已在 Rust/Cargo 1.99.0 上全部通过。验证摘要后续提交仅更新文档，源码、依赖锁和工作流不变，分支后续运行见 GitHub Actions。它不替代下述历史固定 gnullvm 发布流程、helper smoke、干净 Windows 实机验收与打包校验。
 
 ## 发布契约
 
