@@ -5459,6 +5459,8 @@ mod tests {
             category: "Effect".to_owned(),
             is_instrument: false,
             verified: false,
+            vst3_metadata: None,
+            scan_error: None,
         })
     }
 

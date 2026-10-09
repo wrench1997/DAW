@@ -805,6 +805,8 @@ fn full_app_native_inspector_actions_fit_narrow_and_wide_panels() {
                     category: String::new(),
                     is_instrument: view == StudioView::ChannelRack,
                     verified: false,
+                    vst3_metadata: None,
+                    scan_error: None,
                 },
             )
             .unwrap();
@@ -2544,3 +2546,56 @@ mod piano_range_tests;
 
 #[path = "piano_snap_integration_tests.rs"]
 mod piano_snap_integration_tests;
+
+#[test]
+fn plugin_scan_rescan_notice_and_failure_details_use_production_ui() {
+    let mut ui = UiHarness::new();
+    ui.app.plugin_cache_needs_rescan = true;
+    ui.app.show_plugins = true;
+    ui.app.plugins = vec![PluginDescriptor {
+        id: "scan-failure-fixture".into(),
+        name: "Scan failure fixture".into(),
+        vendor: "Unknown vendor".into(),
+        path: PathBuf::from("/not-a-real-plugin/scan-failure.vst3"),
+        format: ScannedPluginFormat::Vst3,
+        category: "Unknown".into(),
+        is_instrument: false,
+        verified: false,
+        vst3_metadata: None,
+        scan_error: Some("required helper is missing; reinstall Citrus Studio".into()),
+    }];
+    ui.settle();
+    assert!(ui.nodes.iter().any(|node| {
+        node.value().or_else(|| node.label())
+            == Some("VST3 index needs a rescan: old filename-based classifications were discarded.")
+    }));
+    let unknown = ui
+        .nodes
+        .iter()
+        .find(|node| node.value().or_else(|| node.label()) == Some("Unknown"))
+        .expect("scan failure classification must be visible");
+    let pointer = node_rect(unknown).center();
+    ui.run(vec![egui::Event::PointerMoved(pointer)]);
+    for _ in 0..15 {
+        ui.run(Vec::new());
+    }
+    assert!(ui.nodes.iter().any(|node| {
+        node.value().or_else(|| node.label())
+            == Some(
+                "VST3 metadata unavailable: required helper is missing; reinstall Citrus Studio",
+            )
+    }), "pointer={pointer:?}, nodes={:?}", ui.nodes.iter().map(|node| (node.value(), node.label(), node.bounds())).collect::<Vec<_>>());
+
+    // Completing an explicit empty-folder scan clears the stale-cache notice. No fixture
+    // module, real plugin, native window, device or user-profile path is opened here.
+    ui.app.scan_paths.clear();
+    ui.app.start_plugin_scan();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while ui.app.scan_receiver.is_some() {
+        ui.app.poll_plugin_scan();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!ui.app.plugin_cache_needs_rescan);
+    assert!(ui.app.plugins.is_empty());
+}

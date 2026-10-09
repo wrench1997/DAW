@@ -4881,7 +4881,8 @@ pub struct CitrusApp {
     plugin_filter: String,
     plugins: Vec<PluginDescriptor>,
     scan_paths: Vec<PathBuf>,
-    scan_receiver: Option<Receiver<Vec<PluginDescriptor>>>,
+    scan_receiver: Option<plugins::PluginScan>,
+    plugin_cache_needs_rescan: bool,
     export_job: ExportJob,
     export_error: Option<String>,
     export_dialog: export_ui::ExportDialog,
@@ -5009,10 +5010,10 @@ impl CitrusApp {
         } else {
             (None, None, None)
         };
-        let plugins = plugin_cache_path
+        let plugin_cache = plugin_cache_path
             .as_ref()
             .and_then(|path| std::fs::read_to_string(path).ok())
-            .and_then(|content| serde_json::from_str(&content).ok())
+            .and_then(|content| plugins::decode_cache(&content).ok())
             .unwrap_or_default();
         let recovery_available = autosave_path.as_ref().is_some_and(|path| path.exists());
         let stored_audio_preferences = cc
@@ -5200,7 +5201,8 @@ impl CitrusApp {
                 plugin_picker_target: None,
                 plugin_picker_show_all: false,
                 plugin_filter: String::new(),
-                plugins,
+                plugins: plugin_cache.plugins,
+                plugin_cache_needs_rescan: plugin_cache.needs_rescan,
                 scan_paths: plugins::default_scan_paths(),
                 scan_receiver: None,
                 export_job: ExportJob::default(),
@@ -5281,7 +5283,10 @@ impl CitrusApp {
                 project_lifecycle: ProjectLifecycle::Idle,
                 next_project_lifecycle_operation_id: 1,
                 suppress_drop_recovery: false,
-                toast: piano_roll_preferences_error.map(|message| (message, Instant::now())),
+                toast: piano_roll_preferences_error.or_else(|| {
+                    plugin_cache.needs_rescan.then(||
+                        "VST3 index needs a rescan to replace old filename-based classifications".into())
+                }).map(|message| (message, Instant::now())),
                 saved_path: None,
                 master_volume: 0.72,
                 snap: 0.25,
@@ -22551,28 +22556,41 @@ impl CitrusApp {
         if self.scan_receiver.is_some() {
             return;
         }
-        let paths = self.scan_paths.clone();
-        let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = sender.send(plugins::scan(&paths));
-        });
-        self.scan_receiver = Some(receiver);
+        self.scan_receiver = Some(plugins::start_scan(self.scan_paths.clone()));
     }
 
     fn poll_plugin_scan(&mut self) {
         let Some(receiver) = &self.scan_receiver else {
             return;
         };
-        if let Ok(found) = receiver.try_recv() {
-            let count = found.len();
-            self.plugins = found;
-            self.scan_receiver = None;
-            if let Some(path) = &self.plugin_cache_path
-                && let Ok(content) = serde_json::to_string_pretty(&self.plugins)
-            {
-                let _ = std::fs::write(path, content);
+        match receiver.try_recv() {
+            Err(mpsc::TryRecvError::Empty) => (),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.scan_receiver = None;
+                self.notify(
+                    "Plugin scan stopped before completion; previous index retained".into(),
+                );
             }
-            self.notify(format!("Plugin scan complete — {count} found"));
+            Ok(found) => {
+                let count = found.len();
+                let unavailable = found
+                    .iter()
+                    .filter(|plugin| plugin.scan_error.is_some())
+                    .count();
+                self.plugins = found;
+                self.plugin_cache_needs_rescan = false;
+                self.scan_receiver = None;
+                if let Some(path) = &self.plugin_cache_path
+                    && let Ok(content) = serde_json::to_string_pretty(&self.plugins)
+                {
+                    let _ = std::fs::write(path, content);
+                }
+                self.notify(if unavailable == 0 {
+                    format!("Plugin scan complete — {count} found")
+                } else {
+                    format!("Plugin scan complete — {count} found, {unavailable} metadata probes unavailable; hover Unknown for details")
+                });
+            }
         }
     }
 
@@ -22897,6 +22915,9 @@ impl CitrusApp {
                     });
                 });
                 ui.label(RichText::new("Native VST2 + isolated VST3 host · scanning never touches the audio thread").size(9.0).color(theme::MUTED));
+                if self.plugin_cache_needs_rescan {
+                    ui.label(RichText::new("VST3 index needs a rescan: old filename-based classifications were discarded.").size(9.0).color(theme::ORANGE));
+                }
                 let selected_track = if self
                     .project
                     .mixer_track_id_at_runtime_slot(self.selected_mixer)
@@ -22969,7 +22990,10 @@ impl CitrusApp {
                                 let format_color = if plugin.format == ScannedPluginFormat::Vst3 { theme::GREEN } else { theme::ORANGE };
                                 ui.add_sized([226.0, 25.0], egui::Label::new(RichText::new(format!("{}  {}", if plugin.is_instrument { "◆" } else { "◇" }, plugin.name)).size(10.0)));
                                 ui.add_sized([63.0, 25.0], egui::Label::new(RichText::new(plugin.format.label()).strong().size(9.0).color(format_color)));
-                                ui.add_sized([86.0, 25.0], egui::Label::new(RichText::new(&plugin.category).size(9.0).color(theme::MUTED)));
+                                let classification = ui.add_sized([86.0, 25.0], egui::Label::new(RichText::new(&plugin.category).size(9.0).color(theme::MUTED)));
+                                if let Some(error) = &plugin.scan_error {
+                                    classification.on_hover_text(format!("VST3 metadata unavailable: {error}"));
+                                }
                                 let location = plugin.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
                                 ui.add_sized([ui.available_width() - 82.0, 25.0], egui::Label::new(RichText::new(location).size(8.0).color(theme::MUTED)).truncate());
                                 let load = ui.add_sized([68.0, 25.0], egui::Button::new(if classification_matches { "LOAD" } else { "LOAD*" }));
@@ -23440,6 +23464,12 @@ impl CitrusApp {
                 }
             });
             property_line(ui, "Cached plug-ins", &self.plugins.len().to_string());
+            if self.plugin_cache_needs_rescan {
+                ui.label(
+                    RichText::new("Rescan required for authoritative VST3 classifications")
+                        .color(theme::ORANGE),
+                );
+            }
         });
         settings_card(ui, "RECORDINGS", |ui| {
             property_line(
@@ -26090,6 +26120,8 @@ fn plugin_instance_runtime_spec(instance: &PluginInstance) -> PluginLoadSpec {
             category: project_plugin_role_label(instance.role).to_owned(),
             is_instrument: instance.role == PluginRole::Instrument,
             verified: instance.path.exists(),
+            vst3_metadata: None,
+            scan_error: None,
         },
         class_uid: None,
         vst3_helper_path: None,
@@ -30940,6 +30972,8 @@ mod playback_tests {
             category: "Fx".into(),
             is_instrument: false,
             verified: true,
+            vst3_metadata: None,
+            scan_error: None,
         }
     }
 
