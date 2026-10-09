@@ -33,13 +33,16 @@ $LockHash = (Get-FileHash Cargo.lock -Algorithm SHA256).Hash.ToLowerInvariant()
 $VsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 $VsRoot = Read-Checked $VsWhere @("-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath")
 if (-not $VsRoot) { throw "Visual Studio C++ Build Tools were not found." }
-$DevCmd = Join-Path $VsRoot "Common7\Tools\VsDevCmd.bat"
-$Environment = & $env:ComSpec /s /c "`"`"$DevCmd`" -no_logo -arch=x64 -host_arch=x64 && set`""
-if ($LASTEXITCODE -ne 0) { throw "Visual Studio environment setup failed." }
-foreach ($Line in $Environment) {
-    if ($Line -match "^([^=]+)=(.*)$") {
-        [Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], "Process")
-    }
+# Microsoft recommends Launch-VsDevShell.ps1 for build automation. Calling the
+# installed PowerShell entry point avoids cmd.exe's nested path quoting rules.
+$DevShell = Join-Path $VsRoot "Common7\Tools\Launch-VsDevShell.ps1"
+if (-not (Test-Path -LiteralPath $DevShell -PathType Leaf)) {
+    throw "Visual Studio Developer PowerShell launcher is missing."
+}
+& $DevShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation | Out-Null
+if ($env:VSCMD_ARG_TGT_ARCH -notin @("x64", "amd64") -or
+    $env:VSCMD_ARG_HOST_ARCH -notin @("x64", "amd64")) {
+    throw "Visual Studio Developer PowerShell did not select x64 host and target tools."
 }
 $Linker = Join-Path $env:VCToolsInstallDir "bin\Hostx64\x64\link.exe"
 if (-not (Test-Path -LiteralPath $Linker -PathType Leaf)) { throw "MSVC linker is missing." }

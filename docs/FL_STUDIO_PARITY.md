@@ -11,7 +11,7 @@ Status terms:
 
 ## 0.4 implementation progress
 
-Evidence note (2026-10-09): Windows MSVC `43e7e41` passed all gates with 805 Rust tests, including media relinking and cancellable export. The current 0.5.0-alpha.1 candidate adds v11 split-envelope/source-phase persistence and is awaiting fresh full Windows verification; its real Linux no-default typecheck and all860 tests pass on default stack. v10 inputs load, but v11 saves require a newer build. “Working” remains a source-scope description rather than commercial or physical-device certification; exact historical results are in WORK_LOG/DEV_STATE.
+Evidence note (2026-10-09): the current 0.5.0-alpha.1/v11 candidate at `a760313d` passed all Windows development gates with862 Rust tests, while the equivalent Linux no-default suite passed860 tests on default stack. Media relinking, cancellable export, WAV format/level review and split-envelope/source-phase persistence are included. v10 inputs load; v11 saves require the new build. Preview packaging and GUI/physical-device/commercial acceptance remain distinct; exact evidence is in WORK_LOG/DEV_STATE.
 
 | Area | Current 0.4 state | Status |
 |---|---|---|

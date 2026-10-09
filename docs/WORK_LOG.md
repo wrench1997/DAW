@@ -177,3 +177,16 @@ Append-only from 2026-10-08 UTC. Timestamps use UTC. Source inspection, executed
 - Corrected two split App-test default-field Clippy findings. Local diagnostic no-default Clippy exits0 with only inherited Linux MIDI unused/dead-code warnings; this is not a claim of strict Windows Clippy completion. Full fmt and diff checks pass.
 - Packaging/helper Python discovery passes52 tests; explicit feature-document allowlist includes media recovery, cancellation/export contract, split fidelity and WAV options, and all14 packaged source-document links validate. The Windows fixture CRLF fix is included; production checksum enforcement remains unchanged.
 - The following canonical documentation checkpoint changes no executable inputs. A single branch push will run both unweakened Windows quality and pinned static-CRT preview workflows. Main, official release tooling, publishing defaults and credentials remain unchanged.
+
+## 2026-10-09 03:57 UTC — Windows packaging tests pass; repair VS shell initialization
+
+- [Preview run 37881375728](https://github.com/wrench1997/DAW/actions/runs/37881375728) at `a760313d599f458976ad6f9fd8e31acd688d2906` passed all **52 Python packaging/helper tests**, including the corrected CRLF and prerelease fixtures.
+- The next build step failed before Rust validation/build because nested cmd.exe quoting treated the installed Visual Studio path as an invalid command. No package was created or uploaded.
+- Replaced shell-string parsing with the installed `Launch-VsDevShell.ps1`, explicitly selecting amd64 host/target and preserving the repository working directory, as recommended by [Microsoft's build-automation documentation](https://learn.microsoft.com/en-us/visualstudio/ide/reference/command-prompt-powershell?view=visualstudio). Existing toolchain/linker pinning, source-cleanliness checks and package guards remain intact. Fresh Windows execution is required to validate this wrapper repair.
+
+## 2026-10-09 03:59 UTC — v11 prerelease passes complete Windows quality gates
+
+- [Quality run 37881375638](https://github.com/wrench1997/DAW/actions/runs/37881375638) at `a760313d599f458976ad6f9fd8e31acd688d2906` is **successful**: Windows all-feature/all-target Rust **862 passed, 0 failed, 0 ignored**, helper Rust target0 tests; fmt, strict Clippy, app/helper debug build,14 Python helper tests, real helper smoke and no-default all-target check all passed.
+- Counts are target/feature-specific: the real Linux no-default full suite passed860. Both cover the coherent0.5.0-alpha.1/v11 source, including packet heap initialization, media, split, cancellation and WAV options. Linux is the primary development/test environment going forward; Windows remains compatibility/Windows-feature/package validation.
+- Preview run37881375728 independently passed52 Python tests but failed VS shell initialization before compiling/packaging. Its narrow installed-PowerShell-launcher fix is ready; no package/artifact success is inferred from quality CI.
+- This follow-up changes packaging orchestration and documentation only; application/helper source and Cargo inputs remain identical to the fully verified candidate. No additional feature merge is mixed into the wrapper repair.

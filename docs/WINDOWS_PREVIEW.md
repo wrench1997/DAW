@@ -15,7 +15,8 @@ security, signing or license acceptance.
   proc-macro builds. Rust documents this option in its
   [linkage reference](https://doc.rust-lang.org/reference/linkage.html#static-and-dynamic-c-runtimes).
 - The **installed** Visual Studio C++ toolchain on the `windows-2025` hosted
-  runner. The wrapper loads its x64 development environment and pins Cargo's
+  runner. The wrapper uses the installed `Launch-VsDevShell.ps1` with explicit
+  x64 host/target architecture to load its development environment, and pins Cargo's
   linker to that installation. The MSVC toolset/linker version and linker SHA-256,
   Windows SDK version and runner image version are recorded. The hosted image
   remains a moving input, so this is not a hermetic or bit-for-bit build promise.
