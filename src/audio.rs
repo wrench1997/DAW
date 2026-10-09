@@ -5573,7 +5573,7 @@ impl DspState {
             timeline_runtime,
             timeline_executor: TimelineExecutor::new(),
             timeline_automation: RealtimeTimelineAutomation::new(),
-            timeline_packet: Box::new(TimelinePacket::new()),
+            timeline_packet: TimelinePacket::new_boxed(),
             timeline_plan: Box::new(TimelineRenderPlan::new()),
             timeline_activation_plan: Box::new(TimelineRenderPlan::new()),
             timeline_automation_values: TimelineAutomationValueMatrix::new(),

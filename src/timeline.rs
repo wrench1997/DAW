@@ -932,7 +932,8 @@ impl TimelineEventRange<'_> {
     }
 }
 
-/// Fixed-capacity callback packet. Construction and refill never allocate.
+/// Fixed-capacity callback packet. Inline construction and refill never
+/// allocate; large control-thread packets can be constructed directly on the heap.
 pub struct TimelinePacket<const CAPACITY: usize = DEFAULT_TIMELINE_PACKET_CAPACITY> {
     epoch: u64,
     start_frame: u64,
@@ -950,6 +951,31 @@ impl<const CAPACITY: usize> TimelinePacket<CAPACITY> {
             frames: 0,
             len: 0,
             events: [MaybeUninit::uninit(); CAPACITY],
+        }
+    }
+
+    /// Allocates directly on the control thread without materializing the
+    /// capacity-sized event array on the stack. Refill remains allocation-free.
+    /// In particular, do not replace this with `Box::new(Self::new())`: in an
+    /// unoptimized build that creates multiple full-size stack temporaries.
+    #[must_use]
+    pub fn new_boxed() -> Box<Self> {
+        let mut packet = Box::<Self>::new_uninit();
+        let pointer = packet.as_mut_ptr();
+        // SAFETY: the allocation is correctly aligned and exclusively owned.
+        // All four fields that require initialized values are written directly
+        // without creating a reference to an uninitialized Self. The remaining
+        // field is an array of MaybeUninit<TimelinePacketEvent>, for which
+        // uninitialized storage is valid, including at CAPACITY = 0. len = 0
+        // prevents events() from exposing any payload before push writes it.
+        // The payload has no Drop implementation; clearing/dropping a packet
+        // never reads an uninitialized TimelinePacketEvent.
+        unsafe {
+            std::ptr::addr_of_mut!((*pointer).epoch).write(0);
+            std::ptr::addr_of_mut!((*pointer).start_frame).write(0);
+            std::ptr::addr_of_mut!((*pointer).frames).write(0);
+            std::ptr::addr_of_mut!((*pointer).len).write(0);
+            packet.assume_init()
         }
     }
 
@@ -4849,5 +4875,75 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn boxed_callback_packet_constructs_refills_and_drops_on_a_small_stack() {
+        std::thread::Builder::new()
+            .name("small-stack-timeline-packet".into())
+            .stack_size(64 * 1024)
+            .spawn(|| {
+                let empty = TimelinePacket::<0>::new_boxed();
+                assert_eq!(
+                    (
+                        empty.epoch(),
+                        empty.start_frame(),
+                        empty.frames(),
+                        empty.len()
+                    ),
+                    (0, 0, 0, 0)
+                );
+                assert!(empty.events().is_empty());
+                drop(empty);
+
+                let mut packet = TimelinePacket::<TIMELINE_CALLBACK_MAX_EVENTS>::new_boxed();
+                assert!(packet.is_empty());
+                assert!(packet.events().is_empty());
+                packet.clear(7, 1234, 64);
+                for index in 0..TIMELINE_CALLBACK_MAX_EVENTS {
+                    packet.push(TimelinePacketEvent {
+                        sample_offset: (index % 64) as u16,
+                        kind: TimelineEventKind::AudioStop {
+                            clip_id: index as u32,
+                            asset_id: 99,
+                        },
+                    });
+                }
+                assert_eq!(
+                    (packet.epoch(), packet.start_frame(), packet.frames()),
+                    (7, 1234, 64)
+                );
+                assert_eq!(packet.len(), TIMELINE_CALLBACK_MAX_EVENTS);
+                for (index, event) in packet.events().iter().enumerate() {
+                    assert_eq!(event.sample_offset, (index % 64) as u16);
+                    assert_eq!(
+                        event.kind,
+                        TimelineEventKind::AudioStop {
+                            clip_id: index as u32,
+                            asset_id: 99
+                        }
+                    );
+                }
+                packet.clear(8, 1298, 1);
+                assert!(packet.events().is_empty());
+                packet.push(TimelinePacketEvent {
+                    sample_offset: 0,
+                    kind: TimelineEventKind::AudioStop {
+                        clip_id: 1,
+                        asset_id: 2,
+                    },
+                });
+                assert_eq!(packet.len(), 1);
+                assert_eq!(
+                    packet.events()[0].kind,
+                    TimelineEventKind::AudioStop {
+                        clip_id: 1,
+                        asset_id: 2
+                    }
+                );
+                drop(packet);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }
