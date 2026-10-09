@@ -183,3 +183,14 @@ and `native-effect-inspector-*`; their 240/340 suffix is the requested panel wid
 The complete capture suite passes 12 tests and emits 23 real app renders, including
 all existing navigation, modal, Browser and decoded-waveform checkpoints. All native
 desktop, file-dialog, hardware and real vendor plug-in acceptance limits still apply.
+
+## Combined visual/editor checkpoint, 2026-10-09 05:58 UTC
+
+The reviewed visual refresh and inspector correction integrate as `76232d9` and
+`37bfabab8c9a6f6c065702aa6ebfa5a7f3eb04a4`. The full combined tree was rerun:
+943 application  + 14 helper  + 5 protocol all-feature tests, 941 no-default application tests,
+fmt, both strict Clippy configurations, app/helper build and ordinary helper smoke pass.
+The final combined capture rerun passes 12 actual-app tests and generates 23 genuine Vulkan
+frames; every PPM-to-PNG conversion is checked for identical RGB pixels. Independent
+integration review confirms native command/ownership and shared import-transition guards
+are unchanged. This still does not establish native desktop/plugin or hardware acceptance.

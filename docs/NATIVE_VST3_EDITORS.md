@@ -224,3 +224,20 @@ This is exit 1, not an unsupported-desktop exit 77. The later button event, nati
 and remaining lifecycle cases were not reached; no full native GUI or state acceptance is claimed.
 A diagnostic rerun retains the failing paint assertion rather than substituting synthetic pixels or
 turning an API error into a pass. Real vendor, physical input/audio, and DPI-transition testing remain open.
+
+## Diagnostic and aggregate acceptance follow-up
+
+At `8961529`, [quality 37889957193](https://github.com/wrench1997/DAW/actions/runs/37889957193)
+again passed source gates and partial attach/resize/stdout isolation. Diagnostic capture found
+both the live verified helper button and a newly created same-process standard Button reject
+PrintWindow flags 1 and 0, with advisory last-error 0. This does not establish a helper-only bug,
+a rendering fix, or successful native paint. The [preview run](https://github.com/wrench1997/DAW/actions/runs/37889957208)
+passed all package/source/ZIP/helper gates, including reviewed vendor provenance, with upload off.
+
+The next harness records explicit PASS/FAIL/SKIP stages. Paint failure still fails overall
+acceptance; an unavailable baseline/edited bitmap also makes repaint comparison SKIP. It can
+continue independent native control/state/lifecycle checks only after freshly validating helper
+PID, HWND classes/ancestry/control ID and exact dimensions immediately before native events.
+Non-paint identity/protocol failures stop dependent session operations; separate fresh-helper
+Shutdown/EOF/crash checks remain bounded. These new results require a Windows run and are not
+inferred from Python orchestration tests. No desktop/driver/security settings are changed.
