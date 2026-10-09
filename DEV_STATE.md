@@ -1,6 +1,6 @@
 # 当前开发状态
 
-最后更新：2026-10-09 01:27 UTC。以当前源码和实际命令结果为准。
+最后更新：2026-10-09 01:45 UTC。以当前源码和实际命令结果为准。
 
 ## 当前基线与验证边界
 
@@ -9,7 +9,7 @@
 - 已完成源码核对：Playlist 分组/Slip、Audio Crossfade、Realtime Master Capture 已有实现与 UI 接线，不能列为完全未实现。
 - 本地环境缺少 `cargo` / `rustc`，基线测试命令退出 127，测试未执行。本轮改用 GitHub Actions Windows MSVC 执行开发质量门禁。
 - **当前会话通过的 Rust 测试数：未建立。** 源码中的测试标记数量不是通过数；旧文档的 752 项通过属于另一环境的历史记录。
-- 当前尚未验证：编译、fmt、Clippy、完整 Rust 测试、Windows GUI、真实音频设备、真实 VST、Release 打包。独立分支 `ci/windows-reliability-20261009` 正在准备首次推送；尚无托管运行结果，未发布 Release。
+- 首次 Windows CI 已成功安装并记录 Rust/Cargo 1.99.0；fmt 报告 6 处格式差异，本地已按日志修正。编译、Clippy、完整 Rust 测试因 fmt 失败而跳过；Windows GUI、真实音频设备、真实 VST、Release 打包仍未验证。独立分支 `ci/windows-reliability-20261009` 已推送源码与文档，提交 `0146efd6cdc4832a3eaa9f6e99a252913c592144`。工作流已发布于 `90226a5e01e1f30299fb716fb1dd129006a9fd8d`，首次 Windows CI 已运行，fmt 失败；未发布 Release。
 
 ## 源码已经具备的能力
 
@@ -21,7 +21,7 @@
 
 1. 存储可靠性：`src/model.rs` 已增加保存前有限数检查与错误清理，避免 NaN/Infinity 将原文件替换为不可回读 JSON；新增四项测试（含 60 个字段/值组合），尚未执行。
 2. Playlist 编辑可靠性：已在 `src/playlist.rs` 加固组缩放最小边界、Slip 数值溢出与循环半开区间、Audio Slip 极值以及 Fade/Crossfade 非有限终点；新增边界回归测试，尚未执行。`src/app.rs` / `src/playlist.rs` 的 Playlist 手势快照也已扩展为 Clips、Automation lanes 与 Clip mixer routing 一起恢复，补充 Undo/Redo 测试。
-3. 构建验证：Windows MSVC GitHub Actions 工作流已配置；首次运行结果待建立。
+3. 构建验证：首次 Windows MSVC CI 在 fmt 门禁失败；已应用精确格式修正，等待后续完整门禁。运行证据见 [CI #1](https://github.com/wrench1997/DAW/actions/runs/37871126045)。
 4. 音频/导出安全：`src/master_capture.rs` 已修复停止时最终队列帧可能变成静音的竞态；`src/export.rs` 拒绝超出 8000..=192000 Hz 的采样率与非有限音频数据，替代静默裁剪采样率。新增四项测试，尚未执行。
 5. 文档同步：README、能力矩阵、构建文档、开发路线图与工作日志已同步。独立静态审查完成；它不替代编译、测试或实机验证。
 

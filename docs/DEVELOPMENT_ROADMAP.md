@@ -1,13 +1,13 @@
 # Development roadmap
 
-Updated: 2026-10-09 UTC. This roadmap tracks acceptance, not promised delivery dates. Current changes are being prepared for an independent validation branch. Current handoff: source fixes and independent static review complete; 15 new test attributes added but none executed. Local tooling is unavailable; Windows GitHub Actions will establish the executable checks.
+Updated: 2026-10-09 UTC. This roadmap tracks acceptance, not promised delivery dates. Current changes are published on an independent validation branch. Current handoff: source fixes and independent static review complete; 15 new test attributes added but none executed. Local tooling is unavailable; The first Windows GitHub Actions run found formatting differences, which are fixed pending rerun.
 
 ## P0 — Establish a trustworthy baseline
 
 - Restore an approved Rust toolchain; record rustc/cargo host, versions, dependency availability and exact command output.
 - Run locked baseline tests, formatting and Clippy; preserve failures rather than treating absent tooling as a code failure or a pass.
 - Acceptance: exact tested revision/working tree, command, exit status and per-target test summary are in WORK_LOG; Windows-only gates remain separate from host checks.
-- Current blocker: local Cargo/Rust are unavailable. Windows GitHub Actions is prepared for independent-branch validation; no Rust tests have run yet.
+- Current blocker: local Cargo/Rust are unavailable. Windows GitHub Actions is running on the independent branch; its first run failed at formatting before Rust tests. Exact formatting fixes are ready for rerun.
 
 ## P0 — Protect project saves
 

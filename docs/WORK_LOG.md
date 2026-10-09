@@ -59,3 +59,15 @@ Append-only from 2026-10-08 UTC. Timestamps use UTC. Source inspection, executed
 - Added a branch-specific push trigger alongside the existing main/PR/manual triggers. Standard GitHub-hosted Windows MSVC checks retain read-only repository permissions, nonpersistent checkout credentials and no artifact publication.
 - Local `git diff --check` passed before publication. Compiler, test, formatting and Clippy results remain pending until the actual workflow runs.
 - Removed environment-specific operational details from the public documentation while preserving the technical validation history.
+
+## 2026-10-09 01:34 UTC — Source branch published; workflow still pending
+
+- Source/docs commit `0146efd6cdc4832a3eaa9f6e99a252913c592144` was pushed to `ci/windows-reliability-20261009` and verified with the remote ref. `main` remains `9c159953163763a354634b3a9f95f84de174641b`.
+- The small workflow-file publication did not complete. Subsequent read-only checks found the workflow path absent and zero Actions runs for the branch. No compiler, test, fmt or Clippy execution has occurred.
+- The complete workflow remains available locally for the next authorized publication attempt. No release, deployment or merge was performed.
+
+## 2026-10-09 01:45 UTC — First Windows run; formatting findings fixed
+
+- Workflow published successfully as `90226a5e01e1f30299fb716fb1dd129006a9fd8d`. [Run 37871126045](https://github.com/wrench1997/DAW/actions/runs/37871126045), Windows Server 2025/MSVC, installed Rust/Cargo 1.99.0. Cargo.lock SHA256: `38d9767b7b618608e2e4ecc91e662b2048a64ea332acaefe338feb0b2189c338`.
+- `cargo +stable-x86_64-pc-windows-msvc fmt --all -- --check` failed with exit 1, reporting six layout-only hunks across app.rs, master_capture.rs and playlist.rs. Applied those exact hunks. Local `git diff --check` passed.
+- Locked tests, Clippy, all-bin build and no-default-features check were skipped after fmt failed. This run establishes no passing Rust tests. The next branch push will run the same complete gates.

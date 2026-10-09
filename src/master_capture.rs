@@ -660,14 +660,7 @@ fn run_collector(
     stats: &CaptureStats,
     maximum_frames: u64,
 ) -> Result<MasterCaptureMetadata> {
-    run_collector_with_drain_observer(
-        consumer,
-        shutdown,
-        writer,
-        stats,
-        maximum_frames,
-        || {},
-    )
+    run_collector_with_drain_observer(consumer, shutdown, writer, stats, maximum_frames, || {})
 }
 
 // The observer is a deterministic test seam on the disk thread, never the audio callback.
@@ -1349,13 +1342,8 @@ mod tests {
             PCM_WAV_HEADER_BYTES + 8 * 6,
         )
         .unwrap();
-        let metadata = run_collector_with_drain_observer(
-            consumer,
-            &shutdown,
-            writer,
-            &stats,
-            8,
-            || {
+        let metadata =
+            run_collector_with_drain_observer(consumer, &shutdown, writer, &stats, 8, || {
                 if let Some(mut endpoint) = endpoint.take() {
                     assert!(matches!(
                         endpoint.push_frame(100, [0.5, -0.5]),
@@ -1364,9 +1352,8 @@ mod tests {
                     drop(endpoint);
                     shutdown.store(COLLECTOR_COMMIT, Ordering::Release);
                 }
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         assert_eq!(metadata.frames, 1);
         assert_eq!(metadata.captured_frames, 1);
         assert_eq!(metadata.inserted_silence_frames, 0);

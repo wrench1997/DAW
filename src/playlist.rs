@@ -390,8 +390,7 @@ pub fn slipped_bounded_source_offset(
         return Err(PlaylistEditError::InvalidBounds);
     }
     let delta = quantized_slip_delta(pointer_delta_beats, snap_beats, bypass_snap)?;
-    Ok((f64::from(origin) - f64::from(delta))
-        .clamp(f64::from(minimum), f64::from(maximum)) as f32)
+    Ok((f64::from(origin) - f64::from(delta)).clamp(f64::from(minimum), f64::from(maximum)) as f32)
 }
 
 pub fn slipped_audio_source_offset(
@@ -641,7 +640,14 @@ mod tests {
         );
         let valid = clip(1, 0, 1.0, 4.0, None);
         assert_eq!(
-            dragged_fade_fraction(&valid, PlaylistFadeSide::In, 0.0, 1.0, f32::MIN_POSITIVE, false),
+            dragged_fade_fraction(
+                &valid,
+                PlaylistFadeSide::In,
+                0.0,
+                1.0,
+                f32::MIN_POSITIVE,
+                false
+            ),
             Ok(0.25)
         );
         let mut left = clip(1, 0, 0.0, f32::MAX, None);

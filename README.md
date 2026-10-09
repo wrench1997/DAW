@@ -4,7 +4,7 @@
 
 Citrus Studio is a clean-room, native music-production application written in Rust. It follows a pattern-first workflow while using its own product identity, vector iconography, layout, project format, DSP, and implementation.
 
-Current checkout status and validation limits are recorded in `DEV_STATE.md`; development milestones and dated evidence are in `docs/DEVELOPMENT_ROADMAP.md` and `docs/WORK_LOG.md`. Historical Windows validation is not a fresh test result for this checkout. New Windows MSVC checks are being prepared on the independent `ci/windows-reliability-20261009` branch.
+Current checkout status and validation limits are recorded in `DEV_STATE.md`; development milestones and dated evidence are in `docs/DEVELOPMENT_ROADMAP.md` and `docs/WORK_LOG.md`. Historical Windows validation is not a fresh test result for this checkout. The source changes are published on the independent `ci/windows-reliability-20261009` branch. The first Windows MSVC run reached formatting checks; its formatting findings are fixed for the next run. Compiler and test results are still pending.
 
 ## Architecture
 

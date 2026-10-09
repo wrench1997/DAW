@@ -19305,7 +19305,8 @@ impl CitrusApp {
             project_gesture_stopped |= canvas_response.drag_stopped();
         }
         if project_gesture_started && self.playlist_gesture_before.is_none() {
-            self.playlist_gesture_before = Some(gesture_snapshot.restore_into(self.project.clone()));
+            self.playlist_gesture_before =
+                Some(gesture_snapshot.restore_into(self.project.clone()));
         }
         if project_gesture_stopped {
             self.finish_playlist_gesture();
