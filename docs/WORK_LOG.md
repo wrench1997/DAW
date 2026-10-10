@@ -1454,3 +1454,14 @@ codec, ownership and mock-callsite review. Existing worker genuine acceptance
 remains the separately retained initialized/headless library qualification;
 this transport source does not extend that acceptance. No App/helper/bounce
 wiring, tagged transport or metadata-policy activation is included.
+
+### First strict-foundation mock run (preserved failure)
+
+Exact source4085f8f7 compiled successfully. The first focused run completed63 tests:
+62 passed, and one negative scalar-spelling assertion expected MalformedReply for
+`"Infinity"` while the deliberate four-byte token cap returned Limit. Valid numeric
+round trips, exact large-payload limits, measured preflight rejection allocations
+and the complete pipe/cancellation/quarantine/cleanup tests passed. The failed
+run remains unchanged. Independent review approved splitting only this test
+expectation; no production parser behavior changed. The corrected revision is
+unvalidated pending the archived rerun and remaining source gates.

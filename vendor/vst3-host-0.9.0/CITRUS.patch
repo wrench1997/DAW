@@ -1649,7 +1649,7 @@
 +mod tests;
 --- a/src/fresh_helper/codec_tests.rs
 +++ b/src/fresh_helper/codec_tests.rs
-@@ -0,0 +1,1740 @@
+@@ -0,0 +1,1736 @@
 +//! Plugin-free source fixtures. These tests must not be compiled or executed
 +//! before the source archive, independent review and explicit execution gate.
 +use super::super::{budget_test_hooks, pump, Cancellation, MAX_PAYLOAD};
@@ -2241,18 +2241,14 @@
 +            assert_eq!(actual.to_bits(), value.to_bits());
 +        }
 +    }
++    // The strict token length cap runs before spelling validation.
++    error(
++        br#"{"ParameterValue":{"value":"Infinity"}}"#,
++        &ReplyShape::ParameterValue,
++        ErrorKind::Limit,
++    );
 +    for value in [
-+        "null",
-+        "\"Infinity\"",
-+        "\"1.0\"",
-+        "1e999",
-+        "01",
-+        "+1",
-+        "1.",
-+        ".5",
-+        "--1",
-+        "1e",
-+        "1e+",
++        "null", "\"1.0\"", "1e999", "01", "+1", "1.", ".5", "--1", "1e", "1e+",
 +    ] {
 +        error(
 +            format!("{{\"ParameterValue\":{{\"value\":{value}}}}}").as_bytes(),

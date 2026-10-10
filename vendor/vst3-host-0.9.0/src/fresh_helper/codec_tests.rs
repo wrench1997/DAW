@@ -589,18 +589,14 @@ fn parameter_wire_preserves_nonfinite_class_and_finite_bits() {
             assert_eq!(actual.to_bits(), value.to_bits());
         }
     }
+    // The strict token length cap runs before spelling validation.
+    error(
+        br#"{"ParameterValue":{"value":"Infinity"}}"#,
+        &ReplyShape::ParameterValue,
+        ErrorKind::Limit,
+    );
     for value in [
-        "null",
-        "\"Infinity\"",
-        "\"1.0\"",
-        "1e999",
-        "01",
-        "+1",
-        "1.",
-        ".5",
-        "--1",
-        "1e",
-        "1e+",
+        "null", "\"1.0\"", "1e999", "01", "+1", "1.", ".5", "--1", "1e", "1e+",
     ] {
         error(
             format!("{{\"ParameterValue\":{{\"value\":{value}}}}}").as_bytes(),
