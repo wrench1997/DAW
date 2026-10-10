@@ -153,6 +153,15 @@ struct MockState {
     expand_audio_on_parameter: AtomicBool,
     audio_bus_info_error: AtomicBool,
     audio_bus_aux: AtomicBool,
+    dry_topology: AtomicBool,
+    event_bus_info_error: AtomicBool,
+    event_names_reversed: AtomicBool,
+    audio_names_reversed: AtomicBool,
+    fail_activation: AtomicBool,
+    fail_arrangement: AtomicBool,
+    activation_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    activation_calls: Mutex<Vec<(i32, i32, i32, bool)>>,
+    dry_process_checks: Mutex<Vec<(i32, bool)>>,
     bus_info_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     event_inputs: AtomicI32,
     event_outputs: AtomicI32,
@@ -192,6 +201,15 @@ impl Default for MockState {
             expand_audio_on_parameter: AtomicBool::new(false),
             audio_bus_info_error: AtomicBool::new(false),
             audio_bus_aux: AtomicBool::new(false),
+            dry_topology: AtomicBool::new(false),
+            event_bus_info_error: AtomicBool::new(false),
+            event_names_reversed: AtomicBool::new(false),
+            audio_names_reversed: AtomicBool::new(false),
+            fail_activation: AtomicBool::new(false),
+            fail_arrangement: AtomicBool::new(false),
+            activation_callback: Mutex::new(None),
+            activation_calls: Mutex::new(Vec::new()),
+            dry_process_checks: Mutex::new(Vec::new()),
             bus_info_callback: Mutex::new(None),
             event_inputs: AtomicI32::new(0),
             event_outputs: AtomicI32::new(0),
@@ -283,7 +301,9 @@ impl<const S: bool, const C: bool> IComponentTrait for MockPlugin<S, C> {
     }
     unsafe fn getBusCount(&self, media: MediaType, direction: BusDirection) -> i32 {
         self.probe.record("getBusCount");
-        if media == kAudio as i32 && direction == kOutput as i32 {
+        if media == kAudio as i32 && direction == kInput as i32 {
+            i32::from(self.state.dry_topology.load(Ordering::Relaxed))
+        } else if media == kAudio as i32 && direction == kOutput as i32 {
             self.state.output_buses.load(Ordering::Relaxed)
         } else if media == kEvent as i32 && direction == kInput as i32 {
             self.state.event_inputs.load(Ordering::Relaxed)
@@ -315,6 +335,9 @@ impl<const S: bool, const C: bool> IComponentTrait for MockPlugin<S, C> {
             None
         };
         if let Some(count) = event_count {
+            if self.state.event_bus_info_error.load(Ordering::Relaxed) {
+                return kNotImplemented;
+            }
             if index < 0 || index >= count {
                 return kInvalidArgument;
             }
@@ -324,26 +347,46 @@ impl<const S: bool, const C: bool> IComponentTrait for MockPlugin<S, C> {
             bus.channelCount = self.state.event_channels.load(Ordering::Relaxed);
             bus.busType = BusTypes_::kMain as i32;
             bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
+            bus.name[0] = if self.state.event_names_reversed.load(Ordering::Relaxed) {
+                (count - index) as _
+            } else {
+                (index + 1) as _
+            };
             *info = bus;
             return kResultOk;
         }
-        if media != kAudio as i32
-            || direction != kOutput as i32
-            || index < 0
-            || index >= self.state.output_buses.load(Ordering::Relaxed)
-        {
+        let audio_count = if direction == kInput as i32 {
+            i32::from(self.state.dry_topology.load(Ordering::Relaxed))
+        } else if direction == kOutput as i32 {
+            self.state.output_buses.load(Ordering::Relaxed)
+        } else {
+            0
+        };
+        if media != kAudio as i32 || index < 0 || index >= audio_count {
             return kInvalidArgument;
         }
         let mut bus: BusInfo = std::mem::zeroed();
         bus.mediaType = media;
         bus.direction = direction;
         bus.channelCount = self.state.channels.load(Ordering::Relaxed);
-        bus.busType = if self.state.audio_bus_aux.load(Ordering::Relaxed) {
+        let dry_aux = self.state.dry_topology.load(Ordering::Relaxed)
+            && direction == kOutput as i32
+            && index > 0;
+        bus.busType = if dry_aux || self.state.audio_bus_aux.load(Ordering::Relaxed) {
             BusTypes_::kAux as i32
         } else {
             BusTypes_::kMain as i32
         };
-        bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
+        bus.flags = if dry_aux {
+            0
+        } else {
+            BusInfo_::BusFlags_::kDefaultActive as u32
+        };
+        bus.name[0] = if self.state.audio_names_reversed.load(Ordering::Relaxed) {
+            (audio_count - index) as _
+        } else {
+            (index + 1) as _
+        };
         *info = bus;
         kResultOk
     }
@@ -356,13 +399,25 @@ impl<const S: bool, const C: bool> IComponentTrait for MockPlugin<S, C> {
     }
     unsafe fn activateBus(
         &self,
-        _media: MediaType,
-        _direction: BusDirection,
-        _index: i32,
-        _state: TBool,
+        media: MediaType,
+        direction: BusDirection,
+        index: i32,
+        state: TBool,
     ) -> tresult {
         self.probe.record("activateBus");
-        kResultOk
+        self.state
+            .activation_calls
+            .lock()
+            .unwrap()
+            .push((media, direction, index, state != 0));
+        if let Some(callback) = self.state.activation_callback.lock().unwrap().as_ref() {
+            callback();
+        }
+        if self.state.fail_activation.load(Ordering::Relaxed) {
+            kResultFalse
+        } else {
+            kResultOk
+        }
     }
     unsafe fn setActive(&self, state: TBool) -> tresult {
         self.probe.record(if state == 0 {
@@ -411,6 +466,9 @@ impl<const S: bool, const C: bool> IAudioProcessorTrait for MockPlugin<S, C> {
         _num_outputs: i32,
     ) -> tresult {
         self.probe.record("setBusArrangements");
+        if self.state.fail_arrangement.load(Ordering::Relaxed) {
+            return vst3::Steinberg::kInternalError;
+        }
         if self.state.change_on_refusal.load(Ordering::Relaxed) {
             self.state.channels.store(2, Ordering::Relaxed);
             kResultFalse
@@ -439,7 +497,10 @@ impl<const S: bool, const C: bool> IAudioProcessorTrait for MockPlugin<S, C> {
         kResultOk
     }
     unsafe fn canProcessSampleSize(&self, size: i32) -> tresult {
-        if size == SymbolicSampleSizes_::kSample32 as i32 {
+        if size == SymbolicSampleSizes_::kSample32 as i32
+            || (size == SymbolicSampleSizes_::kSample64 as i32
+                && self.state.dry_topology.load(Ordering::Relaxed))
+        {
             kResultOk
         } else {
             kResultFalse
@@ -537,6 +598,16 @@ impl<const S: bool, const C: bool> IAudioProcessorTrait for MockPlugin<S, C> {
             return kResultFalse;
         }
         let data = &mut *data;
+        if self.state.dry_topology.load(Ordering::Relaxed) {
+            // This COM mock reports failure rather than unwinding through its vtable.
+            let valid = topology_tests::check_dry_sdk_buffers(data);
+            self.state
+                .dry_process_checks
+                .lock()
+                .unwrap()
+                .push((data.symbolicSampleSize, valid));
+            return if valid { kResultOk } else { kResultFalse };
+        }
         if self.state.capture_origin.load(Ordering::Acquire) {
             let mut events = Vec::new();
             if let Some(list) = vst3::ComRef::from_raw(data.inputEvents) {
@@ -1607,6 +1678,7 @@ fn surge_reused_restore_rejects_before_lifecycle_state_and_queue_mutations() {
             .snapshot();
         let process_data =
             plugin.runtime.process_data.as_ref().unwrap().as_ref() as *const HostProcessData;
+        let activation_before = plugin.runtime.bus_activation.clone();
         let next_note = plugin.runtime.next_note_id;
         let prior_context = plugin
             .runtime
@@ -1634,6 +1706,7 @@ fn surge_reused_restore_rejects_before_lifecycle_state_and_queue_mutations() {
                 .snapshot(),
             native_before
         );
+        assert_eq!(plugin.runtime.bus_activation, activation_before);
         assert_eq!(plugin.runtime.is_processing, !stopped);
         assert_eq!(plugin.control.is_active, !stopped);
         assert_eq!(
@@ -2940,8 +3013,8 @@ fn output_event_overflow_reports_drain_loss_without_falsifying_successful_native
     assert_eq!(plugin.take_output_events_with_loss(), (Vec::new(), false));
 }
 
-mod session_tests;
 mod borrowed_processor_tests;
+mod session_tests;
 
 fn reset_transport() -> crate::plugin::ProcessTransport {
     crate::plugin::ProcessTransport {
@@ -3511,3 +3584,5 @@ mod runtime_loan_tests;
 
 #[cfg(all(feature = "experimental-scoped-worker", target_os = "linux"))]
 mod scoped_worker_tests;
+
+mod topology_tests;

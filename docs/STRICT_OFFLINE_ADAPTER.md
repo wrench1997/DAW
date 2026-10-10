@@ -44,9 +44,13 @@ path/identity validation, not cryptographic authentication of a binary.
    Signed zero is numerically equal; no tolerance or clamp is used. Readback is
    controller evidence, not a claim that SDK Process has applied a queued edit.
 7. Read owner-only checked audio/event layout and latency/tail. Validate raw main
-   and Option<bool> activation before projecting to the legacy metadata tuples.
-   Require no audio input, one known-active main mono/stereo output, one known-
-   active main event input and no event output. Compare complete captured metadata.
+   and Option<bool> activation while retaining every full ordered audio descriptor. The dry-topology
+   prerequisite permits at most one known main mono/stereo input, one known-active
+   main mono/stereo output, and up to two known-inactive auxiliary mono/stereo outputs.
+   Participating input channels receive exact zeros through the closed count-only
+   client. Require one known-active main event input and no event output. Compare
+   complete captured metadata. See DRY_GENERATOR_TOPOLOGY.md for the unvalidated
+   prerequisite and observational capture/fresh-source acknowledgment boundaries.
 8. The existing renderer reads strict metadata before and after every Q128 block,
    sends only planned ordinary notes at offsets 0..127, and processes once with
    explicit transport. Every returned sample, including discarded latency/padding,

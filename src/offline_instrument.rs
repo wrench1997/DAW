@@ -3,6 +3,8 @@
 //! This is preparation/processing infrastructure only. No App action or WAV renderer calls it
 //! yet. It deliberately bypasses the realtime bridge, never its backend/helper contracts.
 
+#[cfg(feature = "vst3")]
+use crate::instrument_bounce::BounceAudioBus;
 use crate::instrument_bounce::{BouncePluginMetadata, CapturedInstrumentBounce};
 
 #[cfg(all(test, feature = "vst3", unix))]
@@ -101,8 +103,14 @@ impl OfflineInstrument {
             .bounce_metadata(None)
             .map_err(|error| error.to_string())?;
         metadata.validate(sample_rate)?;
-        backend.input_channels = 0;
-        backend.output_channels = metadata.output_buses[0].0;
+        if metadata != state.metadata {
+            return Err(
+                "Fresh bounce instance metadata differs from the authoritative captured source"
+                    .into(),
+            );
+        }
+        backend.input_channels = metadata.participating_input_channels();
+        backend.output_channels = metadata.output_buses[0].channel_count;
         Ok(Self {
             _backend: backend,
             metadata,
@@ -117,7 +125,103 @@ impl OfflineInstrument {
 
 #[cfg(feature = "vst3")]
 impl Vst3Backend {
-    fn bounce_metadata(
+    /// Only the new owner's first prepare may call this, after restore and before Start.
+    /// Preflight the entire declaration before the first acknowledgment, then check that
+    /// every intermediate operation preserved all descriptors and prepared participation.
+    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    pub(super) fn qualify_fresh_bounce_source(
+        &mut self,
+        sample_rate: u32,
+    ) -> Result<BouncePluginMetadata, String> {
+        use vst3_host::audio::{BusDirection, MediaType};
+        if self.prepared || self.plugin.is_processing() {
+            return Err(
+                "Fresh bounce source setup requires an unpublished inactive candidate".into(),
+            );
+        }
+        let mut actual = self
+            .bounce_metadata(None)
+            .map_err(|error| error.to_string())?;
+        let prepared = self
+            .plugin
+            .audio_bus_layout()
+            .map_err(|error| error.to_string())?;
+        let mut proposed = actual.clone();
+        let mut acknowledge = Vec::new();
+        for (direction, declared, projected, participating) in [
+            (
+                BusDirection::Input,
+                &actual.input_buses,
+                &mut proposed.input_buses,
+                &prepared.inputs,
+            ),
+            (
+                BusDirection::Output,
+                &actual.output_buses,
+                &mut proposed.output_buses,
+                &prepared.outputs,
+            ),
+        ] {
+            if declared.len() != participating.len() {
+                return Err("Fresh bounce source actual/prepared bus count differs".into());
+            }
+            for (index, ((bus, proposal), storage)) in declared
+                .iter()
+                .zip(projected.iter_mut())
+                .zip(participating)
+                .enumerate()
+            {
+                if bus.channel_count != storage.channel_count
+                    || bus.active.is_some_and(|active| active != storage.active)
+                {
+                    return Err("Fresh bounce source actual/prepared participation differs".into());
+                }
+                if bus.active.is_none() && !storage.active {
+                    // This is a preflight proposal, never a source metadata receipt. Only
+                    // a successful owner call plus a checked reread can attest false.
+                    proposal.active = Some(false);
+                    acknowledge.push((direction, index));
+                }
+            }
+        }
+        // Includes actual factory Instrument identity, ALL later buses, event policy and
+        // latency. In particular an active aux is rejected rather than disabled to fit.
+        proposed.validate(sample_rate)?;
+        for (direction, index) in acknowledge {
+            self.plugin
+                .set_bus_active(MediaType::Audio, direction, index as i32, false)
+                .map_err(|error| error.to_string())?;
+            match direction {
+                BusDirection::Input => actual.input_buses[index].active = Some(false),
+                BusDirection::Output => actual.output_buses[index].active = Some(false),
+            }
+            let checked = self
+                .bounce_metadata(None)
+                .map_err(|error| error.to_string())?;
+            let storage = self
+                .plugin
+                .audio_bus_layout()
+                .map_err(|error| error.to_string())?;
+            if checked != actual || storage != prepared {
+                return Err(
+                    "Fresh bounce source topology changed during inactive-bus acknowledgment"
+                        .into(),
+                );
+            }
+        }
+        let checked = self
+            .bounce_metadata(None)
+            .map_err(|error| error.to_string())?;
+        checked.validate(sample_rate)?;
+        if checked != proposed {
+            return Err("Fresh bounce source topology changed before admission".into());
+        }
+        self.input_channels = checked.participating_input_channels();
+        self.output_channels = checked.output_buses[0].channel_count;
+        Ok(checked)
+    }
+
+    pub(super) fn bounce_metadata(
         &self,
         fence: Option<&BounceCaptureFence>,
     ) -> Result<BouncePluginMetadata, BounceCaptureError> {
@@ -126,13 +230,6 @@ impl Vst3Backend {
                 .checked_audio_bus_layout()
                 .map_err(classify_metadata_error)
         })?;
-        if layout.outputs.iter().any(|bus| !bus.is_main) {
-            return Err(classify_metadata_error(
-                vst3_host::Error::MetadataQueryRejected(
-                    vst3_host::MetadataQueryRejection::Unsupported,
-                ),
-            ));
-        }
         let events = capture_call(fence, || {
             self.plugin
                 .event_bus_layout()
@@ -167,12 +264,12 @@ impl Vst3Backend {
             input_buses: layout
                 .inputs
                 .iter()
-                .map(|bus| (bus.channel_count, bus.active == Some(true)))
+                .map(|bus| BounceAudioBus::new(bus.channel_count, bus.is_main, bus.active))
                 .collect(),
             output_buses: layout
                 .outputs
                 .iter()
-                .map(|bus| (bus.channel_count, bus.active == Some(true)))
+                .map(|bus| BounceAudioBus::new(bus.channel_count, bus.is_main, bus.active))
                 .collect(),
             latency_samples,
             tail_samples,

@@ -1,5 +1,6 @@
 //! Test-only line-protocol stand-in. No VST binary, production helper or native UI is loaded.
 use super::*;
+use crate::instrument_bounce::BounceAudioBus;
 use std::{
     os::unix::fs::PermissionsExt,
     path::PathBuf,
@@ -215,6 +216,9 @@ saved = False
 loaded = False
 processing = False
 parameter_applied = False
+acknowledged = set()
+activation_calls = 0
+dry_shape = mode.startswith('dry_') or mode.startswith('fresh_')
 for line in sys.stdin:
     request = json.loads(line)
     with open(log, 'a') as stream:
@@ -222,13 +226,34 @@ for line in sys.stdin:
     name = request if isinstance(request, str) else next(iter(request))
     data = {} if isinstance(request, str) else request[name]
     result = copy.deepcopy(templates.get(name, templates['Unexpected']))
+    if dry_shape and name == 'LoadPlugin' and mode == 'fresh_identity':
+        result['PluginInfo']['category'] = 'Fx'
+    if dry_shape and name in ('AudioBusLayout', 'CheckedAudioBusLayout'):
+        checked = name == 'CheckedAudioBusLayout'
+        def bus(channels, main, active, index, direction):
+            if checked:
+                if not active and mode not in ('dry_attested', 'dry_drift') and (direction, index) not in acknowledged:
+                    active = None
+                return dict(channel_count=channels, is_main=main, active=active)
+            return dict(channel_count=channels, active=active)
+        inputs = [bus(2, mode != 'fresh_input_aux', mode != 'fresh_input_inactive', 0, 'Input')]
+        outputs = [bus(2, True, True, 0, 'Output'), bus(1, False, False, 1, 'Output'),
+                   bus(3 if mode == 'fresh_unsupported_last' else 2, False, mode == 'fresh_aux_active_last', 2, 'Output')]
+        if mode == 'fresh_extra_output': outputs.append(bus(2, False, False, 3, 'Output'))
+        if mode == 'fresh_prepared_mismatch' and not checked: outputs[-1]['channel_count'] = 1
+        if mode == 'fresh_prepared_count' and not checked: outputs.pop()
+        if mode == 'fresh_prepared_activation' and not checked: outputs[0]['active'] = False
+        if mode == 'fresh_active_unknown' and checked: inputs[0]['active'] = None
+        if mode == 'fresh_drift' and activation_calls: outputs[-1]['channel_count'] = 1
+        if mode == 'dry_drift' and saved: outputs[-1]['channel_count'] = 1
+        result = {name: {'layout': dict(inputs=inputs, outputs=outputs)}}
     if name == 'CheckedAudioBusLayout':
         if mode == 'old_audio_helper': result = templates['OldHelper']
         elif mode == 'audio_wrong_reply': result = templates['Success']
         elif mode == 'audio_sdk_error': result = templates['SdkError']
         elif mode == 'audio_unsupported': result = templates['Unsupported']
         elif mode == 'audio_pending': result = templates['PendingTopology']
-        elif (mode == 'audio_changed_on_start' and processing) or (mode == 'audio_changed_on_parameter' and parameter_applied):
+        elif (mode in ('audio_changed_on_start', 'fresh_changed_on_start') and processing) or (mode == 'audio_changed_on_parameter' and parameter_applied):
             result = templates['InconsistentTopology']
     elif name == 'EventBusLayout':
         if mode == 'old_helper': result = templates['OldHelper']
@@ -237,7 +262,16 @@ for line in sys.stdin:
             bus = layout['inputs'][0]
             if (mode == 'outputs_after_state' and loaded) or (mode == 'metadata_change' and saved): layout['outputs'] = [copy.deepcopy(bus)]
             if mode == 'extra_input': layout['inputs'].append(copy.deepcopy(bus))
-            if mode == 'unknown_activation': bus['active'] = None
+            if mode in ('unknown_activation', 'fresh_event_unknown'): bus['active'] = None
+    elif name == 'SetBusActive':
+        assert dry_shape and not processing and not saved, 'activation outside fresh unpublished setup'
+        assert data['media_type'] == 'Audio' and data['active'] is False, data
+        activation_calls += 1
+        if mode == 'fresh_set_fail2' and activation_calls == 2:
+            result = templates['SdkError']
+        else:
+            if mode != 'fresh_ack_missing': acknowledged.add((data['direction'], data['bus_index']))
+            result = templates['Success']
     elif name == 'ResetOriginSupport':
         result['ResetOriginSupport']['support']['processing'] = processing
     elif name == 'Editor':
@@ -262,7 +296,7 @@ for line in sys.stdin:
         if name == 'LoadState': loaded = True
         if name == 'StartProcessing': processing = True
         if name == 'StopProcessing': processing = False
-        result = templates['Success']
+        result = templates['SdkError'] if name == 'LoadState' and mode == 'fresh_restore_fail' else templates['Success']
     if name == 'Editor' and data['command'] == 'Query': capture_phase = True
     if mode.startswith('block_') and capture_phase:
         capture_step += 1
@@ -366,7 +400,7 @@ fn capture_state() -> BouncePluginState {
             event_input_buses: vec![(16, true, Some(true))],
             event_output_buses: vec![],
             input_buses: vec![],
-            output_buses: vec![(2, true)],
+            output_buses: vec![BounceAudioBus::new(2, true, Some(true))],
             latency_samples: 0,
             tail_samples: 0,
         },
@@ -872,4 +906,422 @@ fn already_cancelled_or_expired_backend_capture_sends_no_request() {
         );
         assert!(fake.names().is_empty());
     }
+}
+
+fn dry_metadata() -> BouncePluginMetadata {
+    let mut metadata = capture_state().metadata;
+    metadata.input_buses = vec![BounceAudioBus::new(2, true, Some(true))];
+    metadata.output_buses.extend([
+        BounceAudioBus::new(1, false, Some(false)),
+        BounceAudioBus::new(2, false, Some(false)),
+    ]);
+    metadata
+}
+
+#[test]
+fn capture_and_factory_preserve_attested_inactive_audio_declarations() {
+    let fake = FakeHelper::new("dry_attested");
+    let mut source = fake.source();
+    let capture = source
+        .capture_bounce_state(&[17], &capture_fence())
+        .unwrap();
+    assert_eq!(capture.metadata, dry_metadata());
+    assert_eq!(fake.names(), CAPTURE_SEQUENCE);
+    let clone_fixture = FakeHelper::new("dry_attested");
+    let clone = OfflineInstrument::load_snapshot(
+        clone_fixture.spec(capture.opaque_state.clone()),
+        48_000,
+        &capture,
+    )
+    .unwrap();
+    assert_eq!(clone.metadata(), &capture.metadata);
+    assert_eq!(clone._backend.input_channels, 2);
+    assert_eq!(clone._backend.output_channels, 2);
+    assert!(
+        !clone_fixture
+            .names()
+            .iter()
+            .any(|name| name == "SetBusActive")
+    );
+}
+
+#[test]
+fn capture_unknown_audio_activation_requires_fresh_load_without_mutation() {
+    let fake = FakeHelper::new("dry_unknown");
+    let mut source = fake.source();
+    let error = source
+        .capture_bounce_state(&[17], &capture_fence())
+        .unwrap_err();
+    assert!(matches!(error, BounceCaptureError::Rejected(_)));
+    assert!(error.to_string().contains("fresh load"));
+    assert_eq!(fake.names(), &CAPTURE_SEQUENCE[..6]);
+    assert!(source.prepared && source.plugin.is_processing());
+}
+
+#[test]
+fn capture_fence_detects_even_supported_inactive_audio_bus_drift() {
+    let fake = FakeHelper::new("dry_drift");
+    let mut source = fake.source();
+    let error = source
+        .capture_bounce_state(&[17], &capture_fence())
+        .unwrap_err();
+    assert!(matches!(error, BounceCaptureError::Rejected(_)));
+    assert!(error.to_string().contains("metadata changed"));
+    assert_eq!(fake.names(), CAPTURE_SEQUENCE);
+    assert!(source.prepared && source.plugin.is_processing());
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn fresh_config() -> PluginPrepareConfig {
+    PluginPrepareConfig {
+        sample_rate: 48_000.0,
+        max_block_frames: 2048,
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_acknowledges_only_unknown_prepared_inactive_slots_once_before_start() {
+    for mode in ["fresh_normal", "fresh_input_inactive", "dry_attested"] {
+        let fake = FakeHelper::new(mode);
+        let mut source =
+            Vst3Backend::load_fresh_bounce_source(fake.spec(vec![1, 2, 3]), fresh_config())
+                .unwrap();
+        source.prepare(fresh_config()).unwrap();
+        let mut expected = dry_metadata();
+        if mode == "fresh_input_inactive" {
+            expected.input_buses[0].active = Some(false);
+        }
+        assert_eq!(source.bounce_metadata(None).unwrap(), expected);
+        assert_eq!(
+            source.input_channels,
+            if mode == "fresh_input_inactive" { 0 } else { 2 }
+        );
+        let requests = fake.requests();
+        let names = fake.names();
+        let restore = names.iter().position(|name| name == "LoadState").unwrap();
+        let start = names
+            .iter()
+            .position(|name| name == "StartProcessing")
+            .unwrap();
+        let activations: Vec<_> = requests
+            .iter()
+            .enumerate()
+            .filter_map(|(index, request)| request.get("SetBusActive").map(|data| (index, data)))
+            .collect();
+        assert_eq!(
+            activations.len(),
+            if mode == "dry_attested" {
+                0
+            } else if mode == "fresh_input_inactive" {
+                3
+            } else {
+                2
+            }
+        );
+        for (index, data) in &activations {
+            assert!(restore < *index && *index < start);
+            assert_eq!(data["active"], false);
+            assert_eq!(data["media_type"], "Audio");
+        }
+        if mode != "dry_attested" {
+            let first = activations[0].0;
+            assert!(names[restore + 1..first].contains(&"CheckedAudioBusLayout".into()));
+            assert!(names[restore + 1..first].contains(&"AudioBusLayout".into()));
+            assert!(names[restore + 1..first].contains(&"EventBusLayout".into()));
+            assert!(names[restore + 1..first].contains(&"TailSamples".into()));
+        }
+        assert!(
+            !names
+                .iter()
+                .any(|name| matches!(name.as_str(), "Process" | "ResetOrigin" | "StopProcessing"))
+        );
+        assert!(
+            source
+                .prepare(fresh_config())
+                .unwrap_err()
+                .contains("one-shot")
+        );
+        assert_eq!(
+            fake.requests(),
+            requests,
+            "published source reprepare must issue no command"
+        );
+        assert!(source.prepared && source.plugin.is_processing());
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_complete_preflight_refuses_without_any_activation_or_start() {
+    for mode in [
+        "fresh_aux_active_last",
+        "fresh_unsupported_last",
+        "fresh_extra_output",
+        "fresh_input_aux",
+        "fresh_prepared_mismatch",
+        "fresh_prepared_count",
+        "fresh_prepared_activation",
+        "fresh_active_unknown",
+        "fresh_identity",
+        "fresh_event_unknown",
+    ] {
+        let fake = FakeHelper::new(mode);
+        let mut source =
+            Vst3Backend::load_fresh_bounce_source(fake.spec(vec![1, 2, 3]), fresh_config())
+                .unwrap();
+        assert!(source.prepare(fresh_config()).is_err(), "{mode}");
+        let requests = fake.requests();
+        assert!(
+            !fake.names().iter().any(|name| matches!(
+                name.as_str(),
+                "SetBusActive" | "StartProcessing" | "Process"
+            )),
+            "{mode}"
+        );
+        assert!(!source.prepared && !source.plugin.is_processing());
+        assert!(
+            source
+                .prepare(fresh_config())
+                .unwrap_err()
+                .contains("one-shot")
+        );
+        assert_eq!(
+            fake.requests(),
+            requests,
+            "failed candidate cannot retry: {mode}"
+        );
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_partial_ack_failure_missing_ack_and_drift_never_start_or_retry() {
+    for (mode, calls) in [
+        ("fresh_set_fail2", 2),
+        ("fresh_ack_missing", 1),
+        ("fresh_drift", 1),
+    ] {
+        let fake = FakeHelper::new(mode);
+        let mut source =
+            Vst3Backend::load_fresh_bounce_source(fake.spec(vec![1, 2, 3]), fresh_config())
+                .unwrap();
+        assert!(source.prepare(fresh_config()).is_err(), "{mode}");
+        let requests = fake.requests();
+        assert_eq!(
+            fake.names()
+                .iter()
+                .filter(|name| *name == "SetBusActive")
+                .count(),
+            calls
+        );
+        assert!(
+            !fake
+                .names()
+                .iter()
+                .any(|name| matches!(name.as_str(), "StartProcessing" | "Process"))
+        );
+        assert!(!source.prepared && !source.plugin.is_processing());
+        assert!(
+            source
+                .prepare(fresh_config())
+                .unwrap_err()
+                .contains("one-shot")
+        );
+        assert_eq!(fake.requests(), requests);
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn failed_fresh_source_worker_publishes_no_ready_or_active_slot_and_leaves_old_source() {
+    use super::super::{PluginChain, RuntimeEvent};
+    use std::time::{Duration, Instant};
+    let old = FakeHelper::new("normal");
+    let old_source = old.source();
+    for mode in [
+        "fresh_aux_active_last",
+        "fresh_set_fail2",
+        "fresh_ack_missing",
+        "fresh_changed_on_start",
+    ] {
+        let fake = FakeHelper::new(mode);
+        let mut chain =
+            PluginChain::spawn_fresh_bounce_source(41, fake.spec(vec![1, 2, 3]), fresh_config())
+                .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut fault = false;
+        while Instant::now() < deadline {
+            while let Some(event) = chain.control.try_next_event() {
+                assert!(!matches!(event, RuntimeEvent::SlotReady { .. }), "{mode}");
+                if matches!(event, RuntimeEvent::SlotFault { slot: 0, .. }) {
+                    fault = true;
+                }
+            }
+            if fault && chain.control.plugin_latency_snapshot().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(fault, "candidate must report its failure: {mode}");
+        assert_eq!(
+            chain.control.plugin_latency_snapshot().unwrap().active_mask,
+            0
+        );
+        assert_eq!(
+            chain.guard.shutdown_blocking(Duration::from_secs(5)),
+            super::super::ShutdownOutcome::Joined
+        );
+        assert!(old_source.prepared && old_source.plugin.is_processing());
+        assert!(
+            old.names().is_empty(),
+            "candidate failure must not touch the existing source"
+        );
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn default_source_loader_never_acknowledges_inactive_defaults() {
+    let mut names = Vec::new();
+    for mode in ["normal", "fresh_normal"] {
+        let fake = FakeHelper::new(mode);
+        let mut source = Vst3Backend::load(fake.spec(vec![]), fresh_config()).unwrap();
+        source.prepare(fresh_config()).unwrap();
+        assert!(!fake.names().iter().any(|name| name == "SetBusActive"));
+        names.push(fake.names());
+    }
+    assert_eq!(
+        names[0], names[1],
+        "default setup call ledger is unchanged for additional inactive buses"
+    );
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_worker_admits_ready_only_after_verified_setup_and_start() {
+    use super::super::{PluginChain, RuntimeEvent};
+    use std::time::{Duration, Instant};
+    let fake = FakeHelper::new("fresh_normal");
+    let mut chain =
+        PluginChain::spawn_fresh_bounce_source(41, fake.spec(vec![1, 2, 3]), fresh_config())
+            .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut ready = false;
+    while Instant::now() < deadline {
+        while let Some(event) = chain.control.try_next_event() {
+            assert!(!matches!(event, RuntimeEvent::SlotFault { .. }));
+            if matches!(event, RuntimeEvent::SlotReady { slot: 0, .. }) {
+                let names = fake.names();
+                let start = names
+                    .iter()
+                    .position(|name| name == "StartProcessing")
+                    .unwrap();
+                assert_eq!(
+                    names[..start]
+                        .iter()
+                        .filter(|name| *name == "SetBusActive")
+                        .count(),
+                    2
+                );
+                assert_eq!(
+                    names[..start]
+                        .iter()
+                        .rposition(|name| name == "SetBusActive")
+                        .map(|index| names[index + 1..start]
+                            .contains(&"CheckedAudioBusLayout".into())),
+                    Some(true)
+                );
+                ready = true;
+            }
+        }
+        if ready && chain.control.plugin_latency_snapshot().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(ready);
+    assert_eq!(
+        chain.control.plugin_latency_snapshot().unwrap().active_mask,
+        1
+    );
+    assert!(
+        !fake
+            .names()
+            .iter()
+            .any(|name| matches!(name.as_str(), "Process" | "ResetOrigin"))
+    );
+    assert_eq!(
+        chain.guard.shutdown_blocking(Duration::from_secs(5)),
+        super::super::ShutdownOutcome::Joined
+    );
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_first_prepare_consumes_setup_even_when_restore_or_initial_guard_fails() {
+    for mode in ["fresh_restore_fail", "fresh_normal"] {
+        let fake = FakeHelper::new(mode);
+        let mut source =
+            Vst3Backend::load_fresh_bounce_source(fake.spec(vec![1, 2, 3]), fresh_config())
+                .unwrap();
+        let config = if mode == "fresh_normal" {
+            PluginPrepareConfig {
+                max_block_frames: 128,
+                ..fresh_config()
+            }
+        } else {
+            fresh_config()
+        };
+        assert!(source.prepare(config).is_err());
+        let requests = fake.requests();
+        assert!(!fake.names().iter().any(|name| matches!(
+            name.as_str(),
+            "SetBusActive" | "StartProcessing" | "Process"
+        )));
+        assert!(
+            source
+                .prepare(fresh_config())
+                .unwrap_err()
+                .contains("one-shot")
+        );
+        assert_eq!(fake.requests(), requests);
+    }
+}
+
+#[test]
+fn fresh_offline_factory_rejects_supported_inactive_bus_change_against_capture() {
+    let fake = FakeHelper::new("dry_attested");
+    let mut capture = capture_state();
+    capture.metadata = dry_metadata();
+    capture.metadata.output_buses[1].channel_count = 2;
+    capture.metadata.validate(48_000).unwrap();
+    let result =
+        OfflineInstrument::load_snapshot(fake.spec(capture.opaque_state.clone()), 48_000, &capture);
+    let error = result
+        .err()
+        .expect("valid but changed inactive descriptor must refuse");
+    assert!(error.contains("metadata differs"), "{error}");
+    assert!(fake.names().iter().any(|name| name == "TailSamples"));
+    assert!(
+        !fake
+            .names()
+            .iter()
+            .any(|name| matches!(name.as_str(), "SetBusActive" | "Process"))
+    );
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_keeps_original_zero_input_topology_without_activation_calls() {
+    let fake = FakeHelper::new("normal");
+    let mut source =
+        Vst3Backend::load_fresh_bounce_source(fake.spec(vec![]), fresh_config()).unwrap();
+    source.prepare(fresh_config()).unwrap();
+    assert_eq!(
+        source.bounce_metadata(None).unwrap(),
+        capture_state().metadata
+    );
+    assert_eq!(source.input_channels, 0);
+    assert!(!fake.names().iter().any(|name| name == "SetBusActive"));
 }

@@ -2774,6 +2774,40 @@ impl PluginChain {
         })
     }
 
+    /// Dormant, one-shot dry-generator source qualification. The default loaders do not
+    /// select this path. Returned endpoints remain unusable until the worker emits SlotReady.
+    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    pub(crate) fn spawn_fresh_bounce_source(
+        instance_id: u64,
+        spec: PluginLoadSpec,
+        config: PluginPrepareConfig,
+    ) -> Result<Self, String> {
+        let config = config.validate()?;
+        let manifest = PluginEndpointManifest::identified(&[instance_id])?;
+        if spec.descriptor.format != super::PluginFormat::Vst3
+            || !spec.enabled
+            || spec.bypassed
+            || spec.wet != 1.0
+            || !spec
+                .class_uid
+                .as_deref()
+                .is_some_and(|uid| uid.len() == 32 && uid.bytes().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err(
+                "Fresh bounce source requires an enabled, dry, identified VST3 instrument".into(),
+            );
+        }
+        Self::spawn_loader(config, manifest, move || {
+            let result = (|| {
+                let mut spec = spec;
+                super::prepare_runtime_spec(&mut spec)?;
+                let backend = Vst3Backend::load_fresh_bounce_source(spec, config)?;
+                Ok(BackendSlot::new(Box::new(backend)))
+            })();
+            vec![result]
+        })
+    }
+
     /// Spawn test/custom backends from a factory that runs inside the worker thread. Constructing
     /// them there lets legacy plug-in wrappers remain correctly thread-affine instead of claiming
     /// an unsound blanket `Send` implementation.
@@ -5136,8 +5170,17 @@ fn validate_vst3_reset_maximum(max_block_frames: usize, reset_frames: usize) -> 
     Ok(())
 }
 
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[derive(Clone, Copy)]
+enum FreshBounceSourceSetup {
+    Pending,
+    Consumed,
+}
+
 #[cfg(feature = "vst3")]
 struct Vst3Backend {
+    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    fresh_bounce_setup: Option<FreshBounceSourceSetup>,
     last_transport: PluginTransport,
     native_revision_base: u64,
     plugin: vst3_host::Plugin,
@@ -5152,6 +5195,25 @@ struct Vst3Backend {
 
 #[cfg(feature = "vst3")]
 impl Vst3Backend {
+    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    fn load_fresh_bounce_source(
+        spec: PluginLoadSpec,
+        config: PluginPrepareConfig,
+    ) -> Result<Self, String> {
+        let expected_uid = spec
+            .class_uid
+            .clone()
+            .ok_or_else(|| "Fresh bounce source requires an exact factory class".to_owned())?;
+        let mut candidate = Self::load(spec, config)?;
+        if candidate.plugin.info().uid != expected_uid {
+            return Err(
+                "Fresh bounce source factory class differs from the requested identity".into(),
+            );
+        }
+        candidate.fresh_bounce_setup = Some(FreshBounceSourceSetup::Pending);
+        Ok(candidate)
+    }
+
     fn reset_origin_frames(&self) -> usize {
         vst3_reset_origin_frames(&self.plugin.info().uid, &self.plugin.info().version)
     }
@@ -5233,6 +5295,8 @@ impl Vst3Backend {
             format!("{} — {}", plugin.info().name, plugin.info().vendor)
         };
         Ok(Self {
+            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+            fresh_bounce_setup: None,
             last_transport: PluginTransport::default(),
             native_revision_base: 0,
             plugin,
@@ -5259,6 +5323,21 @@ impl PluginBackend for Vst3Backend {
     }
 
     fn prepare(&mut self, config: PluginPrepareConfig) -> Result<(), String> {
+        // Consume before any fallible guard: neither failed setup nor a published source
+        // may use a later prepare to gain another activation opportunity.
+        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        let qualify_fresh_source = match self.fresh_bounce_setup {
+            None => false,
+            Some(FreshBounceSourceSetup::Pending) => {
+                self.fresh_bounce_setup = Some(FreshBounceSourceSetup::Consumed);
+                true
+            }
+            Some(FreshBounceSourceSetup::Consumed) => {
+                return Err(
+                    "Fresh bounce source preparation is one-shot; load a new candidate".into(),
+                );
+            }
+        };
         validate_vst3_reset_maximum(config.max_block_frames, self.reset_origin_frames())?;
         // Negotiate before reset-specific lifecycle/state changes. A loaded old helper may
         // have initialized the plugin, but it cannot receive panic or a fallback Process.
@@ -5294,6 +5373,12 @@ impl PluginBackend for Vst3Backend {
                 .load_state(&state)
                 .map_err(|error| error.to_string())?;
         }
+        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        let fresh_metadata = if qualify_fresh_source {
+            Some(self.qualify_fresh_bounce_source(config.sample_rate as u32)?)
+        } else {
+            None
+        };
         self.plugin
             .start_processing()
             .map_err(|error| error.to_string())?;
@@ -5301,6 +5386,18 @@ impl PluginBackend for Vst3Backend {
             .plugin
             .native_dirty_revision()
             .map_err(|error| error.to_string())?;
+        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        if let Some(before_start) = fresh_metadata {
+            let current = self
+                .bounce_metadata(None)
+                .map_err(|error| error.to_string())?;
+            current.validate(config.sample_rate as u32)?;
+            if current != before_start {
+                return Err(
+                    "Fresh bounce source topology changed at Start before admission".into(),
+                );
+            }
+        }
         self.max_block_frames = config.max_block_frames;
         self.prepared = true;
         Ok(())
@@ -5737,7 +5834,13 @@ impl Drop for Vst3Backend {
         let _ = self
             .plugin
             .isolated_editor(vst3_host::IsolatedEditorCommand::Close);
-        if self.prepared {
+        let should_stop = self.prepared;
+        // A one-shot candidate can fail its post-Start fence before prepared becomes
+        // true. Dispose its processing lifecycle without affecting any older source.
+        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        let should_stop =
+            should_stop || (self.fresh_bounce_setup.is_some() && self.plugin.is_processing());
+        if should_stop {
             let _ = self.plugin.stop_processing();
         }
     }

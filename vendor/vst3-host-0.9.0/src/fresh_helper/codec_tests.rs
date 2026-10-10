@@ -1987,7 +1987,7 @@ fn request_view_preserves_text_state_and_audio_storage_identity() {
     );
     let samples = vec![vec![f32::from_bits(0x7fc0_1234), -0.0]];
     let view = RequestView::Process {
-        inputs: &samples,
+        inputs: FlatInputView::Borrowed(&samples),
         frames: 2,
         transport: None,
     };
@@ -2769,4 +2769,184 @@ fn scalar_readback_retains_raw_f64_at_captured_f32_boundaries() {
     let below_zero = -f64::from_bits(1);
     assert_eq!(below_zero as f32, 0.0f32);
     assert!(!(0.0..=1.0).contains(&below_zero));
+}
+
+fn silent_transport() -> ProcessTransport {
+    ProcessTransport {
+        sample_position: -128,
+        quarter_note_position: -0.25,
+        tempo: 123.5,
+        playing: true,
+        time_sig_numerator: 7,
+        time_sig_denominator: 8,
+    }
+}
+
+#[test]
+fn silent_generator_view_is_allocation_free_and_repeats_one_immutable_positive_zero_channel() {
+    let mut first_pointer = None;
+    for count in 0..=2 {
+        allocation_free(|| {
+            let RequestView::Process { inputs, frames, .. } =
+                RequestView::silent_generator(count, silent_transport())
+            else {
+                panic!("flat Process view")
+            };
+            assert_eq!(frames, 128);
+            assert_eq!(inputs.channel_count(), count);
+            assert_eq!(inputs.iter().len(), count);
+            for channel in inputs.iter() {
+                assert_eq!(channel.len(), 128);
+                assert!(channel.iter().all(|sample| sample.to_bits() == 0));
+                assert_eq!(
+                    *first_pointer.get_or_insert(channel.as_ptr()),
+                    channel.as_ptr()
+                );
+            }
+        });
+    }
+    let samples = vec![vec![0.25; 128], vec![-0.5; 128]];
+    allocation_free(|| {
+        let borrowed = FlatInputView::Borrowed(&samples);
+        assert_eq!(borrowed.channel_count(), 2);
+        for (channel, original) in borrowed.iter().zip(&samples) {
+            assert_eq!(channel.as_ptr(), original.as_ptr());
+        }
+    });
+}
+
+#[test]
+fn silent_generator_wire_is_exact_q128_zero_and_matches_existing_flat_encoding() {
+    use crate::internal::native_edit_transport::tests::measure_allocations;
+    for input_channels in 0..=2 {
+        for output_channels in 1..=2 {
+            let request = RequestView::silent_generator(input_channels, silent_transport());
+            let shape = ReplyShape::Audio {
+                channels: output_channels,
+                frames: 128,
+            };
+            let mut budget = new_budget();
+            let (encoded, allocations) =
+                measure_allocations(|| encode_view(&request, &shape, &mut budget));
+            let encoded = encoded.unwrap();
+            assert_eq!(
+                allocations.allocations, 1,
+                "only the charged wire Vec may allocate"
+            );
+            assert_eq!(allocations.allocated_bytes, encoded.capacity());
+            assert_eq!(allocations.deallocations, 0);
+            assert_eq!(budget.live, encoded.capacity());
+            assert_eq!(budget.peak, encoded.capacity());
+            let legacy = HostCommand::Process {
+                inputs: vec![vec![0.0; 128]; input_channels],
+                frames: 128,
+                transport: Some(silent_transport()),
+            };
+            assert_eq!(encoded, encode(&legacy, &shape, &mut new_budget()).unwrap());
+            let HostCommand::Process {
+                inputs,
+                frames,
+                transport,
+            } = serde_json::from_slice(&encoded).unwrap()
+            else {
+                panic!("unchanged Process wire")
+            };
+            assert_eq!(inputs.len(), input_channels);
+            assert_eq!(frames, 128);
+            assert_eq!(transport, Some(silent_transport()));
+            for channel in inputs {
+                assert_eq!(channel.len(), 128);
+                assert!(channel.iter().all(|sample| sample.to_bits() == 0));
+            }
+            let charge = encoded.capacity();
+            drop(encoded);
+            budget.release(charge);
+            assert_eq!(budget.live, 0);
+        }
+    }
+}
+
+#[test]
+fn silent_generator_view_rejects_bounds_after_budget_check_without_allocation() {
+    for (input_channels, frames) in [(3, 128), (usize::MAX, 128), (0, 127), (2, 129)] {
+        let request = RequestView::Process {
+            inputs: FlatInputView::SilentQ128(input_channels),
+            frames,
+            transport: Some(silent_transport()),
+        };
+        let shape = ReplyShape::Audio {
+            channels: 2,
+            frames: frames as usize,
+        };
+        for stop in 0..4 {
+            let mut budget = new_budget();
+            if stop == 1 || stop == 3 {
+                budget.deadline = Instant::now();
+            }
+            if stop == 2 || stop == 3 {
+                budget.cancel.cancelled.store(true, Ordering::Release);
+            }
+            let expected = match stop {
+                1 => ErrorKind::Deadline,
+                2 | 3 => ErrorKind::Cancelled,
+                _ => ErrorKind::Shape,
+            };
+            assert_eq!(
+                allocation_free(|| encode_view(&request, &shape, &mut budget)).unwrap_err(),
+                expected,
+            );
+            assert_eq!((budget.live, budget.peak), (0, 0));
+        }
+    }
+}
+
+#[test]
+fn silent_generator_preserves_every_codec_checkpoint_and_payload_accounting() {
+    let request = RequestView::silent_generator(2, silent_transport());
+    let shape = ReplyShape::Audio {
+        channels: 2,
+        frames: 128,
+    };
+    let checks = {
+        let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
+        encode_view(&request, &shape, &mut new_budget()).unwrap();
+        budget_test_hooks::checks()
+    };
+    // Two channels cross the existing Writer checkpoint in both count and emit,
+    // in addition to initial, allocation and final checks.
+    assert!(checks >= 6);
+    for at in 1..=checks {
+        for expired in [false, true] {
+            let mut budget = new_budget();
+            let _hook = if expired {
+                budget_test_hooks::expire_at_check(at)
+            } else {
+                budget_test_hooks::cancel_at_check(at)
+            };
+            assert_eq!(
+                encode_view(&request, &shape, &mut budget).unwrap_err(),
+                if expired {
+                    ErrorKind::Deadline
+                } else {
+                    ErrorKind::Cancelled
+                },
+            );
+            assert_eq!(budget.live, 0);
+        }
+    }
+    let mut budget = new_budget();
+    budget.live = MAX_PAYLOAD;
+    budget.peak = MAX_PAYLOAD;
+    assert_eq!(
+        allocation_free(|| encode_view(&request, &shape, &mut budget)).unwrap_err(),
+        ErrorKind::Limit,
+    );
+    assert_eq!((budget.live, budget.peak), (MAX_PAYLOAD, MAX_PAYLOAD));
+    let mut budget = new_budget();
+    let _hook = budget_test_hooks::fail_next_allocation();
+    assert_eq!(
+        allocation_free(|| encode_view(&request, &shape, &mut budget)).unwrap_err(),
+        ErrorKind::Allocation,
+    );
+    assert_eq!(budget.live, 0);
 }

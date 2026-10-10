@@ -1,6 +1,7 @@
 //! Plugin-free unit fixtures for the dormant bounce checkpoint. No vendor module is loaded.
 
 use super::*;
+use crate::instrument_bounce::BounceAudioBus;
 use crate::instrument_bounce::{
     BOUNCE_CAPTURE_TIMEOUT, BouncePluginMetadata, BounceSourceIdentity, BounceSourceStatus,
     InstrumentBounceCapture, InstrumentBouncePlan,
@@ -17,7 +18,7 @@ fn state() -> BouncePluginState {
             event_input_buses: vec![(16, true, Some(true))],
             event_output_buses: vec![],
             input_buses: vec![],
-            output_buses: vec![(2, true)],
+            output_buses: vec![BounceAudioBus::new(2, true, Some(true))],
             latency_samples: 0,
             tail_samples: 0,
         },
@@ -730,8 +731,14 @@ fn bounce_metadata_and_state_policy_rejects_unsupported_inputs_and_empty_state()
         let mut state = state();
         match case {
             0 => state.opaque_state.clear(),
-            1 => state.metadata.input_buses.push((2, false)),
-            2 => state.metadata.output_buses.push((2, false)),
+            1 => state
+                .metadata
+                .input_buses
+                .push(BounceAudioBus::new(2, false, Some(false))),
+            2 => state
+                .metadata
+                .output_buses
+                .push(BounceAudioBus::new(2, true, Some(false))),
             3 => state
                 .metadata
                 .event_output_buses
@@ -766,4 +773,90 @@ fn bounce_eligibility_does_not_silently_remove_unsupported_project_features() {
             "case {case}"
         );
     }
+}
+
+#[test]
+fn bounce_audio_policy_keeps_every_declared_bus_and_known_activation() {
+    for input_channels in [0, 1, 2] {
+        for input_active in [false, true] {
+            for output_channels in [1, 2] {
+                for auxiliaries in 0..=2 {
+                    let mut metadata = state().metadata;
+                    metadata.input_buses = if input_channels == 0 {
+                        vec![]
+                    } else {
+                        vec![BounceAudioBus::new(
+                            input_channels,
+                            true,
+                            Some(input_active),
+                        )]
+                    };
+                    metadata.output_buses =
+                        vec![BounceAudioBus::new(output_channels, true, Some(true))];
+                    metadata.output_buses.extend(
+                        (0..auxiliaries)
+                            .map(|index| BounceAudioBus::new(index + 1, false, Some(false))),
+                    );
+                    let exact = metadata.clone();
+                    metadata.validate(48_000).unwrap();
+                    assert_eq!(metadata, exact);
+                    assert_eq!(metadata.output_buses.len(), 1 + auxiliaries);
+                    assert_eq!(
+                        metadata.participating_input_channels(),
+                        if input_active { input_channels } else { 0 }
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn bounce_audio_policy_refuses_every_out_of_bound_raw_descriptor_without_projection() {
+    let mut valid = state().metadata;
+    valid.input_buses = vec![BounceAudioBus::new(2, true, Some(true))];
+    valid.output_buses.extend([
+        BounceAudioBus::new(1, false, Some(false)),
+        BounceAudioBus::new(2, false, Some(false)),
+    ]);
+    for case in 0..19 {
+        let mut metadata = valid.clone();
+        match case {
+            0 => metadata.input_buses.push(metadata.input_buses[0]),
+            1 => metadata.input_buses[0].is_main = false,
+            2 => metadata.input_buses[0].channel_count = 0,
+            3 => metadata.input_buses[0].channel_count = 3,
+            4 => metadata.input_buses[0].active = None,
+            5 => metadata.output_buses.clear(),
+            6 => metadata
+                .output_buses
+                .push(BounceAudioBus::new(2, false, Some(false))),
+            7 => metadata.output_buses[0].is_main = false,
+            8 => metadata.output_buses[0].active = Some(false),
+            9 => metadata.output_buses[0].active = None,
+            10 => metadata.output_buses[0].channel_count = 0,
+            11 => metadata.output_buses[0].channel_count = 3,
+            12 => metadata.output_buses[1].is_main = true,
+            13 => metadata.output_buses[2].is_main = true,
+            14 => metadata.output_buses[1].active = Some(true),
+            15 => metadata.output_buses[2].active = None,
+            16 => metadata.output_buses[2].channel_count = 0,
+            17 => metadata.output_buses[2].channel_count = 3,
+            _ => metadata.output_buses.swap(0, 2),
+        }
+        let exact = metadata.clone();
+        assert!(metadata.validate(48_000).is_err(), "case {case}");
+        assert_eq!(metadata, exact, "admission must be observational");
+    }
+    let mut changed = valid.clone();
+    changed.output_buses[1].channel_count = 2;
+    changed.validate(48_000).unwrap();
+    assert_ne!(
+        changed, valid,
+        "even supported inactive-bus drift changes the receipt"
+    );
+    changed = valid.clone();
+    changed.output_buses.swap(1, 2);
+    changed.validate(48_000).unwrap();
+    assert_ne!(changed, valid, "inactive order survives metadata equality");
 }

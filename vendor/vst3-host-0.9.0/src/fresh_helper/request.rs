@@ -28,6 +28,32 @@ impl<'a> From<&'a StateContext> for StateContextView<'a> {
     }
 }
 
+// This fixed, immutable channel is the only sample source for the closed
+// generator operation. Repetition is a view, not an allocated channel vector.
+static SILENT_Q128_CHANNEL: [f32; 128] = [0.0; 128];
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FlatInputView<'a> {
+    Borrowed(&'a [Vec<f32>]),
+    SilentQ128(usize),
+}
+
+impl<'a> FlatInputView<'a> {
+    pub(crate) fn channel_count(self) -> usize {
+        match self {
+            Self::Borrowed(channels) => channels.len(),
+            Self::SilentQ128(channels) => channels,
+        }
+    }
+
+    pub(crate) fn iter(self) -> impl ExactSizeIterator<Item = &'a [f32]> {
+        (0..self.channel_count()).map(move |index| match self {
+            Self::Borrowed(channels) => channels[index].as_slice(),
+            Self::SilentQ128(_) => SILENT_Q128_CHANNEL.as_slice(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RequestView<'a> {
     LoadPlugin {
@@ -45,7 +71,7 @@ pub(crate) enum RequestView<'a> {
     },
     SaveState,
     Process {
-        inputs: &'a [Vec<f32>],
+        inputs: FlatInputView<'a>,
         frames: u32,
         transport: Option<ProcessTransport>,
     },
@@ -80,6 +106,18 @@ pub(crate) enum RequestView<'a> {
     EventBusLayout,
 }
 
+impl RequestView<'_> {
+    // Count validation stays inside the original exchange budget. This creates
+    // only a synchronous view; no caller samples or variable payload are owned.
+    pub(crate) fn silent_generator(input_channels: usize, transport: ProcessTransport) -> Self {
+        Self::Process {
+            inputs: FlatInputView::SilentQ128(input_channels),
+            frames: 128,
+            transport: Some(transport),
+        }
+    }
+}
+
 impl<'a> TryFrom<&'a HostCommand> for RequestView<'a> {
     type Error = ErrorKind;
 
@@ -112,7 +150,7 @@ impl<'a> TryFrom<&'a HostCommand> for RequestView<'a> {
                 frames,
                 transport,
             } => Self::Process {
-                inputs,
+                inputs: FlatInputView::Borrowed(inputs),
                 frames: *frames,
                 transport: *transport,
             },

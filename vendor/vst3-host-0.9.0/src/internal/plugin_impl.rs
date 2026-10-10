@@ -137,13 +137,8 @@ impl ProcessingSampleSize {
     }
 }
 
-#[derive(Default)]
-struct BusActivationState {
-    audio_inputs: Vec<bool>,
-    audio_outputs: Vec<bool>,
-    event_inputs: Vec<bool>,
-    event_outputs: Vec<bool>,
-}
+mod bus_activation;
+use bus_activation::{ActivationRecord, BusActivationState, BusBinding};
 
 /// Legacy public-API implementation. The helper's `MainThreadPlugin` keeps this aggregate
 /// on its loading thread; legacy `Plugin` users retain their existing `Send` API.
@@ -1888,8 +1883,14 @@ impl PluginImpl {
         ))
     }
 
-    unsafe fn negotiate_default_bus_arrangements(&self) -> Result<()> {
-        let arrangements = self.bus_arrangements()?;
+    unsafe fn negotiate_default_bus_arrangements(&mut self) -> Result<()> {
+        let arrangements = match self.bus_arrangements() {
+            Ok(arrangements) => arrangements,
+            Err(error) => {
+                self.runtime.bus_activation.invalidate_acknowledgments();
+                return Err(error);
+            }
+        };
         let mut inputs: Vec<u64> = arrangements.inputs.iter().map(|a| a.raw()).collect();
         let mut outputs: Vec<u64> = arrangements.outputs.iter().map(|a| a.raw()).collect();
         let result = self.control.processor.setBusArrangements(
@@ -1904,6 +1905,7 @@ impl PluginImpl {
             }
             Ok(())
         } else {
+            self.runtime.bus_activation.invalidate_acknowledgments();
             Err(Error::InterfaceError(format!(
                 "default setBusArrangements failed: {result:#x}"
             )))
@@ -1943,6 +1945,7 @@ impl PluginImpl {
                 .processor
                 .setupProcessing(&setup as *const _ as *mut _);
             if result != kResultOk {
+                self.runtime.bus_activation.invalidate_acknowledgments();
                 return Err(Error::InterfaceError(format!(
                     "Failed to setup processing: {:#x}",
                     result
@@ -2062,7 +2065,10 @@ impl PluginImpl {
                 .unwrap_or(ptr::null_mut());
 
             // Prepare buffers
-            self.prepare_buffers(&mut data)?;
+            if let Err(error) = self.prepare_buffers(&mut data) {
+                self.runtime.bus_activation.invalidate_acknowledgments();
+                return Err(error);
+            }
 
             self.runtime.process_data = Some(data);
             Ok(())
@@ -2118,7 +2124,11 @@ impl PluginImpl {
                 } else {
                     None
                 };
-                return (bus_info.channelCount.max(0), kind);
+                return (
+                    bus_info.channelCount.max(0),
+                    kind,
+                    BusBinding::from_info(kAudio as i32, direction, bus_idx, &bus_info),
+                );
             }
             // A failed getBusInfo must not remove the slot and shift every later bus index.
             // Fall back to the processor's arrangement, whose set bits define its channels.
@@ -2129,27 +2139,77 @@ impl PluginImpl {
                 .getBusArrangement(direction, bus_idx, &mut arrangement)
                 == kResultOk
             {
-                (arrangement.count_ones() as i32, None)
+                (arrangement.count_ones() as i32, None, None)
             } else {
-                (0, None)
+                (0, None, None)
             }
         };
 
+        let mut input_bindings = Vec::with_capacity(input_bus_count.max(0) as usize);
+        let mut output_bindings = Vec::with_capacity(output_bus_count.max(0) as usize);
         for bus_idx in 0..input_bus_count {
             let mut bus: AudioBusBuffers = std::mem::zeroed();
-            let (channels, kind) = channel_count(kInput as i32, bus_idx);
+            let (channels, kind, binding) = channel_count(kInput as i32, bus_idx);
+            input_bindings.push(binding);
             bus.numChannels = channels;
             data.input_bus_types.push(kind);
             data.input_bus_buffers.push(bus);
         }
         for bus_idx in 0..output_bus_count {
             let mut bus: AudioBusBuffers = std::mem::zeroed();
-            let (channels, kind) = channel_count(kOutput as i32, bus_idx);
+            let (channels, kind, binding) = channel_count(kOutput as i32, bus_idx);
+            output_bindings.push(binding);
             bus.numChannels = channels;
             data.output_bus_types.push(kind);
             data.output_bus_buffers.push(bus);
         }
 
+        BusActivationState::retain_prepared_bindings(
+            &mut self.runtime.bus_activation.audio_input_acks,
+            &self.runtime.bus_activation.audio_inputs,
+            &input_bindings,
+        );
+        BusActivationState::retain_prepared_bindings(
+            &mut self.runtime.bus_activation.audio_output_acks,
+            &self.runtime.bus_activation.audio_outputs,
+            &output_bindings,
+        );
+        // Event activation evidence also belongs to the observed setup binding,
+        // even though its buffers are not AudioBusBuffers. Do not let an observed
+        // changed event side disappear and later resurrect an old acknowledgment.
+        let event_bindings = |direction: i32| {
+            let count = self.control.component.getBusCount(kEvent as i32, direction);
+            if !(0..=32).contains(&count) {
+                return Vec::new();
+            }
+            (0..count)
+                .map(|index| {
+                    let mut info: BusInfo = std::mem::zeroed();
+                    if self
+                        .control
+                        .component
+                        .getBusInfo(kEvent as i32, direction, index, &mut info)
+                        == kResultOk
+                    {
+                        BusBinding::from_info(kEvent as i32, direction, index, &info)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        let event_inputs = event_bindings(kInput as i32);
+        let event_outputs = event_bindings(kOutput as i32);
+        BusActivationState::retain_prepared_bindings(
+            &mut self.runtime.bus_activation.event_input_acks,
+            &self.runtime.bus_activation.event_inputs,
+            &event_inputs,
+        );
+        BusActivationState::retain_prepared_bindings(
+            &mut self.runtime.bus_activation.event_output_acks,
+            &self.runtime.bus_activation.event_outputs,
+            &event_outputs,
+        );
         data.process_data.numInputs = data.input_bus_buffers.len() as i32;
         data.process_data.numOutputs = data.output_bus_buffers.len() as i32;
 
@@ -2942,7 +3002,8 @@ impl PluginInternal for PluginImpl {
         let side = |direction: i32,
                     prepared: &[AudioBusBuffers],
                     kinds: &[Option<bool>],
-                    activation: &[bool]|
+                    activation: &[bool],
+                    acknowledgments: &[Option<ActivationRecord>]|
          -> Result<Vec<crate::plugin::CheckedAudioBusConfig>> {
             unsafe {
                 let count = self.control.component.getBusCount(kAudio as i32, direction);
@@ -2991,9 +3052,17 @@ impl PluginInternal for PluginImpl {
                     buses.push(crate::plugin::CheckedAudioBusConfig {
                         channel_count: info.channelCount as usize,
                         is_main,
-                        // True records successful activateBus; false alone may only record
-                        // that default activation was never requested, so cannot attest false.
-                        active: activation[slot].then_some(true),
+                        // Prepared participation is not component acknowledgment. Unknown
+                        // defaults remain None; successful false is retained truthfully.
+                        active: acknowledgments.get(slot).and_then(Option::as_ref).and_then(
+                            |ack| {
+                                ack.observed(
+                                    activation[slot],
+                                    BusBinding::from_info(kAudio as i32, direction, index, &info)
+                                        .as_ref(),
+                                )
+                            },
+                        ),
                     });
                 }
                 Ok(buses)
@@ -3005,12 +3074,14 @@ impl PluginInternal for PluginImpl {
                 &data.input_bus_buffers,
                 &data.input_bus_types,
                 &self.runtime.bus_activation.audio_inputs,
+                &self.runtime.bus_activation.audio_input_acks,
             )?,
             outputs: side(
                 kOutput as i32,
                 &data.output_bus_buffers,
                 &data.output_bus_types,
                 &self.runtime.bus_activation.audio_outputs,
+                &self.runtime.bus_activation.audio_output_acks,
             )?,
         };
         self.reject_pending_topology()?;
@@ -3023,7 +3094,8 @@ impl PluginInternal for PluginImpl {
         self.ensure_control_thread("event bus layout")?;
         self.reject_pending_topology()?;
         let side = |direction: i32,
-                    activation: &[bool]|
+                    activation: &[bool],
+                    acknowledgments: &[Option<ActivationRecord>]|
          -> Result<Vec<crate::plugin::EventBusConfig>> {
             unsafe {
                 let count = self.control.component.getBusCount(kEvent as i32, direction);
@@ -3055,16 +3127,41 @@ impl PluginInternal for PluginImpl {
                         is_main: info.busType == BusTypes_::kMain as i32,
                         // Only successful host activation records can attest current state.
                         // kDefaultActive is a preference, not proof of an active bus.
-                        active: (activation.len() == count as usize && activation[index as usize])
-                            .then_some(true),
+                        active: if activation.len() == count as usize {
+                            acknowledgments
+                                .get(index as usize)
+                                .and_then(Option::as_ref)
+                                .and_then(|ack| {
+                                    ack.observed(
+                                        activation[index as usize],
+                                        BusBinding::from_info(
+                                            kEvent as i32,
+                                            direction,
+                                            index,
+                                            &info,
+                                        )
+                                        .as_ref(),
+                                    )
+                                })
+                        } else {
+                            None
+                        },
                     });
                 }
                 Ok(buses)
             }
         };
         let layout = crate::plugin::EventBusLayout {
-            inputs: side(kInput as i32, &self.runtime.bus_activation.event_inputs)?,
-            outputs: side(kOutput as i32, &self.runtime.bus_activation.event_outputs)?,
+            inputs: side(
+                kInput as i32,
+                &self.runtime.bus_activation.event_inputs,
+                &self.runtime.bus_activation.event_input_acks,
+            )?,
+            outputs: side(
+                kOutput as i32,
+                &self.runtime.bus_activation.event_outputs,
+                &self.runtime.bus_activation.event_output_acks,
+            )?,
         };
         self.reject_pending_topology()?;
         layout.validate()?;
@@ -3207,6 +3304,7 @@ impl PluginInternal for PluginImpl {
             }
 
             self.invalidate_processing_setup();
+            self.runtime.bus_activation.invalidate_acknowledgments();
             let arrangement_result = self.control.processor.setBusArrangements(
                 in_raw.as_mut_ptr(),
                 in_raw.len() as i32,
@@ -3282,12 +3380,60 @@ impl PluginInternal for PluginImpl {
                 self.deactivate_on_control_thread()?;
             }
 
+            // A failed call is not proof the old state survived. Clear only its
+            // prior acknowledgment before entering SDK code; participation keeps
+            // its existing mutation/error behavior.
+            let acks = match (media_type, direction) {
+                (MediaType::Audio, BusDirection::Input) => {
+                    &mut self.runtime.bus_activation.audio_input_acks
+                }
+                (MediaType::Audio, BusDirection::Output) => {
+                    &mut self.runtime.bus_activation.audio_output_acks
+                }
+                (MediaType::Event, BusDirection::Input) => {
+                    &mut self.runtime.bus_activation.event_input_acks
+                }
+                (MediaType::Event, BusDirection::Output) => {
+                    &mut self.runtime.bus_activation.event_output_acks
+                }
+            };
+            if let Some(ack) = acks.get_mut(bus_index as usize) {
+                *ack = None;
+            }
+            let mut info: BusInfo = std::mem::zeroed();
+            let binding = if self
+                .control
+                .component
+                .getBusInfo(media, dir, bus_index, &mut info)
+                == kResultOk
+            {
+                BusBinding::from_info(media, dir, bus_index, &info)
+            } else {
+                None
+            };
             let result = self
                 .control
                 .component
                 .activateBus(media, dir, bus_index, active as u8);
 
             let update_result = if result == kResultOk {
+                let acks = match (media_type, direction) {
+                    (MediaType::Audio, BusDirection::Input) => {
+                        &mut self.runtime.bus_activation.audio_input_acks
+                    }
+                    (MediaType::Audio, BusDirection::Output) => {
+                        &mut self.runtime.bus_activation.audio_output_acks
+                    }
+                    (MediaType::Event, BusDirection::Input) => {
+                        &mut self.runtime.bus_activation.event_input_acks
+                    }
+                    (MediaType::Event, BusDirection::Output) => {
+                        &mut self.runtime.bus_activation.event_output_acks
+                    }
+                };
+                if let Some(ack) = acks.get_mut(bus_index as usize) {
+                    *ack = ActivationRecord::acknowledged(active, binding);
+                }
                 let states = match (media_type, direction) {
                     (MediaType::Audio, BusDirection::Input) => {
                         &mut self.runtime.bus_activation.audio_inputs
@@ -3770,6 +3916,11 @@ impl PluginInternal for PluginImpl {
             .map(|h| h.take_restart_flags())
             .unwrap_or_default();
         let bits = flags.bits();
+        // Observed topology/reload invalidates evidence even if later servicing
+        // fails before its refresh, or a caller only takes the restart flags.
+        if flags.io_changed() || flags.reload_component() {
+            self.runtime.bus_activation.invalidate_acknowledgments();
+        }
         // `restartComponent` can arrive on any thread, and rebuilding these tables is a burst of
         // main-thread-domain controller calls (the MIDI map alone is buses × 16 × 130 of them).
         // So record what went stale and let the control thread rebuild.
@@ -3827,6 +3978,7 @@ impl PluginInternal for PluginImpl {
             }
 
             let apply_result = if flags.io_changed() {
+                self.runtime.bus_activation.invalidate_acknowledgments();
                 self.invalidate_processing_setup();
                 match Self::activate_default_buses(&self.control.component) {
                     Ok(activation) => {
@@ -4667,6 +4819,7 @@ impl PluginInternal for PluginImpl {
                 let comp_ptr = comp_stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                     Error::InterfaceError("Failed to create component state stream".into())
                 })?;
+                self.runtime.bus_activation.invalidate_acknowledgments();
                 let result = self.control.component.setState(comp_ptr.as_ptr());
                 if result != kResultOk && result != kNotImplemented {
                     return Err(Error::Other(format!(
@@ -4765,6 +4918,12 @@ impl PluginInternal for PluginImpl {
                 Ok(())
             })();
 
+            if apply_result.is_err() || restore_result.is_err() {
+                // Even a later successful best-effort activation cannot attest a failed
+                // state/lifecycle transaction. Keep its prepared participation, but require
+                // a subsequent independently successful acknowledgment for checked metadata.
+                self.runtime.bus_activation.invalidate_acknowledgments();
+            }
             match (apply_result, restore_result) {
                 (Ok(()), Ok(())) => Ok(()),
                 (Err(apply), Ok(())) => Err(apply),
@@ -4877,53 +5036,70 @@ impl PluginImpl {
         component: &ComPtr<IComponent>,
         previous: Option<&BusActivationState>,
     ) -> Result<BusActivationState> {
-        let read_and_activate =
-            |media: i32, direction: i32, prior: Option<&[bool]>| -> Result<Vec<bool>> {
-                let count = component.getBusCount(media, direction);
-                let mut states = Vec::with_capacity(count.max(0) as usize);
-                for index in 0..count {
-                    let mut info: BusInfo = std::mem::zeroed();
-                    let default_active = component.getBusInfo(media, direction, index, &mut info)
-                        == kResultOk
-                        && (info.flags & BusInfo_::BusFlags_::kDefaultActive as u32) != 0;
-                    let retained = prior.and_then(|states| states.get(index as usize)).copied();
-                    let active = retained.unwrap_or(default_active);
-                    if active || retained.is_some() {
-                        let result =
-                            component.activateBus(media, direction, index, u8::from(active));
-                        if result != kResultOk {
-                            return Err(Error::InterfaceError(format!(
-                                "activateBus failed for default-active bus \
+        let read_and_activate = |media: i32,
+                                 direction: i32,
+                                 prior: Option<&[bool]>|
+         -> Result<(Vec<bool>, Vec<Option<ActivationRecord>>)> {
+            let count = component.getBusCount(media, direction);
+            let mut states = Vec::with_capacity(count.max(0) as usize);
+            let mut acknowledgments = Vec::with_capacity(count.max(0) as usize);
+            for index in 0..count {
+                let mut info: BusInfo = std::mem::zeroed();
+                let info_ok = component.getBusInfo(media, direction, index, &mut info) == kResultOk;
+                let default_active =
+                    info_ok && (info.flags & BusInfo_::BusFlags_::kDefaultActive as u32) != 0;
+                let retained = prior.and_then(|states| states.get(index as usize)).copied();
+                let active = retained.unwrap_or(default_active);
+                let mut acknowledged = None;
+                if active || retained.is_some() {
+                    let result = component.activateBus(media, direction, index, u8::from(active));
+                    if result != kResultOk {
+                        return Err(Error::InterfaceError(format!(
+                            "activateBus failed for default-active bus \
                              ({media}, {direction}, {index}): {result:#x}"
-                            )));
-                        }
+                        )));
                     }
-                    states.push(active);
+                    if info_ok {
+                        acknowledged = ActivationRecord::acknowledged(
+                            active,
+                            BusBinding::from_info(media, direction, index, &info),
+                        );
+                    }
                 }
-                Ok(states)
-            };
-
+                states.push(active);
+                acknowledgments.push(acknowledged);
+            }
+            Ok((states, acknowledgments))
+        };
+        let (audio_inputs, audio_input_acks) = read_and_activate(
+            kAudio as i32,
+            kInput as i32,
+            previous.map(|state| state.audio_inputs.as_slice()),
+        )?;
+        let (audio_outputs, audio_output_acks) = read_and_activate(
+            kAudio as i32,
+            kOutput as i32,
+            previous.map(|state| state.audio_outputs.as_slice()),
+        )?;
+        let (event_inputs, event_input_acks) = read_and_activate(
+            kEvent as i32,
+            kInput as i32,
+            previous.map(|state| state.event_inputs.as_slice()),
+        )?;
+        let (event_outputs, event_output_acks) = read_and_activate(
+            kEvent as i32,
+            kOutput as i32,
+            previous.map(|state| state.event_outputs.as_slice()),
+        )?;
         Ok(BusActivationState {
-            audio_inputs: read_and_activate(
-                kAudio as i32,
-                kInput as i32,
-                previous.map(|state| state.audio_inputs.as_slice()),
-            )?,
-            audio_outputs: read_and_activate(
-                kAudio as i32,
-                kOutput as i32,
-                previous.map(|state| state.audio_outputs.as_slice()),
-            )?,
-            event_inputs: read_and_activate(
-                kEvent as i32,
-                kInput as i32,
-                previous.map(|state| state.event_inputs.as_slice()),
-            )?,
-            event_outputs: read_and_activate(
-                kEvent as i32,
-                kOutput as i32,
-                previous.map(|state| state.event_outputs.as_slice()),
-            )?,
+            audio_inputs,
+            audio_outputs,
+            event_inputs,
+            event_outputs,
+            audio_input_acks,
+            audio_output_acks,
+            event_input_acks,
+            event_output_acks,
         })
     }
 

@@ -8,11 +8,13 @@
 use crate::{
     export_job::StrictCancelRegistration,
     instrument_bounce::{
-        BOUNCE_PREPARED_MAXIMUM, BOUNCE_QUANTUM, BouncePluginMetadata, CapturedInstrumentBounce,
+        BOUNCE_PREPARED_MAXIMUM, BOUNCE_QUANTUM, BounceAudioBus, BouncePluginMetadata,
+        CapturedInstrumentBounce,
         render::{
             BackendFailure, BackendFailureKind, BlockReply, DisposalObservation, RenderBackend,
             RenderControl,
         },
+        validate_bounce_audio_topology,
     },
     plugins::plugin_runtime::{PluginLoadSpec, PluginTransport},
 };
@@ -41,6 +43,7 @@ pub(crate) struct StrictBackend {
     control: Option<RenderControl>,
     loaded: Option<LoadedPlugin>,
     sample_rate: u32,
+    input_channels: usize,
     output_channels: usize,
     prepare_attempted: bool,
     prepared: bool,
@@ -65,6 +68,7 @@ impl StrictBackend {
             control: None,
             loaded: None,
             sample_rate: 0,
+            input_channels: 0,
             output_channels: 0,
             prepare_attempted: false,
             prepared: false,
@@ -171,17 +175,17 @@ impl StrictBackend {
     }
     fn read_metadata(&mut self) -> Result<BouncePluginMetadata, BackendFailure> {
         let audio = self.exchange(Client::checked_audio_layout)?;
-        // Validate raw information BEFORE the lossy legacy metadata projection.
-        if !audio.inputs.is_empty()
-            || audio.outputs.len() != 1
-            || !audio.outputs[0].is_main
-            || audio.outputs[0].active != Some(true)
-            || !matches!(audio.outputs[0].channel_count, 1 | 2)
-        {
-            return Err(Self::admission(
-                "Strict clone requires no audio input and one known-active main mono/stereo output",
-            ));
-        }
+        let input_buses: Vec<_> = audio
+            .inputs
+            .iter()
+            .map(|bus| BounceAudioBus::new(bus.channel_count, bus.is_main, bus.active))
+            .collect();
+        let output_buses: Vec<_> = audio
+            .outputs
+            .iter()
+            .map(|bus| BounceAudioBus::new(bus.channel_count, bus.is_main, bus.active))
+            .collect();
+        validate_bounce_audio_topology(&input_buses, &output_buses).map_err(Self::admission)?;
         let events = self.exchange(Client::event_layout)?;
         if events.inputs.len() != 1
             || !events.outputs.is_empty()
@@ -204,8 +208,8 @@ impl StrictBackend {
             version: info.version.clone(),
             name: info.name.clone(),
             category: info.category.clone(),
-            input_buses: Vec::new(),
-            output_buses: vec![(audio.outputs[0].channel_count, true)],
+            input_buses,
+            output_buses,
             event_input_buses: vec![(events.inputs[0].channel_count, true, Some(true))],
             event_output_buses: Vec::new(),
             latency_samples,
@@ -421,7 +425,8 @@ impl RenderBackend for StrictBackend {
                 "Fresh strict clone metadata differs from authoritative capture",
             ));
         }
-        self.output_channels = metadata.output_buses[0].0;
+        self.input_channels = metadata.participating_input_channels();
+        self.output_channels = metadata.output_buses[0].channel_count;
         self.prepared = true;
         Ok(metadata)
     }
@@ -468,6 +473,7 @@ impl RenderBackend for StrictBackend {
                 "Strict clone requires exact Q128 processing",
             ));
         }
+        let input_channels = self.input_channels;
         let channels = self.output_channels;
         let transport = ProcessTransport {
             sample_position: transport.sample_position,
@@ -477,8 +483,9 @@ impl RenderBackend for StrictBackend {
             time_sig_numerator: transport.time_sig_numerator,
             time_sig_denominator: transport.time_sig_denominator,
         };
-        let audio =
-            self.exchange(|client, deadline| client.process(channels, transport, deadline))?;
+        let audio = self.exchange(|client, deadline| {
+            client.process_silent_generator(input_channels, channels, transport, deadline)
+        })?;
         Ok(BlockReply {
             channels: audio.outputs,
             transport_applied: audio.transport_applied,

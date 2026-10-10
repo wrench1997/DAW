@@ -10,7 +10,7 @@
 //! are not a hard memory bound. Failed codec transactions drop all their values
 //! and restore their starting live charge; peak observations remain.
 
-use super::request::{RequestView, StateContextView};
+use super::request::{FlatInputView, RequestView, StateContextView};
 use super::{Budget, ErrorKind, ReplyShape, MAX_LINE};
 use crate::audio::AudioBusBuffer;
 use crate::discovery::ClassCompatibility;
@@ -78,9 +78,12 @@ fn check_shape(shape: &ReplyShape) -> Result<()> {
     }
 }
 
-fn check_channels(channels: &[Vec<f32>], frames: usize) -> Result<()> {
-    limit(channels.len(), MAX_CHANNELS)?;
-    for channel in channels {
+fn check_channels(channels: FlatInputView<'_>, frames: usize) -> Result<()> {
+    if matches!(channels, FlatInputView::SilentQ128(count) if count > 2 || frames != 128) {
+        return Err(ErrorKind::Shape);
+    }
+    limit(channels.channel_count(), MAX_CHANNELS)?;
+    for channel in channels.iter() {
         limit(channel.len(), MAX_FRAMES)?;
         if channel.len() != frames {
             return Err(ErrorKind::Shape);
@@ -185,7 +188,7 @@ fn check_request(command: &RequestView<'_>, shape: &ReplyShape) -> Result<()> {
             if *frames as usize != *expected {
                 return Err(ErrorKind::Shape);
             }
-            check_channels(inputs, *expected)?;
+            check_channels(*inputs, *expected)?;
             check_transport(transport)?;
         }
         (
@@ -206,7 +209,7 @@ fn check_request(command: &RequestView<'_>, shape: &ReplyShape) -> Result<()> {
             limit(inputs.len(), MAX_BUSES)?;
             let mut total = 0usize;
             for bus in inputs.iter() {
-                check_channels(&bus.channels, *expected)?;
+                check_channels(FlatInputView::Borrowed(&bus.channels), *expected)?;
                 total = total
                     .checked_add(bus.channels.len())
                     .ok_or(ErrorKind::Limit)?;
@@ -348,7 +351,7 @@ impl Writer<'_> {
         self.put(b"\"")
     }
 
-    fn channels(&mut self, channels: &[Vec<f32>]) -> Result<()> {
+    fn channels(&mut self, channels: FlatInputView<'_>) -> Result<()> {
         self.put(b"[")?;
         for (index, channel) in channels.iter().enumerate() {
             if index != 0 {
@@ -491,7 +494,7 @@ impl Writer<'_> {
                 transport,
             } => {
                 self.put(b"{\"Process\":{\"inputs\":")?;
-                self.channels(inputs)?;
+                self.channels(*inputs)?;
                 self.put(b",\"frames\":")?;
                 self.number(frames)?;
                 self.transport(transport)?;
@@ -511,7 +514,7 @@ impl Writer<'_> {
                     self.put(b"{\"active\":")?;
                     self.boolean(bus.active)?;
                     self.put(b",\"channels\":")?;
-                    self.channels(&bus.channels)?;
+                    self.channels(FlatInputView::Borrowed(&bus.channels))?;
                     self.put(b"}")?;
                 }
                 self.put(b"],\"outputs\":[")?;

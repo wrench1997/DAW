@@ -543,7 +543,7 @@ impl Client {
             deadline,
         )
     }
-    /// Process one Q128 generator block with explicit transport and exact shape.
+    /// Process one Q128 generator block without participating input channels.
     /// Finite/audio-loss acceptance remains a caller policy; no buffers are padded.
     pub fn process(
         &mut self,
@@ -551,23 +551,40 @@ impl Client {
         transport: ProcessTransport,
         deadline: Instant,
     ) -> Result<AudioBlock, Failure> {
+        self.process_silent_generator(0, output_channels, transport, deadline)
+    }
+    /// Process one Q128 dry-generator block with explicit transport and exact shape.
+    /// Accepts only input counts 0..=2 and output counts 1..=2. Each participating input
+    /// is the same immutable positive-zero Q128 channel; caller audio cannot enter.
+    /// Finite/audio-loss acceptance remains a caller policy; no buffers are padded.
+    ///
+    /// ```compile_fail
+    /// use std::time::Instant;
+    /// use vst3_host::{ProcessTransport, strict_offline::Client};
+    /// fn cannot_supply_audio(client: &mut Client, samples: &[Vec<f32>],
+    ///                       transport: ProcessTransport, deadline: Instant) {
+    ///     client.process_silent_generator(samples, 2, transport, deadline);
+    /// }
+    /// ```
+    pub fn process_silent_generator(
+        &mut self,
+        input_channels: usize,
+        output_channels: usize,
+        transport: ProcessTransport,
+        deadline: Instant,
+    ) -> Result<AudioBlock, Failure> {
         // Shape validation remains inside the budgeted session, sealing invalid
-        // requests with NotSent. Restrict the closed client to mono/stereo.
-        if !matches!(output_channels, 1 | 2) {
+        // requests with NotSent and preserving deadline/cancellation precedence.
+        if input_channels > 2 || !matches!(output_channels, 1 | 2) {
             return Err(self
                 .session
                 .reject_request(fresh_helper::ErrorKind::Shape, deadline)
                 .into());
         }
-        let channels = output_channels;
         match self.exchange(
-            RequestView::Process {
-                inputs: &[],
-                frames: 128,
-                transport: Some(transport),
-            },
+            RequestView::silent_generator(input_channels, transport),
             ReplyShape::Audio {
-                channels,
+                channels: output_channels,
                 frames: 128,
             },
             deadline,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::instrument_bounce::BounceAudioBus;
 use crate::{
     instrument_bounce::{BouncePluginState, InstrumentBouncePlan},
     model::*,
@@ -25,7 +26,7 @@ fn metadata(latency: u32, channels: usize) -> BouncePluginMetadata {
         event_input_buses: vec![(16, true, Some(true))],
         event_output_buses: vec![],
         input_buses: vec![],
-        output_buses: vec![(channels, true)],
+        output_buses: vec![BounceAudioBus::new(channels, true, Some(true))],
         latency_samples: latency,
         tail_samples: u32::MAX,
     }
@@ -265,7 +266,7 @@ impl RenderBackend for Fake {
         if matches!(self.fault, Fault::PanicProcess) {
             panic!("injected Process panic");
         }
-        let mut channels = vec![vec![0.0; frames]; self.meta.output_buses[0].0];
+        let mut channels = vec![vec![0.0; frames]; self.meta.output_buses[0].channel_count];
         for (ch, channel) in channels.iter_mut().enumerate() {
             for (i, sample) in channel.iter_mut().enumerate() {
                 let frame = self.next + i as u64;

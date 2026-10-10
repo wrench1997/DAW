@@ -940,7 +940,7 @@ fn render_audio<B: RenderBackend>(
             time_sig_numerator: 4,
             time_sig_denominator: 4,
         };
-        let expected = prepared.metadata.output_buses[0].0;
+        let expected = prepared.metadata.output_buses[0].channel_count;
         let block = control.call_checked(
             || backend.process(transport, BOUNCE_QUANTUM),
             |block| {

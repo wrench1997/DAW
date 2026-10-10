@@ -92,6 +92,50 @@ impl BounceSourceStatus {
     }
 }
 
+/// One declared audio bus, retained in component order even when inactive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BounceAudioBus {
+    pub channel_count: usize,
+    pub is_main: bool,
+    pub active: Option<bool>,
+}
+
+impl BounceAudioBus {
+    pub(crate) const fn new(channel_count: usize, is_main: bool, active: Option<bool>) -> Self {
+        Self {
+            channel_count,
+            is_main,
+            active,
+        }
+    }
+}
+
+/// The single bounded dry-generator policy used for capture and clone admission.
+/// Unknown activation is never projected to false or removed from the declaration.
+pub(crate) fn validate_bounce_audio_topology(
+    inputs: &[BounceAudioBus],
+    outputs: &[BounceAudioBus],
+) -> Result<(), String> {
+    if inputs.iter().chain(outputs).any(|bus| bus.active.is_none()) {
+        return Err("Instrument bounce activation is unknown; a fresh load with explicit inactive-bus acknowledgment is required".into());
+    }
+    if inputs.len() > 1
+        || inputs
+            .iter()
+            .any(|bus| !bus.is_main || !matches!(bus.channel_count, 1 | 2))
+        || !(1..=3).contains(&outputs.len())
+        || !outputs.first().is_some_and(|bus| {
+            bus.is_main && bus.active == Some(true) && matches!(bus.channel_count, 1 | 2)
+        })
+        || outputs.iter().skip(1).any(|bus| {
+            bus.is_main || bus.active != Some(false) || !matches!(bus.channel_count, 1 | 2)
+        })
+    {
+        return Err("Instrument bounce requires at most one known main mono/stereo input, one known-active main mono/stereo output, and at most two known-inactive auxiliary mono/stereo outputs".into());
+    }
+    Ok(())
+}
+
 /// Actual loaded metadata. Project/cache role and path-based IDs cannot construct this receipt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BouncePluginMetadata {
@@ -102,14 +146,23 @@ pub struct BouncePluginMetadata {
     /// Current component event buses: MIDI channel count, main/aux, host-attested activation.
     pub event_input_buses: Vec<(u32, bool, Option<bool>)>,
     pub event_output_buses: Vec<(u32, bool, Option<bool>)>,
-    /// Preserve every bus, including inactive buses. This first slice rejects extra buses.
-    pub input_buses: Vec<(usize, bool)>,
-    pub output_buses: Vec<(usize, bool)>,
+    /// Preserve every declared bus and its exact role and activation evidence.
+    pub input_buses: Vec<BounceAudioBus>,
+    pub output_buses: Vec<BounceAudioBus>,
     pub latency_samples: u32,
     pub tail_samples: u32,
 }
 
 impl BouncePluginMetadata {
+    /// Flat input storage contains only participating channels; no external audio is read.
+    pub(crate) fn participating_input_channels(&self) -> usize {
+        self.input_buses
+            .iter()
+            .filter(|bus| bus.active == Some(true))
+            .map(|bus| bus.channel_count)
+            .sum()
+    }
+
     pub(crate) fn validate(&self, sample_rate: u32) -> Result<(), String> {
         if self.class_uid.len() != 32 || !self.class_uid.bytes().all(|c| c.is_ascii_hexdigit()) {
             return Err("Instrument bounce requires an actual VST3 factory class UID".into());
@@ -127,12 +180,7 @@ impl BouncePluginMetadata {
         {
             return Err("Instrument bounce requires an actual VST3 instrument with MIDI input and no MIDI output".into());
         }
-        if !self.input_buses.is_empty()
-            || self.output_buses.len() != 1
-            || !matches!(self.output_buses.first(), Some((1 | 2, true)))
-        {
-            return Err("Instrument bounce supports no audio input and exactly one active mono/stereo output bus; extra or inactive buses are unsupported".into());
-        }
+        validate_bounce_audio_topology(&self.input_buses, &self.output_buses)?;
         if self.latency_samples > sample_rate.saturating_mul(MAX_BOUNCE_LATENCY_SECONDS) {
             return Err("Instrument bounce plug-in latency exceeds the one-second bound".into());
         }

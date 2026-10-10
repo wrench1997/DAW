@@ -707,3 +707,173 @@ fn process_wrong_shape_is_error_while_finite_policy_evidence_is_preserved() {
     assert!(!out.transport_applied);
     finish_client(&mut c);
 }
+
+#[test]
+fn public_silent_generator_signature_accepts_counts_and_no_sample_buffer() {
+    let _: fn(
+        &mut Client,
+        usize,
+        usize,
+        ProcessTransport,
+        Instant,
+    ) -> Result<strict_offline::AudioBlock, strict_offline::Failure> =
+        Client::process_silent_generator;
+}
+
+#[test]
+fn public_silent_generator_supplies_only_exact_positive_zero_q128_channels() {
+    let _serial = serial();
+    let mut c = client(
+        r#"
+import base64,json,struct,sys
+for input_channels in (0,1,2,2,1,0):
+ for output_channels in (1,2):
+  command=json.loads(sys.stdin.readline())
+  assert set(command)=={'Process'},command
+  request=command['Process']
+  assert set(request)=={'inputs','frames','transport'},request
+  assert request['frames']==128,request
+  assert len(request['inputs'])==input_channels,request
+  for channel in request['inputs']:
+   raw=base64.b64decode(channel,validate=True)
+   assert len(raw)==128*4,len(raw)
+   assert raw==bytes(128*4),raw
+  assert request['transport']=={'sample_position':0,'quarter_note_position':0.0,'tempo':120.0,'playing':True,'time_sig_numerator':4,'time_sig_denominator':4},request
+  outputs=[base64.b64encode(struct.pack('<f',0.25*(channel+1))*128).decode() for channel in range(output_channels)]
+  print(json.dumps({'AudioOutput':{'outputs':outputs,'output_events':[],'output_events_lost':False,'transport_applied':True}}),flush=True)
+assert json.loads(sys.stdin.readline())=='Shutdown'
+assert sys.stdin.read()==''
+"#,
+    );
+    for input_channels in [0, 1, 2, 2, 1, 0] {
+        for output_channels in 1..=2 {
+            let out = c
+                .process_silent_generator(input_channels, output_channels, transport(), deadline())
+                .unwrap();
+            assert_eq!(out.outputs.len(), output_channels);
+            for (channel, samples) in out.outputs.iter().enumerate() {
+                assert_eq!(samples.len(), 128);
+                assert!(samples
+                    .iter()
+                    .all(|sample| *sample == 0.25 * (channel + 1) as f32));
+            }
+            assert_eq!(out.output_event_count, 0);
+            assert!(!out.output_events_lost);
+            assert!(out.transport_applied);
+        }
+    }
+    finish_client(&mut c);
+}
+
+#[test]
+fn original_process_and_zero_input_generator_have_identical_wire_bytes() {
+    let _serial = serial();
+    let mut c = client(
+        r#"
+import base64,json,sys
+for channels in (1,2):
+ first=None
+ for call in range(2):
+  line=sys.stdin.buffer.readline()
+  request=json.loads(line)['Process']
+  assert request['inputs']==[],request
+  assert request['frames']==128,request
+  if first is None:
+   first=line
+  else:
+   assert line==first,(line,first)
+  print(json.dumps({'AudioOutput':{'outputs':[base64.b64encode(bytes(128*4)).decode()]*channels,'output_events':[],'output_events_lost':False,'transport_applied':True}}),flush=True)
+assert json.loads(sys.stdin.buffer.readline())=='Shutdown'
+assert sys.stdin.buffer.read()==b''
+"#,
+    );
+    for channels in 1..=2 {
+        let original = c.process(channels, transport(), deadline()).unwrap();
+        let silent = c
+            .process_silent_generator(0, channels, transport(), deadline())
+            .unwrap();
+        assert_eq!(original.outputs, silent.outputs);
+    }
+    finish_client(&mut c);
+}
+
+#[test]
+fn silent_generator_invalid_counts_are_unsent_allocation_free_and_keep_budget_precedence() {
+    let _serial = serial();
+    use crate::internal::native_edit_transport::tests::measure_allocations;
+    for (inputs, outputs) in [
+        (3, 1),
+        (usize::MAX, 2),
+        (0, 0),
+        (2, 3),
+        (1, usize::MAX),
+        (3, 3),
+    ] {
+        for stop in 0..4 {
+            let mut c = client(&ledger(&[], false));
+            if stop == 2 || stop == 3 {
+                c.cancellation().cancel();
+            }
+            let end = if stop == 1 || stop == 3 {
+                Instant::now()
+            } else {
+                deadline()
+            };
+            let (result, allocations) = measure_allocations(|| {
+                c.process_silent_generator(inputs, outputs, transport(), end)
+            });
+            assert_eq!(allocations.allocations, 0);
+            let failure = result.unwrap_err();
+            assert_eq!(failure.delivery, strict_offline::Delivery::NotSent);
+            assert_eq!(
+                failure.kind,
+                match stop {
+                    1 => FailureKind::Deadline,
+                    2 | 3 => FailureKind::Cancelled,
+                    _ => FailureKind::Shape,
+                }
+            );
+            // Rejection seals the session, retaining the original failure and
+            // sending no follow-up Process or Shutdown bytes.
+            let repeated = c
+                .process_silent_generator(0, 1, transport(), deadline())
+                .unwrap_err();
+            assert_eq!(repeated.kind, failure.kind);
+            assert_eq!(repeated.delivery, strict_offline::Delivery::NotSent);
+            finish_client(&mut c);
+        }
+    }
+}
+
+#[test]
+fn silent_generator_valid_counts_stop_before_encoding_or_send_when_budget_ends() {
+    let _serial = serial();
+    use crate::internal::native_edit_transport::tests::measure_allocations;
+    for inputs in 0..=2 {
+        for cancelled in [false, true] {
+            let mut c = client(&ledger(&[], false));
+            if cancelled {
+                c.cancellation().cancel();
+            }
+            let end = if cancelled {
+                deadline()
+            } else {
+                Instant::now()
+            };
+            let (result, allocations) =
+                measure_allocations(|| c.process_silent_generator(inputs, 2, transport(), end));
+            assert_eq!(allocations.allocations, 0);
+            let failure = result.unwrap_err();
+            assert_eq!(failure.delivery, strict_offline::Delivery::NotSent);
+            assert_eq!(
+                failure.kind,
+                if cancelled {
+                    FailureKind::Cancelled
+                } else {
+                    FailureKind::Deadline
+                }
+            );
+            finish_client(&mut c);
+        }
+    }
+}

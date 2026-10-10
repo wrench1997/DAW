@@ -234,7 +234,7 @@
      Other(String),
 --- a/src/fresh_helper/client_tests.rs
 +++ b/src/fresh_helper/client_tests.rs
-@@ -0,0 +1,709 @@
+@@ -0,0 +1,879 @@
 +//! Actual closed public client against cooperative, ledger-checking mock children.
 +use super::*;
 +use crate::plugin::{CheckedAudioBusConfig, CheckedAudioBusLayout, EventBusConfig, EventBusLayout};
@@ -944,9 +944,179 @@
 +    assert!(!out.transport_applied);
 +    finish_client(&mut c);
 +}
++
++#[test]
++fn public_silent_generator_signature_accepts_counts_and_no_sample_buffer() {
++    let _: fn(
++        &mut Client,
++        usize,
++        usize,
++        ProcessTransport,
++        Instant,
++    ) -> Result<strict_offline::AudioBlock, strict_offline::Failure> =
++        Client::process_silent_generator;
++}
++
++#[test]
++fn public_silent_generator_supplies_only_exact_positive_zero_q128_channels() {
++    let _serial = serial();
++    let mut c = client(
++        r#"
++import base64,json,struct,sys
++for input_channels in (0,1,2,2,1,0):
++ for output_channels in (1,2):
++  command=json.loads(sys.stdin.readline())
++  assert set(command)=={'Process'},command
++  request=command['Process']
++  assert set(request)=={'inputs','frames','transport'},request
++  assert request['frames']==128,request
++  assert len(request['inputs'])==input_channels,request
++  for channel in request['inputs']:
++   raw=base64.b64decode(channel,validate=True)
++   assert len(raw)==128*4,len(raw)
++   assert raw==bytes(128*4),raw
++  assert request['transport']=={'sample_position':0,'quarter_note_position':0.0,'tempo':120.0,'playing':True,'time_sig_numerator':4,'time_sig_denominator':4},request
++  outputs=[base64.b64encode(struct.pack('<f',0.25*(channel+1))*128).decode() for channel in range(output_channels)]
++  print(json.dumps({'AudioOutput':{'outputs':outputs,'output_events':[],'output_events_lost':False,'transport_applied':True}}),flush=True)
++assert json.loads(sys.stdin.readline())=='Shutdown'
++assert sys.stdin.read()==''
++"#,
++    );
++    for input_channels in [0, 1, 2, 2, 1, 0] {
++        for output_channels in 1..=2 {
++            let out = c
++                .process_silent_generator(input_channels, output_channels, transport(), deadline())
++                .unwrap();
++            assert_eq!(out.outputs.len(), output_channels);
++            for (channel, samples) in out.outputs.iter().enumerate() {
++                assert_eq!(samples.len(), 128);
++                assert!(samples
++                    .iter()
++                    .all(|sample| *sample == 0.25 * (channel + 1) as f32));
++            }
++            assert_eq!(out.output_event_count, 0);
++            assert!(!out.output_events_lost);
++            assert!(out.transport_applied);
++        }
++    }
++    finish_client(&mut c);
++}
++
++#[test]
++fn original_process_and_zero_input_generator_have_identical_wire_bytes() {
++    let _serial = serial();
++    let mut c = client(
++        r#"
++import base64,json,sys
++for channels in (1,2):
++ first=None
++ for call in range(2):
++  line=sys.stdin.buffer.readline()
++  request=json.loads(line)['Process']
++  assert request['inputs']==[],request
++  assert request['frames']==128,request
++  if first is None:
++   first=line
++  else:
++   assert line==first,(line,first)
++  print(json.dumps({'AudioOutput':{'outputs':[base64.b64encode(bytes(128*4)).decode()]*channels,'output_events':[],'output_events_lost':False,'transport_applied':True}}),flush=True)
++assert json.loads(sys.stdin.buffer.readline())=='Shutdown'
++assert sys.stdin.buffer.read()==b''
++"#,
++    );
++    for channels in 1..=2 {
++        let original = c.process(channels, transport(), deadline()).unwrap();
++        let silent = c
++            .process_silent_generator(0, channels, transport(), deadline())
++            .unwrap();
++        assert_eq!(original.outputs, silent.outputs);
++    }
++    finish_client(&mut c);
++}
++
++#[test]
++fn silent_generator_invalid_counts_are_unsent_allocation_free_and_keep_budget_precedence() {
++    let _serial = serial();
++    use crate::internal::native_edit_transport::tests::measure_allocations;
++    for (inputs, outputs) in [
++        (3, 1),
++        (usize::MAX, 2),
++        (0, 0),
++        (2, 3),
++        (1, usize::MAX),
++        (3, 3),
++    ] {
++        for stop in 0..4 {
++            let mut c = client(&ledger(&[], false));
++            if stop == 2 || stop == 3 {
++                c.cancellation().cancel();
++            }
++            let end = if stop == 1 || stop == 3 {
++                Instant::now()
++            } else {
++                deadline()
++            };
++            let (result, allocations) = measure_allocations(|| {
++                c.process_silent_generator(inputs, outputs, transport(), end)
++            });
++            assert_eq!(allocations.allocations, 0);
++            let failure = result.unwrap_err();
++            assert_eq!(failure.delivery, strict_offline::Delivery::NotSent);
++            assert_eq!(
++                failure.kind,
++                match stop {
++                    1 => FailureKind::Deadline,
++                    2 | 3 => FailureKind::Cancelled,
++                    _ => FailureKind::Shape,
++                }
++            );
++            // Rejection seals the session, retaining the original failure and
++            // sending no follow-up Process or Shutdown bytes.
++            let repeated = c
++                .process_silent_generator(0, 1, transport(), deadline())
++                .unwrap_err();
++            assert_eq!(repeated.kind, failure.kind);
++            assert_eq!(repeated.delivery, strict_offline::Delivery::NotSent);
++            finish_client(&mut c);
++        }
++    }
++}
++
++#[test]
++fn silent_generator_valid_counts_stop_before_encoding_or_send_when_budget_ends() {
++    let _serial = serial();
++    use crate::internal::native_edit_transport::tests::measure_allocations;
++    for inputs in 0..=2 {
++        for cancelled in [false, true] {
++            let mut c = client(&ledger(&[], false));
++            if cancelled {
++                c.cancellation().cancel();
++            }
++            let end = if cancelled {
++                deadline()
++            } else {
++                Instant::now()
++            };
++            let (result, allocations) =
++                measure_allocations(|| c.process_silent_generator(inputs, 2, transport(), end));
++            assert_eq!(allocations.allocations, 0);
++            let failure = result.unwrap_err();
++            assert_eq!(failure.delivery, strict_offline::Delivery::NotSent);
++            assert_eq!(
++                failure.kind,
++                if cancelled {
++                    FailureKind::Cancelled
++                } else {
++                    FailureKind::Deadline
++                }
++            );
++            finish_client(&mut c);
++        }
++    }
++}
 --- a/src/fresh_helper/codec.rs
 +++ b/src/fresh_helper/codec.rs
-@@ -0,0 +1,1890 @@
+@@ -0,0 +1,1893 @@
 +//! Closed, cooperative, allocation-accounted codec for the fresh-helper subset.
 +//!
 +//! No legacy serde audio/state decoder and no generic JSON value tree is used.
@@ -959,7 +1129,7 @@
 +//! are not a hard memory bound. Failed codec transactions drop all their values
 +//! and restore their starting live charge; peak observations remain.
 +
-+use super::request::{RequestView, StateContextView};
++use super::request::{FlatInputView, RequestView, StateContextView};
 +use super::{Budget, ErrorKind, ReplyShape, MAX_LINE};
 +use crate::audio::AudioBusBuffer;
 +use crate::discovery::ClassCompatibility;
@@ -1027,9 +1197,12 @@
 +    }
 +}
 +
-+fn check_channels(channels: &[Vec<f32>], frames: usize) -> Result<()> {
-+    limit(channels.len(), MAX_CHANNELS)?;
-+    for channel in channels {
++fn check_channels(channels: FlatInputView<'_>, frames: usize) -> Result<()> {
++    if matches!(channels, FlatInputView::SilentQ128(count) if count > 2 || frames != 128) {
++        return Err(ErrorKind::Shape);
++    }
++    limit(channels.channel_count(), MAX_CHANNELS)?;
++    for channel in channels.iter() {
 +        limit(channel.len(), MAX_FRAMES)?;
 +        if channel.len() != frames {
 +            return Err(ErrorKind::Shape);
@@ -1134,7 +1307,7 @@
 +            if *frames as usize != *expected {
 +                return Err(ErrorKind::Shape);
 +            }
-+            check_channels(inputs, *expected)?;
++            check_channels(*inputs, *expected)?;
 +            check_transport(transport)?;
 +        }
 +        (
@@ -1155,7 +1328,7 @@
 +            limit(inputs.len(), MAX_BUSES)?;
 +            let mut total = 0usize;
 +            for bus in inputs.iter() {
-+                check_channels(&bus.channels, *expected)?;
++                check_channels(FlatInputView::Borrowed(&bus.channels), *expected)?;
 +                total = total
 +                    .checked_add(bus.channels.len())
 +                    .ok_or(ErrorKind::Limit)?;
@@ -1297,7 +1470,7 @@
 +        self.put(b"\"")
 +    }
 +
-+    fn channels(&mut self, channels: &[Vec<f32>]) -> Result<()> {
++    fn channels(&mut self, channels: FlatInputView<'_>) -> Result<()> {
 +        self.put(b"[")?;
 +        for (index, channel) in channels.iter().enumerate() {
 +            if index != 0 {
@@ -1440,7 +1613,7 @@
 +                transport,
 +            } => {
 +                self.put(b"{\"Process\":{\"inputs\":")?;
-+                self.channels(inputs)?;
++                self.channels(*inputs)?;
 +                self.put(b",\"frames\":")?;
 +                self.number(frames)?;
 +                self.transport(transport)?;
@@ -1460,7 +1633,7 @@
 +                    self.put(b"{\"active\":")?;
 +                    self.boolean(bus.active)?;
 +                    self.put(b",\"channels\":")?;
-+                    self.channels(&bus.channels)?;
++                    self.channels(FlatInputView::Borrowed(&bus.channels))?;
 +                    self.put(b"}")?;
 +                }
 +                self.put(b"],\"outputs\":[")?;
@@ -2839,7 +3012,7 @@
 +mod tests;
 --- a/src/fresh_helper/codec_tests.rs
 +++ b/src/fresh_helper/codec_tests.rs
-@@ -0,0 +1,2772 @@
+@@ -0,0 +1,2952 @@
 +//! Plugin-free source fixtures. These tests must not be compiled or executed
 +//! before the source archive, independent review and explicit execution gate.
 +use super::super::{budget_test_hooks, pump, Cancellation, MAX_PAYLOAD};
@@ -4829,7 +5002,7 @@
 +    );
 +    let samples = vec![vec![f32::from_bits(0x7fc0_1234), -0.0]];
 +    let view = RequestView::Process {
-+        inputs: &samples,
++        inputs: FlatInputView::Borrowed(&samples),
 +        frames: 2,
 +        transport: None,
 +    };
@@ -5611,6 +5784,186 @@
 +    let below_zero = -f64::from_bits(1);
 +    assert_eq!(below_zero as f32, 0.0f32);
 +    assert!(!(0.0..=1.0).contains(&below_zero));
++}
++
++fn silent_transport() -> ProcessTransport {
++    ProcessTransport {
++        sample_position: -128,
++        quarter_note_position: -0.25,
++        tempo: 123.5,
++        playing: true,
++        time_sig_numerator: 7,
++        time_sig_denominator: 8,
++    }
++}
++
++#[test]
++fn silent_generator_view_is_allocation_free_and_repeats_one_immutable_positive_zero_channel() {
++    let mut first_pointer = None;
++    for count in 0..=2 {
++        allocation_free(|| {
++            let RequestView::Process { inputs, frames, .. } =
++                RequestView::silent_generator(count, silent_transport())
++            else {
++                panic!("flat Process view")
++            };
++            assert_eq!(frames, 128);
++            assert_eq!(inputs.channel_count(), count);
++            assert_eq!(inputs.iter().len(), count);
++            for channel in inputs.iter() {
++                assert_eq!(channel.len(), 128);
++                assert!(channel.iter().all(|sample| sample.to_bits() == 0));
++                assert_eq!(
++                    *first_pointer.get_or_insert(channel.as_ptr()),
++                    channel.as_ptr()
++                );
++            }
++        });
++    }
++    let samples = vec![vec![0.25; 128], vec![-0.5; 128]];
++    allocation_free(|| {
++        let borrowed = FlatInputView::Borrowed(&samples);
++        assert_eq!(borrowed.channel_count(), 2);
++        for (channel, original) in borrowed.iter().zip(&samples) {
++            assert_eq!(channel.as_ptr(), original.as_ptr());
++        }
++    });
++}
++
++#[test]
++fn silent_generator_wire_is_exact_q128_zero_and_matches_existing_flat_encoding() {
++    use crate::internal::native_edit_transport::tests::measure_allocations;
++    for input_channels in 0..=2 {
++        for output_channels in 1..=2 {
++            let request = RequestView::silent_generator(input_channels, silent_transport());
++            let shape = ReplyShape::Audio {
++                channels: output_channels,
++                frames: 128,
++            };
++            let mut budget = new_budget();
++            let (encoded, allocations) =
++                measure_allocations(|| encode_view(&request, &shape, &mut budget));
++            let encoded = encoded.unwrap();
++            assert_eq!(
++                allocations.allocations, 1,
++                "only the charged wire Vec may allocate"
++            );
++            assert_eq!(allocations.allocated_bytes, encoded.capacity());
++            assert_eq!(allocations.deallocations, 0);
++            assert_eq!(budget.live, encoded.capacity());
++            assert_eq!(budget.peak, encoded.capacity());
++            let legacy = HostCommand::Process {
++                inputs: vec![vec![0.0; 128]; input_channels],
++                frames: 128,
++                transport: Some(silent_transport()),
++            };
++            assert_eq!(encoded, encode(&legacy, &shape, &mut new_budget()).unwrap());
++            let HostCommand::Process {
++                inputs,
++                frames,
++                transport,
++            } = serde_json::from_slice(&encoded).unwrap()
++            else {
++                panic!("unchanged Process wire")
++            };
++            assert_eq!(inputs.len(), input_channels);
++            assert_eq!(frames, 128);
++            assert_eq!(transport, Some(silent_transport()));
++            for channel in inputs {
++                assert_eq!(channel.len(), 128);
++                assert!(channel.iter().all(|sample| sample.to_bits() == 0));
++            }
++            let charge = encoded.capacity();
++            drop(encoded);
++            budget.release(charge);
++            assert_eq!(budget.live, 0);
++        }
++    }
++}
++
++#[test]
++fn silent_generator_view_rejects_bounds_after_budget_check_without_allocation() {
++    for (input_channels, frames) in [(3, 128), (usize::MAX, 128), (0, 127), (2, 129)] {
++        let request = RequestView::Process {
++            inputs: FlatInputView::SilentQ128(input_channels),
++            frames,
++            transport: Some(silent_transport()),
++        };
++        let shape = ReplyShape::Audio {
++            channels: 2,
++            frames: frames as usize,
++        };
++        for stop in 0..4 {
++            let mut budget = new_budget();
++            if stop == 1 || stop == 3 {
++                budget.deadline = Instant::now();
++            }
++            if stop == 2 || stop == 3 {
++                budget.cancel.cancelled.store(true, Ordering::Release);
++            }
++            let expected = match stop {
++                1 => ErrorKind::Deadline,
++                2 | 3 => ErrorKind::Cancelled,
++                _ => ErrorKind::Shape,
++            };
++            assert_eq!(
++                allocation_free(|| encode_view(&request, &shape, &mut budget)).unwrap_err(),
++                expected,
++            );
++            assert_eq!((budget.live, budget.peak), (0, 0));
++        }
++    }
++}
++
++#[test]
++fn silent_generator_preserves_every_codec_checkpoint_and_payload_accounting() {
++    let request = RequestView::silent_generator(2, silent_transport());
++    let shape = ReplyShape::Audio {
++        channels: 2,
++        frames: 128,
++    };
++    let checks = {
++        let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
++        encode_view(&request, &shape, &mut new_budget()).unwrap();
++        budget_test_hooks::checks()
++    };
++    // Two channels cross the existing Writer checkpoint in both count and emit,
++    // in addition to initial, allocation and final checks.
++    assert!(checks >= 6);
++    for at in 1..=checks {
++        for expired in [false, true] {
++            let mut budget = new_budget();
++            let _hook = if expired {
++                budget_test_hooks::expire_at_check(at)
++            } else {
++                budget_test_hooks::cancel_at_check(at)
++            };
++            assert_eq!(
++                encode_view(&request, &shape, &mut budget).unwrap_err(),
++                if expired {
++                    ErrorKind::Deadline
++                } else {
++                    ErrorKind::Cancelled
++                },
++            );
++            assert_eq!(budget.live, 0);
++        }
++    }
++    let mut budget = new_budget();
++    budget.live = MAX_PAYLOAD;
++    budget.peak = MAX_PAYLOAD;
++    assert_eq!(
++        allocation_free(|| encode_view(&request, &shape, &mut budget)).unwrap_err(),
++        ErrorKind::Limit,
++    );
++    assert_eq!((budget.live, budget.peak), (MAX_PAYLOAD, MAX_PAYLOAD));
++    let mut budget = new_budget();
++    let _hook = budget_test_hooks::fail_next_allocation();
++    assert_eq!(
++        allocation_free(|| encode_view(&request, &shape, &mut budget)).unwrap_err(),
++        ErrorKind::Allocation,
++    );
++    assert_eq!(budget.live, 0);
 +}
 --- a/src/fresh_helper/mod.rs
 +++ b/src/fresh_helper/mod.rs
@@ -6964,7 +7317,7 @@
 +}
 --- a/src/fresh_helper/request.rs
 +++ b/src/fresh_helper/request.rs
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,193 @@
 +//! Synchronous, stack-only view of the deliberately closed request subset.
 +//!
 +//! Caller-owned state, audio and text remain borrowed through validation, size
@@ -6995,6 +7348,32 @@
 +    }
 +}
 +
++// This fixed, immutable channel is the only sample source for the closed
++// generator operation. Repetition is a view, not an allocated channel vector.
++static SILENT_Q128_CHANNEL: [f32; 128] = [0.0; 128];
++
++#[derive(Debug, Clone, Copy)]
++pub(crate) enum FlatInputView<'a> {
++    Borrowed(&'a [Vec<f32>]),
++    SilentQ128(usize),
++}
++
++impl<'a> FlatInputView<'a> {
++    pub(crate) fn channel_count(self) -> usize {
++        match self {
++            Self::Borrowed(channels) => channels.len(),
++            Self::SilentQ128(channels) => channels,
++        }
++    }
++
++    pub(crate) fn iter(self) -> impl ExactSizeIterator<Item = &'a [f32]> {
++        (0..self.channel_count()).map(move |index| match self {
++            Self::Borrowed(channels) => channels[index].as_slice(),
++            Self::SilentQ128(_) => SILENT_Q128_CHANNEL.as_slice(),
++        })
++    }
++}
++
 +#[derive(Debug, Clone, Copy)]
 +pub(crate) enum RequestView<'a> {
 +    LoadPlugin {
@@ -7012,7 +7391,7 @@
 +    },
 +    SaveState,
 +    Process {
-+        inputs: &'a [Vec<f32>],
++        inputs: FlatInputView<'a>,
 +        frames: u32,
 +        transport: Option<ProcessTransport>,
 +    },
@@ -7047,6 +7426,18 @@
 +    EventBusLayout,
 +}
 +
++impl RequestView<'_> {
++    // Count validation stays inside the original exchange budget. This creates
++    // only a synchronous view; no caller samples or variable payload are owned.
++    pub(crate) fn silent_generator(input_channels: usize, transport: ProcessTransport) -> Self {
++        Self::Process {
++            inputs: FlatInputView::SilentQ128(input_channels),
++            frames: 128,
++            transport: Some(transport),
++        }
++    }
++}
++
 +impl<'a> TryFrom<&'a HostCommand> for RequestView<'a> {
 +    type Error = ErrorKind;
 +
@@ -7079,7 +7470,7 @@
 +                frames,
 +                transport,
 +            } => Self::Process {
-+                inputs,
++                inputs: FlatInputView::Borrowed(inputs),
 +                frames: *frames,
 +                transport: *transport,
 +            },
@@ -15657,31 +16048,41 @@
      },
      module_loader::{load_module, VstModule},
  };
-@@ -135,8 +145,22 @@
-     event_outputs: Vec<bool>,
+@@ -127,16 +137,25 @@
+     }
  }
  
--/// Internal plugin implementation that handles all VST3 COM interactions
+-#[derive(Default)]
+-struct BusActivationState {
+-    audio_inputs: Vec<bool>,
+-    audio_outputs: Vec<bool>,
+-    event_inputs: Vec<bool>,
+-    event_outputs: Vec<bool>,
++mod bus_activation;
++use bus_activation::{ActivationRecord, BusActivationState, BusBinding};
++
 +/// Legacy public-API implementation. The helper's `MainThreadPlugin` keeps this aggregate
 +/// on its loading thread; legacy `Plugin` users retain their existing `Send` API.
 +///
 +/// Runtime drops before control ownership, so host process data cannot outlive the module.
 +/// This is ownership preparation only: other processing work still locks/allocates and all
 +/// helper plugin calls still run synchronously on the main thread.
- pub struct PluginImpl {
++pub struct PluginImpl {
 +    pub(crate) info: PluginInfo,
 +    pub(crate) compatibility: Vec<crate::discovery::ClassCompatibility>,
 +    runtime: ProcessorRuntime,
 +    control: ControlDomain,
-+}
-+
+ }
+ 
+-/// Internal plugin implementation that handles all VST3 COM interactions
+-pub struct PluginImpl {
 +/// Plugin-owned COM references, controller/editor calls and lifecycle administration.
 +/// No processor worker receives this owner. Module and host-context drop order is deliberate.
 +struct ControlDomain {
      // Core VST3 interfaces
      component: ComPtr<IComponent>,
      processor: ComPtr<IAudioProcessor>,
-@@ -146,19 +170,73 @@
+@@ -146,19 +165,73 @@
      /// `setComponentState` on top of it would double-apply and corrupt parameters.
      single_component: bool,
  
@@ -15762,7 +16163,7 @@
      /// Transport tempo (BPM) advertised in the host `ProcessContext`.
      tempo: f64,
      /// Time signature numerator advertised in the host `ProcessContext`.
-@@ -167,13 +245,12 @@
+@@ -167,13 +240,12 @@
      time_sig_denominator: i32,
      /// Whether the transport is playing (the `kPlaying` flag in `ProcessContext.state`).
      playing: bool,
@@ -15777,7 +16178,7 @@
      sample_size: ProcessingSampleSize,
      bus_activation: BusActivationState,
      /// Monotonic allocator for per-voice note ids (note_on); 0/-1 reserved for "unset".
-@@ -190,37 +267,23 @@
+@@ -190,37 +262,23 @@
      // the callback; `restartComponent` merely records invalidation flags atomically.
      midi_mapping_cache: MidiMappingCache,
      program_change_cache: Vec<ProgramChangeMapping>,
@@ -15817,7 +16218,7 @@
  
      // Event handling
      input_events: ComWrapper<HostEventList>,
-@@ -235,34 +298,13 @@
+@@ -235,34 +293,13 @@
      // audio thread can push without locking and a UI thread can drain concurrently; when full
      // the oldest event is dropped (bounded memory if the host never polls).
      output_events_owned: Arc<ArrayQueue<PluginEvent>>,
@@ -15859,7 +16260,7 @@
  }
  
  // Processing data structure
-@@ -271,6 +313,10 @@
+@@ -271,6 +308,10 @@
      sample_buffers: HostSampleBuffers,
      input_bus_buffers: Vec<AudioBusBuffers>,
      output_bus_buffers: Vec<AudioBusBuffers>,
@@ -15870,7 +16271,7 @@
      process_context: ProcessContext,
      process_context_requirements: Option<u32>,
      transport_tempo: f64,
-@@ -284,6 +330,48 @@
+@@ -284,6 +325,48 @@
  enum CallerAudioBuffers<'a> {
      Flat(&'a mut AudioBuffers),
      Buses(&'a mut BusAudioBuffers),
@@ -15919,7 +16320,7 @@
  }
  
  impl CallerAudioBuffers<'_> {
-@@ -335,9 +423,9 @@
+@@ -335,9 +418,9 @@
  
  /// Per-bus channel pointers into the (audio-thread-owned) audio buffers.
  ///
@@ -15932,7 +16333,7 @@
  struct SendChannelPtrs<T>(Vec<Vec<*mut T>>);
  unsafe impl<T: Send> Send for SendChannelPtrs<T> {}
  
-@@ -905,7 +993,7 @@
+@@ -905,7 +988,7 @@
  
  impl PluginImpl {
      fn ensure_control_thread(&self, operation: &str) -> Result<()> {
@@ -15941,7 +16342,7 @@
              Ok(())
          } else {
              Err(Error::Other(format!(
-@@ -945,89 +1033,53 @@
+@@ -945,89 +1028,53 @@
          time_sig_numerator: i32,
          time_sig_denominator: i32,
      ) {
@@ -16046,7 +16447,7 @@
              }
          }
          changes
-@@ -1042,7 +1094,7 @@
+@@ -1042,7 +1089,7 @@
      /// automation on real plugins. Log it and carry on; `log` skips the formatting entirely when
      /// the level is disabled.
      fn apply_controller_parameter(&self, id: u32, value: f64) {
@@ -16055,7 +16456,7 @@
              return;
          };
          let result = unsafe { controller.setParamNormalized(id, value) };
-@@ -1061,20 +1113,22 @@
+@@ -1061,20 +1108,22 @@
      /// service call. The queue drops its oldest entry when full: the newest value for a
      /// parameter is the one worth showing.
      fn mirror_parameter_to_controller(&self, id: u32, value: f64) {
@@ -16082,7 +16483,7 @@
              self.apply_controller_parameter(id, value);
          }
      }
-@@ -1083,32 +1137,37 @@
+@@ -1083,32 +1132,37 @@
      /// and apply parameter values queued for the controller from the same place. A no-op
      /// anywhere but the control thread; both halves are `IEditController` traffic.
      fn service_control_thread_caches(&mut self) {
@@ -16125,7 +16526,7 @@
              return;
          };
          unsafe {
-@@ -1132,12 +1191,12 @@
+@@ -1132,12 +1186,12 @@
                  }
              }
          }
@@ -16141,7 +16542,7 @@
              return;
          };
          let Some(unit_info) = controller.cast::<IUnitInfo>() else {
-@@ -1176,18 +1235,21 @@
+@@ -1176,18 +1230,21 @@
                      continue;
                  };
                  if *program_count > 0 {
@@ -16169,7 +16570,7 @@
              .iter()
              .copied()
              .find(|mapping| mapping.unit_id == unit_id)
-@@ -1227,6 +1289,9 @@
+@@ -1227,6 +1284,9 @@
              // (whether via `InitializedComponent` or `Drop for PluginImpl`) must complete before
              // the module unmaps.
              log::debug!("Step 1: Loading VST3 module...");
@@ -16179,7 +16580,7 @@
              let module = load_module(path)?;
              log::debug!("VST3 module loaded successfully");
  
-@@ -1248,7 +1313,8 @@
+@@ -1248,7 +1308,8 @@
  
              // Factory3 must receive the host context before any class is instantiated. Keep the
              // same context alive for the complete component/controller lifetime.
@@ -16189,7 +16590,7 @@
              let host_ctx = host_app.to_com_ptr::<IHostApplication>();
              let context = host_ctx
                  .as_ref()
-@@ -1336,8 +1402,8 @@
+@@ -1336,8 +1397,8 @@
              // Create component handler for parameter change notifications
              log::debug!("Step 8: Creating component handler...");
              let parameter_changes = Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK)));
@@ -16200,7 +16601,7 @@
              log::debug!("Component handler created");
  
              // Get or create controller (handles both single-component and separate controller)
-@@ -1478,60 +1544,70 @@
+@@ -1478,60 +1539,70 @@
              );
  
              let mut plugin = Self {
@@ -16320,7 +16721,7 @@
  
              // IMidiMapping and unit/program metadata are controller calls and therefore belong
              // here on the loading thread, never in process() or a playback command drain.
-@@ -1565,10 +1641,47 @@
+@@ -1565,10 +1636,47 @@
              log::info!(
                  "Has GUI: {}, Active: {}",
                  plugin.info.has_gui,
@@ -16369,7 +16770,7 @@
      }
  
      /// Put the component into the active state (`IComponent::setActive(true)`).
-@@ -1582,23 +1695,23 @@
+@@ -1582,23 +1690,23 @@
                  "Failed to activate component: {result:#x}"
              )));
          }
@@ -16400,7 +16801,7 @@
          }
          result
      }
-@@ -1744,7 +1857,7 @@
+@@ -1744,7 +1852,7 @@
  
      /// Map the configured [`ProcessMode`](crate::plugin::ProcessMode) to the VST3 enum value.
      fn vst_process_mode(&self) -> i32 {
@@ -16409,8 +16810,20 @@
              crate::plugin::ProcessMode::Offline => ProcessModes_::kOffline as i32,
              crate::plugin::ProcessMode::Prefetch => ProcessModes_::kPrefetch as i32,
              crate::plugin::ProcessMode::Realtime => ProcessModes_::kRealtime as i32,
-@@ -1779,7 +1892,7 @@
-         let arrangements = self.bus_arrangements()?;
+@@ -1775,11 +1883,17 @@
+         ))
+     }
+ 
+-    unsafe fn negotiate_default_bus_arrangements(&self) -> Result<()> {
+-        let arrangements = self.bus_arrangements()?;
++    unsafe fn negotiate_default_bus_arrangements(&mut self) -> Result<()> {
++        let arrangements = match self.bus_arrangements() {
++            Ok(arrangements) => arrangements,
++            Err(error) => {
++                self.runtime.bus_activation.invalidate_acknowledgments();
++                return Err(error);
++            }
++        };
          let mut inputs: Vec<u64> = arrangements.inputs.iter().map(|a| a.raw()).collect();
          let mut outputs: Vec<u64> = arrangements.outputs.iter().map(|a| a.raw()).collect();
 -        let result = self.processor.setBusArrangements(
@@ -16418,7 +16831,15 @@
              inputs.as_mut_ptr(),
              inputs.len() as i32,
              outputs.as_mut_ptr(),
-@@ -1800,26 +1913,35 @@
+@@ -1791,6 +1905,7 @@
+             }
+             Ok(())
+         } else {
++            self.runtime.bus_activation.invalidate_acknowledgments();
+             Err(Error::InterfaceError(format!(
+                 "default setBusArrangements failed: {result:#x}"
+             )))
+@@ -1800,27 +1915,37 @@
      /// The configuration currently baked into the plugin via `setupProcessing`.
      fn current_setup(&self) -> AppliedSetup {
          AppliedSetup {
@@ -16459,9 +16880,11 @@
 +                .processor
 +                .setupProcessing(&setup as *const _ as *mut _);
              if result != kResultOk {
++                self.runtime.bus_activation.invalidate_acknowledgments();
                  return Err(Error::InterfaceError(format!(
                      "Failed to setup processing: {:#x}",
-@@ -1829,7 +1951,7 @@
+                     result
+@@ -1829,7 +1954,7 @@
  
              // Create process data
              self.create_process_data()?;
@@ -16470,7 +16893,7 @@
  
              Ok(())
          }
-@@ -1843,7 +1965,7 @@
+@@ -1843,7 +1968,7 @@
          unsafe {
              let mut data = Box::new(HostProcessData {
                  process_data: std::mem::zeroed(),
@@ -16479,7 +16902,7 @@
                      ProcessingSampleSize::F32 => HostSampleBuffers::F32(TypedSampleBuffers {
                          inputs: Vec::new(),
                          outputs: Vec::new(),
-@@ -1859,51 +1981,69 @@
+@@ -1859,51 +1984,69 @@
                  },
                  input_bus_buffers: Vec::new(),
                  output_bus_buffers: Vec::new(),
@@ -16566,11 +16989,18 @@
                  .output_events
                  .as_com_ref::<IEventList>()
                  .map(|ptr| ptr.as_ptr())
-@@ -1924,49 +2064,89 @@
-             // Prepare buffers
-             self.prepare_buffers(&mut data)?;
+@@ -1922,65 +2065,162 @@
+                 .unwrap_or(ptr::null_mut());
  
+             // Prepare buffers
+-            self.prepare_buffers(&mut data)?;
+-
 -            self.process_data = Some(data);
++            if let Err(error) = self.prepare_buffers(&mut data) {
++                self.runtime.bus_activation.invalidate_acknowledgments();
++                return Err(error);
++            }
++
 +            self.runtime.process_data = Some(data);
              Ok(())
          }
@@ -16628,7 +17058,11 @@
 +                } else {
 +                    None
 +                };
-+                return (bus_info.channelCount.max(0), kind);
++                return (
++                    bus_info.channelCount.max(0),
++                    kind,
++                    BusBinding::from_info(kAudio as i32, direction, bus_idx, &bus_info),
++                );
              }
              // A failed getBusInfo must not remove the slot and shift every later bus index.
              // Fall back to the processor's arrangement, whose set bits define its channels.
@@ -16640,17 +17074,20 @@
                  == kResultOk
              {
 -                arrangement.count_ones() as i32
-+                (arrangement.count_ones() as i32, None)
++                (arrangement.count_ones() as i32, None, None)
              } else {
 -                0
-+                (0, None)
++                (0, None, None)
              }
          };
  
++        let mut input_bindings = Vec::with_capacity(input_bus_count.max(0) as usize);
++        let mut output_bindings = Vec::with_capacity(output_bus_count.max(0) as usize);
          for bus_idx in 0..input_bus_count {
              let mut bus: AudioBusBuffers = std::mem::zeroed();
 -            bus.numChannels = channel_count(kInput as i32, bus_idx);
-+            let (channels, kind) = channel_count(kInput as i32, bus_idx);
++            let (channels, kind, binding) = channel_count(kInput as i32, bus_idx);
++            input_bindings.push(binding);
 +            bus.numChannels = channels;
 +            data.input_bus_types.push(kind);
              data.input_bus_buffers.push(bus);
@@ -16658,13 +17095,62 @@
          for bus_idx in 0..output_bus_count {
              let mut bus: AudioBusBuffers = std::mem::zeroed();
 -            bus.numChannels = channel_count(kOutput as i32, bus_idx);
-+            let (channels, kind) = channel_count(kOutput as i32, bus_idx);
++            let (channels, kind, binding) = channel_count(kOutput as i32, bus_idx);
++            output_bindings.push(binding);
 +            bus.numChannels = channels;
 +            data.output_bus_types.push(kind);
              data.output_bus_buffers.push(bus);
          }
  
-@@ -1976,11 +2156,11 @@
++        BusActivationState::retain_prepared_bindings(
++            &mut self.runtime.bus_activation.audio_input_acks,
++            &self.runtime.bus_activation.audio_inputs,
++            &input_bindings,
++        );
++        BusActivationState::retain_prepared_bindings(
++            &mut self.runtime.bus_activation.audio_output_acks,
++            &self.runtime.bus_activation.audio_outputs,
++            &output_bindings,
++        );
++        // Event activation evidence also belongs to the observed setup binding,
++        // even though its buffers are not AudioBusBuffers. Do not let an observed
++        // changed event side disappear and later resurrect an old acknowledgment.
++        let event_bindings = |direction: i32| {
++            let count = self.control.component.getBusCount(kEvent as i32, direction);
++            if !(0..=32).contains(&count) {
++                return Vec::new();
++            }
++            (0..count)
++                .map(|index| {
++                    let mut info: BusInfo = std::mem::zeroed();
++                    if self
++                        .control
++                        .component
++                        .getBusInfo(kEvent as i32, direction, index, &mut info)
++                        == kResultOk
++                    {
++                        BusBinding::from_info(kEvent as i32, direction, index, &info)
++                    } else {
++                        None
++                    }
++                })
++                .collect::<Vec<_>>()
++        };
++        let event_inputs = event_bindings(kInput as i32);
++        let event_outputs = event_bindings(kOutput as i32);
++        BusActivationState::retain_prepared_bindings(
++            &mut self.runtime.bus_activation.event_input_acks,
++            &self.runtime.bus_activation.event_inputs,
++            &event_inputs,
++        );
++        BusActivationState::retain_prepared_bindings(
++            &mut self.runtime.bus_activation.event_output_acks,
++            &self.runtime.bus_activation.event_outputs,
++            &event_outputs,
++        );
+         data.process_data.numInputs = data.input_bus_buffers.len() as i32;
+         data.process_data.numOutputs = data.output_bus_buffers.len() as i32;
+ 
          match &mut data.sample_buffers {
              HostSampleBuffers::F32(samples) => {
                  *samples = build_typed_sample_buffers(
@@ -16679,7 +17165,7 @@
                  );
                  for (bus, pointers) in data
                      .input_bus_buffers
-@@ -2007,11 +2187,11 @@
+@@ -2007,11 +2247,11 @@
              }
              HostSampleBuffers::F64(samples) => {
                  *samples = build_typed_sample_buffers(
@@ -16694,7 +17180,7 @@
                  );
                  for (bus, pointers) in data
                      .input_bus_buffers
-@@ -2061,7 +2241,15 @@
+@@ -2061,7 +2301,15 @@
      }
  }
  
@@ -16711,7 +17197,7 @@
      /// Process exactly `frames` samples starting at `frame_offset` within the caller's
      /// buffers. `frames` is always <= the configured `block_size`, which is what the plugin
      /// was set up to accept; `process` splits a larger caller block into successive chunks.
-@@ -2070,14 +2258,18 @@
+@@ -2070,14 +2318,18 @@
      /// [`stage_chunk_events`]); queued parameter changes are selected the same way here, by the
      /// chunk their offset falls in. `is_last` marks the chunk that absorbs anything scheduled
      /// past the end of the caller's block.
@@ -16731,7 +17217,7 @@
              unsafe {
                  // Clear output events only - input events should be preserved for processing
                  self.output_events.clear();
-@@ -2089,7 +2281,14 @@
+@@ -2089,7 +2341,14 @@
                  // Without this, addParameterData()/addPoint() would keep appending to queues
                  // from prior blocks, mixing stale points into new ones, growing point storage
                  // unbounded, and risking a reallocation on the audio thread long after warm-up.
@@ -16747,7 +17233,7 @@
  
                  // VST3 allows numSamples to vary up to the maximum given to setupProcessing; the
                  // caller's block may be shorter (BufferSize::Default gives variable sizes) or, if
-@@ -2103,43 +2302,43 @@
+@@ -2103,43 +2362,43 @@
                  // got in `stage_chunk_events`, so automation and MIDI stay aligned across a
                  // split block.
                  for pc in &self.pending_param_changes {
@@ -16826,7 +17312,7 @@
                  }
  
                  match buffers {
-@@ -2175,10 +2374,15 @@
+@@ -2175,10 +2434,15 @@
                  // A zero-sample flush carries events/parameter queues only. The VST3 process
                  // contract requires no audio buses or pointers for that call.
                  let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
@@ -16845,7 +17331,7 @@
  
                  // Everything from here to the output copy is per-block cleanup and MUST run even
                  // when the plugin reported failure. Returning early instead would leave this
-@@ -2194,25 +2398,41 @@
+@@ -2194,25 +2458,41 @@
                      &mut data.process_context,
                      data.process_context_requirements,
                      data.transport_tempo,
@@ -16892,7 +17378,7 @@
  
                  // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
                  // Drain the event list in place (no `mem::take`) and push each converted event
-@@ -2221,11 +2441,24 @@
+@@ -2221,11 +2501,24 @@
                  if !self.output_events.is_empty() {
                      let out = &self.output_events_owned;
                      self.output_events.drain_each(|event| {
@@ -16919,7 +17405,7 @@
                      // Leave the caller's buffers as they were (the playback bridges pre-fill them
                      // with silence) rather than copying out whatever the failed call left behind.
                      Err(Error::ProcessFailed(process_result))
-@@ -2258,9 +2491,7 @@
+@@ -2258,9 +2551,7 @@
              }
          } else {
              Err(Error::Other("Process data not initialized".to_string()))
@@ -16930,7 +17416,7 @@
      }
  
      /// Distribute the block's queued input events over its chunks and process each one.
-@@ -2268,7 +2499,13 @@
+@@ -2268,7 +2559,13 @@
      /// `total` is the caller's block length, already known non-zero by the caller; the empty
      /// block is handled separately (some plugins use a zero-sample call to flush pending
      /// parameter changes).
@@ -16945,7 +17431,7 @@
          // `.max(1)`: a zero block size would make every chunk empty and never advance `offset`,
          // spinning forever on the audio thread. `Vst3HostBuilder::build` rejects 0, but
          // `block_size` is plain state and this loop must terminate regardless.
-@@ -2284,10 +2521,90 @@
+@@ -2284,10 +2581,90 @@
                  frames,
                  is_last,
              );
@@ -17037,7 +17523,7 @@
      }
  
      fn current_audio_bus_layout(&self) -> Result<AudioBusLayout> {
-@@ -2360,8 +2677,32 @@
+@@ -2360,8 +2737,32 @@
          )
      }
  
@@ -17072,7 +17558,7 @@
              return Err(Error::NotProcessing);
          }
  
-@@ -2371,9 +2712,9 @@
+@@ -2371,9 +2772,9 @@
  
          let result = if total == 0 {
              stage_chunk_events(&mut self.chunk_events, &self.input_events, 0, 0, true);
@@ -17084,7 +17570,7 @@
          };
  
          self.chunk_events.clear();
-@@ -2382,13 +2723,36 @@
+@@ -2382,13 +2783,36 @@
      }
  }
  
@@ -17122,7 +17608,7 @@
              return Err(Error::InterfaceError("No controller available".to_string()));
          }
          // VST3 requires both halves: the controller (for GUI/display/formatting) and the
-@@ -2403,26 +2767,12 @@
+@@ -2403,26 +2827,12 @@
          value: f64,
          sample_offset: i32,
      ) -> Result<()> {
@@ -17154,7 +17640,7 @@
              id,
              value,
              sample_offset,
-@@ -2430,6 +2780,10 @@
+@@ -2430,6 +2840,10 @@
          Ok(())
      }
  
@@ -17165,7 +17651,7 @@
      fn set_tempo(&mut self, bpm: f64) -> Result<()> {
          self.update_tempo(bpm);
          Ok(())
-@@ -2447,7 +2801,7 @@
+@@ -2447,7 +2861,7 @@
  
      fn get_parameter(&self, id: u32) -> Result<f64> {
          self.drain_deferred_controller_sync();
@@ -17174,7 +17660,7 @@
              unsafe { Ok(controller.getParamNormalized(id)) }
          } else {
              Err(Error::InterfaceError("No controller available".to_string()))
-@@ -2458,7 +2812,7 @@
+@@ -2458,7 +2872,7 @@
          self.drain_deferred_controller_sync();
          let mut params = Vec::new();
  
@@ -17183,7 +17669,7 @@
              unsafe {
                  let count = controller.getParameterCount();
  
-@@ -2495,7 +2849,7 @@
+@@ -2495,7 +2909,7 @@
  
      fn format_parameter(&self, id: u32, normalized: f64) -> Result<String> {
          self.drain_deferred_controller_sync();
@@ -17192,7 +17678,7 @@
              unsafe {
                  let mut buf: String128 = std::mem::zeroed();
                  if controller.getParamStringByValue(id, normalized, &mut buf) == kResultOk {
-@@ -2514,39 +2868,237 @@
+@@ -2514,39 +2928,274 @@
          self.process_buffer_view(&mut CallerAudioBuffers::Flat(buffers))
      }
  
@@ -17271,7 +17757,8 @@
 +        let side = |direction: i32,
 +                    prepared: &[AudioBusBuffers],
 +                    kinds: &[Option<bool>],
-+                    activation: &[bool]|
++                    activation: &[bool],
++                    acknowledgments: &[Option<ActivationRecord>]|
 +         -> Result<Vec<crate::plugin::CheckedAudioBusConfig>> {
 +            unsafe {
 +                let count = self.control.component.getBusCount(kAudio as i32, direction);
@@ -17320,9 +17807,17 @@
 +                    buses.push(crate::plugin::CheckedAudioBusConfig {
 +                        channel_count: info.channelCount as usize,
 +                        is_main,
-+                        // True records successful activateBus; false alone may only record
-+                        // that default activation was never requested, so cannot attest false.
-+                        active: activation[slot].then_some(true),
++                        // Prepared participation is not component acknowledgment. Unknown
++                        // defaults remain None; successful false is retained truthfully.
++                        active: acknowledgments.get(slot).and_then(Option::as_ref).and_then(
++                            |ack| {
++                                ack.observed(
++                                    activation[slot],
++                                    BusBinding::from_info(kAudio as i32, direction, index, &info)
++                                        .as_ref(),
++                                )
++                            },
++                        ),
 +                    });
 +                }
 +                Ok(buses)
@@ -17334,12 +17829,14 @@
 +                &data.input_bus_buffers,
 +                &data.input_bus_types,
 +                &self.runtime.bus_activation.audio_inputs,
++                &self.runtime.bus_activation.audio_input_acks,
 +            )?,
 +            outputs: side(
 +                kOutput as i32,
 +                &data.output_bus_buffers,
 +                &data.output_bus_types,
 +                &self.runtime.bus_activation.audio_outputs,
++                &self.runtime.bus_activation.audio_output_acks,
 +            )?,
 +        };
 +        self.reject_pending_topology()?;
@@ -17352,7 +17849,8 @@
 +        self.ensure_control_thread("event bus layout")?;
 +        self.reject_pending_topology()?;
 +        let side = |direction: i32,
-+                    activation: &[bool]|
++                    activation: &[bool],
++                    acknowledgments: &[Option<ActivationRecord>]|
 +         -> Result<Vec<crate::plugin::EventBusConfig>> {
 +            unsafe {
 +                let count = self.control.component.getBusCount(kEvent as i32, direction);
@@ -17384,16 +17882,41 @@
 +                        is_main: info.busType == BusTypes_::kMain as i32,
 +                        // Only successful host activation records can attest current state.
 +                        // kDefaultActive is a preference, not proof of an active bus.
-+                        active: (activation.len() == count as usize && activation[index as usize])
-+                            .then_some(true),
++                        active: if activation.len() == count as usize {
++                            acknowledgments
++                                .get(index as usize)
++                                .and_then(Option::as_ref)
++                                .and_then(|ack| {
++                                    ack.observed(
++                                        activation[index as usize],
++                                        BusBinding::from_info(
++                                            kEvent as i32,
++                                            direction,
++                                            index,
++                                            &info,
++                                        )
++                                        .as_ref(),
++                                    )
++                                })
++                        } else {
++                            None
++                        },
 +                    });
 +                }
 +                Ok(buses)
 +            }
 +        };
 +        let layout = crate::plugin::EventBusLayout {
-+            inputs: side(kInput as i32, &self.runtime.bus_activation.event_inputs)?,
-+            outputs: side(kOutput as i32, &self.runtime.bus_activation.event_outputs)?,
++            inputs: side(
++                kInput as i32,
++                &self.runtime.bus_activation.event_inputs,
++                &self.runtime.bus_activation.event_input_acks,
++            )?,
++            outputs: side(
++                kOutput as i32,
++                &self.runtime.bus_activation.event_outputs,
++                &self.runtime.bus_activation.event_output_acks,
++            )?,
 +        };
 +        self.reject_pending_topology()?;
 +        layout.validate()?;
@@ -17446,7 +17969,7 @@
              return Err(e);
          }
  
-@@ -2558,20 +3110,20 @@
+@@ -2558,20 +3207,20 @@
                      result
                  )));
              }
@@ -17470,7 +17993,7 @@
                  Some(value)
                      if value == ePrefetchableSupport_::kIsNeverPrefetchable as u32
                          || value == ePrefetchableSupport_::kIsNotYetPrefetchable as u32 =>
-@@ -2587,19 +3139,18 @@
+@@ -2587,19 +3236,18 @@
              }
          }
          // VST3 requires the component inactive for setupProcessing; mirror reconfigure.
@@ -17495,7 +18018,7 @@
              return Err(e);
          }
  
-@@ -2611,7 +3162,7 @@
+@@ -2611,7 +3259,7 @@
                      result
                  )));
              }
@@ -17504,7 +18027,7 @@
          }
          Ok(())
      }
-@@ -2620,11 +3171,11 @@
+@@ -2620,11 +3268,11 @@
          use crate::audio::SpeakerArrangement;
          unsafe {
              let read = |dir: i32| -> Vec<SpeakerArrangement> {
@@ -17518,7 +18041,7 @@
                          SpeakerArrangement::from_raw(arr)
                      })
                      .collect()
-@@ -2641,7 +3192,7 @@
+@@ -2641,7 +3289,7 @@
          inputs: &[crate::audio::SpeakerArrangement],
          outputs: &[crate::audio::SpeakerArrangement],
      ) -> Result<()> {
@@ -17527,7 +18050,7 @@
              return Err(Error::Other(
                  "cannot set bus arrangements while processing".to_string(),
              ));
-@@ -2650,32 +3201,30 @@
+@@ -2650,32 +3298,31 @@
          let mut out_raw: Vec<u64> = outputs.iter().map(|a| a.raw()).collect();
          unsafe {
              // VST3 requires the component inactive for setBusArrangements + setupProcessing.
@@ -17543,6 +18066,7 @@
 +            }
 +
 +            self.invalidate_processing_setup();
++            self.runtime.bus_activation.invalidate_acknowledgments();
 +            let arrangement_result = self.control.processor.setBusArrangements(
                  in_raw.as_mut_ptr(),
                  in_raw.len() as i32,
@@ -17569,7 +18093,7 @@
                  return Err(Error::InterfaceError(format!(
                      "setBusArrangements failed: {arrangement_result:#x}"
                  )));
-@@ -2691,7 +3240,7 @@
+@@ -2691,7 +3338,7 @@
                          result
                      )));
                  }
@@ -17578,7 +18102,7 @@
              }
          }
          Ok(())
-@@ -2705,7 +3254,7 @@
+@@ -2705,7 +3352,7 @@
          active: bool,
      ) -> Result<()> {
          use crate::audio::{BusDirection, MediaType};
@@ -17587,7 +18111,7 @@
              return Err(Error::Other(
                  "cannot activate a bus while processing".to_string(),
              ));
-@@ -2720,7 +3269,7 @@
+@@ -2720,7 +3367,7 @@
              BusDirection::Output => kOutput as i32,
          };
          unsafe {
@@ -17596,7 +18120,7 @@
              if bus_index < 0 || bus_index >= count {
                  return Err(Error::InvalidParameter(format!(
                      "bus index {bus_index} out of range for {media_type:?} {direction:?} \
-@@ -2728,35 +3277,35 @@
+@@ -2728,35 +3375,83 @@
                  )));
              }
  
@@ -17605,15 +18129,65 @@
              if was_active {
 -                self.set_component_active(false);
 -                self.is_active = false;
+-            }
+-
 +                self.deactivate_on_control_thread()?;
-             }
- 
++            }
++
++            // A failed call is not proof the old state survived. Clear only its
++            // prior acknowledgment before entering SDK code; participation keeps
++            // its existing mutation/error behavior.
++            let acks = match (media_type, direction) {
++                (MediaType::Audio, BusDirection::Input) => {
++                    &mut self.runtime.bus_activation.audio_input_acks
++                }
++                (MediaType::Audio, BusDirection::Output) => {
++                    &mut self.runtime.bus_activation.audio_output_acks
++                }
++                (MediaType::Event, BusDirection::Input) => {
++                    &mut self.runtime.bus_activation.event_input_acks
++                }
++                (MediaType::Event, BusDirection::Output) => {
++                    &mut self.runtime.bus_activation.event_output_acks
++                }
++            };
++            if let Some(ack) = acks.get_mut(bus_index as usize) {
++                *ack = None;
++            }
++            let mut info: BusInfo = std::mem::zeroed();
++            let binding = if self
++                .control
++                .component
++                .getBusInfo(media, dir, bus_index, &mut info)
++                == kResultOk
++            {
++                BusBinding::from_info(media, dir, bus_index, &info)
++            } else {
++                None
++            };
              let result = self
 +                .control
                  .component
                  .activateBus(media, dir, bus_index, active as u8);
  
              let update_result = if result == kResultOk {
++                let acks = match (media_type, direction) {
++                    (MediaType::Audio, BusDirection::Input) => {
++                        &mut self.runtime.bus_activation.audio_input_acks
++                    }
++                    (MediaType::Audio, BusDirection::Output) => {
++                        &mut self.runtime.bus_activation.audio_output_acks
++                    }
++                    (MediaType::Event, BusDirection::Input) => {
++                        &mut self.runtime.bus_activation.event_input_acks
++                    }
++                    (MediaType::Event, BusDirection::Output) => {
++                        &mut self.runtime.bus_activation.event_output_acks
++                    }
++                };
++                if let Some(ack) = acks.get_mut(bus_index as usize) {
++                    *ack = ActivationRecord::acknowledged(active, binding);
++                }
                  let states = match (media_type, direction) {
                      (MediaType::Audio, BusDirection::Input) => {
 -                        &mut self.bus_activation.audio_inputs
@@ -17640,7 +18214,7 @@
                      self.create_process_data()
                  } else {
                      Ok(())
-@@ -2775,7 +3324,7 @@
+@@ -2775,7 +3470,7 @@
                          "Failed to reactivate after set_bus_active: {reactivate:#x}"
                      )));
                  }
@@ -17649,7 +18223,7 @@
              }
  
              update_result?;
-@@ -2788,171 +3337,79 @@
+@@ -2788,171 +3483,79 @@
      }
  
      fn send_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {
@@ -17885,7 +18459,7 @@
      }
  
      fn has_editor(&self) -> bool {
-@@ -2963,12 +3420,12 @@
+@@ -2963,12 +3566,12 @@
  
          // An open editor is proof enough, and probing for a second view while one is attached
          // upsets plugins that assume a single live view.
@@ -17900,7 +18474,7 @@
              unsafe {
                  // Check if controller can create an editor view
                  let view_type = c"editor".as_ptr();
-@@ -2989,7 +3446,7 @@
+@@ -2989,7 +3592,7 @@
      }
  
      fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()> {
@@ -17909,7 +18483,7 @@
              return Err(Error::Other("Editor already open".to_string()));
          }
          if parent.is_null() {
-@@ -2998,7 +3455,22 @@
+@@ -2998,7 +3601,22 @@
              ));
          }
  
@@ -17933,7 +18507,7 @@
              unsafe {
                  // Create editor view
                  let view_type = c"editor".as_ptr();
-@@ -3025,9 +3497,13 @@
+@@ -3025,9 +3643,13 @@
  
                  // Hand the plugin an IPlugFrame (before attach, per the SDK) so it can
                  // request host-side resizes; requests land in `editor_resize`.
@@ -17950,7 +18524,7 @@
                  let frame_result = view.setFrame(frame.as_ptr());
                  if frame_result != kResultOk && frame_result != kResultTrue {
                      return Err(Error::Other(format!(
-@@ -3037,7 +3513,7 @@
+@@ -3037,7 +3659,7 @@
  
                  // Offer the current scale factor, but never let the answer decide whether the
                  // editor opens: a view that declines simply renders at its own scale.
@@ -17959,7 +18533,7 @@
  
                  // Platform-specific attachment
                  #[cfg(target_os = "macos")]
-@@ -3075,7 +3551,7 @@
+@@ -3075,7 +3697,7 @@
  
                  #[cfg(not(target_os = "android"))]
                  {
@@ -17968,7 +18542,7 @@
                      Ok(())
                  }
              }
-@@ -3086,7 +3562,7 @@
+@@ -3086,7 +3708,7 @@
  
      fn close_editor(&mut self) -> Result<()> {
          let mut close_error = None;
@@ -17977,7 +18551,7 @@
              unsafe {
                  let removed_result = view.removed();
                  // Break the view -> host-frame reference before releasing the view. The frame
-@@ -3109,63 +3585,29 @@
+@@ -3109,63 +3731,29 @@
          // `Plugin::service_run_loop` is public with no editor-open guard, a host driving it from
          // its frame loop would then dispatch straight into the removed view.
          #[cfg(target_os = "linux")]
@@ -18055,7 +18629,7 @@
              unsafe {
                  let mut view_rect = ViewRect {
                      left: 0,
-@@ -3180,7 +3622,7 @@
+@@ -3180,7 +3768,7 @@
              }
          }
  
@@ -18064,7 +18638,7 @@
              unsafe {
                  // Create a temporary view to get size
                  let view_type = c"editor".as_ptr();
-@@ -3220,11 +3662,11 @@
+@@ -3220,11 +3808,11 @@
  
      fn editor_can_resize(&self) -> bool {
          unsafe {
@@ -18078,7 +18652,7 @@
                  return false;
              };
              let view_ptr = controller.createView(c"editor".as_ptr());
-@@ -3236,76 +3678,7 @@
+@@ -3236,76 +3824,7 @@
      }
  
      fn resize_editor(&mut self, width: i32, height: i32) -> Result<(i32, i32)> {
@@ -18156,7 +18730,7 @@
      }
  
      fn set_editor_scale_factor(&mut self, factor: f32) -> Result<bool> {
-@@ -3314,11 +3687,11 @@
+@@ -3314,11 +3833,11 @@
                  "editor scale factor must be finite and greater than zero".to_string(),
              ));
          }
@@ -18170,7 +18744,7 @@
          Ok(supported)
      }
  
-@@ -3328,49 +3701,62 @@
+@@ -3328,49 +3847,62 @@
  
      fn take_parameter_edits(&mut self) -> Vec<crate::plugin::ParameterEdit> {
          self.service_control_thread_caches();
@@ -18239,7 +18813,7 @@
              .as_ref()
              .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?
              .dismiss_context_menu(menu_id)
-@@ -3378,6 +3764,7 @@
+@@ -3378,28 +3910,34 @@
  
      fn take_restart_flags(&mut self) -> crate::plugin::RestartFlags {
          let flags = self
@@ -18247,7 +18821,14 @@
              .component_handler
              .as_ref()
              .map(|h| h.take_restart_flags())
-@@ -3387,19 +3774,19 @@
+             .unwrap_or_default();
+         let bits = flags.bits();
++        // Observed topology/reload invalidates evidence even if later servicing
++        // fails before its refresh, or a caller only takes the restart flags.
++        if flags.io_changed() || flags.reload_component() {
++            self.runtime.bus_activation.invalidate_acknowledgments();
++        }
+         // `restartComponent` can arrive on any thread, and rebuilding these tables is a burst of
          // main-thread-domain controller calls (the MIDI map alone is buses × 16 × 130 of them).
          // So record what went stale and let the control thread rebuild.
          if bits & RestartFlags_::kMidiCCAssignmentChanged != 0 {
@@ -18271,7 +18852,7 @@
              return Err(Error::Other(
                  "restart requests must be serviced on the plugin control thread".to_string(),
              ));
-@@ -3411,37 +3798,39 @@
+@@ -3411,37 +3949,40 @@
          }
  
          unsafe {
@@ -18312,6 +18893,7 @@
  
              let apply_result = if flags.io_changed() {
 -                match Self::activate_default_buses(&self.component) {
++                self.runtime.bus_activation.invalidate_acknowledgments();
 +                self.invalidate_processing_setup();
 +                match Self::activate_default_buses(&self.control.component) {
                      Ok(activation) => {
@@ -18320,7 +18902,7 @@
                          self.negotiate_default_bus_arrangements()
                              .and_then(|()| self.setup_processing())
                      }
-@@ -3451,12 +3840,16 @@
+@@ -3451,12 +3992,16 @@
                  Ok(())
              };
  
@@ -18339,7 +18921,7 @@
                      Ok(())
                  } else {
                      Err(Error::Other(format!(
-@@ -3476,39 +3869,43 @@
+@@ -3476,39 +4021,43 @@
      }
  
      fn take_output_events(&self) -> Vec<PluginEvent> {
@@ -18394,7 +18976,7 @@
      }
  
      fn note_on(
-@@ -3518,58 +3915,11 @@
+@@ -3518,58 +4067,11 @@
          velocity: u8,
          sample_offset: i32,
      ) -> Result<crate::midi::NoteId> {
@@ -18455,7 +19037,7 @@
      }
  
      fn send_note_expression(
-@@ -3579,18 +3929,8 @@
+@@ -3579,18 +4081,8 @@
          value: f64,
          sample_offset: i32,
      ) -> Result<()> {
@@ -18476,7 +19058,7 @@
      }
  
      fn note_expressions(
-@@ -3600,6 +3940,7 @@
+@@ -3600,6 +4092,7 @@
      ) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
          use crate::midi::{NoteExpressionInfo, NoteExpressionType};
          let Some(ctrl) = self
@@ -18484,7 +19066,7 @@
              .controller
              .as_ref()
              .and_then(|c| c.cast::<INoteExpressionController>())
-@@ -3635,12 +3976,13 @@
+@@ -3635,12 +4128,13 @@
  
      fn get_units(&self) -> Result<Vec<crate::plugin::PluginUnit>> {
          use crate::plugin::PluginUnit;
@@ -18499,7 +19081,7 @@
              .unit_cache
              .lock()
              .unwrap_or_else(|poison| poison.into_inner())
-@@ -3649,7 +3991,7 @@
+@@ -3649,7 +4143,7 @@
          {
              return Ok(units);
          }
@@ -18508,7 +19090,7 @@
              return Ok(Vec::new());
          };
          // IUnitInfo is optional; plugins without it (no units/program lists) return empty.
-@@ -3696,6 +4038,7 @@
+@@ -3696,6 +4190,7 @@
                  });
              }
              *self
@@ -18516,7 +19098,7 @@
                  .unit_cache
                  .lock()
                  .unwrap_or_else(|poison| poison.into_inner()) = Some(units.clone());
-@@ -3706,7 +4049,7 @@
+@@ -3706,7 +4201,7 @@
      fn select_program(&mut self, unit_id: i32, program_index: i32) -> Result<()> {
          self.service_control_thread_caches();
          if self.cached_program_change(unit_id).is_none()
@@ -18525,7 +19107,7 @@
          {
              self.refresh_program_change_cache();
          }
-@@ -3736,12 +4079,13 @@
+@@ -3736,12 +4231,13 @@
      }
  
      fn selected_unit(&self) -> Result<Option<i32>> {
@@ -18540,7 +19122,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3753,12 +4097,13 @@
+@@ -3753,12 +4249,13 @@
      }
  
      fn select_unit(&mut self, unit_id: i32) -> Result<()> {
@@ -18555,7 +19137,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3783,12 +4128,13 @@
+@@ -3783,12 +4280,13 @@
                  "program index must be non-negative, got {program_index}"
              )));
          }
@@ -18570,7 +19152,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3831,6 +4177,7 @@
+@@ -3831,6 +4329,7 @@
          }
          self.ensure_control_thread("program data read")?;
          let Some(data_interface) = self
@@ -18578,7 +19160,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IProgramListData>())
-@@ -3871,6 +4218,7 @@
+@@ -3871,6 +4370,7 @@
          self.ensure_stream_size(data)?;
          self.ensure_control_thread("program data restore")?;
          let data_interface = self
@@ -18586,7 +19168,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IProgramListData>())
-@@ -3895,6 +4243,7 @@
+@@ -3895,6 +4395,7 @@
                  data_interface.setProgramData(program_list_id, program_index, stream_ptr.as_ptr());
              if result == kResultOk {
                  *self
@@ -18594,7 +19176,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -3911,6 +4260,7 @@
+@@ -3911,6 +4412,7 @@
      fn get_unit_data(&self, unit_id: i32) -> Result<Option<Vec<u8>>> {
          self.ensure_control_thread("unit data read")?;
          let Some(data_interface) = self
@@ -18602,7 +19184,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitData>())
-@@ -3940,6 +4290,7 @@
+@@ -3940,6 +4442,7 @@
          self.ensure_stream_size(data)?;
          self.ensure_control_thread("unit data restore")?;
          let data_interface = self
@@ -18610,7 +19192,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitData>())
-@@ -3961,6 +4312,7 @@
+@@ -3961,6 +4464,7 @@
              let result = data_interface.setUnitData(unit_id, stream_ptr.as_ptr());
              if result == kResultOk {
                  *self
@@ -18618,7 +19200,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -3977,6 +4329,7 @@
+@@ -3977,6 +4481,7 @@
      fn begin_host_edit(&mut self, parameter_id: u32) -> Result<()> {
          self.ensure_control_thread("host edit begin")?;
          let editing = self
@@ -18626,7 +19208,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
-@@ -3992,6 +4345,7 @@
+@@ -3992,6 +4497,7 @@
      fn end_host_edit(&mut self, parameter_id: u32) -> Result<()> {
          self.ensure_control_thread("host edit end")?;
          let editing = self
@@ -18634,7 +19216,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
-@@ -4012,6 +4366,7 @@
+@@ -4012,6 +4518,7 @@
          }
          self.ensure_control_thread("MIDI learn notification")?;
          let midi_learn = self
@@ -18642,7 +19224,7 @@
              .controller
              .as_ref()
              .and_then(|edit_controller| edit_controller.cast::<IMidiLearn>())
-@@ -4026,6 +4381,7 @@
+@@ -4026,6 +4533,7 @@
          use crate::plugin::AutomationState;
          self.ensure_control_thread("automation state update")?;
          let automation = self
@@ -18650,7 +19232,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IAutomationState>())
-@@ -4052,6 +4408,7 @@
+@@ -4052,6 +4560,7 @@
          })?;
          self.ensure_control_thread("parameter id remapping")?;
          let Some(remapper) = self
@@ -18658,7 +19240,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IRemapParamID>())
-@@ -4075,8 +4432,11 @@
+@@ -4075,8 +4584,11 @@
      }
  
      fn midi_panic(&mut self) -> Result<()> {
@@ -18672,7 +19254,7 @@
              unsafe {
                  let mut event: Event = std::mem::zeroed();
                  event.busIndex = 0;
-@@ -4086,30 +4446,46 @@
+@@ -4086,30 +4598,46 @@
                  event.__field0.noteOff.noteId = note_id;
                  event.__field0.noteOff.channel = channel;
                  event.__field0.noteOff.pitch = pitch;
@@ -18743,7 +19325,7 @@
          }
  
          // Also route the standard panic controllers through IMidiMapping for plugins that
-@@ -4126,11 +4502,20 @@
+@@ -4126,11 +4654,20 @@
      }
  
      fn output_channel_count(&self) -> usize {
@@ -18765,7 +19347,7 @@
                      .bus_activation
                      .audio_outputs
                      .get(i as usize)
-@@ -4141,6 +4526,7 @@
+@@ -4141,6 +4678,7 @@
                  }
                  let mut info: BusInfo = std::mem::zeroed();
                  if self
@@ -18773,7 +19355,7 @@
                      .component
                      .getBusInfo(kAudio as i32, kOutput as i32, i, &mut info)
                      == kResultOk
-@@ -4149,6 +4535,7 @@
+@@ -4149,6 +4687,7 @@
                  } else {
                      let mut arrangement = 0u64;
                      if self
@@ -18781,7 +19363,7 @@
                          .processor
                          .getBusArrangement(kOutput as i32, i, &mut arrangement)
                          == kResultOk
-@@ -4162,14 +4549,23 @@
+@@ -4162,14 +4701,23 @@
      }
  
      fn save_state(&self) -> Result<Vec<u8>> {
@@ -18806,7 +19388,7 @@
              if result != kResultOk {
                  return Err(Error::Other(format!(
                      "Plugin does not provide state (getState: {result:#x})"
-@@ -4180,8 +4576,11 @@
+@@ -4180,8 +4728,11 @@
              // its state returns the blob above a second time: the envelope would carry the same
              // bytes twice, the combined size cap would effectively halve, and `load_state` would
              // apply `setState` twice. `load_state` has the matching guard.
@@ -18820,7 +19402,7 @@
              {
                  let stream = create_memory_stream_with_metadata(None, StreamStateType::Project);
                  let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
-@@ -4201,56 +4600,82 @@
+@@ -4201,56 +4752,83 @@
                  None
              };
  
@@ -18904,6 +19486,7 @@
                      Error::InterfaceError("Failed to create component state stream".into())
                  })?;
 -                let result = self.component.setState(comp_ptr.as_ptr());
++                self.runtime.bus_activation.invalidate_acknowledgments();
 +                let result = self.control.component.setState(comp_ptr.as_ptr());
                  if result != kResultOk && result != kNotImplemented {
                      return Err(Error::Other(format!(
@@ -18918,7 +19501,7 @@
                          let stream =
                              create_state_restore_stream(snapshot.component.clone(), context);
                          let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
-@@ -4268,9 +4693,13 @@
+@@ -4268,9 +4846,13 @@
                      }
                  }
  
@@ -18935,7 +19518,7 @@
                      let stream = create_state_restore_stream(controller_state.clone(), context);
                      let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                          Error::InterfaceError("Failed to create controller state stream".into())
-@@ -4283,11 +4712,27 @@
+@@ -4283,11 +4865,27 @@
                      }
                  }
  
@@ -18966,7 +19549,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -4297,17 +4742,25 @@
+@@ -4297,21 +4895,35 @@
              })();
  
              let restore_result = (|| -> Result<()> {
@@ -18994,7 +19577,17 @@
                  }
                  Ok(())
              })();
-@@ -4405,43 +4858,72 @@
+ 
++            if apply_result.is_err() || restore_result.is_err() {
++                // Even a later successful best-effort activation cannot attest a failed
++                // state/lifecycle transaction. Keep its prepared participation, but require
++                // a subsequent independently successful acknowledgment for checked metadata.
++                self.runtime.bus_activation.invalidate_acknowledgments();
++            }
+             match (apply_result, restore_result) {
+                 (Ok(()), Ok(())) => Ok(()),
+                 (Err(apply), Ok(())) => Err(apply),
+@@ -4405,43 +5017,89 @@
          // Rebuild the table here if a restart invalidated it off-thread; a no-op on the audio
          // thread, which must never make controller calls.
          self.service_control_thread_caches();
@@ -19018,82 +19611,89 @@
      #[allow(clippy::unnecessary_cast)]
 -    unsafe fn activate_default_buses(component: &ComPtr<IComponent>) -> Result<BusActivationState> {
 -        let read_and_activate = |media: i32, direction: i32| -> Result<Vec<bool>> {
--            let count = component.getBusCount(media, direction);
--            let mut states = Vec::with_capacity(count.max(0) as usize);
--            for index in 0..count {
--                let mut info: BusInfo = std::mem::zeroed();
--                let active = component.getBusInfo(media, direction, index, &mut info) == kResultOk
--                    && (info.flags & BusInfo_::BusFlags_::kDefaultActive as u32) != 0;
--                if active {
--                    let result = component.activateBus(media, direction, index, 1);
--                    if result != kResultOk {
--                        return Err(Error::InterfaceError(format!(
--                            "activateBus failed for default-active bus \
 +    unsafe fn refresh_bus_activation(
 +        component: &ComPtr<IComponent>,
 +        previous: Option<&BusActivationState>,
 +    ) -> Result<BusActivationState> {
-+        let read_and_activate =
-+            |media: i32, direction: i32, prior: Option<&[bool]>| -> Result<Vec<bool>> {
-+                let count = component.getBusCount(media, direction);
-+                let mut states = Vec::with_capacity(count.max(0) as usize);
-+                for index in 0..count {
-+                    let mut info: BusInfo = std::mem::zeroed();
-+                    let default_active = component.getBusInfo(media, direction, index, &mut info)
-+                        == kResultOk
-+                        && (info.flags & BusInfo_::BusFlags_::kDefaultActive as u32) != 0;
-+                    let retained = prior.and_then(|states| states.get(index as usize)).copied();
-+                    let active = retained.unwrap_or(default_active);
-+                    if active || retained.is_some() {
-+                        let result =
-+                            component.activateBus(media, direction, index, u8::from(active));
-+                        if result != kResultOk {
-+                            return Err(Error::InterfaceError(format!(
-+                                "activateBus failed for default-active bus \
++        let read_and_activate = |media: i32,
++                                 direction: i32,
++                                 prior: Option<&[bool]>|
++         -> Result<(Vec<bool>, Vec<Option<ActivationRecord>>)> {
+             let count = component.getBusCount(media, direction);
+             let mut states = Vec::with_capacity(count.max(0) as usize);
++            let mut acknowledgments = Vec::with_capacity(count.max(0) as usize);
+             for index in 0..count {
+                 let mut info: BusInfo = std::mem::zeroed();
+-                let active = component.getBusInfo(media, direction, index, &mut info) == kResultOk
+-                    && (info.flags & BusInfo_::BusFlags_::kDefaultActive as u32) != 0;
+-                if active {
+-                    let result = component.activateBus(media, direction, index, 1);
++                let info_ok = component.getBusInfo(media, direction, index, &mut info) == kResultOk;
++                let default_active =
++                    info_ok && (info.flags & BusInfo_::BusFlags_::kDefaultActive as u32) != 0;
++                let retained = prior.and_then(|states| states.get(index as usize)).copied();
++                let active = retained.unwrap_or(default_active);
++                let mut acknowledged = None;
++                if active || retained.is_some() {
++                    let result = component.activateBus(media, direction, index, u8::from(active));
+                     if result != kResultOk {
+                         return Err(Error::InterfaceError(format!(
+                             "activateBus failed for default-active bus \
                               ({media}, {direction}, {index}): {result:#x}"
--                        )));
-+                            )));
-+                        }
+                         )));
                      }
--                }
--                states.push(active);
++                    if info_ok {
++                        acknowledged = ActivationRecord::acknowledged(
++                            active,
++                            BusBinding::from_info(media, direction, index, &info),
++                        );
++                    }
+                 }
+                 states.push(active);
 -            }
 -            Ok(states)
--        };
-+                    states.push(active);
-+                }
-+                Ok(states)
-+            };
- 
++                acknowledgments.push(acknowledged);
++            }
++            Ok((states, acknowledgments))
+         };
+-
++        let (audio_inputs, audio_input_acks) = read_and_activate(
++            kAudio as i32,
++            kInput as i32,
++            previous.map(|state| state.audio_inputs.as_slice()),
++        )?;
++        let (audio_outputs, audio_output_acks) = read_and_activate(
++            kAudio as i32,
++            kOutput as i32,
++            previous.map(|state| state.audio_outputs.as_slice()),
++        )?;
++        let (event_inputs, event_input_acks) = read_and_activate(
++            kEvent as i32,
++            kInput as i32,
++            previous.map(|state| state.event_inputs.as_slice()),
++        )?;
++        let (event_outputs, event_output_acks) = read_and_activate(
++            kEvent as i32,
++            kOutput as i32,
++            previous.map(|state| state.event_outputs.as_slice()),
++        )?;
          Ok(BusActivationState {
 -            audio_inputs: read_and_activate(kAudio as i32, kInput as i32)?,
 -            audio_outputs: read_and_activate(kAudio as i32, kOutput as i32)?,
 -            event_inputs: read_and_activate(kEvent as i32, kInput as i32)?,
 -            event_outputs: read_and_activate(kEvent as i32, kOutput as i32)?,
-+            audio_inputs: read_and_activate(
-+                kAudio as i32,
-+                kInput as i32,
-+                previous.map(|state| state.audio_inputs.as_slice()),
-+            )?,
-+            audio_outputs: read_and_activate(
-+                kAudio as i32,
-+                kOutput as i32,
-+                previous.map(|state| state.audio_outputs.as_slice()),
-+            )?,
-+            event_inputs: read_and_activate(
-+                kEvent as i32,
-+                kInput as i32,
-+                previous.map(|state| state.event_inputs.as_slice()),
-+            )?,
-+            event_outputs: read_and_activate(
-+                kEvent as i32,
-+                kOutput as i32,
-+                previous.map(|state| state.event_outputs.as_slice()),
-+            )?,
++            audio_inputs,
++            audio_outputs,
++            event_inputs,
++            event_outputs,
++            audio_input_acks,
++            audio_output_acks,
++            event_input_acks,
++            event_output_acks,
          })
      }
  
-@@ -4576,7 +5058,7 @@
+@@ -4576,7 +5234,7 @@
  /// still fail — and by then the plugin may have spawned threads and registered callbacks.
  /// Releasing its interfaces and unloading the module without `terminate()` leaves that code
  /// running inside memory the unload is about to unmap. This guard runs the same sequence
@@ -19102,7 +19702,7 @@
  ///
  /// It holds its own references (COM refcounts), so `load` keeps using the originals as it
  /// builds; the extra references are released when the guard drops either way.
-@@ -4617,8 +5099,10 @@
+@@ -4617,8 +5275,10 @@
          self.connection.take()
      }
  
@@ -19115,7 +19715,7 @@
          self.armed = false;
      }
  }
-@@ -4681,21 +5165,23 @@
+@@ -4681,21 +5341,23 @@
          let _ = PluginInternal::close_editor(self);
  
          let _ = self.stop_processing();
@@ -19146,7 +19746,7 @@
      }
  }
  
-@@ -4776,18 +5262,53 @@
+@@ -4776,18 +5438,53 @@
          .unwrap_or_default()
  }
  
@@ -19203,7 +19803,7 @@
      if process_context_needs(requirements, R::kNeedContinousTimeSamples as u32) {
          ctx.continousTimeSamples = ctx.continousTimeSamples.wrapping_add(frames);
      }
-@@ -4798,17 +5319,79 @@
+@@ -4798,17 +5495,79 @@
          let nanos = (frames as f64 * 1_000_000_000.0 / ctx.sampleRate).round() as i64;
          ctx.systemTime = ctx.systemTime.saturating_add(nanos);
      }
@@ -19287,7 +19887,7 @@
  
      fn buses(channels: &[i32]) -> Vec<AudioBusBuffers> {
          channels
-@@ -5053,7 +5636,7 @@
+@@ -5053,7 +5812,7 @@
          // One second of audio at 48 kHz in 512-sample blocks.
          let blocks = 48_000 / 512;
          for _ in 0..blocks {
@@ -19296,7 +19896,7 @@
          }
          let advanced = (blocks * 512) as i64;
          assert_eq!(ctx.projectTimeSamples, advanced);
-@@ -5448,3 +6031,317 @@
+@@ -5448,3 +6207,317 @@
          assert_eq!(calls.load(Ordering::SeqCst), 0);
      }
  }
@@ -19747,6 +20347,214 @@
 +    });
 +    assert!(result.is_err());
 +    assert!(!active.load(Ordering::Acquire));
++}
+--- a/src/internal/plugin_impl/bus_activation.rs
++++ b/src/internal/plugin_impl/bus_activation.rs
+@@ -0,0 +1,205 @@
++//! Owner-recorded component acknowledgments, distinct from prepared participation.
++//!
++//! These records are never a query of plugin-private state. They describe a
++//! successful host activateBus call, bound to the descriptor observed for that
++//! call and revalidated when prepared storage is replaced. Unrequested defaults
++//! and failed/invalidated calls remain unknown. No identity is inferred across
++//! indistinguishable, unsignaled plugin-internal topology changes.
++
++#![allow(clippy::unnecessary_cast)] // SDK enum representations vary by platform.
++
++use super::{kAudio, kEvent, kInput, kOutput, BusInfo, BusTypes_};
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(super) struct BusBinding {
++    media: i32,
++    direction: i32,
++    index: i32,
++    channels: i32,
++    kind: i32,
++    name: [u16; 128],
++    flags: u32,
++}
++
++impl BusBinding {
++    #[allow(clippy::unnecessary_cast)]
++    pub(super) fn from_info(
++        media: i32,
++        direction: i32,
++        index: i32,
++        info: &BusInfo,
++    ) -> Option<Self> {
++        let max_channels = if media == kAudio as i32 {
++            256
++        } else if media == kEvent as i32 {
++            16
++        } else {
++            return None;
++        };
++        if index < 0
++            || info.mediaType != media
++            || info.direction != direction
++            || !(1..=max_channels).contains(&info.channelCount)
++            || !matches!(direction, d if d == kInput as i32 || d == kOutput as i32)
++            || (info.busType != BusTypes_::kMain as i32 && info.busType != BusTypes_::kAux as i32)
++        {
++            return None;
++        }
++        Some(Self {
++            media,
++            direction,
++            index,
++            channels: info.channelCount,
++            kind: info.busType,
++            name: info.name.map(|c| c as u16),
++            flags: info.flags,
++        })
++    }
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(super) struct ActivationRecord {
++    active: bool,
++    binding: BusBinding,
++}
++
++impl ActivationRecord {
++    pub(super) fn acknowledged(active: bool, binding: Option<BusBinding>) -> Option<Self> {
++        binding.map(|binding| Self { active, binding })
++    }
++
++    pub(super) fn observed(
++        &self,
++        participation: bool,
++        binding: Option<&BusBinding>,
++    ) -> Option<bool> {
++        (self.active == participation && binding == Some(&self.binding)).then_some(self.active)
++    }
++}
++
++#[derive(Default, Clone, Debug, PartialEq, Eq)]
++pub(super) struct BusActivationState {
++    pub(super) audio_inputs: Vec<bool>,
++    pub(super) audio_outputs: Vec<bool>,
++    pub(super) event_inputs: Vec<bool>,
++    pub(super) event_outputs: Vec<bool>,
++    pub(super) audio_input_acks: Vec<Option<ActivationRecord>>,
++    pub(super) audio_output_acks: Vec<Option<ActivationRecord>>,
++    pub(super) event_input_acks: Vec<Option<ActivationRecord>>,
++    pub(super) event_output_acks: Vec<Option<ActivationRecord>>,
++}
++
++impl BusActivationState {
++    pub(super) fn invalidate_acknowledgments(&mut self) {
++        self.audio_input_acks.fill(None);
++        self.audio_output_acks.fill(None);
++        self.event_input_acks.fill(None);
++        self.event_output_acks.fill(None);
++    }
++
++    /// A new side length invalidates every old index. For unchanged lengths,
++    /// retain only exact descriptor and participation bindings, never an index
++    /// alone. This is owner setup, not processing-thread work.
++    pub(super) fn retain_prepared_bindings(
++        acks: &mut Vec<Option<ActivationRecord>>,
++        participation: &[bool],
++        bindings: &[Option<BusBinding>],
++    ) {
++        if acks.len() != bindings.len() || participation.len() != bindings.len() {
++            acks.clear();
++            acks.resize_with(bindings.len(), || None);
++            return;
++        }
++        for ((ack, active), binding) in acks.iter_mut().zip(participation).zip(bindings) {
++            if ack
++                .as_ref()
++                .and_then(|record| record.observed(*active, binding.as_ref()))
++                .is_none()
++            {
++                *ack = None;
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn descriptor() -> BusInfo {
++        // SDK BusInfo is a scalar/UTF-16 POD, with every field initialized here.
++        let mut info: BusInfo = unsafe { std::mem::zeroed() };
++        info.mediaType = kAudio as i32;
++        info.direction = kOutput as i32;
++        info.channelCount = 2;
++        info.busType = BusTypes_::kAux as i32;
++        info.name[0] = 65;
++        info
++    }
++
++    #[test]
++    fn complete_descriptor_binding_never_confuses_false_with_unknown() {
++        let info = descriptor();
++        let binding = BusBinding::from_info(kAudio as i32, kOutput as i32, 1, &info).unwrap();
++        let ack = ActivationRecord::acknowledged(false, Some(binding.clone())).unwrap();
++        assert_eq!(ack.observed(false, Some(&binding)), Some(false));
++        assert_eq!(ack.observed(true, Some(&binding)), None);
++        assert_eq!(ack.observed(false, None), None);
++        for field in 0..7 {
++            let mut changed = binding.clone();
++            match field {
++                0 => changed.media = kEvent as i32,
++                1 => changed.direction = kInput as i32,
++                2 => changed.index += 1,
++                3 => changed.channels = 1,
++                4 => changed.kind = BusTypes_::kMain as i32,
++                5 => changed.name[127] = 1,
++                _ => changed.flags = 1,
++            }
++            assert_eq!(ack.observed(false, Some(&changed)), None);
++        }
++        assert!(ActivationRecord::acknowledged(false, None).is_none());
++    }
++
++    #[test]
++    fn invalid_descriptor_or_absent_bus_cannot_install_evidence() {
++        for field in 0..6 {
++            let mut info = descriptor();
++            match field {
++                0 => info.mediaType = kEvent as i32,
++                1 => info.direction = kInput as i32,
++                2 => info.channelCount = 0,
++                3 => info.channelCount = 257,
++                4 => info.busType = -1,
++                _ => info.channelCount = -1,
++            }
++            assert!(BusBinding::from_info(kAudio as i32, kOutput as i32, 1, &info).is_none());
++        }
++        assert!(BusBinding::from_info(kAudio as i32, kOutput as i32, -1, &descriptor()).is_none());
++    }
++
++    #[test]
++    fn changed_side_lengths_participation_and_missing_bindings_discard_without_resurrection() {
++        let binding =
++            BusBinding::from_info(kAudio as i32, kOutput as i32, 1, &descriptor()).unwrap();
++        for change in 0..3 {
++            let mut acks = vec![ActivationRecord::acknowledged(false, Some(binding.clone()))];
++            match change {
++                0 => BusActivationState::retain_prepared_bindings(&mut acks, &[], &[]),
++                1 => BusActivationState::retain_prepared_bindings(
++                    &mut acks,
++                    &[true],
++                    &[Some(binding.clone())],
++                ),
++                _ => BusActivationState::retain_prepared_bindings(&mut acks, &[false], &[None]),
++            }
++            assert!(acks.iter().all(Option::is_none));
++            BusActivationState::retain_prepared_bindings(
++                &mut acks,
++                &[false],
++                &[Some(binding.clone())],
++            );
++            assert_eq!(acks, [None]);
++        }
++    }
 +}
 --- a/src/internal/plugin_impl/domain_session.rs
 +++ b/src/internal/plugin_impl/domain_session.rs
@@ -20776,7 +21584,7 @@
 +}
 --- a/src/internal/plugin_impl/domain_tests.rs
 +++ b/src/internal/plugin_impl/domain_tests.rs
-@@ -0,0 +1,3513 @@
+@@ -0,0 +1,3588 @@
 +//! Synchronous ownership/lifecycle regression tests using real VST3 COM interfaces.
 +//! These mocks intentionally allocate and lock; these are not real-time-safety tests.
 +
@@ -20932,6 +21740,15 @@
 +    expand_audio_on_parameter: AtomicBool,
 +    audio_bus_info_error: AtomicBool,
 +    audio_bus_aux: AtomicBool,
++    dry_topology: AtomicBool,
++    event_bus_info_error: AtomicBool,
++    event_names_reversed: AtomicBool,
++    audio_names_reversed: AtomicBool,
++    fail_activation: AtomicBool,
++    fail_arrangement: AtomicBool,
++    activation_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
++    activation_calls: Mutex<Vec<(i32, i32, i32, bool)>>,
++    dry_process_checks: Mutex<Vec<(i32, bool)>>,
 +    bus_info_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 +    event_inputs: AtomicI32,
 +    event_outputs: AtomicI32,
@@ -20971,6 +21788,15 @@
 +            expand_audio_on_parameter: AtomicBool::new(false),
 +            audio_bus_info_error: AtomicBool::new(false),
 +            audio_bus_aux: AtomicBool::new(false),
++            dry_topology: AtomicBool::new(false),
++            event_bus_info_error: AtomicBool::new(false),
++            event_names_reversed: AtomicBool::new(false),
++            audio_names_reversed: AtomicBool::new(false),
++            fail_activation: AtomicBool::new(false),
++            fail_arrangement: AtomicBool::new(false),
++            activation_callback: Mutex::new(None),
++            activation_calls: Mutex::new(Vec::new()),
++            dry_process_checks: Mutex::new(Vec::new()),
 +            bus_info_callback: Mutex::new(None),
 +            event_inputs: AtomicI32::new(0),
 +            event_outputs: AtomicI32::new(0),
@@ -21062,7 +21888,9 @@
 +    }
 +    unsafe fn getBusCount(&self, media: MediaType, direction: BusDirection) -> i32 {
 +        self.probe.record("getBusCount");
-+        if media == kAudio as i32 && direction == kOutput as i32 {
++        if media == kAudio as i32 && direction == kInput as i32 {
++            i32::from(self.state.dry_topology.load(Ordering::Relaxed))
++        } else if media == kAudio as i32 && direction == kOutput as i32 {
 +            self.state.output_buses.load(Ordering::Relaxed)
 +        } else if media == kEvent as i32 && direction == kInput as i32 {
 +            self.state.event_inputs.load(Ordering::Relaxed)
@@ -21094,6 +21922,9 @@
 +            None
 +        };
 +        if let Some(count) = event_count {
++            if self.state.event_bus_info_error.load(Ordering::Relaxed) {
++                return kNotImplemented;
++            }
 +            if index < 0 || index >= count {
 +                return kInvalidArgument;
 +            }
@@ -21103,26 +21934,46 @@
 +            bus.channelCount = self.state.event_channels.load(Ordering::Relaxed);
 +            bus.busType = BusTypes_::kMain as i32;
 +            bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
++            bus.name[0] = if self.state.event_names_reversed.load(Ordering::Relaxed) {
++                (count - index) as _
++            } else {
++                (index + 1) as _
++            };
 +            *info = bus;
 +            return kResultOk;
 +        }
-+        if media != kAudio as i32
-+            || direction != kOutput as i32
-+            || index < 0
-+            || index >= self.state.output_buses.load(Ordering::Relaxed)
-+        {
++        let audio_count = if direction == kInput as i32 {
++            i32::from(self.state.dry_topology.load(Ordering::Relaxed))
++        } else if direction == kOutput as i32 {
++            self.state.output_buses.load(Ordering::Relaxed)
++        } else {
++            0
++        };
++        if media != kAudio as i32 || index < 0 || index >= audio_count {
 +            return kInvalidArgument;
 +        }
 +        let mut bus: BusInfo = std::mem::zeroed();
 +        bus.mediaType = media;
 +        bus.direction = direction;
 +        bus.channelCount = self.state.channels.load(Ordering::Relaxed);
-+        bus.busType = if self.state.audio_bus_aux.load(Ordering::Relaxed) {
++        let dry_aux = self.state.dry_topology.load(Ordering::Relaxed)
++            && direction == kOutput as i32
++            && index > 0;
++        bus.busType = if dry_aux || self.state.audio_bus_aux.load(Ordering::Relaxed) {
 +            BusTypes_::kAux as i32
 +        } else {
 +            BusTypes_::kMain as i32
 +        };
-+        bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
++        bus.flags = if dry_aux {
++            0
++        } else {
++            BusInfo_::BusFlags_::kDefaultActive as u32
++        };
++        bus.name[0] = if self.state.audio_names_reversed.load(Ordering::Relaxed) {
++            (audio_count - index) as _
++        } else {
++            (index + 1) as _
++        };
 +        *info = bus;
 +        kResultOk
 +    }
@@ -21135,13 +21986,25 @@
 +    }
 +    unsafe fn activateBus(
 +        &self,
-+        _media: MediaType,
-+        _direction: BusDirection,
-+        _index: i32,
-+        _state: TBool,
++        media: MediaType,
++        direction: BusDirection,
++        index: i32,
++        state: TBool,
 +    ) -> tresult {
 +        self.probe.record("activateBus");
-+        kResultOk
++        self.state
++            .activation_calls
++            .lock()
++            .unwrap()
++            .push((media, direction, index, state != 0));
++        if let Some(callback) = self.state.activation_callback.lock().unwrap().as_ref() {
++            callback();
++        }
++        if self.state.fail_activation.load(Ordering::Relaxed) {
++            kResultFalse
++        } else {
++            kResultOk
++        }
 +    }
 +    unsafe fn setActive(&self, state: TBool) -> tresult {
 +        self.probe.record(if state == 0 {
@@ -21190,6 +22053,9 @@
 +        _num_outputs: i32,
 +    ) -> tresult {
 +        self.probe.record("setBusArrangements");
++        if self.state.fail_arrangement.load(Ordering::Relaxed) {
++            return vst3::Steinberg::kInternalError;
++        }
 +        if self.state.change_on_refusal.load(Ordering::Relaxed) {
 +            self.state.channels.store(2, Ordering::Relaxed);
 +            kResultFalse
@@ -21218,7 +22084,10 @@
 +        kResultOk
 +    }
 +    unsafe fn canProcessSampleSize(&self, size: i32) -> tresult {
-+        if size == SymbolicSampleSizes_::kSample32 as i32 {
++        if size == SymbolicSampleSizes_::kSample32 as i32
++            || (size == SymbolicSampleSizes_::kSample64 as i32
++                && self.state.dry_topology.load(Ordering::Relaxed))
++        {
 +            kResultOk
 +        } else {
 +            kResultFalse
@@ -21316,6 +22185,16 @@
 +            return kResultFalse;
 +        }
 +        let data = &mut *data;
++        if self.state.dry_topology.load(Ordering::Relaxed) {
++            // This COM mock reports failure rather than unwinding through its vtable.
++            let valid = topology_tests::check_dry_sdk_buffers(data);
++            self.state
++                .dry_process_checks
++                .lock()
++                .unwrap()
++                .push((data.symbolicSampleSize, valid));
++            return if valid { kResultOk } else { kResultFalse };
++        }
 +        if self.state.capture_origin.load(Ordering::Acquire) {
 +            let mut events = Vec::new();
 +            if let Some(list) = vst3::ComRef::from_raw(data.inputEvents) {
@@ -22386,6 +23265,7 @@
 +            .snapshot();
 +        let process_data =
 +            plugin.runtime.process_data.as_ref().unwrap().as_ref() as *const HostProcessData;
++        let activation_before = plugin.runtime.bus_activation.clone();
 +        let next_note = plugin.runtime.next_note_id;
 +        let prior_context = plugin
 +            .runtime
@@ -22413,6 +23293,7 @@
 +                .snapshot(),
 +            native_before
 +        );
++        assert_eq!(plugin.runtime.bus_activation, activation_before);
 +        assert_eq!(plugin.runtime.is_processing, !stopped);
 +        assert_eq!(plugin.control.is_active, !stopped);
 +        assert_eq!(
@@ -23719,8 +24600,8 @@
 +    assert_eq!(plugin.take_output_events_with_loss(), (Vec::new(), false));
 +}
 +
-+mod session_tests;
 +mod borrowed_processor_tests;
++mod session_tests;
 +
 +fn reset_transport() -> crate::plugin::ProcessTransport {
 +    crate::plugin::ProcessTransport {
@@ -24290,6 +25171,8 @@
 +
 +#[cfg(all(feature = "experimental-scoped-worker", target_os = "linux"))]
 +mod scoped_worker_tests;
++
++mod topology_tests;
 --- a/src/internal/plugin_impl/domain_tests/borrowed_processor_tests.rs
 +++ b/src/internal/plugin_impl/domain_tests/borrowed_processor_tests.rs
 @@ -0,0 +1,335 @@
@@ -27817,6 +28700,428 @@
 +    assert!(result.unwrap_err().to_string().contains("unsupported"));
 +    assert!(!invoked);
 +}
+--- a/src/internal/plugin_impl/domain_tests/topology_tests.rs
++++ b/src/internal/plugin_impl/domain_tests/topology_tests.rs
+@@ -0,0 +1,419 @@
++//! Actual owner/SDK evidence for dry topology. No plugin binary or native UI.
++use super::*;
++
++fn dry_state() -> Arc<MockState> {
++    let state = Arc::new(MockState::default());
++    state.dry_topology.store(true, Ordering::Relaxed);
++    state.output_buses.store(3, Ordering::Relaxed);
++    state.channels.store(2, Ordering::Relaxed);
++    state.event_inputs.store(1, Ordering::Relaxed);
++    state
++}
++
++fn restore_blob() -> Vec<u8> {
++    encode_state_snapshot(&StateSnapshot {
++        component: vec![1],
++        controller: None,
++    })
++    .unwrap()
++}
++
++fn all_unknown(plugin: &PluginImpl) {
++    let state = &plugin.runtime.bus_activation;
++    for side in [
++        &state.audio_input_acks,
++        &state.audio_output_acks,
++        &state.event_input_acks,
++        &state.event_output_acks,
++    ] {
++        assert!(side.iter().all(Option::is_none));
++    }
++}
++
++#[test]
++fn dry_defaults_keep_inactive_unknown_until_actual_false_acknowledgment() {
++    let trace = Trace::default();
++    let state = dry_state();
++    let mut plugin = plugin_fixture(&trace, &state);
++    plugin.setup_processing().unwrap();
++    let initial = plugin.checked_audio_bus_layout().unwrap();
++    assert_eq!(initial.inputs[0].active, Some(true));
++    assert_eq!(
++        initial.outputs.iter().map(|b| b.active).collect::<Vec<_>>(),
++        [Some(true), None, None]
++    );
++    assert_eq!(
++        state.activation_calls.lock().unwrap().as_slice(),
++        &[
++            (kAudio as i32, kInput as i32, 0, true),
++            (kAudio as i32, kOutput as i32, 0, true),
++            (kEvent as i32, kInput as i32, 0, true)
++        ]
++    );
++    trace.clear();
++    // Observations never install evidence or invoke activation.
++    plugin.checked_audio_bus_layout().unwrap();
++    plugin.event_bus_layout().unwrap();
++    assert!(!trace.methods().iter().any(|(_, m)| *m == "activateBus"));
++    for index in [1, 2] {
++        plugin
++            .set_bus_active(
++                crate::MediaType::Audio,
++                crate::BusDirection::Output,
++                index,
++                false,
++            )
++            .unwrap();
++    }
++    let acknowledged = plugin.checked_audio_bus_layout().unwrap();
++    assert_eq!(
++        acknowledged
++            .outputs
++            .iter()
++            .map(|b| b.active)
++            .collect::<Vec<_>>(),
++        [Some(true), Some(false), Some(false)]
++    );
++    assert!(acknowledged.outputs[0].is_main);
++    assert!(acknowledged.outputs[1..].iter().all(|b| !b.is_main));
++    let before = plugin.runtime.bus_activation.clone();
++    plugin.reconfigure(44100.0, 128).unwrap();
++    assert_eq!(
++        plugin.runtime.bus_activation, before,
++        "successful unchanged descriptors may retain the original acknowledgment"
++    );
++    drop(plugin);
++    trace.assert_thread(thread::current().id());
++}
++
++#[test]
++fn failed_activation_and_descriptor_change_during_success_never_reuse_old_ack() {
++    for descriptor_changes in [false, true] {
++        let trace = Trace::default();
++        let state = Arc::new(MockState::default());
++        let mut plugin = plugin_fixture(&trace, &state);
++        plugin.setup_processing().unwrap();
++        assert_eq!(
++            plugin.checked_audio_bus_layout().unwrap().outputs[0].active,
++            Some(true)
++        );
++        if descriptor_changes {
++            let weak = Arc::downgrade(&state);
++            *state.activation_callback.lock().unwrap() = Some(Box::new(move || {
++                if let Some(state) = weak.upgrade() {
++                    state.audio_bus_aux.store(true, Ordering::Relaxed);
++                }
++            }));
++        } else {
++            state.fail_activation.store(true, Ordering::Relaxed);
++        }
++        let result = plugin.set_bus_active(
++            crate::MediaType::Audio,
++            crate::BusDirection::Output,
++            0,
++            true,
++        );
++        assert_eq!(result.is_ok(), descriptor_changes);
++        assert_eq!(
++            plugin.checked_audio_bus_layout().unwrap().outputs[0].active,
++            None
++        );
++        // Returning to an earlier descriptor cannot resurrect discarded evidence.
++        state.audio_bus_aux.store(false, Ordering::Relaxed);
++        state.fail_activation.store(false, Ordering::Relaxed);
++        *state.activation_callback.lock().unwrap() = None;
++        plugin.reconfigure(48000.0, 16).unwrap();
++        assert_eq!(
++            plugin.checked_audio_bus_layout().unwrap().outputs[0].active,
++            None
++        );
++    }
++}
++
++#[test]
++fn state_failure_and_failed_post_restore_negotiation_clear_all_acknowledgments() {
++    for failure in 0..3 {
++        let trace = Trace::default();
++        let state = dry_state();
++        let mut plugin = plugin_fixture(&trace, &state);
++        plugin.setup_processing().unwrap();
++        match failure {
++            0 => state.fail_state.store(true, Ordering::Relaxed),
++            1 => state.fail_arrangement.store(true, Ordering::Relaxed),
++            _ => state.fail_setup.store(true, Ordering::Relaxed),
++        }
++        assert!(plugin
++            .load_state_with_context(&restore_blob(), &StateContext::Project)
++            .is_err());
++        all_unknown(&plugin);
++    }
++}
++
++#[test]
++fn successful_restore_attests_retained_false_without_extra_activation_policy() {
++    let trace = Trace::default();
++    let state = dry_state();
++    let mut plugin = plugin_fixture(&trace, &state);
++    plugin.setup_processing().unwrap();
++    state.activation_calls.lock().unwrap().clear();
++    plugin
++        .load_state_with_context(&restore_blob(), &StateContext::Project)
++        .unwrap();
++    assert_eq!(
++        state.activation_calls.lock().unwrap().as_slice(),
++        &[
++            (kAudio as i32, kInput as i32, 0, true),
++            (kAudio as i32, kOutput as i32, 0, true),
++            (kAudio as i32, kOutput as i32, 1, false),
++            (kAudio as i32, kOutput as i32, 2, false),
++            (kEvent as i32, kInput as i32, 0, true)
++        ]
++    );
++    assert_eq!(
++        plugin
++            .checked_audio_bus_layout()
++            .unwrap()
++            .outputs
++            .iter()
++            .map(|b| b.active)
++            .collect::<Vec<_>>(),
++        [Some(true), Some(false), Some(false)]
++    );
++}
++
++#[test]
++fn io_restart_service_failure_before_refresh_invalidates_evidence() {
++    let trace = Trace::default();
++    let state = dry_state();
++    let mut plugin = plugin_fixture(&trace, &state);
++    plugin.start_processing().unwrap();
++    let callback = plugin
++        .control
++        .component_handler
++        .as_ref()
++        .unwrap()
++        .to_com_ptr::<IComponentHandler>()
++        .unwrap();
++    state.fail_deactivate.store(true, Ordering::Relaxed);
++    assert_eq!(
++        unsafe { callback.restartComponent(RestartFlags_::kIoChanged) },
++        kResultOk
++    );
++    state.activation_calls.lock().unwrap().clear();
++    assert!(plugin.service_host_requests().is_err());
++    assert!(state.activation_calls.lock().unwrap().is_empty());
++    all_unknown(&plugin);
++    state.fail_deactivate.store(false, Ordering::Relaxed);
++}
++
++#[test]
++fn event_rebuild_count_reorder_and_read_failure_cannot_resurrect_acknowledgments() {
++    for changed in 0..3 {
++        let trace = Trace::default();
++        let state = Arc::new(MockState::default());
++        state.event_inputs.store(2, Ordering::Relaxed);
++        let mut plugin = plugin_fixture(&trace, &state);
++        plugin.setup_processing().unwrap();
++        assert!(plugin
++            .event_bus_layout()
++            .unwrap()
++            .inputs
++            .iter()
++            .all(|b| b.active == Some(true)));
++        match changed {
++            0 => state.event_inputs.store(1, Ordering::Relaxed),
++            1 => state.event_names_reversed.store(true, Ordering::Relaxed),
++            _ => state.event_bus_info_error.store(true, Ordering::Relaxed),
++        }
++        plugin.reconfigure(48000.0, 32).unwrap();
++        assert!(plugin
++            .runtime
++            .bus_activation
++            .event_input_acks
++            .iter()
++            .all(Option::is_none));
++        state.event_inputs.store(2, Ordering::Relaxed);
++        state.event_names_reversed.store(false, Ordering::Relaxed);
++        state.event_bus_info_error.store(false, Ordering::Relaxed);
++        plugin.reconfigure(48000.0, 16).unwrap();
++        assert!(plugin
++            .event_bus_layout()
++            .unwrap()
++            .inputs
++            .iter()
++            .all(|b| b.active.is_none()));
++    }
++}
++
++/// Called only by the real COM mock Process vtable, with production prepared buffers.
++/// Every nested pointer used below is checked for the expected shape/non-nullness first.
++/// It returns SDK failure on an assertion mismatch rather than unwinding through COM.
++pub(super) unsafe fn check_dry_sdk_buffers(data: &mut ProcessData) -> bool {
++    if data.numSamples != 128
++        || data.numInputs != 1
++        || data.numOutputs != 3
++        || data.inputs.is_null()
++        || data.outputs.is_null()
++    {
++        return false;
++    }
++    let input = &mut *data.inputs;
++    if input.numChannels != 2 {
++        return false;
++    }
++    for bus_index in 0..3 {
++        if (*data.outputs.add(bus_index)).numChannels != 2 {
++            return false;
++        }
++    }
++    macro_rules! check {
++        ($field:ident, $sample:ty) => {{
++            if input.__field0.$field.is_null() {
++                return false;
++            }
++            for channel in 0..2 {
++                let samples = *input.__field0.$field.add(channel);
++                if samples.is_null() {
++                    return false;
++                }
++                if !std::slice::from_raw_parts(samples, 128)
++                    .iter()
++                    .all(|x| x.to_bits() == 0)
++                {
++                    return false;
++                }
++                // Deliberately poison host input storage after observation. The next call
++                // must overwrite it, whether explicit dry zeros or omitted flat inputs.
++                std::slice::from_raw_parts_mut(samples, 128).fill(0.75 as $sample);
++            }
++            for bus_index in 0..3 {
++                let bus = &mut *data.outputs.add(bus_index);
++                if bus.__field0.$field.is_null() {
++                    return false;
++                }
++                for channel in 0..2 {
++                    let samples = *bus.__field0.$field.add(channel);
++                    if bus_index == 0 {
++                        if samples.is_null() {
++                            return false;
++                        }
++                        std::slice::from_raw_parts_mut(samples, 128).fill((channel + 1) as $sample);
++                    } else if !samples.is_null() {
++                        return false;
++                    }
++                }
++                bus.silenceFlags = 0;
++            }
++        }};
++    }
++    if data.symbolicSampleSize == SymbolicSampleSizes_::kSample32 as i32 {
++        check!(channelBuffers32, f32);
++    } else if data.symbolicSampleSize == SymbolicSampleSizes_::kSample64 as i32 {
++        check!(channelBuffers64, f64);
++    } else {
++        return false;
++    }
++    true
++}
++
++#[test]
++fn dry_generator_actual_sdk_f32_and_f64_preserves_all_slots_and_silences_every_input_call() {
++    for sample_size in [ProcessingSampleSize::F32, ProcessingSampleSize::F64] {
++        let trace = Trace::default();
++        let state = dry_state();
++        let mut plugin = plugin_fixture(&trace, &state);
++        plugin.runtime.sample_size = sample_size;
++        plugin.runtime.block_size = 128;
++        plugin.setup_processing().unwrap();
++        plugin
++            .load_state_with_context(&restore_blob(), &StateContext::Project)
++            .unwrap();
++        plugin.start_processing().unwrap();
++        let expected = plugin.checked_audio_bus_layout().unwrap();
++        assert_eq!(plugin.output_channel_count(), 2);
++        for inputs in [2, 2, 0, 0] {
++            let mut buffers = AudioBuffers::new(inputs, 2, 128, 48000.0);
++            assert!(buffers.inputs.iter().flatten().all(|x| x.to_bits() == 0));
++            plugin.process(&mut buffers).unwrap();
++            assert_eq!(buffers.outputs, [vec![1.0; 128], vec![2.0; 128]]);
++            assert_eq!(plugin.checked_audio_bus_layout().unwrap(), expected);
++        }
++        assert_eq!(
++            *state.dry_process_checks.lock().unwrap(),
++            vec![(sample_size.symbolic(), true); 4]
++        );
++        plugin.stop_processing().unwrap();
++        drop(plugin);
++        trace.assert_thread(thread::current().id());
++    }
++}
++
++#[test]
++fn partial_activation_refresh_failure_does_not_publish_earlier_successes() {
++    let trace = Trace::default();
++    let state = dry_state();
++    let mut plugin = plugin_fixture(&trace, &state);
++    plugin.setup_processing().unwrap();
++    state.activation_calls.lock().unwrap().clear();
++    let entered = Arc::new(AtomicUsize::new(0));
++    let observed = entered.clone();
++    let weak = Arc::downgrade(&state);
++    *state.activation_callback.lock().unwrap() = Some(Box::new(move || {
++        if observed.fetch_add(1, Ordering::Relaxed) == 2 {
++            if let Some(state) = weak.upgrade() {
++                state.fail_activation.store(true, Ordering::Relaxed);
++            }
++        }
++    }));
++    assert!(plugin
++        .load_state_with_context(&restore_blob(), &StateContext::Project)
++        .is_err());
++    assert_eq!(entered.load(Ordering::Relaxed), 3);
++    assert_eq!(
++        state.activation_calls.lock().unwrap().as_slice(),
++        &[
++            (kAudio as i32, kInput as i32, 0, true),
++            (kAudio as i32, kOutput as i32, 0, true),
++            (kAudio as i32, kOutput as i32, 1, false)
++        ]
++    );
++    all_unknown(&plugin);
++}
++
++#[test]
++fn audio_count_and_reorder_rebuild_discard_old_index_evidence() {
++    for reorder in [false, true] {
++        let trace = Trace::default();
++        let state = Arc::new(MockState::default());
++        state.output_buses.store(2, Ordering::Relaxed);
++        let mut plugin = plugin_fixture(&trace, &state);
++        plugin.setup_processing().unwrap();
++        assert!(plugin
++            .checked_audio_bus_layout()
++            .unwrap()
++            .outputs
++            .iter()
++            .all(|b| b.active == Some(true)));
++        if reorder {
++            state.audio_names_reversed.store(true, Ordering::Relaxed);
++        } else {
++            state.output_buses.store(1, Ordering::Relaxed);
++        }
++        plugin.reconfigure(48000.0, 32).unwrap();
++        assert!(plugin
++            .runtime
++            .bus_activation
++            .audio_output_acks
++            .iter()
++            .all(Option::is_none));
++        state.output_buses.store(2, Ordering::Relaxed);
++        state.audio_names_reversed.store(false, Ordering::Relaxed);
++        plugin.reconfigure(48000.0, 16).unwrap();
++        assert!(plugin
++            .checked_audio_bus_layout()
++            .unwrap()
++            .outputs
++            .iter()
++            .all(|b| b.active.is_none()));
++    }
++}
 --- a/src/internal/processor_lease.rs
 +++ b/src/internal/processor_lease.rs
 @@ -0,0 +1,68 @@
@@ -31159,7 +32464,7 @@
 +}
 --- a/src/strict_offline.rs
 +++ b/src/strict_offline.rs
-@@ -0,0 +1,614 @@
+@@ -0,0 +1,631 @@
 +//! Disabled-by-default Linux client for a single disposable offline generator.
 +//!
 +//! This closed development API has no App caller. One process-wide reservation
@@ -31705,7 +33010,7 @@
 +            deadline,
 +        )
 +    }
-+    /// Process one Q128 generator block with explicit transport and exact shape.
++    /// Process one Q128 generator block without participating input channels.
 +    /// Finite/audio-loss acceptance remains a caller policy; no buffers are padded.
 +    pub fn process(
 +        &mut self,
@@ -31713,23 +33018,40 @@
 +        transport: ProcessTransport,
 +        deadline: Instant,
 +    ) -> Result<AudioBlock, Failure> {
++        self.process_silent_generator(0, output_channels, transport, deadline)
++    }
++    /// Process one Q128 dry-generator block with explicit transport and exact shape.
++    /// Accepts only input counts 0..=2 and output counts 1..=2. Each participating input
++    /// is the same immutable positive-zero Q128 channel; caller audio cannot enter.
++    /// Finite/audio-loss acceptance remains a caller policy; no buffers are padded.
++    ///
++    /// ```compile_fail
++    /// use std::time::Instant;
++    /// use vst3_host::{ProcessTransport, strict_offline::Client};
++    /// fn cannot_supply_audio(client: &mut Client, samples: &[Vec<f32>],
++    ///                       transport: ProcessTransport, deadline: Instant) {
++    ///     client.process_silent_generator(samples, 2, transport, deadline);
++    /// }
++    /// ```
++    pub fn process_silent_generator(
++        &mut self,
++        input_channels: usize,
++        output_channels: usize,
++        transport: ProcessTransport,
++        deadline: Instant,
++    ) -> Result<AudioBlock, Failure> {
 +        // Shape validation remains inside the budgeted session, sealing invalid
-+        // requests with NotSent. Restrict the closed client to mono/stereo.
-+        if !matches!(output_channels, 1 | 2) {
++        // requests with NotSent and preserving deadline/cancellation precedence.
++        if input_channels > 2 || !matches!(output_channels, 1 | 2) {
 +            return Err(self
 +                .session
 +                .reject_request(fresh_helper::ErrorKind::Shape, deadline)
 +                .into());
 +        }
-+        let channels = output_channels;
 +        match self.exchange(
-+            RequestView::Process {
-+                inputs: &[],
-+                frames: 128,
-+                transport: Some(transport),
-+            },
++            RequestView::silent_generator(input_channels, transport),
 +            ReplyShape::Audio {
-+                channels,
++                channels: output_channels,
 +                frames: 128,
 +            },
 +            deadline,

@@ -576,7 +576,7 @@ EVENT_QA_FILES = frozenset((
 EVENT_INVENTORY_SHA256 = "9bf3d8af3a911286a766b628f547ee4579e2d40ef582b38b6c36254d0e9b8b88"
 # Explicitly reviewed documentation that may land on an independent branch.
 OPTIONAL_SOURCE_FILES = frozenset((
-    "docs/NATIVE_CONTROL_AUTOMATION.md",
+    "docs/NATIVE_CONTROL_AUTOMATION.md", "docs/DRY_GENERATOR_TOPOLOGY.md",
     "docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md",
     "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md", "docs/LOCAL_SAMPLE_BROWSER.md",
     "docs/HEADLESS_UI_QA.md", "docs/NATIVE_VST3_EDITORS.md", "docs/FL_INSPIRED_NATIVE_THEME.md", "docs/MULTIWINDOW_WORKSPACE.md",
@@ -600,8 +600,8 @@ VENDOR_COMMIT = "ed054908cfe057694d8cf037d0c39dfb5eb4c2ca"
 # modified dependency's entire source tree. A changed bundle needs fresh review.
 VENDOR_FILE_HASHES = {
     f"{VENDOR_PATH}/LICENSE": "a65a537295910b776a8b2edb2e7410c3b0e975ca6388994e032c4d1842b4952d",
-    f"{VENDOR_PATH}/CITRUS_PATCHES.md": "2e8dec7469f9c1c514965f1b3b1473f67a7ccf6a30f72d8f2531a853f91bdba3",
-    f"{VENDOR_PATH}/CITRUS.patch": "d18fdb892290def76c39aadbe95c4f4e243aeeec0cf6d1b7d62d4d6b0bccd560",
+    f"{VENDOR_PATH}/CITRUS_PATCHES.md": "587f84166327e33ff76d3698af2884bfcdde5901516f13007eb6f859e3fdaae4",
+    f"{VENDOR_PATH}/CITRUS.patch": "94d166154996bdf6456885fcd59871abf94a0c51edd1f1ca7b83124cb9b98b63",
     f"{VENDOR_PATH}/.cargo_vcs_info.json": "737b52ce29e201e3cc14bab20bc449c6e4a3238c78320391a14d8bc1cf8a9657",
 }
 VENDOR_FILES = frozenset(VENDOR_FILE_HASHES)

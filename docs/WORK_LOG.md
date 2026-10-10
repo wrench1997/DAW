@@ -1660,3 +1660,24 @@ binding-schema failure is retained. Current tests and historical reuse remain
 separately labeled. Target is released; result docs/hash review and durable tested
 archive close this stop. No real plugin, native UI, selected-occurrence integration
 or user-facing render activation occurred.
+
+
+## 2026-10-10 — Dry-generator topology prerequisite, UNVALIDATED
+
+Root approved proposal aa82dc92 after the fixed initialized Surge topology was
+shown to fall outside the old bounce policy. No genuine run was attempted under
+that refusal. This isolated change, based on reviewed 7255e5f0, preserves complete
+audio descriptors, truthful successful activation evidence and explicit silent
+input authority. A dormant feature-gated fresh-source constructor completes its
+one-shot acknowledgment/setup before SlotReady; working-source capture remains
+observational. Default activation policy and strict per-block metadata remain.
+
+Source fixtures include bounded policy/drift, no mutation on refused capture or
+pure reused restore, state/restart/activation failures, exact source admission
+ledgers, codec cancellation/allocation checks and actual f32/f64 full SDK bus
+shapes with repeated poisoned input overwrite. Additional owner setup event reads
+revalidate bindings; no new default activation calls are added. Documentation and
+vendor patch/hash pins are refreshed. Formatting and static source review only
+at this checkpoint; archive/persistence and exact independent reviews precede
+compiler/mock gates. Genuine plugins, native UI/device, user action activation
+and publication remain separately gated.

@@ -452,3 +452,19 @@ deadlines and a nonwaiting retained-owner cleanup continuation share the origina
 teardown kernel, preserve first error evidence and cache proven exit status.
 The repository's STRICT_OFFLINE_CLIENT.md records limits and the separately
 gated future one-shot adapter; no real plugin or App integration is included.
+
+## Dry-generator acknowledgment and silent-input prerequisite (unvalidated)
+
+Owner activation records now distinguish successful false/true SDK acknowledgments
+from prepared participation, retaining a complete observed bus descriptor binding.
+Default inactive buses remain unknown; no default activation calls are added.
+Known state/topology changes and failures invalidate records; owner setup rechecks
+audio and event bindings. Pure rejected used-Surge restore leaves evidence intact.
+Checked getters expose the recorded known state, never infer false from prepared
+nonparticipation. No SDK processing kernel or owning COM thread authority changes.
+
+The disabled closed strict client adds count-only Q128 silent generator inputs
+(0..2); its fixed borrowed positive-zero view uses the existing bounded codec,
+without arbitrary external input authority or a per-call input Vec. New codec,
+client, activation and actual f32/f64 COM fixtures are unexecuted at this freeze.
+See docs/DRY_GENERATOR_TOPOLOGY.md for source/capture admission and remaining gates.
