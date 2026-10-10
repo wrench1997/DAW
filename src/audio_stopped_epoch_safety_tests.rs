@@ -1132,19 +1132,66 @@ fn stopped_epoch_safety_event_failure_matrix_keeps_obligation_and_fault_evidence
 #[test]
 fn stopped_epoch_safety_reset_fault_cannot_be_mistaken_for_delivery() {
     let mut f = StoppedSafetyFixture::new();
+    let original_snapshot = f.workers[0].control().plugin_latency_snapshot().unwrap();
+    assert!(original_snapshot.slot_is_active(0));
     f.workers[0]
         .probe
         .reset_failure
         .store(true, Ordering::Release);
     f.activate(2, false);
-    wait_until(|| f.workers[0].control().stats().reset_faults != 0);
-    f.pump(128);
+    // A reset fault and its coherent inactive metadata publication are separate
+    // worker writes. Await both so the real callback deterministically sees the
+    // changed graph identity before its later generic worker-health check.
+    wait_until(|| {
+        let stats = f.workers[0].control().stats();
+        stats.reset_faults == 1
+            && stats.faults == 1
+            && f.workers[0]
+                .control()
+                .plugin_latency_snapshot()
+                .is_some_and(|snapshot| {
+                    snapshot.revision > original_snapshot.revision && !snapshot.slot_is_active(0)
+                })
+    });
+    let mut fault_event = None;
+    wait_until(|| {
+        while let Some(event) = f.workers[0].control_mut().try_next_event() {
+            if matches!(
+                event,
+                crate::plugins::plugin_runtime::RuntimeEvent::SlotFault { .. }
+            ) {
+                fault_event = Some(event);
+                return true;
+            }
+        }
+        false
+    });
+    assert!(matches!(
+        &fault_event,
+        Some(crate::plugins::plugin_runtime::RuntimeEvent::SlotFault { slot: 0, message })
+            if message == "transport epoch 2 reset preflight failed: deliberate stopped safety reset failure"
+    ));
     assert_eq!(
-        f.callback().dsp.plugin_fault.unwrap().reason,
-        PluginProcessingFaultReason::WorkerFault
+        f.workers[0].probe.trace(),
+        vec![SafetyTrace::ResetPreflight]
+    );
+    f.pump(128);
+    let fault = f.callback().dsp.plugin_fault.unwrap();
+    assert_eq!(
+        (fault.endpoint_id, fault.epoch, fault.reason),
+        (
+            SAFETY_GENERATOR_ENDPOINT,
+            2,
+            PluginProcessingFaultReason::LatencyDrift
+        )
     );
     assert!(f.generator().stopped_epoch_safety.is_some());
-    assert_eq!(f.generator().stats().submitted_quanta, 0);
+    assert!(f.stats().iter().all(|stats| stats.submitted_quanta == 0));
+    assert!(
+        f.workers
+            .iter()
+            .all(|worker| worker.control().stats().submitted == 0)
+    );
     assert_eq!(f.workers[0].probe.process_count.load(Ordering::Acquire), 0);
     assert!(
         !f.callback()
@@ -1154,6 +1201,10 @@ fn stopped_epoch_safety_reset_fault_cannot_be_mistaken_for_delivery() {
     let before = f.stats();
     f.pump(128);
     assert_eq!(f.stats(), before);
+    assert_eq!(
+        f.workers[0].probe.trace(),
+        vec![SafetyTrace::ResetPreflight]
+    );
 }
 
 #[test]
