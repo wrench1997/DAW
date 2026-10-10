@@ -1206,3 +1206,11 @@ build reproduces the same helper SHA256
 The initial compile failure, absent upstream fixture, and prior checkpoint
 qualifications remain in the evidence. Genuine-plugin/native/Windows runtime
 acceptance and release are outside these source-only checkpoints.
+
+
+## 2026-10-10 01:58 UTC — Integrate reviewed metadata/layout refusal checkpoints
+
+- The clean recovered development branch fast-forwards through reviewed `6fdfb8f39a130dfb02f0707d3e0cc5b8eeaefb64` and `959958f6bcb1f5ac99b297b94eee6224eae9ebba`. All 700 tracked files match the final executed source manifest before additive status documentation. No unavailable former worktree or artifact is used as current evidence; the unrelated dirty checkout is untouched.
+- Exact owner receipts bind current 1,188 App/1,171 core, both strict root Clippy profiles, fmt and 239 Python. The unchanged 68 vendor/helper/protocol inputs explicitly reuse checkpoint01's 400 available vendor, 26 doctest, 25 helper and 13 protocol results. The absent Dexed fixture, zero-match first filter, initial helper-env skip and corrected test-only type-path failure remain preserved.
+- Integration verifies copied helper SHA256 `000195915ef88f8ab2e212b97f87f26bb41eb9a7d54a36540fdb470a61e409cd`, replays the official crate plus cumulative patch for all 46 files and independently reruns Python/package checks. Only documentation changes follow; tested production bytes stay exact.
+- This is bounded error propagation/admission, not new genuine-plugin, native editor, Windows runtime, thread or performance acceptance. Historical cbbbe1f source and its approved appendices retain their original attribution. New exact-commit CI and final bundle integrity are recorded separately after publication; no main merge or executable release.

@@ -11,7 +11,14 @@ Status terms:
 
 ## Current implementation and historical evidence
 
-Current combined sourcef086170 has independently reviewed private same-thread
+Current source adds checked latency/tail and audio-bus layout admission. Failed
+queries reject the candidate or preserve the existing fault boundary rather than
+inventing zero/stereo metadata. Source tests pass 1,188 App and 1,171 core cases;
+new genuine-plugin/native/Windows runtime acceptance remains pending. No new UI,
+threading, latency or FL feature-parity claim follows. Details and deliberately
+reused unchanged-input test results are in [processor domains](PLUGIN_PROCESSOR_DOMAINS.md).
+
+Historical combined source f086170 has independently reviewed private same-thread
 scoped domains and an [owner-only reset-origin transaction](PLUGIN_RESET_ORIGIN.md).
 Ordinary/reset SDK calls share the restricted RAII gate. New combined source gates and
 actual graph/UI/state acceptance pass; no worker, GUI stall or realtime improvement

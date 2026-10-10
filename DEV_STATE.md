@@ -1,8 +1,16 @@
 # 当前开发状态
 
-最后更新：2026-10-09 17:32 UTC。以当前源码、集成状态和实际执行结果为准。
+最后更新：2026-10-10 01:58 UTC。以当前源码、集成状态和实际执行结果为准。
 
-## 当前目标与状态
+## 当前检查点：拒绝未知插件元数据
+
+- 已按原提交快进集成 `6fdfb8f` 和 `959958f`，与独立审查、执行测试的 700 个源码文件逐字节一致。生产路径不再把 latency/tail 查询失败当作合法零值，也不再把 `AudioBusLayout` 查询失败猜成 stereo；合法零值、无限 tail 和合法 empty/mono/multibus 回答仍保留。
+- 当前源码测试通过：1,188 all-feature App、1,171 core、两套严格 root Clippy、fmt；集成目录重新执行 239 Python（含四项真实 Unix descriptor）及 vendor patch 重建。第二提交未变的 68 个 vendor/helper/protocol 输入明确复用第一提交的 400 available vendor、26 doctests、25 helper、13 protocol 结果，不冒称重新执行。
+- 失败候选不得变成 ready；后续元数据错误保留既有 sticky fault 和旧候选保留规则。Timing Retry/新 epoch 不会复活已故障的 helper。没有自动状态重载、静默预热、新线程或协议变更。App 通用 loader 失败保留用不存在的 VST2 fixture 测试，VST3 layout 拒绝由直接 backend/candidate 测试覆盖，不宣称端到端 App VST3 layout 验收。
+- 本轮尚无新的真实插件、原生编辑器、Windows runtime 或性能验收。下方真实插件记录绑定历史 `f086170`/`cbbbe1f`，不得借作新 helper 的通过。新 Windows CI 待发布后执行；终态写入源码交付包的外部验证记录。
+- 已交付历史 `cbbbe1f` 的 [preview](https://github.com/wrench1997/DAW/actions/runs/37967569203) 通过；[quality](https://github.com/wrench1997/DAW/actions/runs/37967569032) 源码和独立 native control/state/lifecycle 通过，但两次 paint capture 失败，repaint 跳过。没有完整 native paint 或商业发布结论。
+
+## 已交付历史检查点：scoped session 与 reset origin
 
 
 - **新 scoped-session + reset-origin 合并源码：`f08617092f74903862a9e7bf04698c2db49b523c`。** 审查通过的96410ec与fd6f5b1已合并，独立语义审查确认普通/reset SDK调用共用restricted AtomicBool RAII gate；两种私有facade仍!Send/!Sync，reset只可在session rejoin后由owner执行。新增三路径gate回归与六项reset编译期权限检查；精确Surge instrument1.3.4 reset256兼容修正236f784已合入，136源码hash一致。最终组合源码门禁及新的真实图/UI/state验收通过；新Windows CI须发布后独立执行。

@@ -1,6 +1,6 @@
 # Development roadmap
 
-Updated: 2026-10-09 17:32 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-10 01:58 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
@@ -13,7 +13,22 @@ Updated: 2026-10-09 17:32 UTC. Current priorities are detailed Piano composition
 
 - Follow-on guarded state source **`60134a5`** is locally integrated from reviewed `c056dc5`. It rejects used/editor-opened exact Surge XT 1.3.4 before helper detachment or mutation, with fresh-instance/native rejection evidence. This guard later passed combined gates and exact Windows source/preview at244f622. The [state report](PLUGIN_STATE_RESTORE_LIMITS.md) retains previous failures, the legacy Admin caller limitation and absence of silent settlement. It now combines with reviewed timing source at **4fdfbc2**, whose fresh aggregate gates now pass1,170 app +22 helper +5 editor protocol +2 transport protocol,1,166 core,207 Python,276 available vendor tests (one named missing-fixture exclusion),26 doctests, both strict Clippy modes and both MSVC source profiles. Combined default2048 four-case delivery and fresh-state checks passed with helper9dd18d74; its exact244f622 Windows results are recorded above.
 
-## Current scoped-session and reset-origin integration
+## Current checked metadata/layout checkpoint
+
+Reviewed `6fdfb8f` and `959958f` are integrated byte-for-byte. Failed isolated
+latency/tail polls and unavailable AudioBusLayout now reject readiness instead of
+silently supplying zero/stereo. Valid replies and the existing sticky-fault,
+old-candidate retention and no-automatic-recovery policy remain. Current source
+passes 1,188 App/1,171 core, both strict root Clippy profiles, fmt and 239 Python.
+The unchanged vendor/helper/protocol inputs explicitly reuse 400 available vendor,
+26 doctest, 25 helper and 13 protocol results from the preceding source checkpoint.
+One named absent upstream fixture and test-only setup failures remain recorded.
+No new genuine-plugin/native/Windows runtime or performance acceptance is implied.
+The next gate is exact-commit Windows CI, with terminal results in the source
+bundle receipt. Historical cbbbe1f preview passed; quality retained its native paint
+failure despite successful independent control/state/lifecycle checks.
+
+## Historical scoped-session and reset-origin integration
 
 Reviewed sourcef086170 combines private borrowed control/processor sessions with
 owner-only reset-origin processing. Independent semantic review confirms SDK-only
