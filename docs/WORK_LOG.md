@@ -1681,3 +1681,30 @@ vendor patch/hash pins are refreshed. Formatting and static source review only
 at this checkpoint; archive/persistence and exact independent reviews precede
 compiler/mock gates. Genuine plugins, native UI/device, user action activation
 and publication remain separately gated.
+
+### Dry-topology first mock run and fixture correction (unvalidated continuation)
+
+Frozen 3868c2fb compiled against the current worktree and passed all 596 available
+vendor tests (one pre-existing absent SDK metadata fixture excluded), 27 doc tests,
+direct vendor Clippy, and 59 selected App bounce tests. The separate offline suite
+stopped at 22/23: its new successful worker-admission fixture rejected SlotFault.
+The original assertion did not print the message and its unwind deleted the
+helper ledger before worker cleanup, causing a subsequent FileNotFoundError.
+Those raw logs and the evidence gap remain preserved; no exact missing runtime
+message or original request ledger is claimed recovered.
+
+Independent source inspection established that the worker immediately performs
+normal native polling, but this mock omitted TakeParameterEdits,
+TakeHostNotifications and ServiceHostRequests. Its first unsupported polling
+command therefore reaches the deliberate Unexpected/Error response. The narrow
+correction adds compile-checked empty replies, requires the full initial poll and
+clean published snapshot, and retains strict no-fault/active/no-positive-audio
+assertions. Both new worker fixtures now release waits and attempt bounded join
+before fixture removal; panic or non-Joined retains the directory and outcome.
+The legacy worker's possible timeout/detach is still a limitation, not strict
+child-reap proof. Production Rust and all vendor bytes are unchanged.
+
+The corrected source must be archived and reviewed before fresh offline tests
+and previously unexecuted gates. Earlier passes remain bound to 3868c2fb with
+explicit unchanged-vendor/unchanged-test attribution; no whole-App or genuine
+qualification is claimed. No retry or criterion relaxation occurred in production.

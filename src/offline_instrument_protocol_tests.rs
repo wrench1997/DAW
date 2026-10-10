@@ -4,7 +4,7 @@ use crate::instrument_bounce::BounceAudioBus;
 use std::{
     os::unix::fs::PermissionsExt,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
@@ -100,6 +100,14 @@ fn response_templates() -> String {
             "NativeDirtyRevision",
             R::NativeDirtyRevision { revision: 9 },
         ),
+        ("TakeParameterEdits", R::ParameterEdits { edits: vec![] }),
+        (
+            "TakeHostNotifications",
+            R::HostNotifications {
+                notifications: vec![],
+            },
+        ),
+        ("ServiceHostRequests", R::RestartFlags { bits: 0 }),
         ("LatencySamples", R::LatencySamples { samples: 0 }),
         ("TailSamples", R::TailSamples { samples: 0 }),
         (
@@ -189,6 +197,7 @@ struct FakeHelper {
     script: PathBuf,
     log: PathBuf,
     plugin: PathBuf,
+    preserve_evidence: AtomicBool,
 }
 
 impl FakeHelper {
@@ -326,6 +335,7 @@ for line in sys.stdin:
             script,
             log,
             plugin,
+            preserve_evidence: AtomicBool::new(false),
         }
     }
 
@@ -386,7 +396,87 @@ for line in sys.stdin:
 
 impl Drop for FakeHelper {
     fn drop(&mut self) {
+        if std::thread::panicking() || self.preserve_evidence.load(Ordering::Relaxed) {
+            eprintln!(
+                "Retained offline protocol fixture evidence: {}",
+                self.dir.display()
+            );
+            return;
+        }
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The worker owns the helper, so fixture files outlive its bounded shutdown even
+/// when an assertion unwinds. The production legacy shutdown may still time out
+/// and detach. Retaining evidence does not prove worker join or helper reap.
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+struct FreshSourceWorkerGuard<'a> {
+    worker: Option<super::super::PluginWorkerGuard>,
+    outcome: Option<super::super::ShutdownOutcome>,
+    fixture: &'a FakeHelper,
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+impl<'a> FreshSourceWorkerGuard<'a> {
+    fn new(fixture: &'a FakeHelper, worker: super::super::PluginWorkerGuard) -> Self {
+        Self {
+            worker: Some(worker),
+            outcome: None,
+            fixture,
+        }
+    }
+
+    fn join(&mut self) -> super::super::ShutdownOutcome {
+        use super::super::ShutdownOutcome;
+        if let Some(outcome) = self.outcome {
+            return outcome;
+        }
+        let worker = self
+            .worker
+            .take()
+            .expect("unjoined fixture owns its worker");
+        // Also release any test-owned wait before asking its owner to exit.
+        if let Err(error) =
+            std::fs::write(self.fixture.dir.join("release"), b"fixture owner shutdown")
+        {
+            self.fixture
+                .preserve_evidence
+                .store(true, Ordering::Relaxed);
+            eprintln!("Unable to release offline protocol fixture: {error}");
+        }
+        let outcome = worker.shutdown_blocking(std::time::Duration::from_secs(5));
+        self.outcome = Some(outcome);
+        if outcome != ShutdownOutcome::Joined {
+            self.fixture
+                .preserve_evidence
+                .store(true, Ordering::Relaxed);
+        }
+        if let Err(error) = std::fs::write(
+            self.fixture.dir.join("worker-shutdown.txt"),
+            format!("{outcome:?}\n"),
+        ) {
+            self.fixture
+                .preserve_evidence
+                .store(true, Ordering::Relaxed);
+            eprintln!("Unable to save offline protocol shutdown evidence: {error}");
+        }
+        outcome
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+impl Drop for FreshSourceWorkerGuard<'_> {
+    fn drop(&mut self) {
+        if self.worker.is_some() {
+            let outcome = self.join();
+            if std::thread::panicking() || outcome != super::super::ShutdownOutcome::Joined {
+                eprintln!(
+                    "Offline protocol worker shutdown: {outcome:?}; evidence: {}",
+                    self.fixture.dir.display()
+                );
+            }
+        }
     }
 }
 
@@ -1146,32 +1236,30 @@ fn failed_fresh_source_worker_publishes_no_ready_or_active_slot_and_leaves_old_s
         "fresh_changed_on_start",
     ] {
         let fake = FakeHelper::new(mode);
-        let mut chain =
-            PluginChain::spawn_fresh_bounce_source(41, fake.spec(vec![1, 2, 3]), fresh_config())
-                .unwrap();
+        let PluginChain {
+            audio: _audio,
+            mut control,
+            guard,
+        } = PluginChain::spawn_fresh_bounce_source(41, fake.spec(vec![1, 2, 3]), fresh_config())
+            .unwrap();
+        let mut worker = FreshSourceWorkerGuard::new(&fake, guard);
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut fault = false;
         while Instant::now() < deadline {
-            while let Some(event) = chain.control.try_next_event() {
+            while let Some(event) = control.try_next_event() {
                 assert!(!matches!(event, RuntimeEvent::SlotReady { .. }), "{mode}");
                 if matches!(event, RuntimeEvent::SlotFault { slot: 0, .. }) {
                     fault = true;
                 }
             }
-            if fault && chain.control.plugin_latency_snapshot().is_some() {
+            if fault && control.plugin_latency_snapshot().is_some() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(fault, "candidate must report its failure: {mode}");
-        assert_eq!(
-            chain.control.plugin_latency_snapshot().unwrap().active_mask,
-            0
-        );
-        assert_eq!(
-            chain.guard.shutdown_blocking(Duration::from_secs(5)),
-            super::super::ShutdownOutcome::Joined
-        );
+        assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 0);
+        assert_eq!(worker.join(), super::super::ShutdownOutcome::Joined);
         assert!(old_source.prepared && old_source.plugin.is_processing());
         assert!(
             old.names().is_empty(),
@@ -1203,14 +1291,23 @@ fn fresh_source_worker_admits_ready_only_after_verified_setup_and_start() {
     use super::super::{PluginChain, RuntimeEvent};
     use std::time::{Duration, Instant};
     let fake = FakeHelper::new("fresh_normal");
-    let mut chain =
-        PluginChain::spawn_fresh_bounce_source(41, fake.spec(vec![1, 2, 3]), fresh_config())
-            .unwrap();
+    let PluginChain {
+        audio: _audio,
+        mut control,
+        guard,
+    } = PluginChain::spawn_fresh_bounce_source(41, fake.spec(vec![1, 2, 3]), fresh_config())
+        .unwrap();
+    let mut worker = FreshSourceWorkerGuard::new(&fake, guard);
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut ready = false;
     while Instant::now() < deadline {
-        while let Some(event) = chain.control.try_next_event() {
-            assert!(!matches!(event, RuntimeEvent::SlotFault { .. }));
+        while let Some(event) = control.try_next_event() {
+            if let RuntimeEvent::SlotFault { slot, message } = &event {
+                panic!(
+                    "unexpected slot {slot} fault: {message}; request ledger: {:#?}",
+                    fake.requests()
+                );
+            }
             if matches!(event, RuntimeEvent::SlotReady { slot: 0, .. }) {
                 let names = fake.names();
                 let start = names
@@ -1235,25 +1332,60 @@ fn fresh_source_worker_admits_ready_only_after_verified_setup_and_start() {
                 ready = true;
             }
         }
-        if ready && chain.control.plugin_latency_snapshot().is_some() {
+        let feedback_published = control
+            .native_editor_snapshot(0)
+            .is_some_and(|snapshot| snapshot.state.generation == 2 && snapshot.error.is_none());
+        if ready && feedback_published && control.plugin_latency_snapshot().is_some() {
             break;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    assert!(ready);
-    assert_eq!(
-        chain.control.plugin_latency_snapshot().unwrap().active_mask,
-        1
+    assert!(
+        ready,
+        "no SlotReady; request ledger: {:#?}",
+        fake.requests()
     );
+    let feedback = control
+        .native_editor_snapshot(0)
+        .expect("identified slot snapshot");
+    assert_eq!(
+        feedback.state.generation, 2,
+        "normal worker feedback must complete"
+    );
+    assert!(feedback.state.supported && feedback.state.has_editor && !feedback.state.open);
+    assert!(
+        feedback.error.is_none(),
+        "native feedback failed: {:?}; request ledger: {:#?}",
+        feedback.error,
+        fake.requests()
+    );
+    assert_eq!(feedback.dirty_revision, 0);
+    let names = fake.names();
+    assert!(
+        names
+            .windows(5)
+            .any(|window| window.iter().map(String::as_str).eq([
+                "Editor",
+                "TakeParameterEdits",
+                "TakeHostNotifications",
+                "ServiceHostRequests",
+                "NativeDirtyRevision",
+            ])),
+        "complete normal polling sequence missing: {names:?}"
+    );
+    assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 1);
     assert!(
         !fake
             .names()
             .iter()
             .any(|name| matches!(name.as_str(), "Process" | "ResetOrigin"))
     );
+    let joined = worker.join();
+    assert_eq!(joined, super::super::ShutdownOutcome::Joined);
     assert_eq!(
-        chain.guard.shutdown_blocking(Duration::from_secs(5)),
-        super::super::ShutdownOutcome::Joined
+        worker.join(),
+        joined,
+        "repeated join preserves the original observation"
     );
 }
 
@@ -1324,4 +1456,112 @@ fn fresh_source_keeps_original_zero_input_topology_without_activation_calls() {
     );
     assert_eq!(source.input_channels, 0);
     assert!(!fake.names().iter().any(|name| name == "SetBusActive"));
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_fixture_unwind_joins_worker_and_retains_terminal_evidence() {
+    use super::super::{PluginChain, RuntimeEvent};
+    use std::time::{Duration, Instant};
+    const INTENTIONAL_PANIC: &str = "intentional Rust panic to exercise fixture owner unwind";
+    let mut retained_directory = None;
+    let unwound: std::thread::Result<()> = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || {
+            let fake = FakeHelper::new("fresh_normal");
+            retained_directory = Some(fake.dir.clone());
+            let PluginChain {
+                audio: _audio,
+                mut control,
+                guard,
+            } = PluginChain::spawn_fresh_bounce_source(
+                41,
+                fake.spec(vec![1, 2, 3]),
+                fresh_config(),
+            )
+            .unwrap();
+            // No explicit join: this exact guard and the fixture must drop while unwinding.
+            let _worker = FreshSourceWorkerGuard::new(&fake, guard);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut ready = false;
+            let mut feedback_published = false;
+            while Instant::now() < deadline {
+                while let Some(event) = control.try_next_event() {
+                    if let RuntimeEvent::SlotFault { slot, message } = &event {
+                        panic!(
+                            "unexpected slot {slot} fault before unwind: {message}; request ledger: {:#?}",
+                            fake.requests()
+                        );
+                    }
+                    ready |= matches!(event, RuntimeEvent::SlotReady { slot: 0, .. });
+                }
+                feedback_published = control.native_editor_snapshot(0).is_some_and(|snapshot| {
+                    snapshot.state.generation == 2 && snapshot.error.is_none()
+                });
+                if ready && feedback_published {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                ready && feedback_published,
+                "worker setup must succeed before intentional unwind; request ledger: {:#?}",
+                fake.requests()
+            );
+            assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 1);
+            // Deliberate test-thread Rust panic, outside every helper/COM operation.
+            // RAII cleanup must not replace this payload with a secondary cleanup panic.
+            panic!("{INTENTIONAL_PANIC}");
+        },
+    ));
+    let panic = unwound.expect_err("fixture scope must unwind intentionally");
+    let message = panic
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| panic.downcast_ref::<&str>().copied());
+    assert_eq!(
+        message,
+        Some(INTENTIONAL_PANIC),
+        "original panic payload must survive bounded cleanup"
+    );
+    let directory = retained_directory.expect("fixture path retained outside unwinding scope");
+    assert!(
+        directory.is_dir(),
+        "panic must preserve the fixture directory"
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.join("worker-shutdown.txt")).unwrap(),
+        "Joined\n"
+    );
+    assert_eq!(
+        std::fs::read(directory.join("release")).unwrap(),
+        b"fixture owner shutdown"
+    );
+    let raw = std::fs::read_to_string(directory.join("requests.jsonl")).unwrap();
+    let requests: Vec<serde_json::Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        requests.last().and_then(serde_json::Value::as_str),
+        Some("Shutdown"),
+        "terminal helper request must be retained: {raw}"
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.as_str() == Some("Shutdown"))
+            .count(),
+        1
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.as_str() == Some("StopProcessing"))
+    );
+    assert!(!requests.iter().any(|request| request.get("Process").is_some() || request.get("ResetOrigin").is_some()));
+    // Inspect the actual bounded-join observation and terminal request before cleanup.
+    // Any failed assertion above leaves the retained evidence untouched; this does not
+    // claim the legacy shutdown mechanism has gained strict helper-reap guarantees.
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert!(!directory.exists());
 }
