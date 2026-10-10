@@ -1007,17 +1007,64 @@ fn owned_topology_actual_pending_receipt_never_launders_app_fault_or_retry() {
                 .is_err()
         );
     }
+    assert!(!test.fixture.app.plugin_processing_retry_required);
     test.fixture.app.plugin_processing_retry_pending =
         Some((claim.old_generation, claim.old_epoch));
-    assert!(topology::ordinary_health_clear_from_app(test.fixture.app()).is_err());
-    assert!(
-        test.ledger
-            .observe_issued(test.fixture.app.genuine_timeline_app_state())
-            .is_err()
+    // Ordinary health uses the independent required flag. The actual pending
+    // owner still makes it Wait; the topology ledger rejects pending retry.
+    assert_eq!(
+        topology::ordinary_health_clear_from_app(test.fixture.app()),
+        Ok(false)
     );
-    assert!(test.ledger.settled_baseline().is_err());
-    // Retry remains set through bounded cleanup; this test never clears a fault
-    // or acknowledges runtime resync to manufacture later success.
+    let assert_retry_rejected = |retry_state: observe::TimelineAppState| {
+        let mut ledger = OwnedTopologyLedger::new(RUN);
+        ledger.claim(claim).unwrap();
+        ledger
+            .callback_receipts(&[receipt], receipt.pump_ordinal, claim.next_poll)
+            .unwrap();
+        assert_eq!(
+            ledger.observe_issued(retry_state).unwrap_err(),
+            "terminal App Timeline fault or retry"
+        );
+        assert_eq!(ledger.evidence()["terminal_failure"], true);
+        assert!(ledger.settled_baseline().is_err());
+        assert_eq!(
+            ledger.observe_issued(state).unwrap_err(),
+            "owned topology ledger already terminal"
+        );
+    };
+    let pending_state = test.fixture.app.genuine_timeline_app_state();
+    assert!(!pending_state.retry_required);
+    assert_eq!(
+        pending_state.retry_pending,
+        Some((claim.old_generation, claim.old_epoch))
+    );
+    assert_retry_rejected(pending_state);
+
+    test.fixture.app.plugin_processing_retry_required = true;
+    let error = topology::ordinary_health_clear_from_app(test.fixture.app())
+        .expect_err("required retry must fail ordinary health independently");
+    let evidence: serde_json::Value = serde_json::from_str(
+        error
+            .strip_prefix("ordinary App health failed during owned topology: ")
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(evidence["health"]["classification"], "Failed");
+    assert_eq!(
+        evidence["health"]["failed_operands"],
+        serde_json::json!(["plugin_processing_retry_required"])
+    );
+    // This separate negative ledger removes pending only from the copied
+    // observation, proving required alone is fatal without clearing App state.
+    let required_state = test.fixture.app.genuine_timeline_app_state();
+    assert!(required_state.retry_required && required_state.retry_pending.is_some());
+    assert_retry_rejected(observe::TimelineAppState {
+        retry_pending: None,
+        ..required_state
+    });
+    // Both actual retry fields remain set through bounded cleanup; no fault or
+    // runtime resync is cleared to manufacture later success.
 }
 
 #[test]
