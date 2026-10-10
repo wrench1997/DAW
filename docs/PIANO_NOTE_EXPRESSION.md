@@ -83,11 +83,29 @@ and 13 protocol tests, plus both strict Clippy profiles, formatting, all-bin
 build and ordinary helper smoke. Python checks ran 235 cases with one existing
 skip. These are source/production-input results, not native Windows acceptance.
 
-The subsequent precision correction adds untouched numeric focus/Enter/Apply
-regressions for both fields at 1/64, 1/24 and the final legal start, requiring
-exact Project preservation and zero history. This second source checkpoint is
-**unvalidated** until its own test results are recorded; the earlier results
-do not validate it.
+The completed precision correction at
+`707e0ea77034ed0d276b906464e5d3283afff7d1` passes **22 expression checks**, **1,175
+core application tests**, and **1,192 all-feature application +25 helper +13
+protocol tests**, with zero failures or ignored tests. Both strict all-target
+Clippy profiles, formatting, all-feature/all-bin build and ordinary helper smoke
+pass. The full Python discovery command from the worktree, with
+`CITRUS_VST3_HELPER` pointing to its built shared-target helper, passes **239
+cases with zero skips**. It includes the four Unix helper tests omitted by the
+earlier unset-helper run; that earlier 235-case result retains its separate scope.
+
+The new production-input test covers both timing fields through untouched
+focus/Enter and focus/Apply for 1/64, 1/24 and the final legal start, requiring
+exact Project preservation, no dirty flag and zero Undo/Redo history. The first
+precision checkpoint `3adc585` stopped with 21 focused passes and one fixture
+dirty-baseline failure; the corrected test initializes its saved fingerprint
+before asserting no-op behavior. Runtime code was unchanged by that test fix,
+and the failed run is retained separately from the final passing results.
+
+These are Linux source and production-input checks. No new Windows/native
+desktop, physical input/audio, genuine-plugin or rendered-capture acceptance is
+claimed. The shared-target vendor compilation is bound to this worktree's
+earlier forced source refresh, with unchanged source hashes, dep-info and the
+same linked rlib hash retained in the validation receipts.
 
 `src/app/piano_expression_tests.rs` operates the production app through actual
 egui pointer, key, text and wheel input. Pure candidate regressions cover invalid
