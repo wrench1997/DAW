@@ -186,6 +186,15 @@ impl DataExchangeProcessGate<'_> {
     }
 }
 
+// Test-only borrowing proof. The normal gate remains !Send/!Sync and no production
+// caller can extract its flag or turn it into cross-thread authority.
+#[cfg(test)]
+impl<'owner> DataExchangeProcessGate<'owner> {
+    pub(super) fn flag_for_scoped_worker_test(&self) -> &'owner AtomicBool {
+        self.in_process
+    }
+}
+
 /// Ends the process interval on success, early return, or Rust unwinding.
 #[must_use = "dropping the guard ends the data-exchange process interval"]
 pub(super) struct DataExchangeProcessGuard<'gate> {

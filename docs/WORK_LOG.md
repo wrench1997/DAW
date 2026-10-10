@@ -1214,3 +1214,35 @@ acceptance and release are outside these source-only checkpoints.
 - Exact owner receipts bind current 1,188 App/1,171 core, both strict root Clippy profiles, fmt and 239 Python. The unchanged 68 vendor/helper/protocol inputs explicitly reuse checkpoint01's 400 available vendor, 26 doctest, 25 helper and 13 protocol results. The absent Dexed fixture, zero-match first filter, initial helper-env skip and corrected test-only type-path failure remain preserved.
 - Integration verifies copied helper SHA256 `000195915ef88f8ab2e212b97f87f26bb41eb9a7d54a36540fdb470a61e409cd`, replays the official crate plus cumulative patch for all 46 files and independently reruns Python/package checks. Only documentation changes follow; tested production bytes stay exact.
 - This is bounded error propagation/admission, not new genuine-plugin, native editor, Windows runtime, thread or performance acceptance. Historical cbbbe1f source and its approved appendices retain their original attribution. New exact-commit CI and final bundle integrity are recorded separately after publication; no main merge or executable release.
+
+
+## 2026-10-10 — Borrowed processor thread proof (UNVALIDATED test-only checkpoint)
+
+The entire new capability and its constructor are `cfg(test)`. Production
+`ProcessorLease`, `ProcessorOps`, `MainThreadPlugin`, helper dispatch and strict
+metadata policy are unchanged. A private non-owning token exclusively borrows
+the aggregate owner and its module lifetime. It exposes only an unsafe mutable
+`process` call; one narrowly documented `Send` implementation moves that call
+capability into a scoped worker. It is neither Clone nor Sync and grants no
+controller, metadata, lifecycle, cast, AddRef or Release access. All owning COM
+references and final destruction remain on the loading thread.
+
+The mock uses worker-local f32 mono buffers and prepared ProcessData. Fixtures
+cover a 350 ms simulated main-thread hold, a same-thread negative baseline,
+checked readiness, SDK result errors, Rust-only worker/main panic, process-flag
+cleanup and a blocked worker that must join before owner/module release. No
+foreign COM unwind recovery is claimed. The mock intentionally allocates and
+locks. Its output proves only thread ownership/progress, not real-time safety.
+
+This is not a production audio fix: the raw fixture does not perform runtime
+native acknowledgments, process history, event/parameter orchestration, or
+output-fault handling. It cannot be selected by a user or helper. Production
+integration must preserve all of those semantics under a separately reviewed
+capability. Independent IPC, native polling, metadata freshness and device/PDC
+publication remain unresolved by this fixture. Existing strict mode still waits
+for fresh main-thread metadata. No experimental 500 ms mode is implemented.
+
+The new full-source compile-contract runner checks the actual test-only private
+types and a positive scoped use before asserting the borrow/visibility/auto-trait
+failures. At this recovery boundary compilation and execution remain pending;
+the exact unsafe call sites require independent review before execution.

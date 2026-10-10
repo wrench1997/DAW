@@ -692,3 +692,35 @@ build reproduces the same helper SHA256
 The initial compile failure, absent upstream fixture, and prior checkpoint
 qualifications remain in the evidence. Genuine-plugin/native/Windows runtime
 acceptance and release are outside these source-only checkpoints.
+
+
+## 2026-10-10 — Borrowed processor thread proof (UNVALIDATED test-only checkpoint)
+
+The entire new capability and its constructor are `cfg(test)`. Production
+`ProcessorLease`, `ProcessorOps`, `MainThreadPlugin`, helper dispatch and strict
+metadata policy are unchanged. A private non-owning token exclusively borrows
+the aggregate owner and its module lifetime. It exposes only an unsafe mutable
+`process` call; one narrowly documented `Send` implementation moves that call
+capability into a scoped worker. It is neither Clone nor Sync and grants no
+controller, metadata, lifecycle, cast, AddRef or Release access. All owning COM
+references and final destruction remain on the loading thread.
+
+The mock uses worker-local f32 mono buffers and prepared ProcessData. Fixtures
+cover a 350 ms simulated main-thread hold, a same-thread negative baseline,
+checked readiness, SDK result errors, Rust-only worker/main panic, process-flag
+cleanup and a blocked worker that must join before owner/module release. No
+foreign COM unwind recovery is claimed. The mock intentionally allocates and
+locks. Its output proves only thread ownership/progress, not real-time safety.
+
+This is not a production audio fix: the raw fixture does not perform runtime
+native acknowledgments, process history, event/parameter orchestration, or
+output-fault handling. It cannot be selected by a user or helper. Production
+integration must preserve all of those semantics under a separately reviewed
+capability. Independent IPC, native polling, metadata freshness and device/PDC
+publication remain unresolved by this fixture. Existing strict mode still waits
+for fresh main-thread metadata. No experimental 500 ms mode is implemented.
+
+The new full-source compile-contract runner checks the actual test-only private
+types and a positive scoped use before asserting the borrow/visibility/auto-trait
+failures. At this recovery boundary compilation and execution remain pending;
+the exact unsafe call sites require independent review before execution.

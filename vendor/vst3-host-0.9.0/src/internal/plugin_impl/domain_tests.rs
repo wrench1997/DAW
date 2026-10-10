@@ -2676,6 +2676,7 @@ fn output_event_overflow_reports_drain_loss_without_falsifying_successful_native
 }
 
 mod session_tests;
+mod borrowed_processor_tests;
 
 fn reset_transport() -> crate::plugin::ProcessTransport {
     crate::plugin::ProcessTransport {

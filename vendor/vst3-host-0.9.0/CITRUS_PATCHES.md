@@ -356,3 +356,15 @@ The first source recovery archive was explicitly unvalidated. Focused tests cove
 zero/infinite tail, wrong/Error/malformed replies, helper death with recovery opt-in, partial
 latency/tail reads and old-chain retention. Executed validation is recorded separately.
 No wire addition, metadata cache, automatic reload, COM threading or SHM policy change.
+
+
+## Test-only borrowed processor capability (2026-10-10)
+
+Add a wholly cfg(test), private non-owning process capability and scoped-thread
+COM fixtures. The sole new unsafe Send applies only to that test token; no
+production owner, lease, runtime or host interface gains cross-thread authority.
+Owner/module lifetime, main-thread reference destruction, serial unsafe Process,
+atomic data-exchange interval and scoped join are audited independently before
+execution. The fixtures intentionally omit production runtime orchestration and
+do not enable an audio worker, metadata cache or user mode. Source recovery
+checkpoint is unvalidated until separate receipts record executed tests.

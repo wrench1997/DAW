@@ -4,6 +4,8 @@ use super::data_exchange::DataExchangeProcessGate;
 use super::native_edit_transport::NativeEditReceiver;
 
 pub(crate) mod domain_session;
+#[cfg(test)]
+pub(crate) mod borrowed_processor_fixture;
 use super::processor_lease::{ProcessorCalls, ProcessorLease};
 use crate::{
     audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
