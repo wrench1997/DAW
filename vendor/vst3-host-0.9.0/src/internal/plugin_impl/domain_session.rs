@@ -3,6 +3,11 @@
 //! movable owner, user callback or worker authority is introduced.
 
 use super::*;
+
+#[cfg(test)]
+mod runtime_loan_fixture;
+#[cfg(test)]
+pub(crate) use runtime_loan_fixture::{with_runtime_loan_for_test, RuntimeLoan};
 use std::{marker::PhantomData, rc::Rc};
 
 pub(crate) type DomainSessionCallback<'callback> = dyn for<'owner> FnMut(&mut ControlOps<'owner>, &mut ProcessorOps<'owner>) -> Result<()>
@@ -25,8 +30,14 @@ pub(crate) struct ControlOps<'owner> {
 /// Only exclusive runtime state, a non-owning process capability, and an active-call marker.
 /// The copied active flag cannot become stale: no facade can activate/deactivate the owner.
 pub(crate) struct ProcessorOps<'owner> {
+    core: PreparedRuntimeOps<'owner, ProcessorLease<'owner>>,
+}
+
+/// Private generic implementation shared by the unchanged facade and the test-only loan.
+/// Generic process authority is never exported through the crate-private facade type.
+struct PreparedRuntimeOps<'owner, P> {
     runtime: &'owner mut ProcessorRuntime,
-    processor: ProcessorLease<'owner>,
+    processor: P,
     gate: DataExchangeProcessGate<'owner>,
     is_active: bool,
     _same_thread: PhantomData<Rc<()>>,
@@ -63,11 +74,13 @@ pub(super) fn visit(
         _same_thread: PhantomData,
     };
     let mut processing = ProcessorOps {
-        runtime: &mut owner.runtime,
-        processor: ProcessorLease::new(processor, _module.as_ref()),
-        gate: _host_app.data_exchange_process_gate(),
-        is_active: *is_active,
-        _same_thread: PhantomData,
+        core: PreparedRuntimeOps {
+            runtime: &mut owner.runtime,
+            processor: ProcessorLease::new(processor, _module.as_ref()),
+            gate: _host_app.data_exchange_process_gate(),
+            is_active: *is_active,
+            _same_thread: PhantomData,
+        },
     };
     callback(&mut control, &mut processing)
 }
@@ -79,16 +92,18 @@ pub(super) fn process_buffer_view(
     buffers: &mut CallerAudioBuffers<'_>,
 ) -> Result<()> {
     let mut processing = ProcessorOps {
-        runtime: &mut owner.runtime,
-        processor: ProcessorLease::new(
-            &mut owner.control.processor,
-            owner.control._module.as_ref(),
-        ),
-        gate: owner.control._host_app.data_exchange_process_gate(),
-        is_active: owner.control.is_active,
-        _same_thread: PhantomData,
+        core: PreparedRuntimeOps {
+            runtime: &mut owner.runtime,
+            processor: ProcessorLease::new(
+                &mut owner.control.processor,
+                owner.control._module.as_ref(),
+            ),
+            gate: owner.control._host_app.data_exchange_process_gate(),
+            is_active: owner.control.is_active,
+            _same_thread: PhantomData,
+        },
     };
-    processing.process_buffer_view(buffers)
+    processing.core.process_buffer_view(buffers)
 }
 
 // This private seam is intentionally not yet used by helper dispatch. Its methods are tested
@@ -157,7 +172,7 @@ impl ControlOps<'_> {
 }
 
 #[allow(dead_code)]
-impl ProcessorOps<'_> {
+impl<P: ProcessorProcessCall> PreparedRuntimeOps<'_, P> {
     fn process_buffer_view(&mut self, buffers: &mut CallerAudioBuffers<'_>) -> Result<()> {
         self.runtime.process_buffer_view(
             &mut self.processor,
@@ -238,6 +253,53 @@ impl ProcessorOps<'_> {
 
     pub(crate) fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
         self.runtime.take_output_events_with_loss()
+    }
+}
+
+#[allow(dead_code)]
+impl ProcessorOps<'_> {
+    pub(crate) fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()> {
+        self.core.process(buffers)
+    }
+    pub(crate) fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
+        self.core.process_buses(buffers)
+    }
+    /// Queue admission only; never mirrors or confirms controller state.
+    pub(crate) fn queue_parameter_at(&mut self, id: u32, value: f64, offset: i32) -> Result<()> {
+        self.core.queue_parameter_at(id, value, offset)
+    }
+    pub(crate) fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
+        self.core.send_plugin_event(event)
+    }
+    pub(crate) fn note_on(
+        &mut self,
+        channel: MidiChannel,
+        note: u8,
+        velocity: u8,
+        offset: i32,
+    ) -> Result<crate::midi::NoteId> {
+        self.core.note_on(channel, note, velocity, offset)
+    }
+    pub(crate) fn note_off(&mut self, id: crate::midi::NoteId, offset: i32) -> Result<()> {
+        self.core.note_off(id, offset)
+    }
+    pub(crate) fn send_note_expression(
+        &mut self,
+        id: crate::midi::NoteId,
+        kind: crate::midi::NoteExpressionType,
+        value: f64,
+        offset: i32,
+    ) -> Result<()> {
+        self.core.send_note_expression(id, kind, value, offset)
+    }
+    pub(crate) fn set_process_transport(
+        &mut self,
+        transport: crate::plugin::ProcessTransport,
+    ) -> Result<()> {
+        self.core.set_process_transport(transport)
+    }
+    pub(crate) fn take_output_events_with_loss(&self) -> (Vec<PluginEvent>, bool) {
+        self.core.take_output_events_with_loss()
     }
 }
 

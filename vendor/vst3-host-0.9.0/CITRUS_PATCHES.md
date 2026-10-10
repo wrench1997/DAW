@@ -356,3 +356,27 @@ The first source recovery archive was explicitly unvalidated. Focused tests cove
 zero/infinite tail, wrong/Error/malformed replies, helper death with recovery opt-in, partial
 latency/tail reads and old-chain retention. Executed validation is recorded separately.
 No wire addition, metadata cache, automatic reload, COM threading or SHM policy change.
+
+
+## Test-only borrowed processor capability (2026-10-10)
+
+Add a wholly cfg(test), private non-owning process capability and scoped-thread
+COM fixtures. The sole new unsafe Send applies only to that test token; no
+production owner, lease, runtime or host interface gains cross-thread authority.
+Owner/module lifetime, main-thread reference destruction, serial unsafe Process,
+atomic data-exchange interval and scoped join are audited independently before
+execution. The fixtures intentionally omit production runtime orchestration and
+do not enable an audio worker, metadata cache or user mode. Source recovery
+checkpoint is unvalidated until separate receipts record executed tests.
+
+## Scoped full-runtime process dependency (2026-10-10)
+
+Separate process-only SDK authority from lifecycle setProcessing notification.
+The existing kernel bodies, caller-side public envelopes and non-Send production
+session remain intact. A wholly cfg(test) disjoint runtime loan exercises that
+same complete kernel while loading-thread controller/UI access remains possible;
+only the test wrapper gains narrowly audited Send, without moving owning COM
+references, replacing prepared buffers or adding a helper worker. Retired host
+queue final Release after rebuild remains a disclosed processing-thread free
+possibility, not a no-free guarantee. Source checkpoint is unvalidated until the
+separate executed receipt, and unsafe fixture invocations require source review.

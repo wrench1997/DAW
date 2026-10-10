@@ -1222,3 +1222,115 @@ acceptance and release are outside these source-only checkpoints.
 - Properties share the canonical1/64 timing minimum and precise horizon-end validation. Shortest round-trippable f32 text prevents untouched focus/Enter/Apply from changing1/64,1/24 and last-legal-start timing. Production input checks demand exact Project, dirty and Undo/Redo preservation.
 - Exact final execution passes22 focused expression checks,1175 core,1192 App+25 helper+13 protocol, both strict all-target Clippy profiles,fmt,all-bin build,ordinary helper smoke and239 Python with zero skips. The earlier235 Python/one skip and3adc585 focused21-pass/one saved-baseline fixture failure remain separate. The final test fix initializes saved identity; runtime is unchanged.
 - Integration independently verifies source equivalence and reruns Python plus real package document/vendor/QA closure; no concurrent Cargo build is used. Historical source/evidence appendices retain old identity and all negatives. New Windows CI and final source ZIP are tracked independently after publication. No new rendered/native/physical/genuine-plugin or performance acceptance, main merge or binary release is claimed.
+
+## 2026-10-10 — Borrowed processor thread proof (UNVALIDATED test-only checkpoint)
+
+The entire new capability and its constructor are `cfg(test)`. Production
+`ProcessorLease`, `ProcessorOps`, `MainThreadPlugin`, helper dispatch and strict
+metadata policy are unchanged. A private non-owning token exclusively borrows
+the aggregate owner and its module lifetime. It exposes only an unsafe mutable
+`process` call; one narrowly documented `Send` implementation moves that call
+capability into a scoped worker. It is neither Clone nor Sync and grants no
+controller, metadata, lifecycle, cast, AddRef or Release access. All owning COM
+references and final destruction remain on the loading thread.
+
+The mock uses worker-local f32 mono buffers and prepared ProcessData. Fixtures
+cover a 350 ms simulated main-thread hold, a same-thread negative baseline,
+checked readiness, SDK result errors, Rust-only worker/main panic, process-flag
+cleanup and a blocked worker that must join before owner/module release. No
+foreign COM unwind recovery is claimed. The mock intentionally allocates and
+locks. Its output proves only thread ownership/progress, not real-time safety.
+
+This is not a production audio fix: the raw fixture does not perform runtime
+native acknowledgments, process history, event/parameter orchestration, or
+output-fault handling. It cannot be selected by a user or helper. Production
+integration must preserve all of those semantics under a separately reviewed
+capability. Independent IPC, native polling, metadata freshness and device/PDC
+publication remain unresolved by this fixture. Existing strict mode still waits
+for fresh main-thread metadata. No experimental 500 ms mode is implemented.
+
+The new full-source compile-contract runner checks the actual test-only private
+types and a positive scoped use before asserting the borrow/visibility/auto-trait
+failures. At this recovery boundary compilation and execution remain pending;
+the exact unsafe call sites require independent review before execution.
+
+
+### Executed borrowed-capability proof (2026-10-10)
+
+Independent unsafe-boundary review preceded execution. All 8 new mock-thread
+fixtures and all 52 private compiler contracts pass. The latter include positive
+scoped transfer/rejoin and production-owner controls, then independent production
+exclusion, mutable/unsafe-call, authority, lifetime and borrow-failure checks. The
+350 ms fixture establishes completion before release of a main-thread hold lasting
+at least 350 ms, with a generous watchdog; it is not a 350 ms execution deadline.
+The same-thread case is a sequential-call structural control, not an execution of
+the actual helper dispatcher. Detached-thread exclusion is for a nonstatic owner
+loan; a deliberately leaked static owner is outside the tested teardown contract.
+
+Fresh source gates pass 408 available vendor tests (one known absent SDK fixture
+excluded), 26 doctests, 1,188 App tests, 25 helper tests, 13 protocol tests and 239
+Python tests. Root strict all-feature Clippy, formatting and the vendor test
+Clippy check pass; the latter retains only the already documented deprecated and
+drain_collect exceptions. Package closure checks 552 inputs and the upstream
+patch replays 48 files exactly. The separately archived lifecycle branch's two
+additional tests are not part of this branch or its 1,188 count.
+
+The first compiler-runner input was rejected before Cargo because it contained
+two binary targets. A separate QA library-only manifest removes only those two
+sections, preserving dependencies, features and the exact lock. The first ad hoc
+package-input check passed paths where bytes were required; its retained failure
+and corrected 552-input pass changed no source. All Rust bytes remain identical
+to the durably archived, independently reviewed pretest checkpoint.
+
+A forced current-worktree vendor compile and exact rlib link produced the copied
+helper SHA256 `ca1751af6d848d35a2b0054713d44bb1614d952eb4d280740123c52155dd6b7d`.
+These are source/mock/protocol results only. There is no genuine-plugin, native
+GUI, Windows runtime, device-audio or performance acceptance. The production
+helper has no new process capability, mode, worker or metadata policy.
+
+## 2026-10-10 — scoped full-runtime processing preparation (unvalidated)
+
+- Started a separate branch from reviewed test-only capability checkpoint
+  `45620f15868d2cfda3b0200645e743ad3355f586`. Accepted publication remains separate.
+- Split the SDK process-only dependency from lifecycle notification authority,
+  without changing the three existing runtime kernel bodies or public callback/
+  meter envelopes.
+- Added a cfg(test)-only exclusive runtime loan with disjoint loading-thread UI
+  control, one existing SDK gate and no owning COM/buffer movement or rebuild.
+  Full-kernel thread fixtures and compiler contracts require independent unsafe
+  source review and durable source/bundle archival before execution.
+- Retain the explicit retired-host-queue final-Release/free limitation after a
+  main-thread rebuild. No production helper worker, user mode, metadata-policy
+  change, genuine-plugin run or audible-isolation result is introduced here.
+
+### Scoped runtime preparation: executed source/mock results
+
+- Twenty full-kernel scoped COM/thread fixtures pass, including completion during
+  a main-thread getter hold of at least 350 ms and explicit retired-queue final-free
+  evidence. No helper worker or user mode is enabled.
+- 428 available vendor tests, 26 doctests,1,188 App, 25 helper, 13 protocol and 239
+  Python checks pass; one known unavailable SDK fixture is separately excluded.
+  Strict root Clippy/fmt, bounded vendor Clippy exceptions, 552 package inputs and
+  exact 50-file upstream patch replay pass.
+- Updated domain compiler contracts pass 55/55. The runtime 88-case corpus is a
+  hash-verified union: 85 passing outcomes from the preserved interrupted run,
+  plus a six-case rerun including three positive controls and all remaining cases.
+  It is not reported as an uninterrupted full 88 run. Production source and every
+  reused fixture/lock are verified unchanged.
+- Preserve initial missing-test-import compile failure, generated-module positive
+  control failure, diagnostic classification mismatch/interruption and unexecuted
+  source-review corrections. Runner corrections changed no production Rust.
+- Current-worktree compiler and copied-helper linkage are retained. Full source
+  and exact Git recovery bundle are archived before each significant gate, with
+  the separate lifecycle branch bundle preserved. This branch has not incorporated
+  the separately accepted piano fix; any integration must preserve that work.
+
+## 2026-10-10 — Local combined baseline for scoped worker Step1 (UNVALIDATED)
+
+Accepted piano checkpoint `dcdb2c1` and reviewed runtime preparation `7746d437`
+are combined only in a new experimental worktree. The sole conflict was additive
+WORK_LOG history; both sides are retained. All non-document files are exactly
+from their reviewed parents, including the piano tests and the full-runtime
+preparation. No production worker feature, helper dispatch, wire or metadata-mode
+change has been added at this checkpoint. Combined validation remains pending;
+archive the complete source and recovery bundle before running those gates.

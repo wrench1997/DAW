@@ -4,7 +4,9 @@ use super::data_exchange::DataExchangeProcessGate;
 use super::native_edit_transport::NativeEditReceiver;
 
 pub(crate) mod domain_session;
-use super::processor_lease::{ProcessorCalls, ProcessorLease};
+#[cfg(test)]
+pub(crate) mod borrowed_processor_fixture;
+use super::processor_lease::{ProcessorCalls, ProcessorLease, ProcessorProcessCall};
 use crate::{
     audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
     error::{Error, Result},
@@ -2221,7 +2223,7 @@ impl ProcessorRuntime {
     #[allow(clippy::too_many_arguments)]
     fn process_chunk(
         &mut self,
-        processor: &mut ProcessorLease<'_>,
+        processor: &mut impl ProcessorProcessCall,
         gate: &mut DataExchangeProcessGate<'_>,
         buffers: &mut CallerAudioBuffers<'_>,
         frame_offset: usize,
@@ -2461,7 +2463,7 @@ impl ProcessorRuntime {
     /// parameter changes).
     fn process_chunks(
         &mut self,
-        processor: &mut ProcessorLease<'_>,
+        processor: &mut impl ProcessorProcessCall,
         gate: &mut DataExchangeProcessGate<'_>,
         buffers: &mut CallerAudioBuffers<'_>,
         total: usize,
@@ -2654,7 +2656,7 @@ impl ProcessorRuntime {
 
     fn process_buffer_view(
         &mut self,
-        processor: &mut ProcessorLease<'_>,
+        processor: &mut impl ProcessorProcessCall,
         gate: &mut DataExchangeProcessGate<'_>,
         is_active: bool,
         buffers: &mut CallerAudioBuffers<'_>,
@@ -5216,9 +5218,6 @@ mod process_buffer_tests {
     }
 
     impl ProcessorCalls for MockProcessorCalls {
-        unsafe fn process(&mut self, _data: &mut ProcessData) -> tresult {
-            panic!("notification transitions must not render audio")
-        }
         fn set_processing(&mut self, value: u8) -> tresult {
             self.trace.push((value, thread::current().id()));
             self.result
