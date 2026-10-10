@@ -119,3 +119,21 @@ effects to avoid double processing. Our first dry, one-occurrence instrument
 conversion has the narrower scope above and must not claim contextual FL
 consolidation parity. These reference distinctions were supplied by the root's
 verified documentation review; no FL behavior is implemented by this checkpoint.
+
+## Pure-slice review correction boundary
+
+The current fake-only job exposes Running, Disposing, CleanupPending and
+Terminated status. After a five-second cleanup grace, it retains the same owner
+and admission and reports sticky nonterminal diagnostics while continuing
+cooperative 250 ms cleanup polling. Completed audio is freed as soon as cleanup
+forbids publication. This status remains visible after result-receiver drop;
+only the per-job Acquire termination acknowledgment permits terminal receipt and
+readmission. Disposal polls receive the absolute grace deadline and must return
+promptly, using only nonblocking cleanup progress after expiry. This is bounded
+visibility and retained ownership, not proof that the engine can forcibly stop
+a blocking OS call. The strict adapter supplies actual deadline/reap guarantees.
+
+Writer errors retain typed Cancelled/Deadline categories and the full checked
+abort failure/path chain. Final deadline expiry is checked after sync and before
+commit CAS. Native Offline/state/base/reset128/reset256 order and any real helper
+cleanup remain adapter-only acceptance, not evidence from opaque fake methods.

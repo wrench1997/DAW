@@ -19,7 +19,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, TryRecvError},
     },
@@ -377,7 +377,10 @@ pub(crate) trait RenderBackend: 'static {
     fn process(&mut self, transport: PluginTransport, frames: usize) -> Result<BlockReply, String>;
     /// Must be idempotently polled; normal cancellation cannot skip cleanup. Pending/failed
     /// disposal retains the owner. Acknowledgment includes all plugin/process/I/O resources.
-    fn dispose(&mut self) -> DisposalObservation;
+    /// Each poll must return promptly, honoring this absolute grace deadline;
+    /// after expiry it may only make nonblocking cleanup progress. The engine
+    /// cannot turn an arbitrary blocking OS call into bounded termination.
+    fn dispose(&mut self, deadline: Instant) -> DisposalObservation;
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -396,14 +399,67 @@ pub(crate) enum RenderOutcome {
     Failed(RenderFailure),
 }
 
+/// Nonterminal cleanup visibility never substitutes for termination acknowledgment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RenderStatus {
+    Running,
+    Disposing,
+    CleanupPending { diagnostics: Vec<String> },
+    Terminated,
+}
+struct JobProgress {
+    status: Mutex<RenderStatus>,
+    #[cfg(test)]
+    expire_cleanup_grace: AtomicBool,
+}
+impl JobProgress {
+    fn new() -> Self {
+        Self {
+            status: Mutex::new(RenderStatus::Running),
+            #[cfg(test)]
+            expire_cleanup_grace: AtomicBool::new(false),
+        }
+    }
+    fn status(&self) -> RenderStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+    fn set(&self, value: RenderStatus) {
+        *self.status.lock().unwrap_or_else(|p| p.into_inner()) = value;
+    }
+    fn grace_elapsed(&self, deadline: Instant) -> bool {
+        let elapsed = Instant::now() >= deadline;
+        #[cfg(test)]
+        let elapsed = elapsed || self.expire_cleanup_grace.load(Ordering::Acquire);
+        elapsed
+    }
+}
+#[derive(Default)]
+struct RenderSlot {
+    busy: AtomicBool,
+    // Retain visibility even when the caller drops its result receiver.
+    job: Mutex<Option<Arc<JobProgress>>>,
+}
 #[derive(Clone, Default)]
-pub(crate) struct RenderAdmission(Arc<AtomicBool>);
+pub(crate) struct RenderAdmission(Arc<RenderSlot>);
 pub(crate) struct RenderReceipt {
     receiver: Receiver<RenderOutcome>,
     control: RenderControl,
     terminated: Arc<AtomicBool>,
+    progress: Arc<JobProgress>,
 }
 impl RenderReceipt {
+    pub fn status(&self) -> RenderStatus {
+        self.progress.status()
+    }
+    #[cfg(test)]
+    fn expire_cleanup_grace(&self) {
+        self.progress
+            .expire_cleanup_grace
+            .store(true, Ordering::Release);
+    }
     pub fn cancel(&self) -> bool {
         self.control.export.cancel()
     }
@@ -424,7 +480,15 @@ impl Drop for RenderReceipt {
 }
 impl RenderAdmission {
     pub fn is_busy(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.0.busy.load(Ordering::Acquire)
+    }
+    pub fn status(&self) -> Option<RenderStatus> {
+        self.0
+            .job
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|job| job.status())
     }
     /// The factory here creates an empty fixture owner, not a loaded plugin. Strict production
     /// spawn/load ownership is deliberately absent until its foundation is qualified.
@@ -437,12 +501,16 @@ impl RenderAdmission {
         fixture_owner: impl FnOnce() -> B + Send + 'static,
     ) -> Result<RenderReceipt, String> {
         self.0
+            .busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| "An instrument renderer still owns this job")?;
         let (sender, receiver) = mpsc::sync_channel(1);
         let terminated = Arc::new(AtomicBool::new(false));
         let ack = Arc::clone(&terminated);
-        let busy = Arc::clone(&self.0);
+        let slot = Arc::clone(&self.0);
+        let progress = Arc::new(JobProgress::new());
+        *self.0.job.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&progress));
+        let worker_progress = Arc::clone(&progress);
         let worker_control = control.clone();
         let spawn = std::thread::Builder::new()
             .name("dormant-instrument-render".into())
@@ -452,22 +520,26 @@ impl RenderAdmission {
                     path,
                     acknowledge_fixed_tail,
                     &worker_control,
+                    &worker_progress,
                     fixture_owner,
                 );
                 let _ = sender.try_send(outcome);
                 drop(sender);
                 // Every backend/file owner has terminated before publication of this final ack.
-                busy.store(false, Ordering::Release);
+                worker_progress.set(RenderStatus::Terminated);
+                slot.busy.store(false, Ordering::Release);
                 ack.store(true, Ordering::Release);
             });
         if let Err(error) = spawn {
-            self.0.store(false, Ordering::Release);
+            progress.set(RenderStatus::Terminated);
+            self.0.busy.store(false, Ordering::Release);
             return Err(error.to_string());
         }
         Ok(RenderReceipt {
             receiver,
             control,
             terminated,
+            progress,
         })
     }
 }
@@ -477,6 +549,7 @@ fn run_owned<B: RenderBackend>(
     path: PathBuf,
     acknowledge_fixed_tail: bool,
     control: &RenderControl,
+    progress: &JobProgress,
     fixture_owner: impl FnOnce() -> B,
 ) -> RenderOutcome {
     let prepared = match catch_unwind(AssertUnwindSafe(|| {
@@ -501,7 +574,7 @@ fn run_owned<B: RenderBackend>(
         }
     };
     // Backend stays outside the unwind scope so every rendering panic still enters disposal.
-    let rendered = catch_unwind(AssertUnwindSafe(|| {
+    let mut rendered = catch_unwind(AssertUnwindSafe(|| {
         render_audio(&capture, &prepared, &mut backend, control)
     }))
     .unwrap_or_else(|_| {
@@ -511,8 +584,13 @@ fn run_owned<B: RenderBackend>(
         ))
     });
     let mut cleanup_errors = Vec::new();
+    // This bounds the grace before reporting nonterminal cleanup trouble; it
+    // does not claim to interrupt a blocking backend/OS call. The real adapter
+    // must supply its separately reviewed bounded exchange/reap semantics.
+    let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+    progress.set(RenderStatus::Disposing);
     loop {
-        let observation = catch_unwind(AssertUnwindSafe(|| backend.dispose()));
+        let observation = catch_unwind(AssertUnwindSafe(|| backend.dispose(cleanup_deadline)));
         match observation {
             Ok(observation) => {
                 if let Some(error) = observation.error {
@@ -527,9 +605,32 @@ fn run_owned<B: RenderBackend>(
                 record_cleanup_error(&mut cleanup_errors, error);
             }
         }
-        // No result/lease release while resources remain. This is an owner-retained wait,
-        // not another musical/setup request or an automatic fresh helper retry.
-        std::thread::sleep(Duration::from_millis(1));
+        let grace_elapsed = progress.grace_elapsed(cleanup_deadline);
+        if grace_elapsed {
+            record_cleanup_error(
+                &mut cleanup_errors,
+                "Cleanup grace elapsed; termination remains unproven".into(),
+            );
+            progress.set(RenderStatus::CleanupPending {
+                diagnostics: cleanup_errors.clone(),
+            });
+        }
+        if !cleanup_errors.is_empty() && rendered.is_ok() {
+            // Publication is now forbidden. Free the bounded completed audio
+            // while retaining the backend and the original cleanup evidence.
+            rendered = Err(RenderFailure::new(
+                FailureKind::Backend,
+                "Instrument cleanup failed",
+            ));
+        }
+        // Keep the same backend and admission, with visible pending status and
+        // non-busy polling after grace. This is not a completed cancellation,
+        // detached cleanup task, fresh helper retry, or forced lease release.
+        std::thread::sleep(if grace_elapsed {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_millis(10)
+        });
     }
     if catch_unwind(AssertUnwindSafe(|| drop(backend))).is_err() {
         cleanup_errors.push("Disposed backend destructor panicked".into());
@@ -572,15 +673,25 @@ fn run_owned<B: RenderBackend>(
                 .iter()
                 .fold(0.0_f32, |p, f| p.max(f.left.abs()).max(f.right.abs())),
         }),
-        Ok(Err(error)) => RenderOutcome::Failed(RenderFailure::new(
-            FailureKind::Output,
-            format!("{error:#}"),
-        )),
+        Ok(Err(error)) => RenderOutcome::Failed(writer_failure(error)),
         Err(_) => RenderOutcome::Failed(RenderFailure::new(
             FailureKind::Panic,
             "Checked WAV writer panicked",
         )),
     }
+}
+
+fn writer_failure(error: anyhow::Error) -> RenderFailure {
+    let kind = if error.is::<crate::export_job::ExportCancelled>() {
+        FailureKind::Cancelled
+    } else if error.is::<crate::export_job::ExportDeadlineExceeded>() {
+        FailureKind::Deadline
+    } else {
+        FailureKind::Output
+    };
+    // Checked abort context retains the original typed cause and any failed
+    // removal/path. Do not reduce this to the outer context's to_string().
+    RenderFailure::new(kind, format!("{error:#}"))
 }
 
 fn render_audio<B: RenderBackend>(

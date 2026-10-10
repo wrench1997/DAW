@@ -33,6 +33,8 @@ struct ControlState {
     progress: AtomicU32,
     #[cfg(test)]
     cancel_at: AtomicU32,
+    #[cfg(test)]
+    deadline_at: AtomicU32,
 }
 
 #[derive(Clone, Default)]
@@ -136,7 +138,13 @@ impl ExportControl {
     /// operations can block; this does not interrupt an in-progress OS call.
     pub(crate) fn check_deadline(&self, deadline: Instant) -> anyhow::Result<()> {
         self.check_cancelled()?;
-        if Instant::now() >= deadline {
+        let expired = Instant::now() >= deadline;
+        #[cfg(test)]
+        let expired = expired || {
+            let at = self.0.deadline_at.load(Ordering::Relaxed);
+            at != 0 && self.0.progress.load(Ordering::Relaxed) >= at
+        };
+        if expired {
             return Err(ExportDeadlineExceeded.into());
         }
         Ok(())
@@ -158,6 +166,13 @@ impl ExportControl {
     pub(crate) fn complete(&self) {
         self.0.progress.store(10000, Ordering::Relaxed);
         self.0.state.store(COMPLETE, Ordering::Release);
+    }
+
+    /// Deterministic clock-expiry seam for checked-writer integration fixtures.
+    /// It changes only deadline checks, never the cancel/commit CAS itself.
+    #[cfg(test)]
+    pub(crate) fn deadline_at(&self, basis_points: u32) {
+        self.0.deadline_at.store(basis_points, Ordering::Relaxed);
     }
 
     #[cfg(test)]

@@ -286,7 +286,7 @@ impl RenderBackend for Fake {
             output_events_lost: matches!(self.fault, Fault::Loss),
         })
     }
-    fn dispose(&mut self) -> DisposalObservation {
+    fn dispose(&mut self, _deadline: Instant) -> DisposalObservation {
         if matches!(self.fault, Fault::CleanupPanic) && !self.cleanup_panicked {
             self.cleanup_panicked = true;
             self.log("DisposePanic");
@@ -381,7 +381,7 @@ fn fake_render_rejects_entire_bad_reply_including_trimmed_and_padding_samples() 
         render_audio(&c, &prepared, &mut good, &ctl).unwrap().len(),
         129
     );
-    good.dispose();
+    good.dispose(ctl.deadline);
     for fault in [
         Fault::Short,
         Fault::Extra,
@@ -554,7 +554,13 @@ fn dropped_receiver_and_pending_disposal_retain_owner_and_job_until_ack() {
     wait_until(|| ledger.lock().unwrap().iter().any(|s| s == "DisposePending"));
     assert!(!receipt.termination_acknowledged());
     assert!(matches!(receipt.try_recv(), Err(TryRecvError::Empty)));
+    receipt.expire_cleanup_grace();
+    wait_until(|| matches!(receipt.status(), RenderStatus::CleanupPending { .. }));
     drop(receipt);
+    assert!(matches!(
+        admission.status(),
+        Some(RenderStatus::CleanupPending { .. })
+    ));
     assert!(admission.is_busy());
     assert!(!disposed.load(Ordering::Acquire));
     assert!(!files.output().exists());
@@ -917,4 +923,203 @@ fn empty_fixture_constructor_panic_releases_only_the_empty_job() {
     assert!(error.cleanup.is_empty());
     assert!(!admission.is_busy());
     assert!(!files.output().exists());
+}
+
+#[test]
+fn renderer_writer_cancel_and_deadline_keep_category_after_backend_termination() {
+    // A full successful job is the control for each publication-stage injection.
+    for (cancel_at, deadline_at) in [
+        (0, 0),
+        (7000, 0),
+        (7800, 0),
+        (9800, 0),
+        (9900, 0),
+        (0, 9900),
+    ] {
+        let c = capture(16384, 0, 0, 2);
+        let ctl = control();
+        if cancel_at != 0 {
+            ctl.export.cancel_at(cancel_at);
+        }
+        if deadline_at != 0 {
+            ctl.export.deadline_at(deadline_at);
+        }
+        let observed_control = ctl.clone();
+        let fake = Fake::new(c.metadata().clone(), ctl.clone(), Fault::None, 16384);
+        let ledger = Arc::clone(&fake.ledger);
+        let files = Files::new();
+        std::fs::write(files.output(), b"original destination").unwrap();
+        let admission = RenderAdmission::default();
+        let receipt = admission
+            .start(c, files.output(), true, ctl, move || fake)
+            .unwrap();
+        let result = outcome(&receipt);
+        if cancel_at == 0 && deadline_at == 0 {
+            assert!(matches!(result, RenderOutcome::Complete(_)));
+            assert_eq!(
+                crate::wav::read_wav(files.output()).unwrap().frame_count(),
+                16384
+            );
+        } else {
+            let RenderOutcome::Failed(error) = result else {
+                panic!("writer injection published")
+            };
+            assert_eq!(
+                error.kind,
+                if cancel_at != 0 {
+                    FailureKind::Cancelled
+                } else {
+                    FailureKind::Deadline
+                }
+            );
+            assert!(error.primary.contains(if cancel_at != 0 {
+                "WAV export cancelled"
+            } else {
+                "WAV export deadline elapsed"
+            }));
+            assert_eq!(
+                std::fs::read(files.output()).unwrap(),
+                b"original destination"
+            );
+            let progress = observed_control.export.progress().basis_points;
+            assert!(progress >= cancel_at.max(deadline_at) && progress < 10000);
+        }
+        assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 1);
+        assert!(!admission.is_busy());
+        let log = ledger.lock().unwrap();
+        assert_eq!(&log[log.len() - 2..], ["Disposed", "Dropped"]);
+        assert_eq!(
+            log.iter().filter(|s| s.starts_with("Process:")).count(),
+            129
+        );
+    }
+}
+
+#[test]
+fn renderer_writer_categories_preserve_checked_abort_error_and_retained_path() {
+    for deadline in [false, true] {
+        let original: anyhow::Error = if deadline {
+            crate::export_job::ExportDeadlineExceeded.into()
+        } else {
+            crate::export_job::ExportCancelled.into()
+        };
+        let error = original.context(crate::export::StagedOutputAbortFailure {
+            retained_path: PathBuf::from("retained-stage.wav"),
+            removal_error: std::io::Error::other("injected abort failure"),
+        });
+        let failure = writer_failure(error);
+        assert_eq!(
+            failure.kind,
+            if deadline {
+                FailureKind::Deadline
+            } else {
+                FailureKind::Cancelled
+            }
+        );
+        assert!(failure.primary.contains("retained-stage.wav"));
+        assert!(failure.primary.contains("injected abort failure"));
+        assert!(failure.primary.contains(if deadline {
+            "deadline elapsed"
+        } else {
+            "export cancelled"
+        }));
+    }
+}
+
+#[test]
+fn bounded_cleanup_grace_becomes_visible_pending_without_ack_or_owner_release() {
+    for fault in [Fault::None, Fault::CleanupFailure, Fault::CleanupPanic] {
+        let c = capture(128, 0, 0, 2);
+        let ctl = control();
+        let fake = Fake::new(c.metadata().clone(), ctl.clone(), fault, 128);
+        fake.cleanup_gate.store(false, Ordering::Release);
+        let gate = Arc::clone(&fake.cleanup_gate);
+        let ledger = Arc::clone(&fake.ledger);
+        let disposed = Arc::clone(&fake.disposed);
+        let admission = RenderAdmission::default();
+        let files = Files::new();
+        let receipt = admission
+            .start(c, files.output(), true, ctl, move || fake)
+            .unwrap();
+        wait_until(|| ledger.lock().unwrap().iter().any(|s| s == "DisposePending"));
+        receipt.expire_cleanup_grace();
+        wait_until(|| matches!(receipt.status(), RenderStatus::CleanupPending { .. }));
+        let RenderStatus::CleanupPending { diagnostics } = receipt.status() else {
+            unreachable!()
+        };
+        assert!(diagnostics.iter().any(|s| s.contains("grace elapsed")));
+        if matches!(fault, Fault::CleanupFailure) {
+            assert!(diagnostics.iter().any(|s| s.contains("unproven disposal")));
+        }
+        if matches!(fault, Fault::CleanupPanic) {
+            assert!(diagnostics.iter().any(|s| s.contains("disposal panicked")));
+        }
+        assert!(admission.is_busy());
+        assert!(!receipt.termination_acknowledged());
+        assert!(matches!(receipt.try_recv(), Err(TryRecvError::Empty)));
+        assert!(!disposed.load(Ordering::Acquire));
+        assert!(!files.output().exists());
+        receipt.cancel();
+        // Visibility is retained by the admission owner, not only this receiver.
+        assert!(matches!(
+            admission.status(),
+            Some(RenderStatus::CleanupPending { .. })
+        ));
+        let retry = admission.start(
+            capture(128, 0, 0, 2),
+            files.output(),
+            true,
+            control(),
+            || -> Fake { panic!("pending cleanup cannot admit a replacement") },
+        );
+        assert_eq!(
+            retry.err().unwrap(),
+            "An instrument renderer still owns this job"
+        );
+        gate.store(true, Ordering::Release);
+        let RenderOutcome::Failed(error) = outcome(&receipt) else {
+            panic!("late cleanup published")
+        };
+        assert_eq!(error.kind, FailureKind::Backend);
+        assert!(error.cleanup.iter().any(|s| s.contains("grace elapsed")));
+        assert_eq!(receipt.status(), RenderStatus::Terminated);
+        assert!(!admission.is_busy());
+        assert!(!files.output().exists());
+        assert!(disposed.load(Ordering::Acquire));
+        // Acquire acknowledgment allows immediate readmission. The old receipt
+        // remains bound to its old progress/control and cannot cancel this job.
+        let next_capture = capture(128, 0, 0, 2);
+        let next_control = control();
+        let next_fake = Fake::new(
+            next_capture.metadata().clone(),
+            next_control.clone(),
+            Fault::None,
+            128,
+        );
+        next_fake.cleanup_gate.store(false, Ordering::Release);
+        let next_gate = Arc::clone(&next_fake.cleanup_gate);
+        let next_ledger = Arc::clone(&next_fake.ledger);
+        let next = admission
+            .start(
+                next_capture,
+                files.output(),
+                true,
+                next_control.clone(),
+                move || next_fake,
+            )
+            .unwrap();
+        wait_until(|| {
+            next_ledger
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|s| s == "DisposePending")
+        });
+        drop(receipt);
+        assert!(!next_control.export.progress().cancelling);
+        assert_eq!(next.status(), RenderStatus::Disposing);
+        next_gate.store(true, Ordering::Release);
+        assert!(matches!(outcome(&next), RenderOutcome::Complete(_)));
+        assert!(!admission.is_busy());
+    }
 }

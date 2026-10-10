@@ -325,3 +325,25 @@ qualification remain open. Existing full-song VST export still refuses.
   owner retention, panic, staged I/O errors and cancellation/expiry at commit.
   No counts here are test results. Save source plus Git bundle, obtain independent
   frozen review, and coordinate exclusive Cargo ownership before execution.
+
+### Pre-execution renderer review corrections
+
+The first renderer source freeze `be7af26` was archived without execution. Review
+found that the engine flattened writer cancellation/deadline into Output, and
+that indefinite silent 1 ms disposal polling did not expose bounded-grace
+cleanup trouble. The next source correction remains **unvalidated**:
+
+- Typed writer cancellation and deadline causes retain their engine categories,
+  including when an abort failure adds a retained-path context. Renderer-level
+  fixtures exercise validation/encoding/pre-flush/final-CAS cancellation and
+  deadline expiry after sync, with exact result categories and terminal ledger.
+- Disposal receives an absolute five-second grace deadline and must return
+  promptly. After grace the same worker exposes nonterminal CleanupPending with
+  sticky diagnostics and polls at 250 ms. It keeps the backend/admission; a
+  dropped receiver cannot lose status retained by the admission owner. Audio is
+  freed once cleanup makes publication impossible. Only checked termination
+  permits a final receipt and admission release, and stale receipts stay bound
+  to their original job. The outer timer cannot interrupt a blocking backend or
+  OS call; strict bounded exchange/reap semantics are still an adapter gate.
+- Fake preparation/disposal are opaque fixture calls. These tests do not prove
+  Offline/state/base application or reset128/reset256 native sequencing.
