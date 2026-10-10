@@ -1,8 +1,10 @@
-# Selected-instrument bounce: dormant preparation checkpoint
+# Selected-instrument bounce: dormant capture and fake-renderer checkpoint
 
-Status: **PURE FAKE-BACKEND RENDERER SOURCE, UNVALIDATED**.
+Status: **DORMANT FAKE RENDERER, FOCUSED PLUGIN-FREE GATES PASSED**.
 The current source adds a dormant selected-generator engine, strict fake reply
-validation, and checked float32 WAV staging. It has not been compiled or tested.
+validation, and checked float32 WAV staging. Focused gates passed at `b66a9a7`;
+counts and limitations are recorded below. Final documentation does not change
+that tested Rust source.
 Only tests implement its backend contract; there is no real VST render adapter,
 App action, clip conversion, automatic freeze, or full-song plug-in export.
 Existing whole-song WAV export still refuses active VSTs.
@@ -59,10 +61,11 @@ sections below retain their original failures and bounded attribution.
 
 ## Deliberate pending work
 
-The fake-only engine now has source for exact note mapping, Q128 processing,
-metadata/reply rejection, native latency trimming, explicit fixed-tail consent,
-owner-retained cleanup and checked WAV publication. These additions are
-**unvalidated**. They do not connect `offline_instrument.rs` to the renderer.
+The fake-only engine has focused plugin-free proof for exact note mapping,
+Q128 processing, metadata/reply rejection, native latency trimming, explicit
+fixed-tail consent, owner-retained cleanup and checked WAV publication. These
+mechanics do not connect `offline_instrument.rs` to the renderer and do not
+qualify genuine plugin behavior.
 The older fresh factory's preparation tests do not establish bounded native
 setup/teardown: inherited cold-load replay, blocking writes, permissive Process
 shape adaptation and unchecked Drop/shutdown remain explicit blockers.
@@ -369,3 +372,38 @@ exactly the same tempo/song length values; production Rust is unchanged. The
 failed Clippy receipt remains under `73b051e`. Core Clippy, Cargo fmt, Python and
 package checks were not reached in that attempt. The fixture correction is
 archived before rerunning; prior passing counts retain their original hash.
+
+
+## Corrected pure-slice verification at `b66a9a7`
+
+The corrected source was archived and independently cleared before rerunning.
+All listed gates are terminal PASS at
+`b66a9a77aa033ce984995cfa21caf136f857761a`:
+
+- Forced current-worktree vendor/root all-feature, all-target compilation.
+- App bounce group: 33 tests, consisting of 15 pure-renderer lifecycle/mapping
+  tests, 3 paired actual callback mapper fixtures, and 15 prior capture tests.
+- All App export-related tests: 89, including every ordinary export writer test,
+  checked float32 staging, export control/options and related export regressions.
+- Runtime module: 115; helper: 25; editor/transport/reset protocol: 5 + 2 + 6.
+- No-default/core compilation, bounce group: 33, and export-related group: 89.
+- App/core Clippy with `-D warnings`, formatting, explicit-current-helper Python
+  tests: 239 with no skips, and package-input validation: 552 files. The inherited
+  dependency Atomic::fetch_update deprecation warning remains a baseline warning.
+
+The receipt binds all 708 tracked source files, 9 copied binaries, 6 dep-info
+files and 16 gate logs. Current-worktree rustc/link provenance is retained.
+The earlier `73b051e` Clippy failure is preserved with its own passing unit logs;
+its counts are not relabeled as the corrected source. Earlier source-only review
+findings, capture failures and all prior checkpoint evidence remain retained.
+
+Full App/core aggregate suites and unchanged vendor suites were not rerun for
+this slice. No genuine plugin, real clone adapter, native audio/editor, Windows
+atomic-publication qualification, exact App control binding or Playlist
+render-and-reinsert action is covered. Those gates remain open. Future source
+changes require their own review and source-bound evidence.
+
+Independent final review verified the `b66a9a7` receipt, all bound source,
+binary, dep-info and gate-log hashes, and accepted this narrow fake-renderer
+slice with the limitations above. The final documentation freeze changes no
+Rust or Cargo source; test attribution remains `b66a9a7`.
