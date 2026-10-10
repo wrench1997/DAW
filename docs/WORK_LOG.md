@@ -1580,3 +1580,26 @@ the error code, type/method fragments and primary-span requirement remain.
 No Rust, manifest, lock or fixture bytes change. The original67/68 report is kept;
 two fresh positive controls plus the corrected negative will support an explicitly
 attributed68-case union, followed by the still-unexecuted root/package gates.
+
+### Strict offline Stop A: bounded source/mock gates passed
+
+Corrected 51aa05a4 passed 575 available vendor tests (including 97 foundation/client),
+26 docs and direct strict vendor Clippy; the unavailable external SDK metadata
+fixture remains excluded. Runner-only fa2819f2 passed the corrected E0599 negative
+and both positive controls. The original 67/68 failure remains unchanged; an exact
+fixture/input comparison binds the 68-unique-case union across these runs.
+
+Fresh current caller compilation and 121 selected App tests, 25 helper/13 protocol
+checks, feature/default/core Clippy, formatting, six compiler positive cases
+across three older runners, 239 Python tests/zero skips and 555 package inputs all
+pass. No whole App/core or old-negative outcome reuse is claimed. Forced current-
+worktree vendor compilation, exact caller rlib links, copied dep-info/artifacts
+and stable source hashes bind the results. The default helper reproduces the
+combined baseline's 78658763 SHA prefix byte-for-byte.
+
+Both initial failures are retained as test/classifier corrections, with no
+production relaxation. This closes the bounded Stop A source/mock/client gate
+subject to independent frozen-evidence review. Stop B's real clone adapter,
+cancellation registration, typed renderer cleanup, selected-occurrence activation
+and genuine plugin execution remain separate decisions. No user-facing render
+control, strict-default change, tagged IPC or metadata-age policy is enabled.

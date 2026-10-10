@@ -129,3 +129,37 @@ The external compiler runner uses actual dependency APIs, positive controls and
 marked-expression diagnostics, including feature absence and ownership boundaries.
 Existing three source-linked runners change only their expected module count20.
 No execution result is claimed until the separately frozen test receipt exists.
+
+## Executed Stop A source/mock qualification
+
+The reviewed source was compiled and tested with Rust 1.99.0 on Linux. The corrected
+vendor source 51aa05a4 passed 575 available tests, including 97 foundation/client
+cases, 26 doctests and strict direct vendor Clippy. One SDK module-info test needs
+an unavailable external fixture and is explicitly excluded. No production parser
+change was needed: the initial 96/97 failure was a stale negative expectation for
+the newly supported Parameters reply; its precise WrongReply correction retains
+an independently unsupported ParameterString probe.
+
+The complete external API compiler run is retained as FAILED 67/68. Its only
+mismatch was expected diagnostic wording: the marked CancelHandle cleanup call
+correctly failed with E0599, but the compiler used a different exact phrase.
+Runner-only revision fa2819f2 passed both positive controls and that negative.
+All 68 fixture bodies, compiler-reachable Rust, manifests, locks and features are
+unchanged between these runs. The union establishes 68 distinct expected outcomes;
+it is not a claim that the original report passed or that all 68 were rerun.
+
+Fresh current all-feature caller compilation and 121 selected App tests passed
+(33 bounce, 11 offline preparation and 77 runtime), as did 25 helper tests and 13
+protocol tests. Feature/default/core Clippy, formatting, six positive cases across
+three older compiler runners, 239 Python tests with zero skips, and 555 package
+inputs passed. No full current App/core suite or historical compiler negatives
+are promoted to this checkpoint's execution. The vendor tests above ran on Rust
+identical to fa2819f2; only the runner diagnostic fragment and result history differ.
+
+Fresh worktree vendor rustc commands, exact caller rlib links, copied dep-info,
+test artifacts and source hashes bind these results. The reproduced default
+helper SHA-256 is 7865876366d2eb608fc2b685d79256b71ca4d9d27683a3e33ec7afa2469b3f69,
+identical to the tested combined baseline. Both original failed reports remain
+in the frozen evidence. Only this result appendix and WORK_LOG changed after the
+last gates. This is source/mock/client qualification. No real RenderBackend
+adapter, genuine plugin, native UI, device or tagged transport was exercised.
