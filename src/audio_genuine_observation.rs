@@ -154,6 +154,9 @@ pub(crate) struct GenuineEndpointObservation {
     pub(crate) partial_live_events: usize,
     pub(crate) partial_total_events: usize,
     pub(crate) admitted_live_edit_markers: u8,
+    pub(crate) stopped_epoch_safety_epoch: Option<u64>,
+    pub(crate) stopped_epoch_safety_remaining_frames: usize,
+    pub(crate) stopped_epoch_safety_failed: bool,
     pub(crate) live_lane_faulted: bool,
     pub(crate) suppress_output_frames: usize,
     pub(crate) pdc_delay: Option<GenuineDelayObservation>,
@@ -326,6 +329,13 @@ impl PreparedFixedEndpoint {
             partial_live_events: self.partial_quantum_usage.live,
             partial_total_events: self.partial_quantum_usage.total,
             admitted_live_edit_markers: self.admitted_live_edit_markers,
+            stopped_epoch_safety_epoch: self.stopped_epoch_safety.map(|service| service.epoch),
+            stopped_epoch_safety_remaining_frames: self
+                .stopped_epoch_safety
+                .map_or(0, |service| service.remaining_frames),
+            stopped_epoch_safety_failed: self
+                .stopped_epoch_safety
+                .is_some_and(|service| service.failed),
             live_lane_faulted: self.events.scratch.live_faulted,
             suppress_output_frames,
             pdc_delay: pdc_delay.map(GenuineDelayObservation::from_line),
@@ -335,6 +345,19 @@ impl PreparedFixedEndpoint {
 }
 
 impl DspState {
+    fn genuine_stopped_epoch_safety(&self) -> impl Iterator<Item = StoppedEpochSafetyService> + '_ {
+        self.generator_endpoints
+            .iter()
+            .flatten()
+            .filter_map(|slot| slot.endpoint.stopped_epoch_safety)
+            .chain(
+                self.insert_endpoints
+                    .iter()
+                    .flatten()
+                    .filter_map(|slot| slot.endpoint.stopped_epoch_safety),
+            )
+    }
+
     fn genuine_hooks_inactive(&self) -> bool {
         crate::realtime_test_alloc::genuine_guard_inactive()
             && self.test_restoration_reset_arm.is_none()
@@ -455,7 +478,8 @@ impl DspState {
                 .map(|identity| (identity.revision, identity.epoch, identity.fingerprint)),
             pdc_revision: self.pdc_plan_revision,
             zero_pdc: self.genuine_zero_pdc(),
-            paused_safety_services: self.paused_midi_safety.iter().flatten().count(),
+            paused_safety_services: self.paused_midi_safety.iter().flatten().count()
+                + self.genuine_stopped_epoch_safety().count(),
             admitted_live_edit_endpoints: self.admitted_live_edit_endpoint_count,
             parameter_edit_admission: self
                 .parameter_edit_callback_admission
@@ -776,12 +800,17 @@ impl TestAudioCallback {
                     .collect()
             }),
             zero_pdc: dsp.genuine_zero_pdc(),
-            paused_safety_services: dsp.paused_midi_safety.iter().flatten().count(),
+            paused_safety_services: dsp.paused_midi_safety.iter().flatten().count()
+                + dsp.genuine_stopped_epoch_safety().count(),
             paused_safety_remaining_frames: dsp
                 .paused_midi_safety
                 .iter()
                 .flatten()
                 .map(|service| service.remaining_frames)
+                .chain(
+                    dsp.genuine_stopped_epoch_safety()
+                        .map(|service| service.remaining_frames),
+                )
                 .sum(),
             admitted_live_edit_endpoints: dsp.admitted_live_edit_endpoint_count,
             parameter_edit_admission: dsp
@@ -815,6 +844,7 @@ impl GenuineEndpointObservation {
             || self.staged_live_events != 0
             || self.partial_total_events != 0
             || self.admitted_live_edit_markers != 0
+            || self.stopped_epoch_safety_epoch.is_some()
             || self.fixed.input_phase_frames != 0
             || self.fixed.pending_event_count != 0
             || self.fixed.bridge.pending_inline_events != 0

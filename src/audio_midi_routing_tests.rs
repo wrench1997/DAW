@@ -1154,7 +1154,7 @@ fn midi_port_graph_new_epoch_clears_old_failure_suppression_and_recovers() {
             .all(|slot| slot.suppress_output_frames > 0)
     );
     let fault_mask = fixture.dsp.midi_route_faulted;
-    fixture.dsp.apply_transport_epoch(&fixture.status, 2, 0);
+    fixture.dsp.apply_transport_epoch(&fixture.status, 2, 0, true);
     assert_eq!(
         fixture.dsp.midi_route_faulted, fault_mask,
         "same epoch cannot clear fault ownership"
@@ -1954,6 +1954,12 @@ fn late_paused_monitor_fault_fences_same_callback_safety_and_parameter_services(
         }
         fixture.activation_playing = false;
         fixture.activate(2, 0);
+        assert!(fixture.dsp.generator_endpoints.iter().flatten().all(|slot| {
+            slot.endpoint.stopped_epoch_safety.is_some_and(|safety| safety.epoch == 2 && safety.remaining_frames == 128 && !safety.failed)
+        }));
+        assert!(fixture.dsp.insert_endpoints.iter().flatten().all(|slot| {
+            slot.endpoint.stopped_epoch_safety.is_some_and(|safety| safety.epoch == 2 && safety.remaining_frames == 128 && !safety.failed)
+        }));
         let source_index = fixture.dsp.find_generator_slot(SOURCE_CHANNEL).unwrap();
         let source_id = fixture.dsp.generator_endpoints[source_index].as_ref().unwrap().endpoint_id;
         let sink_id = fixture.dsp.generator_endpoints[fixture.dsp.find_generator_slot(SINK_CHANNEL).unwrap()]
@@ -2006,6 +2012,8 @@ fn late_paused_monitor_fault_fences_same_callback_safety_and_parameter_services(
         assert!(output.iter().all(|frame| *frame == [0.0; 2]));
         assert_eq!(fixture.dsp.generator_endpoints[source_index].as_ref().unwrap().endpoint.stats().callbacks, callbacks);
         assert_eq!(fixture.dsp.paused_midi_safety[source_index].unwrap().remaining_frames, 128);
+        let epoch_safety = fixture.dsp.generator_endpoints[source_index].as_ref().unwrap().endpoint.stopped_epoch_safety.unwrap();
+        assert_eq!((epoch_safety.epoch, epoch_safety.remaining_frames), (2, 128));
         assert!(fixture.controls.iter().all(|c| c.stats().submitted == 0));
         fixture.finish();
     }

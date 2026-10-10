@@ -2987,6 +2987,7 @@ impl RealtimeTransport {
                 self.beat_q32,
                 self.timeline_frame,
                 TransportDiscontinuity::OneShot,
+                request.playing,
             );
         }
 
@@ -3057,6 +3058,7 @@ impl RealtimeTransport {
             self.beat_q32,
             self.timeline_frame,
             TransportDiscontinuity::Loop,
+            self.request.playing,
         );
     }
 
@@ -3211,15 +3213,22 @@ fn render_transport_chunk(
             && let Some(monitor) = midi_monitor_endpoint
         {
             let progress = dsp.render_paused_midi_monitor(status, segment_frames, monitor);
+            // A late monitor failure must fence every remaining stopped owner this segment.
+            dsp.observe_plugin_processing_health();
             // The monitor graph was already advanced audibly. Generic edits on every unrelated
             // endpoint still receive their bounded silent paused service.
             dsp.observe_midi_safety_progress(progress.generator_mask, segment_frames);
             let safety_generator_mask =
                 dsp.service_paused_midi_safety(segment_frames, progress.generator_mask);
-            dsp.service_paused_parameter_edits(
+            let epoch_progress = dsp.service_paused_epoch_safety(
                 segment_frames,
                 progress.generator_mask | safety_generator_mask,
                 progress.insert_mask,
+            );
+            dsp.service_paused_parameter_edits(
+                segment_frames,
+                progress.generator_mask | safety_generator_mask | epoch_progress.generator_mask,
+                progress.insert_mask | epoch_progress.insert_mask,
             );
         } else if timeline_ready {
             dsp.render_block(status, segment_frames);
@@ -3228,7 +3237,13 @@ fn render_transport_chunk(
             dsp.master_block[..segment_frames].fill([0.0; 2]);
             if !transport.request.playing {
                 let safety_generator_mask = dsp.service_paused_midi_safety(segment_frames, 0);
-                dsp.service_paused_parameter_edits(segment_frames, safety_generator_mask, 0);
+                let epoch_progress =
+                    dsp.service_paused_epoch_safety(segment_frames, safety_generator_mask, 0);
+                dsp.service_paused_parameter_edits(
+                    segment_frames,
+                    safety_generator_mask | epoch_progress.generator_mask,
+                    epoch_progress.insert_mask,
+                );
             }
         }
         dsp.observe_plugin_processing_health();
@@ -5441,6 +5456,7 @@ pub struct PreparedFixedEndpoint {
     health_observed_fixed: FixedQuantumStats,
     partial_quantum_usage: EndpointQuantumClassUsage,
     admitted_live_edit_markers: u8,
+    stopped_epoch_safety: Option<StoppedEpochSafetyService>,
     #[cfg(test)]
     fresh_snapshot_script: [Option<PluginLatencySnapshot>; 2],
     #[cfg(test)]
@@ -5469,6 +5485,7 @@ impl PreparedFixedEndpoint {
             health_observed_fixed: FixedQuantumStats::default(),
             partial_quantum_usage: EndpointQuantumClassUsage::default(),
             admitted_live_edit_markers: 0,
+            stopped_epoch_safety: None,
             #[cfg(test)]
             fresh_snapshot_script: [None; 2],
             #[cfg(test)]
@@ -5488,6 +5505,7 @@ impl PreparedFixedEndpoint {
             self.priming_output_count = self.adapter.stats().plugin_output_quanta;
             self.partial_quantum_usage = EndpointQuantumClassUsage::default();
             self.admitted_live_edit_markers = 0;
+            self.stopped_epoch_safety = None;
         }
         changed
     }
@@ -5695,6 +5713,8 @@ impl PreparedFixedEndpoint {
         output_left: &mut [f32],
         output_right: &mut [f32],
     ) -> FixedQuantumProcessStatus {
+        let before = self.adapter.stats();
+        let before_epoch = self.adapter.epoch();
         let old_phase = self.adapter.input_phase_frames();
         let old_usage = self.partial_quantum_usage;
         let (events, classes) = self.events.prepare_callback(input_left.len());
@@ -5723,6 +5743,7 @@ impl PreparedFixedEndpoint {
         ) {
             self.admitted_live_edit_markers = 0;
         }
+        self.observe_stopped_epoch_safety_progress(epoch, before_epoch, before, status);
         status
     }
 
@@ -5733,6 +5754,8 @@ impl PreparedFixedEndpoint {
         output_left: &mut [f32],
         output_right: &mut [f32],
     ) -> FixedQuantumProcessStatus {
+        let before = self.adapter.stats();
+        let before_epoch = self.adapter.epoch();
         let old_phase = self.adapter.input_phase_frames();
         let old_usage = self.partial_quantum_usage;
         let (events, classes) = self.events.prepare_callback(frames);
@@ -5756,7 +5779,66 @@ impl PreparedFixedEndpoint {
         ) {
             self.admitted_live_edit_markers = 0;
         }
+        self.observe_stopped_epoch_safety_progress(epoch, before_epoch, before, status);
         status
+    }
+
+    /// Callback submission ownership only. Worker reset/processing settlement is independent.
+    /// Keep failed work visible: neither a partial event transfer nor a gapped quantum delivers it.
+    fn observe_stopped_epoch_safety_progress(
+        &mut self,
+        epoch: u64,
+        before_epoch: u64,
+        before: FixedQuantumStats,
+        status: FixedQuantumProcessStatus,
+    ) {
+        let Some(mut safety) = self.stopped_epoch_safety else {
+            return;
+        };
+        if safety.failed {
+            return;
+        }
+        let after = self.adapter.stats();
+        let diagnostics = fixed_quantum_stats_delta(before, after);
+        let submitted = after
+            .submitted_quanta
+            .saturating_sub(before.submitted_quanta);
+        let completed = after
+            .completed_quanta
+            .saturating_sub(before.completed_quanta);
+        let frames = match status {
+            FixedQuantumProcessStatus::Processed {
+                frames,
+                epoch_changed: false,
+                ..
+            } if safety.epoch == epoch
+                && before_epoch == epoch
+                && self.adapter.epoch() == epoch
+                && submitted == completed
+                && diagnostics.event_overflows == 0
+                && diagnostics.invalid_events == 0
+                && diagnostics.endpoint_event_rejections == 0
+                && diagnostics.bridge_gaps == 0
+                && diagnostics.latency_drift_quanta == 0 =>
+            {
+                frames
+            }
+            _ => {
+                safety.failed = true;
+                self.stopped_epoch_safety = Some(safety);
+                return;
+            }
+        };
+        if frames < safety.remaining_frames {
+            safety.remaining_frames -= frames;
+            self.stopped_epoch_safety = Some(safety);
+        } else if submitted != 0 {
+            // The budget ends at the boundary of the quantum containing the safety batch.
+            self.stopped_epoch_safety = None;
+        } else {
+            safety.failed = true;
+            self.stopped_epoch_safety = Some(safety);
+        }
     }
 }
 
@@ -5854,6 +5936,15 @@ struct PausedEndpointProgress {
 struct PausedMidiSafetyService {
     stamp: MidiGeneratorRouteStamp,
     remaining_frames: usize,
+}
+
+/// Finite ownership of one callback-staged CC123 batch on this physical endpoint.
+/// An ordinary stopped Q128 submission is separate from worker reset-origin processing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StoppedEpochSafetyService {
+    epoch: u64,
+    remaining_frames: usize,
+    failed: bool,
 }
 
 impl RealtimeMidiInputRoute {
@@ -8553,7 +8644,7 @@ impl DspState {
         } else {
             None
         };
-        self.apply_transport_epoch(status, actual_epoch, spec.beat_q32);
+        self.apply_transport_epoch(status, actual_epoch, spec.beat_q32, spec.playing);
         #[cfg(test)]
         if let Some((arm, before)) = test_reset_before {
             let after_epoch = self.test_restoration_histories(arm.channel_id);
@@ -8773,8 +8864,9 @@ impl DspState {
         beat_q32: u64,
         frame: u64,
         discontinuity: TransportDiscontinuity,
+        playing: bool,
     ) {
-        self.apply_transport_epoch(status, epoch, beat_q32);
+        self.apply_transport_epoch(status, epoch, beat_q32, playing);
         self.timeline_plan.clear();
         self.timeline_plan_has_chase = false;
         self.timeline_plan_render_active = false;
@@ -9066,7 +9158,13 @@ impl DspState {
         self.reset_voice_and_pdc_state(self.timeline_transport_beat_q32);
     }
 
-    fn apply_transport_epoch(&mut self, status: &AudioStatus, epoch: u64, beat_q32: u64) {
+    fn apply_transport_epoch(
+        &mut self,
+        status: &AudioStatus,
+        epoch: u64,
+        beat_q32: u64,
+        playing: bool,
+    ) {
         debug_assert_ne!(epoch, 0);
         if self.transport_epoch != epoch {
             self.plugin_recovered_epoch = None;
@@ -9079,7 +9177,8 @@ impl DspState {
         let mut failures = 0_u64;
         let mut synchronized = false;
         for slot in self.insert_endpoints.iter_mut().flatten() {
-            match synchronize_endpoint_epoch(&mut slot.endpoint, epoch) {
+            let sync = synchronize_endpoint_epoch(&mut slot.endpoint, epoch);
+            match sync {
                 EndpointEpochSync::AlreadyCurrent => synchronized = true,
                 EndpointEpochSync::Reset => {
                     // Suppression belongs to the discarded epoch. Keeping it would make
@@ -9090,14 +9189,25 @@ impl DspState {
                 }
                 EndpointEpochSync::Failed => failures += 1,
             }
-            let _ = slot.endpoint.clear_and_stage_all_notes_off();
+            let deferred = slot.endpoint.clear_and_stage_all_notes_off();
+            slot.endpoint.stopped_epoch_safety =
+                (!playing && sync != EndpointEpochSync::Failed && slot.endpoint.epoch() == epoch)
+                    .then(|| StoppedEpochSafetyService {
+                        epoch,
+                        remaining_frames: midi_safety_frames_to_complete_quantum(
+                            slot.endpoint.input_phase_frames(),
+                            deferred,
+                        ),
+                        failed: false,
+                    });
         }
         for (index, slot) in self.generator_endpoints.iter_mut().enumerate() {
             let Some(slot) = slot else {
                 self.midi_route_faulted &= !(1_u64 << index);
                 continue;
             };
-            match synchronize_endpoint_epoch(&mut slot.endpoint, epoch) {
+            let sync = synchronize_endpoint_epoch(&mut slot.endpoint, epoch);
+            match sync {
                 EndpointEpochSync::AlreadyCurrent => synchronized = true,
                 EndpointEpochSync::Reset => {
                     // Suppression belongs to the discarded epoch. Keeping it would make
@@ -9109,7 +9219,17 @@ impl DspState {
                 }
                 EndpointEpochSync::Failed => failures += 1,
             }
-            let _ = slot.endpoint.clear_and_stage_all_notes_off();
+            let deferred = slot.endpoint.clear_and_stage_all_notes_off();
+            slot.endpoint.stopped_epoch_safety =
+                (!playing && sync != EndpointEpochSync::Failed && slot.endpoint.epoch() == epoch)
+                    .then(|| StoppedEpochSafetyService {
+                        epoch,
+                        remaining_frames: midi_safety_frames_to_complete_quantum(
+                            slot.endpoint.input_phase_frames(),
+                            deferred,
+                        ),
+                        failed: false,
+                    });
         }
         self.admitted_live_edit_endpoint_count = 0;
         self.plugin_epoch_resets = self.plugin_epoch_resets.saturating_add(resets);
@@ -11998,6 +12118,23 @@ impl DspState {
                     ));
                 }
             }
+            if fault.is_none()
+                && endpoint
+                    .stopped_epoch_safety
+                    .is_some_and(|safety| safety.failed)
+            {
+                // A co-owner (normal render or monitor) may discover the failed delivery
+                // before the stopped helper sees this endpoint. Fence that path as well.
+                fault = Some((
+                    id,
+                    endpoint.adapter.expected_sequence(),
+                    if fixed.latency_drift_quanta > previous_fixed.latency_drift_quanta {
+                        PluginProcessingFaultReason::LatencyDrift
+                    } else {
+                        PluginProcessingFaultReason::InputLoss
+                    },
+                ));
+            }
         }
         if fault.is_none() && self.midi_route_event_loss {
             fault = Some((0, 0, PluginProcessingFaultReason::EventLoss));
@@ -12807,7 +12944,8 @@ impl DspState {
     }
 
     fn service_paused_midi_safety(&mut self, frames: usize, skip_mask: u64) -> u64 {
-        if self.plugin_fault.is_some() || self.plugin_processing_suspended() {
+        self.observe_plugin_processing_health();
+        if frames == 0 || self.plugin_fault.is_some() || self.plugin_processing_suspended() {
             return 0;
         }
         let mut processed_mask = 0_u64;
@@ -12825,6 +12963,7 @@ impl DspState {
             let slot = self.generator_endpoints[index]
                 .as_mut()
                 .expect("exact MIDI safety endpoint remains installed");
+            let had_admitted_marker = slot.endpoint.has_admitted_live_edit_marker();
             let before = slot.endpoint.stats();
             let _ = slot.endpoint.process_generator(
                 self.transport_epoch,
@@ -12833,6 +12972,16 @@ impl DspState {
                 &mut self.plugin_output_right[..process_frames],
             );
             let diagnostics = fixed_quantum_stats_delta(before, slot.endpoint.stats());
+            if had_admitted_marker && !slot.endpoint.has_admitted_live_edit_marker() {
+                self.admitted_live_edit_endpoint_count =
+                    self.admitted_live_edit_endpoint_count.saturating_sub(1);
+            }
+            let endpoint_id = slot.endpoint_id;
+            let expected_sequence = slot.endpoint.adapter.expected_sequence();
+            let epoch_service_failed = slot
+                .endpoint
+                .stopped_epoch_safety
+                .is_some_and(|service| service.failed);
             let mut rearmed_budget = None;
             if diagnostics.event_overflows != 0
                 || diagnostics.endpoint_event_rejections != 0
@@ -12856,8 +13005,170 @@ impl DspState {
                 self.paused_midi_safety[index] = Some(safety);
             }
             processed_mask |= 1_u64 << index;
+            self.observe_paused_safety_processing_health(
+                endpoint_id,
+                expected_sequence,
+                diagnostics,
+                epoch_service_failed,
+            );
+            if self.plugin_fault.is_some() || self.plugin_processing_suspended() {
+                break;
+            }
         }
         processed_mask
+    }
+
+    /// Deliver only the callback-staged batch for the exact stopped endpoint epoch.
+    /// No graph/native/PDC path is visited and plug-in output stays in discarded scratch.
+    fn service_paused_epoch_safety(
+        &mut self,
+        frames: usize,
+        skip_generator_mask: u64,
+        skip_insert_mask: u32,
+    ) -> PausedEndpointProgress {
+        let mut progress = PausedEndpointProgress::default();
+        self.observe_plugin_processing_health();
+        if frames == 0 || self.plugin_fault.is_some() || self.plugin_processing_suspended() {
+            return progress;
+        }
+        for index in 0..MAX_GENERATOR_ENDPOINTS {
+            if skip_generator_mask & (1_u64 << index) != 0 {
+                continue;
+            }
+            let Some(slot) = self.generator_endpoints[index].as_mut() else {
+                continue;
+            };
+            let Some(safety) = slot.endpoint.stopped_epoch_safety else {
+                continue;
+            };
+            if safety.failed
+                || safety.epoch != self.transport_epoch
+                || slot.endpoint.epoch() != self.transport_epoch
+            {
+                continue;
+            }
+            // Stop at a physical boundary so an unsuccessful quantum is fenced before
+            // another one can be submitted, including the AlreadyCurrent deferred case.
+            let process_frames = frames
+                .min(safety.remaining_frames)
+                .min(DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES - slot.endpoint.input_phase_frames());
+            let had_admitted_marker = slot.endpoint.has_admitted_live_edit_marker();
+            let before = slot.endpoint.stats();
+            let _ = slot.endpoint.process_generator(
+                self.transport_epoch,
+                process_frames,
+                &mut self.plugin_output_left[..process_frames],
+                &mut self.plugin_output_right[..process_frames],
+            );
+            let diagnostics = fixed_quantum_stats_delta(before, slot.endpoint.stats());
+            if had_admitted_marker && !slot.endpoint.has_admitted_live_edit_marker() {
+                self.admitted_live_edit_endpoint_count =
+                    self.admitted_live_edit_endpoint_count.saturating_sub(1);
+            }
+            let endpoint_id = slot.endpoint_id;
+            let expected_sequence = slot.endpoint.adapter.expected_sequence();
+            let failed = slot
+                .endpoint
+                .stopped_epoch_safety
+                .is_some_and(|safety| safety.failed);
+            progress.generator_mask |= 1_u64 << index;
+            self.accumulate_fixed_quantum_diagnostics(diagnostics);
+            self.observe_paused_safety_processing_health(
+                endpoint_id,
+                expected_sequence,
+                diagnostics,
+                failed,
+            );
+            if self.plugin_fault.is_some() || self.plugin_processing_suspended() {
+                return progress;
+            }
+        }
+        for insert in 0..TRACK_COUNT {
+            if skip_insert_mask & (1_u32 << insert) != 0 {
+                continue;
+            }
+            let Some(slot) = self.insert_endpoints[insert].as_mut() else {
+                continue;
+            };
+            let Some(safety) = slot.endpoint.stopped_epoch_safety else {
+                continue;
+            };
+            if safety.failed
+                || safety.epoch != self.transport_epoch
+                || slot.endpoint.epoch() != self.transport_epoch
+            {
+                continue;
+            }
+            let process_frames = frames
+                .min(safety.remaining_frames)
+                .min(DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES - slot.endpoint.input_phase_frames());
+            self.plugin_input_left[..process_frames].fill(0.0);
+            self.plugin_input_right[..process_frames].fill(0.0);
+            let had_admitted_marker = slot.endpoint.has_admitted_live_edit_marker();
+            let before = slot.endpoint.stats();
+            let _ = slot.endpoint.process(
+                self.transport_epoch,
+                &self.plugin_input_left[..process_frames],
+                &self.plugin_input_right[..process_frames],
+                &mut self.plugin_output_left[..process_frames],
+                &mut self.plugin_output_right[..process_frames],
+            );
+            let diagnostics = fixed_quantum_stats_delta(before, slot.endpoint.stats());
+            if had_admitted_marker && !slot.endpoint.has_admitted_live_edit_marker() {
+                self.admitted_live_edit_endpoint_count =
+                    self.admitted_live_edit_endpoint_count.saturating_sub(1);
+            }
+            let endpoint_id = slot.endpoint_id;
+            let expected_sequence = slot.endpoint.adapter.expected_sequence();
+            let failed = slot
+                .endpoint
+                .stopped_epoch_safety
+                .is_some_and(|safety| safety.failed);
+            progress.insert_mask |= 1_u32 << insert;
+            self.accumulate_fixed_quantum_diagnostics(diagnostics);
+            self.observe_paused_safety_processing_health(
+                endpoint_id,
+                expected_sequence,
+                diagnostics,
+                failed,
+            );
+            if self.plugin_fault.is_some() || self.plugin_processing_suspended() {
+                return progress;
+            }
+        }
+        progress
+    }
+
+    fn observe_paused_safety_processing_health(
+        &mut self,
+        endpoint_id: u64,
+        expected_sequence: u64,
+        diagnostics: FixedQuantumStatsDelta,
+        epoch_service_failed: bool,
+    ) {
+        // Prefer an already published, more specific bridge/worker fault. Event loss
+        // is also detected here by the existing cumulative health observer.
+        self.observe_plugin_processing_health();
+        if self.plugin_fault.is_some() {
+            return;
+        }
+        let reason = if diagnostics.event_overflows != 0
+            || diagnostics.invalid_events != 0
+            || diagnostics.endpoint_event_rejections != 0
+        {
+            Some(PluginProcessingFaultReason::EventLoss)
+        } else if diagnostics.bridge_gaps != 0 {
+            Some(PluginProcessingFaultReason::InputLoss)
+        } else if diagnostics.latency_drift_quanta != 0 && epoch_service_failed {
+            Some(PluginProcessingFaultReason::LatencyDrift)
+        } else if epoch_service_failed {
+            Some(PluginProcessingFaultReason::InputLoss)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            self.latch_plugin_processing_fault(endpoint_id, expected_sequence, reason);
+        }
     }
 
     fn observe_midi_safety_progress(&mut self, processed_mask: u64, frames: usize) {
@@ -15511,6 +15822,7 @@ mod tests {
             0,
             frame,
             TransportDiscontinuity::OneShot,
+            true,
         );
         (controller, dsp, status)
     }
@@ -18253,7 +18565,7 @@ mod tests {
             .unwrap();
         controller.install_loop_chase(loop_chase).unwrap();
         assert_eq!(dsp.apply_pending_timeline_commands(), 1);
-        dsp.apply_transport_discontinuity(&status, 3, 0, 0, TransportDiscontinuity::Loop);
+        dsp.apply_transport_discontinuity(&status, 3, 0, 0, TransportDiscontinuity::Loop, true);
         let loop_base = dsp.timeline_channel_bases.get(7).unwrap();
         assert_eq!(loop_base.volume_automation_slot, Some(slot));
         assert_eq!(
@@ -18410,7 +18722,7 @@ mod tests {
         assert_eq!(dsp.apply_pending_timeline_commands(), 2);
         let status = AudioStatus::default();
         status.playing.store(true, Ordering::Release);
-        dsp.apply_transport_discontinuity(&status, 2, 0, 0, TransportDiscontinuity::OneShot);
+        dsp.apply_transport_discontinuity(&status, 2, 0, 0, TransportDiscontinuity::OneShot, true);
 
         let base = dsp.timeline_channel_bases.get(10).unwrap();
         assert_eq!(base.volume_automation_slot, None);
@@ -18819,7 +19131,7 @@ mod tests {
             .unwrap();
         controller.install_loop_chase(loop_chase).unwrap();
         assert_eq!(dsp.apply_pending_timeline_commands(), 1);
-        dsp.apply_transport_discontinuity(&status, 3, 0, 5, TransportDiscontinuity::Loop);
+        dsp.apply_transport_discontinuity(&status, 3, 0, 5, TransportDiscontinuity::Loop, true);
         assert_eq!(dsp.timeline_automation.epoch(), 3);
         assert_eq!(dsp.timeline_automation.next_frame(), 5);
         assert!(dsp.prepare_timeline_render(3, 5, 0, 1, true));
@@ -19418,6 +19730,7 @@ mod tests {
             0,
             start_frame,
             TransportDiscontinuity::OneShot,
+            true,
         );
 
         let mut pcm = Vec::new();
@@ -21369,7 +21682,7 @@ mod tests {
         });
         assert_eq!(dsp.apply_pending_timeline_commands(), 3);
         let status = AudioStatus::default();
-        dsp.apply_transport_discontinuity(&status, 1, 0, 0, TransportDiscontinuity::OneShot);
+        dsp.apply_transport_discontinuity(&status, 1, 0, 0, TransportDiscontinuity::OneShot, false);
         assert_eq!(dsp.timeline_automation_pending, 1);
         assert_eq!(
             dsp.timeline_plugin_automation_bindings
@@ -21388,7 +21701,7 @@ mod tests {
         );
 
         dsp.render_block(&status, 64);
-        dsp.apply_transport_discontinuity(&status, 2, 0, 0, TransportDiscontinuity::Loop);
+        dsp.apply_transport_discontinuity(&status, 2, 0, 0, TransportDiscontinuity::Loop, true);
         assert!(dsp.timeline_plugin_automation_bindings.is_bound_to(1, 2));
         assert_eq!(dsp.timeline_automation_pending, 1);
         assert!(dsp.prepare_timeline_render(2, 0, 0, 64, true));
@@ -23552,7 +23865,7 @@ mod tests {
         );
 
         let status = AudioStatus::default();
-        dsp.apply_transport_epoch(&status, 2, 0);
+        dsp.apply_transport_epoch(&status, 2, 0, false);
         let slot = dsp.insert_endpoints[1].as_ref().unwrap();
         assert_eq!(slot.endpoint.epoch(), 2);
         assert_eq!(slot.endpoint.stats().epoch_resets, 1);
@@ -24545,6 +24858,9 @@ mod tests {
     }
     mod midi_routing_tests {
         include!("audio_midi_routing_tests.rs");
+    }
+    mod stopped_epoch_safety_tests {
+        include!("audio_stopped_epoch_safety_tests.rs");
     }
     mod stamped_generator_removal_tests {
         include!("audio_stamped_removal_tests.rs");
