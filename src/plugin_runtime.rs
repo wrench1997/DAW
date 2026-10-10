@@ -4894,26 +4894,21 @@ impl Vst3Backend {
             config.max_block_frames,
             vst3_reset_origin_frames(&plugin.info().uid, &plugin.info().version),
         )?;
-        let layout = plugin.audio_bus_layout().ok();
-        let input_channels = layout.as_ref().map_or_else(
-            || usize::from(plugin.info().audio_inputs != 0) * 2,
-            |layout| {
-                layout
-                    .inputs
-                    .iter()
-                    .filter(|bus| bus.active)
-                    .map(|bus| bus.channel_count)
-                    .sum()
-            },
-        );
-        let output_channels = layout.as_ref().map_or(2, |layout| {
-            layout
-                .outputs
-                .iter()
-                .filter(|bus| bus.active)
-                .map(|bus| bus.channel_count)
-                .sum()
-        });
+        let layout = plugin
+            .audio_bus_layout()
+            .map_err(|error| format!("unable to query VST3 audio bus layout: {error}"))?;
+        let input_channels = layout
+            .inputs
+            .iter()
+            .filter(|bus| bus.active)
+            .map(|bus| bus.channel_count)
+            .sum();
+        let output_channels = layout
+            .outputs
+            .iter()
+            .filter(|bus| bus.active)
+            .map(|bus| bus.channel_count)
+            .sum();
         let name = if plugin.info().vendor.trim().is_empty() {
             plugin.info().name.clone()
         } else {

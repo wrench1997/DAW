@@ -1164,3 +1164,45 @@ editor, Windows runtime or performance acceptance. The stable accepted release i
 unchanged. Timing Retry remains a timing-plan operation and does not revive a dead
 helper; there is no automatic state reload. The initial UNVALIDATED archive entries
 above are historical checkpoints, not the current test result.
+
+
+## 2026-10-10 — Checked bus-layout admission, checkpoint 02 (UNVALIDATED)
+
+The production VST3 backend now propagates `AudioBusLayout` query failure instead
+of guessing stereo channels. A valid reply retains the existing sum of active
+bus channels, including empty, mono and multibus layouts. This change occurs
+after helper LoadPlugin initialization, but before backend construction, pending
+state restoration, DAW prepare/reconfigure/start/reset or endpoint promotion.
+The existing disabled-auto-recovery policy and wire format are unchanged.
+
+New tests exercise Error/wrong-response/helper-death refusal, valid channel counts,
+no candidate readiness on layout failure, and the existing App old-model/endpoint
+retention path for load failure. At this source archival boundary these added
+tests have not been compiled or run. The preceding metadata checkpoint remains
+separately committed and source-tested at `6fdfb8f`.
+
+The first checkpoint02 compile found a missing qualified test-only
+`PluginPrepareConfig` path in the App fixture. The diagnostic is retained; the
+fixture now uses the same fully qualified type as its production loader. Its App
+case proves generic nonexistent-plugin loader-failure retention; the direct VST3
+backend/candidate tests separately prove layout-specific refusal. These are not
+an end-to-end App VST3-layout integration test. No production correction was
+needed for this compile error.
+
+
+### Executed checkpoint 02 validation (2026-10-10)
+
+After the test-only path correction, all three direct VST3 layout regressions
+and the expanded App retention case pass. Full current-source runs pass 1,188
+all-feature App tests and 1,171 core tests; both strict root Clippy profiles and
+formatting pass. All 239 Python tests pass with the copied helper configured,
+including its four actual Unix descriptor checks.
+
+The vendor, helper and protocol inputs are byte-identical to checkpoint01 across
+68 recorded files; those 400 available vendor tests, 26 doctests, 25 helper tests
+and 13 protocol checks are reused results, not claimed as new executions. The
+build reproduces the same helper SHA256
+`000195915ef88f8ab2e212b97f87f26bb41eb9a7d54a36540fdb470a61e409cd`.
+The initial compile failure, absent upstream fixture, and prior checkpoint
+qualifications remain in the evidence. Genuine-plugin/native/Windows runtime
+acceptance and release are outside these source-only checkpoints.

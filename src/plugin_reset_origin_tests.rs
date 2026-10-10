@@ -9,6 +9,7 @@ struct ResetHelper {
     mode: PathBuf,
     identity: PathBuf,
     maximum: PathBuf,
+    layout: PathBuf,
 }
 
 impl ResetHelper {
@@ -28,6 +29,12 @@ impl ResetHelper {
         std::fs::write(&identity, r#"["00000000000000000000000000000001","1"]"#).unwrap();
         let maximum = root.join("maximum");
         std::fs::write(&maximum, "2048").unwrap();
+        let layout = root.join("layout.json");
+        std::fs::write(
+            &layout,
+            r#"{"inputs":[],"outputs":[{"channel_count":2,"active":true}]}"#,
+        )
+        .unwrap();
         let source = format!(
             r#"#!/usr/bin/python3
 import json,sys,pathlib
@@ -35,6 +42,7 @@ log=pathlib.Path({log:?})
 mode=pathlib.Path({mode:?})
 identity=pathlib.Path({identity:?})
 maximum=pathlib.Path({maximum:?})
+layout=pathlib.Path({layout:?})
 for line in sys.stdin:
     command=json.loads(line)
     with log.open('a') as f: f.write(json.dumps(command)+'\n')
@@ -49,6 +57,9 @@ for line in sys.stdin:
         response={{'Error':{{'message':'deliberate '+kind+' refusal'}}}}
     elif kind=='ProcessResetOrigin':
         response={{'ResetOriginReport':{{'report':{{'frames':command[kind]['frames'],'discarded_prior_midi_events':0,'discarded_midi_events':2,'discarded_prior_parameter_points':0,'discarded_parameter_points':3,'output_events_lost':selected=='loss','parameter_output_fault':False,'process_error':'SDK refusal' if selected=='sdk' else None}}}}}}
+    elif kind=='AudioBusLayout':
+        if selected=='layout-exit': sys.exit(9)
+        response=({{'Success':{{'message':'wrong layout response'}}}} if selected=='layout-wrong' else {{'AudioBusLayout':{{'layout':json.loads(layout.read_text())}}}})
     elif kind=='LatencySamples': response={{'LatencySamples':{{'samples':37}}}}
     elif kind=='TailSamples': response={{'TailSamples':{{'samples':511}}}}
     elif kind=='NativeDirtyRevision': response={{'NativeDirtyRevision':{{'revision':0}}}}
@@ -58,7 +69,8 @@ for line in sys.stdin:
             log = log.to_string_lossy(),
             mode = mode.to_string_lossy(),
             identity = identity.to_string_lossy(),
-            maximum = maximum.to_string_lossy()
+            maximum = maximum.to_string_lossy(),
+            layout = layout.to_string_lossy()
         );
         std::fs::write(&script, source).unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -69,6 +81,7 @@ for line in sys.stdin:
             mode,
             identity,
             maximum,
+            layout,
         }
     }
     fn set_identity(&self, uid: &str, version: &str) {
@@ -527,6 +540,119 @@ fn checked_vst3_candidate_tail_failure_never_emits_ready_or_reloads() {
             .count(),
         1
     );
+    assert_eq!(
+        chain.guard.shutdown_blocking(Duration::from_secs(5)),
+        ShutdownOutcome::Joined
+    );
+}
+
+#[test]
+fn checked_vst3_layout_preserves_empty_mono_stereo_and_active_bus_totals() {
+    use vst3_host::audio::{AudioBusConfig, AudioBusLayout};
+    let bus = |channel_count, active| AudioBusConfig {
+        channel_count,
+        active,
+    };
+    for (layout, expected) in [
+        (
+            AudioBusLayout {
+                inputs: vec![],
+                outputs: vec![],
+            },
+            (0, 0),
+        ),
+        (
+            AudioBusLayout {
+                inputs: vec![bus(1, true)],
+                outputs: vec![bus(1, true)],
+            },
+            (1, 1),
+        ),
+        (
+            AudioBusLayout {
+                inputs: vec![bus(2, true)],
+                outputs: vec![bus(2, true)],
+            },
+            (2, 2),
+        ),
+        (
+            AudioBusLayout {
+                inputs: vec![bus(2, true), bus(5, false), bus(1, true)],
+                outputs: vec![bus(6, true), bus(3, false)],
+            },
+            (3, 6),
+        ),
+    ] {
+        let helper = ResetHelper::new();
+        std::fs::write(&helper.layout, serde_json::to_vec(&layout).unwrap()).unwrap();
+        let backend = Vst3Backend::load(helper.spec(), reset_config()).unwrap();
+        assert_eq!((backend.input_channels, backend.output_channels), expected);
+        assert!(!backend.prepared);
+        assert_eq!(backend.pending_state, [1, 2, 3]);
+        assert_eq!(backend.plugin.recovery_count(), 0);
+    }
+}
+
+#[test]
+fn checked_vst3_layout_failure_refuses_load_before_state_or_prepare() {
+    for mode in ["AudioBusLayout", "layout-wrong", "layout-exit"] {
+        let helper = ResetHelper::new();
+        helper.select(mode);
+        let error = Vst3Backend::load(helper.spec(), reset_config())
+            .err()
+            .unwrap();
+        assert!(error.contains("audio bus layout"), "{mode}: {error}");
+        let commands = helper.commands();
+        assert_eq!(
+            commands.iter().filter(|c| kind(c) == "LoadPlugin").count(),
+            1
+        );
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|c| kind(c) == "AudioBusLayout")
+                .count(),
+            1
+        );
+        assert!(!commands.iter().any(|c| matches!(
+            kind(c),
+            "LoadState"
+                | "Reconfigure"
+                | "StartProcessing"
+                | "ResetOriginSupport"
+                | "ProcessResetOrigin"
+        )));
+    }
+}
+
+#[test]
+fn checked_vst3_layout_candidate_failure_never_becomes_ready() {
+    let helper = ResetHelper::new();
+    helper.select("AudioBusLayout");
+    let mut chain =
+        PluginChain::spawn_identified(vec![(42, helper.spec())], reset_config()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_fault = false;
+    while std::time::Instant::now() < deadline {
+        while let Some(event) = chain.control.try_next_event() {
+            assert!(!matches!(event, RuntimeEvent::SlotReady { .. }));
+            if let RuntimeEvent::SlotFault { message, .. } = event {
+                assert!(message.contains("audio bus layout"), "{message}");
+                saw_fault = true;
+            }
+        }
+        if saw_fault && chain.control.plugin_latency_snapshot().is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(saw_fault);
+    assert_eq!(
+        chain.control.plugin_latency_snapshot().unwrap().active_mask,
+        0
+    );
+    assert_eq!(chain.control.stats().faults, 1);
+    assert!(!helper.commands().iter().any(|c| kind(c) == "LoadState"));
     assert_eq!(
         chain.guard.shutdown_blocking(Duration::from_secs(5)),
         ShutdownOutcome::Joined

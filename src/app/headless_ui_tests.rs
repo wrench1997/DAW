@@ -3941,7 +3941,7 @@ fn plugin_config_prepared_candidate_waits_for_all_slots_and_replay_before_instal
 
 #[test]
 fn plugin_config_candidate_prepare_restore_and_replay_failures_preserve_old_model() {
-    for failure in ["prepare", "restore", "replay", "metadata"] {
+    for failure in ["prepare", "restore", "replay", "metadata", "load"] {
         let mut ui = UiHarness::new();
         let id = config_capture_plugin(
             &mut ui.app.project,
@@ -3973,13 +3973,27 @@ fn plugin_config_candidate_prepare_restore_and_replay_failures_preserve_old_mode
                 .parameters
                 .insert(u32::MAX, 0.9);
         }
-        let chain = spawn_config_candidate_fixture_checked(
-            &candidate,
-            &[id],
-            failure == "prepare",
-            failure == "restore",
-            failure == "metadata",
-        );
+        let chain = if failure == "load" {
+            plugins::plugin_runtime::PluginChain::spawn_identified(
+                vec![(
+                    id,
+                    plugin_instance_runtime_spec(&candidate.plugin_instances[0]),
+                )],
+                plugins::plugin_runtime::PluginPrepareConfig {
+                    sample_rate: 48_000.0,
+                    max_block_frames: 2048,
+                },
+            )
+            .unwrap()
+        } else {
+            spawn_config_candidate_fixture_checked(
+                &candidate,
+                &[id],
+                failure == "prepare",
+                failure == "restore",
+                failure == "metadata",
+            )
+        };
         let mut prepared = PreparedPluginSlotConfig::new(candidate, chain, vec![id], 701);
         wait_config_condition(|| match prepared.poll() {
             Err(_) => true,
