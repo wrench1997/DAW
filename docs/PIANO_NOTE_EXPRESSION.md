@@ -60,6 +60,9 @@ short imported note does not silently lengthen it.
   lengths, including 1/24-beat notes; the final legal minimum-length note starts
   at 4095.984375 beats. End validation checks the exact stored start and length
   without allowing f32 addition to conceal an overshoot.
+  Valid timing fields use the shortest text that round-trips their stored f32
+  values, so focusing a number and pressing Enter or clicking Apply without
+  typing does not round a short note, dirty the Project or create Undo history.
 - Properties never replace the Project with an opening snapshot. Unrelated newer
   project data survives; changed target notes or stale project/pattern/Channel
   identity fail closed. The opening target set remains frozen while the dialog
@@ -74,10 +77,17 @@ slice does not add new synthesis behavior or change the project format.
 
 ## Verification
 
-The short-timing properties correction has source regressions for real numeric
-Start-only edits, typed 1/64- and 1/24-beat lengths, the final legal start, grouped
-Undo/Redo and invalid bounds. This source checkpoint is **unvalidated** until its
-own test results are recorded; the historical results below do not validate it.
+The initial short-timing correction at `96223cc1ca63e2bac0e6089653b1f108a9dbd4de`
+passed 1,174 core application tests and 1,191 all-feature application, 25 helper
+and 13 protocol tests, plus both strict Clippy profiles, formatting, all-bin
+build and ordinary helper smoke. Python checks ran 235 cases with one existing
+skip. These are source/production-input results, not native Windows acceptance.
+
+The subsequent precision correction adds untouched numeric focus/Enter/Apply
+regressions for both fields at 1/64, 1/24 and the final legal start, requiring
+exact Project preservation and zero history. This second source checkpoint is
+**unvalidated** until its own test results are recorded; the earlier results
+do not validate it.
 
 `src/app/piano_expression_tests.rs` operates the production app through actual
 egui pointer, key, text and wheel input. Pure candidate regressions cover invalid

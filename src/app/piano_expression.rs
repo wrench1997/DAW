@@ -354,8 +354,11 @@ impl CitrusApp {
             egui::Grid::new("note-properties-fields").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
                 if draft.origins.len() == 1 {
                     property_control(ui, "Pitch (MIDI)", egui::DragValue::new(&mut draft.edited.note).range(0..=127));
-                    property_control(ui, "Start (beats)", egui::DragValue::new(&mut draft.edited.start).range(0.0..=MAX_NOTE_START_BEATS).clamp_existing_to_range(false).speed(0.05).max_decimals(3));
-                    property_control(ui, "Length (beats)", egui::DragValue::new(&mut draft.edited.length).range(MIN_NOTE_LENGTH_BEATS..=MAX_PIANO_BEAT as f32).clamp_existing_to_range(false).speed(0.05).max_decimals(3));
+                    // DragValue re-parses its displayed text on focus loss, even without an
+                    // edit. Keep exact f32 timing through that round trip; max_decimals
+                    // still controls drag rounding independently of this formatter.
+                    property_control(ui, "Start (beats)", egui::DragValue::new(&mut draft.edited.start).range(0.0..=MAX_NOTE_START_BEATS).clamp_existing_to_range(false).speed(0.05).max_decimals(3).custom_formatter(|value, _| (value as f32).to_string()));
+                    property_control(ui, "Length (beats)", egui::DragValue::new(&mut draft.edited.length).range(MIN_NOTE_LENGTH_BEATS..=MAX_PIANO_BEAT as f32).clamp_existing_to_range(false).speed(0.05).max_decimals(3).custom_formatter(|value, _| (value as f32).to_string()));
                     property_control(ui, "Velocity", egui::Slider::new(&mut draft.edited.velocity, 0.0..=1.0).fixed_decimals(3));
                 } else {
                     property_control(ui, "Transpose (semitones)", egui::DragValue::new(&mut draft.transpose).range(-127..=127));

@@ -750,6 +750,67 @@ fn piano_expression_properties_accepts_typed_short_lengths_and_final_legal_start
 }
 
 #[test]
+fn piano_expression_properties_untouched_timing_focus_preserves_exact_notes_and_history() {
+    let minimum = crate::piano_roll::MIN_NOTE_LENGTH_BEATS;
+    for (start, length) in [
+        (0.375, minimum),
+        (0.375, 1.0 / 24.0),
+        (4096.0 - minimum, minimum),
+    ] {
+        for enter in [false, true] {
+            for name in ["Start (beats)", "Length (beats)"] {
+                let mut ui = fixture();
+                ui.app.piano_roll_state.grouping_enabled = false;
+                ui.app.project.active_pattern_mut().notes[0].start = start;
+                ui.app.project.active_pattern_mut().notes[0].length = length;
+                ui.app.piano_roll_state.selection_ids = HashSet::from([90001]);
+                ui.app.show_inspector = true;
+                ui.size = Vec2::new(1920.0, 1080.0);
+                ui.app.sync_history_observer();
+                ui.app.undo_stack.clear();
+                ui.app.redo_stack.clear();
+                ui.app.dirty = false;
+                ui.settle();
+                let before = project_fingerprint(&ui.app.project);
+                ui.click("Edit note properties");
+                let pos = field(&ui, name).rect.center();
+                double_click(&mut ui, pos);
+                assert!(
+                    ui.ctx.text_edit_focused(),
+                    "real numeric text focus for {name}"
+                );
+                if enter {
+                    ui.key(egui::Key::Enter, egui::Modifiers::NONE);
+                    ui.settle();
+                    assert!(
+                        ui.app.piano_note_properties.is_some(),
+                        "numeric Enter must stay local"
+                    );
+                }
+                // Without Enter, Apply also exercises real pointer-driven focus loss.
+                ui.click("Apply");
+                assert!(
+                    ui.app.piano_note_properties.is_none(),
+                    "untouched {name} must remain valid: start={start:?}, length={length:?}, enter={enter}"
+                );
+                assert_eq!(
+                    project_fingerprint(&ui.app.project),
+                    before,
+                    "focus alone cannot rewrite {name}"
+                );
+                assert_eq!(
+                    (note(&ui, 90001).start, note(&ui, 90001).length),
+                    (start, length)
+                );
+                assert!(ui.app.undo_stack.is_empty(), "focus alone is not an edit");
+                assert!(ui.app.redo_stack.is_empty());
+                assert!(!ui.app.dirty);
+            }
+        }
+    }
+}
+
+#[test]
 fn piano_expression_double_click_batched_and_resize_modifiers_keep_press_ownership() {
     let mut ui = fixture();
     let before = project_fingerprint(&ui.app.project);
