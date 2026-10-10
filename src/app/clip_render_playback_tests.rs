@@ -560,8 +560,7 @@ fn same_bytes_reopen_clears_session_projection_and_forces_new_compile_identity()
 }
 
 fn fill_remaining_command_slots(fixture: &mut Fixture) -> usize {
-    let mut admitted = 0;
-    for _ in 0..=64 {
+    for admitted in 0..=64 {
         if !fixture
             .app_mut()
             .audio
@@ -571,7 +570,6 @@ fn fill_remaining_command_slots(fixture: &mut Fixture) -> usize {
         {
             return admitted;
         }
-        admitted += 1;
     }
     panic!("bounded real callback command ring did not fill");
 }

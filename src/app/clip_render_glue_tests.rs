@@ -185,7 +185,8 @@ fn actual_model_entry_points_are_fenced_before_history_dialogs_or_workers() {
     assert!(app.clip_operation_fence_active());
     let before = project_and_history(&app);
     let revision = app.clip_render_model_revision;
-    let actions: [(&str, fn(&mut CitrusApp)); 12] = [
+    type ModelAction = (&'static str, fn(&mut CitrusApp));
+    let actions: [ModelAction; 12] = [
         ("add Pattern", CitrusApp::add_pattern),
         ("add automation", CitrusApp::add_automation_clip),
         ("Undo", CitrusApp::undo),
@@ -797,7 +798,7 @@ impl Drop for RestorationFixture {
                     "restoration fixture cleanup unproven; exact owner and Project evidence quarantined; later admission refused"
                 );
             }
-            return; // Preserve the original assertion panic.
+            // Returning normally from Drop preserves the original assertion panic.
         }
     }
 }

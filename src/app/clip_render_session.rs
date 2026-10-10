@@ -269,6 +269,8 @@ impl CitrusApp {
     }
     /// This transfer performs no allocation or panic-capable operation before
     /// the incoming guard is installed into its pre-reserved exact owner slot.
+    // Refusal retains the exact incoming worker owner without error-path allocation.
+    #[allow(clippy::result_large_err)]
     pub(super) fn retain_clip_session_source(
         &mut self,
         source: RunningGeneratorChain,

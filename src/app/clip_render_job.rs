@@ -386,6 +386,8 @@ impl ClipRenderJob {
 impl CitrusApp {
     /// Engine-loss teardown transfers the exact source owner here instead of
     /// dropping its guard. The callback outcome remains unknown until its receipt.
+    // Refusal returns the same worker guard; boxing would allocate during teardown.
+    #[allow(clippy::result_large_err)]
     pub(super) fn retain_clip_render_source_on_engine_loss(
         &mut self,
         source: RunningGeneratorChain,

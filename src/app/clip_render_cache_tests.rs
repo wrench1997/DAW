@@ -225,8 +225,7 @@ fn every_existing_asset_id_collision_refuses_without_overwrite() {
     let returned = fixture
         .app_mut()
         .install_retained_clip_media(prepared)
-        .err()
-        .expect("late occupied slot must retain prepared owner");
+        .expect_err("late occupied slot must retain prepared owner");
     assert!(Arc::ptr_eq(&new_samples, returned.entry.pcm.samples()));
     assert!(Arc::ptr_eq(
         &old_samples,

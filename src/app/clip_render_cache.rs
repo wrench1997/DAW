@@ -120,6 +120,8 @@ impl PreparedRetainedClipMedia {
 impl CitrusApp {
     /// Every reservation and recoverable validation is performed before the
     /// App commit CAS/removal. Refusal returns the producer-owned PCM intact.
+    // Err returns the exact producer-owned PCM without allocating on refusal.
+    #[allow(clippy::result_large_err)]
     pub(super) fn prepare_retained_clip_media(
         &mut self,
         operation_id: u64,
@@ -222,6 +224,8 @@ impl CitrusApp {
     }
     /// Move-only insertion alongside the successful history swap. No allocation,
     /// file read, PCM copy, or replacement is permitted at this boundary.
+    // A failed move-only insertion must return its exact owner without allocation.
+    #[allow(clippy::result_large_err)]
     pub(super) fn install_retained_clip_media(
         &mut self,
         prepared: PreparedRetainedClipMedia,
