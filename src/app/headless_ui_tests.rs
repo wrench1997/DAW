@@ -3154,6 +3154,7 @@ struct ConfigCaptureBackend {
     dirty: std::sync::Arc<std::sync::atomic::AtomicU64>,
     open: bool,
     note_on: bool,
+    fail_metadata: bool,
 }
 
 impl plugins::plugin_runtime::PluginBackend for ConfigCaptureBackend {
@@ -3252,6 +3253,13 @@ impl plugins::plugin_runtime::PluginBackend for ConfigCaptureBackend {
             catalog_invalidated: false,
         })
     }
+    fn processing_metadata(&self) -> Result<(u32, u32), String> {
+        if self.fail_metadata {
+            Err("synthetic candidate metadata failure".into())
+        } else {
+            Ok((0, 0))
+        }
+    }
     fn latency_samples(&self) -> u32 {
         0
     }
@@ -3332,6 +3340,7 @@ fn plugin_config_native_capture_all_slots_survives_bypass_enable_and_save_reopen
                         dirty,
                         open: false,
                         note_on: false,
+                        fail_metadata: false,
                     }))
                 })
                 .collect()
@@ -3492,6 +3501,7 @@ fn plugin_config_native_capture_all_slots_survives_bypass_enable_and_save_reopen
             dirty: Arc::new(AtomicU64::new(0)),
             open: false,
             note_on: false,
+            fail_metadata: false,
         };
         restored
             .prepare(PluginPrepareConfig {
@@ -3744,6 +3754,16 @@ fn spawn_config_candidate_fixture(
     fail_prepare: bool,
     fail_restore: bool,
 ) -> plugins::plugin_runtime::PluginChain {
+    spawn_config_candidate_fixture_checked(candidate, ids, fail_prepare, fail_restore, false)
+}
+
+fn spawn_config_candidate_fixture_checked(
+    candidate: &Project,
+    ids: &[u64],
+    fail_prepare: bool,
+    fail_restore: bool,
+    fail_metadata: bool,
+) -> plugins::plugin_runtime::PluginChain {
     use plugins::plugin_runtime::{BackendSlot, PluginBackend, PluginChain, PluginPrepareConfig};
     use std::sync::atomic::{AtomicU32, AtomicU64};
     let instances = ids
@@ -3768,6 +3788,7 @@ fn spawn_config_candidate_fixture(
                         dirty: Arc::new(AtomicU64::new(0)),
                         open: false,
                         note_on: false,
+                        fail_metadata,
                     };
                     if fail_restore {
                         backend
@@ -3920,7 +3941,7 @@ fn plugin_config_prepared_candidate_waits_for_all_slots_and_replay_before_instal
 
 #[test]
 fn plugin_config_candidate_prepare_restore_and_replay_failures_preserve_old_model() {
-    for failure in ["prepare", "restore", "replay"] {
+    for failure in ["prepare", "restore", "replay", "metadata"] {
         let mut ui = UiHarness::new();
         let id = config_capture_plugin(
             &mut ui.app.project,
@@ -3952,11 +3973,12 @@ fn plugin_config_candidate_prepare_restore_and_replay_failures_preserve_old_mode
                 .parameters
                 .insert(u32::MAX, 0.9);
         }
-        let chain = spawn_config_candidate_fixture(
+        let chain = spawn_config_candidate_fixture_checked(
             &candidate,
             &[id],
             failure == "prepare",
             failure == "restore",
+            failure == "metadata",
         );
         let mut prepared = PreparedPluginSlotConfig::new(candidate, chain, vec![id], 701);
         wait_config_condition(|| match prepared.poll() {
@@ -4183,6 +4205,7 @@ fn plugin_config_deferred_restore_preserves_blob_without_resave_or_hidden_proces
                     dirty: Arc::new(AtomicU64::new(0)),
                     open: false,
                     note_on: false,
+                    fail_metadata: false,
                 },
                 deferred: None,
                 saves: worker_saves,

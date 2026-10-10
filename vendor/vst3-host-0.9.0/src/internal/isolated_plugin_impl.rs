@@ -1017,6 +1017,18 @@ impl PluginInternal for IsolatedPluginImpl {
         .unwrap_or(0)
     }
 
+    fn try_latency_samples(&self) -> Result<u32> {
+        // Recovery would substitute metadata from a new, default-initialized instance.
+        // Checked metadata must describe this exact helper or report its failure.
+        match self.send_command_once(HostCommand::LatencySamples)? {
+            HostResponse::LatencySamples { samples } => Ok(samples),
+            HostResponse::Error { message } => {
+                Err(Error::Other(format!("LatencySamples: {message}")))
+            }
+            _ => Err(Error::Other("LatencySamples: unexpected response".into())),
+        }
+    }
+
     fn tail_samples(&self) -> u32 {
         self.poll(
             HostCommand::TailSamples,
@@ -1027,6 +1039,14 @@ impl PluginInternal for IsolatedPluginImpl {
             },
         )
         .unwrap_or(0)
+    }
+
+    fn try_tail_samples(&self) -> Result<u32> {
+        match self.send_command_once(HostCommand::TailSamples)? {
+            HostResponse::TailSamples { samples } => Ok(samples),
+            HostResponse::Error { message } => Err(Error::Other(format!("TailSamples: {message}"))),
+            _ => Err(Error::Other("TailSamples: unexpected response".into())),
+        }
     }
 
     fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
@@ -1470,6 +1490,34 @@ mod tests {
             let helper = Self::new(name);
             let script = std::fs::read_to_string(&helper.script).unwrap();
             let reply = format!("    *NativeDirtyRevision*) printf '%s\\n' '{response}' ;;\n");
+            std::fs::write(
+                &helper.script,
+                script.replace("    *)", &(reply + "    *)")),
+            )
+            .unwrap();
+            helper
+        }
+
+        fn metadata_replies(name: &str, latency: &HostResponse, tail: &HostResponse) -> Self {
+            let helper = Self::new(name);
+            let script = std::fs::read_to_string(&helper.script).unwrap();
+            let replies = format!(
+                "    *LatencySamples*) printf '%s\\n' '{}' ;;\n    *TailSamples*) printf '%s\\n' '{}' ;;\n",
+                serde_json::to_string(latency).unwrap(),
+                serde_json::to_string(tail).unwrap(),
+            );
+            std::fs::write(
+                &helper.script,
+                script.replace("    *)", &(replies + "    *)")),
+            )
+            .unwrap();
+            helper
+        }
+
+        fn raw_metadata_reply(name: &str, command: &str, response: &str) -> Self {
+            let helper = Self::new(name);
+            let script = std::fs::read_to_string(&helper.script).unwrap();
+            let reply = format!("    *{command}*) printf '%s\\n' '{response}' ;;\n");
             std::fs::write(
                 &helper.script,
                 script.replace("    *)", &(reply + "    *)")),
@@ -2032,6 +2080,139 @@ mod tests {
             .is_empty());
         assert_eq!(plugin.take_output_events_with_loss(), (vec![], true));
         assert_reset_requests(&fake, Some(47));
+    }
+
+    #[test]
+    fn checked_metadata_preserves_zero_nonzero_and_maximum_values() {
+        for (index, (latency, tail)) in [(0, 0), (37, 128), (u32::MAX, u32::MAX)]
+            .into_iter()
+            .enumerate()
+        {
+            let fake = FakeHelper::metadata_replies(
+                &format!("metadata_values_{index}"),
+                &HostResponse::LatencySamples { samples: latency },
+                &HostResponse::TailSamples { samples: tail },
+            );
+            let plugin = isolated(&fake);
+            assert_eq!(plugin.try_latency_samples().unwrap(), latency);
+            assert_eq!(plugin.try_tail_samples().unwrap(), tail);
+            assert_eq!(plugin.latency_samples(), latency);
+            assert_eq!(plugin.tail_samples(), tail);
+            assert_eq!(fake.requests().len(), 4);
+            assert_eq!(plugin.recovery_count(), 0);
+        }
+    }
+
+    #[test]
+    fn checked_metadata_rejects_error_and_wrong_replies_with_legacy_zero_fallbacks() {
+        for (index, response) in [
+            HostResponse::Error {
+                message: "metadata unavailable".into(),
+            },
+            HostResponse::Success {
+                message: "wrong reply".into(),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fake = FakeHelper::metadata_replies(
+                &format!("metadata_failure_{index}"),
+                &response,
+                &response,
+            );
+            let plugin = isolated(&fake);
+            let expected_detail = if index == 0 {
+                "metadata unavailable"
+            } else {
+                "unexpected response"
+            };
+            for (command, error) in [
+                ("LatencySamples", plugin.try_latency_samples().unwrap_err()),
+                ("TailSamples", plugin.try_tail_samples().unwrap_err()),
+            ] {
+                let message = error.to_string();
+                assert!(message.contains(command), "{message}");
+                assert!(message.contains(expected_detail), "{message}");
+            }
+            assert_eq!(plugin.latency_samples(), 0);
+            assert_eq!(plugin.tail_samples(), 0);
+            assert_eq!(fake.requests().len(), 4);
+            assert_eq!(plugin.recovery_count(), 0);
+        }
+    }
+
+    #[test]
+    fn checked_metadata_helper_death_stays_failed_without_auto_recovery() {
+        for command in ["LatencySamples", "TailSamples"] {
+            let fake = FakeHelper::exit_on(&format!("metadata_death_{command}"), command);
+            let mut plugin = isolated(&fake);
+            plugin.auto_recover = true;
+            plugin.auto_recover_max_retries = 2;
+            let original_pid = plugin.helper_pid();
+            for _ in 0..2 {
+                let result = match command {
+                    "LatencySamples" => plugin.try_latency_samples(),
+                    "TailSamples" => plugin.try_tail_samples(),
+                    _ => unreachable!(),
+                };
+                assert!(matches!(result, Err(Error::PluginCrashed)), "{result:?}");
+                assert_eq!(plugin.helper_pid(), original_pid);
+                assert_eq!(plugin.recovery_count(), 0);
+            }
+            assert_eq!(
+                fake.requests().len(),
+                1,
+                "{command} must not reload, retry, or send to a known-dead helper"
+            );
+        }
+    }
+
+    #[test]
+    fn checked_metadata_malformed_json_times_out_without_auto_recovery() {
+        for command in ["LatencySamples", "TailSamples"] {
+            let malformed = format!("{{\"{command}\":{{\"samples\":");
+            let fake = FakeHelper::raw_metadata_reply(
+                &format!("metadata_malformed_{command}"),
+                command,
+                &malformed,
+            );
+            let mut plugin = isolated(&fake);
+            plugin.auto_recover = true;
+            plugin.auto_recover_max_retries = 2;
+            // Establish that the shell is servicing requests before shortening this test's
+            // deadline. The fake's generic response is enough for this startup handshake.
+            plugin
+                .send_command_once(HostCommand::GetAllParameters)
+                .unwrap();
+            plugin.response_timeout = Duration::from_secs(1);
+            plugin
+                .process
+                .lock()
+                .unwrap()
+                .set_timeout(Duration::from_secs(1));
+            let original_pid = plugin.helper_pid();
+            let result = match command {
+                "LatencySamples" => plugin.try_latency_samples(),
+                "TailSamples" => plugin.try_tail_samples(),
+                _ => unreachable!(),
+            };
+            // Malformed lines from a live helper are discarded as protocol noise. With no
+            // valid reply, the exchange reaches its deadline and kills the helper; it does
+            // not return a JSON error or report an observed crash.
+            assert!(matches!(result, Err(Error::PluginTimeout)), "{result:?}");
+            assert_eq!(plugin.helper_pid(), original_pid);
+            assert_eq!(plugin.recovery_count(), 0);
+            let process = plugin.process.lock().unwrap();
+            assert!(!process.is_alive());
+            assert_eq!(process.discarded_line_count(), 1);
+            let requests = fake.requests();
+            assert_eq!(requests.len(), 2, "only startup and one metadata request");
+            assert!(requests[1].contains(command));
+            assert!(requests
+                .iter()
+                .all(|request| !request.contains("LoadPlugin")));
+        }
     }
 
     #[test]

@@ -416,6 +416,12 @@ pub trait PluginBackend: 'static {
     }
     fn latency_samples(&self) -> u32;
     fn tail_samples(&self) -> u32;
+    /// Read one complete metadata pair, failing instead of inventing valid zeroes when a
+    /// transport cannot answer. Legacy/local backends retain their infallible SDK behavior.
+    /// The worker publishes neither field unless both reads succeed.
+    fn processing_metadata(&self) -> Result<(u32, u32), String> {
+        Ok((self.latency_samples(), self.tail_samples()))
+    }
 }
 
 /// Persistable information needed to construct one real plug-in instance on its worker.
@@ -3104,16 +3110,13 @@ fn reset_worker_epoch(
 }
 
 fn backend_metadata(backend: &dyn PluginBackend) -> Result<(u32, u32), String> {
-    catch_backend(|| Ok((backend.latency_samples(), backend.tail_samples())))
+    catch_backend(|| backend.processing_metadata())
 }
 
 fn backend_ready_metadata(backend: &dyn PluginBackend) -> Result<(String, u32, u32), String> {
     catch_backend(|| {
-        Ok((
-            backend.name().to_owned(),
-            backend.latency_samples(),
-            backend.tail_samples(),
-        ))
+        let (latency, tail) = backend.processing_metadata()?;
+        Ok((backend.name().to_owned(), latency, tail))
     })
 }
 
@@ -5381,6 +5384,18 @@ impl PluginBackend for Vst3Backend {
     fn tail_samples(&self) -> u32 {
         self.plugin.tail_samples()
     }
+
+    fn processing_metadata(&self) -> Result<(u32, u32), String> {
+        let latency = self
+            .plugin
+            .try_latency_samples()
+            .map_err(|error| error.to_string())?;
+        let tail = self
+            .plugin
+            .try_tail_samples()
+            .map_err(|error| error.to_string())?;
+        Ok((latency, tail))
+    }
 }
 
 #[cfg(feature = "vst3")]
@@ -5921,6 +5936,7 @@ mod tests {
         state: Vec<u8>,
         latency: u32,
         tail: u32,
+        metadata_failure: Option<Arc<AtomicBool>>,
         entered: Option<Arc<AtomicBool>>,
         last_midi: Option<Arc<AtomicU64>>,
         note_on_count: Option<Arc<AtomicU64>>,
@@ -5945,6 +5961,7 @@ mod tests {
                 state: vec![1, 2, 3],
                 latency: 0,
                 tail: 0,
+                metadata_failure: None,
                 entered: None,
                 last_midi: None,
                 note_on_count: None,
@@ -6143,6 +6160,17 @@ mod tests {
             Ok(())
         }
 
+        fn processing_metadata(&self) -> Result<(u32, u32), String> {
+            if self
+                .metadata_failure
+                .as_ref()
+                .is_some_and(|failure| failure.load(Ordering::Acquire))
+            {
+                return Err("mock metadata unavailable".into());
+            }
+            Ok((self.latency, self.tail))
+        }
+
         fn latency_samples(&self) -> u32 {
             self.latency
         }
@@ -6150,6 +6178,122 @@ mod tests {
         fn tail_samples(&self) -> u32 {
             self.tail
         }
+    }
+
+    #[test]
+    fn checked_backend_metadata_preserves_zero_and_infinite_tail() {
+        let mut backend = MockBackend::new("metadata", MockProcess::Gain(1.0));
+        assert_eq!(backend_metadata(&backend).unwrap(), (0, 0));
+        backend.latency = 73;
+        backend.tail = u32::MAX;
+        assert_eq!(
+            backend_ready_metadata(&backend).unwrap(),
+            ("metadata".into(), 73, u32::MAX)
+        );
+    }
+
+    #[test]
+    fn initial_metadata_failure_faults_without_ready_or_active_publication() {
+        let failure = Arc::new(AtomicBool::new(true));
+        let mut chain = PluginChain::spawn_with_backend_factory(
+            move || {
+                let mut backend = MockBackend::new("failed candidate", MockProcess::Panic);
+                backend.metadata_failure = Some(failure);
+                vec![BackendSlot::new(Box::new(backend))]
+            },
+            config(),
+        )
+        .unwrap();
+        let mut saw_fault = false;
+        wait_until(|| {
+            while let Some(event) = chain.control.try_next_event() {
+                assert!(!matches!(event, RuntimeEvent::SlotReady { .. }));
+                if let RuntimeEvent::SlotFault { message, .. } = event {
+                    assert!(message.contains("metadata unavailable"));
+                    saw_fault = true;
+                }
+            }
+            saw_fault && chain.control.plugin_latency_snapshot().is_some()
+        });
+        let snapshot = chain.control.plugin_latency_snapshot().unwrap();
+        assert_eq!(snapshot.active_mask, 0);
+        assert_eq!(snapshot.total_plugin_latency_samples, 0);
+        assert_eq!(chain.control.stats().faults, 1);
+        chain.guard.shutdown();
+    }
+
+    #[test]
+    fn later_metadata_failure_latches_without_publishing_partial_pair_or_auto_recovery() {
+        let failure = Arc::new(AtomicBool::new(false));
+        let mut backend = MockBackend::new("live", MockProcess::Panic);
+        backend.latency = 73;
+        backend.tail = 511;
+        backend.metadata_failure = Some(Arc::clone(&failure));
+        let mut slots = vec![WorkerSlot {
+            backend: Some(Box::new(backend)),
+            config: SlotConfig::default(),
+            fault: None,
+            parameter_catalog_cache: None,
+            native_base_ids: Vec::new(),
+        }];
+        let (mut events, mut received) = RingBuffer::new(8);
+        let metrics = BridgeMetrics::default();
+        update_latency_and_tail(&mut slots, &mut events, &metrics);
+        let revision = metrics.plugin_latency_revision.load(Ordering::Acquire);
+        assert_eq!(metrics.plugin_latency_samples.load(Ordering::Acquire), 73);
+        assert_eq!(metrics.tail_samples.load(Ordering::Acquire), 511);
+        failure.store(true, Ordering::Release);
+        update_latency_and_tail(&mut slots, &mut events, &metrics);
+        assert!(slots[0].fault.is_some());
+        assert_eq!(metrics.plugin_active_mask.load(Ordering::Acquire), 0);
+        assert_eq!(metrics.plugin_latency_samples.load(Ordering::Acquire), 0);
+        assert_eq!(metrics.tail_samples.load(Ordering::Acquire), 0);
+        assert!(metrics.plugin_latency_revision.load(Ordering::Acquire) > revision);
+        assert_eq!(metrics.faults.load(Ordering::Acquire), 1);
+        assert!(matches!(
+            received.pop().unwrap(),
+            RuntimeEvent::SlotFault { .. }
+        ));
+        failure.store(false, Ordering::Release);
+        reset_worker_epoch(2, &mut slots, &mut events, &metrics);
+        update_latency_and_tail(&mut slots, &mut events, &metrics);
+        assert_eq!(metrics.plugin_active_mask.load(Ordering::Acquire), 0);
+        assert_eq!(metrics.faults.load(Ordering::Acquire), 1);
+        assert!(
+            received.pop().is_err(),
+            "timing/epoch retry cannot revive a faulted helper"
+        );
+        let fresh = MockBackend::new("explicit replacement", MockProcess::Gain(1.0));
+        assert_eq!(
+            backend_ready_metadata(&fresh).unwrap(),
+            ("explicit replacement".into(), 0, 0)
+        );
+    }
+
+    #[test]
+    fn checked_metadata_fault_stays_visible_when_event_ring_is_full() {
+        let mut backend = MockBackend::new("failed metadata", MockProcess::Panic);
+        backend.metadata_failure = Some(Arc::new(AtomicBool::new(true)));
+        let mut slots = vec![WorkerSlot {
+            backend: Some(Box::new(backend)),
+            config: SlotConfig::default(),
+            fault: None,
+            parameter_catalog_cache: None,
+            native_base_ids: Vec::new(),
+        }];
+        let (mut events, mut received) = RingBuffer::new(1);
+        events.push(RuntimeEvent::ShutdownComplete).unwrap();
+        let metrics = BridgeMetrics::default();
+        update_latency_and_tail(&mut slots, &mut events, &metrics);
+        assert!(slots[0].fault.is_some());
+        assert_eq!(metrics.faults.load(Ordering::Acquire), 1);
+        assert_eq!(metrics.event_overflows.load(Ordering::Acquire), 1);
+        assert_eq!(metrics.plugin_latency_snapshot().unwrap().active_mask, 0);
+        assert!(matches!(
+            received.pop().unwrap(),
+            RuntimeEvent::ShutdownComplete
+        ));
+        assert!(received.pop().is_err());
     }
 
     #[test]

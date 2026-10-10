@@ -49,6 +49,8 @@ for line in sys.stdin:
         response={{'Error':{{'message':'deliberate '+kind+' refusal'}}}}
     elif kind=='ProcessResetOrigin':
         response={{'ResetOriginReport':{{'report':{{'frames':command[kind]['frames'],'discarded_prior_midi_events':0,'discarded_midi_events':2,'discarded_prior_parameter_points':0,'discarded_parameter_points':3,'output_events_lost':selected=='loss','parameter_output_fault':False,'process_error':'SDK refusal' if selected=='sdk' else None}}}}}}
+    elif kind=='LatencySamples': response={{'LatencySamples':{{'samples':37}}}}
+    elif kind=='TailSamples': response={{'TailSamples':{{'samples':511}}}}
     elif kind=='NativeDirtyRevision': response={{'NativeDirtyRevision':{{'revision':0}}}}
     else: response={{'Success':{{'message':'ok'}}}}
     print(json.dumps(response),flush=True)
@@ -446,4 +448,87 @@ fn daw_surge_prepare_rejects_authoritative_helper_capacity_before_state_or_lifec
             assert_eq!(backend.max_block_frames, 2048);
         }
     }
+}
+
+#[test]
+fn checked_vst3_metadata_rejects_partial_pair_after_valid_latency() {
+    let helper = ResetHelper::new();
+    let backend = helper.backend();
+    assert_eq!(backend_metadata(&backend).unwrap(), (37, 511));
+    helper.select("TailSamples");
+    helper.clear();
+    assert!(
+        backend_metadata(&backend)
+            .unwrap_err()
+            .contains("TailSamples")
+    );
+    assert_eq!(
+        helper.commands().iter().map(kind).collect::<Vec<_>>(),
+        ["LatencySamples", "TailSamples"]
+    );
+    helper.clear();
+    assert!(
+        backend_ready_metadata(&backend)
+            .unwrap_err()
+            .contains("TailSamples")
+    );
+    assert_eq!(
+        helper.commands().iter().map(kind).collect::<Vec<_>>(),
+        ["LatencySamples", "TailSamples"]
+    );
+    assert_eq!(backend.plugin.recovery_count(), 0);
+    helper.select("LatencySamples");
+    helper.clear();
+    assert!(
+        backend_metadata(&backend)
+            .unwrap_err()
+            .contains("LatencySamples")
+    );
+    assert_eq!(
+        helper.commands().iter().map(kind).collect::<Vec<_>>(),
+        ["LatencySamples"]
+    );
+}
+
+#[test]
+fn checked_vst3_candidate_tail_failure_never_emits_ready_or_reloads() {
+    let helper = ResetHelper::new();
+    helper.select("TailSamples");
+    let mut chain =
+        PluginChain::spawn_identified(vec![(42, helper.spec())], reset_config()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut saw_fault = false;
+    while std::time::Instant::now() < deadline {
+        while let Some(event) = chain.control.try_next_event() {
+            assert!(!matches!(event, RuntimeEvent::SlotReady { .. }));
+            if let RuntimeEvent::SlotFault { message, .. } = event {
+                assert!(message.contains("TailSamples"), "{message}");
+                saw_fault = true;
+            }
+        }
+        if saw_fault && chain.control.plugin_latency_snapshot().is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        saw_fault,
+        "checked tail failure must become a visible candidate fault"
+    );
+    let snapshot = chain.control.plugin_latency_snapshot().unwrap();
+    assert_eq!(snapshot.active_mask, 0);
+    assert_eq!(snapshot.total_plugin_latency_samples, 0);
+    assert_eq!(chain.control.stats().faults, 1);
+    assert_eq!(
+        helper
+            .commands()
+            .iter()
+            .filter(|c| kind(c) == "LoadPlugin")
+            .count(),
+        1
+    );
+    assert_eq!(
+        chain.guard.shutdown_blocking(Duration::from_secs(5)),
+        ShutdownOutcome::Joined
+    );
 }

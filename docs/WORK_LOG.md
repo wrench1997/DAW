@@ -1108,3 +1108,59 @@ the final filter executed seven tests. Aggregate/source-bound genuine gates foll
 - Corrected-source archivefe46a506eb1a936fcf0fc13f8f3ed571f31ff5c1e3339e5563c29a77578b70f5 (339092bytes,129files) passes all five actual-plugin invocations. Automatic exact-identity256 reset sustains new G4 at offsets0/1/127, held/future+sustain cleanup leaves192000 samples zero, state/host position are unchanged, genuine max128 refusal works, eight normal graph phases keep FX0/no initialRetry, deliberate ordinary1 still causes strict FX32 drift/actualRetry, and advancing blank-tail/fresh-state controls pass. Core interval overruns12/14 ordinary and15/17 routed remain. All136 frozen owner hashes match236f784/f086170;127 runtime snapshot files and appended harness modules are separately bound.
 - Fresh native smoke verifies136 hashes before/after: newSurge edit/poll/save/fresh numeric, unchanged guard window/value, Stochas step7 used-state restoration/repaint and cleanShutdown. The exact newGUI blob011ded9e passes fresh17/47/128/256 first-note PCM without positive warmup, onsets11/44/64/40 and unchanged controller/component. Raw receiptbd6365eb84026aa96050a0089663a736e1b2f3534d74f6e225c3fc6b7cb2a138, normalizedde96e3194ea881bcc0589fb68be3c213aba35efc7d53634c34dfae742fa9456c. Minimal smoke does not borrow prior fixture/EOF/crash or hardware results.
 - Historical fd6 diagnostic archive3ff69eab remains separate, including failed onset/silence assumptions, old/new128 immediate truncation and causalCC120/256 controls. Historical parameter1bd33df7 and optimized244f622/9ffb53a5 archives remain unchanged. New receipts establish correctness only; the256 reset advances internal DSP5.333ms at48k without timeline/PDC advance. Windows publication/checks remain pending at this freeze; no main merge or binary release.
+
+
+## 2026-10-10 — Checked replacement metadata, unvalidated source checkpoint
+
+The first resumed patch starts from accepted `cbbbe1f`, independently of the unavailable
+unpublished dispatcher checkpoint. Isolated latency/tail getters previously converted failed
+IPC polls into zero; production readiness and later metadata publication could accept those
+zeroes as genuine answers. New checked getters preserve transport, Error and wrong-response
+failures without automatic helper recovery. The worker consumes one fallible metadata pair;
+neither value is accepted unless both reads succeed. Legacy infallible APIs remain compatible.
+Existing helper response variants and main-thread ownership are retained.
+
+Source tests cover valid zero/nonzero/infinite tail, error/wrong replies, helper death with
+legacy recovery opt-in, initial readiness rejection, later sticky faults and old candidate
+state/endpoint retention. Timing Retry or a new transport epoch cannot revive a faulted helper;
+only a separately prepared fresh candidate with successful checked metadata can become ready.
+No automatic reload, state discard, silent warmup, worker separation or SHM workaround is added.
+
+Status at this archival checkpoint: **UNVALIDATED, tests not run**. The replaced environment
+has no Rust toolchain; the source archive is persisted before toolchain bootstrap. Formatting,
+compilation, test execution and mechanical vendor patch/hash regeneration remain pending.
+The adjacent AudioBusLayout fallback is a separate approved follow-up and is unchanged here.
+
+Before the first compile, official task-local Rust/Cargo 1.99.0 was restored (rustc
+b940084d7, LLVM23.1.1), matching the accepted version. Additional review cases cover raw
+malformed JSON, valid-latency/failed-tail in the real VST3 backend, and a full fault-event ring.
+Touched-source rustfmt and exact46-file upstream archive+patch replay now pass; compilation
+and test execution remain pending in the next UNVALIDATED recovery archive.
+
+
+### Executed checkpoint 01 validation (2026-10-10)
+
+On the recovered Linux cloud workspace, the restored official Rust/Cargo 1.99.0
+(rustc `b940084d7`, LLVM23.1.1) compiles the patch. All 1,185 all-feature App tests,
+1,171 core-only App tests, 25 helper tests and 13 protocol tests pass. The directly
+source-linked vendor harness passes 400 available tests and 26 doctests with
+`cpal-backend,process-isolation`; its original full run records one failure because
+the upstream Dexed moduleinfo fixture is absent. That failure is retained, and the
+subsequent available-case run explicitly filters only that named fixture. No Rust
+test source or cfg was removed; the external harness omits unused example/dev-only
+dependencies and records its exact manifest, lock and source hashes.
+
+Both strict root Clippy profiles, formatting and upstream archive+patch replay
+(46 files) pass. Python reports 235 tests with one missing-helper skip, followed
+by all four real copied-helper Unix descriptor cases passing with the helper path
+set. The initial candidate test invocation accidentally selected zero tests; its
+log is retained, and the corrected named invocation passes one test. Metadata
+failure tests cover malformed JSON/timeout, helper death, wrong responses, an
+actual valid-latency/failed-tail backend pair, saturated fault-event delivery and
+old-model/endpoint retention. No missing reply becomes a healthy zero.
+
+This is source/mock/helper-protocol validation, not a new genuine-plugin, native
+editor, Windows runtime or performance acceptance. The stable accepted release is
+unchanged. Timing Retry remains a timing-plan operation and does not revive a dead
+helper; there is no automatic state reload. The initial UNVALIDATED archive entries
+above are historical checkpoints, not the current test result.

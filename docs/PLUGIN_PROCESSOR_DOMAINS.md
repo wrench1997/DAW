@@ -600,3 +600,53 @@ both reset APIs on each facade and for owner reset during a live session. The
 positive baseline calls owner reset after rejoin. The same restricted RAII gate
 surrounds only SDK Process in ordinary and reset calls; combined COM regression
 checks entry/exit on success, SDK failure and pre-SDK staging failure.
+
+
+## 2026-10-10 — Checked replacement metadata, unvalidated source checkpoint
+
+The first resumed patch starts from accepted `cbbbe1f`, independently of the unavailable
+unpublished dispatcher checkpoint. Isolated latency/tail getters previously converted failed
+IPC polls into zero; production readiness and later metadata publication could accept those
+zeroes as genuine answers. New checked getters preserve transport, Error and wrong-response
+failures without automatic helper recovery. The worker consumes one fallible metadata pair;
+neither value is accepted unless both reads succeed. Legacy infallible APIs remain compatible.
+Existing helper response variants and main-thread ownership are retained.
+
+Source tests cover valid zero/nonzero/infinite tail, error/wrong replies, helper death with
+legacy recovery opt-in, initial readiness rejection, later sticky faults and old candidate
+state/endpoint retention. Timing Retry or a new transport epoch cannot revive a faulted helper;
+only a separately prepared fresh candidate with successful checked metadata can become ready.
+No automatic reload, state discard, silent warmup, worker separation or SHM workaround is added.
+
+Status at this archival checkpoint: **UNVALIDATED, tests not run**. The replaced environment
+has no Rust toolchain; the source archive is persisted before toolchain bootstrap. Formatting,
+compilation, test execution and mechanical vendor patch/hash regeneration remain pending.
+The adjacent AudioBusLayout fallback is a separate approved follow-up and is unchanged here.
+
+
+### Executed checkpoint 01 validation (2026-10-10)
+
+On the recovered Linux cloud workspace, the restored official Rust/Cargo 1.99.0
+(rustc `b940084d7`, LLVM23.1.1) compiles the patch. All 1,185 all-feature App tests,
+1,171 core-only App tests, 25 helper tests and 13 protocol tests pass. The directly
+source-linked vendor harness passes 400 available tests and 26 doctests with
+`cpal-backend,process-isolation`; its original full run records one failure because
+the upstream Dexed moduleinfo fixture is absent. That failure is retained, and the
+subsequent available-case run explicitly filters only that named fixture. No Rust
+test source or cfg was removed; the external harness omits unused example/dev-only
+dependencies and records its exact manifest, lock and source hashes.
+
+Both strict root Clippy profiles, formatting and upstream archive+patch replay
+(46 files) pass. Python reports 235 tests with one missing-helper skip, followed
+by all four real copied-helper Unix descriptor cases passing with the helper path
+set. The initial candidate test invocation accidentally selected zero tests; its
+log is retained, and the corrected named invocation passes one test. Metadata
+failure tests cover malformed JSON/timeout, helper death, wrong responses, an
+actual valid-latency/failed-tail backend pair, saturated fault-event delivery and
+old-model/endpoint retention. No missing reply becomes a healthy zero.
+
+This is source/mock/helper-protocol validation, not a new genuine-plugin, native
+editor, Windows runtime or performance acceptance. The stable accepted release is
+unchanged. Timing Retry remains a timing-plan operation and does not revive a dead
+helper; there is no automatic state reload. The initial UNVALIDATED archive entries
+above are historical checkpoints, not the current test result.

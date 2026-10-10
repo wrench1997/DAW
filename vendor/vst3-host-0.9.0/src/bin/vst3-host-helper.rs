@@ -443,11 +443,13 @@ fn handle(
                 Err(e) => err("RemapParameterId", e),
             }
         }),
-        HostCommand::LatencySamples => with(plugin, |p| HostResponse::LatencySamples {
-            samples: p.latency_samples(),
+        HostCommand::LatencySamples => with(plugin, |p| match p.try_latency_samples() {
+            Ok(samples) => HostResponse::LatencySamples { samples },
+            Err(error) => err("LatencySamples", error),
         }),
-        HostCommand::TailSamples => with(plugin, |p| HostResponse::TailSamples {
-            samples: p.tail_samples(),
+        HostCommand::TailSamples => with(plugin, |p| match p.try_tail_samples() {
+            Ok(samples) => HostResponse::TailSamples { samples },
+            Err(error) => err("TailSamples", error),
         }),
         HostCommand::MidiCcToParameter { bus, channel, cc } => {
             with(plugin, |p| HostResponse::MidiParameterMapping {

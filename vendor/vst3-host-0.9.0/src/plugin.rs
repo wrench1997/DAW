@@ -1081,9 +1081,17 @@ impl MainThreadPlugin {
     pub fn latency_samples(&self) -> u32 {
         self.plugin.latency_samples()
     }
+    /// Main-thread equivalent of [`Plugin::try_latency_samples`].
+    pub fn try_latency_samples(&self) -> Result<u32> {
+        self.plugin.try_latency_samples()
+    }
     /// Main-thread equivalent of [`Plugin::tail_samples`].
     pub fn tail_samples(&self) -> u32 {
         self.plugin.tail_samples()
+    }
+    /// Main-thread equivalent of [`Plugin::try_tail_samples`].
+    pub fn try_tail_samples(&self) -> Result<u32> {
+        self.plugin.try_tail_samples()
     }
     /// Main-thread equivalent of [`Plugin::midi_cc_to_parameter`].
     pub fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
@@ -1771,9 +1779,18 @@ pub(crate) trait PluginInternal: Send {
     fn latency_samples(&self) -> u32 {
         0
     }
+    /// Checked latency metadata. Local implementations have no transport failure; isolated
+    /// implementations override this instead of presenting an unavailable reply as zero.
+    fn try_latency_samples(&self) -> Result<u32> {
+        Ok(self.latency_samples())
+    }
     /// Tail length in samples (`IAudioProcessor::getTailSamples`). Defaults to 0.
     fn tail_samples(&self) -> u32 {
         0
+    }
+    /// Checked tail metadata, preserving the local implementation's reported value.
+    fn try_tail_samples(&self) -> Result<u32> {
+        Ok(self.tail_samples())
     }
     /// Resolve a MIDI controller `(bus, channel, cc)` to a parameter id via `IMidiMapping`.
     /// Defaults to `None` (plugin doesn't implement the interface, or no mapping).
@@ -2299,6 +2316,16 @@ impl Plugin {
             .unwrap_or(0)
     }
 
+    /// Read processing latency without treating an unavailable helper reply as zero.
+    /// Returns an error if the plugin is uninitialized or its isolated helper fails to
+    /// answer correctly. An isolated query never respawns or replaces the plugin.
+    pub fn try_latency_samples(&self) -> Result<u32> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .try_latency_samples()
+    }
+
     /// The plugin's reported tail length in samples (how long it keeps producing output
     /// after input stops — e.g. reverb/delay), via `IAudioProcessor::getTailSamples`. `0`
     /// means no tail; `u32::MAX` means an infinite tail. Works both in-process and across
@@ -2308,6 +2335,16 @@ impl Plugin {
             .as_ref()
             .map(|i| i.tail_samples())
             .unwrap_or(0)
+    }
+
+    /// Read tail length without treating an unavailable helper reply as zero.
+    /// A successful `0` means no tail and `u32::MAX` means an infinite tail. Returns an
+    /// error for an uninitialized plugin or failed isolated query, without recovery.
+    pub fn try_tail_samples(&self) -> Result<u32> {
+        self.internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
+            .try_tail_samples()
     }
 
     /// Resolve a MIDI controller to the parameter it's mapped to, via the plugin's
@@ -3875,6 +3912,21 @@ mod vstpreset {
 #[cfg(test)]
 mod public_surface_tests {
     use super::*;
+
+    #[test]
+    fn unloaded_checked_metadata_fails_without_changing_legacy_zero_fallbacks() {
+        let plugin = unloaded_plugin();
+        assert!(plugin.try_latency_samples().is_err());
+        assert!(plugin.try_tail_samples().is_err());
+        assert_eq!(plugin.latency_samples(), 0);
+        assert_eq!(plugin.tail_samples(), 0);
+
+        let main_thread = MainThreadPlugin::from_in_process(plugin);
+        assert!(main_thread.try_latency_samples().is_err());
+        assert!(main_thread.try_tail_samples().is_err());
+        assert_eq!(main_thread.latency_samples(), 0);
+        assert_eq!(main_thread.tail_samples(), 0);
+    }
 
     #[test]
     fn unloaded_native_feedback_checks_never_report_a_clean_result() {

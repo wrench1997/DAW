@@ -341,3 +341,18 @@ RAII gate in ordinary and reset SDK calls. Owner reset obtains disjoint borrowed
 processor/module and gate capabilities only after session rejoin. Neither facade
 exposes reset. A combined COM fixture observes the marker inside SDK entry and
 its cleared state after success, SDK error and pre-SDK staging failure.
+
+
+## Checked processing metadata (2026-10-10)
+
+Additive `try_latency_samples` and `try_tail_samples` methods preserve isolated transport and
+protocol failures rather than reporting zero. Checked isolated queries never recover/reload;
+local defaults preserve direct SDK values, and absent implementations fail explicitly.
+Legacy infallible polling remains unchanged. Both helper binaries forward checked metadata
+through existing response/Error variants. The production worker admits/publishes a complete
+fallible pair and retains its existing sticky-fault and candidate-rollback boundaries.
+
+The first source recovery archive was explicitly unvalidated. Focused tests cover legitimate
+zero/infinite tail, wrong/Error/malformed replies, helper death with recovery opt-in, partial
+latency/tail reads and old-chain retention. Executed validation is recorded separately.
+No wire addition, metadata cache, automatic reload, COM threading or SHM policy change.

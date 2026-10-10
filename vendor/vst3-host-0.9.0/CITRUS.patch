@@ -1,6 +1,24 @@
 --- a/src/bin/vst3-host-helper.rs
 +++ b/src/bin/vst3-host-helper.rs
-@@ -454,7 +454,36 @@
+@@ -443,18 +443,49 @@
+                 Err(e) => err("RemapParameterId", e),
+             }
+         }),
+-        HostCommand::LatencySamples => with(plugin, |p| HostResponse::LatencySamples {
+-            samples: p.latency_samples(),
+-        }),
+-        HostCommand::TailSamples => with(plugin, |p| HostResponse::TailSamples {
+-            samples: p.tail_samples(),
++        HostCommand::LatencySamples => with(plugin, |p| match p.try_latency_samples() {
++            Ok(samples) => HostResponse::LatencySamples { samples },
++            Err(error) => err("LatencySamples", error),
++        }),
++        HostCommand::TailSamples => with(plugin, |p| match p.try_tail_samples() {
++            Ok(samples) => HostResponse::TailSamples { samples },
++            Err(error) => err("TailSamples", error),
+         }),
+         HostCommand::MidiCcToParameter { bus, channel, cc } => {
+             with(plugin, |p| HostResponse::MidiParameterMapping {
                  id: p.midi_cc_to_parameter(bus, channel, cc),
              })
          }
@@ -38,7 +56,7 @@
              let sr = *sample_rate;
              with(plugin, |p| {
                  // Live channel count (sums getBusInfo across output buses), so a negotiated
-@@ -466,11 +495,19 @@
+@@ -466,11 +497,19 @@
                      sample_rate: sr,
                      block_size: frames as usize,
                  };
@@ -62,7 +80,7 @@
                      Err(e) => err("Process", e),
                  }
              })
-@@ -479,6 +516,7 @@
+@@ -479,6 +518,7 @@
              inputs,
              outputs,
              frames,
@@ -70,7 +88,7 @@
          } => {
              if inputs.len() > 256
                  || outputs.len() > 256
-@@ -506,11 +544,19 @@
+@@ -506,11 +546,19 @@
                      sample_rate: sr,
                      block_size: frames as usize,
                  };
@@ -94,7 +112,7 @@
                      Err(e) => err("ProcessBuses", e),
                  }
              })
-@@ -603,6 +649,10 @@
+@@ -603,6 +651,10 @@
          HostCommand::TakeHostNotifications => with(plugin, |p| HostResponse::HostNotifications {
              notifications: p.take_host_notifications(),
          }),
@@ -105,7 +123,7 @@
          HostCommand::TakeDataExchangeBlocks => with(plugin, |p| HostResponse::DataExchangeBlocks {
              blocks: p.take_data_exchange_blocks(),
          }),
-@@ -629,6 +679,10 @@
+@@ -629,6 +681,10 @@
              Ok(flags) => HostResponse::RestartFlags { bits: flags.bits() },
              Err(error) => err("ServiceHostRequests", error),
          }),
@@ -5202,7 +5220,41 @@
                  }
                  Ok(())
              }
-@@ -832,6 +1080,26 @@
+@@ -769,6 +1017,18 @@
+         .unwrap_or(0)
+     }
+ 
++    fn try_latency_samples(&self) -> Result<u32> {
++        // Recovery would substitute metadata from a new, default-initialized instance.
++        // Checked metadata must describe this exact helper or report its failure.
++        match self.send_command_once(HostCommand::LatencySamples)? {
++            HostResponse::LatencySamples { samples } => Ok(samples),
++            HostResponse::Error { message } => {
++                Err(Error::Other(format!("LatencySamples: {message}")))
++            }
++            _ => Err(Error::Other("LatencySamples: unexpected response".into())),
++        }
++    }
++
+     fn tail_samples(&self) -> u32 {
+         self.poll(
+             HostCommand::TailSamples,
+@@ -779,6 +1039,14 @@
+             },
+         )
+         .unwrap_or(0)
++    }
++
++    fn try_tail_samples(&self) -> Result<u32> {
++        match self.send_command_once(HostCommand::TailSamples)? {
++            HostResponse::TailSamples { samples } => Ok(samples),
++            HostResponse::Error { message } => Err(Error::Other(format!("TailSamples: {message}"))),
++            _ => Err(Error::Other("TailSamples: unexpected response".into())),
++        }
+     }
+ 
+     fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
+@@ -832,6 +1100,26 @@
          self.info.has_gui
      }
  
@@ -5229,7 +5281,7 @@
      fn open_editor(&mut self, _parent: *mut std::ffi::c_void) -> Result<()> {
          let response = self.send_command(HostCommand::CreateGui)?;
  
-@@ -920,6 +1188,30 @@
+@@ -920,6 +1208,30 @@
          .unwrap_or_default()
      }
  
@@ -5260,7 +5312,7 @@
      fn take_data_exchange_blocks(&mut self) -> Vec<crate::plugin::DataExchangeBlock> {
          self.poll(
              HostCommand::TakeDataExchangeBlocks,
-@@ -930,6 +1222,23 @@
+@@ -930,6 +1242,23 @@
              },
          )
          .unwrap_or_default()
@@ -5284,7 +5336,7 @@
      }
  
      fn execute_context_menu_item(&mut self, menu_id: u64, item_id: u32) -> Result<()> {
-@@ -971,7 +1280,7 @@
+@@ -971,7 +1300,7 @@
      }
  
      fn service_host_requests(&mut self) -> Result<crate::plugin::RestartFlags> {
@@ -5293,7 +5345,7 @@
              HostResponse::RestartFlags { bits } => Ok(crate::plugin::RestartFlags::from_bits(bits)),
              HostResponse::Error { message } => {
                  Err(Error::Other(format!("ServiceHostRequests: {message}")))
-@@ -983,7 +1292,7 @@
+@@ -983,7 +1312,7 @@
      }
  
      fn save_state(&self) -> Result<Vec<u8>> {
@@ -5302,7 +5354,7 @@
              HostResponse::State { data } => Ok(data),
              HostResponse::Error { message } => Err(Error::Other(format!("SaveState: {message}"))),
              _ => Err(Error::Other("SaveState: unexpected response".to_string())),
-@@ -1005,6 +1314,17 @@
+@@ -1005,6 +1334,17 @@
              .lock()
              .map(|mut o| std::mem::take(&mut *o))
              .unwrap_or_default()
@@ -5320,7 +5372,7 @@
      }
  
      fn output_channel_count(&self) -> usize {
-@@ -1146,6 +1466,54 @@
+@@ -1146,6 +1486,82 @@
              Self { dir, script, log }
          }
  
@@ -5328,6 +5380,34 @@
 +            let helper = Self::new(name);
 +            let script = std::fs::read_to_string(&helper.script).unwrap();
 +            let reply = format!("    *NativeDirtyRevision*) printf '%s\\n' '{response}' ;;\n");
++            std::fs::write(
++                &helper.script,
++                script.replace("    *)", &(reply + "    *)")),
++            )
++            .unwrap();
++            helper
++        }
++
++        fn metadata_replies(name: &str, latency: &HostResponse, tail: &HostResponse) -> Self {
++            let helper = Self::new(name);
++            let script = std::fs::read_to_string(&helper.script).unwrap();
++            let replies = format!(
++                "    *LatencySamples*) printf '%s\\n' '{}' ;;\n    *TailSamples*) printf '%s\\n' '{}' ;;\n",
++                serde_json::to_string(latency).unwrap(),
++                serde_json::to_string(tail).unwrap(),
++            );
++            std::fs::write(
++                &helper.script,
++                script.replace("    *)", &(replies + "    *)")),
++            )
++            .unwrap();
++            helper
++        }
++
++        fn raw_metadata_reply(name: &str, command: &str, response: &str) -> Self {
++            let helper = Self::new(name);
++            let script = std::fs::read_to_string(&helper.script).unwrap();
++            let reply = format!("    *{command}*) printf '%s\\n' '{response}' ;;\n");
 +            std::fs::write(
 +                &helper.script,
 +                script.replace("    *)", &(reply + "    *)")),
@@ -5375,7 +5455,7 @@
          fn requests(&self) -> Vec<String> {
              std::fs::read_to_string(&self.log)
                  .unwrap_or_default()
-@@ -1193,6 +1561,660 @@
+@@ -1193,6 +1609,793 @@
          )
      }
  
@@ -5850,6 +5930,139 @@
 +            .is_empty());
 +        assert_eq!(plugin.take_output_events_with_loss(), (vec![], true));
 +        assert_reset_requests(&fake, Some(47));
++    }
++
++    #[test]
++    fn checked_metadata_preserves_zero_nonzero_and_maximum_values() {
++        for (index, (latency, tail)) in [(0, 0), (37, 128), (u32::MAX, u32::MAX)]
++            .into_iter()
++            .enumerate()
++        {
++            let fake = FakeHelper::metadata_replies(
++                &format!("metadata_values_{index}"),
++                &HostResponse::LatencySamples { samples: latency },
++                &HostResponse::TailSamples { samples: tail },
++            );
++            let plugin = isolated(&fake);
++            assert_eq!(plugin.try_latency_samples().unwrap(), latency);
++            assert_eq!(plugin.try_tail_samples().unwrap(), tail);
++            assert_eq!(plugin.latency_samples(), latency);
++            assert_eq!(plugin.tail_samples(), tail);
++            assert_eq!(fake.requests().len(), 4);
++            assert_eq!(plugin.recovery_count(), 0);
++        }
++    }
++
++    #[test]
++    fn checked_metadata_rejects_error_and_wrong_replies_with_legacy_zero_fallbacks() {
++        for (index, response) in [
++            HostResponse::Error {
++                message: "metadata unavailable".into(),
++            },
++            HostResponse::Success {
++                message: "wrong reply".into(),
++            },
++        ]
++        .into_iter()
++        .enumerate()
++        {
++            let fake = FakeHelper::metadata_replies(
++                &format!("metadata_failure_{index}"),
++                &response,
++                &response,
++            );
++            let plugin = isolated(&fake);
++            let expected_detail = if index == 0 {
++                "metadata unavailable"
++            } else {
++                "unexpected response"
++            };
++            for (command, error) in [
++                ("LatencySamples", plugin.try_latency_samples().unwrap_err()),
++                ("TailSamples", plugin.try_tail_samples().unwrap_err()),
++            ] {
++                let message = error.to_string();
++                assert!(message.contains(command), "{message}");
++                assert!(message.contains(expected_detail), "{message}");
++            }
++            assert_eq!(plugin.latency_samples(), 0);
++            assert_eq!(plugin.tail_samples(), 0);
++            assert_eq!(fake.requests().len(), 4);
++            assert_eq!(plugin.recovery_count(), 0);
++        }
++    }
++
++    #[test]
++    fn checked_metadata_helper_death_stays_failed_without_auto_recovery() {
++        for command in ["LatencySamples", "TailSamples"] {
++            let fake = FakeHelper::exit_on(&format!("metadata_death_{command}"), command);
++            let mut plugin = isolated(&fake);
++            plugin.auto_recover = true;
++            plugin.auto_recover_max_retries = 2;
++            let original_pid = plugin.helper_pid();
++            for _ in 0..2 {
++                let result = match command {
++                    "LatencySamples" => plugin.try_latency_samples(),
++                    "TailSamples" => plugin.try_tail_samples(),
++                    _ => unreachable!(),
++                };
++                assert!(matches!(result, Err(Error::PluginCrashed)), "{result:?}");
++                assert_eq!(plugin.helper_pid(), original_pid);
++                assert_eq!(plugin.recovery_count(), 0);
++            }
++            assert_eq!(
++                fake.requests().len(),
++                1,
++                "{command} must not reload, retry, or send to a known-dead helper"
++            );
++        }
++    }
++
++    #[test]
++    fn checked_metadata_malformed_json_times_out_without_auto_recovery() {
++        for command in ["LatencySamples", "TailSamples"] {
++            let malformed = format!("{{\"{command}\":{{\"samples\":");
++            let fake = FakeHelper::raw_metadata_reply(
++                &format!("metadata_malformed_{command}"),
++                command,
++                &malformed,
++            );
++            let mut plugin = isolated(&fake);
++            plugin.auto_recover = true;
++            plugin.auto_recover_max_retries = 2;
++            // Establish that the shell is servicing requests before shortening this test's
++            // deadline. The fake's generic response is enough for this startup handshake.
++            plugin
++                .send_command_once(HostCommand::GetAllParameters)
++                .unwrap();
++            plugin.response_timeout = Duration::from_secs(1);
++            plugin
++                .process
++                .lock()
++                .unwrap()
++                .set_timeout(Duration::from_secs(1));
++            let original_pid = plugin.helper_pid();
++            let result = match command {
++                "LatencySamples" => plugin.try_latency_samples(),
++                "TailSamples" => plugin.try_tail_samples(),
++                _ => unreachable!(),
++            };
++            // Malformed lines from a live helper are discarded as protocol noise. With no
++            // valid reply, the exchange reaches its deadline and kills the helper; it does
++            // not return a JSON error or report an observed crash.
++            assert!(matches!(result, Err(Error::PluginTimeout)), "{result:?}");
++            assert_eq!(plugin.helper_pid(), original_pid);
++            assert_eq!(plugin.recovery_count(), 0);
++            let process = plugin.process.lock().unwrap();
++            assert!(!process.is_alive());
++            assert_eq!(process.discarded_line_count(), 1);
++            let requests = fake.requests();
++            assert_eq!(requests.len(), 2, "only startup and one metadata request");
++            assert!(requests[1].contains(command));
++            assert!(requests
++                .iter()
++                .all(|request| !request.contains("LoadPlugin")));
++        }
 +    }
 +
 +    #[test]
@@ -15058,7 +15271,7 @@
  /// VST3 plugin instance
  #[allow(clippy::type_complexity)] // callback fields are Box<dyn Fn...>; intrinsic to the API
  pub struct Plugin {
-@@ -723,8 +843,562 @@
+@@ -723,8 +843,570 @@
      pub(crate) internal: Option<Box<dyn PluginInternal>>,
  }
  
@@ -15300,9 +15513,17 @@
 +    pub fn latency_samples(&self) -> u32 {
 +        self.plugin.latency_samples()
 +    }
++    /// Main-thread equivalent of [`Plugin::try_latency_samples`].
++    pub fn try_latency_samples(&self) -> Result<u32> {
++        self.plugin.try_latency_samples()
++    }
 +    /// Main-thread equivalent of [`Plugin::tail_samples`].
 +    pub fn tail_samples(&self) -> u32 {
 +        self.plugin.tail_samples()
++    }
++    /// Main-thread equivalent of [`Plugin::try_tail_samples`].
++    pub fn try_tail_samples(&self) -> Result<u32> {
++        self.plugin.try_tail_samples()
 +    }
 +    /// Main-thread equivalent of [`Plugin::midi_cc_to_parameter`].
 +    pub fn midi_cc_to_parameter(&self, bus: i32, channel: i16, cc: u16) -> Option<u32> {
@@ -15621,7 +15842,7 @@
      fn set_parameter(&mut self, id: u32, value: f64) -> Result<()>;
      /// Schedule a parameter change at a sample offset within the next process block.
      /// Defaults to a block-start change (ignores the offset) for implementations that don't
-@@ -749,6 +1423,21 @@
+@@ -749,6 +1431,21 @@
      fn get_all_parameters(&self) -> Result<Vec<Parameter>>;
      fn format_parameter(&self, id: u32, normalized: f64) -> Result<String>;
      fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()>;
@@ -15643,7 +15864,7 @@
      /// Query the current per-bus channel counts and activation state.
      fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
          Err(Error::Other(
-@@ -805,9 +1494,13 @@
+@@ -805,9 +1502,13 @@
              "bus activation is not supported for this plugin".to_string(),
          ))
      }
@@ -15660,7 +15881,7 @@
      fn set_tempo(&mut self, _bpm: f64) -> Result<()> {
          Err(Error::Other(
              "runtime transport mutation is not supported for this plugin".to_string(),
-@@ -898,10 +1591,21 @@
+@@ -898,10 +1599,21 @@
      }
      fn start_processing(&mut self) -> Result<()>;
      fn stop_processing(&mut self) -> Result<()>;
@@ -15682,7 +15903,7 @@
      /// Whether the editor accepts host-driven size changes.
      fn editor_can_resize(&self) -> bool {
          false
-@@ -931,6 +1635,19 @@
+@@ -931,6 +1643,19 @@
      fn take_host_notifications(&mut self) -> Vec<HostNotification> {
          Vec::new()
      }
@@ -15702,7 +15923,7 @@
      /// Dispatch any main-thread data-exchange blocks to the controller and drain owned host
      /// snapshots. Background-dispatched queues are copied into the same bounded snapshot sink.
      fn take_data_exchange_blocks(&mut self) -> Vec<DataExchangeBlock> {
-@@ -962,8 +1679,11 @@
+@@ -962,8 +1687,11 @@
      fn take_output_events(&self) -> Vec<PluginEvent> {
          Vec::new()
      }
@@ -15716,7 +15937,26 @@
      fn output_midi_handle(&self) -> Option<OutputMidiConsumer> {
          None
      }
-@@ -1066,6 +1786,11 @@
+@@ -1051,9 +1779,18 @@
+     fn latency_samples(&self) -> u32 {
+         0
+     }
++    /// Checked latency metadata. Local implementations have no transport failure; isolated
++    /// implementations override this instead of presenting an unavailable reply as zero.
++    fn try_latency_samples(&self) -> Result<u32> {
++        Ok(self.latency_samples())
++    }
+     /// Tail length in samples (`IAudioProcessor::getTailSamples`). Defaults to 0.
+     fn tail_samples(&self) -> u32 {
+         0
++    }
++    /// Checked tail metadata, preserving the local implementation's reported value.
++    fn try_tail_samples(&self) -> Result<u32> {
++        Ok(self.tail_samples())
+     }
+     /// Resolve a MIDI controller `(bus, channel, cc)` to a parameter id via `IMidiMapping`.
+     /// Defaults to `None` (plugin doesn't implement the interface, or no mapping).
+@@ -1066,6 +1803,11 @@
              "state save/restore is not supported".to_string(),
          ))
      }
@@ -15728,7 +15968,7 @@
      /// Restore the plugin's state from a blob previously returned by [`Self::save_state`],
      /// telling the plugin what kind of restore this is via the stream's attributes.
      ///
-@@ -1341,6 +2066,19 @@
+@@ -1341,6 +2083,19 @@
              .queue_processor_parameter_at(id, value, sample_offset)
      }
  
@@ -15748,7 +15988,7 @@
      /// Change the transport tempo (beats per minute) advertised to the plugin in the host
      /// `ProcessContext`, taking effect on the **next** processed block — even while the plugin
      /// is actively processing. Drives tempo-synced DSP (LFOs, synced delays, arpeggiators).
-@@ -1387,10 +2125,8 @@
+@@ -1387,10 +2142,8 @@
      /// `ProcessContext` (the `kPlaying` flag), taking effect on the **next** processed block —
      /// even while the plugin is actively processing.
      ///
@@ -15761,7 +16001,41 @@
      pub fn set_playing(&mut self, playing: bool) -> Result<()> {
          self.internal
              .as_mut()
-@@ -1846,10 +2582,15 @@
+@@ -1563,6 +2316,16 @@
+             .unwrap_or(0)
+     }
+ 
++    /// Read processing latency without treating an unavailable helper reply as zero.
++    /// Returns an error if the plugin is uninitialized or its isolated helper fails to
++    /// answer correctly. An isolated query never respawns or replaces the plugin.
++    pub fn try_latency_samples(&self) -> Result<u32> {
++        self.internal
++            .as_ref()
++            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
++            .try_latency_samples()
++    }
++
+     /// The plugin's reported tail length in samples (how long it keeps producing output
+     /// after input stops — e.g. reverb/delay), via `IAudioProcessor::getTailSamples`. `0`
+     /// means no tail; `u32::MAX` means an infinite tail. Works both in-process and across
+@@ -1572,6 +2335,16 @@
+             .as_ref()
+             .map(|i| i.tail_samples())
+             .unwrap_or(0)
++    }
++
++    /// Read tail length without treating an unavailable helper reply as zero.
++    /// A successful `0` means no tail and `u32::MAX` means an infinite tail. Returns an
++    /// error for an uninitialized plugin or failed isolated query, without recovery.
++    pub fn try_tail_samples(&self) -> Result<u32> {
++        self.internal
++            .as_ref()
++            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
++            .try_tail_samples()
+     }
+ 
+     /// Resolve a MIDI controller to the parameter it's mapped to, via the plugin's
+@@ -1846,10 +2619,15 @@
              return Ok(());
          }
  
@@ -15781,7 +16055,7 @@
  
          self.is_processing = false;
          Ok(())
-@@ -1882,6 +2623,37 @@
+@@ -1882,6 +2660,37 @@
          }
  
          Ok(())
@@ -15819,7 +16093,7 @@
      }
  
      /// Return every audio bus's current channel count and activation state.
-@@ -1986,6 +2758,29 @@
+@@ -1986,6 +2795,29 @@
              .as_ref()
              .map(|i| i.has_editor())
              .unwrap_or(false)
@@ -15849,7 +16123,7 @@
      }
  
      /// Open the plugin editor window
-@@ -2115,6 +2910,39 @@
+@@ -2115,6 +2947,39 @@
              .unwrap_or_default()
      }
  
@@ -15889,7 +16163,7 @@
      /// Drain ordered requests the plugin reported through `IComponentHandler2`.
      pub fn take_host_notifications(&mut self) -> Vec<HostNotification> {
          self.internal
-@@ -2176,10 +3004,17 @@
+@@ -2176,10 +3041,17 @@
      /// lifecycle. The returned flags still describe every request; in particular,
      /// [`RestartFlags::reload_component`] means the caller must replace this plugin instance.
      pub fn service_host_requests(&mut self) -> Result<RestartFlags> {
@@ -15911,7 +16185,7 @@
      }
  
      /// Take the MIDI events the plugin has emitted (e.g. from an arpeggiator or MPE
-@@ -2191,7 +3026,8 @@
+@@ -2191,7 +3063,8 @@
      /// marshalled back alongside each processed block.
      ///
      /// The buffer is capped at 4096 events: if you never poll while a chatty plugin keeps
@@ -15921,7 +16195,7 @@
      pub fn take_output_midi(&self) -> Vec<MidiEvent> {
          self.internal
              .as_ref()
-@@ -2209,6 +3045,19 @@
+@@ -2209,6 +3082,19 @@
          self.internal
              .as_ref()
              .map(|i| i.take_output_events())
@@ -15941,7 +16215,7 @@
              .unwrap_or_default()
      }
  
-@@ -2248,6 +3097,15 @@
+@@ -2248,6 +3134,15 @@
              .save_state()
      }
  
@@ -15957,7 +16231,7 @@
      /// Restore plugin state from a blob produced by [`Self::save_state`] on the *same*
      /// plugin. Applies to both the processor and the controller, so parameter values and
      /// the editor reflect the restored state.
-@@ -2258,10 +3116,17 @@
+@@ -2258,10 +3153,17 @@
      /// The plugin is told this is a project/session restore ([`StateContext::Project`]). Use
      /// [`Self::load_state_with_context`] when the bytes came from a preset file instead.
      pub fn load_state(&mut self, data: &[u8]) -> Result<()> {
@@ -15979,7 +16253,7 @@
      }
  
      /// Restore plugin state as [`Self::load_state`] does, and tell the plugin where the bytes
-@@ -2276,10 +3141,17 @@
+@@ -2276,10 +3178,17 @@
      /// Works both in-process and across process isolation — an isolated plugin's `setState`
      /// sees the same attributes.
      pub fn load_state_with_context(&mut self, data: &[u8], context: &StateContext) -> Result<()> {
@@ -16001,7 +16275,7 @@
      }
  
      /// Save this plugin's state to a file as a [`PluginPreset`] (JSON: the plugin's `uid`
-@@ -2454,14 +3326,14 @@
+@@ -2454,14 +3363,14 @@
  /// Highest value a 14-bit MIDI pitch-bend can carry.
  const MIDI_PITCH_BEND_MAX: u16 = 16383;
  
@@ -16018,7 +16292,7 @@
      if velocity > MIDI_DATA_MAX {
          return Err(Error::MidiError(format!("Invalid velocity: {}", velocity)));
      }
-@@ -2543,7 +3415,7 @@
+@@ -2543,7 +3452,7 @@
      }
  }
  
@@ -16027,7 +16301,7 @@
      if event.bus_index < 0 {
          return Err(Error::MidiError(format!(
              "Invalid event bus index: {}",
-@@ -2669,6 +3541,59 @@
+@@ -2669,6 +3578,59 @@
              "Legacy MIDI CC events are plugin output only".to_string(),
          )),
      }
@@ -16087,10 +16361,25 @@
  }
  
  /// Platform-specific window handle
-@@ -2950,6 +3875,14 @@
+@@ -2950,6 +3912,29 @@
  #[cfg(test)]
  mod public_surface_tests {
      use super::*;
++
++    #[test]
++    fn unloaded_checked_metadata_fails_without_changing_legacy_zero_fallbacks() {
++        let plugin = unloaded_plugin();
++        assert!(plugin.try_latency_samples().is_err());
++        assert!(plugin.try_tail_samples().is_err());
++        assert_eq!(plugin.latency_samples(), 0);
++        assert_eq!(plugin.tail_samples(), 0);
++
++        let main_thread = MainThreadPlugin::from_in_process(plugin);
++        assert!(main_thread.try_latency_samples().is_err());
++        assert!(main_thread.try_tail_samples().is_err());
++        assert_eq!(main_thread.latency_samples(), 0);
++        assert_eq!(main_thread.tail_samples(), 0);
++    }
 +
 +    #[test]
 +    fn unloaded_native_feedback_checks_never_report_a_clean_result() {
@@ -16102,7 +16391,7 @@
  
      /// A `Plugin` with no backing implementation. Enough to exercise the checks the public
      /// surface performs *before* it reaches into `internal`.
-@@ -3327,3 +4260,68 @@
+@@ -3327,3 +4312,68 @@
          assert!(decode_state_snapshot(&bytes).is_err());
      }
  }
