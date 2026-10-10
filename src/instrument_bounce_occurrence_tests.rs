@@ -34,7 +34,7 @@ impl Files {
 }
 impl Drop for Files {
     fn drop(&mut self) {
-        if !std::thread::panicking() {
+        if !std::thread::panicking() && !crate::occurrence_media::verification_test_has_pending() {
             let _ = std::fs::remove_dir_all(&self.0);
         }
     }
@@ -307,9 +307,7 @@ fn render(
 
 #[test]
 fn occurrence_actual_capture_renderer_file_and_authoritative_history_join() {
-    let _serial = crate::occurrence_media::VERIFICATION_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
+    let _serial = crate::occurrence_media::verification_test_guard();
     for (a, n, latency) in [
         (0, 1, 0),
         (1, 127, 1),
@@ -357,9 +355,7 @@ fn occurrence_actual_capture_renderer_file_and_authoritative_history_join() {
 
 #[test]
 fn occurrence_second_actual_capture_drift_keeps_source_and_published_media() {
-    let _serial = crate::occurrence_media::VERIFICATION_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
+    let _serial = crate::occurrence_media::verification_test_guard();
     for changed_field in 0..5 {
         let files = Files::new();
         let (project, request, state) = fixture(129, 129, 1);
@@ -577,9 +573,7 @@ fn occurrence_cancel_before_factory_or_after_first_reply_retains_source_and_dest
 
 #[test]
 fn occurrence_second_capture_cancel_timeout_and_fault_are_drained_without_insertion() {
-    let _serial = crate::occurrence_media::VERIFICATION_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|p| p.into_inner());
+    let _serial = crate::occurrence_media::verification_test_guard();
     for case in 0..3 {
         let files = Files::new();
         let (project, request, state) = fixture(129, 129, 1);

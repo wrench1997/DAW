@@ -286,10 +286,154 @@ impl VerificationCancellation {
 /// actual finished-handle join. This is a narrow Stop A constraint, not a pool.
 static VERIFICATION_SLOT: std::sync::Mutex<Option<VerificationSlot>> = std::sync::Mutex::new(None);
 
-// All source/mock tests using the one global owner, including the end-to-end
-// capture/render/history test, share this lock. It has no production counterpart.
+// All source/mock tests using the one global owner enter through the drain
+// guard. Its serial lock stays private so a fixture cannot accidentally unlock
+// while a verifier, result, open File, or PCM owner is still pending.
 #[cfg(test)]
-pub(crate) static VERIFICATION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static VERIFICATION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(test)]
+static VERIFICATION_FIXTURE_CLEANUP_FAILURE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FixtureDrainFailure {
+    TimedOut,
+    Panicked,
+}
+
+#[cfg(test)]
+struct FixtureJoinedOwner {
+    ticket: std::sync::Arc<()>,
+    thread: std::thread::ThreadId,
+}
+
+/// Declare this FIRST in an owner fixture. Later gate-release, receipt, admission
+/// and directory-retention guards then drop before its bounded final drain.
+/// Directories are retained on unwind and whenever termination remains pending.
+#[cfg(test)]
+pub(crate) struct VerificationTestGuard {
+    _serial: std::sync::MutexGuard<'static, ()>,
+    joined: std::sync::Arc<std::sync::Mutex<Option<FixtureJoinedOwner>>>,
+}
+
+#[cfg(test)]
+pub(crate) fn verification_test_guard() -> VerificationTestGuard {
+    let serial = VERIFICATION_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(
+        VERIFICATION_FIXTURE_CLEANUP_FAILURE.load(Ordering::Acquire),
+        0,
+        "Prior verifier fixture cleanup failed; any pending slot retained and subsequent fixture admission refused"
+    );
+    VerificationTestGuard {
+        _serial: serial,
+        joined: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn verification_test_has_pending() -> bool {
+    VERIFICATION_SLOT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_some()
+}
+
+#[cfg(test)]
+impl VerificationTestGuard {
+    fn drain(&self) -> Result<(), FixtureDrainFailure> {
+        {
+            let mut slot = VERIFICATION_SLOT
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(job) = slot.as_mut() {
+                job.abandoned = true;
+                job.cancel.cancel();
+            }
+        }
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            // Snapshot only identity handles, never File/PCM/result ownership.
+            let observed = {
+                let slot = VERIFICATION_SLOT
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let Some(job) = slot.as_ref() else {
+                    return Ok(());
+                };
+                job.handle.as_ref().map(|handle| FixtureJoinedOwner {
+                    ticket: std::sync::Arc::clone(&job.ticket),
+                    thread: handle.thread().id(),
+                })
+            };
+            if let Some(outcome) = VerificationAdmission::poll_abandoned() {
+                // A terminal poll has joined the exact observed handle. Result
+                // ownership is destroyed here, outside both admission locks.
+                drop(outcome);
+                *self
+                    .joined
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = observed;
+            }
+            let empty = VERIFICATION_SLOT
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_none();
+            if empty {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(FixtureDrainFailure::TimedOut);
+            }
+            // No lock is held across this test-only bounded watchdog wait.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for VerificationTestGuard {
+    fn drop(&mut self) {
+        let already_unwinding = std::thread::panicking();
+        // Never replace the original assertion panic, even if cleanup itself
+        // panics. No pending slot is reset and no JoinHandle is detached.
+        let failure = match catch_unwind(AssertUnwindSafe(|| self.drain())) {
+            Ok(Ok(())) => None,
+            Ok(Err(failure)) => Some(failure),
+            Err(_) => Some(FixtureDrainFailure::Panicked),
+        };
+        if let Some(failure) = failure {
+            let code = match failure {
+                FixtureDrainFailure::TimedOut => 1,
+                FixtureDrainFailure::Panicked => 2,
+            };
+            let _ = VERIFICATION_FIXTURE_CLEANUP_FAILURE.compare_exchange(
+                0,
+                code,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+            // Fixed diagnostics only. Even a stderr failure is caught so Drop
+            // remains non-panicking during the original fixture unwind.
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+                eprintln!(
+                    "VERIFIER_FIXTURE_CLEANUP_FAILED: {failure:?}; any pending slot retained; subsequent fixture admission refused"
+                );
+            }));
+            if !already_unwinding {
+                // Fail this fixture even if it is the final test in the binary.
+                // Inner gates/owners have already dropped; there is no original
+                // panic to replace on this normal-exit failure path.
+                panic!(
+                    "Verifier fixture cleanup failed; any pending slot retained and subsequent fixture admission refused"
+                );
+            }
+        }
+        // The private serial guard is released only after this drain/report.
+    }
+}
 
 struct VerificationSlot {
     owner: std::sync::Arc<()>,
@@ -343,6 +487,16 @@ impl VerificationAdmission {
         published: PublishedOccurrenceRender,
         policy: VerificationPolicy,
     ) -> Result<VerificationReceipt, VerificationStartFailure> {
+        #[cfg(test)]
+        if VERIFICATION_FIXTURE_CLEANUP_FAILURE.load(Ordering::Acquire) != 0 {
+            return Err(VerificationStartFailure::Refused {
+                published,
+                problem: MediaProblem::new(
+                    MediaFailureKind::Invalid,
+                    "Prior verifier fixture cleanup failed; subsequent fixture admission refused",
+                ),
+            });
+        }
         // Only small bounded path/proof handles are copied. No file, raw audio,
         // PCM, or captured state is cloned. Nothing here performs filesystem I/O.
         let retained = match RetainedMediaEvidence::prepare(&published) {
@@ -566,7 +720,8 @@ fn checkpoint(cancel: &AtomicBool) -> Result<(), MediaProblem> {
 /// Synchronous worker body, never a UI/callback operation. All file/raw-buffer
 /// resources are destroyed before this function returns an outcome. Its caller
 /// retains the worker and acknowledges terminal completion only after joining.
-#[allow(clippy::result_large_err)] // Failure retains the producer seal by value.
+#[cfg(test)]
+#[allow(clippy::result_large_err)] // Pure fixtures only; production must retain/join the worker owner.
 pub(crate) fn verify_published_occurrence(
     published: PublishedOccurrenceRender,
     cancel: &AtomicBool,
@@ -1375,9 +1530,7 @@ mod tests {
 
     #[test]
     fn verifier_busy_refusal_returns_the_exact_unstarted_publication() {
-        let _serial = VERIFICATION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _serial = verification_test_guard();
         let (directory, published) = owned_occurrence("busy-active");
         let (other_directory, other) = owned_occurrence("busy-refused");
         let expected_path = other.path().to_path_buf();
@@ -1415,9 +1568,7 @@ mod tests {
 
     #[test]
     fn verifier_pending_polls_retain_same_handle_ticket_and_slot() {
-        let _serial = VERIFICATION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _serial = verification_test_guard();
         let (directory, published) = owned_occurrence("same-owner");
         let owner = VerificationAdmission::default();
         let (gate, release) = gate();
@@ -1466,9 +1617,7 @@ mod tests {
 
     #[test]
     fn verifier_receipt_drop_keeps_exact_slot_until_abandoned_finished_join() {
-        let _serial = VERIFICATION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _serial = verification_test_guard();
         let (directory, published) = owned_occurrence("receipt-drop");
         let expected_path = published.path().to_path_buf();
         let owner = VerificationAdmission::default();
@@ -1519,9 +1668,7 @@ mod tests {
 
     #[test]
     fn verifier_admission_drop_cancels_but_live_receipt_can_drain_same_worker() {
-        let _serial = VERIFICATION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _serial = verification_test_guard();
         let (directory, published) = owned_occurrence("admission-drop");
         let owner = VerificationAdmission::default();
         let (gate, release) = gate();
@@ -1552,9 +1699,7 @@ mod tests {
 
     #[test]
     fn verifier_cancel_capability_cannot_release_admission_or_erase_media() {
-        let _serial = VERIFICATION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _serial = verification_test_guard();
         let (directory, published) = owned_occurrence("cancel-capability");
         let path = published.path().to_path_buf();
         let owner = VerificationAdmission::default();
@@ -1587,9 +1732,7 @@ mod tests {
 
     #[test]
     fn verifier_completion_before_poll_retains_result_and_admission_until_join() {
-        let _serial = VERIFICATION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _serial = verification_test_guard();
         let (directory, published) = owned_occurrence("completed-unjoined");
         let owner = VerificationAdmission::default();
         let mut receipt = owner.start(published).unwrap();
@@ -1610,9 +1753,7 @@ mod tests {
 
     #[test]
     fn verifier_worker_panic_and_post_result_panic_join_with_retained_path() {
-        let _serial = VERIFICATION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _serial = verification_test_guard();
         for after_result in [false, true] {
             let (directory, published) = owned_occurrence("worker-panic");
             let path = published.path().to_path_buf();
@@ -1649,9 +1790,7 @@ mod tests {
 
     #[test]
     fn verifier_completed_owner_drop_drains_then_reuses_the_single_slot() {
-        let _serial = VERIFICATION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _serial = verification_test_guard();
         let (directory, published) = owned_occurrence("completed-drop");
         let owner = VerificationAdmission::default();
         let receipt = owner.start(published).unwrap();
@@ -1675,9 +1814,7 @@ mod tests {
 
     #[test]
     fn verifier_spawn_failure_keeps_path_and_releases_only_unspawned_reservation() {
-        let _serial = VERIFICATION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _serial = verification_test_guard();
         let (directory, published) = owned_occurrence("spawn-failed");
         let path = published.path().to_path_buf();
         let owner = VerificationAdmission::default();
@@ -1704,9 +1841,7 @@ mod tests {
     }
     #[test]
     fn verifier_cancel_while_open_file_and_pcm_are_owned_waits_for_finished_join() {
-        let _serial = VERIFICATION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _serial = verification_test_guard();
         let (directory, published) = owned_occurrence("cancel-owned-pcm");
         let path = published.path().to_path_buf();
         let owner = VerificationAdmission::default();
@@ -1770,9 +1905,7 @@ mod tests {
 
     #[test]
     fn verifier_caught_validation_panic_retains_producer_seal_until_join() {
-        let _serial = VERIFICATION_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _serial = verification_test_guard();
         let (directory, published) = owned_occurrence("caught-validation-panic");
         let path = published.path().to_path_buf();
         let owner = VerificationAdmission::default();
@@ -1796,5 +1929,95 @@ mod tests {
         assert!(!owner.is_busy());
         assert!(path.is_file());
         std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn verifier_assertion_unwind_releases_gate_drains_same_handle_and_preserves_panic() {
+        let directory = std::sync::Mutex::new(None);
+        let gate_seen = std::sync::Mutex::new(None);
+        let owner_seen = std::sync::Mutex::new(None);
+        let drain_seen = std::sync::Mutex::new(None);
+        let assertion = catch_unwind(AssertUnwindSafe(|| {
+            // First local guard, deliberately outside every inner owner/release.
+            let serial = verification_test_guard();
+            *drain_seen.lock().unwrap() = Some(std::sync::Arc::clone(&serial.joined));
+            let (path, published) = owned_occurrence("assertion-unwind");
+            *directory.lock().unwrap() = Some(path);
+            let owner = VerificationAdmission::default();
+            let (gate, _release) = gate();
+            *gate_seen.lock().unwrap() = Some(std::sync::Arc::clone(&gate));
+            let receipt = owner
+                .start_with_policy(
+                    published,
+                    VerificationPolicy {
+                        fixture: VerificationFixture {
+                            pause_step: Some((
+                                VerificationStep::AfterDecode,
+                                std::sync::Arc::clone(&gate),
+                            )),
+                            ..VerificationFixture::default()
+                        },
+                    },
+                )
+                .unwrap();
+            await_condition(|| gate.entered.load(Ordering::Acquire));
+            let thread = VERIFICATION_SLOT
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .handle
+                .as_ref()
+                .unwrap()
+                .thread()
+                .id();
+            *owner_seen.lock().unwrap() = Some((std::sync::Arc::clone(&receipt.ticket), thread));
+            assert!(
+                receipt.termination_acknowledged(),
+                "intentional original verifier fixture assertion"
+            );
+        }))
+        .unwrap_err();
+        let original = assertion
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| assertion.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("");
+        assert!(original.contains("intentional original verifier fixture assertion"));
+        // A new guarded admission can proceed only after the original guard's
+        // drain finished. Interleaved independent fixtures remain serialized.
+        let _serial = verification_test_guard();
+        assert_eq!(
+            VERIFICATION_FIXTURE_CLEANUP_FAILURE.load(Ordering::Acquire),
+            0
+        );
+        let gate = gate_seen.into_inner().unwrap().unwrap();
+        assert!(
+            *gate
+                .released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        );
+        let (ticket, thread) = owner_seen.into_inner().unwrap().unwrap();
+        let drain = drain_seen.into_inner().unwrap().unwrap();
+        let joined = drain.lock().unwrap();
+        let joined = joined
+            .as_ref()
+            .expect("unwind guard joined the original verifier");
+        assert!(std::sync::Arc::ptr_eq(&joined.ticket, &ticket));
+        assert_eq!(joined.thread, thread);
+        assert!(VERIFICATION_SLOT.lock().unwrap().is_none());
+        let old_directory = directory.into_inner().unwrap().unwrap();
+        assert!(old_directory.join("output.wav").is_file());
+        let (next_directory, published) = owned_occurrence("after-assertion-unwind");
+        let owner = VerificationAdmission::default();
+        let mut receipt = owner.start(published).unwrap();
+        assert!(matches!(
+            await_outcome(&mut receipt),
+            VerificationOutcome::Verified(_)
+        ));
+        assert!(receipt.termination_acknowledged());
+        // Neither directory is removed until actual joined termination.
+        std::fs::remove_dir_all(old_directory).unwrap();
+        std::fs::remove_dir_all(next_directory).unwrap();
     }
 }
