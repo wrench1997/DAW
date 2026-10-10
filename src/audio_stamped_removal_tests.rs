@@ -1029,53 +1029,95 @@ fn stamped_removal_stopped_epoch_and_acceptance_exclude_every_poisoned_residue()
         .plugin_instances
         .push(timeline_test_plugin(700));
     let source_timeline = compile_timeline_test_project(&source_project);
+    let fixed_before_safety = fixture.callback.as_ref().unwrap().dsp.generator_endpoints[0]
+        .as_ref()
+        .unwrap()
+        .endpoint
+        .stats();
+    let submitted_before_safety = fixture.workers[0].control().stats().submitted;
     activate_removal_fixture_timeline(&mut fixture, Arc::clone(&source_timeline), 10, 2, false);
 
-    // Stopped activation leaves its real All Notes Off safety lane pending. A paused
-    // callback deliberately does not advance this source, so drain one actual Q128
-    // quantum before admitting the fixture's single live Note On. Ring enqueue alone
-    // would otherwise succeed even though endpoint live staging still refuses it.
+    // The activation helper already runs one real paused callback. That callback
+    // must submit the finite stopped-epoch safety Q128 before the fixture's one
+    // Live Note On can be admitted; do not drain it with a second direct process.
     {
-        let endpoint = &fixture.callback.as_ref().unwrap().dsp.generator_endpoints[0]
+        let callback = fixture.callback.as_ref().unwrap();
+        assert!(
+            callback
+                .last_output()
+                .iter()
+                .all(|frame| *frame == [0.0; 2])
+        );
+        let endpoint = &callback.dsp.generator_endpoints[0]
             .as_ref()
             .unwrap()
             .endpoint;
-        assert_eq!(endpoint.adapter.input_phase_frames(), 0);
-        assert!(endpoint.events.scratch.live_faulted);
+        let after = endpoint.stats();
+        assert_eq!(endpoint.epoch(), 2);
+        assert_eq!(after.callbacks - fixed_before_safety.callbacks, 1);
         assert_eq!(
-            endpoint.events.scratch.system.pending_len,
+            after.callback_frames - fixed_before_safety.callback_frames,
+            128
+        );
+        assert_eq!(
+            after.completed_quanta - fixed_before_safety.completed_quanta,
+            1
+        );
+        assert_eq!(
+            after.submitted_quanta - fixed_before_safety.submitted_quanta,
+            1
+        );
+        assert_eq!(
+            after.frame_events_received - fixed_before_safety.frame_events_received,
+            16
+        );
+        assert_eq!(
+            after.frame_events_staged - fixed_before_safety.frame_events_staged,
+            16
+        );
+        assert_eq!(endpoint.adapter.input_phase_frames(), 0);
+        assert!(!endpoint.events.scratch.live_faulted);
+        assert_eq!(endpoint.events.scratch.system.pending_len, 0);
+        assert_eq!(endpoint.events.scratch.timeline.pending_len, 0);
+        assert_eq!(endpoint.events.scratch.live.pending_len, 0);
+        assert_eq!(endpoint.partial_quantum_usage.total, 0);
+        assert_eq!(endpoint.adapter.genuine_snapshot().pending_event_count, 0);
+        assert!(endpoint.stopped_epoch_safety.is_none());
+        // The last real prepare_callback view retains the exact transferred
+        // batch, separately from the worker's independent 48-message reset.
+        assert_eq!(
+            endpoint.events.scratch.current_len,
             TIMELINE_ENDPOINT_DISCONTINUITY_EVENTS
         );
         for channel in 0..16_u8 {
             assert_eq!(
-                endpoint.events.scratch.system.pending[usize::from(channel)],
+                endpoint.events.scratch.current[usize::from(channel)],
                 FrameEvent::midi(0, None, [0xB0 | channel, 123, 0])
             );
+            assert_eq!(
+                endpoint.events.scratch.current_classes[usize::from(channel)],
+                EndpointEventClass::System
+            );
         }
-        assert_eq!(endpoint.events.scratch.live.pending_len, 0);
     }
-    let submitted_before_safety = fixture.workers[0].control().stats().submitted;
-    assert!(
-        fixture
-            .callback
-            .as_mut()
-            .unwrap()
-            .dsp
-            .process_generator_endpoints(128)
-    );
     let submitted_safety = fixture.workers[0].control().stats().submitted;
     assert_eq!(submitted_safety, submitted_before_safety + 1);
-    wait_until(|| fixture.workers[0].control().stats().completed >= submitted_safety);
-    {
-        let endpoint = &fixture.callback.as_ref().unwrap().dsp.generator_endpoints[0]
+    // Observe the same submission settling without another callback/DSP pump.
+    wait_until(|| {
+        let bridge = fixture.callback.as_ref().unwrap().dsp.generator_endpoints[0]
             .as_ref()
             .unwrap()
-            .endpoint;
-        assert_eq!(endpoint.adapter.input_phase_frames(), 0);
-        assert!(!endpoint.events.scratch.live_faulted);
-        assert_eq!(endpoint.events.scratch.system.pending_len, 0);
-        assert_eq!(endpoint.events.scratch.live.pending_len, 0);
-    }
+            .endpoint
+            .adapter
+            .genuine_snapshot()
+            .bridge;
+        fixture.workers[0].control().stats().completed == submitted_safety
+            && bridge.worker_epoch == 2
+            && bridge.input_pending == 0
+            && bridge.worker_busy == 0
+            && bridge.input_consumed == submitted_safety
+            && bridge.operations_completed == submitted_safety
+    });
     let live_overflows_before_note = fixture
         .callback
         .as_ref()
