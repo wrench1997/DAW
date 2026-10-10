@@ -153,6 +153,12 @@ fn response_templates() -> String {
             },
         ),
         (
+            "CaptureError",
+            R::Error {
+                message: "injected capture IPC failure".into(),
+            },
+        ),
+        (
             "Unsupported",
             R::MetadataQueryRejected {
                 reason: vst3_host::MetadataQueryRejection::Unsupported,
@@ -197,9 +203,13 @@ impl FakeHelper {
         let plugin = dir.join("no-vendor-code.vst3");
         std::fs::write(&plugin, b"protocol fixture only").unwrap();
         let program = r#"#!/usr/bin/env python3
-import copy, json, sys
+import copy, json, sys, time
+from pathlib import Path
 mode = MODE
 log = LOG
+fixture_dir = Path(FIXTURE_DIR)
+capture_phase = False
+capture_step = 0
 templates = json.loads(TEMPLATES)
 saved = False
 loaded = False
@@ -240,6 +250,10 @@ for line in sys.stdin:
         if mode == 'revision_change' and saved: result['NativeDirtyRevision']['revision'] = 10
     elif name == 'GetAllParameters':
         if mode == 'unknown_base': result['Parameters']['params'] = []
+        if mode.startswith('block_'):
+            second = copy.deepcopy(result['Parameters']['params'][0])
+            second['id'] = 18
+            result['Parameters']['params'].append(second)
     elif name == 'SaveState':
         saved = True
         if mode == 'empty_state': result = templates['EmptyState']
@@ -249,6 +263,17 @@ for line in sys.stdin:
         if name == 'StartProcessing': processing = True
         if name == 'StopProcessing': processing = False
         result = templates['Success']
+    if name == 'Editor' and data['command'] == 'Query': capture_phase = True
+    if mode.startswith('block_') and capture_phase:
+        capture_step += 1
+        target = int(mode.split('_')[1])
+        if capture_step == target:
+            (fixture_dir / 'entered').write_text(name)
+            wait_until = time.monotonic() + 4
+            while not (fixture_dir / 'release').exists() and time.monotonic() < wait_until:
+                time.sleep(0.001)
+            if not (fixture_dir / 'release').exists() or mode.endswith('_fault'):
+                result = templates['CaptureError']
     print(json.dumps(result), flush=True)
     if name == 'Shutdown': break
 "#;
@@ -257,6 +282,7 @@ for line in sys.stdin:
                 "TEMPLATES",
                 &serde_json::to_string(&response_templates()).unwrap(),
             )
+            .replace("FIXTURE_DIR", &serde_json::to_string(&dir).unwrap())
             .replace("MODE", &serde_json::to_string(mode).unwrap())
             .replace("LOG", &serde_json::to_string(&log).unwrap());
         std::fs::write(&script, program).unwrap();
@@ -369,10 +395,21 @@ const CAPTURE_SEQUENCE: &[&str] = &[
     "TailSamples",
 ];
 
+fn capture_fence() -> BounceCaptureFence {
+    BounceCaptureFence::new(
+        std::time::Instant::now() + crate::instrument_bounce::BOUNCE_CAPTURE_TIMEOUT,
+    )
+}
+
 fn capture_control() {
     let fake = FakeHelper::new("normal");
     let mut source = fake.source();
-    assert_eq!(source.capture_bounce_state(&[17]).unwrap(), capture_state());
+    assert_eq!(
+        source
+            .capture_bounce_state(&[17], &capture_fence())
+            .unwrap(),
+        capture_state()
+    );
     assert_eq!(fake.names(), CAPTURE_SEQUENCE);
 }
 
@@ -453,7 +490,9 @@ fn assert_factory_failure(fake: &FakeHelper, message: &str, last_stage: &str) {
 fn actual_vst3_capture_queries_closed_state_current_bases_and_all_fences_only() {
     let fake = FakeHelper::new("normal");
     let mut source = fake.source();
-    let state = source.capture_bounce_state(&[17]).unwrap();
+    let state = source
+        .capture_bounce_state(&[17], &capture_fence())
+        .unwrap();
     assert_eq!(state, capture_state());
     assert_eq!(
         fake.names(),
@@ -533,7 +572,7 @@ fn actual_vst3_capture_rejects_open_editor_unknown_keys_empty_state_and_changed_
         let mut source = fake.source();
         assert_capture_failure(
             &fake,
-            source.capture_bounce_state(&[17]),
+            source.capture_bounce_state(&[17], &capture_fence()),
             harmless,
             message,
             prefix,
@@ -653,7 +692,7 @@ fn capture_metadata_typed_refusal_is_harmless_but_unknown_remote_errors_fault() 
         let mut source = fake.source();
         assert_capture_failure(
             &fake,
-            source.capture_bounce_state(&[17]),
+            source.capture_bounce_state(&[17], &capture_fence()),
             harmless,
             message,
             prefix,
@@ -690,5 +729,147 @@ fn fresh_factory_rejects_audio_changes_at_start_or_parameter_application_and_sdk
     ] {
         let fake = FakeHelper::new(mode);
         assert_factory_failure(&fake, message, "CheckedAudioBusLayout");
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CaptureInterruption {
+    Cancel,
+    Deadline,
+    CancelWithFault,
+}
+
+/// The fixture keeps its source owner alive until assertions finish, so the request ledger
+/// proves capture termination without confusing source teardown with further capture calls.
+fn interrupt_capture_at(stage: usize, interruption: CaptureInterruption, ids: &[u32]) {
+    use std::{
+        sync::{Arc, mpsc},
+        thread,
+        time::{Duration, Instant},
+    };
+    let fault = matches!(interruption, CaptureInterruption::CancelWithFault);
+    let fake = FakeHelper::new(&format!(
+        "block_{stage}_{}",
+        if fault { "fault" } else { "ok" }
+    ));
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let (result_tx, result_rx) = mpsc::sync_channel(1);
+    let (finish_tx, finish_rx) = mpsc::sync_channel(1);
+    thread::scope(|scope| {
+        let source_fixture = &fake;
+        let owner = scope.spawn(move || {
+            let mut source = source_fixture.source();
+            let deadline = Instant::now()
+                + if matches!(interruption, CaptureInterruption::Deadline) {
+                    Duration::from_secs(2)
+                } else {
+                    crate::instrument_bounce::BOUNCE_CAPTURE_TIMEOUT
+                };
+            let fence = Arc::new(BounceCaptureFence::new(deadline));
+            ready_tx.send(Arc::clone(&fence)).unwrap();
+            let result = source.capture_bounce_state(ids, &fence);
+            result_tx
+                .send((result, source.prepared, source.plugin.is_processing()))
+                .unwrap();
+            // A failed test cannot hold the scoped owner forever.
+            let _ = finish_rx.recv_timeout(Duration::from_secs(8));
+        });
+        let fence = ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let wait_until = Instant::now() + Duration::from_secs(3);
+        while !fake.dir.join("entered").exists() && Instant::now() < wait_until {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            std::fs::read_to_string(fake.dir.join("entered")).unwrap(),
+            CAPTURE_SEQUENCE[stage - 1]
+        );
+        if matches!(interruption, CaptureInterruption::Deadline) {
+            thread::sleep(
+                fence.deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(5),
+            );
+        } else {
+            fence.cancel();
+        }
+        std::fs::write(fake.dir.join("release"), b"release").unwrap();
+        let (result, prepared, processing) =
+            result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            prepared && processing,
+            "source lifecycle must remain untouched"
+        );
+        let reason = if fault {
+            "injected capture IPC failure"
+        } else if matches!(interruption, CaptureInterruption::Deadline) {
+            "timed out"
+        } else {
+            "cancelled"
+        };
+        let error = result.unwrap_err();
+        assert_eq!(
+            matches!(error, BounceCaptureError::BackendFailed(_)),
+            fault,
+            "{error}"
+        );
+        assert!(error.to_string().contains(reason), "{error}");
+        assert_eq!(fake.names(), &CAPTURE_SEQUENCE[..stage]);
+        // No second parameter request or trailing fence is permitted after cancellation/deadline.
+        assert!(
+            fake.requests()
+                .iter()
+                .filter_map(|request| request.get("GetParameter"))
+                .all(|parameter| parameter["id"] == 17)
+        );
+        assert!(fake.requests().iter().all(|request| {
+            request
+                .get("Editor")
+                .is_none_or(|data| data["command"] == "Query")
+        }));
+        finish_tx.send(()).unwrap();
+        owner.join().unwrap();
+    });
+}
+
+#[test]
+fn capture_cancellation_stops_after_each_inflight_state_metadata_and_parameter_stage() {
+    capture_control();
+    for stage in 1..=CAPTURE_SEQUENCE.len() {
+        interrupt_capture_at(stage, CaptureInterruption::Cancel, &[17]);
+    }
+}
+
+#[test]
+fn slow_successful_base_getter_observes_deadline_before_any_next_request() {
+    capture_control();
+    interrupt_capture_at(9, CaptureInterruption::Deadline, &[17, 18]);
+}
+
+#[test]
+fn inflight_state_and_getter_ipc_failures_win_over_concurrent_cancellation() {
+    capture_control();
+    for stage in [7, 9] {
+        interrupt_capture_at(stage, CaptureInterruption::CancelWithFault, &[17, 18]);
+    }
+}
+
+#[test]
+fn already_cancelled_or_expired_backend_capture_sends_no_request() {
+    capture_control();
+    for cancelled in [false, true] {
+        let fake = FakeHelper::new("normal");
+        let mut source = fake.source();
+        let fence = if cancelled {
+            capture_fence()
+        } else {
+            BounceCaptureFence::new(std::time::Instant::now())
+        };
+        if cancelled {
+            fence.cancel();
+        }
+        let result = source.capture_bounce_state(&[17], &fence);
+        let expected = if cancelled { "cancelled" } else { "timed out" };
+        assert!(
+            matches!(result, Err(BounceCaptureError::Rejected(reason)) if reason.contains(expected))
+        );
+        assert!(fake.names().is_empty());
     }
 }

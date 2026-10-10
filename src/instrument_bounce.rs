@@ -343,6 +343,7 @@ pub struct InstrumentBounceCapture {
     receiver: Option<BounceStateReceiver>,
     started_at: Instant,
     terminal: bool,
+    abort_reason: Option<String>,
 }
 
 pub struct CapturedInstrumentBounce {
@@ -399,13 +400,33 @@ impl InstrumentBounceCapture {
             receiver: Some(receiver),
             started_at: now,
             terminal: false,
+            abort_reason: None,
         })
     }
 
+    /// Request cancellation, retaining preparation and source ownership until worker ack.
+    /// A future App adapter must retain this coordinator/session fence while poll is pending.
     pub fn cancel(&mut self) {
-        self.terminal = true;
-        self.plan = None;
-        self.receiver = None;
+        self.request_abort("Instrument bounce capture was cancelled".into());
+    }
+
+    pub fn termination_acknowledged(&self) -> bool {
+        self.receiver
+            .as_ref()
+            .map_or(self.terminal, BounceStateReceiver::termination_acknowledged)
+    }
+
+    pub fn is_cancelling(&self) -> bool {
+        self.abort_reason.is_some() && !self.terminal
+    }
+
+    fn request_abort(&mut self, reason: String) {
+        if !self.terminal && self.abort_reason.is_none() {
+            self.abort_reason = Some(reason);
+        }
+        if let Some(receiver) = &self.receiver {
+            receiver.cancel();
+        }
     }
 
     pub fn poll(
@@ -433,19 +454,30 @@ impl InstrumentBounceCapture {
         now: Instant,
     ) -> Result<Option<CapturedInstrumentBounce>, String> {
         if identity != self.identity {
-            return Err("Instrument bounce source changed during capture".into());
+            self.request_abort("Instrument bounce source changed during capture".into());
         }
-        status.validate()?;
+        if let Err(reason) = status.validate() {
+            self.request_abort(reason);
+        }
         if now.saturating_duration_since(self.started_at) >= BOUNCE_CAPTURE_TIMEOUT {
-            return Err("Instrument bounce state capture timed out".into());
+            self.request_abort("Instrument bounce state capture timed out".into());
         }
         let receipt = match self
             .receiver
             .as_ref()
-            .ok_or("Instrument bounce capture was cancelled")?
+            .ok_or("Instrument bounce capture is unavailable")?
             .try_recv()
         {
-            Ok(result) => result.map_err(|error| error.to_string())?,
+            Ok(Err(BounceCaptureError::BackendFailed(message))) => {
+                // The worker already published its real fault; cancellation cannot replace it.
+                return Err(message);
+            }
+            Ok(result) => {
+                if let Some(reason) = &self.abort_reason {
+                    return Err(reason.clone());
+                }
+                result.map_err(|error| error.to_string())?
+            }
             Err(TryRecvError::Empty) => return Ok(None),
             Err(TryRecvError::Disconnected) => {
                 return Err("Instrument bounce source worker disconnected".into());

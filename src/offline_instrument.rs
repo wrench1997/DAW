@@ -11,7 +11,7 @@ mod protocol_tests;
 
 #[cfg(feature = "vst3")]
 use {
-    super::{PluginBackend, PluginPrepareConfig, Vst3Backend},
+    super::{BounceCaptureFence, PluginBackend, PluginPrepareConfig, Vst3Backend},
     crate::instrument_bounce::{
         BOUNCE_PREPARED_MAXIMUM, BounceCaptureError, BouncePluginState, MAX_BOUNCE_STATE_BYTES,
     },
@@ -98,7 +98,7 @@ impl OfflineInstrument {
             }
         }
         let metadata = backend
-            .bounce_metadata()
+            .bounce_metadata(None)
             .map_err(|error| error.to_string())?;
         metadata.validate(sample_rate)?;
         backend.input_channels = 0;
@@ -117,17 +117,38 @@ impl OfflineInstrument {
 
 #[cfg(feature = "vst3")]
 impl Vst3Backend {
-    fn bounce_metadata(&self) -> vst3_host::Result<BouncePluginMetadata> {
-        let layout = self.plugin.checked_audio_bus_layout()?;
+    fn bounce_metadata(
+        &self,
+        fence: Option<&BounceCaptureFence>,
+    ) -> Result<BouncePluginMetadata, BounceCaptureError> {
+        let layout = capture_call(fence, || {
+            self.plugin
+                .checked_audio_bus_layout()
+                .map_err(classify_metadata_error)
+        })?;
         if layout.outputs.iter().any(|bus| !bus.is_main) {
-            return Err(vst3_host::Error::MetadataQueryRejected(
-                vst3_host::MetadataQueryRejection::Unsupported,
+            return Err(classify_metadata_error(
+                vst3_host::Error::MetadataQueryRejected(
+                    vst3_host::MetadataQueryRejection::Unsupported,
+                ),
             ));
         }
-        let events = self.plugin.event_bus_layout()?;
+        let events = capture_call(fence, || {
+            self.plugin
+                .event_bus_layout()
+                .map_err(classify_metadata_error)
+        })?;
         let info = self.plugin.info();
-        let latency_samples = self.plugin.try_latency_samples()?;
-        let tail_samples = self.plugin.try_tail_samples()?;
+        let latency_samples = capture_call(fence, || {
+            self.plugin
+                .try_latency_samples()
+                .map_err(classify_metadata_error)
+        })?;
+        let tail_samples = capture_call(fence, || {
+            self.plugin
+                .try_tail_samples()
+                .map_err(classify_metadata_error)
+        })?;
         Ok(BouncePluginMetadata {
             class_uid: info.uid.clone(),
             version: info.version.clone(),
@@ -161,33 +182,37 @@ impl Vst3Backend {
     pub(super) fn capture_bounce_state(
         &mut self,
         parameter_ids: &[u32],
+        fence: &BounceCaptureFence,
     ) -> Result<BouncePluginState, BounceCaptureError> {
         use BounceCaptureError::{BackendFailed, Rejected};
+        fence.checkpoint()?;
         if !self.prepared || self.last_transport.playing {
             return Err(Rejected(
                 "Instrument bounce source has not reached stopped processing".into(),
             ));
         }
-        let before = self
-            .plugin
-            .isolated_editor(vst3_host::IsolatedEditorCommand::Query)
-            .map_err(|error| BackendFailed(error.to_string()))?;
+        let before = capture_call(Some(fence), || {
+            self.plugin
+                .isolated_editor(vst3_host::IsolatedEditorCommand::Query)
+                .map_err(|error| BackendFailed(error.to_string()))
+        })?;
         if before.open {
             return Err(Rejected(
                 "Close the source native editor before instrument bounce".into(),
             ));
         }
-        let revision = self
-            .plugin
-            .native_dirty_revision()
-            .map_err(|error| BackendFailed(error.to_string()))?;
-        let metadata = self.bounce_metadata().map_err(classify_metadata_error)?;
+        let revision = capture_call(Some(fence), || {
+            self.plugin
+                .native_dirty_revision()
+                .map_err(|error| BackendFailed(error.to_string()))
+        })?;
+        let metadata = self.bounce_metadata(Some(fence))?;
         metadata
             .validate(self.plugin.sample_rate() as u32)
             .map_err(Rejected)?;
         // Production SaveState has a zero-sample parameter flush. No Close, positive Process,
         // LoadState, transport reset or shared native publication is performed here.
-        let opaque_state = self.save_state().map_err(BackendFailed)?;
+        let opaque_state = capture_call(Some(fence), || self.save_state().map_err(BackendFailed))?;
         if opaque_state.is_empty() || opaque_state.len() > MAX_BOUNCE_STATE_BYTES {
             return Err(Rejected(
                 "Instrument bounce requires nonempty authoritative state within 64 MiB".into(),
@@ -195,9 +220,9 @@ impl Vst3Backend {
         }
         let mut parameter_bases = BTreeMap::new();
         if !parameter_ids.is_empty() {
-            let (_, catalog) = super::validate_catalog_snapshot(
-                self.parameter_catalog_snapshot().map_err(BackendFailed)?,
-            )
+            let (_, catalog) = super::validate_catalog_snapshot(capture_call(Some(fence), || {
+                self.parameter_catalog_snapshot().map_err(BackendFailed)
+            })?)
             .map_err(Rejected)?;
             for &id in parameter_ids {
                 if !catalog
@@ -208,7 +233,9 @@ impl Vst3Backend {
                         "Stored parameter base {id} is missing or read-only in current metadata"
                     )));
                 }
-                let value = self.get_parameter(id).map_err(BackendFailed)?;
+                let value = capture_call(Some(fence), || {
+                    self.get_parameter(id).map_err(BackendFailed)
+                })?;
                 if !value.is_finite() || !(0.0..=1.0).contains(&value) {
                     return Err(Rejected(format!(
                         "Stored parameter base {id} has an invalid current value"
@@ -219,21 +246,24 @@ impl Vst3Backend {
                 }
             }
         }
-        let after = self
-            .plugin
-            .isolated_editor(vst3_host::IsolatedEditorCommand::Query)
-            .map_err(|error| BackendFailed(error.to_string()))?;
-        let after_revision = self
-            .plugin
-            .native_dirty_revision()
-            .map_err(|error| BackendFailed(error.to_string()))?;
+        let after = capture_call(Some(fence), || {
+            self.plugin
+                .isolated_editor(vst3_host::IsolatedEditorCommand::Query)
+                .map_err(|error| BackendFailed(error.to_string()))
+        })?;
+        let after_revision = capture_call(Some(fence), || {
+            self.plugin
+                .native_dirty_revision()
+                .map_err(|error| BackendFailed(error.to_string()))
+        })?;
         if after.open
             || before.generation != after.generation
             || revision != after_revision
-            || metadata != self.bounce_metadata().map_err(classify_metadata_error)?
+            || metadata != self.bounce_metadata(Some(fence))?
         {
             return Err(Rejected("Source native generation, state revision or metadata changed during instrument bounce capture".into()));
         }
+        fence.checkpoint()?;
         Ok(BouncePluginState {
             metadata,
             opaque_state,
@@ -242,6 +272,23 @@ impl Vst3Backend {
             native_dirty_revision: revision,
         })
     }
+}
+
+/// Preserve the operation's failure before examining post-call cancellation. Once dispatched,
+/// IPC is neither retried nor reclassified as harmless merely because its owner cancelled.
+#[cfg(feature = "vst3")]
+fn capture_call<T>(
+    fence: Option<&BounceCaptureFence>,
+    operation: impl FnOnce() -> Result<T, BounceCaptureError>,
+) -> Result<T, BounceCaptureError> {
+    if let Some(fence) = fence {
+        fence.checkpoint()?;
+    }
+    let value = operation()?;
+    if let Some(fence) = fence {
+        fence.checkpoint()?;
+    }
+    Ok(value)
 }
 
 /// Only explicit bounded admission refusal is harmless. Never infer it from remote text:

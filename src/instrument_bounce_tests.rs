@@ -32,6 +32,7 @@ struct CaptureBackend {
     result: Result<BouncePluginState, BounceCaptureError>,
     captures: Arc<AtomicU64>,
     changed_epoch: Option<Arc<AtomicU64>>,
+    capture_hook: Option<fn(&BounceCaptureFence)>,
 }
 
 impl PluginBackend for CaptureBackend {
@@ -77,11 +78,16 @@ impl PluginBackend for CaptureBackend {
     fn capture_instrument_bounce_state(
         &mut self,
         ids: &[u32],
+        fence: &BounceCaptureFence,
     ) -> Result<BouncePluginState, BounceCaptureError> {
+        fence.checkpoint()?;
         assert_eq!(ids, &[17]);
         self.captures.fetch_add(1, Ordering::SeqCst);
         if let Some(epoch) = &self.changed_epoch {
             epoch.store(8, Ordering::Release);
+        }
+        if let Some(hook) = self.capture_hook {
+            hook(fence);
         }
         self.result.clone()
     }
@@ -97,12 +103,17 @@ fn slot(
             result,
             captures,
             changed_epoch,
+            capture_hook: None,
         })),
         config: SlotConfig::default(),
         fault: None,
         parameter_catalog_cache: None,
         native_base_ids: vec![17],
     }
+}
+
+fn capture_fence() -> BounceCaptureFence {
+    BounceCaptureFence::new(Instant::now() + BOUNCE_CAPTURE_TIMEOUT)
 }
 
 #[test]
@@ -113,6 +124,7 @@ fn bounce_worker_capture_has_no_normal_state_or_native_publication() {
     let before = metrics.native_editors.lock().unwrap()[0].clone();
     let (mut events, mut rx) = RingBuffer::new(4);
     let receipt = capture_instrument_bounce_on_worker(
+        &capture_fence(),
         7,
         7,
         &AtomicU64::new(7),
@@ -156,6 +168,7 @@ fn bounce_worker_rejects_stale_nonquiescent_editor_and_pending_edit_without_capt
         }
         let (mut events, mut rx) = RingBuffer::new(4);
         let result = capture_instrument_bounce_on_worker(
+            &capture_fence(),
             7,
             if case == 0 { 6 } else { 7 },
             &AtomicU64::new(if case == 1 { 8 } else { 7 }),
@@ -185,6 +198,7 @@ fn bounce_epoch_changes_after_capture_never_publish_success() {
     )];
     let (mut events, mut rx) = RingBuffer::new(4);
     let result = capture_instrument_bounce_on_worker(
+        &capture_fence(),
         7,
         7,
         &epoch,
@@ -212,6 +226,7 @@ fn bounce_backend_failure_stays_visible_but_capture_rejection_does_not_fault() {
         let (mut events, mut rx) = RingBuffer::new(4);
         assert!(
             capture_instrument_bounce_on_worker(
+                &capture_fence(),
                 7,
                 7,
                 &AtomicU64::new(7),
@@ -250,6 +265,7 @@ fn bounce_capture_failure_republishes_inactive_identity_when_fault_event_is_lost
     events.push(RuntimeEvent::ShutdownComplete).unwrap();
     assert!(
         capture_instrument_bounce_on_worker(
+            &capture_fence(),
             7,
             7,
             &AtomicU64::new(7),
@@ -289,39 +305,205 @@ fn control(capacity: usize) -> (PluginChainControl, Receiver<AdminCommand>) {
 }
 
 #[test]
-fn bounce_capture_admission_is_bounded_and_cancel_releases_it() {
+fn bounce_receiver_drop_keeps_admission_until_queued_worker_lease_terminates() {
     let (control, commands) = control(1);
     let receipt = control
         .request_instrument_bounce_state(41, 7, vec![17])
         .unwrap();
-    assert!(
-        control
-            .request_instrument_bounce_state(41, 7, vec![17])
-            .is_err()
-    );
+    let fence = Arc::clone(&receipt.fence);
     drop(receipt);
-    assert!(!control.metrics.bounce_capture_busy.load(Ordering::Acquire));
-    // The abandoned command still fills the bounded queue; never accumulate render/capture jobs.
+    assert!(control.metrics.bounce_capture_busy.load(Ordering::Acquire));
     assert!(
         control
             .request_instrument_bounce_state(41, 7, vec![17])
-            .is_err()
+            .err()
+            .unwrap()
+            .contains("already pending")
     );
-    let AdminCommand::CaptureInstrumentBounce { cancelled, .. } = commands.try_recv().unwrap()
+    let AdminCommand::CaptureInstrumentBounce { lease, reply, .. } = commands.try_recv().unwrap()
     else {
         panic!("wrong command")
     };
-    assert!(cancelled.load(Ordering::Acquire));
+    assert!(fence.cancelled.load(Ordering::Acquire));
+    assert!(!fence.terminated.load(Ordering::Acquire));
+    let captures = Arc::new(AtomicU64::new(0));
+    let mut slots = vec![slot(Ok(state()), Arc::clone(&captures), None)];
+    let (mut events, _) = RingBuffer::new(4);
+    let result = capture_instrument_bounce_on_worker(
+        &lease.fence,
+        7,
+        7,
+        &AtomicU64::new(7),
+        true,
+        &[17],
+        &AtomicU32::new(0),
+        &mut slots,
+        &mut events,
+        &control.metrics,
+    );
+    assert!(
+        matches!(result, Err(BounceCaptureError::Rejected(ref reason)) if reason.contains("cancelled"))
+    );
+    assert_eq!(captures.load(Ordering::Acquire), 0);
+    assert!(matches!(
+        reply.try_send(result),
+        Err(TrySendError::Disconnected(_))
+    ));
+    assert!(control.metrics.bounce_capture_busy.load(Ordering::Acquire));
+    drop(lease);
+    assert!(fence.terminated.load(Ordering::Acquire));
+    assert!(!control.metrics.bounce_capture_busy.load(Ordering::Acquire));
     let next = control
         .request_instrument_bounce_state(41, 7, vec![17])
         .unwrap();
-    drop(next);
+    drop(commands); // Real std channel teardown drops its queued lease even while sender lives.
+    assert!(next.termination_acknowledged());
+    assert!(matches!(next.try_recv(), Err(TryRecvError::Disconnected)));
+    assert!(!control.metrics.bounce_capture_busy.load(Ordering::Acquire));
+}
+
+#[test]
+fn bounce_admission_releases_on_queue_rejection_and_old_receiver_cannot_release_new_job() {
+    let (control, commands) = control(1);
+    assert!(control.try_admin(AdminCommand::Shutdown));
+    assert!(
+        control
+            .request_instrument_bounce_state(41, 7, vec![17])
+            .err()
+            .unwrap()
+            .contains("queue is full or disconnected")
+    );
+    assert!(!control.metrics.bounce_capture_busy.load(Ordering::Acquire));
+    assert!(matches!(commands.try_recv(), Ok(AdminCommand::Shutdown)));
+    let first = control
+        .request_instrument_bounce_state(41, 7, vec![17])
+        .unwrap();
+    drop(commands.try_recv().unwrap());
+    assert!(first.termination_acknowledged());
+    let second = control
+        .request_instrument_bounce_state(41, 7, vec![17])
+        .unwrap();
+    drop(first);
+    assert!(control.metrics.bounce_capture_busy.load(Ordering::Acquire));
+    assert!(!second.termination_acknowledged());
+    drop(commands.try_recv().unwrap());
+    assert!(second.termination_acknowledged());
+    assert!(!control.metrics.bounce_capture_busy.load(Ordering::Acquire));
     drop(commands);
     assert!(
         control
             .request_instrument_bounce_state(41, 7, vec![17])
-            .is_err()
+            .err()
+            .unwrap()
+            .contains("disconnected")
     );
+    assert!(!control.metrics.bounce_capture_busy.load(Ordering::Acquire));
+}
+
+#[test]
+fn bounce_expired_queued_request_has_no_backend_calls_and_panic_unwinds_lease() {
+    let (control, commands) = control(1);
+    let receipt = control
+        .request_instrument_bounce_state_until(41, 7, vec![17], Instant::now())
+        .unwrap();
+    let AdminCommand::CaptureInstrumentBounce { lease, reply, .. } = commands.try_recv().unwrap()
+    else {
+        panic!("wrong command")
+    };
+    let captures = Arc::new(AtomicU64::new(0));
+    let mut slots = vec![slot(Ok(state()), Arc::clone(&captures), None)];
+    let (mut events, _) = RingBuffer::new(4);
+    let result = capture_instrument_bounce_on_worker(
+        &lease.fence,
+        7,
+        7,
+        &AtomicU64::new(7),
+        true,
+        &[17],
+        &AtomicU32::new(0),
+        &mut slots,
+        &mut events,
+        &control.metrics,
+    );
+    assert!(
+        matches!(result, Err(BounceCaptureError::Rejected(ref reason)) if reason.contains("timed out"))
+    );
+    assert_eq!(captures.load(Ordering::Acquire), 0);
+    reply.try_send(result).unwrap();
+    assert!(matches!(receipt.try_recv(), Err(TryRecvError::Empty)));
+    let unwind = panic::catch_unwind(AssertUnwindSafe(move || {
+        let _lease = lease;
+        panic!("synthetic worker teardown");
+    }));
+    assert!(unwind.is_err());
+    assert!(receipt.termination_acknowledged());
+    assert!(!control.metrics.bounce_capture_busy.load(Ordering::Acquire));
+    assert!(
+        matches!(receipt.try_recv(), Ok(Err(BounceCaptureError::Rejected(reason))) if reason.contains("timed out"))
+    );
+}
+
+#[test]
+fn bounce_cancel_during_capture_preserves_real_failure_and_panic_as_reliable_fault() {
+    for case in 0..3 {
+        let captures = Arc::new(AtomicU64::new(0));
+        let mut slots = vec![slot(Ok(state()), Arc::clone(&captures), None)];
+        slots[0].backend = Some(Box::new(CaptureBackend {
+            result: if case == 1 {
+                Err(BounceCaptureError::BackendFailed(
+                    "getter IPC failure".into(),
+                ))
+            } else {
+                Ok(state())
+            },
+            captures,
+            changed_epoch: None,
+            capture_hook: Some(if case == 2 {
+                |fence| {
+                    fence.cancel();
+                    panic!("capture panic");
+                }
+            } else {
+                |fence| fence.cancel()
+            }),
+        }));
+        let metrics = BridgeMetrics::default();
+        let (mut events, mut rx) = RingBuffer::new(4);
+        update_latency_and_tail(&mut slots, &mut events, &metrics);
+        let fence = capture_fence();
+        let result = capture_instrument_bounce_on_worker(
+            &fence,
+            7,
+            7,
+            &AtomicU64::new(7),
+            true,
+            &[17],
+            &AtomicU32::new(0),
+            &mut slots,
+            &mut events,
+            &metrics,
+        );
+        if case == 0 {
+            assert!(
+                matches!(result, Err(BounceCaptureError::Rejected(reason)) if reason.contains("cancelled"))
+            );
+            assert!(slots[0].fault.is_none());
+            assert_eq!(metrics.plugin_latency_snapshot().unwrap().active_mask, 1);
+            assert!(rx.pop().is_err());
+        } else {
+            let message = if case == 1 {
+                "getter IPC failure"
+            } else {
+                "capture panic"
+            };
+            assert!(
+                matches!(result, Err(BounceCaptureError::BackendFailed(reason)) if reason.contains(message))
+            );
+            assert!(slots[0].fault.as_ref().unwrap().contains(message));
+            assert_eq!(metrics.plugin_latency_snapshot().unwrap().active_mask, 0);
+            assert!(matches!(rx.pop(), Ok(RuntimeEvent::SlotFault { .. })));
+        }
+    }
 }
 
 fn project() -> crate::model::Project {
@@ -379,7 +561,8 @@ fn bounce_coordinator_captures_current_bases_without_changing_project() {
     let now = Instant::now();
     let mut capture = InstrumentBounceCapture::begin(plan, stamp, status(), &control, now).unwrap();
     assert!(capture.poll(stamp, status(), now).unwrap().is_none());
-    let AdminCommand::CaptureInstrumentBounce { reply, .. } = commands.try_recv().unwrap() else {
+    let AdminCommand::CaptureInstrumentBounce { reply, lease, .. } = commands.try_recv().unwrap()
+    else {
         panic!("wrong command")
     };
     reply
@@ -388,6 +571,10 @@ fn bounce_coordinator_captures_current_bases_without_changing_project() {
             state: state(),
         }))
         .unwrap();
+    assert!(capture.poll(stamp, status(), now).unwrap().is_none());
+    assert!(!capture.termination_acknowledged());
+    assert!(control.metrics.bounce_capture_busy.load(Ordering::Acquire));
+    drop(lease);
     let captured = capture.poll(stamp, status(), now).unwrap().unwrap();
     assert_eq!(captured.state.parameter_bases[&17], 0.75);
     assert_eq!(captured.render_spec().initial_state, vec![1, 2, 3]);
@@ -401,9 +588,10 @@ fn bounce_coordinator_captures_current_bases_without_changing_project() {
 }
 
 #[test]
-fn bounce_coordinator_rejects_stale_session_epoch_timeout_cancel_and_worker_disconnect() {
+fn bounce_coordinator_retains_cancel_timeout_stale_and_disconnect_until_worker_ack() {
     for case in 0..6 {
         let project = project();
+        let original = serde_json::to_vec(&project).unwrap();
         let plan =
             InstrumentBouncePlan::prepare(&project, project.channels[0].id, 48_000, 0).unwrap();
         let stamp = identity(&plan);
@@ -411,7 +599,8 @@ fn bounce_coordinator_rejects_stale_session_epoch_timeout_cancel_and_worker_disc
         let now = Instant::now();
         let mut capture =
             InstrumentBounceCapture::begin(plan, stamp, status(), &control, now).unwrap();
-        let AdminCommand::CaptureInstrumentBounce { reply, .. } = commands.try_recv().unwrap()
+        let AdminCommand::CaptureInstrumentBounce { reply, lease, .. } =
+            commands.try_recv().unwrap()
         else {
             panic!("wrong command")
         };
@@ -441,11 +630,61 @@ fn bounce_coordinator_rejects_stale_session_epoch_timeout_cancel_and_worker_disc
             now
         };
         assert!(
-            capture.poll(observed, status(), polled).is_err(),
+            capture.poll(observed, status(), polled).unwrap().is_none(),
             "case {case}"
         );
+        assert!(!capture.termination_acknowledged());
+        assert_eq!(capture.is_cancelling(), matches!(case, 0 | 1 | 3 | 4));
+        assert!(control.metrics.bounce_capture_busy.load(Ordering::Acquire));
+        assert!(
+            control
+                .request_instrument_bounce_state(41, 7, vec![17])
+                .err()
+                .unwrap()
+                .contains("already pending")
+        );
+        drop(lease);
+        assert!(capture.termination_acknowledged());
+        let error = capture.poll(observed, status(), polled).err().unwrap();
+        let expected = [
+            "source changed",
+            "source changed",
+            "stale epoch",
+            "timed out",
+            "cancelled",
+            "disconnected",
+        ][case];
+        assert!(error.contains(expected), "case {case}: {error}");
+        assert_eq!(serde_json::to_vec(&project).unwrap(), original);
         assert!(!control.metrics.bounce_capture_busy.load(Ordering::Acquire));
     }
+}
+
+#[test]
+fn bounce_coordinator_cancel_does_not_replace_a_real_worker_failure() {
+    let project = project();
+    let plan = InstrumentBouncePlan::prepare(&project, project.channels[0].id, 48_000, 0).unwrap();
+    let stamp = identity(&plan);
+    let (control, commands) = control(1);
+    let now = Instant::now();
+    let mut capture = InstrumentBounceCapture::begin(plan, stamp, status(), &control, now).unwrap();
+    let AdminCommand::CaptureInstrumentBounce { reply, lease, .. } = commands.try_recv().unwrap()
+    else {
+        panic!("wrong command")
+    };
+    capture.cancel();
+    reply
+        .send(Err(BounceCaptureError::BackendFailed(
+            "real IPC fault wins".into(),
+        )))
+        .unwrap();
+    assert!(capture.poll(stamp, status(), now).unwrap().is_none());
+    drop(lease);
+    assert_eq!(
+        capture.poll(stamp, status(), now).err().unwrap(),
+        "real IPC fault wins"
+    );
+    assert!(!capture.is_cancelling());
 }
 
 #[test]

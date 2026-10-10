@@ -1,9 +1,11 @@
 # Selected-instrument bounce: dormant preparation checkpoint
 
-Status: **DORMANT EXPERIMENTAL PREPARATION, PLUGIN-FREE GATES PASSED**.
-Rust gates passed at `d91cb74`; the unchanged-Rust provenance correction passed
-its Python/package gates at `5a2d0b3`. Native bounce, App integration, capture
-cancellation and rendering remain unqualified.
+Status: **DORMANT CANCELLATION CHECKPOINT, UNVALIDATED**.
+The prior preparation slice was accepted at `0728a8c`: Rust gates passed at
+`d91cb74`, and its unchanged-Rust provenance correction passed Python/package
+gates at `5a2d0b3`. The new cancellation/termination source below has not yet
+been compiled or tested. Native bounce, App integration and rendering remain
+unqualified.
 This branch starts from published
 `dcdb2c14809b5e6f34af7db071db36f763d757f5`. No new App action is enabled. There is
 no WAV renderer, project replacement, freeze, or complete-song plug-in export.
@@ -143,9 +145,9 @@ waiting 120 seconds per deliberate malformed response. No-feature production bui
 omit the unused VST3 render spec while keeping plugin-free capture tests available.
 These corrections are not yet execution-validated at source freeze.
 
-This first slice is **not App-cancellation-qualified**. The present receiver-drop/
-35-second coordinator timeout does not stop a capture already reading current bases
-and releases admission before worker termination. A separate reviewed checkpoint
+This first slice was **not App-cancellation-qualified**. At that checkpoint, receiver-drop/
+35-second coordinator timeout did not stop a capture already reading current bases
+and released admission before worker termination. The separate reviewed checkpoint
 must carry cancellation/deadline checks before and after every state/metadata/base
 IPC operation, preserve genuine in-flight failure as a backend fault, and retain a
 worker-owned admission lease until terminal acknowledgment. Queued cancellation,
@@ -206,3 +208,47 @@ Rust, the helper wire protocol, or packaging behavior. It does not qualify genui
 VST processing, audible/WAV output, native UI, Windows, cancellation or App actions.
 The next bounded checkpoint must close worker-owned cancellation/deadline admission
 before any App integration or renderer acceptance. Full-song VST export still refuses.
+
+
+## Cancellation/termination checkpoint (unvalidated source)
+
+This follow-on changes only the dormant capture coordinator, runtime capture path,
+and plugin-free fixtures. It does not add an App adapter or renderer. No tests for
+this source have run at freeze; earlier accepted receipts remain bound to their
+original source hashes.
+
+- One non-cloneable queued/worker lease owns per-source admission. Receiver drop
+  requests cancellation but cannot release that lease. Queue rejection, worker
+  teardown and panic use the same RAII release path; an old receiver cannot clear
+  a later job's busy state. Release publishes termination acknowledgment before
+  reopening admission. Replies remain unreadable until that acknowledgment.
+- The immutable capture deadline starts at request admission. The shared fence is
+  checked before and after editor/native-revision, strict audio/event/latency/tail,
+  zero-sample SaveState, catalog and every current-base IPC. An already-dispatched
+  call keeps its existing helper timeout. It is never retried or interrupted via
+  source reset, reload, editor close, or positive-sample processing.
+- A successful in-flight call followed by cancel/deadline becomes harmless refusal,
+  and no later capture request is dispatched. The actual result of a failed IPC
+  or backend panic takes precedence over simultaneous cancellation. Such failures
+  still publish the reliable source-fault metadata before termination.
+- The coordinator retains its immutable plan and receipt during cancellation,
+  stale-source rejection or deadline expiry until worker acknowledgment. A future
+  App adapter must retain its corresponding session/job ownership while polling,
+  bind the supplied stamp to the exact live control endpoint, and test same-instance
+  endpoint replacement. Dropping the coordinator still cancels without releasing
+  the worker's source lease, but does not implement the future App session guard.
+
+Plugin-free tests cover queued cancellation/expiry without backend calls, dropped
+receiver, full/disconnected queue, teardown/panic, immediate retry while pending,
+old-receiver versus new-job ownership, acknowledgment-gated success/error receipts,
+and real-fault precedence. A typed line-protocol stand-in blocks each of the 15
+source-capture IPC stages separately: cancellation must stop at that exact ledger
+prefix. A slow successful first base getter crosses the deadline with a second
+base waiting; no second request is permitted. State/getter faults concurrent with
+cancel remain faults. Every group first exercises the successful control sequence.
+The source owner stays alive for ledger assertions, separating capture termination
+from ordinary later source teardown. No vendor module or production helper runs.
+
+Cancellation during fresh helper construction, restore, rendering and teardown is
+a later stage. This capture-only patch cannot qualify App actions, audible output,
+WAV files, latency trimming, tail consent or native/Windows behavior.
