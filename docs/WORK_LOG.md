@@ -1929,3 +1929,25 @@ archive precede that preparation.
   markers fail, exact content and bounded waits remain unchanged. No production
   body or acceptance criterion changes. Original failure and all input hashes are
   retained in the correction archive before the bounded current-source rerun.
+
+## 2026-10-10: fresh timing bounded source/mock gates complete
+
+- Corrected b1e62cbb passed feature offline49/bounce60/runtime77 and default
+  offline15/bounce43/runtime77, with current all-target builds in both profiles.
+  All-feature/default/core Clippy-Dwarnings, fmt, Python239 and package557 pass.
+  New coverage comprises3 pure functions and7 actual mock-worker/backend functions;
+  internal cases keep exact stage, field, reply, cancellation and lifecycle oracles.
+- Run001's e447564a compile PASS/offline48-of49 failure is retained unchanged.
+  The only correction is shared atomic publication of test-held markers and its
+  factual log note. It was archived/reviewed before run002's fresh49; no production
+  or assertion relaxation. Previously unfinished suites ran once afterward.
+- Binding d93750de records15 current root executables,3 current-worktree vendor
+  rlibs, actual extern/source roots and dep-info plus unchanged739-file maps.
+  Helperbafce0dc reproduces. Vendor/helper/dependency bytes remain unchanged from
+  the accepted baseline, with prior broad evidence attributed historically.
+  No whole-App/vendor/compiler-negative or fresh core test-execution claim.
+- Final changes are only three result appendices. The target is released and all
+  compiler/mock processes are terminal. Original genuine failures and the observed
+  tail-only refusal retain their outcomes. No genuine source/capture/clone/audio/
+  WAV/cancellation rerun occurred; a separately reviewed full harness and explicit
+  invocation approval remain necessary.

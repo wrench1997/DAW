@@ -208,3 +208,30 @@ The old complete-view diagnostic harness requires refusal and remains historical
 it must not be rerun expecting readiness. Any further genuine qualification needs
 a separately frozen/reviewed harness and explicit authorization. State/base,
 frames/latency/tail, audio/WAV, cancellation and strict disposal criteria remain.
+
+## Executed fresh timing source/mock result, 2026-10-10
+
+The exact b1e62cbb corrected source passed all remaining gates: feature offline49,
+instrument-bounce60 and runtime77; default offline15, bounce43 and runtime77;
+current all-target compilation in both profiles; all-feature/default/core strict
+Clippy, fmt, Python239 and package557. New coverage is three pure comparator
+functions and seven protocol functions with bounded per-stage matrices. The live
+Ready/snapshot/capture pin and returned-fault precedence were exercised using
+synthetic line-protocol helpers, not a VST binary.
+
+Initial e447564a compilation passed but offline49 returned48 pass/1 empty-marker
+fixture failure. Its exact bytes/logs and Joined/retained fixture evidence remain.
+The shared atomic temporary-write/close/rename correction was archived/reviewed
+before the fresh full49 run; no production change or weaker assertion was needed.
+All other selected suites were previously unexecuted and ran once on b1e62cbb.
+
+Receipt d93750de30ef95923664e7a168102312216b85b89b4b67b3bd46b1c80f6c8a22 binds15
+current root binary copies,3 vendor rlibs, exact compiler paths/externs/dep-info,
+and source-stable739-file maps. Helperbafce0dc reproduces. Unchanged historical
+vendor/helper/codec/compiler results are not fresh whole-corpus claims; there is
+no full-App qualification claim. Only three result appendices changed afterward.
+
+No new genuine plugin invocation occurred in this source/mock checkpoint. The two
+failed three-instance attempts and the observation-only tail diagnostic retain
+all limits. Actual Ready, capture/state/base fidelity, strict clone processing,
+PCM/WAV and cancellation still require the separately frozen full qualification.

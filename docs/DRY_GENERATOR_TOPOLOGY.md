@@ -255,3 +255,11 @@ after Ready was queued and then publishes inactive state. This ordering is not
 changed or represented as atomic admission. No extra query or positive audio is
 introduced. Source/archive/review/mock gates remain pending, and a new genuine
 run is separately gated.
+
+The fresh timing source/mock follow-on is now tested on b1e62cbb: feature49/60/77
+and default15/43/77 selected suites, both all-target compiles, three strict Clippy
+profiles, fmt, Python239 and package557 pass. Initial48/49 marker-publication
+failure remains preserved; a reviewed test-only atomic marker fix preceded the
+full corrected49 run. Actual plugin readiness/capture/render remains unqualified.
+Current linkage and exact source attribution are in receipt d93750de; no topology,
+SDK or default activation change accompanies the timing exception.
