@@ -20766,7 +20766,10 @@ impl CitrusApp {
                             &automation.lane,
                             base,
                         );
-                        if selected && self.tool_mode == ToolMode::Select {
+                        if selected
+                            && self.tool_mode == ToolMode::Select
+                            && automation_points::valid_clip_span(clip)
+                        {
                             let value_range = automation.lane.value_range();
                             for (point_index, point) in
                                 automation.lane.points().iter().copied().enumerate()

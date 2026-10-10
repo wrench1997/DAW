@@ -4647,3 +4647,20 @@ fn automation_point_double_click_is_retained_and_unselected_right_click_is_safe(
     assert_eq!(project_fingerprint(&ui.app.project), before);
     assert_eq!(ui.app.project.clips.len(), 1);
 }
+
+#[test]
+fn automation_point_invalid_source_span_has_no_editable_nodes_or_mutation() {
+    let mut ui = automation_point_ui();
+    let pos = automation_point_position(&ui, 2);
+    ui.app.project.clips[0].source_offset = f32::NAN;
+    ui.app.sync_history_observer();
+    ui.settle();
+    let before = project_fingerprint(&ui.app.project);
+    assert!(
+        !ui.nodes
+            .iter()
+            .any(|node| node.label() == Some("Automation point 2"))
+    );
+    automation_secondary_click(&mut ui, pos);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+}

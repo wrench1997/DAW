@@ -21,6 +21,17 @@ pub(super) enum PointAction {
     },
 }
 
+pub(super) fn valid_clip_span(clip: &Clip) -> bool {
+    clip.start.is_finite()
+        && clip.start >= 0.0
+        && clip.source_offset.is_finite()
+        && clip.source_offset >= 0.0
+        && clip.length.is_finite()
+        && clip.length > 0.0
+        && (clip.start + clip.length).is_finite()
+        && (clip.source_offset + clip.length).is_finite()
+}
+
 /// A context action resolves the captured value, never a potentially reordered index.
 pub(super) fn candidate(project: &Project, action: PointAction) -> Option<Project> {
     let (clip_id, lane_id) = match &action {
@@ -51,15 +62,7 @@ pub(super) fn candidate(project: &Project, action: PointAction) -> Option<Projec
             && clip.kind == ClipKind::Automation
             && clip.automation_id == Some(lane_id)
     })?;
-    if !clip.start.is_finite()
-        || clip.start < 0.0
-        || !clip.source_offset.is_finite()
-        || clip.source_offset < 0.0
-        || !clip.length.is_finite()
-        || clip.length <= 0.0
-        || !(clip.start + clip.length).is_finite()
-        || !(clip.source_offset + clip.length).is_finite()
-    {
+    if !valid_clip_span(clip) {
         return None;
     }
     let mut result = project.clone();
