@@ -994,7 +994,3 @@ mod tests {
         assert!(validate_generated_audio(&samples).is_ok());
     }
 }
-
-#[cfg(test)]
-#[path = "gate.rs"]
-mod gate;

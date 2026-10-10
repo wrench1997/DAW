@@ -1,8 +1,9 @@
 //! Ignored, explicit-run-only qualification of the actual selected-clip App path.
 //!
 //! SOURCE PREPARATION ONLY. Ordinary builds/discovery cannot run this test. The
-//! independent IEEE/WAV oracle below is copied verbatim from the reviewed prior
-//! qualification: SHA256 1bff180934231ca40cf92c079038f45b4dddfdd2ad29a6df9216174b12a0d8b2.
+//! independent IEEE/WAV oracle retains every imported body and its22 tests; only
+//! the obsolete standalone Gate test-module registration is removed. Original
+//! import SHA256 1bff180934231ca40cf92c079038f45b4dddfdd2ad29a6df9216174b12a0d8b2.
 //! The UI boundary is a headlessly rendered real review plus direct invocation
 //! of the exact begin_clip_render_stop method used by its Render-and-convert
 //! button. This does not claim pointer activation, a native window or a device.
@@ -768,7 +769,7 @@ impl GenuineFixture {
         Ok(())
     }
     fn preflight(&mut self) -> Check {
-        self.journal.emit("declaration",json!({"stages":STAGES,"selector":SELECTOR,"binding_sha256":self.binding.binding_hash,"ui_boundary":"headless real review plus exact shared begin_clip_render_stop acceptance method; no pointer/native-window claim","control_ceilings":CONTROL_CEILINGS,"playing_segments":PLAY_SEGMENTS,"stopped_segments":[32,32,32],"cleanup_reserve":CLEANUP_PUMPS,"outer_seconds":120,"oracle_source_sha256":"1bff180934231ca40cf92c079038f45b4dddfdd2ad29a6df9216174b12a0d8b2"}))?;
+        self.journal.emit("declaration",json!({"stages":STAGES,"selector":SELECTOR,"binding_sha256":self.binding.binding_hash,"ui_boundary":"headless real review plus exact shared begin_clip_render_stop acceptance method; no pointer/native-window claim","control_ceilings":CONTROL_CEILINGS,"playing_segments":PLAY_SEGMENTS,"stopped_segments":[32,32,32],"cleanup_reserve":CLEANUP_PUMPS,"outer_seconds":120,"original_imported_oracle_sha256":"1bff180934231ca40cf92c079038f45b4dddfdd2ad29a6df9216174b12a0d8b2","adapted_oracle_source_sha256":"a02d3b59af625bdc68bc992753bbfd6683b4913b2f44bd8413240b7e722d4ca2","oracle_adaptation":"removed standalone test-only Gate module registration; all22 numerical/WAV/SHA test bodies unchanged"}))?;
         self.stage(0, Stage::Preflight)?;
         self.hooks()?;
         let descriptor_pin = self.binding.raw["harness_sources"]
