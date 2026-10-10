@@ -769,8 +769,13 @@ fn piano_expression_properties_untouched_timing_focus_preserves_exact_notes_and_
                 ui.app.sync_history_observer();
                 ui.app.undo_stack.clear();
                 ui.app.redo_stack.clear();
+                ui.app.project_fingerprint = project_fingerprint(&ui.app.project);
                 ui.app.dirty = false;
                 ui.settle();
+                assert!(
+                    !ui.app.dirty,
+                    "prepared fixture starts at its saved baseline"
+                );
                 let before = project_fingerprint(&ui.app.project);
                 ui.click("Edit note properties");
                 let pos = field(&ui, name).rect.center();
