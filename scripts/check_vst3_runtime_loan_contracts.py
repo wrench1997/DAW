@@ -459,7 +459,7 @@ def prepare(here, repo, manifest_input, lock_input):
         return f'#[path = {json.dumps(str(matches[0]))}]\n{visibility}mod {name};'
 
     shim, count = re.subn(r'(?m)^(pub )?mod (\w+);$', rebase, lib)
-    if count != 17:
+    if count != 18:
         raise ValueError(f'Unexpected top-level module layout: {count}')
     # Anchor an inline internal module at the original directory and preserve
     # its declarations verbatim. An absolute #[path] on plugin_impl.rs would

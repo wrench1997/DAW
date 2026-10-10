@@ -1373,3 +1373,14 @@ and the UI dispatch anchor is declared before the branded port inside the same
 scope. No public authority or execution policy changes. All original logs are
 retained; no feature test has run yet. Corrected source requires its new recovery
 archive and review before rerun.
+
+### Existing compiler-runner module count (unvalidated runner correction)
+
+The feature-era source now declares18 top-level modules, including the cfg-gated
+scoped worker. The three existing source-linked compiler runners expected17.
+Only those three exact expected counts are corrected; fixture bytes, diagnostics,
+feature selection and source visibility are unchanged. Their prior results remain
+historical until fresh runs finish. The new external34-case runner has already
+passed on346de8b4, as have41 focused and469 available vendor tests. Current copied
+App/source gates continue against identical Rust bytes while this QA-only change
+is prepared for durable archival.
