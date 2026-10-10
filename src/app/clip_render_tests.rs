@@ -503,11 +503,8 @@ fn occurrence_admission_rejects_missing_duplicate_routes_and_unrepresentable_gai
                 (OccurrenceErrorKind::Unsupported, "Configured MIDI routing")
             }
             5 => {
-                p.channels[0].volume = 1.5001;
-                (
-                    OccurrenceErrorKind::Unsupported,
-                    "Channel volume in 0..=1.5",
-                )
+                p.channels[0].volume = 1.0001;
+                (OccurrenceErrorKind::Unsupported, "Channel volume in 0..=1")
             }
             6 => {
                 p.plugin_instances[0].role = PluginRole::Effect;

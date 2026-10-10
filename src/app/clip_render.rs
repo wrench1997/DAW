@@ -251,12 +251,12 @@ impl OccurrencePlan {
             ));
         }
         if !channel.volume.is_finite()
-            || !(0.0..=1.5).contains(&channel.volume)
+            || !(0.0..=1.0).contains(&channel.volume)
             || channel.pan != 0.0
         {
             return Err(failure(
                 OccurrenceErrorKind::Unsupported,
-                "The source requires Channel volume in 0..=1.5 and centered Channel pan",
+                "The source requires Channel volume in 0..=1 and centered Channel pan",
             ));
         }
         let instance_id = channel.instrument_plugin_instance_id.ok_or_else(|| {

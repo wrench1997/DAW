@@ -49,10 +49,10 @@ fn prepare_candidate(
     // an edit of the current Project, even when only an unrelated field changed.
     plan.check_current(project, context)?;
     validate_rendered_media(plan, media)?;
-    if !plan.channel_gain.is_finite() || !(0.0..=1.5).contains(&plan.channel_gain) {
+    if !plan.channel_gain.is_finite() || !(0.0..=1.0).contains(&plan.channel_gain) {
         return Err(failure(
             OccurrenceErrorKind::Unsupported,
-            "The captured Channel volume cannot be represented as an Audio Clip gain",
+            "The captured Channel volume is outside the supported source range",
         ));
     }
     let audio_clip_id = project
@@ -776,7 +776,7 @@ mod tests {
 
     #[test]
     fn candidate_accepts_exact_song_end_and_transfers_supported_gain_without_scaling_pcm() {
-        for volume in [0.0, 0.25, 1.0, 1.5] {
+        for volume in [0.0, 0.25, 0.75, 1.0] {
             let mut project = fixture();
             project.clips[0].start = 7.9375;
             project.channels[0].volume = volume;

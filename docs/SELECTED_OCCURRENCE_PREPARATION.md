@@ -3,13 +3,14 @@
 Reference checkout: `/workspace/shared/DAW-recovered-cbbbe1f`, clean accepted
 `ec47b63fff8bd33b7c09159c190735cde8df5785`. Renderer mechanics remain separately
 accepted at `e79894920204610c4c5ca6d0d1ada1c08dc2fe4b`; do not alter that branch.
-Status: IMPLEMENTED SOURCE, UNVALIDATED. No build or test has run for this
-checkpoint. The independently cleared source plan is preserved by SHA-256
+Status: CORRECTED SOURCE, UNVALIDATED. Earlier 7578047 compiled successfully,
+but its focused suite had 21 passes and one failed invalid-gain fixture. The
+current correction has not been compiled or tested. The independently cleared source plan is preserved by SHA-256
 `c05b8c98d01eb08c0ae895a4b5a99ab2d312bde12183b53c765d63e0d94e1a95`.
 
 Implementation: `src/app/clip_render.rs`, `clip_render_candidate.rs`, and
 `clip_render_tests.rs`, registered as a dormant module in `src/app.rs`.
-Twenty-two plugin-free test functions are written but unexecuted. The source adds
+Twenty-two plugin-free test functions are present; the corrected source is unexecuted. The source adds
 no App action/call site. The separate e798949 renderer/capture branch is not
 integrated into this ec47b63-based slice.
 
@@ -21,7 +22,7 @@ actual endpoint ownership, durable publication bytes, and user transaction gates
 
 Additional explicit admission limits: source length at most ten minutes; rounded
 N + fixed tail + reserved one-second native latency at most 24 million frames;
-Channel volume in 0..=1.5 so Audio Clip gain can represent it exactly, centered
+Channel volume in 0..=1, the valid source Channel domain, centered
 Channel pan. The original selected schedule preserves its compiled note IDs.
 Muting a source renumbers later sequential runtime note IDs; the remaining-event
 proof ignores only those transient IDs, retaining complete source identity,
@@ -48,6 +49,21 @@ Project through the same bounded writer and requires byte equality, rejecting
 that lossy serialization even on ignored Pattern/muted references. No normalize
 or repair pass is permitted. Both original findings are retained in this
 checkpoint history; no execution preceded these corrections.
+
+## Preserved first-execution failure
+
+At `7578047e377b717450268524516b5fe79b78623e`, forced-source all-feature/all-target
+compilation passed. The focused occurrence suite reported 21 passed / 1 failed.
+The failing successful-control fixture supplied Channel volume 1.5; the existing
+Timeline compiler correctly emitted `InvalidChannelVolume { value: 1.5 }`
+(`timeline.rs:1334` accepts only 0..=1). The destination Audio Clip gain permits
+1.5, but that does not widen the source domain. No candidate was installed.
+
+The narrow correction tightens both planner/candidate admission to 0..=1, uses
+only source-valid positive gains and explicitly refuses 1.0001. It does not
+weaken or change the compiler. Original compile/test logs, source hashes, copied
+binaries and dep-info remain preserved under the 7578047 QA receipt. No other
+suite or native action was executed before this corrected checkpoint.
 
 ## One small implementation slice
 
