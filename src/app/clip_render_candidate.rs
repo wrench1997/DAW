@@ -793,7 +793,7 @@ mod tests {
             endpoint_id: 41,
             channel_id: 1,
             instance_id: 71,
-            mixer_track_id: 8,
+            mixer_track_id: 7,
             native_generation: 0,
             app_native_dirty_revision: 0,
             native_capture_serial: 0,
@@ -884,6 +884,8 @@ mod tests {
         other.start = 2.0;
         other.name = "Same Pattern, untouched".into();
         project.clips.push(other);
+        // Bind the stamp to the actual stable assignment before display reordering.
+        assert_eq!(context().mixer_track_id, project.channels[0].mixer_track);
         // Display order deliberately disagrees with the stable bus identity.
         project.mixer_tracks.swap(1, 7);
         project
