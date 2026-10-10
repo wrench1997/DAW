@@ -138,6 +138,13 @@ pub(super) fn native_evidence(native: Option<&NativeEditorSnapshot>) -> Value {
         "completed_request":n.completed_request,"error":n.error.as_deref().map(text_evidence)}))
         .unwrap_or_else(||json!({"present":false,"idle":false}))
 }
+pub(super) fn stopped_epoch_safety_evidence(
+    epoch: Option<u64>,
+    remaining_frames: usize,
+    failed: bool,
+) -> Value {
+    json!({"epoch":epoch,"remaining_frames":remaining_frames,"failed":failed})
+}
 
 // This is the unchanged control_tick decision, exposed only for attribution.
 // No callback work is serviced here, and no pending bit grants a new pump.
@@ -154,6 +161,8 @@ pub(super) fn callback_evidence(snapshot: &GenuineCallbackSnapshot, mailbox_barr
         json!({"endpoint":e.endpoint_id,"project_session":e.project_session,"channel":e.channel_id,
             "instance":e.plugin_instance_id,"mixer_track":e.mixer_track,"worker":b.worker_id,
             "callback_work_pending":e.callback_work_pending(),"live_lane_faulted":e.live_lane_faulted,
+            "stopped_epoch_safety":stopped_epoch_safety_evidence(e.stopped_epoch_safety_epoch,
+                e.stopped_epoch_safety_remaining_frames,e.stopped_epoch_safety_failed),
             "staged_system":e.staged_system_events,"staged_timeline":e.staged_timeline_events,
             "staged_live":e.staged_live_events,"partial_system":e.partial_system_events,
             "partial_timeline":e.partial_timeline_events,"partial_live":e.partial_live_events,
@@ -260,6 +269,77 @@ mod tests {
             running_owner_exact: true,
             coherent_live_binding: true,
             diagnostics_complete: true,
+        }
+    }
+    #[test]
+    fn stopped_epoch_safety_evidence_preserves_exact_observed_scalars() {
+        for (epoch, remaining_frames, failed, expected) in [
+            (
+                None,
+                0,
+                false,
+                json!({"epoch":null,"remaining_frames":0,"failed":false}),
+            ),
+            (
+                Some(7),
+                128,
+                false,
+                json!({"epoch":7,"remaining_frames":128,"failed":false}),
+            ),
+            (
+                Some(7),
+                128,
+                true,
+                json!({"epoch":7,"remaining_frames":128,"failed":true}),
+            ),
+            (
+                Some(7),
+                32,
+                false,
+                json!({"epoch":7,"remaining_frames":32,"failed":false}),
+            ),
+            // Synthetic inconsistent observations must not be normalized.
+            (
+                None,
+                32,
+                false,
+                json!({"epoch":null,"remaining_frames":32,"failed":false}),
+            ),
+            (
+                None,
+                0,
+                true,
+                json!({"epoch":null,"remaining_frames":0,"failed":true}),
+            ),
+            (
+                None,
+                32,
+                true,
+                json!({"epoch":null,"remaining_frames":32,"failed":true}),
+            ),
+            (
+                Some(7),
+                0,
+                false,
+                json!({"epoch":7,"remaining_frames":0,"failed":false}),
+            ),
+            (
+                Some(0),
+                0,
+                true,
+                json!({"epoch":0,"remaining_frames":0,"failed":true}),
+            ),
+            (
+                Some(u64::MAX),
+                usize::MAX,
+                true,
+                json!({"epoch":u64::MAX,"remaining_frames":usize::MAX,"failed":true}),
+            ),
+        ] {
+            assert_eq!(
+                stopped_epoch_safety_evidence(epoch, remaining_frames, failed),
+                expected
+            );
         }
     }
     #[test]

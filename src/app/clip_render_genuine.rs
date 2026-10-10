@@ -1676,11 +1676,13 @@ impl GenuineFixture {
         let pair = identity.ok_or("stopped activation never observed")?;
         let s = self.snapshot();
         // This is the fixed end, not a polling extension to rescue pending work.
+        let observed_quiescent =
+            s.paused_work_quiescent(pair.0.ok_or("paused generation")?, pair.1);
+        self.journal.emit("fixed_stop_window",json!({"pass":pass,"segments":32,"frames":4096,"generation":pair.0,"epoch":pair.1,"snapshot":snapshot_summary(&s),"observed_quiescent":observed_quiescent,"label":"observation_only"}))?;
         require(
-            s.paused_work_quiescent(pair.0.ok_or("paused generation")?, pair.1),
+            observed_quiescent,
             "source work remains at end of fixed32 stop window",
         )?;
-        self.journal.emit("fixed_stop_window",json!({"pass":pass,"segments":32,"frames":4096,"generation":pair.0,"epoch":pair.1,"snapshot":snapshot_summary(&s)}))?;
         require(
             self.poll("consume exact Stop acknowledgment")?.class == HealthClass::Clear,
             "settled Stop acknowledgment still has pending App health",
@@ -1847,7 +1849,7 @@ impl GenuineFixture {
     }
 }
 fn snapshot_summary(s: &GenuineCallbackSnapshot) -> Value {
-    json!({"engine":s.engine_session,"project":s.project_session,"generation":s.generation,"active_epoch":s.active_epoch,"epoch":s.epoch,"frame":s.start_frame,"playing":s.playing,"loop_count":s.loop_count,"pending_audio":s.pending_audio_commands,"pending_timeline":s.pending_timeline_commands,"pending_activation":s.pending_timeline_activation,"endpoints":s.endpoints.iter().map(|e|json!({"id":e.endpoint_id,"instance":e.plugin_instance_id,"mixer_track":e.mixer_track,"fixed":format!("{:?}",e.fixed),"exact":format!("{:?}",e.exact_snapshot),"latency":format!("{:?}",e.coherent_latency)})).collect::<Vec<_>>(),"assets":s.assets.iter().map(|a|json!({"id":a.id,"rate":a.sample_rate,"channels":a.channels,"frames":a.frames,"arc_address":Arc::as_ptr(&a.samples) as *const f32 as usize})).collect::<Vec<_>>(),"native_voices":s.native_voices.len(),"audio_voices":s.audio_voices.len(),"zero_pdc":s.zero_pdc,"pdc_revision":s.pdc_revision,"graph_identity":s.graph_identity,"graph_pdc":format!("{:?}",s.graph_pdc),"raw_delays":format!("{:?}",s.raw_delays),"raw_delay_active":s.raw_delay_active,"legacy_pdc_active":s.legacy_pdc_active,"route_delays":format!("{:?}",s.route_delays),"master_gain":s.master_gain,"master_pan":s.master_pan,"track1_gain":s.track_gains[1],"track1_pan":s.track_pans[1]})
+    json!({"engine":s.engine_session,"project":s.project_session,"generation":s.generation,"active_epoch":s.active_epoch,"epoch":s.epoch,"frame":s.start_frame,"playing":s.playing,"loop_count":s.loop_count,"pending_audio":s.pending_audio_commands,"pending_timeline":s.pending_timeline_commands,"pending_activation":s.pending_timeline_activation,"endpoints":s.endpoints.iter().map(|e|json!({"id":e.endpoint_id,"instance":e.plugin_instance_id,"mixer_track":e.mixer_track,"stopped_epoch_safety":startup::stopped_epoch_safety_evidence(e.stopped_epoch_safety_epoch,e.stopped_epoch_safety_remaining_frames,e.stopped_epoch_safety_failed),"fixed":format!("{:?}",e.fixed),"exact":format!("{:?}",e.exact_snapshot),"latency":format!("{:?}",e.coherent_latency)})).collect::<Vec<_>>(),"assets":s.assets.iter().map(|a|json!({"id":a.id,"rate":a.sample_rate,"channels":a.channels,"frames":a.frames,"arc_address":Arc::as_ptr(&a.samples) as *const f32 as usize})).collect::<Vec<_>>(),"native_voices":s.native_voices.len(),"audio_voices":s.audio_voices.len(),"zero_pdc":s.zero_pdc,"pdc_revision":s.pdc_revision,"graph_identity":s.graph_identity,"graph_pdc":format!("{:?}",s.graph_pdc),"raw_delays":format!("{:?}",s.raw_delays),"raw_delay_active":s.raw_delay_active,"legacy_pdc_active":s.legacy_pdc_active,"route_delays":format!("{:?}",s.route_delays),"master_gain":s.master_gain,"master_pan":s.master_pan,"track1_gain":s.track_gains[1],"track1_pan":s.track_pans[1]})
 }
 impl GenuineFixture {
     fn audit_media_and_history(&mut self) -> Check {
