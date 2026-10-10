@@ -148,3 +148,20 @@ worker-owned admission lease until terminal acknowledgment. Queued cancellation,
 slow getter, elapsed-deadline success, concurrent IPC failure, dropped receiver,
 worker teardown and immediate retry must be tested before user-visible integration.
 No source/UI ownership may be released merely because the reply was abandoned.
+
+The d192277 application/all-target build then passed, as did ten coordinator tests
+and the existing helper/protocol targets. Its new backend/factory suite had three
+passes and four failures: handwritten parameter replies omitted the required
+`Parameter.flags`, causing unrelated protocol timeouts. Broad `is_err()` assertions
+could also falsely pass negative scenarios that never reached the intended fault.
+Those failed receipts remain preserved; they are not acceptance evidence.
+
+The next test-only correction serializes complete `HostResponse` templates using
+production Rust types and round-trips them through the real decoder before launch.
+Each negative group first runs a successful control fixture; every source rejection
+then asserts the intended fault/rejection category, reason and exact request prefix.
+Fresh-candidate failures assert the intended error and terminal setup stage, ordered
+Offline/LoadState/Start/base application, and cleanup-only Close. Open-editor injection
+now supplies valid open geometry so it tests editor admission rather than malformed
+wire rejection. No production behavior or error policy is weakened. These corrected
+fixture tests remain unexecuted at their source checkpoint.

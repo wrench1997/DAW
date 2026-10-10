@@ -9,6 +9,174 @@ use std::{
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 const UID: &str = "ABCDEF019182FAEB566D624153675854";
 
+/// Compile-checked complete replies, round-tripped through the real decoder before any helper
+/// is launched. Failure modes mutate one intentional field/stage of these valid templates.
+fn response_templates() -> String {
+    use vst3_host::{
+        plugin::{CheckedAudioBusConfig, CheckedAudioBusLayout, EventBusConfig, EventBusLayout},
+        process_isolation::HostResponse as R,
+    };
+    let responses = BTreeMap::from([
+        (
+            "LoadPlugin",
+            R::PluginInfo {
+                vendor: "Fixture".into(),
+                name: "Fixture".into(),
+                version: "1.3.4".into(),
+                category: "Instrument|Synth".into(),
+                uid: UID.into(),
+                has_gui: true,
+                audio_inputs: 0,
+                audio_outputs: 1,
+                output_channels: 2,
+                has_midi_input: true,
+                has_midi_output: false,
+                compatibility: vec![],
+            },
+        ),
+        (
+            "AudioBusLayout",
+            R::AudioBusLayout {
+                layout: vst3_host::audio::AudioBusLayout {
+                    inputs: vec![],
+                    outputs: vec![vst3_host::audio::AudioBusConfig {
+                        channel_count: 2,
+                        active: true,
+                    }],
+                },
+            },
+        ),
+        (
+            "CheckedAudioBusLayout",
+            R::CheckedAudioBusLayout {
+                layout: CheckedAudioBusLayout {
+                    inputs: vec![],
+                    outputs: vec![CheckedAudioBusConfig {
+                        channel_count: 2,
+                        is_main: true,
+                        active: Some(true),
+                    }],
+                },
+            },
+        ),
+        (
+            "EventBusLayout",
+            R::EventBusLayout {
+                layout: EventBusLayout {
+                    inputs: vec![EventBusConfig {
+                        channel_count: 16,
+                        is_main: true,
+                        active: Some(true),
+                    }],
+                    outputs: vec![],
+                },
+            },
+        ),
+        (
+            "ResetOriginSupport",
+            R::ResetOriginSupport {
+                support: vst3_host::ResetOriginSupport {
+                    contract_version: 1,
+                    max_block_frames: 2048,
+                    processing: false,
+                },
+            },
+        ),
+        (
+            "Editor",
+            R::EditorState {
+                state: vst3_host::IsolatedEditorState {
+                    supported: true,
+                    has_editor: true,
+                    open: false,
+                    width: 0,
+                    height: 0,
+                    generation: 2,
+                },
+            },
+        ),
+        (
+            "NativeDirtyRevision",
+            R::NativeDirtyRevision { revision: 9 },
+        ),
+        ("LatencySamples", R::LatencySamples { samples: 0 }),
+        ("TailSamples", R::TailSamples { samples: 0 }),
+        (
+            "GetAllParameters",
+            R::Parameters {
+                params: vec![vst3_host::Parameter {
+                    id: 17,
+                    name: "Gain".into(),
+                    value: 0.75,
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.5,
+                    unit: String::new(),
+                    step_count: 0,
+                    can_automate: true,
+                    is_read_only: false,
+                    is_bypass: false,
+                    flags: 0,
+                }],
+            },
+        ),
+        ("GetParameter", R::ParameterValue { value: 0.75 }),
+        (
+            "SaveState",
+            R::State {
+                data: vec![1, 2, 3],
+            },
+        ),
+        ("EmptyState", R::State { data: vec![] }),
+        (
+            "Success",
+            R::Success {
+                message: "ok".into(),
+            },
+        ),
+        (
+            "OldHelper",
+            R::Error {
+                message: "unsupported command".into(),
+            },
+        ),
+        (
+            "SdkError",
+            R::Error {
+                message: "getBusInfo failed".into(),
+            },
+        ),
+        (
+            "Unexpected",
+            R::Error {
+                message: "forbidden/unimplemented command".into(),
+            },
+        ),
+        (
+            "Unsupported",
+            R::MetadataQueryRejected {
+                reason: vst3_host::MetadataQueryRejection::Unsupported,
+            },
+        ),
+        (
+            "PendingTopology",
+            R::MetadataQueryRejected {
+                reason: vst3_host::MetadataQueryRejection::PendingTopology,
+            },
+        ),
+        (
+            "InconsistentTopology",
+            R::MetadataQueryRejected {
+                reason: vst3_host::MetadataQueryRejection::InconsistentTopology,
+            },
+        ),
+    ]);
+    let encoded = serde_json::to_string(&responses).unwrap();
+    let decoded: BTreeMap<String, R> = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded.len(), responses.len());
+    encoded
+}
+
 struct FakeHelper {
     dir: PathBuf,
     script: PathBuf,
@@ -29,79 +197,66 @@ impl FakeHelper {
         let plugin = dir.join("no-vendor-code.vst3");
         std::fs::write(&plugin, b"protocol fixture only").unwrap();
         let program = r#"#!/usr/bin/env python3
-import json, sys
+import copy, json, sys
 mode = MODE
 log = LOG
+templates = json.loads(TEMPLATES)
 saved = False
 loaded = False
 processing = False
 parameter_applied = False
-uid = 'ABCDEF019182FAEB566D624153675854'
 for line in sys.stdin:
     request = json.loads(line)
     with open(log, 'a') as stream:
         stream.write(json.dumps(request) + '\n')
     name = request if isinstance(request, str) else next(iter(request))
     data = {} if isinstance(request, str) else request[name]
-    if name == 'LoadPlugin':
-        result = {'PluginInfo': {'vendor':'Fixture','name':'Fixture','version':'1.3.4','category':'Instrument|Synth','uid':uid,'has_gui':True,'audio_inputs':0,'audio_outputs':1,'output_channels':2,'has_midi_input':True,'has_midi_output':False}}
-    elif name == 'AudioBusLayout':
-        result = {'AudioBusLayout': {'layout': {'inputs': [], 'outputs': [{'channel_count':2,'active':True}]}}}
-    elif name == 'CheckedAudioBusLayout':
-        if mode == 'old_audio_helper':
-            result = {'Error': {'message':'unsupported command'}}
-        elif mode == 'audio_wrong_reply':
-            result = {'Success': {'message':'wrong'}}
-        elif mode == 'audio_sdk_error':
-            result = {'Error': {'message':'getBusInfo failed'}}
-        elif mode == 'audio_unsupported':
-            result = {'MetadataQueryRejected': {'reason':'Unsupported'}}
-        elif mode == 'audio_pending':
-            result = {'MetadataQueryRejected': {'reason':'PendingTopology'}}
+    result = copy.deepcopy(templates.get(name, templates['Unexpected']))
+    if name == 'CheckedAudioBusLayout':
+        if mode == 'old_audio_helper': result = templates['OldHelper']
+        elif mode == 'audio_wrong_reply': result = templates['Success']
+        elif mode == 'audio_sdk_error': result = templates['SdkError']
+        elif mode == 'audio_unsupported': result = templates['Unsupported']
+        elif mode == 'audio_pending': result = templates['PendingTopology']
         elif (mode == 'audio_changed_on_start' and processing) or (mode == 'audio_changed_on_parameter' and parameter_applied):
-            result = {'MetadataQueryRejected': {'reason':'InconsistentTopology'}}
-        else:
-            result = {'CheckedAudioBusLayout': {'layout': {'inputs': [], 'outputs': [{'channel_count':2,'is_main':True,'active':True}]}}}
+            result = templates['InconsistentTopology']
     elif name == 'EventBusLayout':
-        if mode == 'old_helper':
-            result = {'Error': {'message':'unsupported command'}}
+        if mode == 'old_helper': result = templates['OldHelper']
         else:
-            bus = {'channel_count':16,'is_main':True,'active':True}
-            outputs = [bus] if (mode == 'outputs_after_state' and loaded) or (mode == 'metadata_change' and saved) else []
-            inputs = [bus, bus] if mode == 'extra_input' else [dict(bus, active=None)] if mode == 'unknown_activation' else [bus]
-            result = {'EventBusLayout': {'layout': {'inputs':inputs,'outputs':outputs}}}
+            layout = result['EventBusLayout']['layout']
+            bus = layout['inputs'][0]
+            if (mode == 'outputs_after_state' and loaded) or (mode == 'metadata_change' and saved): layout['outputs'] = [copy.deepcopy(bus)]
+            if mode == 'extra_input': layout['inputs'].append(copy.deepcopy(bus))
+            if mode == 'unknown_activation': bus['active'] = None
     elif name == 'ResetOriginSupport':
-        result = {'ResetOriginSupport': {'support': {'contract_version':1,'max_block_frames':2048,'processing':processing}}}
+        result['ResetOriginSupport']['support']['processing'] = processing
     elif name == 'Editor':
-        if data['command'] != 'Query':
-            result = {'Error': {'message':'editor mutation forbidden in fixture'}}
-        else:
-            generation = 3 if mode == 'generation_change' and saved else 2
-            result = {'EditorState': {'state': {'supported':True,'has_editor':True,'open':mode == 'open','width':0,'height':0,'generation':generation}}}
+        if data['command'] not in ('Query', 'Close'): result = templates['Unexpected']
+        elif data['command'] == 'Query':
+            state = result['EditorState']['state']
+            state['generation'] = 3 if mode == 'generation_change' and saved else 2
+            if mode == 'open': state.update(open=True, width=320, height=240)
     elif name == 'NativeDirtyRevision':
-        result = {'NativeDirtyRevision': {'revision':10 if mode == 'revision_change' and saved else 9}}
-    elif name == 'LatencySamples' or name == 'TailSamples':
-        result = {name: {'samples':0}}
+        if mode == 'revision_change' and saved: result['NativeDirtyRevision']['revision'] = 10
     elif name == 'GetAllParameters':
-        parameters = [] if mode == 'unknown_base' else [{'id':17,'name':'Gain','value':0.75,'min':0.0,'max':1.0,'default':0.5,'unit':'','step_count':0,'can_automate':True,'is_read_only':False,'is_bypass':False}]
-        result = {'Parameters': {'params':parameters}}
-    elif name == 'GetParameter':
-        result = {'ParameterValue': {'value':0.75}}
+        if mode == 'unknown_base': result['Parameters']['params'] = []
     elif name == 'SaveState':
         saved = True
-        result = {'State': {'data':[] if mode == 'empty_state' else [1,2,3]}}
+        if mode == 'empty_state': result = templates['EmptyState']
     elif name in ('SetProcessMode','LoadState','StartProcessing','StopProcessing','SetParameter','Shutdown','UnloadPlugin'):
         if name == 'SetParameter': parameter_applied = True
         if name == 'LoadState': loaded = True
         if name == 'StartProcessing': processing = True
         if name == 'StopProcessing': processing = False
-        result = {'Success': {'message':'ok'}}
-    else:
-        result = {'Error': {'message':'forbidden/unimplemented command: ' + name}}
+        result = templates['Success']
     print(json.dumps(result), flush=True)
     if name == 'Shutdown': break
 "#;
         let program = program
+            .replace(
+                "TEMPLATES",
+                &serde_json::to_string(&response_templates()).unwrap(),
+            )
             .replace("MODE", &serde_json::to_string(mode).unwrap())
             .replace("LOG", &serde_json::to_string(&log).unwrap());
         std::fs::write(&script, program).unwrap();
@@ -196,6 +351,104 @@ fn capture_state() -> BouncePluginState {
     }
 }
 
+const CAPTURE_SEQUENCE: &[&str] = &[
+    "Editor",
+    "NativeDirtyRevision",
+    "CheckedAudioBusLayout",
+    "EventBusLayout",
+    "LatencySamples",
+    "TailSamples",
+    "SaveState",
+    "GetAllParameters",
+    "GetParameter",
+    "Editor",
+    "NativeDirtyRevision",
+    "CheckedAudioBusLayout",
+    "EventBusLayout",
+    "LatencySamples",
+    "TailSamples",
+];
+
+fn capture_control() {
+    let fake = FakeHelper::new("normal");
+    let mut source = fake.source();
+    assert_eq!(source.capture_bounce_state(&[17]).unwrap(), capture_state());
+    assert_eq!(fake.names(), CAPTURE_SEQUENCE);
+}
+
+fn factory_control() {
+    let fake = FakeHelper::new("normal");
+    let state = capture_state();
+    let owner =
+        OfflineInstrument::load_snapshot(fake.spec(state.opaque_state.clone()), 48_000, &state)
+            .unwrap();
+    assert_eq!(owner.metadata(), &state.metadata);
+}
+
+fn assert_capture_failure(
+    fake: &FakeHelper,
+    result: Result<BouncePluginState, BounceCaptureError>,
+    harmless: bool,
+    message: &str,
+    prefix_len: usize,
+) {
+    let error = result.unwrap_err();
+    assert_eq!(
+        matches!(error, BounceCaptureError::Rejected(_)),
+        harmless,
+        "{error}"
+    );
+    assert!(error.to_string().contains(message), "{error}");
+    assert!(
+        !error.to_string().contains("timed out"),
+        "unexpected protocol timeout: {error}"
+    );
+    assert_eq!(fake.names(), &CAPTURE_SEQUENCE[..prefix_len]);
+    assert!(fake.requests().iter().all(|request| {
+        request
+            .get("Editor")
+            .is_none_or(|data| data["command"] == "Query")
+    }));
+}
+
+fn assert_factory_failure(fake: &FakeHelper, message: &str, last_stage: &str) {
+    let state = capture_state();
+    let error =
+        OfflineInstrument::load_snapshot(fake.spec(state.opaque_state.clone()), 48_000, &state)
+            .err()
+            .expect("injection must reject");
+    assert!(error.contains(message), "{error}");
+    assert!(
+        !error.contains("timed out"),
+        "unexpected protocol timeout: {error}"
+    );
+    let names = fake.names();
+    let cleanup = names
+        .iter()
+        .position(|name| name == "Editor")
+        .expect("candidate Drop closes its editor");
+    let setup = &names[..cleanup];
+    assert_eq!(setup.last().map(String::as_str), Some(last_stage));
+    let index = |wanted: &str| setup.iter().position(|name| name == wanted).unwrap();
+    assert!(index("SetProcessMode") < index("LoadState"));
+    assert!(index("LoadState") < index("StartProcessing"));
+    assert!(index("StartProcessing") < index("SetParameter"));
+    assert!(index("SetParameter") < index("CheckedAudioBusLayout"));
+    assert!(!names.iter().any(|name| matches!(
+        name.as_str(),
+        "Process" | "ProcessBuses" | "ProcessResetOrigin" | "SaveState"
+    )));
+    assert!(names[cleanup..].iter().all(|name| matches!(
+        name.as_str(),
+        "Editor" | "StopProcessing" | "Shutdown" | "UnloadPlugin"
+    )));
+    assert!(fake.requests().iter().all(|request| {
+        request
+            .get("Editor")
+            .is_none_or(|data| data["command"] == "Close")
+    }));
+}
+
 #[test]
 fn actual_vst3_capture_queries_closed_state_current_bases_and_all_fences_only() {
     let fake = FakeHelper::new("normal");
@@ -229,44 +482,62 @@ fn actual_vst3_capture_queries_closed_state_current_bases_and_all_fences_only() 
 
 #[test]
 fn actual_vst3_capture_rejects_open_editor_unknown_keys_empty_state_and_changed_fences() {
-    for mode in [
-        "open",
-        "unknown_base",
-        "empty_state",
-        "generation_change",
-        "revision_change",
-        "metadata_change",
-        "old_helper",
-        "extra_input",
-        "unknown_activation",
+    capture_control();
+    for (mode, harmless, message, prefix) in [
+        ("open", true, "Close the source native editor", 1),
+        (
+            "unknown_base",
+            true,
+            "Stored parameter base 17 is missing or read-only",
+            8,
+        ),
+        (
+            "empty_state",
+            true,
+            "requires nonempty authoritative state",
+            7,
+        ),
+        (
+            "generation_change",
+            true,
+            "Source native generation, state revision or metadata changed",
+            11,
+        ),
+        (
+            "revision_change",
+            true,
+            "Source native generation, state revision or metadata changed",
+            11,
+        ),
+        (
+            "metadata_change",
+            true,
+            "Source native generation, state revision or metadata changed",
+            15,
+        ),
+        (
+            "old_helper",
+            false,
+            "EventBusLayout: unsupported command",
+            4,
+        ),
+        ("extra_input", true, "requires an actual VST3 instrument", 6),
+        (
+            "unknown_activation",
+            true,
+            "requires an actual VST3 instrument",
+            6,
+        ),
     ] {
         let fake = FakeHelper::new(mode);
         let mut source = fake.source();
-        assert!(source.capture_bounce_state(&[17]).is_err(), "{mode}");
-        let names = fake.names();
-        assert!(
-            !names.iter().any(|name| matches!(
-                name.as_str(),
-                "Process"
-                    | "ProcessBuses"
-                    | "ProcessResetOrigin"
-                    | "LoadState"
-                    | "StopProcessing"
-                    | "StartProcessing"
-            )),
-            "{mode}: {names:?}"
+        assert_capture_failure(
+            &fake,
+            source.capture_bounce_state(&[17]),
+            harmless,
+            message,
+            prefix,
         );
-        assert!(fake.requests().iter().all(|request| {
-            request
-                .get("Editor")
-                .is_none_or(|data| data["command"] == "Query")
-        }));
-        if mode == "open" {
-            assert_eq!(names, ["Editor"]);
-        }
-        if mode == "unknown_base" {
-            assert!(!names.iter().any(|name| name == "GetParameter"));
-        }
     }
 }
 
@@ -303,84 +574,121 @@ fn actual_fresh_factory_selects_offline_before_restore_and_start_without_warmup_
 
 #[test]
 fn actual_fresh_factory_rejects_post_restore_event_output_and_old_helper() {
-    for mode in [
-        "outputs_after_state",
-        "old_helper",
-        "extra_input",
-        "unknown_activation",
+    factory_control();
+    for (mode, message, stage) in [
+        (
+            "outputs_after_state",
+            "requires an actual VST3 instrument",
+            "TailSamples",
+        ),
+        (
+            "old_helper",
+            "EventBusLayout: unsupported command",
+            "EventBusLayout",
+        ),
+        (
+            "extra_input",
+            "requires an actual VST3 instrument",
+            "TailSamples",
+        ),
+        (
+            "unknown_activation",
+            "requires an actual VST3 instrument",
+            "TailSamples",
+        ),
     ] {
         let fake = FakeHelper::new(mode);
-        let state = capture_state();
-        assert!(
-            OfflineInstrument::load_snapshot(fake.spec(state.opaque_state.clone()), 48_000, &state)
-                .is_err(),
-            "{mode}"
-        );
-        let names = fake.names();
-        assert!(names.iter().any(|name| name == "LoadState"));
-        assert!(names.iter().any(|name| name == "EventBusLayout"));
-        assert!(!names.iter().any(|name| matches!(
-            name.as_str(),
-            "Process" | "ProcessBuses" | "ProcessResetOrigin" | "SaveState"
-        )));
+        assert_factory_failure(&fake, message, stage);
     }
 }
 
 #[test]
 fn capture_metadata_typed_refusal_is_harmless_but_unknown_remote_errors_fault() {
-    for (mode, harmless) in [
-        ("audio_unsupported", true),
-        ("audio_pending", true),
-        ("audio_changed_on_start", true),
-        ("old_audio_helper", false),
-        ("old_helper", false),
-        ("audio_wrong_reply", false),
-        ("audio_sdk_error", false),
+    capture_control();
+    for (mode, harmless, message, prefix) in [
+        (
+            "audio_unsupported",
+            true,
+            "Metadata query rejected: Unsupported",
+            3,
+        ),
+        (
+            "audio_pending",
+            true,
+            "Metadata query rejected: PendingTopology",
+            3,
+        ),
+        (
+            "audio_changed_on_start",
+            true,
+            "Metadata query rejected: InconsistentTopology",
+            3,
+        ),
+        (
+            "old_audio_helper",
+            false,
+            "CheckedAudioBusLayout: unsupported command",
+            3,
+        ),
+        (
+            "old_helper",
+            false,
+            "EventBusLayout: unsupported command",
+            4,
+        ),
+        (
+            "audio_wrong_reply",
+            false,
+            "CheckedAudioBusLayout: unexpected response",
+            3,
+        ),
+        (
+            "audio_sdk_error",
+            false,
+            "CheckedAudioBusLayout: getBusInfo failed",
+            3,
+        ),
     ] {
         let fake = FakeHelper::new(mode);
         let mut source = fake.source();
-        let result = source.capture_bounce_state(&[17]);
-        assert!(
-            if harmless {
-                matches!(result, Err(BounceCaptureError::Rejected(_)))
-            } else {
-                matches!(result, Err(BounceCaptureError::BackendFailed(_)))
-            },
-            "{mode}"
+        assert_capture_failure(
+            &fake,
+            source.capture_bounce_state(&[17]),
+            harmless,
+            message,
+            prefix,
         );
-        assert!(!fake.names().iter().any(|name| name == "SaveState"));
         assert!(source.prepared);
     }
 }
 
 #[test]
 fn fresh_factory_rejects_audio_changes_at_start_or_parameter_application_and_sdk_errors() {
-    for mode in [
-        "audio_changed_on_start",
-        "audio_changed_on_parameter",
-        "audio_sdk_error",
-        "audio_wrong_reply",
-        "old_audio_helper",
-        "audio_pending",
+    factory_control();
+    for (mode, message) in [
+        (
+            "audio_changed_on_start",
+            "Metadata query rejected: InconsistentTopology",
+        ),
+        (
+            "audio_changed_on_parameter",
+            "Metadata query rejected: InconsistentTopology",
+        ),
+        (
+            "audio_sdk_error",
+            "CheckedAudioBusLayout: getBusInfo failed",
+        ),
+        (
+            "audio_wrong_reply",
+            "CheckedAudioBusLayout: unexpected response",
+        ),
+        (
+            "old_audio_helper",
+            "CheckedAudioBusLayout: unsupported command",
+        ),
+        ("audio_pending", "Metadata query rejected: PendingTopology"),
     ] {
         let fake = FakeHelper::new(mode);
-        let state = capture_state();
-        assert!(
-            OfflineInstrument::load_snapshot(fake.spec(state.opaque_state.clone()), 48_000, &state)
-                .is_err(),
-            "{mode}"
-        );
-        let names = fake.names();
-        assert!(names.iter().any(|name| name == "CheckedAudioBusLayout"));
-        // Existing backend Drop closes the failed fresh candidate; no editor was opened.
-        assert!(fake.requests().iter().all(|request| {
-            request
-                .get("Editor")
-                .is_none_or(|data| data["command"] == "Close")
-        }));
-        assert!(!names.iter().any(|name| matches!(
-            name.as_str(),
-            "Process" | "ProcessBuses" | "ProcessResetOrigin" | "SaveState"
-        )));
+        assert_factory_failure(&fake, message, "CheckedAudioBusLayout");
     }
 }
