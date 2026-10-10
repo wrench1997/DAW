@@ -1,0 +1,204 @@
+//! Thread-affine synchronous owner for one fresh isolated VST3 instrument.
+//!
+//! This is preparation/processing infrastructure only. No App action or WAV renderer calls it
+//! yet. It deliberately bypasses the realtime bridge, never its backend/helper contracts.
+
+use crate::instrument_bounce::{BouncePluginMetadata, CapturedInstrumentBounce};
+
+#[cfg(feature = "vst3")]
+use {
+    super::{PluginBackend, PluginPrepareConfig, Vst3Backend},
+    crate::instrument_bounce::{
+        BOUNCE_PREPARED_MAXIMUM, BounceCaptureError, BouncePluginState, MAX_BOUNCE_STATE_BYTES,
+    },
+    std::collections::BTreeMap,
+};
+
+/// Construct and use on the same background owner thread. The backend is deliberately !Send.
+pub struct OfflineInstrument {
+    #[cfg(feature = "vst3")]
+    _backend: Vst3Backend,
+    metadata: BouncePluginMetadata,
+}
+
+impl OfflineInstrument {
+    /// A receipt is mandatory: stale Project.opaque_state or default-state fallback is impossible.
+    pub fn from_capture(capture: &CapturedInstrumentBounce) -> Result<Self, String> {
+        #[cfg(not(feature = "vst3"))]
+        {
+            let _ = capture;
+            Err("This build does not include VST3 instrument bounce".into())
+        }
+        #[cfg(feature = "vst3")]
+        {
+            let sample_rate = capture.plan().sample_rate();
+            let ids: Vec<_> = capture.state.parameter_bases.keys().copied().collect();
+            capture.state.validate(&ids, sample_rate)?;
+            let mut spec = capture.render_spec();
+            super::super::prepare_runtime_spec(&mut spec)?;
+            let config = PluginPrepareConfig {
+                sample_rate: f64::from(sample_rate),
+                max_block_frames: BOUNCE_PREPARED_MAXIMUM,
+            }
+            .validate()?;
+            let mut backend = Vst3Backend::load(spec, config)?;
+            let identity = backend.plugin.info();
+            if identity.uid != capture.metadata().class_uid
+                || identity.version != capture.metadata().version
+            {
+                return Err("The installed VST3 class/version differs from the authoritative captured source".into());
+            }
+            // Fresh load is inactive for processing. Set kOffline before restore/start, never
+            // reconfigure the source instance or claim a successful realtime-mode bounce.
+            backend
+                .plugin
+                .set_process_mode(vst3_host::ProcessMode::Offline)
+                .map_err(|error| error.to_string())?;
+            backend.prepare(config)?;
+            if !ids.is_empty() {
+                let (_, catalog) =
+                    super::validate_catalog_snapshot(backend.parameter_catalog_snapshot()?)?;
+                for (&id, &value) in &capture.state.parameter_bases {
+                    if !catalog
+                        .iter()
+                        .any(|parameter| parameter.id == id && !parameter.read_only)
+                    {
+                        return Err(format!(
+                            "Captured parameter base {id} is absent or read-only in the fresh instance"
+                        ));
+                    }
+                    backend.set_parameter(id, value)?;
+                }
+            }
+            let metadata = backend.bounce_metadata()?;
+            metadata.validate(sample_rate)?;
+            backend.input_channels = 0;
+            backend.output_channels = metadata.output_buses[0].0;
+            Ok(Self {
+                _backend: backend,
+                metadata,
+            })
+        }
+    }
+
+    pub fn metadata(&self) -> &BouncePluginMetadata {
+        &self.metadata
+    }
+}
+
+#[cfg(feature = "vst3")]
+impl Vst3Backend {
+    fn bounce_metadata(&self) -> Result<BouncePluginMetadata, String> {
+        let layout = self
+            .plugin
+            .audio_bus_layout()
+            .map_err(|error| error.to_string())?;
+        let info = self.plugin.info();
+        let (latency_samples, tail_samples) = self.processing_metadata()?;
+        Ok(BouncePluginMetadata {
+            class_uid: info.uid.clone(),
+            version: info.version.clone(),
+            name: info.name.clone(),
+            category: info.category.clone(),
+            has_midi_input: info.has_midi_input,
+            has_midi_output: info.has_midi_output,
+            input_buses: layout
+                .inputs
+                .iter()
+                .map(|bus| (bus.channel_count, bus.active))
+                .collect(),
+            output_buses: layout
+                .outputs
+                .iter()
+                .map(|bus| (bus.channel_count, bus.active))
+                .collect(),
+            latency_samples,
+            tail_samples,
+        })
+    }
+
+    pub(super) fn capture_bounce_state(
+        &mut self,
+        parameter_ids: &[u32],
+    ) -> Result<BouncePluginState, BounceCaptureError> {
+        use BounceCaptureError::{BackendFailed, Rejected};
+        if !self.prepared || self.last_transport.playing {
+            return Err(Rejected(
+                "Instrument bounce source has not reached stopped processing".into(),
+            ));
+        }
+        let before = self
+            .plugin
+            .isolated_editor(vst3_host::IsolatedEditorCommand::Query)
+            .map_err(|error| BackendFailed(error.to_string()))?;
+        if before.open {
+            return Err(Rejected(
+                "Close the source native editor before instrument bounce".into(),
+            ));
+        }
+        let revision = self
+            .plugin
+            .native_dirty_revision()
+            .map_err(|error| BackendFailed(error.to_string()))?;
+        let metadata = self.bounce_metadata().map_err(BackendFailed)?;
+        metadata
+            .validate(self.plugin.sample_rate() as u32)
+            .map_err(Rejected)?;
+        // Production SaveState has a zero-sample parameter flush. No Close, positive Process,
+        // LoadState, transport reset or shared native publication is performed here.
+        let opaque_state = self.save_state().map_err(BackendFailed)?;
+        if opaque_state.is_empty() || opaque_state.len() > MAX_BOUNCE_STATE_BYTES {
+            return Err(Rejected(
+                "Instrument bounce requires nonempty authoritative state within 64 MiB".into(),
+            ));
+        }
+        let mut parameter_bases = BTreeMap::new();
+        if !parameter_ids.is_empty() {
+            let (_, catalog) = super::validate_catalog_snapshot(
+                self.parameter_catalog_snapshot().map_err(BackendFailed)?,
+            )
+            .map_err(Rejected)?;
+            for &id in parameter_ids {
+                if !catalog
+                    .iter()
+                    .any(|parameter| parameter.id == id && !parameter.read_only)
+                {
+                    return Err(Rejected(format!(
+                        "Stored parameter base {id} is missing or read-only in current metadata"
+                    )));
+                }
+                let value = self.get_parameter(id).map_err(BackendFailed)?;
+                if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                    return Err(Rejected(format!(
+                        "Stored parameter base {id} has an invalid current value"
+                    )));
+                }
+                if parameter_bases.insert(id, value).is_some() {
+                    return Err(Rejected("Duplicate captured parameter key".into()));
+                }
+            }
+        }
+        let after = self
+            .plugin
+            .isolated_editor(vst3_host::IsolatedEditorCommand::Query)
+            .map_err(|error| BackendFailed(error.to_string()))?;
+        let after_revision = self
+            .plugin
+            .native_dirty_revision()
+            .map_err(|error| BackendFailed(error.to_string()))?;
+        if after.open
+            || before.generation != after.generation
+            || revision != after_revision
+            || metadata != self.bounce_metadata().map_err(BackendFailed)?
+        {
+            return Err(Rejected("Source native generation, state revision or metadata changed during instrument bounce capture".into()));
+        }
+        Ok(BouncePluginState {
+            metadata,
+            opaque_state,
+            parameter_bases,
+            native_generation: before.generation,
+            native_dirty_revision: revision,
+        })
+    }
+}
