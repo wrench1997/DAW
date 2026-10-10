@@ -49,8 +49,45 @@ fn project() -> Project {
     project.clips[0].pattern_id = project.patterns[0].id;
     project
 }
+fn acknowledgment(
+    project: &Project,
+    context: OccurrenceContext,
+    clip_id: u32,
+    sample_rate: u32,
+    tail_frames: u32,
+) -> FixedTailAcknowledgment {
+    FixedTailAcknowledgment {
+        source_snapshot: serde_json::to_vec(project).unwrap().into(),
+        context,
+        clip_id,
+        sample_rate,
+        tail_frames,
+    }
+}
+fn admitted_plan(
+    project: &Project,
+    context: OccurrenceContext,
+    clip_id: u32,
+    sample_rate: u32,
+    tail_frames: u32,
+) -> Result<OccurrencePlan, OccurrenceError> {
+    OccurrencePlan::prepare(
+        project,
+        context,
+        clip_id,
+        sample_rate,
+        tail_frames,
+        Some(acknowledgment(
+            project,
+            context,
+            clip_id,
+            sample_rate,
+            tail_frames,
+        )),
+    )
+}
 fn plan(project: &Project, tail: u32) -> OccurrencePlan {
-    OccurrencePlan::prepare(project, context(), project.clips[0].id, 8000, tail).unwrap()
+    admitted_plan(project, context(), project.clips[0].id, 8000, tail).unwrap()
 }
 fn published_path() -> PathBuf {
     if cfg!(windows) {
@@ -63,6 +100,7 @@ fn media(plan: &OccurrencePlan) -> RenderedOccurrenceMedia {
     let frames = plan.end_frame - plan.start_frame + u64::from(plan.tail_frames);
     let samples = (0..frames).flat_map(|_| [0.25, -0.5]).collect();
     RenderedOccurrenceMedia {
+        tail_acknowledgment: Some(plan.tail_acknowledgment.clone()),
         snapshot: Arc::clone(&plan.snapshot),
         context: plan.context,
         clip_id: plan.clip_id,
@@ -181,7 +219,7 @@ fn occurrence_plan_uses_real_source_offsets_swing_and_separate_repeat_periods() 
 #[test]
 fn occurrence_plan_rejects_exact_unsupported_source_cases_without_mutation() {
     let good = project();
-    assert!(OccurrencePlan::prepare(&good, context(), good.clips[0].id, 8000, 0).is_ok());
+    assert!(admitted_plan(&good, context(), good.clips[0].id, 8000, 0).is_ok());
     for case in 0..12 {
         let mut p = project();
         let (kind, reason) = match case {
@@ -269,7 +307,7 @@ fn occurrence_plan_rejects_exact_unsupported_source_cases_without_mutation() {
             }
         };
         let before = serde_json::to_vec(&p).unwrap();
-        let e = OccurrencePlan::prepare(&p, context(), p.clips[0].id, 8000, 0)
+        let e = admitted_plan(&p, context(), p.clips[0].id, 8000, 0)
             .err()
             .unwrap();
         assert_eq!(e.kind, kind, "case {case}: {e:?}");
@@ -308,7 +346,7 @@ fn occurrence_plan_rejects_other_generator_overlap_and_tail_but_allows_touching(
         other.start = start;
         other.length = length;
         p.clips.push(other);
-        let result = OccurrencePlan::prepare(&p, context(), p.clips[0].id, 8000, tail);
+        let result = admitted_plan(&p, context(), p.clips[0].id, 8000, tail);
         if allowed {
             assert!(
                 result.is_ok(),
@@ -502,7 +540,7 @@ fn occurrence_admission_rejects_missing_duplicate_routes_and_unrepresentable_gai
             }
         };
         let before = project_snapshot(&p).unwrap();
-        let error = OccurrencePlan::prepare(&p, context(), p.clips[0].id, 8000, 0)
+        let error = admitted_plan(&p, context(), p.clips[0].id, 8000, 0)
             .err()
             .unwrap();
         assert_eq!(error.kind, kind, "case {case}: {error:?}");
@@ -550,7 +588,7 @@ fn occurrence_bounds_reject_tail_song_end_rate_context_and_processing_capacity()
             }
         };
         let before = project_snapshot(&p).unwrap();
-        let error = OccurrencePlan::prepare(&p, now, p.clips[0].id, rate, tail)
+        let error = admitted_plan(&p, now, p.clips[0].id, rate, tail)
             .err()
             .unwrap();
         assert_eq!(error.kind, kind, "case {case}: {error:?}");
@@ -616,5 +654,99 @@ fn occurrence_filter_rejects_full_noteoff_identity_and_selected_source_corruptio
             }),
             "case {case}: {error:?}"
         );
+    }
+}
+
+#[test]
+fn occurrence_requires_explicit_source_bound_acknowledgment_even_for_zero_tail() {
+    let p = project();
+    let id = p.clips[0].id;
+    for tail in [0, 127] {
+        let consent = acknowledgment(&p, context(), id, 8000, tail);
+        OccurrencePlan::prepare(&p, context(), id, 8000, tail, Some(consent.clone())).unwrap();
+        for case in 0..7 {
+            let mut changed = consent.clone();
+            match case {
+                0 => {}
+                1 => changed.tail_frames += 1,
+                2 => changed.clip_id += 1,
+                3 => changed.context.source_revision += 1,
+                4 => changed.source_snapshot = Arc::from(&b"different acknowledged source"[..]),
+                5 => changed.context.project_session += 1,
+                _ => changed.sample_rate += 1,
+            }
+            let before = project_snapshot(&p).unwrap();
+            let error = OccurrencePlan::prepare(
+                &p,
+                context(),
+                id,
+                8000,
+                tail,
+                if case == 0 { None } else { Some(changed) },
+            )
+            .err()
+            .unwrap();
+            assert_eq!(error.kind, OccurrenceErrorKind::Unsupported);
+            assert_eq!(
+                error.reason,
+                if case == 0 {
+                    "Explicit fixed-tail truncation acknowledgment is required"
+                } else {
+                    "Fixed-tail acknowledgment does not match the exact source/context/tail"
+                }
+            );
+            assert_eq!(project_snapshot(&p).unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn occurrence_snapshot_rejects_optional_nonfinite_dormant_fade_references() {
+    let mut p = project();
+    let reference = crate::model::AudioFadeReference {
+        offset_beats: 0.0,
+        length_beats: 1.0,
+        end_limit_beats: Some(1.0),
+        export_length_beats: Some(1.0),
+    };
+    p.clips[0].fade_in_reference = Some(reference);
+    let _ = plan(&p, 0);
+    for muted in [false, true] {
+        for field in [0, 1] {
+            for nonfinite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut dormant = p.clips[0].clone();
+                dormant.id = 701;
+                dormant.muted = muted;
+                dormant.start = 4.0;
+                let mut fade = reference;
+                if field == 0 {
+                    fade.end_limit_beats = Some(nonfinite);
+                } else {
+                    fade.export_length_beats = Some(nonfinite);
+                }
+                dormant.fade_in_reference = Some(fade);
+                let mut changed = p.clone();
+                changed.clips.push(dormant);
+                let before = serde_json::to_vec(&changed).unwrap();
+                let error = project_snapshot(&changed).unwrap_err();
+                assert_eq!(error.kind, OccurrenceErrorKind::Source);
+                assert_eq!(
+                    error.reason,
+                    "Project snapshot changes during serialization round-trip"
+                );
+                assert_eq!(serde_json::to_vec(&changed).unwrap(), before);
+                let saved = changed.clips.last().unwrap().fade_in_reference.unwrap();
+                assert_eq!(
+                    if field == 0 {
+                        saved.end_limit_beats
+                    } else {
+                        saved.export_length_beats
+                    }
+                    .unwrap()
+                    .to_bits(),
+                    nonfinite.to_bits()
+                );
+            }
+        }
     }
 }

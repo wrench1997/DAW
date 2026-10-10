@@ -9,7 +9,7 @@ checkpoint. The independently cleared source plan is preserved by SHA-256
 
 Implementation: `src/app/clip_render.rs`, `clip_render_candidate.rs`, and
 `clip_render_tests.rs`, registered as a dormant module in `src/app.rs`.
-Nineteen plugin-free test functions are written but unexecuted. The source adds
+Twenty-two plugin-free test functions are written but unexecuted. The source adds
 no App action/call site. The separate e798949 renderer/capture branch is not
 integrated into this ec47b63-based slice.
 
@@ -31,6 +31,24 @@ No native state/history, idle-silence, output files or real audio equivalence is
 qualified by this source checkpoint. Older renderer/capture acceptance and its
 failed attempts remain in their separate durable archives and Git history.
 
+## Preserved pre-execution review finding
+
+Initial source checkpoint `1ca990b225de1e4f43e9117b275404166c03bf13` omitted an
+explicit fixed-tail consent token. It was durably saved but was never compiled
+or tested. The correction adds `FixedTailAcknowledgment`, bound to the exact
+serialized source snapshot, source context, Clip ID, sample rate and chosen tail frames.
+Admission rejects missing/mismatched acknowledgment even for T=0; the media
+receipt must carry the same admitted token before a candidate can exist. A
+numeric `tail_frames` argument does not imply consent. Real UI presentation and
+authoritative token issuance remain a later App adapter gate.
+
+The same review found optional nonfinite fade-reference numbers can deserialize
+from JSON null into absent fields. Snapshot capture now re-encodes the restored
+Project through the same bounded writer and requires byte equality, rejecting
+that lossy serialization even on ignored Pattern/muted references. No normalize
+or repair pass is permitted. Both original findings are retained in this
+checkpoint history; no execution preceded these corrections.
+
 ## One small implementation slice
 
 Create a separate worktree from ec47b63. Add a dormant pure module beside
@@ -43,7 +61,7 @@ source endpoint and filesystem verification remain later adapter responsibilitie
 
 Suggested boundaries (names may be adjusted without broadening behavior):
 
-- `OccurrencePlan::prepare(project, context, clip_id, sample_rate, tail_frames)`.
+- `OccurrencePlan::prepare(project, context, clip_id, sample_rate, tail_frames, acknowledgment)`.
   Own the exact fallible serialized Project bytes and immutable context rather
   than relying solely on a hash. The context includes the actual project session
   plus source/control revision tokens; the future App adapter must bind those

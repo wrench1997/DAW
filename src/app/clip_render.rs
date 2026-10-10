@@ -83,16 +83,41 @@ fn project_snapshot(project: &Project) -> Result<Arc<[u8]>, OccurrenceError> {
     })?;
     // serde_json encodes nonfinite floats as null. Refuse a snapshot which
     // cannot round-trip as a Project instead of treating NaN/Inf as equal nulls.
-    serde_json::from_slice::<Project>(&output.0).map_err(|e| {
+    let restored = serde_json::from_slice::<Project>(&output.0).map_err(|e| {
         failure(
             OccurrenceErrorKind::Source,
             format!("Project snapshot is not persistable: {e}"),
         )
     })?;
+    let mut reencoded = Bounded(Vec::new());
+    serde_json::to_writer(&mut reencoded, &restored).map_err(|e| {
+        failure(
+            OccurrenceErrorKind::Source,
+            format!("Unable to re-encode exact Project snapshot: {e}"),
+        )
+    })?;
+    if output.0 != reencoded.0 {
+        return Err(failure(
+            OccurrenceErrorKind::Source,
+            "Project snapshot changes during serialization round-trip",
+        ));
+    }
     Ok(output.0.into())
 }
 
+/// Explicit user choice bound to the source shown for the selected cutoff/tail.
+/// A supplied numeric tail alone never constitutes acknowledgment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FixedTailAcknowledgment {
+    source_snapshot: Arc<[u8]>,
+    context: OccurrenceContext,
+    clip_id: u32,
+    sample_rate: u32,
+    tail_frames: u32,
+}
+
 struct OccurrencePlan {
+    tail_acknowledgment: FixedTailAcknowledgment,
     snapshot: Arc<[u8]>,
     context: OccurrenceContext,
     clip_id: u32,
@@ -118,6 +143,7 @@ impl OccurrencePlan {
         clip_id: u32,
         sample_rate: u32,
         tail_frames: u32,
+        acknowledgment: Option<FixedTailAcknowledgment>,
     ) -> Result<Self, OccurrenceError> {
         if context.project_session == 0 || context.source_revision == 0 {
             return Err(failure(
@@ -132,6 +158,23 @@ impl OccurrencePlan {
             ));
         }
         let snapshot = project_snapshot(project)?;
+        let tail_acknowledgment = acknowledgment.ok_or_else(|| {
+            failure(
+                OccurrenceErrorKind::Unsupported,
+                "Explicit fixed-tail truncation acknowledgment is required",
+            )
+        })?;
+        if tail_acknowledgment.source_snapshot != snapshot
+            || tail_acknowledgment.context != context
+            || tail_acknowledgment.sample_rate != sample_rate
+            || tail_acknowledgment.clip_id != clip_id
+            || tail_acknowledgment.tail_frames != tail_frames
+        {
+            return Err(failure(
+                OccurrenceErrorKind::Unsupported,
+                "Fixed-tail acknowledgment does not match the exact source/context/tail",
+            ));
+        }
         let clips: Vec<_> = project.clips.iter().filter(|c| c.id == clip_id).collect();
         let [clip] = clips.as_slice() else {
             return Err(failure(
@@ -338,6 +381,7 @@ impl OccurrencePlan {
             stop,
         )?;
         Ok(Self {
+            tail_acknowledgment,
             snapshot,
             context,
             clip_id,
@@ -545,6 +589,7 @@ fn select_occurrence_events(
 /// Data-only fixture boundary. No production constructor exists until an
 /// adapter can attest immutable publication, capture identity and exact bytes.
 struct RenderedOccurrenceMedia {
+    tail_acknowledgment: Option<FixedTailAcknowledgment>,
     snapshot: Arc<[u8]>,
     context: OccurrenceContext,
     clip_id: u32,
@@ -561,6 +606,11 @@ fn validate_rendered_media(
     media: &RenderedOccurrenceMedia,
 ) -> Result<(), OccurrenceError> {
     let invalid = |reason| failure(OccurrenceErrorKind::Media, reason);
+    if media.tail_acknowledgment.as_ref() != Some(&plan.tail_acknowledgment) {
+        return Err(invalid(
+            "Rendered media lacks the exact admitted fixed-tail acknowledgment",
+        ));
+    }
     if media.snapshot != plan.snapshot
         || media.context != plan.context
         || media.clip_id != plan.clip_id

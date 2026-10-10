@@ -545,6 +545,7 @@ mod tests {
             pattern_id: plan.pattern_id,
             channel_id: plan.channel_id,
             instance_id: plan.instance_id,
+            tail_acknowledgment: Some(plan.tail_acknowledgment.clone()),
             publication_id: 101,
             path: published_path(),
             asset: wav::WavAsset {
@@ -567,9 +568,27 @@ mod tests {
         }
     }
 
+    fn admitted_plan(project: &Project, clip_id: u32, tail: u32) -> OccurrencePlan {
+        let acknowledgment = FixedTailAcknowledgment {
+            source_snapshot: project_snapshot(project).unwrap(),
+            context: context(),
+            clip_id,
+            sample_rate: RATE,
+            tail_frames: tail,
+        };
+        OccurrencePlan::prepare(
+            project,
+            context(),
+            clip_id,
+            RATE,
+            tail,
+            Some(acknowledgment),
+        )
+        .unwrap()
+    }
+
     fn prepare(project: &Project, tail: u32) -> PreparedOccurrenceCandidate {
-        let plan =
-            OccurrencePlan::prepare(project, context(), project.clips[0].id, RATE, tail).unwrap();
+        let plan = admitted_plan(project, project.clips[0].id, tail);
         prepare_rendered_occurrence_candidate(project, context(), &plan, &media(&plan)).unwrap()
     }
 
@@ -592,7 +611,7 @@ mod tests {
     fn candidate_preserves_exact_source_and_other_content_with_gain_and_stable_route() {
         let project = fixture();
         let before = bytes(&project);
-        let plan = OccurrencePlan::prepare(&project, context(), 11, RATE, 0).unwrap();
+        let plan = admitted_plan(&project, 11, 0);
         assert!(plan.local_events.iter().any(|event| matches!(event.kind,
             TimelineEventKind::NoteOn { gain, .. } if gain == 0.4)));
         let rendered = media(&plan);
@@ -673,53 +692,61 @@ mod tests {
     #[test]
     fn candidate_preserves_frame_geometry_for_quantum_edges_and_fixed_tails() {
         for start_frame in [0, 1, 127, 128, 129] {
-            for tail in [0, 1, 127, 129] {
-                let mut project = fixture();
-                project.clips[0].start = start_frame as f32 / 4_000.0;
-                let plan = OccurrencePlan::prepare(&project, context(), 11, RATE, tail).unwrap();
-                assert_eq!(plan.start_frame, start_frame);
-                let rendered = media(&plan);
-                let candidate =
-                    prepare_rendered_occurrence_candidate(&project, context(), &plan, &rendered)
-                        .unwrap();
-                let audio = candidate.project.clips.last().unwrap();
-                let reference = audio.audio_length_reference.unwrap();
-                let stop = plan.end_frame + u64::from(tail);
-                assert_eq!(
-                    reference.length_beats,
-                    plan.tempo_map.frame_to_beat(stop).unwrap() - f64::from(audio.start)
-                );
-                assert_eq!(reference.export_length_beats, reference.length_beats);
-                if tail == 0 {
-                    assert_eq!(audio.length.to_bits(), project.clips[0].length.to_bits());
-                } else {
-                    assert_eq!(audio.length, reference.length_beats as f32);
-                }
-                for export in [false, true] {
+            for length_frames in [1, 127, 128, 129, 257] {
+                for tail in [0, 1, 127, 129] {
+                    let mut project = fixture();
+                    project.clips[0].start = start_frame as f32 / 4_000.0;
+                    project.clips[0].length = length_frames as f32 / 4_000.0;
+                    let plan = admitted_plan(&project, 11, tail);
+                    assert_eq!(plan.start_frame, start_frame);
+                    assert_eq!(plan.end_frame, start_frame + length_frames);
+                    let rendered = media(&plan);
+                    let candidate = prepare_rendered_occurrence_candidate(
+                        &project,
+                        context(),
+                        &plan,
+                        &rendered,
+                    )
+                    .unwrap();
+                    let audio = candidate.project.clips.last().unwrap();
+                    let reference = audio.audio_length_reference.unwrap();
+                    let stop = plan.end_frame + u64::from(tail);
                     assert_eq!(
-                        plan.tempo_map
-                            .beat_to_frame(
-                                crate::audio_clip::audio_end_beat(audio, export).unwrap()
-                            )
-                            .unwrap(),
-                        stop
+                        reference.length_beats,
+                        plan.tempo_map.frame_to_beat(stop).unwrap() - f64::from(audio.start)
+                    );
+                    assert_eq!(reference.export_length_beats, reference.length_beats);
+                    if tail == 0 {
+                        assert_eq!(audio.length.to_bits(), project.clips[0].length.to_bits());
+                    } else {
+                        assert_eq!(audio.length, reference.length_beats as f32);
+                    }
+                    for export in [false, true] {
+                        assert_eq!(
+                            plan.tempo_map
+                                .beat_to_frame(
+                                    crate::audio_clip::audio_end_beat(audio, export).unwrap()
+                                )
+                                .unwrap(),
+                            stop
+                        );
+                    }
+                    let timeline =
+                        compile_candidate_timeline(&candidate.project, &plan.tempo_map).unwrap();
+                    let descriptor = timeline.audio_clips().last().unwrap();
+                    assert_eq!(
+                        (
+                            descriptor.start_frame,
+                            descriptor.clip_end_frame,
+                            descriptor.stop_frame
+                        ),
+                        (start_frame, stop, stop)
+                    );
+                    assert_eq!(
+                        candidate.project.song_length_beats,
+                        project.song_length_beats
                     );
                 }
-                let timeline =
-                    compile_candidate_timeline(&candidate.project, &plan.tempo_map).unwrap();
-                let descriptor = timeline.audio_clips().last().unwrap();
-                assert_eq!(
-                    (
-                        descriptor.start_frame,
-                        descriptor.clip_end_frame,
-                        descriptor.stop_frame
-                    ),
-                    (start_frame, stop, stop)
-                );
-                assert_eq!(
-                    candidate.project.song_length_beats,
-                    project.song_length_beats
-                );
             }
         }
     }
@@ -753,7 +780,7 @@ mod tests {
             let mut project = fixture();
             project.clips[0].start = 7.9375;
             project.channels[0].volume = volume;
-            let plan = OccurrencePlan::prepare(&project, context(), 11, RATE, 0).unwrap();
+            let plan = admitted_plan(&project, 11, 0);
             assert_eq!(plan.end_frame, plan.tempo_map.duration_frames());
             let rendered = media(&plan);
             let pcm_before = rendered.asset.samples.clone();
@@ -789,7 +816,7 @@ mod tests {
             } else {
                 project.clips[1].id = u32::MAX;
             }
-            let plan = OccurrencePlan::prepare(&project, context(), 11, RATE, 0).unwrap();
+            let plan = admitted_plan(&project, 11, 0);
             let rendered = media(&plan);
             let before = bytes(&project);
             let error =
@@ -813,7 +840,7 @@ mod tests {
     #[test]
     fn candidate_failures_retain_published_path_and_never_mutate_source() {
         let project = fixture();
-        let plan = OccurrencePlan::prepare(&project, context(), 11, RATE, 0).unwrap();
+        let plan = admitted_plan(&project, 11, 0);
         let good_media = media(&plan);
         let _ =
             prepare_rendered_occurrence_candidate(&project, context(), &plan, &good_media).unwrap();
@@ -849,6 +876,82 @@ mod tests {
             );
             assert_eq!(error.published_path.as_ref(), Some(&rendered.path));
             assert_eq!(bytes(&project), before);
+        }
+    }
+
+    #[test]
+    fn missing_or_wrong_tail_media_acknowledgment_cannot_prepare_or_commit() {
+        for tail in [0, 129] {
+            // Both cutting at the Clip end and a positive fixed tail require
+            // explicit fixture acknowledgment. Establish the working path first.
+            let mut control = fixture();
+            let candidate = prepare(&control, tail);
+            let mut control_history = control.clone();
+            let mut control_fingerprint = project_fingerprint(&control);
+            commit_rendered_occurrence_history_transaction(
+                context(),
+                &mut control,
+                &mut control_history,
+                &mut control_fingerprint,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &mut false,
+                candidate,
+            )
+            .unwrap();
+
+            for missing in [true, false] {
+                let mut project = fixture();
+                let plan = admitted_plan(&project, 11, tail);
+                let mut rendered = media(&plan);
+                if missing {
+                    rendered.tail_acknowledgment = None;
+                } else {
+                    rendered.tail_acknowledgment.as_mut().unwrap().tail_frames = tail + 1;
+                }
+                let mut history = project.clone();
+                history.name = "Earlier observed snapshot".into();
+                let mut fingerprint = project_fingerprint(&history);
+                let mut undo = vec![history.clone()];
+                let mut redo = vec![project.clone()];
+                let mut dirty = missing;
+                let before = history_bytes(&project, &history, fingerprint, &undo, &redo, dirty);
+                let prepared =
+                    prepare_rendered_occurrence_candidate(&project, context(), &plan, &rendered);
+                assert!(
+                    prepared.is_err(),
+                    "An unacknowledged receipt must produce no candidate"
+                );
+                // Exercise the full prepare-then-commit chain. Its closure must
+                // not run because no admitted candidate exists on this path.
+                let mut commit_attempted = false;
+                let error = prepared
+                    .and_then(|candidate| {
+                        commit_attempted = true;
+                        commit_rendered_occurrence_history_transaction(
+                            context(),
+                            &mut project,
+                            &mut history,
+                            &mut fingerprint,
+                            &mut undo,
+                            &mut redo,
+                            &mut dirty,
+                            candidate,
+                        )
+                    })
+                    .unwrap_err();
+                assert!(!commit_attempted);
+                assert_eq!(error.kind, OccurrenceErrorKind::Media);
+                assert_eq!(
+                    error.reason,
+                    "Rendered media lacks the exact admitted fixed-tail acknowledgment"
+                );
+                assert_eq!(error.published_path.as_ref(), Some(&rendered.path));
+                assert_eq!(
+                    history_bytes(&project, &history, fingerprint, &undo, &redo, dirty),
+                    before
+                );
+            }
         }
     }
 
