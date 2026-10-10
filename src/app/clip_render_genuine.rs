@@ -29,10 +29,13 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::atomic::AtomicBool,
 };
+#[path = "clip_render_genuine_health.rs"]
+mod health;
 #[path = "clip_render_genuine_oracles.rs"]
 mod oracles;
 #[path = "clip_render_genuine_support.rs"]
 mod support;
+use health::{HealthClass, HealthStatus};
 use support::*;
 const GLOBAL_VOLUME: u32 = 1_336_600_346;
 const SET_REQUEST: u64 = 0xA660_0002;
@@ -272,6 +275,7 @@ struct GenuineFixture {
     undo_endpoint: Option<u64>,
     undo_worker: Option<usize>,
     initial_asset_operation: Option<AudioAssetOperation>,
+    last_health_evidence: Option<Value>,
 }
 impl GenuineFixture {
     fn new(binding: RunBinding, token: [u8; 32], entered: Instant) -> Check<Self> {
@@ -312,6 +316,7 @@ impl GenuineFixture {
             undo_endpoint: None,
             undo_worker: None,
             initial_asset_operation: None,
+            last_health_evidence: None,
         };
         let (engine, callback) = AudioEngine::test_engine_with_callback();
         f.callback = Some(callback);
@@ -350,6 +355,15 @@ impl GenuineFixture {
             .emit("stage_begin", json!({"index":index,"stage":STAGES[index]}))
     }
     fn passed(&mut self) -> Check {
+        if self
+            .active_stage
+            .is_some_and(|index| (1..=8).contains(&index))
+        {
+            require(
+                self.healthy()?.class == HealthClass::Clear,
+                "pending App health cannot complete a qualification stage",
+            )?;
+        }
         let index = self.active_stage.take().ok_or("stage owner missing")?;
         self.stage_results[index] = "completed";
         self.journal.emit(
@@ -371,7 +385,7 @@ impl GenuineFixture {
             "behavior-changing test hook active",
         )
     }
-    fn healthy(&self) -> Check {
+    fn healthy(&mut self) -> Check<HealthStatus> {
         self.hooks()?;
         self.observer.with_snapshot(|s| {
             require(s.failure.is_none(), s.failure.unwrap_or("observer failure"))
@@ -384,14 +398,18 @@ impl GenuineFixture {
                 .genuine_observation_overflowed(),
             "callback observation overflow",
         )?;
-        let app = self.app();
+        let observed = health::observe(self.app());
+        if observed.status.class == HealthClass::Failed
+            || self.last_health_evidence.as_ref() != Some(&observed.evidence)
+        {
+            self.journal.emit("app_health", observed.evidence.clone())?;
+            self.last_health_evidence = Some(observed.evidence);
+        }
         require(
-            !app.plugin_processing_retry_required
-                && !app.clip_restoration_failed
-                && app.timeline_compile_error.is_none()
-                && app.timeline_audio_sync.last_error.is_none(),
-            "actual App processing/restoration/Timeline fault",
+            observed.status.class != HealthClass::Failed,
+            "actual App health failed; exact bounded operands precede this failure",
         )?;
+        let app = self.app();
         if let Some(job) = &app.clip_render_job {
             require(
                 job.failure.is_none()
@@ -461,7 +479,7 @@ impl GenuineFixture {
                 "actual source bridge fault/underrun/loss/detachment",
             )?;
         }
-        self.observer.with_snapshot(|s| {
+        self.observer.with_snapshot(|s| -> Check {
             let mut ordinary_states = 0usize;
             for r in &s.records { match &r.kind {
                 RecordKind::Call{boundary:Boundary::Returned,outcome:Some(CallOutcome::Error(_) | CallOutcome::StrictError(_)),..} => return Err("actual host operation failed".into()),
@@ -482,7 +500,8 @@ impl GenuineFixture {
                 },
                 _=>{}
             }} Ok(())
-        })
+        })?;
+        Ok(observed.status)
     }
     fn pace(&mut self, cadence: Cadence, deadline: Instant) -> Check {
         if let Some(outer) = self.launch["watchdog_deadline_monotonic_ns"].as_u64() {
@@ -493,7 +512,7 @@ impl GenuineFixture {
         }
         self.pacer.wait(cadence, deadline.min(self.outer))
     }
-    fn poll(&mut self, reason: &str) -> Check {
+    fn poll(&mut self, reason: &str) -> Check<HealthStatus> {
         self.pace(Cadence::Poll, self.outer)?;
         self.budget.poll()?;
         let ctx = self.ctx.clone();
@@ -583,14 +602,17 @@ impl GenuineFixture {
         condition: impl Fn(&Self) -> bool,
     ) -> Check {
         let deadline = (Instant::now() + Duration::from_secs(seconds)).min(self.outer);
-        while !condition(self) {
+        loop {
+            let health = self.healthy()?;
+            if health.admits_condition(condition(self)) {
+                return Ok(());
+            }
             require(
                 Instant::now() < deadline,
                 &format!("bounded wait failed: {reason}"),
             )?;
             self.control_tick(control, reason)?;
         }
-        self.healthy()
     }
     fn exact_paused(&self) -> Option<(u64, u64)> {
         let app = self.app();
@@ -1267,6 +1289,10 @@ impl GenuineFixture {
         Ok(())
     }
     fn play_pass(&mut self, pass: usize, control: usize, pcm: Option<&[f32]>) -> Check<Vec<f32>> {
+        require(
+            self.healthy()?.class == HealthClass::Clear,
+            "Play requested while App health remains pending",
+        )?;
         let before = self
             .exact_paused()
             .ok_or("Play lacks confirmed frame-zero paused identity")?;
@@ -1276,6 +1302,7 @@ impl GenuineFixture {
         let count = PLAY_SEGMENTS[pass];
         let mut output = Vec::with_capacity(count * 256);
         let mut active = None;
+        let mut pending_activation_ack = None;
         let baseline = self.snapshot();
         let loop_count = baseline.loop_count;
         self.app_mut().toggle_play();
@@ -1283,13 +1310,38 @@ impl GenuineFixture {
         let deadline = (Instant::now() + Duration::from_secs(30)).min(self.outer);
         while self.budget.playing[pass] < count {
             require(Instant::now() < deadline, "fixed playing pass deadline")?;
-            self.poll("Play activation / fixed musical output")?;
+            let expected_ack = pending_activation_ack.take();
+            if let Some((phase, _)) = expected_ack {
+                require(
+                    self.app().timeline_audio_sync.phase == phase,
+                    "pending Play activation identity changed before acknowledgment",
+                )?;
+            }
+            let health = self.poll("Play activation / fixed musical output")?;
+            if let Some((phase, actual_epoch)) = expected_ack {
+                require(
+                    health.confirms_activation(phase, actual_epoch),
+                    "next scheduled poll did not confirm exact Play activation epoch",
+                )?;
+            }
+            if active.is_some() {
+                require(
+                    health.class == HealthClass::Clear,
+                    "unexpected pending App health within fixed musical window",
+                )?;
+            }
             if active.is_none() {
                 require(
                     self.budget.controls[control] < CONTROL_CEILINGS[control],
                     "Play activation control ceiling",
                 )?;
             }
+            let legacy_barrier = self
+                .app()
+                .audio
+                .as_ref()
+                .unwrap()
+                .test_transport_request_id();
             let (segment, samples) = self.pump(if active.is_some() {
                 Cadence::Measured
             } else {
@@ -1300,6 +1352,21 @@ impl GenuineFixture {
                 self.budget.charge(Charge::Control(control))?;
                 continue;
             }
+            if active.is_none() {
+                self.journal.emit("first_activation_identity",json!({"pass":pass,"playing":true,
+                    "expected_timeline_phase":format!("{:?}",self.app().timeline_audio_sync.phase),
+                    "legacy_barrier_before_pump":legacy_barrier,"segment_legacy_barrier":segment.request_id,
+                    "actual_generation":segment.generation,"actual_epoch":segment.epoch,"actual_frame":segment.start_frame}))?;
+            }
+            require(
+                health.admits_first_activation(
+                    segment.generation.ok_or("activation generation missing")?,
+                    segment.epoch,
+                    segment.request_id,
+                    legacy_barrier,
+                ),
+                "first musical activation has non-activation pending work or wrong acknowledgment identity",
+            )?;
             // The activation segment is first measured output and is charged
             // once here, never as both a control and musical segment.
             let index = self.budget.playing[pass];
@@ -1325,6 +1392,9 @@ impl GenuineFixture {
                 )?;
             } else {
                 active = Some((segment.generation, segment.epoch));
+                pending_activation_ack = health
+                    .pending_activation()
+                    .map(|phase| (phase, segment.epoch));
             }
             for state in [segment.before, segment.after] {
                 require(
@@ -1372,6 +1442,10 @@ impl GenuineFixture {
             output.extend_from_slice(&samples);
         }
         // No further musical callback is permitted after the fixed final block.
+        require(
+            self.healthy()?.class == HealthClass::Clear,
+            "Stop requested while App health remains pending",
+        )?;
         self.app_mut().stop();
         let metrics = if pass == 0 {
             require_audible_windows(
@@ -1394,6 +1468,7 @@ impl GenuineFixture {
     }
     fn stop_window(&mut self, pass: usize, control: usize, previous_epoch: u64) -> Check {
         let mut identity = None;
+        let mut pending_activation_ack = None;
         let mut loop_count = None;
         let deadline = (Instant::now() + Duration::from_secs(15)).min(self.outer);
         while self.budget.stopped[pass] < 32 {
@@ -1401,13 +1476,38 @@ impl GenuineFixture {
                 Instant::now() < deadline,
                 "actual Stop activation / fixed silence deadline",
             )?;
-            self.poll("Stop activation / fixed32 stopped output")?;
+            let expected_ack = pending_activation_ack.take();
+            if let Some((phase, _)) = expected_ack {
+                require(
+                    self.app().timeline_audio_sync.phase == phase,
+                    "pending Stop activation identity changed before acknowledgment",
+                )?;
+            }
+            let health = self.poll("Stop activation / fixed32 stopped output")?;
+            if let Some((phase, actual_epoch)) = expected_ack {
+                require(
+                    health.confirms_activation(phase, actual_epoch),
+                    "next scheduled poll did not confirm exact Stop activation epoch",
+                )?;
+            }
+            if identity.is_some() {
+                require(
+                    health.class == HealthClass::Clear,
+                    "unexpected pending App health within fixed stopped window",
+                )?;
+            }
             if identity.is_none() {
                 require(
                     self.budget.controls[control] < CONTROL_CEILINGS[control],
                     "Stop activation control ceiling",
                 )?;
             }
+            let legacy_barrier = self
+                .app()
+                .audio
+                .as_ref()
+                .unwrap()
+                .test_transport_request_id();
             let (segment, samples) = self.pump(if identity.is_some() {
                 Cadence::Measured
             } else {
@@ -1426,6 +1526,23 @@ impl GenuineFixture {
                 self.budget.charge(Charge::Control(control))?;
                 continue;
             }
+            if identity.is_none() {
+                self.journal.emit("first_activation_identity",json!({"pass":pass,"playing":false,
+                    "expected_timeline_phase":format!("{:?}",self.app().timeline_audio_sync.phase),
+                    "legacy_barrier_before_pump":legacy_barrier,"segment_legacy_barrier":segment.request_id,
+                    "actual_generation":segment.generation,"actual_epoch":segment.epoch,"actual_frame":segment.start_frame}))?;
+            }
+            require(
+                health.admits_first_activation(
+                    segment
+                        .generation
+                        .ok_or("stopped activation generation missing")?,
+                    segment.epoch,
+                    segment.request_id,
+                    legacy_barrier,
+                ),
+                "first stopped activation has non-activation pending work or wrong acknowledgment identity",
+            )?;
             self.budget.charge(Charge::Stopped(pass))?;
             if let Some(pair) = identity {
                 require(
@@ -1434,6 +1551,9 @@ impl GenuineFixture {
                 )?;
             } else {
                 identity = Some((segment.generation, segment.epoch));
+                pending_activation_ack = health
+                    .pending_activation()
+                    .map(|phase| (phase, segment.epoch));
                 loop_count = Some(segment.loop_count);
             }
             require(
@@ -1456,7 +1576,10 @@ impl GenuineFixture {
             "source work remains at end of fixed32 stop window",
         )?;
         self.journal.emit("fixed_stop_window",json!({"pass":pass,"segments":32,"frames":4096,"generation":pair.0,"epoch":pair.1,"snapshot":snapshot_summary(&s)}))?;
-        self.poll("consume exact Stop acknowledgment")?;
+        require(
+            self.poll("consume exact Stop acknowledgment")?.class == HealthClass::Clear,
+            "settled Stop acknowledgment still has pending App health",
+        )?;
         require(
             self.exact_paused() == Some((pair.0.unwrap(), pair.1)),
             "actual exact Stop acknowledgment missing",
