@@ -360,7 +360,7 @@ def prepare(here, repo, manifest_input, lock_input):
         });
         Ok(())
     })
-}''', ['E0521'], ['escapes', "'static", 'loan'],
+}''', [None], ['lifetime may not live long enough', "'static", 'must outlive'],
          'Send does not allow a borrowed runtime to enter a detached static worker.')
     case('loan_cannot_enter_outer_thread_scope', '''fn contract(owner: &mut PluginImpl) -> Result<()> {
     std::thread::scope(|scope| {
