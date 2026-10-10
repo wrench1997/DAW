@@ -77,7 +77,7 @@ fn fixture(
         endpoint_id: 19,
         channel_id: p.channels[0].id,
         instance_id: 41,
-        mixer_track_id: p.mixer_tracks[1].id,
+        mixer_track_id: p.channels[0].mixer_track,
         native_generation: 2,
         app_native_dirty_revision: 1,
         native_capture_serial: 0,
