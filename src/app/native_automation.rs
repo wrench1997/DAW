@@ -6,6 +6,13 @@ pub(super) fn control_menu(
     target: AutomationTarget,
     request: &mut Option<AutomationTarget>,
 ) {
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Slider,
+            response.enabled(),
+            automation_target_label(&target),
+        )
+    });
     response.context_menu(|ui| {
         if ui.button("Create/open automation clip").clicked() {
             *request = Some(target);
@@ -106,6 +113,9 @@ fn native_automation_candidate(
             let item = channels.next().ok_or("The Channel no longer exists")?;
             if channels.next().is_some() {
                 return Err("The Channel identity is ambiguous".into());
+            }
+            if item.instrument_plugin_instance_id.is_some() {
+                return Err("Channel volume/pan automation is not supported for plug-in instruments. Automate the assigned Mixer track or a plug-in parameter instead".into());
             }
             let pan = matches!(target, AutomationTarget::ChannelPan { .. });
             (
@@ -270,6 +280,30 @@ mod tests {
             let lane = candidate.automation_lanes.last().unwrap();
             assert_eq!(lane.lane.target(), &target);
             assert_eq!(lane.lane.points().len(), 2);
+            let expected = match target {
+                AutomationTarget::MasterVolume => {
+                    project
+                        .mixer_track_by_id(MASTER_MIXER_TRACK_ID)
+                        .unwrap()
+                        .volume
+                }
+                AutomationTarget::MasterPan => {
+                    project
+                        .mixer_track_by_id(MASTER_MIXER_TRACK_ID)
+                        .unwrap()
+                        .pan
+                }
+                AutomationTarget::MixerVolume { track } => {
+                    project.mixer_track_by_id(track).unwrap().volume
+                }
+                AutomationTarget::MixerPan { track } => {
+                    project.mixer_track_by_id(track).unwrap().pan
+                }
+                AutomationTarget::ChannelVolume { .. } => project.channels[0].volume,
+                AutomationTarget::ChannelPan { .. } => project.channels[0].pan,
+                _ => unreachable!(),
+            };
+            assert_eq!(lane.lane.points()[0].value, f64::from(expected));
             assert_eq!(lane.lane.points()[0].value, lane.lane.points()[1].value);
             let restored: Project =
                 serde_json::from_slice(&serde_json::to_vec(&candidate).unwrap()).unwrap();
@@ -450,5 +484,25 @@ mod tests {
             candidate
         ));
         assert_eq!(undo.len(), 2);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn native_generator_channel_automation_is_rejected_without_mutation() {
+    let mut project = Project::blank();
+    project.channels[0].instrument_plugin_instance_id = Some(77);
+    let channel = project.channels[0].id;
+    let before = project_fingerprint(&project);
+    for target in [
+        AutomationTarget::ChannelVolume { channel },
+        AutomationTarget::ChannelPan { channel },
+    ] {
+        assert!(
+            native_automation_candidate(&project, target, 0.0, 0.25, 0)
+                .unwrap_err()
+                .contains("plug-in instruments")
+        );
+        assert_eq!(project_fingerprint(&project), before);
     }
 }

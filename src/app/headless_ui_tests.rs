@@ -4269,3 +4269,90 @@ fn plugin_config_deferred_restore_preserves_blob_without_resave_or_hidden_proces
         0.73f32.to_le_bytes()
     );
 }
+
+#[test]
+fn native_automation_context_menu_dismiss_create_and_reopen() {
+    let mut ui = UiHarness::new();
+    ui.app.install_project(Project::blank(), None, false);
+    let channel = ui.app.project.channels[0].id;
+    for (view, label, target) in [
+        (
+            StudioView::ChannelRack,
+            format!("Channel {channel} · Volume"),
+            AutomationTarget::ChannelVolume { channel },
+        ),
+        (
+            StudioView::ChannelRack,
+            format!("Channel {channel} · Pan"),
+            AutomationTarget::ChannelPan { channel },
+        ),
+        (
+            StudioView::Mixer,
+            format!("Mixer {MASTER_MIXER_TRACK_ID:02} · Volume"),
+            AutomationTarget::MasterVolume,
+        ),
+        (
+            StudioView::Mixer,
+            format!("Mixer {MASTER_MIXER_TRACK_ID:02} · Pan"),
+            AutomationTarget::MasterPan,
+        ),
+    ] {
+        let open_menu = |ui: &mut UiHarness| {
+            ui.app.focus_editor(view);
+            ui.settle();
+            let node = ui
+                .nodes
+                .iter()
+                .find(|node| node.label() == Some(label.as_str()))
+                .expect("native control has accessible bounds");
+            let bounds = node.bounds().unwrap();
+            let pos = Pos2::new(
+                ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                ((bounds.y0 + bounds.y1) / 2.0) as f32,
+            );
+            for pressed in [true, false] {
+                ui.run(vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+            ui.settle();
+            ui.button("Create/open automation clip");
+        };
+        let before = project_fingerprint(&ui.app.project);
+        open_menu(&mut ui);
+        ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+        assert_eq!(project_fingerprint(&ui.app.project), before);
+        open_menu(&mut ui);
+        ui.click("Create/open automation clip");
+        let clip_id = ui.app.selected_clip.expect("new automation selected");
+        let clip = ui
+            .app
+            .project
+            .clips
+            .iter()
+            .find(|clip| clip.id == clip_id)
+            .unwrap();
+        let lane = ui
+            .app
+            .project
+            .automation_lanes
+            .iter()
+            .find(|lane| Some(lane.id) == clip.automation_id)
+            .unwrap();
+        assert_eq!(lane.lane.target(), &target);
+        assert!(matches!(ui.app.tool_mode, ToolMode::Select));
+        let fingerprint = project_fingerprint(&ui.app.project);
+        let undo_len = ui.app.undo_stack.len();
+        open_menu(&mut ui);
+        ui.click("Create/open automation clip");
+        assert_eq!(ui.app.selected_clip, Some(clip_id));
+        assert_eq!(project_fingerprint(&ui.app.project), fingerprint);
+        assert_eq!(ui.app.undo_stack.len(), undo_len);
+    }
+}

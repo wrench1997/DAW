@@ -12,7 +12,7 @@ Repeating the command opens the existing target's earliest placement (start time
 
 With the selected clip and Select tool, double-click to insert a point, drag a point to change time/value, and right-click a point to delete it. The inspector provides precise position, value and tension edits, and Linear, Tension or Hold curves. Playlist move, split and Slip retain source-relative envelope positions. Save the project to retain the lane and clip; undo/redo restores creation together.
 
-Use SONG mode to hear Playlist automation. PAT mode intentionally excludes it. Mixer/Master volume and pan use the existing UI-rate compatibility dispatcher, not sample-accurate callback automation. Native Channel targets are sample-exact only for internal Channels without compiled Generator routes. Creating a Channel target does not expand generator-backed DSP support.
+Use SONG mode to hear Playlist automation. PAT mode intentionally excludes it. Mixer/Master volume and pan use the existing UI-rate compatibility dispatcher, not sample-accurate callback automation. Native Channel targets are sample-exact only for internal Channels without compiled Generator routes. Channel volume/pan creation is rejected for plug-in-backed Channels with guidance to automate the assigned Mixer track or a plug-in parameter instead.
 
 Plug-in parameters already have **AUTOMATE** in the generic parameter catalog. That existing flow and its native-editor/MIDI-port guards are unchanged. Eligible plug-in automation is Q128/block-rate; native-editor last-tweaked linking and automation recording are not added here.
 
