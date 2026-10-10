@@ -4559,7 +4559,7 @@
 +}
 --- a/src/fresh_helper/tests.rs
 +++ b/src/fresh_helper/tests.rs
-@@ -0,0 +1,800 @@
+@@ -0,0 +1,820 @@
 +use super::*;
 +use std::sync::{Mutex, MutexGuard};
 +use std::time::Duration;
@@ -5083,6 +5083,24 @@
 +                None => panic!("disposable {mode} exceeded its watchdog"),
 +            }
 +        }
++        use std::io::Read;
++        let mut captured = String::new();
++        session
++            .owner
++            .as_mut()
++            .unwrap()
++            .stdout
++            .as_mut()
++            .unwrap()
++            .take(64 * 1024)
++            .read_to_string(&mut captured)
++            .unwrap();
++        let marker = format!("STRICT_SIGNAL_COMPLETE:{mode}");
++        assert_eq!(
++            captured.lines().filter(|line| *line == marker).count(),
++            1,
++            "disposable filter must actually execute its mode-specific assertions: {captured}"
++        );
 +        finish(&mut session);
 +    }
 +}
@@ -5111,6 +5129,7 @@
 +                cleanup: None
 +            })
 +        ));
++        println!("STRICT_SIGNAL_COMPLETE:{mode}");
 +        return;
 +    }
 +    assert_eq!(mode, "epipe");
@@ -5145,6 +5164,7 @@
 +    assert_eq!(failure.cause, ErrorKind::Io(libc::EPIPE));
 +    assert_eq!(failure.delivery, Delivery::NotSent);
 +    finish_forced(&mut session);
++    println!("STRICT_SIGNAL_COMPLETE:{mode}");
 +}
 +
 +#[test]

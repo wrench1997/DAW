@@ -521,6 +521,24 @@ fn unsupported_sigpipe_and_epipe_are_confined_to_disposable_hosts() {
                 None => panic!("disposable {mode} exceeded its watchdog"),
             }
         }
+        use std::io::Read;
+        let mut captured = String::new();
+        session
+            .owner
+            .as_mut()
+            .unwrap()
+            .stdout
+            .as_mut()
+            .unwrap()
+            .take(64 * 1024)
+            .read_to_string(&mut captured)
+            .unwrap();
+        let marker = format!("STRICT_SIGNAL_COMPLETE:{mode}");
+        assert_eq!(
+            captured.lines().filter(|line| *line == marker).count(),
+            1,
+            "disposable filter must actually execute its mode-specific assertions: {captured}"
+        );
         finish(&mut session);
     }
 }
@@ -549,6 +567,7 @@ fn disposable_signal_host() {
                 cleanup: None
             })
         ));
+        println!("STRICT_SIGNAL_COMPLETE:{mode}");
         return;
     }
     assert_eq!(mode, "epipe");
@@ -583,6 +602,7 @@ fn disposable_signal_host() {
     assert_eq!(failure.cause, ErrorKind::Io(libc::EPIPE));
     assert_eq!(failure.delivery, Delivery::NotSent);
     finish_forced(&mut session);
+    println!("STRICT_SIGNAL_COMPLETE:{mode}");
 }
 
 #[test]
