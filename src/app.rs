@@ -21475,15 +21475,14 @@ impl CitrusApp {
                 .retain(|clip_id| !clip_ids.contains(clip_id));
             self.selected_clip = self.playlist_selection_ids.iter().copied().min();
         }
-        if let Some((automation_id, point_index, point)) = automation_update_request {
-            if let Some(automation) = self
+        if let Some((automation_id, point_index, point)) = automation_update_request
+            && let Some(automation) = self
                 .project
                 .automation_lanes
                 .iter_mut()
                 .find(|lane| lane.id == automation_id)
-            {
-                let _ = automation.lane.update_point(point_index, point);
-            }
+        {
+            let _ = automation.lane.update_point(point_index, point);
         }
         if let Some(action) = automation_point_action {
             self.commit_automation_point_action(action);
