@@ -15398,12 +15398,13 @@
 +}
 --- /dev/null
 +++ b/src/internal/plugin_impl/domain_tests/runtime_loan_tests.rs
-@@ -0,0 +1,1071 @@
+@@ -0,0 +1,1072 @@
 +//! Full-kernel scoped-runtime evidence with allocating, locking COM mocks.
 +//! Completion during a held UI call is not an audio deadline or native-plug-in guarantee.
 +//! Rust unwind tests never panic through a COM vtable.
 +use super::super::domain_session::{with_runtime_loan_for_test, RuntimeLoan};
 +use super::*;
++use vst3::com_scrape_types::Unknown;
 +use std::{
 +    panic::{catch_unwind, AssertUnwindSafe},
 +    sync::mpsc,

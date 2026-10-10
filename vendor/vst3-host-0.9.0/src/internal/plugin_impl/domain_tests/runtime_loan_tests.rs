@@ -3,6 +3,7 @@
 //! Rust unwind tests never panic through a COM vtable.
 use super::super::domain_session::{with_runtime_loan_for_test, RuntimeLoan};
 use super::*;
+use vst3::com_scrape_types::Unknown;
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     sync::mpsc,
