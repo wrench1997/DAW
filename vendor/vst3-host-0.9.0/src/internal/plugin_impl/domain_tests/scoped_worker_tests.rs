@@ -1311,7 +1311,9 @@ fn exercise_shutdown(stage: &'static str, exit_kind: ExitKind, sdk_fails: bool) 
             (ScopedWorkerFailure::UnconsumedReply, ExitKind::Normal, false) => (),
             other => panic!("wrong precedence: {other:?}"),
         }
-        let Some(WorkerReply::Processed { buffers, result }) = error.unconsumed_reply else {
+        let Some(WorkerReply::Processed { buffers, result }) =
+            error.unconsumed_reply.map(|reply| *reply)
+        else {
             panic!("missing original unread audio");
         };
         assert_eq!(buffers.outputs[0].as_ptr(), submitted_address);

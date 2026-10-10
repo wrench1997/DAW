@@ -897,7 +897,9 @@ with a full queue. Worker replies are nonblocking; failed publication is an
 explicit session fault. Kernel errors remain visible even after reply consumption;
 unread successful completion cannot be reported as delivered. Callback errors
 retain their original identity, and original Rust panic payloads resume only after
-join. A worker Rust panic marks terminal status before exit; if a preceding kernel
+join. Joined unread-reply diagnostics use one main-thread box after the body-panic
+path has been ruled out; ordinary successfully consumed replies are not boxed.
+A worker Rust panic marks terminal status before exit; if a preceding kernel
 error was already observed, the exact shared error remains bounded secondary
 evidence after join, including when a callback error is primary. Foreign COM unwind
 is unsupported. A hung foreign call pins the scope/module; no timeout detach or

@@ -1384,3 +1384,17 @@ historical until fresh runs finish. The new external34-case runner has already
 passed on346de8b4, as have41 focused and469 available vendor tests. Current copied
 App/source gates continue against identical Rust bytes while this QA-only change
 is prepared for durable archival.
+
+### Scoped worker diagnostic representation correction (unvalidated)
+
+The feature41/469, default vendor428, App1192, core1175, doctests26, helper25,
+protocol13, all three root Clippy modes, formatting and compiler corpora34+55+88+52
+passed on the preceding source. Direct vendor Clippy rejected the136-byte session
+error because it embeds an unread owned reply. Only that optional diagnostic is
+now boxed, on main after join and after ruling out the original callback panic;
+normal consumed replies and their audio allocations are unchanged. The full exit
+matrix still verifies buffer pointer and shared-error identity after dereferencing
+the box. The original Clippy failure remains retained. This representation change
+requires its own recovery archive, review and affected-feature rerun. Older
+cfg-excluded/default results may be reused only with explicit per-file/feature
+attribution; no raw-input identity is claimed for changed feature files.

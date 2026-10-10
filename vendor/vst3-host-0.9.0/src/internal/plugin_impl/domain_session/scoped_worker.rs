@@ -419,6 +419,9 @@ fn run_inner(
             Ok(result) => result,
             Err(payload) => resume_unwind(payload), // exact Rust payload, AFTER join
         };
+        // Only joined unread-result reporting needs this allocation. Do not introduce
+        // an allocation before resuming the original body-panic payload.
+        let unread = unread.map(Box::new);
         if let Err(error) = body_result {
             return Err(ScopedWorkerError {
                 primary: ScopedWorkerFailure::Body(error),

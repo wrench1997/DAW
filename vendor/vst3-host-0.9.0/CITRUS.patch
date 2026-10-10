@@ -12007,7 +12007,7 @@
 +}
 --- /dev/null
 +++ b/src/internal/plugin_impl/domain_session/scoped_worker.rs
-@@ -0,0 +1,459 @@
+@@ -0,0 +1,462 @@
 +//! Disabled-feature library session. Owning COM references and prepared storage remain
 +//! in the loading-thread owner. Only the fixed processing dispatcher crosses threads.
 +
@@ -12429,6 +12429,9 @@
 +            Ok(result) => result,
 +            Err(payload) => resume_unwind(payload), // exact Rust payload, AFTER join
 +        };
++        // Only joined unread-result reporting needs this allocation. Do not introduce
++        // an allocation before resuming the original body-panic payload.
++        let unread = unread.map(Box::new);
 +        if let Err(error) = body_result {
 +            return Err(ScopedWorkerError {
 +                primary: ScopedWorkerFailure::Body(error),
@@ -17139,7 +17142,7 @@
 +}
 --- /dev/null
 +++ b/src/internal/plugin_impl/domain_tests/scoped_worker_tests.rs
-@@ -0,0 +1,1731 @@
+@@ -0,0 +1,1733 @@
 +//! Disabled-feature full-kernel session evidence using allocating, locking COM mocks.
 +//! A held attached-view call establishes overlap, not a native-plugin or audio deadline.
 +//! All intentional Rust panics occur outside COM vtables. No native GUI is created.
@@ -18453,7 +18456,9 @@
 +            (ScopedWorkerFailure::UnconsumedReply, ExitKind::Normal, false) => (),
 +            other => panic!("wrong precedence: {other:?}"),
 +        }
-+        let Some(WorkerReply::Processed { buffers, result }) = error.unconsumed_reply else {
++        let Some(WorkerReply::Processed { buffers, result }) =
++            error.unconsumed_reply.map(|reply| *reply)
++        else {
 +            panic!("missing original unread audio");
 +        };
 +        assert_eq!(buffers.outputs[0].as_ptr(), submitted_address);
@@ -21450,7 +21455,7 @@
 +}
 --- /dev/null
 +++ b/src/scoped_worker.rs
-@@ -0,0 +1,946 @@
+@@ -0,0 +1,948 @@
 +//! Owned messages and borrowed ports for an opt-in, library-owned scoped worker.
 +//!
 +//! A session keeps the plug-in owner on its control thread. Its callback receives only an
@@ -22027,7 +22032,9 @@
 +    pub secondary_worker: Option<WorkerOutcome>,
 +    /// An unconsumed owned reply, retaining original audio allocations when one is available.
 +    /// Recovered audio is diagnostic only, even if the individual command reported success.
-+    pub unconsumed_reply: Option<WorkerReply>,
++    /// The diagnostic box is allocated on main only after join and after ruling out a
++    /// callback panic. Successfully consumed replies do not use this box.
++    pub unconsumed_reply: Option<Box<WorkerReply>>,
 +}
 +
 +impl fmt::Display for ScopedWorkerError {

@@ -574,7 +574,9 @@ pub struct ScopedWorkerError {
     pub secondary_worker: Option<WorkerOutcome>,
     /// An unconsumed owned reply, retaining original audio allocations when one is available.
     /// Recovered audio is diagnostic only, even if the individual command reported success.
-    pub unconsumed_reply: Option<WorkerReply>,
+    /// The diagnostic box is allocated on main only after join and after ruling out a
+    /// callback panic. Successfully consumed replies do not use this box.
+    pub unconsumed_reply: Option<Box<WorkerReply>>,
 }
 
 impl fmt::Display for ScopedWorkerError {
