@@ -3561,7 +3561,7 @@ fn capture_instrument_bounce_on_worker(
     .unwrap_or_else(|payload| {
         Err(BounceCaptureError::BackendFailed(format!(
             "Instrument bounce capture panicked: {}",
-            panic_payload_message(payload)
+            panic_payload_message(payload.as_ref())
         )))
     });
     if let Err(BounceCaptureError::BackendFailed(message)) = &captured {

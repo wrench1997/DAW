@@ -128,3 +128,23 @@ boundary with a private Rc marker and compile-time negative-trait test. Failed f
 candidate cleanup may issue the existing backend Drop's Editor Close; no Open/Focus
 or source editor mutation is permitted. The protocol tests distinguish that teardown
 from setup. Malformed audio layout/unknown rejection enums remain protocol faults.
+
+## First execution findings and remaining capture gate
+
+The first 71d0323 vendor compilation and five focused strict-audio tests passed.
+Application compilation found a boxed panic-payload borrowing error, corrected in
+this follow-on source checkpoint. Malformed-response fixtures now perform the
+established readiness handshake before a one-second test-only timeout, rather than
+waiting 120 seconds per deliberate malformed response. No-feature production builds
+omit the unused VST3 render spec while keeping plugin-free capture tests available.
+These corrections are not yet execution-validated at source freeze.
+
+This first slice is **not App-cancellation-qualified**. The present receiver-drop/
+35-second coordinator timeout does not stop a capture already reading current bases
+and releases admission before worker termination. A separate reviewed checkpoint
+must carry cancellation/deadline checks before and after every state/metadata/base
+IPC operation, preserve genuine in-flight failure as a backend fault, and retain a
+worker-owned admission lease until terminal acknowledgment. Queued cancellation,
+slow getter, elapsed-deadline success, concurrent IPC failure, dropped receiver,
+worker teardown and immediate retry must be tested before user-visible integration.
+No source/UI ownership may be released merely because the reply was abandoned.

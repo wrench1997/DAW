@@ -2241,10 +2241,14 @@ mod tests {
             let fake = FakeHelper::raw_metadata_reply(&format!("checked_audio_malformed_{index}"), "CheckedAudioBusLayout", raw);
             let mut plugin = isolated(&fake);
             plugin.auto_recover = true;
+            // Establish readiness before the deliberately short malformed-response deadline.
+            plugin.send_command_once(HostCommand::GetAllParameters).unwrap();
+            plugin.response_timeout = Duration::from_secs(1);
+            plugin.process.lock().unwrap().set_timeout(Duration::from_secs(1));
             let error = plugin.checked_audio_bus_layout().unwrap_err();
             assert!(!matches!(error, Error::MetadataQueryRejected(_)));
             assert_eq!(plugin.recovery_count(), 0);
-            assert_eq!(fake.requests().len(), 1);
+            assert_eq!(fake.requests().len(), 2);
         }
         let fake = FakeHelper::exit_on("checked_audio_dead", "CheckedAudioBusLayout");
         let mut plugin = isolated(&fake);

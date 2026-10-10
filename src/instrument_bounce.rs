@@ -13,10 +13,13 @@ use std::{
 
 use crate::{
     model::{PluginFormat, Project},
-    plugins::plugin_runtime::{BounceStateReceiver, PluginChainControl, PluginLoadSpec},
+    plugins::plugin_runtime::{BounceStateReceiver, PluginChainControl},
     tempo_map::TempoMap,
     timeline::{CompiledTimeline, TimelineCompileOptions},
 };
+
+#[cfg(any(feature = "vst3", test))]
+use crate::plugins::plugin_runtime::PluginLoadSpec;
 
 pub const BOUNCE_PREPARED_MAXIMUM: usize = 2048;
 pub const BOUNCE_QUANTUM: usize = 128;
@@ -205,6 +208,7 @@ pub struct InstrumentBouncePlan {
     sample_rate: u32,
     tail_frames: u32,
     timeline: CompiledTimeline,
+    #[cfg(any(feature = "vst3", test))]
     spec: PluginLoadSpec,
     parameter_ids: Vec<u32>,
 }
@@ -292,6 +296,7 @@ impl InstrumentBouncePlan {
         {
             return Err("Instrument bounce exceeds its ten-minute / 24-million-frame bound or has zero length".into());
         }
+        #[cfg(any(feature = "vst3", test))]
         let spec = crate::plugins::plugin_load_spec_from_instance(instance);
         let mut hasher = DefaultHasher::new();
         serde_json::to_vec(project)
@@ -304,6 +309,7 @@ impl InstrumentBouncePlan {
             sample_rate,
             tail_frames,
             timeline,
+            #[cfg(any(feature = "vst3", test))]
             spec,
             parameter_ids: instance.parameters.keys().copied().collect(),
         })
@@ -356,6 +362,7 @@ impl CapturedInstrumentBounce {
     ) -> Result<crate::plugins::plugin_runtime::OfflineInstrument, String> {
         crate::plugins::plugin_runtime::OfflineInstrument::from_capture(self)
     }
+    #[cfg(any(feature = "vst3", test))]
     pub(crate) fn render_spec(&self) -> PluginLoadSpec {
         let mut spec = self.plan.spec.clone();
         spec.initial_state.clone_from(&self.state.opaque_state);
