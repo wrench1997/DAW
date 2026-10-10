@@ -3392,7 +3392,7 @@
 +}
 --- a/src/fresh_helper/mod.rs
 +++ b/src/fresh_helper/mod.rs
-@@ -0,0 +1,576 @@
+@@ -0,0 +1,579 @@
 +//! Experimental Linux-only, owner-thread fresh-child transport foundation.
 +//!
 +//! This crate-private module has no production caller. It does not load a plugin by
@@ -3924,6 +3924,9 @@
 +        CHECKS.with(|n| n.set(0));
 +        Guard
 +    }
++    pub(super) fn force_expired() {
++        EXPIRED.with(|e| e.set(true));
++    }
 +    pub(super) fn deadline_should_expire() -> bool {
 +        if EXPIRED.with(Cell::get) {
 +            return true;
@@ -3971,7 +3974,7 @@
 +}
 --- a/src/fresh_helper/pump.rs
 +++ b/src/fresh_helper/pump.rs
-@@ -0,0 +1,499 @@
+@@ -0,0 +1,513 @@
 +use super::{Budget, ChildOwner, CleanupReport, CleanupState, Delivery, ErrorKind, MAX_LINE};
 +use std::io;
 +use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -4178,6 +4181,11 @@
 +        }
 +        if !would_block() {
 +            return Err(last_error());
++        }
++        #[cfg(test)]
++        if test_hooks::take(test_hooks::Fault::ExpireBlockedWrite) {
++            test_hooks::record_blocked_write();
++            super::budget_test_hooks::force_expired();
 +        }
 +        let mut fds = [
 +            libc::pollfd {
@@ -4420,6 +4428,7 @@
 +        ProbeInterrupted,
 +        WriteZero,
 +        WriteZeroAfterPrefix,
++        ExpireBlockedWrite,
 +        WriteInterrupted,
 +        ReapPanic,
 +        Wait,
@@ -4447,6 +4456,13 @@
 +    thread_local! {
 +        static WAKE_LEFT: Cell<usize> = const { Cell::new(0) };
 +        static WAKE_COUNT: Cell<usize> = const { Cell::new(0) };
++        static BLOCKED_WRITE: Cell<bool> = const { Cell::new(false) };
++    }
++    pub(crate) fn record_blocked_write() {
++        BLOCKED_WRITE.with(|b| b.set(true));
++    }
++    pub(crate) fn blocked_write_observed() -> bool {
++        BLOCKED_WRITE.with(Cell::get)
 +    }
 +    pub(crate) fn arm_wake_interrupts(count: usize) {
 +        WAKE_LEFT.with(|v| v.set(count));
@@ -4469,6 +4485,7 @@
 +    pub(crate) fn clear() {
 +        NEXT.with(|next| next.set(None));
 +        WAKE_LEFT.with(|v| v.set(0));
++        BLOCKED_WRITE.with(|b| b.set(false));
 +    }
 +}
 --- a/src/fresh_helper/quarantine.rs
@@ -4610,7 +4627,7 @@
 +}
 --- a/src/fresh_helper/tests.rs
 +++ b/src/fresh_helper/tests.rs
-@@ -0,0 +1,820 @@
+@@ -0,0 +1,842 @@
 +use super::*;
 +use std::sync::{Mutex, MutexGuard};
 +use std::time::Duration;
@@ -4886,17 +4903,23 @@
 +#[test]
 +fn blocked_stdin_deadline_marks_partial_delivery() {
 +    let _serial = serial();
-+    let mut session = spawn("import time\ntime.sleep(10)\n");
++    let mut session = spawn("import time\ntime.sleep(180)\n");
 +    // Larger than the OS pipe and bounded by the strict state limit.
 +    let command = HostCommand::LoadState {
 +        data: vec![7; 1024 * 1024],
 +        context: crate::plugin::StateContext::Project,
 +    };
++    // Expire only after an actual EAGAIN on the non-reading pipe. Counting
++    // and encoding have a generous watchdog, never a MayHaveApplied assumption.
++    let expiry = budget_test_hooks::expire_at_check(usize::MAX);
++    pump::test_hooks::arm(pump::test_hooks::Fault::ExpireBlockedWrite);
 +    let failure = failure_kind(session.exchange(
 +        &command,
 +        ReplyShape::Success,
-+        Instant::now() + Duration::from_millis(300),
++        Instant::now() + Duration::from_secs(180),
 +    ));
++    assert!(pump::test_hooks::blocked_write_observed());
++    drop(expiry);
 +    assert_eq!(failure.cause, ErrorKind::Deadline);
 +    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
 +    finish_forced(&mut session);
@@ -5429,6 +5452,22 @@
 +    assert_eq!(later.delivery, Delivery::NotSent);
 +    assert_eq!(session.state, State::Terminal);
 +    drop(writer);
++    finish(&mut session);
++}
++
++#[test]
++fn expiry_during_encoding_is_not_sent_and_child_observes_no_bytes() {
++    let _serial = serial();
++    let mut session = spawn("import sys\nassert sys.stdin.read()==''\n");
++    let command = HostCommand::LoadState {
++        data: vec![1; 64 * 1024],
++        context: crate::plugin::StateContext::Project,
++    };
++    let expiry = budget_test_hooks::expire_at_check(8);
++    let failure = failure_kind(session.exchange(&command, ReplyShape::Success, deadline()));
++    drop(expiry);
++    assert_eq!(failure.cause, ErrorKind::Deadline);
++    assert_eq!(failure.delivery, Delivery::NotSent);
 +    finish(&mut session);
 +}
 --- a/src/host.rs

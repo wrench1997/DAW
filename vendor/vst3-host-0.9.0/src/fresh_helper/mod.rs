@@ -529,6 +529,9 @@ mod budget_test_hooks {
         CHECKS.with(|n| n.set(0));
         Guard
     }
+    pub(super) fn force_expired() {
+        EXPIRED.with(|e| e.set(true));
+    }
     pub(super) fn deadline_should_expire() -> bool {
         if EXPIRED.with(Cell::get) {
             return true;

@@ -273,17 +273,23 @@ fn expired_and_unsupported_requests_send_nothing() {
 #[test]
 fn blocked_stdin_deadline_marks_partial_delivery() {
     let _serial = serial();
-    let mut session = spawn("import time\ntime.sleep(10)\n");
+    let mut session = spawn("import time\ntime.sleep(180)\n");
     // Larger than the OS pipe and bounded by the strict state limit.
     let command = HostCommand::LoadState {
         data: vec![7; 1024 * 1024],
         context: crate::plugin::StateContext::Project,
     };
+    // Expire only after an actual EAGAIN on the non-reading pipe. Counting
+    // and encoding have a generous watchdog, never a MayHaveApplied assumption.
+    let expiry = budget_test_hooks::expire_at_check(usize::MAX);
+    pump::test_hooks::arm(pump::test_hooks::Fault::ExpireBlockedWrite);
     let failure = failure_kind(session.exchange(
         &command,
         ReplyShape::Success,
-        Instant::now() + Duration::from_millis(300),
+        Instant::now() + Duration::from_secs(180),
     ));
+    assert!(pump::test_hooks::blocked_write_observed());
+    drop(expiry);
     assert_eq!(failure.cause, ErrorKind::Deadline);
     assert_eq!(failure.delivery, Delivery::MayHaveApplied);
     finish_forced(&mut session);
@@ -816,5 +822,21 @@ fn direct_child_exit_is_detected_while_a_separate_writer_holds_stdout_open() {
     assert_eq!(later.delivery, Delivery::NotSent);
     assert_eq!(session.state, State::Terminal);
     drop(writer);
+    finish(&mut session);
+}
+
+#[test]
+fn expiry_during_encoding_is_not_sent_and_child_observes_no_bytes() {
+    let _serial = serial();
+    let mut session = spawn("import sys\nassert sys.stdin.read()==''\n");
+    let command = HostCommand::LoadState {
+        data: vec![1; 64 * 1024],
+        context: crate::plugin::StateContext::Project,
+    };
+    let expiry = budget_test_hooks::expire_at_check(8);
+    let failure = failure_kind(session.exchange(&command, ReplyShape::Success, deadline()));
+    drop(expiry);
+    assert_eq!(failure.cause, ErrorKind::Deadline);
+    assert_eq!(failure.delivery, Delivery::NotSent);
     finish(&mut session);
 }

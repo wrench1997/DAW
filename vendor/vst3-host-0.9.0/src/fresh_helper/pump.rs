@@ -205,6 +205,11 @@ pub(super) fn write_request(
         if !would_block() {
             return Err(last_error());
         }
+        #[cfg(test)]
+        if test_hooks::take(test_hooks::Fault::ExpireBlockedWrite) {
+            test_hooks::record_blocked_write();
+            super::budget_test_hooks::force_expired();
+        }
         let mut fds = [
             libc::pollfd {
                 fd: stdin,
@@ -446,6 +451,7 @@ pub(super) mod test_hooks {
         ProbeInterrupted,
         WriteZero,
         WriteZeroAfterPrefix,
+        ExpireBlockedWrite,
         WriteInterrupted,
         ReapPanic,
         Wait,
@@ -473,6 +479,13 @@ pub(super) mod test_hooks {
     thread_local! {
         static WAKE_LEFT: Cell<usize> = const { Cell::new(0) };
         static WAKE_COUNT: Cell<usize> = const { Cell::new(0) };
+        static BLOCKED_WRITE: Cell<bool> = const { Cell::new(false) };
+    }
+    pub(crate) fn record_blocked_write() {
+        BLOCKED_WRITE.with(|b| b.set(true));
+    }
+    pub(crate) fn blocked_write_observed() -> bool {
+        BLOCKED_WRITE.with(Cell::get)
     }
     pub(crate) fn arm_wake_interrupts(count: usize) {
         WAKE_LEFT.with(|v| v.set(count));
@@ -495,5 +508,6 @@ pub(super) mod test_hooks {
     pub(crate) fn clear() {
         NEXT.with(|next| next.set(None));
         WAKE_LEFT.with(|v| v.set(0));
+        BLOCKED_WRITE.with(|b| b.set(false));
     }
 }
