@@ -186,7 +186,7 @@ while True:
     elif name == 'CheckedAudioBusLayout':
         layout = dict(inputs=[dict(bus) for bus in cfg.get('inputs', [])],
                       outputs=[dict(channel_count=cfg['channels'], is_main=True, active=True)] +
-                              [dict(channel_count=channels, is_main=False, active=False) for channels in cfg.get('auxiliaries', [])])
+                              [dict(bus) for bus in cfg.get('extra_outputs', [])])
         if fault == 'audio_aux': layout['outputs'][0]['is_main'] = False
         if fault == 'audio_unknown': layout['outputs'][0]['active'] = None
         if fault == 'audio_inactive': layout['outputs'][0]['active'] = False
@@ -195,17 +195,22 @@ while True:
         if fault == 'audio_channels': layout['outputs'][0]['channel_count'] = 3
         if fault == 'audio_input_unknown': layout['inputs'][0]['active'] = None
         if fault == 'audio_input_aux': layout['inputs'][0]['is_main'] = False
+        if fault == 'audio_input_main': layout['inputs'][0]['is_main'] = True
+        if fault == 'audio_extra_input': layout['inputs'].append(dict(channel_count=1, is_main=layout['inputs'][0]['is_main'], active=False))
+        if fault == 'audio_output_missing': layout['outputs'] = []
         if fault == 'audio_input_channels': layout['inputs'][0]['channel_count'] = 3
         if fault == 'audio_input_activation_drift': layout['inputs'][0]['active'] = False
         if fault == 'audio_active_aux': layout['outputs'][-1]['active'] = True
         if fault == 'audio_aux_unknown': layout['outputs'][-1]['active'] = None
         if fault == 'audio_aux_main': layout['outputs'][-1]['is_main'] = True
+        if fault == 'audio_aux_aux': layout['outputs'][-1]['is_main'] = False
         if fault == 'audio_aux_channels': layout['outputs'][-1]['channel_count'] = 3
         if fault == 'audio_aux_drift': layout['outputs'][-1]['channel_count'] = 1
         if fault == 'audio_aux_order': layout['outputs'][1:] = reversed(layout['outputs'][1:])
         if fault == 'audio_aux_removed': layout['outputs'].pop()
         if fault == 'audio_extra_aux': layout['outputs'].append(dict(channel_count=2, is_main=False, active=False))
         if fault.startswith('audio_'): log('injected_audio_topology', stage=stage, fault=fault, layout=layout)
+        log('audio_topology', stage=stage, layout=layout)
         response = {'CheckedAudioBusLayout': {'layout': layout}}
     elif name == 'EventBusLayout':
         layout = dict(inputs=[dict(channel_count=16, is_main=True, active=True)], outputs=[])
@@ -267,8 +272,10 @@ struct Mock {
     channels: usize,
     latency: u32,
     blocked_stdin: bool,
-    input: Option<(usize, bool)>,
-    auxiliaries: Vec<usize>,
+    // Channels, declared Main role, and known activation are independent.
+    input: Option<(usize, bool, bool)>,
+    // Extra outputs retain their declared role while remaining known inactive.
+    extra_outputs: Vec<(usize, bool)>,
 }
 impl Mock {
     fn new(fault: &str, stage: &str) -> Self {
@@ -288,7 +295,7 @@ impl Mock {
             latency,
             blocked_stdin: fault == "block_stdin",
             input: None,
-            auxiliaries: Vec::new(),
+            extra_outputs: Vec::new(),
         };
         this.write(
             "config.json",
@@ -312,14 +319,19 @@ impl Mock {
         this.write("render.wav", SENTINEL);
         this
     }
-    fn with_topology(mut self, input: Option<(usize, bool)>, auxiliaries: Vec<usize>) -> Self {
+    fn with_topology(
+        mut self,
+        input: Option<(usize, bool, bool)>,
+        extra_outputs: Vec<(usize, bool)>,
+    ) -> Self {
         self.input = input;
-        self.auxiliaries = auxiliaries;
+        self.extra_outputs = extra_outputs;
         let path = self.root.join("config.json");
         let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        config["inputs"] = json!(input.into_iter().map(|(channels, active)|
-            json!({"channel_count": channels, "is_main": true, "active": active})).collect::<Vec<_>>());
-        config["auxiliaries"] = json!(self.auxiliaries);
+        config["inputs"] = json!(input.into_iter().map(|(channels, is_main, active)|
+            json!({"channel_count": channels, "is_main": is_main, "active": active})).collect::<Vec<_>>());
+        config["extra_outputs"] = json!(self.extra_outputs.iter().map(|&(channels, is_main)|
+            json!({"channel_count": channels, "is_main": is_main, "active": false})).collect::<Vec<_>>());
         fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
         self
     }
@@ -469,14 +481,14 @@ impl Mock {
                 input_buses: self
                     .input
                     .into_iter()
-                    .map(|(channels, active)| BounceAudioBus::new(channels, true, Some(active)))
+                    .map(|(channels, is_main, active)| {
+                        BounceAudioBus::new(channels, is_main, Some(active))
+                    })
                     .collect(),
                 output_buses: std::iter::once(BounceAudioBus::new(self.channels, true, Some(true)))
-                    .chain(
-                        self.auxiliaries
-                            .iter()
-                            .map(|&channels| BounceAudioBus::new(channels, false, Some(false))),
-                    )
+                    .chain(self.extra_outputs.iter().map(|&(channels, is_main)| {
+                        BounceAudioBus::new(channels, is_main, Some(false))
+                    }))
                     .collect(),
                 event_input_buses: vec![(16, true, Some(true))],
                 event_output_buses: vec![],
@@ -1416,195 +1428,296 @@ fn strict_clone_pending_retains_same_reservation_until_force_and_concrete_reap()
 #[test]
 fn strict_clone_dry_topology_preserves_descriptors_and_sends_exact_positive_zero_inputs() {
     let _serial = serial();
-    for input in [
-        None,
-        Some((1, true)),
-        Some((2, true)),
-        Some((1, false)),
-        Some((2, false)),
-    ] {
-        for channels in [1, 2] {
-            let mock = Mock::with_shape("", "", channels, 0).with_topology(input, vec![1, 2]);
-            let (_, capture) = mock.capture();
-            assert_eq!(
-                capture.metadata().input_buses.len(),
-                usize::from(input.is_some())
-            );
-            assert_eq!(capture.metadata().output_buses.len(), 3);
-            let RenderOutcome::Complete(_) = normal_job(&mock).finish() else {
-                panic!("dry topology mock failed: input={input:?}, channels={channels}")
-            };
-            let expected_inputs = input
-                .filter(|(_, active)| *active)
-                .map_or(0, |(channels, _)| channels);
-            let zeros: Vec<_> = mock
-                .ledger()
-                .into_iter()
-                .filter(|entry| entry["kind"] == "silent_inputs")
-                .collect();
-            assert_eq!(
-                zeros.len(),
-                2,
-                "every musical Process checks all wire samples"
-            );
-            for entry in zeros {
-                assert_eq!(entry["channels"], expected_inputs);
-                assert_eq!(entry["frames"], 128);
-                assert_eq!(entry["bits"], "positive_zero");
+    let mut inputs = vec![None];
+    let mut extra_bus_options = Vec::new();
+    for channels in [1, 2] {
+        for is_main in [false, true] {
+            extra_bus_options.push((channels, is_main));
+            for active in [false, true] {
+                inputs.push(Some((channels, is_main, active)));
             }
-            let wav = crate::wav::read_wav(mock.output()).unwrap();
-            assert_eq!(wav.frame_count(), 128);
-            let (frames, remainder) = wav.samples.as_chunks::<2>();
-            assert!(remainder.is_empty());
-            for frame in frames {
-                assert_eq!(frame, &[0.25, if channels == 1 { 0.25 } else { -0.5 }]);
-            }
-            assert!(
-                !mock
-                    .commands()
-                    .iter()
-                    .any(|name| name.starts_with("SetBusActive"))
-            );
-            mock.assert_cooperative(true);
         }
     }
+    let mut extra_output_layouts = vec![vec![]];
+    for &first in &extra_bus_options {
+        extra_output_layouts.push(vec![first]);
+        for &second in &extra_bus_options {
+            extra_output_layouts.push(vec![first, second]);
+        }
+    }
+    assert_eq!(inputs.len(), 9);
+    assert_eq!(extra_output_layouts.len(), 21);
+    let mut observed_shape_cases = 0;
+    for input in inputs {
+        for channels in [1, 2] {
+            for extra_outputs in &extra_output_layouts {
+                let mock = Mock::with_shape("", "", channels, 0)
+                    .with_topology(input, extra_outputs.clone());
+                let (_, capture) = mock.capture();
+                let expected_inputs: Vec<_> = input
+                    .into_iter()
+                    .map(|(channels, is_main, active)| {
+                        BounceAudioBus::new(channels, is_main, Some(active))
+                    })
+                    .collect();
+                let expected_outputs: Vec<_> =
+                    std::iter::once(BounceAudioBus::new(channels, true, Some(true)))
+                        .chain(extra_outputs.iter().map(|&(channels, is_main)| {
+                            BounceAudioBus::new(channels, is_main, Some(false))
+                        }))
+                        .collect();
+                assert_eq!(capture.metadata().input_buses, expected_inputs);
+                assert_eq!(capture.metadata().output_buses, expected_outputs);
+                // The observed Aux stereo input and all-Main stereo outputs must
+                // appear as exactly this bounded, known-activation fixture.
+                if input == Some((2, false, true))
+                    && channels == 2
+                    && extra_outputs.as_slice() == [(2, true), (2, true)]
+                {
+                    observed_shape_cases += 1;
+                    assert_eq!(
+                        capture.metadata().input_buses,
+                        vec![BounceAudioBus::new(2, false, Some(true))]
+                    );
+                    assert_eq!(
+                        capture.metadata().output_buses,
+                        vec![
+                            BounceAudioBus::new(2, true, Some(true)),
+                            BounceAudioBus::new(2, true, Some(false)),
+                            BounceAudioBus::new(2, true, Some(false)),
+                        ]
+                    );
+                }
+                let RenderOutcome::Complete(_) = normal_job(&mock).finish() else {
+                    panic!(
+                        "dry topology mock failed: input={input:?}, channels={channels}, extras={extra_outputs:?}"
+                    )
+                };
+                let expected_layout = json!({
+                    "inputs": expected_inputs.iter().map(|bus| json!({
+                        "channel_count": bus.channel_count,
+                        "is_main": bus.is_main,
+                        "active": bus.active,
+                    })).collect::<Vec<_>>(),
+                    "outputs": expected_outputs.iter().map(|bus| json!({
+                        "channel_count": bus.channel_count,
+                        "is_main": bus.is_main,
+                        "active": bus.active,
+                    })).collect::<Vec<_>>(),
+                });
+                let ledger = mock.ledger();
+                let layouts: Vec<_> = ledger
+                    .iter()
+                    .filter(|entry| entry["kind"] == "audio_topology")
+                    .collect();
+                assert_eq!(layouts.len(), 5);
+                for (index, entry) in layouts.into_iter().enumerate() {
+                    assert_eq!(
+                        entry["stage"],
+                        format!("CheckedAudioBusLayout:{}", index + 1)
+                    );
+                    assert_eq!(entry["layout"], expected_layout);
+                }
+                let expected_input_channels = input
+                    .filter(|(_, _, active)| *active)
+                    .map_or(0, |(channels, _, _)| channels);
+                let zeros: Vec<_> = ledger
+                    .iter()
+                    .filter(|entry| entry["kind"] == "silent_inputs")
+                    .collect();
+                assert_eq!(
+                    zeros.len(),
+                    2,
+                    "every musical Process checks all wire samples"
+                );
+                for entry in zeros {
+                    assert_eq!(entry["channels"], expected_input_channels);
+                    assert_eq!(entry["frames"], 128);
+                    assert_eq!(entry["bits"], "positive_zero");
+                }
+                let wav = crate::wav::read_wav(mock.output()).unwrap();
+                assert_eq!(wav.frame_count(), 128);
+                let (frames, remainder) = wav.samples.as_chunks::<2>();
+                assert!(remainder.is_empty());
+                for frame in frames {
+                    assert_eq!(frame, &[0.25, if channels == 1 { 0.25 } else { -0.5 }]);
+                }
+                assert!(
+                    !mock
+                        .commands()
+                        .iter()
+                        .any(|name| name.starts_with("SetBusActive"))
+                );
+                mock.assert_cooperative(true);
+            }
+        }
+    }
+    assert_eq!(observed_shape_cases, 1);
 }
 
 #[test]
 fn strict_clone_full_dry_topology_drift_refuses_before_and_after_each_process() {
     let _serial = serial();
     for occurrence in 1..=5 {
-        for fault in [
-            "audio_input_unknown",
-            "audio_input_aux",
-            "audio_input_channels",
-            "audio_input_activation_drift",
-            "audio_active_aux",
-            "audio_aux_unknown",
-            "audio_aux_main",
-            "audio_aux_channels",
-            "audio_aux_drift",
-            "audio_aux_order",
-            "audio_aux_removed",
-            "audio_extra_aux",
-        ] {
-            let stage = format!("CheckedAudioBusLayout:{occurrence}");
-            let mock = Mock::new(fault, &stage).with_topology(Some((2, true)), vec![1, 2]);
-            let failure = failed(normal_job(&mock).finish());
-            let supported_drift = matches!(
-                fault,
-                "audio_input_activation_drift"
-                    | "audio_aux_drift"
-                    | "audio_aux_order"
-                    | "audio_aux_removed"
-            );
-            let (expected_kind, expected_message) = if supported_drift {
-                match occurrence {
-                    1 => (
-                        FailureKind::Backend,
-                        "Fresh strict clone metadata differs from authoritative capture",
-                    ),
-                    2 | 4 => (
-                        FailureKind::Invalid,
-                        "Instrument metadata changed before Process",
-                    ),
-                    3 | 5 => (
-                        FailureKind::Invalid,
-                        "Instrument metadata changed after Process",
-                    ),
-                    _ => unreachable!(),
+        for (input_main, extra_main) in [(true, false), (false, false), (true, true), (false, true)]
+        {
+            for fault in [
+                "audio_input_unknown",
+                "audio_input_aux",
+                "audio_input_main",
+                "audio_extra_input",
+                "audio_input_channels",
+                "audio_input_activation_drift",
+                "audio_active_aux",
+                "audio_aux_unknown",
+                "audio_aux_main",
+                "audio_aux_aux",
+                "audio_aux_channels",
+                "audio_aux_drift",
+                "audio_aux_order",
+                "audio_aux_removed",
+                "audio_extra_aux",
+                "audio_aux",
+                "audio_unknown",
+                "audio_inactive",
+                "audio_channels",
+                "audio_output_missing",
+            ] {
+                if matches!(fault, "audio_input_aux") && !input_main
+                    || matches!(fault, "audio_input_main") && input_main
+                    || matches!(fault, "audio_aux_main") && extra_main
+                    || matches!(fault, "audio_aux_aux") && !extra_main
+                {
+                    continue;
                 }
-            } else if matches!(fault, "audio_input_unknown" | "audio_aux_unknown") {
-                (
-                    FailureKind::Backend,
-                    "Instrument bounce activation is unknown; a fresh load with explicit inactive-bus acknowledgment is required",
-                )
-            } else {
-                (
-                    FailureKind::Backend,
-                    "Instrument bounce requires at most one known main mono/stereo input, one known-active main mono/stereo output, and at most two known-inactive auxiliary mono/stereo outputs",
-                )
-            };
-            assert_eq!(
-                failure.kind, expected_kind,
-                "{fault} at {stage}: {failure:?}"
-            );
-            assert_eq!(failure.primary, expected_message, "{fault} at {stage}");
-            if expected_kind == FailureKind::Backend {
-                let backend = failure
-                    .backend
-                    .as_ref()
-                    .expect("exact local admission failure");
-                assert_eq!(backend.kind, BackendFailureKind::Backend);
-                assert_eq!(backend.diagnostic(), expected_message);
+                let stage = format!("CheckedAudioBusLayout:{occurrence}");
+                let mock = Mock::new(fault, &stage).with_topology(
+                    Some((2, input_main, true)),
+                    vec![(1, extra_main), (2, extra_main)],
+                );
+                let failure = failed(normal_job(&mock).finish());
+                let supported_drift = matches!(
+                    fault,
+                    "audio_input_aux"
+                        | "audio_input_main"
+                        | "audio_aux_main"
+                        | "audio_aux_aux"
+                        | "audio_input_activation_drift"
+                        | "audio_aux_drift"
+                        | "audio_aux_order"
+                        | "audio_aux_removed"
+                );
+                let (expected_kind, expected_message) = if supported_drift {
+                    match occurrence {
+                        1 => (
+                            FailureKind::Backend,
+                            "Fresh strict clone metadata differs from authoritative capture",
+                        ),
+                        2 | 4 => (
+                            FailureKind::Invalid,
+                            "Instrument metadata changed before Process",
+                        ),
+                        3 | 5 => (
+                            FailureKind::Invalid,
+                            "Instrument metadata changed after Process",
+                        ),
+                        _ => unreachable!(),
+                    }
+                } else if matches!(
+                    fault,
+                    "audio_input_unknown" | "audio_aux_unknown" | "audio_unknown"
+                ) {
+                    (
+                        FailureKind::Backend,
+                        "Instrument bounce activation is unknown; a fresh load with explicit inactive-bus acknowledgment is required",
+                    )
+                } else {
+                    (
+                        FailureKind::Backend,
+                        "Instrument bounce requires at most one known mono/stereo input for explicit silence, one known-active main mono/stereo output at index zero, and at most two known-inactive mono/stereo extra outputs",
+                    )
+                };
                 assert_eq!(
-                    backend.strict_kind, None,
-                    "not a transport or decoder failure"
+                    failure.kind, expected_kind,
+                    "{fault} at {stage}: {failure:?}"
                 );
-                assert_eq!(backend.delivery, None);
-            } else {
+                assert_eq!(failure.primary, expected_message, "{fault} at {stage}");
+                if expected_kind == FailureKind::Backend {
+                    let backend = failure
+                        .backend
+                        .as_ref()
+                        .expect("exact local admission failure");
+                    assert_eq!(backend.kind, BackendFailureKind::Backend);
+                    assert_eq!(backend.diagnostic(), expected_message);
+                    assert_eq!(
+                        backend.strict_kind, None,
+                        "not a transport or decoder failure"
+                    );
+                    assert_eq!(backend.delivery, None);
+                } else {
+                    assert!(
+                        failure.backend.is_none(),
+                        "renderer equality fence owns supported drift"
+                    );
+                }
+                assert!(failure.cleanup.is_empty(), "{fault}: {failure:?}");
+                assert!(failure.cleanup_backend.is_none());
+                assert!(!failure.cleanup_grace_elapsed);
+                let ledger = mock.ledger();
+                let injections: Vec<_> = ledger
+                    .iter()
+                    .filter(|entry| entry["kind"] == "injected_audio_topology")
+                    .collect();
+                assert_eq!(
+                    injections.len(),
+                    1,
+                    "the selected mutation must actually occur"
+                );
+                assert_eq!(injections[0]["stage"], stage);
+                assert_eq!(injections[0]["fault"], fault);
                 assert!(
-                    failure.backend.is_none(),
-                    "renderer equality fence owns supported drift"
+                    ledger
+                        .iter()
+                        .any(|entry| entry["kind"] == "reply" && entry["stage"] == stage)
                 );
+                let commands = mock.commands();
+                assert_eq!(
+                    commands
+                        .iter()
+                        .filter(|name| name.starts_with("CheckedAudioBusLayout:"))
+                        .count(),
+                    occurrence
+                );
+                let injected_index = commands
+                    .iter()
+                    .position(|name| name == &stage)
+                    .expect("injected request was dispatched");
+                let mut exact_suffix = vec![stage];
+                if supported_drift {
+                    // Supported shapes reach complete metadata equality; policy failures stop
+                    // at the raw audio policy before any later metadata request.
+                    exact_suffix.extend([
+                        format!("EventBusLayout:{occurrence}"),
+                        format!("LatencySamples:{occurrence}"),
+                        format!("TailSamples:{occurrence}"),
+                    ]);
+                }
+                exact_suffix.extend(["StopProcessing:1".into(), "Shutdown:1".into()]);
+                assert_eq!(
+                    &commands[injected_index..],
+                    exact_suffix.as_slice(),
+                    "exact refusal and cleanup stage: {fault}"
+                );
+                assert_eq!(
+                    commands
+                        .iter()
+                        .filter(|name| name.starts_with("Process:"))
+                        .count(),
+                    (occurrence - 1) / 2
+                );
+                mock.assert_unchanged();
+                mock.assert_cooperative(true);
             }
-            assert!(failure.cleanup.is_empty(), "{fault}: {failure:?}");
-            assert!(failure.cleanup_backend.is_none());
-            assert!(!failure.cleanup_grace_elapsed);
-            let ledger = mock.ledger();
-            let injections: Vec<_> = ledger
-                .iter()
-                .filter(|entry| entry["kind"] == "injected_audio_topology")
-                .collect();
-            assert_eq!(
-                injections.len(),
-                1,
-                "the selected mutation must actually occur"
-            );
-            assert_eq!(injections[0]["stage"], stage);
-            assert_eq!(injections[0]["fault"], fault);
-            assert!(
-                ledger
-                    .iter()
-                    .any(|entry| entry["kind"] == "reply" && entry["stage"] == stage)
-            );
-            let commands = mock.commands();
-            assert_eq!(
-                commands
-                    .iter()
-                    .filter(|name| name.starts_with("CheckedAudioBusLayout:"))
-                    .count(),
-                occurrence
-            );
-            let injected_index = commands
-                .iter()
-                .position(|name| name == &stage)
-                .expect("injected request was dispatched");
-            let mut exact_suffix = vec![stage];
-            if supported_drift {
-                // Supported shapes reach complete metadata equality; policy failures stop
-                // at the raw audio policy before any later metadata request.
-                exact_suffix.extend([
-                    format!("EventBusLayout:{occurrence}"),
-                    format!("LatencySamples:{occurrence}"),
-                    format!("TailSamples:{occurrence}"),
-                ]);
-            }
-            exact_suffix.extend(["StopProcessing:1".into(), "Shutdown:1".into()]);
-            assert_eq!(
-                &commands[injected_index..],
-                exact_suffix.as_slice(),
-                "exact refusal and cleanup stage: {fault}"
-            );
-            assert_eq!(
-                commands
-                    .iter()
-                    .filter(|name| name.starts_with("Process:"))
-                    .count(),
-                (occurrence - 1) / 2
-            );
-            mock.assert_unchanged();
-            mock.assert_cooperative(true);
         }
     }
 }

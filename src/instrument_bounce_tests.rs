@@ -734,11 +734,11 @@ fn bounce_metadata_and_state_policy_rejects_unsupported_inputs_and_empty_state()
             1 => state
                 .metadata
                 .input_buses
-                .push(BounceAudioBus::new(2, false, Some(false))),
+                .push(BounceAudioBus::new(3, false, Some(false))),
             2 => state
                 .metadata
                 .output_buses
-                .push(BounceAudioBus::new(2, true, Some(false))),
+                .push(BounceAudioBus::new(2, true, Some(true))),
             3 => state
                 .metadata
                 .event_output_buses
@@ -779,32 +779,41 @@ fn bounce_eligibility_does_not_silently_remove_unsupported_project_features() {
 fn bounce_audio_policy_keeps_every_declared_bus_and_known_activation() {
     for input_channels in [0, 1, 2] {
         for input_active in [false, true] {
-            for output_channels in [1, 2] {
-                for auxiliaries in 0..=2 {
-                    let mut metadata = state().metadata;
-                    metadata.input_buses = if input_channels == 0 {
-                        vec![]
-                    } else {
-                        vec![BounceAudioBus::new(
-                            input_channels,
-                            true,
-                            Some(input_active),
-                        )]
-                    };
-                    metadata.output_buses =
-                        vec![BounceAudioBus::new(output_channels, true, Some(true))];
-                    metadata.output_buses.extend(
-                        (0..auxiliaries)
-                            .map(|index| BounceAudioBus::new(index + 1, false, Some(false))),
-                    );
-                    let exact = metadata.clone();
-                    metadata.validate(48_000).unwrap();
-                    assert_eq!(metadata, exact);
-                    assert_eq!(metadata.output_buses.len(), 1 + auxiliaries);
-                    assert_eq!(
-                        metadata.participating_input_channels(),
-                        if input_active { input_channels } else { 0 }
-                    );
+            for input_main in [false, true] {
+                for output_channels in [1, 2] {
+                    for extras in 0..=2 {
+                        for role_mask in 0..(1 << extras) {
+                            for channel_mask in 0..(1 << extras) {
+                                let mut metadata = state().metadata;
+                                metadata.input_buses = if input_channels == 0 {
+                                    vec![]
+                                } else {
+                                    vec![BounceAudioBus::new(
+                                        input_channels,
+                                        input_main,
+                                        Some(input_active),
+                                    )]
+                                };
+                                metadata.output_buses =
+                                    vec![BounceAudioBus::new(output_channels, true, Some(true))];
+                                metadata.output_buses.extend((0..extras).map(|index| {
+                                    BounceAudioBus::new(
+                                        1 + ((channel_mask >> index) & 1),
+                                        role_mask & (1 << index) != 0,
+                                        Some(false),
+                                    )
+                                }));
+                                let exact = metadata.clone();
+                                metadata.validate(48_000).unwrap();
+                                assert_eq!(metadata, exact);
+                                assert_eq!(metadata.output_buses.len(), 1 + extras);
+                                assert_eq!(
+                                    metadata.participating_input_channels(),
+                                    if input_active { input_channels } else { 0 }
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -813,50 +822,78 @@ fn bounce_audio_policy_keeps_every_declared_bus_and_known_activation() {
 
 #[test]
 fn bounce_audio_policy_refuses_every_out_of_bound_raw_descriptor_without_projection() {
-    let mut valid = state().metadata;
-    valid.input_buses = vec![BounceAudioBus::new(2, true, Some(true))];
-    valid.output_buses.extend([
-        BounceAudioBus::new(1, false, Some(false)),
-        BounceAudioBus::new(2, false, Some(false)),
-    ]);
-    for case in 0..19 {
-        let mut metadata = valid.clone();
-        match case {
-            0 => metadata.input_buses.push(metadata.input_buses[0]),
-            1 => metadata.input_buses[0].is_main = false,
-            2 => metadata.input_buses[0].channel_count = 0,
-            3 => metadata.input_buses[0].channel_count = 3,
-            4 => metadata.input_buses[0].active = None,
-            5 => metadata.output_buses.clear(),
-            6 => metadata
-                .output_buses
-                .push(BounceAudioBus::new(2, false, Some(false))),
-            7 => metadata.output_buses[0].is_main = false,
-            8 => metadata.output_buses[0].active = Some(false),
-            9 => metadata.output_buses[0].active = None,
-            10 => metadata.output_buses[0].channel_count = 0,
-            11 => metadata.output_buses[0].channel_count = 3,
-            12 => metadata.output_buses[1].is_main = true,
-            13 => metadata.output_buses[2].is_main = true,
-            14 => metadata.output_buses[1].active = Some(true),
-            15 => metadata.output_buses[2].active = None,
-            16 => metadata.output_buses[2].channel_count = 0,
-            17 => metadata.output_buses[2].channel_count = 3,
-            _ => metadata.output_buses.swap(0, 2),
+    for input_main in [false, true] {
+        for extra_one_main in [false, true] {
+            for extra_two_main in [false, true] {
+                let mut valid = state().metadata;
+                valid.input_buses = vec![BounceAudioBus::new(2, input_main, Some(true))];
+                valid.output_buses.extend([
+                    BounceAudioBus::new(1, extra_one_main, Some(false)),
+                    BounceAudioBus::new(2, extra_two_main, Some(false)),
+                ]);
+                valid.validate(48_000).unwrap();
+                for case in 0..20 {
+                    let mut metadata = valid.clone();
+                    match case {
+                        0 => metadata.input_buses.push(metadata.input_buses[0]),
+                        1 => metadata.input_buses[0].channel_count = 0,
+                        2 => metadata.input_buses[0].channel_count = 3,
+                        3 => metadata.input_buses[0].active = None,
+                        4 => metadata.output_buses.clear(),
+                        5 => metadata.output_buses.push(BounceAudioBus::new(
+                            2,
+                            extra_one_main,
+                            Some(false),
+                        )),
+                        6 => metadata.output_buses[0].is_main = false,
+                        7 => metadata.output_buses[0].active = Some(false),
+                        8 => metadata.output_buses[0].active = None,
+                        9 => metadata.output_buses[0].channel_count = 0,
+                        10 => metadata.output_buses[0].channel_count = 3,
+                        11 => metadata.output_buses[1].active = Some(true),
+                        12 => metadata.output_buses[2].active = Some(true),
+                        13 => metadata.output_buses[1].active = None,
+                        14 => metadata.output_buses[2].active = None,
+                        15 => metadata.output_buses[1].channel_count = 0,
+                        16 => metadata.output_buses[1].channel_count = 3,
+                        17 => metadata.output_buses[2].channel_count = 0,
+                        18 => metadata.output_buses[2].channel_count = 3,
+                        _ => metadata.output_buses.swap(0, 2),
+                    }
+                    let exact = metadata.clone();
+                    assert!(metadata.validate(48_000).is_err(), "case {case}");
+                    assert_eq!(metadata, exact, "admission must be observational");
+                }
+            }
         }
-        let exact = metadata.clone();
-        assert!(metadata.validate(48_000).is_err(), "case {case}");
-        assert_eq!(metadata, exact, "admission must be observational");
     }
-    let mut changed = valid.clone();
-    changed.output_buses[1].channel_count = 2;
-    changed.validate(48_000).unwrap();
-    assert_ne!(
-        changed, valid,
-        "even supported inactive-bus drift changes the receipt"
-    );
-    changed = valid.clone();
-    changed.output_buses.swap(1, 2);
-    changed.validate(48_000).unwrap();
-    assert_ne!(changed, valid, "inactive order survives metadata equality");
+}
+
+#[test]
+fn bounce_audio_supported_role_channel_and_order_drift_still_changes_full_receipt() {
+    let mut valid = state().metadata;
+    valid.input_buses = vec![BounceAudioBus::new(2, false, Some(true))];
+    valid.output_buses.extend([
+        BounceAudioBus::new(1, true, Some(false)),
+        BounceAudioBus::new(2, true, Some(false)),
+    ]);
+    valid.validate(48_000).unwrap();
+    for case in 0..6 {
+        let mut changed = valid.clone();
+        match case {
+            0 => changed.input_buses[0].is_main = true,
+            1 => changed.output_buses[1].is_main = false,
+            2 => changed.output_buses[2].is_main = false,
+            3 => changed.output_buses[1].channel_count = 2,
+            4 => changed.output_buses.swap(1, 2),
+            _ => changed.input_buses[0].active = Some(false),
+        }
+        let exact = changed.clone();
+        changed.validate(48_000).unwrap();
+        assert_eq!(changed, exact, "admission must not normalize a descriptor");
+        assert_ne!(
+            changed, valid,
+            "supported drift {case} changes the full receipt"
+        );
+    }
 }

@@ -180,7 +180,10 @@ mod fresh_topology_diagnostic {
 
         #[test]
         fn refusal_preserves_raw_roles_unknowns_and_separate_proposal() {
-            let actual = metadata();
+            let mut actual = metadata();
+            // Roles are supported independently of participation. This refusal now
+            // uses an explicit channel bound while retaining the observed roles.
+            actual.output_buses[2].channel_count = 3;
             let mut proposal = actual.clone();
             for bus in &mut proposal.output_buses[1..] {
                 bus.active = Some(false);
@@ -201,7 +204,7 @@ mod fresh_topology_diagnostic {
                         active: false,
                     },
                     AudioBusConfig {
-                        channel_count: 2,
+                        channel_count: 3,
                         active: false,
                     },
                 ],
@@ -216,6 +219,18 @@ mod fresh_topology_diagnostic {
             );
             let json = parse(&encoded, &original);
             assert_eq!(json["validation_phase"], "proposed_preflight");
+            assert_eq!(
+                json["raw_checked"]["outputs"]["entries"][2]["channel_count"],
+                3
+            );
+            assert_eq!(
+                json["proposal"]["outputs"]["entries"][2]["channel_count"],
+                3
+            );
+            assert_eq!(
+                json["prepared"]["outputs"]["entries"][2]["channel_count"],
+                3
+            );
             assert_eq!(
                 json["raw_checked"]["inputs"]["entries"][0]["is_main"],
                 false

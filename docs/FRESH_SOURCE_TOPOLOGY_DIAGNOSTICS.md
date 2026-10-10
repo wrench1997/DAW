@@ -64,3 +64,30 @@ from dabcd337; earlier broad evidence remains historical and is not counted here
 The only post-test repository changes are this result appendix and WORK_LOG.
 Genuine001 remains failed; no additional plugin instance, diagnostic attempt,
 capture, clone or WAV qualification was performed for this checkpoint.
+
+## One-source observed diagnostic and role-policy follow-on, 2026-10-10
+
+The separately frozen one-source diagnostic completed all three diagnostic stages
+with one typed proposed-preflight refusal, exit0, no watchdog signals and unchanged
+inputs. It did not admit the instrument. Actual raw input0 was stereo Aux/known true;
+all three stereo outputs were Main, with activation true/null/null. Prepared
+participation was input true and outputs true/false/false. Proposed false remained
+hypothetical and separately tagged. This establishes both old role-policy
+mismatches without retroactively filling the earlier failed run's missing evidence.
+Legacy source Joined/helper absence remains distinct from strict checked reap.
+
+Outer receipt c5c5e111d2f2bf3efac2f03ea93c3671f2cb33b2ad5a4152482d6cea1589e2af
+and raw events 47d6e5da27a364b55b29762dda586a82574bb2e47048e900bc34757eb26fc0be
+retain qualification_success=false. The existing HOME warning is not causal proof.
+No capture, setter, musical Process, strict clone or WAV stage ran.
+
+The current UNVALIDATED policy source, approved in plan 00be9d0d, allows either
+preserved input role and either preserved inactive-extra-output role. Output0 must
+remain Main/known true; every extra output still needs a real known false record.
+The shared validator's structural error wording therefore changes deliberately;
+the diagnostic serializer, marker, bounded schema and refusal-only call sites do
+not. Current rejection fixtures add an explicit unsupported channel count while
+retaining exact raw/proposal/null distinctions and no-extra-call ledgers. Frozen
+historical diagnostic harnesses and their old-prefix acceptance remain untouched.
+A future genuine qualification must observe fresh actual acknowledgments rather
+than treating this diagnostic's proposal as evidence of inactivity.

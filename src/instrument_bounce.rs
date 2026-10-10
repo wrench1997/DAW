@@ -112,6 +112,7 @@ impl BounceAudioBus {
 }
 
 /// The single bounded dry-generator policy used for capture and clone admission.
+/// Input and inactive-extra roles are preserved without determining participation.
 /// Unknown activation is never projected to false or removed from the declaration.
 pub(crate) fn validate_bounce_audio_topology(
     inputs: &[BounceAudioBus],
@@ -121,18 +122,17 @@ pub(crate) fn validate_bounce_audio_topology(
         return Err("Instrument bounce activation is unknown; a fresh load with explicit inactive-bus acknowledgment is required".into());
     }
     if inputs.len() > 1
-        || inputs
-            .iter()
-            .any(|bus| !bus.is_main || !matches!(bus.channel_count, 1 | 2))
+        || inputs.iter().any(|bus| !matches!(bus.channel_count, 1 | 2))
         || !(1..=3).contains(&outputs.len())
         || !outputs.first().is_some_and(|bus| {
             bus.is_main && bus.active == Some(true) && matches!(bus.channel_count, 1 | 2)
         })
-        || outputs.iter().skip(1).any(|bus| {
-            bus.is_main || bus.active != Some(false) || !matches!(bus.channel_count, 1 | 2)
-        })
+        || outputs
+            .iter()
+            .skip(1)
+            .any(|bus| bus.active != Some(false) || !matches!(bus.channel_count, 1 | 2))
     {
-        return Err("Instrument bounce requires at most one known main mono/stereo input, one known-active main mono/stereo output, and at most two known-inactive auxiliary mono/stereo outputs".into());
+        return Err("Instrument bounce requires at most one known mono/stereo input for explicit silence, one known-active main mono/stereo output at index zero, and at most two known-inactive mono/stereo extra outputs".into());
     }
     Ok(())
 }

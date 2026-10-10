@@ -1781,3 +1781,28 @@ is claimed. Vendor/shared-validator/helper bytes remain equal to dabcd337. This
 appendix and the diagnostic result appendix are the only post-test source edits.
 The historical genuine001 failure is preserved; a new one-source diagnostic run
 still requires its own frozen harness/review/archive and root authorization.
+
+
+## Minimal role-versus-participation policy source, 2026-10-10 — UNVALIDATED
+
+Base 28b3e38 is the reviewed diagnostic source/mock checkpoint. Its separately frozen
+one-source actual observation was completed and durably saved as experimental v96:
+Aux stereo input/known true, all-Main stereo outputs with raw true/null/null,
+prepared true/[true,false,false], hypothetical false acknowledgments only.
+The instrument stayed refused; original genuine001 remains FAILED.
+
+Root approved plan 00be9d0d0231270971ecf8c437426e75c4f4e846dffe64edb2ab5b4f64821084
+after both independent reviewers cleared it. This source removes only the shared
+validator's input-Main and inactive-extra-Aux checks, with an accurate structural
+error. Output0 Main/known true, known false extras, bounded mono/stereo channels,
+explicit positive-zero input and complete ordered descriptor equality stay strict.
+Capture remains read-only; fresh source setup, default activation, vendor/kernel,
+wire, clone state/base handling and checked disposal bodies are unchanged.
+
+Targeted pure/worker/strict mock matrices cover independent role acceptance, actual
+observed shape, exact zero samples and supported-but-drift role failures. Former
+role-only rejection fixtures gain a genuine channel/count/activation violation.
+The pure diagnostic fixture changes only its test metadata, not serialization.
+All new source/mock/compiler gates remain UNEXECUTED. Full source/recovery archive
+and exact independent source reviews precede execution. Genuine capture/render/WAV
+qualification remains separately frozen and authorized after source/mock closure.

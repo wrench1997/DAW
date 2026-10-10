@@ -227,7 +227,12 @@ processing = False
 parameter_applied = False
 acknowledged = set()
 activation_calls = 0
+post_start_fence_held = False
 dry_shape = mode.startswith('dry_') or mode.startswith('fresh_')
+attested = mode.startswith('dry_attested') or mode.startswith('dry_drift')
+observed_roles = 'observed_roles' in mode or mode == 'fresh_role_diagnostic'
+input_aux = observed_roles or mode in ('fresh_input_aux', 'dry_attested_input_aux')
+extra_main = observed_roles or mode in ('fresh_extra_main', 'fresh_main_active_last', 'dry_attested_extra_main')
 for line in sys.stdin:
     request = json.loads(line)
     with open(log, 'a') as stream:
@@ -241,17 +246,15 @@ for line in sys.stdin:
         checked = name == 'CheckedAudioBusLayout'
         def bus(channels, main, active, index, direction):
             if checked:
-                if not active and mode not in ('dry_attested', 'dry_drift') and (direction, index) not in acknowledged:
+                if not active and not attested and (direction, index) not in acknowledged:
                     active = None
                 return dict(channel_count=channels, is_main=main, active=active)
             return dict(channel_count=channels, active=active)
-        inputs = [bus(2, mode != 'fresh_input_aux', mode != 'fresh_input_inactive', 0, 'Input')]
-        outputs = [bus(2, True, True, 0, 'Output'), bus(1, False, False, 1, 'Output'),
-                   bus(3 if mode == 'fresh_unsupported_last' else 2, False, mode == 'fresh_aux_active_last', 2, 'Output')]
-        if mode == 'fresh_role_diagnostic':
-            if checked:
-                inputs[0]['is_main'] = False
-                for output in outputs: output['is_main'] = True
+        inputs = [bus(2, not input_aux, mode != 'fresh_input_inactive', 0, 'Input')]
+        outputs = [bus(2, mode != 'fresh_output0_aux', True, 0, 'Output'),
+                   bus(2 if observed_roles else 1, extra_main, False, 1, 'Output'),
+                   bus(3 if mode in ('fresh_unsupported_last', 'fresh_role_diagnostic') else 2,
+                       extra_main, mode in ('fresh_aux_active_last', 'fresh_main_active_last'), 2, 'Output')]
         if mode == 'fresh_raw_invalid_after_start' and checked and processing:
             outputs[0]['channel_count'] = 4
         if mode == 'fresh_extra_output': outputs.append(bus(2, False, False, 3, 'Output'))
@@ -261,6 +264,15 @@ for line in sys.stdin:
         if mode == 'fresh_active_unknown' and checked: inputs[0]['active'] = None
         if mode == 'fresh_drift' and activation_calls: outputs[-1]['channel_count'] = 1
         if mode == 'dry_drift' and saved: outputs[-1]['channel_count'] = 1
+        if checked:
+            if ((mode == 'fresh_input_role_drift' and activation_calls)
+                    or (mode == 'fresh_input_role_on_start' and processing)
+                    or (mode == 'dry_drift_input_role' and saved)):
+                inputs[0]['is_main'] = False
+            if ((mode == 'fresh_extra_role_drift' and activation_calls)
+                    or (mode == 'fresh_extra_role_on_start' and processing)
+                    or (mode == 'dry_drift_extra_role' and saved)):
+                outputs[-1]['is_main'] = True
         result = {name: {'layout': dict(inputs=inputs, outputs=outputs)}}
     if name == 'CheckedAudioBusLayout':
         if mode == 'old_audio_helper': result = templates['OldHelper']
@@ -323,6 +335,16 @@ for line in sys.stdin:
                 time.sleep(0.001)
             if not (fixture_dir / 'release').exists() or mode.endswith('_fault'):
                 result = templates['CaptureError']
+    if name == 'CheckedAudioBusLayout' and 'CheckedAudioBusLayout' in result:
+        with (fixture_dir / 'checked-layouts.jsonl').open('a') as stream:
+            stream.write(json.dumps(result['CheckedAudioBusLayout']['layout']) + '\n')
+    if mode == 'fresh_observed_roles_block_post_start' and name == 'TailSamples' and processing and not post_start_fence_held:
+        post_start_fence_held = True
+        (fixture_dir / 'entered').write_text(name)
+        wait_until = time.monotonic() + 4
+        while not (fixture_dir / 'release').exists() and time.monotonic() < wait_until:
+            time.sleep(0.001)
+        if not (fixture_dir / 'release').exists(): result = templates['CaptureError']
     print(json.dumps(result), flush=True)
     if name == 'Shutdown': break
 "#;
@@ -382,6 +404,14 @@ for line in sys.stdin:
     fn requests(&self) -> Vec<serde_json::Value> {
         std::fs::read_to_string(&self.log)
             .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn checked_layouts(&self) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(self.dir.join("checked-layouts.jsonl"))
+            .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
@@ -1014,57 +1044,98 @@ fn dry_metadata() -> BouncePluginMetadata {
     metadata
 }
 
+fn role_metadata(input_main: bool, extras_main: bool, stereo_extras: bool) -> BouncePluginMetadata {
+    let mut metadata = dry_metadata();
+    metadata.input_buses[0].is_main = input_main;
+    for bus in &mut metadata.output_buses[1..] {
+        bus.is_main = extras_main;
+        if stereo_extras {
+            bus.channel_count = 2;
+        }
+    }
+    metadata
+}
+
 #[test]
 fn capture_and_factory_preserve_attested_inactive_audio_declarations() {
-    let fake = FakeHelper::new("dry_attested");
-    let mut source = fake.source();
-    let capture = source
-        .capture_bounce_state(&[17], &capture_fence())
+    for (mode, expected) in [
+        ("dry_attested", dry_metadata()),
+        ("dry_attested_input_aux", role_metadata(false, false, false)),
+        ("dry_attested_extra_main", role_metadata(true, true, false)),
+        (
+            "dry_attested_observed_roles",
+            role_metadata(false, true, true),
+        ),
+    ] {
+        let fake = FakeHelper::new(mode);
+        let mut source = fake.source();
+        let capture = source
+            .capture_bounce_state(&[17], &capture_fence())
+            .unwrap();
+        assert_eq!(capture.metadata, expected, "{mode}");
+        assert_eq!(fake.names(), CAPTURE_SEQUENCE, "{mode}");
+        let clone_fixture = FakeHelper::new(mode);
+        let clone = OfflineInstrument::load_snapshot(
+            clone_fixture.spec(capture.opaque_state.clone()),
+            48_000,
+            &capture,
+        )
         .unwrap();
-    assert_eq!(capture.metadata, dry_metadata());
-    assert_eq!(fake.names(), CAPTURE_SEQUENCE);
-    let clone_fixture = FakeHelper::new("dry_attested");
-    let clone = OfflineInstrument::load_snapshot(
-        clone_fixture.spec(capture.opaque_state.clone()),
-        48_000,
-        &capture,
-    )
-    .unwrap();
-    assert_eq!(clone.metadata(), &capture.metadata);
-    assert_eq!(clone._backend.input_channels, 2);
-    assert_eq!(clone._backend.output_channels, 2);
-    assert!(
-        !clone_fixture
-            .names()
-            .iter()
-            .any(|name| name == "SetBusActive")
-    );
+        assert_eq!(clone.metadata(), &capture.metadata, "{mode}");
+        assert_eq!(clone._backend.input_channels, 2);
+        assert_eq!(clone._backend.output_channels, 2);
+        assert!(!clone_fixture.names().iter().any(|name| matches!(
+            name.as_str(),
+            "SetBusActive" | "Process" | "ProcessBuses" | "ProcessResetOrigin" | "ResetOrigin"
+        )));
+    }
 }
 
 #[test]
 fn capture_unknown_audio_activation_requires_fresh_load_without_mutation() {
-    let fake = FakeHelper::new("dry_unknown");
-    let mut source = fake.source();
-    let error = source
-        .capture_bounce_state(&[17], &capture_fence())
-        .unwrap_err();
-    assert!(matches!(error, BounceCaptureError::Rejected(_)));
-    assert!(error.to_string().contains("fresh load"));
-    assert_eq!(fake.names(), &CAPTURE_SEQUENCE[..6]);
-    assert!(source.prepared && source.plugin.is_processing());
+    for mode in ["dry_unknown", "dry_unknown_observed_roles"] {
+        let fake = FakeHelper::new(mode);
+        let mut source = fake.source();
+        let error = source
+            .capture_bounce_state(&[17], &capture_fence())
+            .unwrap_err();
+        assert!(matches!(error, BounceCaptureError::Rejected(_)));
+        assert!(error.to_string().contains("fresh load"), "{mode}: {error}");
+        assert_eq!(fake.names(), &CAPTURE_SEQUENCE[..6]);
+        let layouts = fake.checked_layouts();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0]["inputs"][0]["active"], true);
+        for index in [1, 2] {
+            assert!(layouts[0]["outputs"][index]["active"].is_null());
+        }
+        if mode == "dry_unknown_observed_roles" {
+            assert_eq!(layouts[0]["inputs"][0]["is_main"], false);
+            assert_eq!(layouts[0]["inputs"][0]["channel_count"], 2);
+            for index in 0..3 {
+                assert_eq!(layouts[0]["outputs"][index]["is_main"], true);
+                assert_eq!(layouts[0]["outputs"][index]["channel_count"], 2);
+            }
+        }
+        assert!(source.prepared && source.plugin.is_processing());
+    }
 }
 
 #[test]
 fn capture_fence_detects_even_supported_inactive_audio_bus_drift() {
-    let fake = FakeHelper::new("dry_drift");
-    let mut source = fake.source();
-    let error = source
-        .capture_bounce_state(&[17], &capture_fence())
-        .unwrap_err();
-    assert!(matches!(error, BounceCaptureError::Rejected(_)));
-    assert!(error.to_string().contains("metadata changed"));
-    assert_eq!(fake.names(), CAPTURE_SEQUENCE);
-    assert!(source.prepared && source.plugin.is_processing());
+    for mode in ["dry_drift", "dry_drift_input_role", "dry_drift_extra_role"] {
+        let fake = FakeHelper::new(mode);
+        let mut source = fake.source();
+        let error = source
+            .capture_bounce_state(&[17], &capture_fence())
+            .unwrap_err();
+        assert!(matches!(error, BounceCaptureError::Rejected(_)));
+        assert!(
+            error.to_string().contains("metadata changed"),
+            "{mode}: {error}"
+        );
+        assert_eq!(fake.names(), CAPTURE_SEQUENCE);
+        assert!(source.prepared && source.plugin.is_processing());
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
@@ -1078,13 +1149,19 @@ fn fresh_config() -> PluginPrepareConfig {
 #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
 #[test]
 fn fresh_source_acknowledges_only_unknown_prepared_inactive_slots_once_before_start() {
-    for mode in ["fresh_normal", "fresh_input_inactive", "dry_attested"] {
+    for (mode, mut expected) in [
+        ("fresh_normal", dry_metadata()),
+        ("fresh_input_inactive", dry_metadata()),
+        ("dry_attested", dry_metadata()),
+        ("fresh_input_aux", role_metadata(false, false, false)),
+        ("fresh_extra_main", role_metadata(true, true, false)),
+        ("fresh_observed_roles", role_metadata(false, true, true)),
+    ] {
         let fake = FakeHelper::new(mode);
         let mut source =
             Vst3Backend::load_fresh_bounce_source(fake.spec(vec![1, 2, 3]), fresh_config())
                 .unwrap();
         source.prepare(fresh_config()).unwrap();
-        let mut expected = dry_metadata();
         if mode == "fresh_input_inactive" {
             expected.input_buses[0].active = Some(false);
         }
@@ -1120,6 +1197,17 @@ fn fresh_source_acknowledges_only_unknown_prepared_inactive_slots_once_before_st
             assert_eq!(data["active"], false);
             assert_eq!(data["media_type"], "Audio");
         }
+        let expected_targets = if mode == "dry_attested" {
+            vec![]
+        } else if mode == "fresh_input_inactive" {
+            vec![("Input", 0), ("Output", 1), ("Output", 2)]
+        } else {
+            vec![("Output", 1), ("Output", 2)]
+        };
+        for ((_, data), (direction, index)) in activations.iter().zip(expected_targets) {
+            assert_eq!(data["direction"], direction);
+            assert_eq!(data["bus_index"], index);
+        }
         if mode != "dry_attested" {
             let first = activations[0].0;
             assert!(names[restore + 1..first].contains(&"CheckedAudioBusLayout".into()));
@@ -1152,9 +1240,10 @@ fn fresh_source_acknowledges_only_unknown_prepared_inactive_slots_once_before_st
 fn fresh_source_complete_preflight_refuses_without_any_activation_or_start() {
     for mode in [
         "fresh_aux_active_last",
+        "fresh_main_active_last",
         "fresh_unsupported_last",
         "fresh_extra_output",
-        "fresh_input_aux",
+        "fresh_output0_aux",
         "fresh_prepared_mismatch",
         "fresh_prepared_count",
         "fresh_prepared_activation",
@@ -1197,12 +1286,20 @@ fn fresh_source_partial_ack_failure_missing_ack_and_drift_never_start_or_retry()
         ("fresh_set_fail2", 2),
         ("fresh_ack_missing", 1),
         ("fresh_drift", 1),
+        ("fresh_input_role_drift", 1),
+        ("fresh_extra_role_drift", 1),
     ] {
         let fake = FakeHelper::new(mode);
         let mut source =
             Vst3Backend::load_fresh_bounce_source(fake.spec(vec![1, 2, 3]), fresh_config())
                 .unwrap();
-        assert!(source.prepare(fresh_config()).is_err(), "{mode}");
+        let error = source.prepare(fresh_config()).unwrap_err();
+        if matches!(mode, "fresh_input_role_drift" | "fresh_extra_role_drift") {
+            assert_eq!(
+                error, "Fresh bounce source topology changed during inactive-bus acknowledgment",
+                "{mode}"
+            );
+        }
         let requests = fake.requests();
         assert_eq!(
             fake.names()
@@ -1240,6 +1337,8 @@ fn failed_fresh_source_worker_publishes_no_ready_or_active_slot_and_leaves_old_s
         "fresh_set_fail2",
         "fresh_ack_missing",
         "fresh_changed_on_start",
+        "fresh_input_role_on_start",
+        "fresh_extra_role_on_start",
     ] {
         let fake = FakeHelper::new(mode);
         let PluginChain {
@@ -1254,7 +1353,17 @@ fn failed_fresh_source_worker_publishes_no_ready_or_active_slot_and_leaves_old_s
         while Instant::now() < deadline {
             while let Some(event) = control.try_next_event() {
                 assert!(!matches!(event, RuntimeEvent::SlotReady { .. }), "{mode}");
-                if matches!(event, RuntimeEvent::SlotFault { slot: 0, .. }) {
+                if let RuntimeEvent::SlotFault { slot: 0, message } = event {
+                    if matches!(
+                        mode,
+                        "fresh_input_role_on_start" | "fresh_extra_role_on_start"
+                    ) {
+                        assert_eq!(
+                            message,
+                            "Fresh bounce source topology changed at Start before admission",
+                            "{mode}"
+                        );
+                    }
                     fault = true;
                 }
             }
@@ -1266,6 +1375,13 @@ fn failed_fresh_source_worker_publishes_no_ready_or_active_slot_and_leaves_old_s
         assert!(fault, "candidate must report its failure: {mode}");
         assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 0);
         assert_eq!(worker.join(), super::super::ShutdownOutcome::Joined);
+        while let Some(event) = control.try_next_event() {
+            assert!(!matches!(event, RuntimeEvent::SlotReady { .. }), "{mode}");
+        }
+        assert!(!fake.names().iter().any(|name| matches!(
+            name.as_str(),
+            "Process" | "ProcessBuses" | "ProcessResetOrigin" | "ResetOrigin"
+        )));
         assert!(old_source.prepared && old_source.plugin.is_processing());
         assert!(
             old.names().is_empty(),
@@ -1278,16 +1394,101 @@ fn failed_fresh_source_worker_publishes_no_ready_or_active_slot_and_leaves_old_s
 #[test]
 fn default_source_loader_never_acknowledges_inactive_defaults() {
     let mut names = Vec::new();
-    for mode in ["normal", "fresh_normal"] {
+    for mode in ["normal", "fresh_normal", "fresh_observed_roles"] {
         let fake = FakeHelper::new(mode);
         let mut source = Vst3Backend::load(fake.spec(vec![]), fresh_config()).unwrap();
         source.prepare(fresh_config()).unwrap();
         assert!(!fake.names().iter().any(|name| name == "SetBusActive"));
         names.push(fake.names());
     }
+    for candidate in &names[1..] {
+        assert_eq!(
+            &names[0], candidate,
+            "default setup call ledger is unchanged for additional inactive buses and roles"
+        );
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn assert_fresh_setup_fences(fake: &FakeHelper, expected: &BouncePluginMetadata) {
+    let mut setup = vec![
+        "LoadPlugin",
+        "AudioBusLayout",
+        "ResetOriginSupport",
+        "LoadState",
+        "CheckedAudioBusLayout",
+        "EventBusLayout",
+        "LatencySamples",
+        "TailSamples",
+        "AudioBusLayout",
+    ];
+    for _ in 0..2 {
+        setup.extend([
+            "SetBusActive",
+            "CheckedAudioBusLayout",
+            "EventBusLayout",
+            "LatencySamples",
+            "TailSamples",
+            "AudioBusLayout",
+        ]);
+    }
+    setup.extend([
+        "CheckedAudioBusLayout",
+        "EventBusLayout",
+        "LatencySamples",
+        "TailSamples",
+        "StartProcessing",
+        "NativeDirtyRevision",
+        "CheckedAudioBusLayout",
+        "EventBusLayout",
+        "LatencySamples",
+        "TailSamples",
+    ]);
+    let names = fake.names();
+    assert!(names.len() >= setup.len(), "incomplete setup: {names:?}");
+    assert!(
+        names[..setup.len()].iter().map(String::as_str).eq(setup),
+        "full preflight, each acknowledgment reread, and post-Start fence precede Ready: {names:?}"
+    );
+    let activations: Vec<_> = fake
+        .requests()
+        .into_iter()
+        .filter_map(|request| request.get("SetBusActive").cloned())
+        .collect();
     assert_eq!(
-        names[0], names[1],
-        "default setup call ledger is unchanged for additional inactive buses"
+        activations,
+        [1, 2].map(|index| serde_json::json!({
+            "media_type": "Audio",
+            "direction": "Output",
+            "bus_index": index,
+            "active": false,
+        }))
+    );
+    let buses = |buses: &[BounceAudioBus]| {
+        buses
+            .iter()
+            .map(|bus| {
+                serde_json::json!({
+                    "channel_count": bus.channel_count,
+                    "is_main": bus.is_main,
+                    "active": bus.active,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let known = serde_json::json!({
+        "inputs": buses(&expected.input_buses),
+        "outputs": buses(&expected.output_buses),
+    });
+    let mut raw = known.clone();
+    raw["outputs"][1]["active"] = serde_json::Value::Null;
+    raw["outputs"][2]["active"] = serde_json::Value::Null;
+    let mut first_ack = raw.clone();
+    first_ack["outputs"][1]["active"] = false.into();
+    assert_eq!(
+        fake.checked_layouts(),
+        [raw, first_ack, known.clone(), known.clone(), known],
+        "raw unknowns become false only after each actual mock acknowledgment; all descriptors survive"
     );
 }
 
@@ -1296,103 +1497,128 @@ fn default_source_loader_never_acknowledges_inactive_defaults() {
 fn fresh_source_worker_admits_ready_only_after_verified_setup_and_start() {
     use super::super::{PluginChain, RuntimeEvent};
     use std::time::{Duration, Instant};
-    let fake = FakeHelper::new("fresh_normal");
-    let PluginChain {
-        audio: _audio,
-        mut control,
-        guard,
-    } = PluginChain::spawn_fresh_bounce_source(41, fake.spec(vec![1, 2, 3]), fresh_config())
-        .unwrap();
-    let mut worker = FreshSourceWorkerGuard::new(&fake, guard);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut ready = false;
-    while Instant::now() < deadline {
-        while let Some(event) = control.try_next_event() {
-            if let RuntimeEvent::SlotFault { slot, message } = &event {
-                panic!(
-                    "unexpected slot {slot} fault: {message}; request ledger: {:#?}",
-                    fake.requests()
+    for (mode, expected) in [
+        ("fresh_normal", dry_metadata()),
+        (
+            "fresh_observed_roles_block_post_start",
+            role_metadata(false, true, true),
+        ),
+    ] {
+        let fake = FakeHelper::new(mode);
+        let PluginChain {
+            audio: _audio,
+            mut control,
+            guard,
+        } = PluginChain::spawn_fresh_bounce_source(41, fake.spec(vec![1, 2, 3]), fresh_config())
+            .unwrap();
+        let mut worker = FreshSourceWorkerGuard::new(&fake, guard);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        if mode == "fresh_observed_roles_block_post_start" {
+            // Hold the final post-Start metadata reply, so command issue alone cannot
+            // masquerade as a completed admission fence. The guard releases on unwind.
+            while !fake.dir.join("entered").exists() && Instant::now() < deadline {
+                while let Some(event) = control.try_next_event() {
+                    assert!(
+                        !matches!(
+                            event,
+                            RuntimeEvent::SlotReady { .. } | RuntimeEvent::SlotFault { .. }
+                        ),
+                        "publication before the held post-Start fence: {event:?}"
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert_eq!(
+                std::fs::read_to_string(fake.dir.join("entered")).unwrap(),
+                "TailSamples"
+            );
+            assert_fresh_setup_fences(&fake, &expected);
+            while let Some(event) = control.try_next_event() {
+                assert!(
+                    !matches!(
+                        event,
+                        RuntimeEvent::SlotReady { .. } | RuntimeEvent::SlotFault { .. }
+                    ),
+                    "publication with final post-Start reply still withheld: {event:?}"
                 );
             }
-            if matches!(event, RuntimeEvent::SlotReady { slot: 0, .. }) {
-                let names = fake.names();
-                let start = names
-                    .iter()
-                    .position(|name| name == "StartProcessing")
-                    .unwrap();
-                assert_eq!(
-                    names[..start]
-                        .iter()
-                        .filter(|name| *name == "SetBusActive")
-                        .count(),
-                    2
-                );
-                assert_eq!(
-                    names[..start]
-                        .iter()
-                        .rposition(|name| name == "SetBusActive")
-                        .map(|index| names[index + 1..start]
-                            .contains(&"CheckedAudioBusLayout".into())),
-                    Some(true)
-                );
-                ready = true;
-            }
+            assert!(
+                control
+                    .plugin_latency_snapshot()
+                    .is_none_or(|snapshot| snapshot.active_mask == 0)
+            );
+            std::fs::write(fake.dir.join("release"), b"allow post-Start fence reply").unwrap();
         }
-        let feedback_published = control
+        let mut ready = false;
+        while Instant::now() < deadline {
+            while let Some(event) = control.try_next_event() {
+                if let RuntimeEvent::SlotFault { slot, message } = &event {
+                    panic!(
+                        "unexpected slot {slot} fault: {message}; request ledger: {:#?}",
+                        fake.requests()
+                    );
+                }
+                if matches!(event, RuntimeEvent::SlotReady { slot: 0, .. }) {
+                    assert_fresh_setup_fences(&fake, &expected);
+                    ready = true;
+                }
+            }
+            let feedback_published = control
+                .native_editor_snapshot(0)
+                .is_some_and(|snapshot| snapshot.state.generation == 2 && snapshot.error.is_none());
+            if ready && feedback_published && control.plugin_latency_snapshot().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            ready,
+            "no SlotReady; request ledger: {:#?}",
+            fake.requests()
+        );
+        let feedback = control
             .native_editor_snapshot(0)
-            .is_some_and(|snapshot| snapshot.state.generation == 2 && snapshot.error.is_none());
-        if ready && feedback_published && control.plugin_latency_snapshot().is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(1));
+            .expect("identified slot snapshot");
+        assert_eq!(
+            feedback.state.generation, 2,
+            "normal worker feedback must complete"
+        );
+        assert!(feedback.state.supported && feedback.state.has_editor && !feedback.state.open);
+        assert!(
+            feedback.error.is_none(),
+            "native feedback failed: {:?}; request ledger: {:#?}",
+            feedback.error,
+            fake.requests()
+        );
+        assert_eq!(feedback.dirty_revision, 0);
+        let names = fake.names();
+        assert!(
+            names
+                .windows(5)
+                .any(|window| window.iter().map(String::as_str).eq([
+                    "Editor",
+                    "TakeParameterEdits",
+                    "TakeHostNotifications",
+                    "ServiceHostRequests",
+                    "NativeDirtyRevision",
+                ])),
+            "complete normal polling sequence missing: {names:?}"
+        );
+        assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 1);
+        assert!(!fake.names().iter().any(|name| matches!(
+            name.as_str(),
+            "Process" | "ProcessBuses" | "ProcessResetOrigin" | "ResetOrigin"
+        )));
+        assert_eq!(control.stats().submitted, 0);
+        assert_eq!(control.stats().completed, 0);
+        let joined = worker.join();
+        assert_eq!(joined, super::super::ShutdownOutcome::Joined);
+        assert_eq!(
+            worker.join(),
+            joined,
+            "repeated join preserves the original observation"
+        );
     }
-    assert!(
-        ready,
-        "no SlotReady; request ledger: {:#?}",
-        fake.requests()
-    );
-    let feedback = control
-        .native_editor_snapshot(0)
-        .expect("identified slot snapshot");
-    assert_eq!(
-        feedback.state.generation, 2,
-        "normal worker feedback must complete"
-    );
-    assert!(feedback.state.supported && feedback.state.has_editor && !feedback.state.open);
-    assert!(
-        feedback.error.is_none(),
-        "native feedback failed: {:?}; request ledger: {:#?}",
-        feedback.error,
-        fake.requests()
-    );
-    assert_eq!(feedback.dirty_revision, 0);
-    let names = fake.names();
-    assert!(
-        names
-            .windows(5)
-            .any(|window| window.iter().map(String::as_str).eq([
-                "Editor",
-                "TakeParameterEdits",
-                "TakeHostNotifications",
-                "ServiceHostRequests",
-                "NativeDirtyRevision",
-            ])),
-        "complete normal polling sequence missing: {names:?}"
-    );
-    assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 1);
-    assert!(
-        !fake
-            .names()
-            .iter()
-            .any(|name| matches!(name.as_str(), "Process" | "ResetOrigin"))
-    );
-    let joined = worker.join();
-    assert_eq!(joined, super::super::ShutdownOutcome::Joined);
-    assert_eq!(
-        worker.join(),
-        joined,
-        "repeated join preserves the original observation"
-    );
 }
 
 #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
@@ -1429,24 +1655,35 @@ fn fresh_source_first_prepare_consumes_setup_even_when_restore_or_initial_guard_
 
 #[test]
 fn fresh_offline_factory_rejects_supported_inactive_bus_change_against_capture() {
-    let fake = FakeHelper::new("dry_attested");
-    let mut capture = capture_state();
-    capture.metadata = dry_metadata();
-    capture.metadata.output_buses[1].channel_count = 2;
-    capture.metadata.validate(48_000).unwrap();
-    let result =
-        OfflineInstrument::load_snapshot(fake.spec(capture.opaque_state.clone()), 48_000, &capture);
-    let error = result
-        .err()
-        .expect("valid but changed inactive descriptor must refuse");
-    assert!(error.contains("metadata differs"), "{error}");
-    assert!(fake.names().iter().any(|name| name == "TailSamples"));
-    assert!(
-        !fake
-            .names()
-            .iter()
-            .any(|name| matches!(name.as_str(), "SetBusActive" | "Process"))
-    );
+    for changed in ["inactive_channels", "input_role", "extra_role"] {
+        let fake = FakeHelper::new("dry_attested");
+        let mut capture = capture_state();
+        capture.metadata = dry_metadata();
+        match changed {
+            "inactive_channels" => capture.metadata.output_buses[1].channel_count = 2,
+            "input_role" => capture.metadata.input_buses[0].is_main = false,
+            "extra_role" => capture.metadata.output_buses[1].is_main = true,
+            _ => unreachable!(),
+        }
+        capture.metadata.validate(48_000).unwrap();
+        let result = OfflineInstrument::load_snapshot(
+            fake.spec(capture.opaque_state.clone()),
+            48_000,
+            &capture,
+        );
+        let error = result
+            .err()
+            .expect("valid but changed descriptor must refuse");
+        assert_eq!(
+            error, "Fresh bounce instance metadata differs from the authoritative captured source",
+            "{changed}"
+        );
+        assert!(fake.names().iter().any(|name| name == "TailSamples"));
+        assert!(!fake.names().iter().any(|name| matches!(
+            name.as_str(),
+            "SetBusActive" | "Process" | "ProcessBuses" | "ProcessResetOrigin" | "ResetOrigin"
+        )));
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
@@ -1577,7 +1814,7 @@ fn parse_fresh_topology_refusal(error: &str) -> serde_json::Value {
     let (prefix, data) = error.split_once("\nFreshBounceTopologyRefusalV1=").unwrap();
     assert_eq!(
         prefix,
-        "Instrument bounce requires at most one known main mono/stereo input, one known-active main mono/stereo output, and at most two known-inactive auxiliary mono/stereo outputs"
+        "Instrument bounce requires at most one known mono/stereo input for explicit silence, one known-active main mono/stereo output at index zero, and at most two known-inactive mono/stereo extra outputs"
     );
     serde_json::from_str(data).unwrap()
 }
@@ -1608,7 +1845,11 @@ fn fresh_source_diagnostic_worker_keeps_exact_refusal_ledger_and_raw_roles() {
     }
     let fault = fault.expect("actual worker refusal required");
     let json = parse_fresh_topology_refusal(&fault);
+    assert_eq!(json["schema"], 1);
+    assert_eq!(json["kind"], "fresh_bounce_topology_refusal");
     assert_eq!(json["validation_phase"], "proposed_preflight");
+    assert_eq!(json["prepared_observation_phase"], "initial_preflight_read");
+    assert!(json["expected_before_start"].is_null());
     assert_eq!(json["raw_checked"]["inputs"]["total_count"], 1);
     assert_eq!(
         json["raw_checked"]["inputs"]["entries"][0]["is_main"],
@@ -1630,6 +1871,28 @@ fn fresh_source_diagnostic_worker_keeps_exact_refusal_ledger_and_raw_roles() {
         assert_eq!(
             json["proposal"]["outputs"]["entries"][index]["active"],
             false
+        );
+    }
+    for layer in ["raw_checked", "prepared", "proposal"] {
+        assert_eq!(json[layer]["inputs"]["total_count"], 1);
+        assert_eq!(json[layer]["outputs"]["total_count"], 3);
+        assert_eq!(json[layer]["inputs"]["truncated"], false);
+        assert_eq!(json[layer]["outputs"]["truncated"], false);
+        assert_eq!(json[layer]["inputs"]["entries"][0]["channel_count"], 2);
+        assert_eq!(json[layer]["inputs"]["entries"][0]["active"], true);
+        assert_eq!(json[layer]["outputs"]["entries"][0]["channel_count"], 2);
+        assert_eq!(json[layer]["outputs"]["entries"][0]["active"], true);
+        assert_eq!(json[layer]["outputs"]["entries"][1]["channel_count"], 2);
+        assert_eq!(
+            json[layer]["outputs"]["entries"][2]["channel_count"], 3,
+            "the otherwise-admissible role fixture refuses an explicit unsupported channel count"
+        );
+    }
+    assert_eq!(json["proposal"]["inputs"]["entries"][0]["is_main"], false);
+    for index in 0..3 {
+        assert_eq!(
+            json["proposal"]["outputs"]["entries"][index]["is_main"],
+            true
         );
     }
     assert_eq!(worker.join(), ShutdownOutcome::Joined);
