@@ -140,3 +140,27 @@ active slot through Joined shutdown, and unchanged old-source observations. A
 matching control and earlier validation-refusal path remain distinct. These new
 tests have not executed at this source checkpoint. A one-source diagnostic run
 requires separately reviewed source/harness/build/archive and root authorization.
+
+## Executed complete-metadata diagnostic mocks, 2026-10-10
+
+The single bounded run on733c415f passed without a source or test correction:
+current all-feature/all-target compilation; offline39, instrument-bounce60 and
+runtime77; strict all-feature/default/core Clippy; fmt; Python239 and package557.
+Offline39 includes the six new pure diagnostic functions and the new six-mode
+actual-worker mismatch fixture, plus the strengthened existing refusal/success
+fixtures. All ten field flags, both bounded operands, unchanged prior validator
+schema, exact no-extra-call ledgers and no-Ready/old-source retention passed.
+
+All739 per-run source hashes were unchanged. Exact current-worktree compiler
+commands, test-profile selection, eight copied root artifacts and two vendor rlibs
+are bound by artifact receipt918979eb4947ff1ca528b36473503afa671d6a6c7f44a608c0539795521020b7.
+The ordinary helper reproducesbafce0dcf4c24411651d84df0877638b77b051019002a6cfbb06ce38ec96b76d.
+Vendor/helper/protocol/dependency bytes remain unchanged fromc7a5d432; prior broad
+vendor/docs/compiler results remain historical, not freshly rerun whole-corpus
+claims. The only post-test edits are this appendix and WORK_LOG.
+
+This closes the bounded source/mock diagnostic gate only. Both earlier genuine
+attempts remain failed, including the unobserved post-Start operand difference;
+no new genuine helper/plugin observation, capture, render or WAV qualification
+occurred. The later one-source diagnostic still requires its own frozen harness,
+build/artifact binding, durable archive, independent reviews and root authorization.

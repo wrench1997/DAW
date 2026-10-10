@@ -1871,3 +1871,19 @@ archive precede that preparation.
 - This is UNVALIDATED source. Exact source archive/reviews precede bounded compiler
   and mock gates. No new helper/plugin execution is authorized by this checkpoint;
   the later one-source observation requires a separate frozen harness and run gate.
+
+## 2026-10-10: complete metadata diagnostic mock result
+
+- Exact733c415f passed its first bounded run with no correction: current all-feature
+  all-target compile, offline39/bounce60/runtime77, all-feature/default/core strict
+  Clippy, fmt, Python239 and package557. New coverage is six pure diagnostic
+  functions plus one actual-worker function with six valid drift cases; strengthened
+  prior validation/success/no-Ready/old-source fixtures also ran.
+- Before/after739-file maps match. Receipt918979eb binds eight exact copied root
+  artifacts, two current-worktree rlibs, compiler invocations/externs and dep-info.
+  Ordinary helperbafce0dc reproduces. Vendor/helper/dependencies are unchanged;
+  broad historical vendor/docs/compiler evidence is not a fresh execution claim.
+- Only the two result appendices changed after tests. No new real plugin invocation
+  occurred. The failed c7a5d432 genuine source_setup and all unexecuted stages remain
+  intact; this diagnostic cannot name the actual changed field until a separately
+  authorized one-source observation records both operands.
