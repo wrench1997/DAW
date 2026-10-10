@@ -1031,6 +1031,58 @@ fn stamped_removal_stopped_epoch_and_acceptance_exclude_every_poisoned_residue()
     let source_timeline = compile_timeline_test_project(&source_project);
     activate_removal_fixture_timeline(&mut fixture, Arc::clone(&source_timeline), 10, 2, false);
 
+    // Stopped activation leaves its real All Notes Off safety lane pending. A paused
+    // callback deliberately does not advance this source, so drain one actual Q128
+    // quantum before admitting the fixture's single live Note On. Ring enqueue alone
+    // would otherwise succeed even though endpoint live staging still refuses it.
+    {
+        let endpoint = &fixture.callback.as_ref().unwrap().dsp.generator_endpoints[0]
+            .as_ref()
+            .unwrap()
+            .endpoint;
+        assert_eq!(endpoint.adapter.input_phase_frames(), 0);
+        assert!(endpoint.events.scratch.live_faulted);
+        assert_eq!(
+            endpoint.events.scratch.system.pending_len,
+            TIMELINE_ENDPOINT_DISCONTINUITY_EVENTS
+        );
+        for channel in 0..16_u8 {
+            assert_eq!(
+                endpoint.events.scratch.system.pending[usize::from(channel)],
+                FrameEvent::midi(0, None, [0xB0 | channel, 123, 0])
+            );
+        }
+        assert_eq!(endpoint.events.scratch.live.pending_len, 0);
+    }
+    let submitted_before_safety = fixture.workers[0].control().stats().submitted;
+    assert!(
+        fixture
+            .callback
+            .as_mut()
+            .unwrap()
+            .dsp
+            .process_generator_endpoints(128)
+    );
+    let submitted_safety = fixture.workers[0].control().stats().submitted;
+    assert_eq!(submitted_safety, submitted_before_safety + 1);
+    wait_until(|| fixture.workers[0].control().stats().completed >= submitted_safety);
+    {
+        let endpoint = &fixture.callback.as_ref().unwrap().dsp.generator_endpoints[0]
+            .as_ref()
+            .unwrap()
+            .endpoint;
+        assert_eq!(endpoint.adapter.input_phase_frames(), 0);
+        assert!(!endpoint.events.scratch.live_faulted);
+        assert_eq!(endpoint.events.scratch.system.pending_len, 0);
+        assert_eq!(endpoint.events.scratch.live.pending_len, 0);
+    }
+    let live_overflows_before_note = fixture
+        .callback
+        .as_ref()
+        .unwrap()
+        .dsp
+        .fixed_quantum_event_overflows;
+
     // Produce real nonzero mock worker output, including a partially consumed
     // fixed-quantum output FIFO. No SDK, helper process, or audio device exists.
     assert!(
@@ -1041,6 +1093,21 @@ fn stamped_removal_stopped_epoch_and_acceptance_exclude_every_poisoned_residue()
             .send_generator_midi(9, Some(0), [0x90, 60, 127], 0)
     );
     fixture.process_commands();
+    {
+        let dsp = &fixture.callback.as_ref().unwrap().dsp;
+        assert_eq!(
+            dsp.fixed_quantum_event_overflows,
+            live_overflows_before_note
+        );
+        let endpoint = &dsp.generator_endpoints[0].as_ref().unwrap().endpoint;
+        assert!(!endpoint.events.scratch.live_faulted);
+        assert_eq!(endpoint.events.scratch.system.pending_len, 0);
+        assert_eq!(endpoint.events.scratch.live.pending_len, 1);
+        assert_eq!(
+            endpoint.events.scratch.live.pending[0],
+            FrameEvent::midi(0, Some(0), [0x90, 60, 127])
+        );
+    }
     let mut saw_old_audio = false;
     for _ in 0..fixture
         .callback
