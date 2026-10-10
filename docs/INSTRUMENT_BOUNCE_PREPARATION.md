@@ -1,6 +1,9 @@
 # Selected-instrument bounce: dormant preparation checkpoint
 
-Status: **UNVALIDATED SOURCE CHECKPOINT**. This branch starts from published
+Status: **DORMANT EXPERIMENTAL PREPARATION**. Plugin-free Rust gates passed at
+`d91cb74`; the final provenance-test correction is pending execution at this
+source freeze. Native bounce, App integration and rendering remain unqualified.
+This branch starts from published
 `dcdb2c14809b5e6f34af7db071db36f763d757f5`. No new App action is enabled. There is
 no WAV renderer, project replacement, freeze, or complete-song plug-in export.
 Existing whole-song WAV export refuses active VSTs exactly as before.
@@ -165,3 +168,21 @@ Offline/LoadState/Start/base application, and cleanup-only Close. Open-editor in
 now supplies valid open geometry so it tests editor admission rather than malformed
 wire rejection. No production behavior or error policy is weakened. These corrected
 fixture tests remain unexecuted at their source checkpoint.
+
+## Plugin-free results at d91cb74
+
+The unchanged source passed 1209 App tests, 1186 no-default core tests, 409 available
+vendor tests, 26 vendor doctests, App/core/vendor Clippy, formatting, helper build,
+and the focused coordinator/capture/factory tests. One vendor test requiring an
+external SDK-generated fixture was explicitly filtered, not counted as passing.
+The independent review matched all 140 Rust/manifest hashes and eight saved binary
+hashes to their receipts. These are plugin-free/headless tests, not native bounce
+or user-facing rendering qualification.
+
+Python had 238/239 passes: its separate provenance-constant test still expected the
+old vendor patch digest. Before changing that assertion, the official crate digest
+was checked and the reviewed patch was applied to pristine upstream with fuzz zero;
+all 38 resulting source files matched the vendored source byte-for-byte. The next
+correction updates the hardcoded test pin and adds the reviewed patch-document pin;
+no Rust or production packaging code changes. Its bounded Python/package rerun is
+still pending at source freeze. All previous failed receipts remain preserved.
