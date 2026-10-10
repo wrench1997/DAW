@@ -218,6 +218,14 @@ from pathlib import Path
 mode = MODE
 log = LOG
 fixture_dir = Path(FIXTURE_DIR)
+def publish_entered(value):
+    # Publish existence only after the complete exact stage has been written/closed.
+    marker = fixture_dir / 'entered'
+    temporary = fixture_dir / 'entered.tmp'
+    assert not marker.exists(), 'duplicate held-stage marker'
+    with temporary.open('x') as stream:
+        stream.write(value)
+    temporary.rename(marker)
 capture_phase = False
 capture_step = 0
 templates = json.loads(TEMPLATES)
@@ -358,7 +366,7 @@ for line in sys.stdin:
         capture_step += 1
         target = int(mode.split('_')[1])
         if capture_step == target:
-            (fixture_dir / 'entered').write_text(name)
+            publish_entered(name)
             wait_until = time.monotonic() + 4
             while not (fixture_dir / 'release').exists() and time.monotonic() < wait_until:
                 time.sleep(0.001)
@@ -369,7 +377,7 @@ for line in sys.stdin:
             stream.write(json.dumps(result['CheckedAudioBusLayout']['layout']) + '\n')
     if mode == 'fresh_observed_roles_block_post_start' and name == 'TailSamples' and processing and not post_start_fence_held:
         post_start_fence_held = True
-        (fixture_dir / 'entered').write_text(name)
+        publish_entered(name)
         wait_until = time.monotonic() + 4
         while not (fixture_dir / 'release').exists() and time.monotonic() < wait_until:
             time.sleep(0.001)
@@ -383,7 +391,7 @@ for line in sys.stdin:
             result = templates['CaptureError']
         if timing_stage is not None and timing_stage == timing.get('hold_stage') and name == timing.get('field') and not timing_held:
             timing_held = True
-            (fixture_dir / 'entered').write_text(timing_stage + ':' + name)
+            publish_entered(timing_stage + ':' + name)
             wait_until = time.monotonic() + 4
             while not (fixture_dir / 'release').exists() and time.monotonic() < wait_until:
                 time.sleep(0.001)

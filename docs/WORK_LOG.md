@@ -1914,3 +1914,18 @@ archive precede that preparation.
   replies and exact ledgers. All new compiler/mock execution awaits the exact
   source archive, independent reviews and coordinated target lease. No new real
   plugin retry is authorized by this source checkpoint.
+
+## 2026-10-10: held-marker fixture correction before continuation
+
+- Run001 current all-feature/all-target compile passed. Offline49 then returned
+  48 passed/1 failed: the new capture matrix observed an empty `entered` file at
+  the exact dispatched capture_final:LatencySamples request. Python write_text
+  created the path before writing its content; the retained file afterward held
+  the exact expected stage. The worker guard Joined and preserved the complete
+  fixture ledger and normal interpreter-exit marker. Remaining gates did not run.
+- Both reviewers confirmed the publication race from the original log and retained
+  bytes. The test-only helper now writes/closes a same-directory temporary marker
+  before atomic rename; all three fixture marker producers use it. Duplicate
+  markers fail, exact content and bounded waits remain unchanged. No production
+  body or acceptance criterion changes. Original failure and all input hashes are
+  retained in the correction archive before the bounded current-source rerun.
