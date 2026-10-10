@@ -1,0 +1,920 @@
+use super::*;
+use crate::{
+    instrument_bounce::{BouncePluginState, InstrumentBouncePlan},
+    model::*,
+};
+use std::{
+    collections::BTreeMap,
+    sync::{Mutex, atomic::AtomicU64},
+    thread,
+};
+
+static NEXT: AtomicU64 = AtomicU64::new(1);
+fn control() -> RenderControl {
+    RenderControl {
+        export: ExportControl::default(),
+        deadline: Instant::now() + Duration::from_secs(20),
+    }
+}
+fn metadata(latency: u32, channels: usize) -> BouncePluginMetadata {
+    BouncePluginMetadata {
+        class_uid: "ABCDEF019182FAEB566D624153675854".into(),
+        version: "1.3.4".into(),
+        name: "Fake only".into(),
+        category: "Instrument|Synth".into(),
+        event_input_buses: vec![(16, true, Some(true))],
+        event_output_buses: vec![],
+        input_buses: vec![],
+        output_buses: vec![(channels, true)],
+        latency_samples: latency,
+        tail_samples: u32::MAX,
+    }
+}
+fn fixture_project(song_frames: u64) -> Project {
+    let mut project = Project::default();
+    project.tempo = 120.0;
+    project.song_length_beats = song_frames as f32 / 4000.0;
+    project.automation_lanes.clear();
+    project.channels.truncate(1);
+    project.channels[0].instrument_plugin_instance_id = Some(41);
+    project.plugin_instances = vec![PluginInstance {
+        id: 41,
+        format: PluginFormat::Vst3,
+        role: PluginRole::Instrument,
+        path: "fake-only.vst3".into(),
+        uid: "path-id".into(),
+        vendor: "Fixture".into(),
+        name: "Fixture".into(),
+        enabled: true,
+        bypass: false,
+        wet: 1.0,
+        parameters: BTreeMap::new(),
+        opaque_state: vec![1],
+        runtime_status: PluginRuntimeStatus::Loaded,
+        midi_ports: Default::default(),
+    }];
+    project.patterns.truncate(1);
+    project.patterns[0].channel_steps = vec![[false; 16]];
+    project.patterns[0].channel_steps[0][0] = true;
+    project.patterns[0].notes.clear();
+    project.clips.truncate(1);
+    project.clips[0].start = 0.0;
+    project.clips[0].length = project.song_length_beats;
+    project.clips[0].source_offset = 0.0;
+    project.clips[0].pattern_id = project.patterns[0].id;
+    project
+}
+fn capture(song_frames: u64, tail: u32, latency: u32, channels: usize) -> CapturedInstrumentBounce {
+    capture_project(
+        &fixture_project(song_frames),
+        song_frames,
+        tail,
+        latency,
+        channels,
+    )
+}
+fn capture_project(
+    project: &Project,
+    song_frames: u64,
+    tail: u32,
+    latency: u32,
+    channels: usize,
+) -> CapturedInstrumentBounce {
+    let plan = InstrumentBouncePlan::prepare(project, project.channels[0].id, 8000, tail).unwrap();
+    assert_eq!(plan.timeline().duration_frames(), song_frames);
+    let identity = BounceSourceIdentity {
+        project_session: 11,
+        project_fingerprint: plan.project_fingerprint(),
+        timeline_revision: 12,
+        epoch: 13,
+        endpoint_id: 14,
+        channel_id: plan.channel_id(),
+        instance_id: 41,
+    };
+    CapturedInstrumentBounce {
+        identity,
+        plan,
+        state: BouncePluginState {
+            metadata: metadata(latency, channels),
+            opaque_state: vec![1],
+            parameter_bases: BTreeMap::new(),
+            native_generation: 2,
+            native_dirty_revision: 9,
+        },
+    }
+}
+struct Files(PathBuf);
+impl Files {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "bounce-engine-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+    fn output(&self) -> PathBuf {
+        self.0.join("render.wav")
+    }
+}
+impl Drop for Files {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+fn wait_until(mut condition: impl FnMut() -> bool) {
+    let end = Instant::now() + Duration::from_secs(8);
+    while !condition() {
+        assert!(Instant::now() < end, "fixture deadline");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+fn outcome(receipt: &RenderReceipt) -> RenderOutcome {
+    wait_until(|| receipt.termination_acknowledged());
+    receipt.try_recv().unwrap()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Fault {
+    None,
+    Short,
+    Extra,
+    Missing,
+    BadLatencySample,
+    BadPaddingSample,
+    MissingTransport,
+    Midi,
+    Loss,
+    Drift,
+    CancelPrepare,
+    CancelMetadata,
+    CancelMidi,
+    DeadlineProcess,
+    CancelProcess,
+    FailAndCancel,
+    InvalidAndCancel,
+    PanicProcess,
+    CleanupFailure,
+    CleanupPanic,
+}
+struct Fake {
+    meta: BouncePluginMetadata,
+    ledger: Arc<Mutex<Vec<String>>>,
+    control: RenderControl,
+    fault: Fault,
+    next: u64,
+    retained_end: u64,
+    query_count: usize,
+    cleanup_gate: Arc<AtomicBool>,
+    disposed: Arc<AtomicBool>,
+    cleanup_panicked: bool,
+}
+impl Fake {
+    fn new(meta: BouncePluginMetadata, control: RenderControl, fault: Fault, end: u64) -> Self {
+        Self {
+            meta,
+            ledger: Arc::new(Mutex::new(vec![])),
+            control,
+            fault,
+            next: 0,
+            retained_end: end,
+            query_count: 0,
+            cleanup_gate: Arc::new(AtomicBool::new(true)),
+            disposed: Arc::new(AtomicBool::new(false)),
+            cleanup_panicked: false,
+        }
+    }
+    fn log(&self, s: impl Into<String>) {
+        self.ledger.lock().unwrap().push(s.into());
+    }
+}
+impl RenderBackend for Fake {
+    fn prepare(
+        &mut self,
+        capture: &CapturedInstrumentBounce,
+        control: &RenderControl,
+    ) -> Result<BouncePluginMetadata, String> {
+        control.checkpoint().map_err(|e| e.primary)?;
+        assert_eq!(capture.state.opaque_state, vec![1]);
+        self.log("Prepare");
+        if matches!(self.fault, Fault::CancelPrepare) {
+            self.control.export.cancel();
+        }
+        Ok(self.meta.clone())
+    }
+    fn metadata(&mut self) -> Result<BouncePluginMetadata, String> {
+        self.query_count += 1;
+        self.log("Metadata");
+        if matches!(self.fault, Fault::CancelMetadata) {
+            self.control.export.cancel();
+        }
+        let mut meta = self.meta.clone();
+        if matches!(self.fault, Fault::Drift) && self.query_count == 2 {
+            meta.latency_samples += 1;
+        }
+        Ok(meta)
+    }
+    fn send_midi(&mut self, midi: [u8; 3], offset: u16) -> Result<(), String> {
+        self.log(format!("Midi:{}:{midi:?}", self.next + u64::from(offset)));
+        if matches!(self.fault, Fault::CancelMidi) {
+            self.control.export.cancel();
+        }
+        Ok(())
+    }
+    fn process(&mut self, transport: PluginTransport, frames: usize) -> Result<BlockReply, String> {
+        assert_eq!(frames, 128);
+        assert_eq!(transport.sample_position, self.next as i64);
+        assert!(transport.playing);
+        assert_eq!(
+            (transport.time_sig_numerator, transport.time_sig_denominator),
+            (4, 4)
+        );
+        assert!((transport.quarter_note_position - self.next as f64 / 4000.0).abs() < 1e-12);
+        self.log(format!("Process:{}", self.next));
+        if matches!(self.fault, Fault::DeadlineProcess) {
+            thread::sleep(
+                self.control
+                    .deadline
+                    .saturating_duration_since(Instant::now())
+                    + Duration::from_millis(2),
+            );
+        }
+        if matches!(
+            self.fault,
+            Fault::CancelProcess
+                | Fault::FailAndCancel
+                | Fault::InvalidAndCancel
+                | Fault::PanicProcess
+        ) {
+            self.control.export.cancel();
+        }
+        if matches!(self.fault, Fault::FailAndCancel) {
+            return Err("injected Process failure".into());
+        }
+        if matches!(self.fault, Fault::PanicProcess) {
+            panic!("injected Process panic");
+        }
+        let mut channels = vec![vec![0.0; frames]; self.meta.output_buses[0].0];
+        for (ch, channel) in channels.iter_mut().enumerate() {
+            for (i, sample) in channel.iter_mut().enumerate() {
+                let frame = self.next + i as u64;
+                if frame == u64::from(self.meta.latency_samples) {
+                    *sample = if ch == 0 { 0.75 } else { -0.25 };
+                }
+                if (matches!(self.fault, Fault::BadLatencySample) && frame == 0)
+                    || (matches!(self.fault, Fault::BadPaddingSample) && frame == self.retained_end)
+                {
+                    *sample = f32::NAN;
+                }
+            }
+        }
+        if matches!(self.fault, Fault::Short | Fault::InvalidAndCancel) {
+            channels[0].pop();
+        }
+        if matches!(self.fault, Fault::Missing) {
+            channels.pop();
+        }
+        if matches!(self.fault, Fault::Extra) {
+            channels.push(vec![0.0; frames]);
+        }
+        self.next += frames as u64;
+        Ok(BlockReply {
+            channels,
+            transport_applied: !matches!(self.fault, Fault::MissingTransport),
+            output_events: usize::from(matches!(self.fault, Fault::Midi)),
+            output_events_lost: matches!(self.fault, Fault::Loss),
+        })
+    }
+    fn dispose(&mut self) -> DisposalObservation {
+        if matches!(self.fault, Fault::CleanupPanic) && !self.cleanup_panicked {
+            self.cleanup_panicked = true;
+            self.log("DisposePanic");
+            panic!("injected disposal panic");
+        }
+        if !self.cleanup_gate.load(Ordering::Acquire) {
+            self.log("DisposePending");
+            return DisposalObservation {
+                terminated: false,
+                error: matches!(self.fault, Fault::CleanupFailure)
+                    .then(|| "injected unproven disposal".into()),
+            };
+        }
+        self.log("Disposed");
+        self.disposed.store(true, Ordering::Release);
+        DisposalObservation {
+            terminated: true,
+            error: matches!(self.fault, Fault::CleanupFailure)
+                .then(|| "injected cleanup failure".into()),
+        }
+    }
+}
+impl Drop for Fake {
+    fn drop(&mut self) {
+        assert!(
+            self.disposed.load(Ordering::Acquire),
+            "owner dropped before checked disposal"
+        );
+        self.log("Dropped");
+    }
+}
+
+#[test]
+fn fake_render_exact_native_latency_tail_padding_and_mono_stereo_unity() {
+    for latency in [0, 1, 127, 128, 129] {
+        for n in [127, 128, 129, 257] {
+            for tail in [0, 7] {
+                for channels in [1, 2] {
+                    let c = capture(n, tail, latency, channels);
+                    let stamp = c.identity();
+                    let ctl = control();
+                    let files = Files::new();
+                    let fake = Fake::new(
+                        c.metadata().clone(),
+                        ctl.clone(),
+                        Fault::None,
+                        n + u64::from(tail) + u64::from(latency),
+                    );
+                    let ledger = Arc::clone(&fake.ledger);
+                    let admission = RenderAdmission::default();
+                    let receipt = admission
+                        .start(c, files.output(), true, ctl, move || fake)
+                        .unwrap();
+                    let RenderOutcome::Complete(report) = outcome(&receipt) else {
+                        panic!("successful control failed")
+                    };
+                    assert_eq!(report.identity, stamp);
+                    assert_eq!(report.frames, n as usize + tail as usize);
+                    assert_eq!(report.native_latency, latency);
+                    assert_eq!(report.fixed_tail, tail);
+                    assert_eq!(report.reported_tail, u32::MAX);
+                    assert_eq!(report.sample_peak, 0.75);
+                    assert_eq!(report.generated_frames % 128, 0);
+                    assert!(report.generated_frames > n);
+                    assert!(!admission.is_busy());
+                    let wav = crate::wav::read_wav(files.output()).unwrap();
+                    assert_eq!(wav.frame_count(), report.frames);
+                    assert_eq!(wav.samples[0], 0.75);
+                    assert_eq!(wav.samples[1], if channels == 1 { 0.75 } else { -0.25 });
+                    assert!(wav.samples[2..].iter().all(|s| *s == 0.0));
+                    let ledger = ledger.lock().unwrap();
+                    assert!(
+                        ledger
+                            .iter()
+                            .any(|s| s == &format!("Midi:{n}:[128, 36, 0]"))
+                    );
+                    assert_eq!(&ledger[ledger.len() - 2..], ["Disposed", "Dropped"]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fake_render_rejects_entire_bad_reply_including_trimmed_and_padding_samples() {
+    // Explicit successful control precedes the failure matrix.
+    let ctl = control();
+    let c = capture(129, 0, 1, 2);
+    let prepared = PreparedRender::from_capture(&c, true, &ctl).unwrap();
+    let mut good = Fake::new(c.metadata().clone(), ctl.clone(), Fault::None, 130);
+    assert_eq!(
+        render_audio(&c, &prepared, &mut good, &ctl).unwrap().len(),
+        129
+    );
+    good.dispose();
+    for fault in [
+        Fault::Short,
+        Fault::Extra,
+        Fault::Missing,
+        Fault::BadLatencySample,
+        Fault::BadPaddingSample,
+        Fault::MissingTransport,
+        Fault::Midi,
+        Fault::Loss,
+        Fault::Drift,
+    ] {
+        let c = capture(129, 0, 1, 2);
+        let ctl = control();
+        let files = Files::new();
+        std::fs::write(files.output(), b"original").unwrap();
+        let fake = Fake::new(c.metadata().clone(), ctl.clone(), fault, 130);
+        let ledger = Arc::clone(&fake.ledger);
+        let receipt = RenderAdmission::default()
+            .start(c, files.output(), true, ctl, move || fake)
+            .unwrap();
+        let RenderOutcome::Failed(error) = outcome(&receipt) else {
+            panic!("fault {fault:?} accepted")
+        };
+        assert_eq!(error.kind, FailureKind::Invalid);
+        assert!(error.primary.contains(if matches!(fault, Fault::Drift) {
+            "metadata changed after"
+        } else {
+            "Invalid exact Process"
+        }));
+        assert_eq!(std::fs::read(files.output()).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 1);
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.last().unwrap(), "Dropped");
+        let processes = ledger.iter().filter(|s| s.starts_with("Process:")).count();
+        assert_eq!(
+            processes,
+            if matches!(fault, Fault::BadPaddingSample) {
+                2
+            } else {
+                1
+            },
+            "{fault:?}"
+        );
+    }
+}
+
+#[test]
+fn cancellation_fault_panic_and_cleanup_errors_never_publish() {
+    let good_capture = capture(128, 0, 0, 2);
+    let good_control = control();
+    let good_files = Files::new();
+    let good = Fake::new(
+        good_capture.metadata().clone(),
+        good_control.clone(),
+        Fault::None,
+        128,
+    );
+    let good_receipt = RenderAdmission::default()
+        .start(
+            good_capture,
+            good_files.output(),
+            true,
+            good_control,
+            move || good,
+        )
+        .unwrap();
+    assert!(matches!(outcome(&good_receipt), RenderOutcome::Complete(_)));
+    assert!(good_files.output().exists());
+    for fault in [
+        Fault::CancelPrepare,
+        Fault::CancelMetadata,
+        Fault::CancelMidi,
+        Fault::DeadlineProcess,
+        Fault::CancelProcess,
+        Fault::FailAndCancel,
+        Fault::InvalidAndCancel,
+        Fault::PanicProcess,
+        Fault::CleanupFailure,
+        Fault::CleanupPanic,
+    ] {
+        let c = capture(128, 0, 0, 2);
+        let mut ctl = control();
+        if matches!(fault, Fault::DeadlineProcess) {
+            ctl.deadline = Instant::now() + Duration::from_secs(2);
+        }
+        let files = Files::new();
+        let fake = Fake::new(c.metadata().clone(), ctl.clone(), fault, 128);
+        let ledger = Arc::clone(&fake.ledger);
+        let admission = RenderAdmission::default();
+        let receipt = admission
+            .start(c, files.output(), true, ctl, move || fake)
+            .unwrap();
+        let RenderOutcome::Failed(error) = outcome(&receipt) else {
+            panic!("fault {fault:?} accepted")
+        };
+        let expected = match fault {
+            Fault::CancelPrepare
+            | Fault::CancelMetadata
+            | Fault::CancelMidi
+            | Fault::CancelProcess => FailureKind::Cancelled,
+            Fault::DeadlineProcess => FailureKind::Deadline,
+            Fault::InvalidAndCancel => FailureKind::Invalid,
+            Fault::PanicProcess => FailureKind::Panic,
+            _ => FailureKind::Backend,
+        };
+        assert_eq!(error.kind, expected, "{fault:?}: {error:?}");
+        let reason = match fault {
+            Fault::FailAndCancel => "injected Process failure",
+            Fault::InvalidAndCancel => "Invalid exact Process",
+            Fault::DeadlineProcess => "deadline expired",
+            Fault::PanicProcess => "backend panicked",
+            Fault::CleanupFailure | Fault::CleanupPanic => "cleanup failed",
+            _ => "cancel",
+        };
+        assert!(error.primary.contains(reason), "{fault:?}: {error:?}");
+        if matches!(fault, Fault::CleanupFailure | Fault::CleanupPanic) {
+            assert!(!error.cleanup.is_empty());
+        }
+        assert!(!files.output().exists());
+        assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 0);
+        assert!(!admission.is_busy());
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.last().unwrap(), "Dropped");
+        let before_cleanup = ledger
+            .iter()
+            .position(|s| s == "Disposed" || s == "DisposePanic")
+            .unwrap();
+        if matches!(
+            fault,
+            Fault::CancelPrepare | Fault::CancelMetadata | Fault::CancelMidi
+        ) {
+            let expected = match fault {
+                Fault::CancelPrepare => 1,
+                Fault::CancelMetadata => 2,
+                _ => 3,
+            };
+            assert_eq!(before_cleanup, expected, "{fault:?}: {ledger:?}");
+            assert!(!ledger.iter().any(|s| s.starts_with("Process:")));
+        }
+        if matches!(
+            fault,
+            Fault::CancelProcess
+                | Fault::DeadlineProcess
+                | Fault::FailAndCancel
+                | Fault::InvalidAndCancel
+                | Fault::PanicProcess
+        ) {
+            assert_eq!(
+                ledger.iter().filter(|s| s.starts_with("Process:")).count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn dropped_receiver_and_pending_disposal_retain_owner_and_job_until_ack() {
+    let c = capture(128, 0, 0, 2);
+    let ctl = control();
+    let files = Files::new();
+    let fake = Fake::new(c.metadata().clone(), ctl.clone(), Fault::None, 128);
+    fake.cleanup_gate.store(false, Ordering::Release);
+    let gate = Arc::clone(&fake.cleanup_gate);
+    let ledger = Arc::clone(&fake.ledger);
+    let disposed = Arc::clone(&fake.disposed);
+    let admission = RenderAdmission::default();
+    let receipt = admission
+        .start(c, files.output(), true, ctl, move || fake)
+        .unwrap();
+    wait_until(|| ledger.lock().unwrap().iter().any(|s| s == "DisposePending"));
+    assert!(!receipt.termination_acknowledged());
+    assert!(matches!(receipt.try_recv(), Err(TryRecvError::Empty)));
+    drop(receipt);
+    assert!(admission.is_busy());
+    assert!(!disposed.load(Ordering::Acquire));
+    assert!(!files.output().exists());
+    let rejected = admission.start(
+        capture(128, 0, 0, 2),
+        files.output(),
+        true,
+        control(),
+        || -> Fake { panic!("busy factory must not run") },
+    );
+    assert!(rejected.err().unwrap().contains("still owns"));
+    gate.store(true, Ordering::Release);
+    wait_until(|| !admission.is_busy());
+    assert!(disposed.load(Ordering::Acquire));
+    assert_eq!(ledger.lock().unwrap().last().unwrap(), "Dropped");
+    assert!(!files.output().exists());
+}
+
+fn source() -> NoteSourceDescriptor {
+    NoteSourceDescriptor::ChannelStep {
+        clip_id: 1,
+        pattern_id: 1,
+        step: 0,
+        repetition: 0,
+    }
+}
+fn on(id: u64, frame: u64, pitch: u8) -> TimelineEvent {
+    TimelineEvent {
+        frame,
+        kind: TimelineEventKind::NoteOn {
+            note_id: id,
+            channel_id: 7,
+            note: pitch,
+            velocity: 0.5,
+            gain: 0.75,
+            mixer_track: 1,
+            source: source(),
+        },
+    }
+}
+fn off(id: u64, frame: u64, pitch: u8) -> TimelineEvent {
+    TimelineEvent {
+        frame,
+        kind: TimelineEventKind::NoteOff {
+            note_id: id,
+            channel_id: 7,
+            note: pitch,
+            mixer_track: 1,
+            source: source(),
+        },
+    }
+}
+#[test]
+fn mapper_rejects_boundaries_and_full_off_identity_mismatches_without_partial_result() {
+    assert_eq!(
+        map_selected_notes(&[on(1, 0, 60), off(1, 128, 60)], 7, 128, &control()).unwrap(),
+        vec![
+            ScheduledMidi {
+                frame: 0,
+                data: [0x90, 60, 48]
+            },
+            ScheduledMidi {
+                frame: 128,
+                data: [0x80, 60, 0]
+            }
+        ]
+    );
+    for case in 0..9 {
+        let mut events = vec![on(1, 0, 60), off(1, 128, 60)];
+        match case {
+            0 => events[0].frame = 128,
+            1 => events[1].frame = 129,
+            2 => events[1].frame = 0,
+            3 => {
+                if let TimelineEventKind::NoteOff { ref mut source, .. } = events[1].kind {
+                    *source = NoteSourceDescriptor::LegacyPiano {
+                        clip_id: 1,
+                        pattern_id: 1,
+                        persistent_note_id: 1,
+                        note_index: 0,
+                        repetition: 0,
+                    }
+                }
+            }
+            4 => {
+                if let TimelineEventKind::NoteOff {
+                    ref mut mixer_track,
+                    ..
+                } = events[1].kind
+                {
+                    *mixer_track = 2
+                }
+            }
+            5 => events[1] = off(1, 128, 61),
+            6 => events[1] = off(2, 128, 60),
+            7 => events.insert(1, on(1, 1, 60)),
+            _ => {
+                if let TimelineEventKind::NoteOn {
+                    ref mut velocity, ..
+                } = events[0].kind
+                {
+                    *velocity = f32::NAN
+                }
+            }
+        }
+        let error = map_selected_notes(&events, 7, 128, &control()).unwrap_err();
+        assert_eq!(error.kind, FailureKind::Invalid, "case {case}");
+        let reason = match case {
+            0 | 7 | 8 => "Selected NoteOn has an invalid frame",
+            6 => "Selected NoteOff has no active identity",
+            _ => "Selected NoteOff does not match its full NoteOn identity/range",
+        };
+        assert!(error.primary.contains(reason), "case {case}: {error:?}");
+    }
+}
+#[test]
+fn mapper_capacity_limits_and_preflight_cancellation_are_explicit() {
+    for count in [96, 97] {
+        let mut events: Vec<_> = (0..count).map(|n| on(n + 1, 0, (n % 128) as u8)).collect();
+        events.extend((0..count).map(|n| off(n + 1, 256, (n % 128) as u8)));
+        let result = map_selected_notes(&events, 7, 256, &control());
+        if count == 96 {
+            assert_eq!(result.unwrap().len(), 192)
+        } else {
+            assert!(result.unwrap_err().primary.contains("96 Timeline"));
+        }
+    }
+    for count in [512, 513] {
+        let mut events: Vec<_> = (0..count).map(|n| on(n + 1, n * 128, 60)).collect();
+        events.extend((0..count).map(|n| off(n + 1, 100_000 + n, 60)));
+        let result = map_selected_notes(&events, 7, 200_000, &control());
+        if count == 512 {
+            assert_eq!(result.unwrap().len(), 513)
+        } else {
+            assert!(result.unwrap_err().primary.contains("512 active"));
+        }
+    }
+    let ctl = control();
+    ctl.export.cancel();
+    assert_eq!(
+        map_selected_notes(&[on(1, 0, 60), off(1, 1, 60)], 7, 2, &ctl)
+            .unwrap_err()
+            .kind,
+        FailureKind::Cancelled
+    );
+    let expired = RenderControl {
+        export: ExportControl::default(),
+        deadline: Instant::now(),
+    };
+    assert_eq!(
+        PreparedRender::from_capture(&capture(128, 0, 0, 2), true, &expired)
+            .err()
+            .unwrap()
+            .kind,
+        FailureKind::Deadline
+    );
+    assert!(
+        PreparedRender::from_capture(&capture(128, 0, 0, 2), false, &control())
+            .err()
+            .unwrap()
+            .primary
+            .contains("acknowledgment")
+    );
+}
+
+#[test]
+fn rounded_processing_bounds_are_checked_without_allocating_the_song() {
+    assert_eq!(render_frame_bounds(127, 0, 0).unwrap(), (127, 128));
+    assert_eq!(render_frame_bounds(128, 0, 0).unwrap(), (128, 256));
+    assert_eq!(render_frame_bounds(129, 7, 129).unwrap(), (136, 384));
+    assert_eq!(
+        render_frame_bounds(MAX_BOUNCE_FRAMES - 1, 0, 0).unwrap().1,
+        MAX_BOUNCE_FRAMES
+    );
+    assert!(
+        render_frame_bounds(MAX_BOUNCE_FRAMES, 0, 0)
+            .unwrap_err()
+            .primary
+            .contains("Rounded render")
+    );
+    for (n, t, l) in [(0, 0, 0), (u64::MAX, 1, 0), (u64::MAX, 0, 1)] {
+        assert_eq!(
+            render_frame_bounds(n, t, l).unwrap_err().kind,
+            FailureKind::Invalid
+        );
+    }
+}
+
+#[test]
+fn full_schedule_preflight_observes_mid_scan_cancellation_and_never_constructs_backend() {
+    let ctl = control();
+    ctl.export.cancel_at(500);
+    let events: Vec<_> = (0..1000)
+        .map(|n| {
+            let mut event = on(n + 1, n, 60);
+            if let TimelineEventKind::NoteOn {
+                ref mut channel_id, ..
+            } = event.kind
+            {
+                *channel_id = 99;
+            }
+            event
+        })
+        .collect();
+    let error = map_selected_notes(&events, 7, 2000, &ctl).unwrap_err();
+    assert_eq!(error.kind, FailureKind::Cancelled);
+    assert_eq!(ctl.export.progress().basis_points, 500);
+    let admission = RenderAdmission::default();
+    let files = Files::new();
+    let calls = Arc::new(AtomicU64::new(0));
+    let worker_calls = Arc::clone(&calls);
+    let receipt = admission
+        .start(
+            capture(128, 0, 0, 2),
+            files.output(),
+            false,
+            control(),
+            move || -> Fake {
+                worker_calls.fetch_add(1, Ordering::Relaxed);
+                panic!("invalid preflight must not construct backend")
+            },
+        )
+        .unwrap();
+    let RenderOutcome::Failed(error) = outcome(&receipt) else {
+        panic!("unacknowledged tail accepted")
+    };
+    assert_eq!(error.kind, FailureKind::Invalid);
+    assert!(error.primary.contains("acknowledgment"));
+    assert_eq!(calls.load(Ordering::Acquire), 0);
+    assert!(!files.output().exists());
+    assert!(!admission.is_busy());
+}
+
+#[test]
+fn failed_disposal_keeps_receipt_pending_and_preserves_error_after_ack() {
+    let c = capture(128, 0, 0, 2);
+    let ctl = control();
+    let files = Files::new();
+    let fake = Fake::new(
+        c.metadata().clone(),
+        ctl.clone(),
+        Fault::CleanupFailure,
+        128,
+    );
+    fake.cleanup_gate.store(false, Ordering::Release);
+    let gate = Arc::clone(&fake.cleanup_gate);
+    let ledger = Arc::clone(&fake.ledger);
+    let admission = RenderAdmission::default();
+    let receipt = admission
+        .start(c, files.output(), true, ctl, move || fake)
+        .unwrap();
+    wait_until(|| ledger.lock().unwrap().iter().any(|s| s == "DisposePending"));
+    assert!(admission.is_busy());
+    assert!(!receipt.termination_acknowledged());
+    assert!(!files.output().exists());
+    receipt.cancel();
+    gate.store(true, Ordering::Release);
+    let RenderOutcome::Failed(error) = outcome(&receipt) else {
+        panic!("failed disposal published")
+    };
+    assert_eq!(error.kind, FailureKind::Backend);
+    assert!(
+        error
+            .cleanup
+            .iter()
+            .any(|s| s.contains("unproven disposal"))
+    );
+    assert!(error.cleanup.iter().any(|s| s.contains("cleanup failure")));
+    assert!(!files.output().exists());
+    assert!(!admission.is_busy());
+}
+
+#[test]
+fn compiled_arrangement_keeps_swing_step_and_piano_repeats_source_offsets_and_clip_gain() {
+    let mut swung = fixture_project(2000);
+    swung.swing = 1.0;
+    swung.patterns[0].channel_steps[0][1] = true;
+
+    let mut steps = fixture_project(13000);
+    steps.patterns[0].length_steps = 4;
+    steps.clips[0].start = 1.0;
+    steps.clips[0].length = 2.25;
+    steps.clips[0].source_offset = 0.25;
+
+    let mut piano = fixture_project(73500);
+    piano.patterns[0].channel_steps[0] = [false; 16];
+    piano.patterns[0].notes = vec![PianoNote {
+        id: 1,
+        channel_id: Some(piano.channels[0].id),
+        group_id: None,
+        note: 64,
+        start: 0.5,
+        length: 2.0,
+        velocity: 0.8,
+        selected: false,
+        muted: false,
+    }];
+    piano.channels[0].volume = 0.01; // Not part of instrument MIDI velocity.
+    piano.clips[0].gain = 0.5;
+    piano.clips[0].start = 1.0;
+    piano.clips[0].length = 17.375;
+    piano.clips[0].source_offset = 0.25;
+
+    for (project, frames, ons, offs, pitch, velocity) in [
+        (swung, 2000, vec![0, 1750], vec![1000, 2000], 36, 127),
+        (steps, 13000, vec![7000, 11000], vec![8000, 12000], 36, 127),
+        (piano, 73500, vec![5000, 69000], vec![13000, 73500], 64, 51),
+    ] {
+        let before = serde_json::to_vec(&project).unwrap();
+        let capture = capture_project(&project, frames, 0, 0, 2);
+        let prepared = PreparedRender::from_capture(&capture, true, &control()).unwrap();
+        assert_eq!(
+            prepared
+                .midi
+                .iter()
+                .filter(|e| e.data[0] == 0x90)
+                .map(|e| e.frame)
+                .collect::<Vec<_>>(),
+            ons
+        );
+        assert_eq!(
+            prepared
+                .midi
+                .iter()
+                .filter(|e| e.data[0] == 0x80)
+                .map(|e| e.frame)
+                .collect::<Vec<_>>(),
+            offs
+        );
+        assert!(prepared.midi.iter().all(|e| e.data[1] == pitch));
+        assert!(
+            prepared
+                .midi
+                .iter()
+                .filter(|e| e.data[0] == 0x90)
+                .all(|e| e.data[2] == velocity)
+        );
+        assert_eq!(serde_json::to_vec(&project).unwrap(), before);
+    }
+}
+
+#[test]
+fn empty_fixture_constructor_panic_releases_only_the_empty_job() {
+    let admission = RenderAdmission::default();
+    let files = Files::new();
+    let receipt = admission
+        .start(
+            capture(128, 0, 0, 2),
+            files.output(),
+            true,
+            control(),
+            || -> Fake { panic!("empty fixture constructor panic") },
+        )
+        .unwrap();
+    let RenderOutcome::Failed(error) = outcome(&receipt) else {
+        panic!("constructor panic accepted")
+    };
+    assert_eq!(error.kind, FailureKind::Panic);
+    assert_eq!(error.primary, "Empty fixture owner construction panicked");
+    assert!(error.cleanup.is_empty());
+    assert!(!admission.is_busy());
+    assert!(!files.output().exists());
+}

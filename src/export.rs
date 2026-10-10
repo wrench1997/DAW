@@ -5,6 +5,7 @@ use std::{
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -63,9 +64,9 @@ struct Voice {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct StereoFrame {
-    left: f32,
-    right: f32,
+pub(crate) struct StereoFrame {
+    pub(crate) left: f32,
+    pub(crate) right: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -988,7 +989,133 @@ fn write_stereo_wav_controlled(
     gain: f32,
     control: &ExportControl,
 ) -> Result<()> {
+    write_stereo_wav_core(
+        path,
+        options,
+        stereo,
+        gain,
+        control,
+        WavWritePolicy::default(),
+    )
+}
+
+/// Publish already-rendered stereo at unity gain, preserving finite Float32
+/// headroom. The caller must finish checked backend cleanup before entering.
+///
+/// Checks are cooperative around normal filesystem operations, including the
+/// final commit CAS; blocking OS writes/sync/rename are not forcibly interrupted.
+pub(crate) fn write_stereo_float32_checked(
+    path: &Path,
+    sample_rate: u32,
+    stereo: &[StereoFrame],
+    control: &ExportControl,
+    deadline: Instant,
+) -> Result<()> {
+    write_stereo_wav_core(
+        path,
+        WavExportOptions {
+            sample_rate,
+            sample_format: WavSampleFormat::Float32,
+            level_policy: crate::export_options::WavLevelPolicy::PreserveLevel,
+        },
+        stereo,
+        1.0,
+        control,
+        WavWritePolicy::checked(deadline),
+    )
+}
+
+#[derive(Default)]
+struct WavWritePolicy {
+    // None preserves the ordinary writer's original cancellation/Drop behavior.
+    deadline: Option<Instant>,
+    #[cfg(test)]
+    fixture: WavWriteFixture,
+}
+
+impl WavWritePolicy {
+    fn checked(deadline: Instant) -> Self {
+        Self {
+            deadline: Some(deadline),
+            #[cfg(test)]
+            fixture: WavWriteFixture::default(),
+        }
+    }
+
+    fn check(&self, control: &ExportControl) -> Result<()> {
+        if let Some(deadline) = self.deadline {
+            control.check_deadline(deadline)?;
+        }
+        Ok(())
+    }
+
+    fn begin_commit(&self, control: &ExportControl) -> Result<()> {
+        #[cfg(test)]
+        {
+            if self.fixture.cancel_before_commit {
+                assert!(control.cancel());
+            }
+            if self.fixture.expire_before_commit {
+                return control.begin_commit_before(Instant::now());
+            }
+        }
+        if let Some(deadline) = self.deadline {
+            control.begin_commit_before(deadline)
+        } else {
+            control.begin_commit().map_err(Into::into)
+        }
+    }
+
+    #[cfg(test)]
+    fn operation(&self, operation: StagedOperation) -> std::io::Result<()> {
+        assert_ne!(
+            self.fixture.panic_at,
+            Some(operation),
+            "injected staged {operation:?} panic"
+        );
+        if self.fixture.fail == Some(operation)
+            || (operation == StagedOperation::Abort && self.fixture.fail_abort)
+        {
+            return Err(std::io::Error::other(format!(
+                "injected staged {operation:?} failure"
+            )));
+        }
+        Ok(())
+    }
+}
+
+// Faults are local to one invocation. No process-global timing or I/O overrides
+// can affect ordinary export tests running concurrently.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StagedOperation {
+    Write,
+    Flush,
+    Sync,
+    Rename,
+    Abort,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct WavWriteFixture {
+    fail: Option<StagedOperation>,
+    panic_at: Option<StagedOperation>,
+    fail_abort: bool,
+    expire_before_commit: bool,
+    cancel_before_commit: bool,
+}
+
+fn write_stereo_wav_core(
+    path: &Path,
+    options: WavExportOptions,
+    stereo: &[StereoFrame],
+    gain: f32,
+    control: &ExportControl,
+    policy: WavWritePolicy,
+) -> Result<()> {
     control.checkpoint(7000)?;
+    policy.check(control)?;
     options.validate()?;
     let sample_rate = options.sample_rate;
     let format = options.sample_format;
@@ -996,6 +1123,7 @@ fn write_stereo_wav_controlled(
     for (index, frame) in stereo.iter().enumerate() {
         if index % PROGRESS_FRAME_INTERVAL == 0 {
             control.work_progress(index, stereo.len(), 7000, 7500)?;
+            policy.check(control)?;
         }
         ensure!(
             frame.left.is_finite()
@@ -1016,82 +1144,144 @@ fn write_stereo_wav_controlled(
     let data_size = format.data_size_for_frames(stereo.len())?;
 
     control.checkpoint(7500)?;
+    policy.check(control)?;
     let (mut staged, file) = create_staged_output(path)?;
-    let mut writer = BufWriter::with_capacity(WAV_WRITE_BUFFER_BYTES, file);
-    writer.write_all(b"RIFF")?;
-    writer.write_all(&(format.riff_overhead() + data_size).to_le_bytes())?;
-    writer.write_all(b"WAVEfmt ")?;
-    let fmt_size = if format == WavSampleFormat::Float32 {
-        18_u32
-    } else {
-        16_u32
-    };
-    writer.write_all(&fmt_size.to_le_bytes())?;
-    writer.write_all(&format.format_tag().to_le_bytes())?;
-    writer.write_all(&channels.to_le_bytes())?;
-    writer.write_all(&sample_rate.to_le_bytes())?;
-    let byte_rate = sample_rate * channels as u32 * bytes_per_sample;
-    writer.write_all(&byte_rate.to_le_bytes())?;
-    let block_align = channels * bytes_per_sample as u16;
-    writer.write_all(&block_align.to_le_bytes())?;
-    writer.write_all(&bits_per_sample.to_le_bytes())?;
-    if format == WavSampleFormat::Float32 {
-        writer.write_all(&0_u16.to_le_bytes())?; // cbSize, no extension
-        writer.write_all(b"fact")?;
-        writer.write_all(&4_u32.to_le_bytes())?;
-        writer.write_all(&(stereo.len() as u32).to_le_bytes())?;
-    }
-    writer.write_all(b"data")?;
-    writer.write_all(&data_size.to_le_bytes())?;
-    for (index, frame) in stereo.iter().enumerate() {
-        if index % PROGRESS_FRAME_INTERVAL == 0 {
-            control.work_progress(index, stereo.len(), 7500, 9800)?;
+    // Keep the writer inside the closure: every error closes it before checked
+    // abort attempts removal (also required by Windows file sharing semantics).
+    let write_and_commit = || -> Result<()> {
+        let mut writer = BufWriter::with_capacity(WAV_WRITE_BUFFER_BYTES, file);
+        policy.check(control)?;
+        #[cfg(test)]
+        policy.operation(StagedOperation::Write)?;
+        writer.write_all(b"RIFF")?;
+        writer.write_all(&(format.riff_overhead() + data_size).to_le_bytes())?;
+        writer.write_all(b"WAVEfmt ")?;
+        let fmt_size = if format == WavSampleFormat::Float32 {
+            18_u32
+        } else {
+            16_u32
+        };
+        writer.write_all(&fmt_size.to_le_bytes())?;
+        writer.write_all(&format.format_tag().to_le_bytes())?;
+        writer.write_all(&channels.to_le_bytes())?;
+        writer.write_all(&sample_rate.to_le_bytes())?;
+        let byte_rate = sample_rate * channels as u32 * bytes_per_sample;
+        writer.write_all(&byte_rate.to_le_bytes())?;
+        let block_align = channels * bytes_per_sample as u16;
+        writer.write_all(&block_align.to_le_bytes())?;
+        writer.write_all(&bits_per_sample.to_le_bytes())?;
+        if format == WavSampleFormat::Float32 {
+            writer.write_all(&0_u16.to_le_bytes())?; // cbSize, no extension
+            writer.write_all(b"fact")?;
+            writer.write_all(&4_u32.to_le_bytes())?;
+            writer.write_all(&(stereo.len() as u32).to_le_bytes())?;
         }
-        let mut encoded_frame = [0_u8; 8];
-        for (channel, sample) in [frame.left, frame.right].into_iter().enumerate() {
-            let value = sample * gain;
-            let width = bytes_per_sample as usize;
-            let offset = channel * width;
-            match format {
-                WavSampleFormat::Pcm16 => {
-                    let integer = (value * 32_767.0).round() as i16;
-                    encoded_frame[offset..offset + width].copy_from_slice(&integer.to_le_bytes());
-                }
-                WavSampleFormat::Pcm24 => {
-                    // Keep the legacy quantizer byte-for-byte, without adding dither.
-                    let integer = (value * 8_388_607.0).round() as i32;
-                    encoded_frame[offset..offset + width]
-                        .copy_from_slice(&integer.to_le_bytes()[..3]);
-                }
-                WavSampleFormat::Float32 => {
-                    // Floating point preserves finite headroom; never clamp to unity.
-                    encoded_frame[offset..offset + width].copy_from_slice(&value.to_le_bytes());
+        writer.write_all(b"data")?;
+        writer.write_all(&data_size.to_le_bytes())?;
+        for (index, frame) in stereo.iter().enumerate() {
+            if index % PROGRESS_FRAME_INTERVAL == 0 {
+                control.work_progress(index, stereo.len(), 7500, 9800)?;
+                policy.check(control)?;
+            }
+            let mut encoded_frame = [0_u8; 8];
+            for (channel, sample) in [frame.left, frame.right].into_iter().enumerate() {
+                let value = sample * gain;
+                let width = bytes_per_sample as usize;
+                let offset = channel * width;
+                match format {
+                    WavSampleFormat::Pcm16 => {
+                        let integer = (value * 32_767.0).round() as i16;
+                        encoded_frame[offset..offset + width]
+                            .copy_from_slice(&integer.to_le_bytes());
+                    }
+                    WavSampleFormat::Pcm24 => {
+                        // Keep the legacy quantizer byte-for-byte, without adding dither.
+                        let integer = (value * 8_388_607.0).round() as i32;
+                        encoded_frame[offset..offset + width]
+                            .copy_from_slice(&integer.to_le_bytes()[..3]);
+                    }
+                    WavSampleFormat::Float32 => {
+                        // Floating point preserves finite headroom; never clamp to unity.
+                        encoded_frame[offset..offset + width].copy_from_slice(&value.to_le_bytes());
+                    }
                 }
             }
+            writer.write_all(&encoded_frame[..usize::from(block_align)])?;
         }
-        writer.write_all(&encoded_frame[..usize::from(block_align)])?;
+        control.checkpoint(9800)?;
+        policy.check(control)?;
+        #[cfg(test)]
+        policy.operation(StagedOperation::Flush)?;
+        writer
+            .flush()
+            .with_context(|| format!("Unable to flush staged WAV for {}", path.display()))?;
+        control.check_cancelled()?;
+        policy.check(control)?;
+        #[cfg(test)]
+        policy.operation(StagedOperation::Sync)?;
+        writer
+            .get_ref()
+            .sync_all()
+            .with_context(|| format!("Unable to sync staged WAV for {}", path.display()))?;
+        drop(writer);
+        // The cancellation/commit CAS makes the final boundary unambiguous even
+        // if the UI requests Cancel concurrently with the worker's rename.
+        policy.begin_commit(control)?;
+        #[cfg(test)]
+        policy.operation(StagedOperation::Rename)?;
+        staged.commit(path)?;
+        Ok(())
+    };
+    let result = if policy.deadline.is_some() {
+        // Keep `staged` alive outside the unwind boundary so even a panic has
+        // one checked abort outcome, including a retained path on failure.
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(write_and_commit))
+            .unwrap_or_else(|payload| Err(WavStagingPanic::from_payload(payload).into()))
+    } else {
+        write_and_commit()
+    };
+    match result {
+        Err(original) if policy.deadline.is_some() => Err(staged.abort_checked(original, &policy)),
+        Ok(()) => {
+            // No fallible operation remains after a successful rename.
+            control.complete();
+            Ok(())
+        }
+        other => other,
     }
-    control.checkpoint(9800)?;
-    writer
-        .flush()
-        .with_context(|| format!("Unable to flush staged WAV for {}", path.display()))?;
-    control.check_cancelled()?;
-    writer
-        .get_ref()
-        .sync_all()
-        .with_context(|| format!("Unable to sync staged WAV for {}", path.display()))?;
-    drop(writer);
-    // The cancellation/commit CAS makes the final boundary unambiguous even
-    // if the UI requests Cancel concurrently with the worker's rename.
-    control.begin_commit()?;
-    staged.commit(path)?;
-    control.complete();
-    Ok(())
 }
 
 struct StagedOutput {
     path: PathBuf,
-    committed: bool,
+    cleanup_on_drop: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("WAV staging panicked: {message}")]
+struct WavStagingPanic {
+    message: String,
+}
+
+impl WavStagingPanic {
+    fn from_payload(payload: Box<dyn std::any::Any + Send>) -> Self {
+        let message = if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_owned()
+        } else {
+            "non-string panic payload".to_owned()
+        };
+        Self { message }
+    }
+}
+
+/// Attached as anyhow context, preserving downcasts to the original failure
+/// while also exposing the failed removal and retained temporary path.
+#[derive(Debug, thiserror::Error)]
+#[error("Unable to remove staged WAV '{path}'; temporary file retained: {removal_error}", path = .retained_path.display())]
+pub(crate) struct StagedOutputAbortFailure {
+    pub(crate) retained_path: PathBuf,
+    pub(crate) removal_error: std::io::Error,
 }
 
 impl StagedOutput {
@@ -1103,8 +1293,40 @@ impl StagedOutput {
                 destination.display()
             )
         })?;
-        self.committed = true;
+        self.cleanup_on_drop = false;
         Ok(())
+    }
+
+    fn abort_checked(
+        &mut self,
+        original: anyhow::Error,
+        _policy: &WavWritePolicy,
+    ) -> anyhow::Error {
+        // One visible cleanup result only. A hidden retry from Drop could erase
+        // the retained-path evidence after reporting that removal failed.
+        self.cleanup_on_drop = false;
+        // Cleanup is independently fallible. Retain both the original error
+        // and the owner/path even if removal itself unwinds.
+        let removal =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> std::io::Result<()> {
+                #[cfg(test)]
+                _policy.operation(StagedOperation::Abort)?;
+                std::fs::remove_file(&self.path)
+            }))
+            .unwrap_or_else(|payload| {
+                Err(std::io::Error::other(WavStagingPanic::from_payload(
+                    payload,
+                )))
+            });
+        match removal {
+            Ok(()) => original,
+            // Already absent satisfies the cleanup postcondition.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => original,
+            Err(removal_error) => original.context(StagedOutputAbortFailure {
+                retained_path: self.path.clone(),
+                removal_error,
+            }),
+        }
     }
 }
 
@@ -1132,7 +1354,7 @@ fn allocate_render_buffer(frame_count: usize, sample_rate: u32) -> Result<Vec<St
 
 impl Drop for StagedOutput {
     fn drop(&mut self) {
-        if !self.committed {
+        if self.cleanup_on_drop {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -1169,7 +1391,7 @@ fn create_staged_output(destination: &Path) -> Result<(StagedOutput, File)> {
                 return Ok((
                     StagedOutput {
                         path: temporary,
-                        committed: false,
+                        cleanup_on_drop: true,
                     },
                     file,
                 ));
@@ -1252,7 +1474,7 @@ mod tests {
             PluginFormat, PluginInstance, PluginRole, PluginRuntimeStatus, ProjectAutomation,
         },
     };
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, time::Duration};
 
     fn arrangement_project() -> Project {
         let mut project = Project {
@@ -1752,6 +1974,352 @@ mod tests {
         ));
         std::fs::create_dir(&directory).unwrap();
         directory
+    }
+
+    fn checked_writer_with_fixture(
+        path: &Path,
+        control: &ExportControl,
+        fixture: WavWriteFixture,
+    ) -> Result<()> {
+        let mut policy = WavWritePolicy::checked(Instant::now() + Duration::from_secs(60));
+        policy.fixture = fixture;
+        write_stereo_wav_core(
+            path,
+            WavExportOptions {
+                sample_rate: 8000,
+                sample_format: WavSampleFormat::Float32,
+                level_policy: crate::export_options::WavLevelPolicy::PreserveLevel,
+            },
+            &[StereoFrame {
+                left: 0.25,
+                right: -0.5,
+            }; 8193],
+            1.0,
+            control,
+            policy,
+        )
+    }
+
+    #[test]
+    fn checked_float_writer_success_matches_legacy_bytes_at_unity_and_replaces_only_on_success() {
+        let directory = workflow_test_directory("checked-float-success");
+        let legacy = directory.join("legacy.wav");
+        let destination = directory.join("checked.wav");
+        let frames = [
+            StereoFrame {
+                left: -2.25,
+                right: 3.5,
+            },
+            StereoFrame {
+                left: f32::MAX,
+                right: -f32::MAX,
+            },
+        ];
+        write_stereo_wav_controlled(
+            &legacy,
+            WavExportOptions {
+                sample_rate: 8000,
+                sample_format: WavSampleFormat::Float32,
+                level_policy: crate::export_options::WavLevelPolicy::PreserveLevel,
+            },
+            &frames,
+            1.0,
+            &ExportControl::default(),
+        )
+        .unwrap();
+        // Both first publication and replacement use the real checked entry point.
+        for replace_existing in [false, true] {
+            if replace_existing {
+                std::fs::write(&destination, b"original").unwrap();
+            }
+            let control = ExportControl::default();
+            write_stereo_float32_checked(
+                &destination,
+                8000,
+                &frames,
+                &control,
+                Instant::now() + Duration::from_secs(60),
+            )
+            .unwrap();
+            assert_eq!(
+                std::fs::read(&destination).unwrap(),
+                std::fs::read(&legacy).unwrap()
+            );
+            assert_eq!(control.progress().basis_points, 10000);
+            assert!(!control.cancel());
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 2);
+        }
+        let bytes = std::fs::read(&destination).unwrap();
+        let samples = bytes[58..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|sample| f32::from_le_bytes(*sample))
+            .collect::<Vec<_>>();
+        assert_eq!(samples, vec![-2.25, 3.5, f32::MAX, -f32::MAX]);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn checked_float_writer_rejects_early_cancel_expiry_and_invalid_audio_without_staging() {
+        use crate::export_job::{ExportCancelled, ExportDeadlineExceeded};
+        let directory = workflow_test_directory("checked-float-admission");
+        let path = directory.join("original.wav");
+        std::fs::write(&path, b"original").unwrap();
+        for case in 0..4 {
+            let control = ExportControl::default();
+            let deadline = if case == 0 {
+                Instant::now()
+            } else {
+                Instant::now() + Duration::from_secs(60)
+            };
+            if case == 1 {
+                assert!(control.cancel());
+            }
+            let frame = StereoFrame {
+                left: if case == 2 { f32::NAN } else { 0.25 },
+                right: -0.5,
+            };
+            let error = write_stereo_float32_checked(
+                &path,
+                if case == 3 { 0 } else { 8000 },
+                &[frame],
+                &control,
+                deadline,
+            )
+            .unwrap_err();
+            match case {
+                0 => assert!(error.is::<ExportDeadlineExceeded>()),
+                1 => assert!(error.is::<ExportCancelled>()),
+                2 => assert!(error.to_string().contains("non-finite")),
+                _ => assert!(error.to_string().contains("sample rate")),
+            }
+            assert!(control.progress().basis_points < 10000);
+            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn checked_float_writer_final_boundary_cancel_and_expiry_abort_before_publication() {
+        use crate::export_job::{ExportCancelled, ExportDeadlineExceeded};
+        let directory = workflow_test_directory("checked-float-boundary");
+        let path = directory.join("original.wav");
+        // A successful fixture control rules out an always-rejecting seam.
+        checked_writer_with_fixture(&path, &ExportControl::default(), WavWriteFixture::default())
+            .unwrap();
+        for expiry in [false, true] {
+            for fail_abort in [false, true] {
+                std::fs::write(&path, b"original").unwrap();
+                let control = ExportControl::default();
+                let error = checked_writer_with_fixture(
+                    &path,
+                    &control,
+                    WavWriteFixture {
+                        fail_abort,
+                        expire_before_commit: expiry,
+                        cancel_before_commit: !expiry,
+                        ..WavWriteFixture::default()
+                    },
+                )
+                .unwrap_err();
+                if expiry {
+                    assert!(error.is::<ExportDeadlineExceeded>());
+                    assert!(
+                        control.cancel(),
+                        "expired writer must not win the commit CAS"
+                    );
+                } else {
+                    assert!(error.is::<ExportCancelled>());
+                    assert!(control.progress().cancelling);
+                }
+                assert_eq!(control.progress().basis_points, 9900);
+                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                assert_checked_abort(&directory, &error, fail_abort);
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn assert_checked_abort(directory: &Path, error: &anyhow::Error, failed: bool) {
+        if failed {
+            let abort = error.downcast_ref::<StagedOutputAbortFailure>().unwrap();
+            assert_eq!(abort.retained_path.parent(), Some(directory));
+            assert!(
+                abort.retained_path.is_file(),
+                "Drop must not retry a checked abort"
+            );
+            assert_eq!(
+                abort.removal_error.to_string(),
+                "injected staged Abort failure"
+            );
+            let message = format!("{error:#}");
+            assert!(message.contains(&abort.retained_path.display().to_string()));
+            assert!(message.contains("injected staged Abort failure"));
+            assert_eq!(std::fs::read_dir(directory).unwrap().count(), 2);
+            std::fs::remove_file(&abort.retained_path).unwrap();
+        } else {
+            assert!(error.downcast_ref::<StagedOutputAbortFailure>().is_none());
+        }
+        assert_eq!(std::fs::read_dir(directory).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn checked_float_writer_keeps_original_io_error_and_checked_abort_evidence() {
+        let directory = workflow_test_directory("checked-float-io");
+        let path = directory.join("original.wav");
+        for operation in [
+            StagedOperation::Write,
+            StagedOperation::Flush,
+            StagedOperation::Sync,
+            StagedOperation::Rename,
+        ] {
+            for fail_abort in [false, true] {
+                std::fs::write(&path, b"original").unwrap();
+                let control = ExportControl::default();
+                let error = checked_writer_with_fixture(
+                    &path,
+                    &control,
+                    WavWriteFixture {
+                        fail: Some(operation),
+                        fail_abort,
+                        ..WavWriteFixture::default()
+                    },
+                )
+                .unwrap_err();
+                let expected = format!("injected staged {operation:?} failure");
+                assert_eq!(
+                    error.downcast_ref::<std::io::Error>().unwrap().to_string(),
+                    expected
+                );
+                assert!(format!("{error:#}").contains(&expected));
+                assert!(control.progress().basis_points < 10000);
+                assert_eq!(
+                    control.progress().can_cancel,
+                    operation != StagedOperation::Rename
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                assert_checked_abort(&directory, &error, fail_abort);
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn checked_float_writer_real_rename_failure_preserves_destination_and_removes_stage() {
+        let directory = workflow_test_directory("checked-float-rename");
+        let path = directory.join("existing-directory.wav");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("original"), b"original").unwrap();
+        let control = ExportControl::default();
+        let error = write_stereo_float32_checked(
+            &path,
+            8000,
+            &[StereoFrame::default()],
+            &control,
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Unable to commit staged WAV"));
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert_eq!(std::fs::read(path.join("original")).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        assert_eq!(control.progress().basis_points, 9900);
+        assert!(!control.cancel());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn checked_float_writer_panic_is_primary_and_abort_failure_retains_its_path() {
+        let directory = workflow_test_directory("checked-float-panic");
+        let path = directory.join("original.wav");
+        for operation in [
+            StagedOperation::Write,
+            StagedOperation::Flush,
+            StagedOperation::Sync,
+            StagedOperation::Rename,
+        ] {
+            for fail_abort in [false, true] {
+                std::fs::write(&path, b"original").unwrap();
+                let control = ExportControl::default();
+                let error = checked_writer_with_fixture(
+                    &path,
+                    &control,
+                    WavWriteFixture {
+                        panic_at: Some(operation),
+                        fail_abort,
+                        ..WavWriteFixture::default()
+                    },
+                )
+                .unwrap_err();
+                let expected = format!("injected staged {operation:?} panic");
+                assert!(
+                    error
+                        .downcast_ref::<WavStagingPanic>()
+                        .unwrap()
+                        .message
+                        .contains(&expected)
+                );
+                assert!(format!("{error:#}").contains(&expected));
+                assert!(control.progress().basis_points < 10000);
+                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                assert_checked_abort(&directory, &error, fail_abort);
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn checked_float_writer_abort_panic_preserves_original_failure_and_retained_path() {
+        let directory = workflow_test_directory("checked-float-abort-panic");
+        let path = directory.join("original.wav");
+        for operation in [
+            StagedOperation::Write,
+            StagedOperation::Flush,
+            StagedOperation::Sync,
+            StagedOperation::Rename,
+        ] {
+            std::fs::write(&path, b"original").unwrap();
+            let control = ExportControl::default();
+            let error = checked_writer_with_fixture(
+                &path,
+                &control,
+                WavWriteFixture {
+                    fail: Some(operation),
+                    panic_at: Some(StagedOperation::Abort),
+                    ..WavWriteFixture::default()
+                },
+            )
+            .unwrap_err();
+            let expected = format!("injected staged {operation:?} failure");
+            assert_eq!(
+                error.downcast_ref::<std::io::Error>().unwrap().to_string(),
+                expected
+            );
+            let abort = error.downcast_ref::<StagedOutputAbortFailure>().unwrap();
+            let panic = abort
+                .removal_error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<WavStagingPanic>()
+                .unwrap();
+            assert!(panic.message.contains("injected staged Abort panic"));
+            assert_eq!(abort.retained_path.parent(), Some(directory.as_path()));
+            assert!(
+                abort.retained_path.is_file(),
+                "Drop must not retry a panicking abort"
+            );
+            let message = format!("{error:#}");
+            assert!(message.contains(&expected));
+            assert!(message.contains("injected staged Abort panic"));
+            assert!(message.contains(&abort.retained_path.display().to_string()));
+            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+            assert!(control.progress().basis_points < 10000);
+            assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 2);
+            std::fs::remove_file(&abort.retained_path).unwrap();
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

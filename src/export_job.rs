@@ -11,6 +11,7 @@ use std::{
         atomic::{AtomicU8, AtomicU32, Ordering},
         mpsc::{self, Receiver},
     },
+    time::Instant,
 };
 
 const RUNNING: u8 = 0;
@@ -21,6 +22,10 @@ const COMPLETE: u8 = 3;
 #[derive(Debug, thiserror::Error)]
 #[error("WAV export cancelled; the destination was not changed")]
 pub struct ExportCancelled;
+
+#[derive(Debug, thiserror::Error)]
+#[error("WAV export deadline elapsed before publication; the destination was not changed")]
+pub(crate) struct ExportDeadlineExceeded;
 
 #[derive(Default)]
 struct ControlState {
@@ -120,6 +125,29 @@ impl ExportControl {
 
     pub(crate) fn begin_commit(&self) -> Result<(), ExportCancelled> {
         self.checkpoint(9900)?;
+        self.0
+            .state
+            .compare_exchange(RUNNING, COMMITTING, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| ExportCancelled)?;
+        Ok(())
+    }
+
+    /// Cooperative deadline for the checked publication path only. Filesystem
+    /// operations can block; this does not interrupt an in-progress OS call.
+    pub(crate) fn check_deadline(&self, deadline: Instant) -> anyhow::Result<()> {
+        self.check_cancelled()?;
+        if Instant::now() >= deadline {
+            return Err(ExportDeadlineExceeded.into());
+        }
+        Ok(())
+    }
+
+    /// The deadline reaches the final cancellation/commit boundary. Once this
+    /// CAS wins, publication may finish even if the OS rename outlasts the
+    /// deadline; reporting a deadline error after publication would be false.
+    pub(crate) fn begin_commit_before(&self, deadline: Instant) -> anyhow::Result<()> {
+        self.checkpoint(9900)?;
+        self.check_deadline(deadline)?;
         self.0
             .state
             .compare_exchange(RUNNING, COMMITTING, Ordering::AcqRel, Ordering::Acquire)
@@ -271,6 +299,29 @@ mod tests {
         assert!(control.begin_commit().is_err());
         assert!(control.progress().cancelling);
         assert!(!control.progress().can_cancel);
+    }
+
+    #[test]
+    fn checked_commit_has_success_expiry_and_cancellation_controls() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let success = ExportControl::default();
+        success.begin_commit_before(deadline).unwrap();
+        assert_eq!(success.progress().basis_points, 9900);
+        assert!(!success.cancel());
+        success.complete();
+        assert_eq!(success.progress().basis_points, 10000);
+
+        let expired = ExportControl::default();
+        let error = expired.begin_commit_before(Instant::now()).unwrap_err();
+        assert!(error.is::<ExportDeadlineExceeded>());
+        assert_eq!(expired.progress().basis_points, 9900);
+        assert!(expired.cancel(), "expiry must not enter COMMITTING");
+
+        let cancelled = ExportControl::default();
+        cancelled.cancel_at(9900);
+        let error = cancelled.begin_commit_before(deadline).unwrap_err();
+        assert!(error.is::<ExportCancelled>());
+        assert!(cancelled.progress().cancelling);
     }
 
     #[test]

@@ -4,6 +4,10 @@
 //! A capture is delivered on a private one-shot channel, never through project-save/native
 //! publications. The caller must keep session actions fenced while this coordinator is pending.
 
+#[path = "instrument_bounce_render.rs"]
+#[allow(dead_code)] // Dormant fake-backend engine; no real clone adapter or App caller.
+pub(crate) mod render;
+
 use std::{
     collections::BTreeMap,
     hash::{DefaultHasher, Hash, Hasher},
@@ -347,11 +351,15 @@ pub struct InstrumentBounceCapture {
 }
 
 pub struct CapturedInstrumentBounce {
+    identity: BounceSourceIdentity,
     pub(crate) plan: InstrumentBouncePlan,
     pub(crate) state: BouncePluginState,
 }
 
 impl CapturedInstrumentBounce {
+    pub fn identity(&self) -> BounceSourceIdentity {
+        self.identity
+    }
     pub fn plan(&self) -> &InstrumentBouncePlan {
         &self.plan
     }
@@ -494,6 +502,7 @@ impl InstrumentBounceCapture {
             .state
             .validate(&plan.parameter_ids, plan.sample_rate)?;
         Ok(Some(CapturedInstrumentBounce {
+            identity: self.identity,
             plan: self.plan.take().expect("checked above"),
             state: receipt.state,
         }))

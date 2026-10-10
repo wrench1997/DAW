@@ -611,6 +611,7 @@ fn bounce_coordinator_captures_current_bases_without_changing_project() {
     assert!(control.metrics.bounce_capture_busy.load(Ordering::Acquire));
     drop(lease);
     let captured = capture.poll(stamp, status(), now).unwrap().unwrap();
+    assert_eq!(captured.identity(), stamp);
     assert_eq!(captured.state.parameter_bases[&17], 0.75);
     assert_eq!(captured.render_spec().initial_state, vec![1, 2, 3]);
     assert_eq!(

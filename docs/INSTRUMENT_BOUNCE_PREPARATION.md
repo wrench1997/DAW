@@ -1,15 +1,23 @@
 # Selected-instrument bounce: dormant preparation checkpoint
 
-Status: **DORMANT CAPTURE CANCELLATION, BOUNDED PLUGIN-FREE GATES PASSED**.
-The cancellation/termination source passed its narrow gates at `90795d5`, as
-detailed below. The earlier preparation slice was accepted at `0728a8c`, with
-aggregate Rust receipts at `d91cb74` and provenance receipts at `5a2d0b3`. Those
-older aggregate counts are not attributed to the new source. Native bounce,
-App integration and rendering remain unqualified.
-This branch starts from published
-`dcdb2c14809b5e6f34af7db071db36f763d757f5`. No new App action is enabled. There is
-no WAV renderer, project replacement, freeze, or complete-song plug-in export.
-Existing whole-song WAV export refuses active VSTs exactly as before.
+Status: **PURE FAKE-BACKEND RENDERER SOURCE, UNVALIDATED**.
+The current source adds a dormant selected-generator engine, strict fake reply
+validation, and checked float32 WAV staging. It has not been compiled or tested.
+Only tests implement its backend contract; there is no real VST render adapter,
+App action, clip conversion, automatic freeze, or full-song plug-in export.
+Existing whole-song WAV export still refuses active VSTs.
+
+The previous capture/cancellation slice was independently accepted at `12af28b`
+(documentation freeze), with narrow plugin-free receipts at `90795d5`. The earlier
+preparation slice was accepted at `0728a8c`, with aggregate Rust receipts at
+`d91cb74` and provenance receipts at `5a2d0b3`. None of those passes is attributed
+to the new renderer/writer source. This branch starts from published
+`dcdb2c14809b5e6f34af7db071db36f763d757f5`.
+
+See [the renderer contract](INSTRUMENT_BOUNCE_RENDER_PLAN.md) for the current
+pure slice, unqualified real transport/setup/teardown prerequisites, and the
+later selected Playlist occurrence conversion plan. Historical checkpoint
+sections below retain their original failures and bounded attribution.
 
 ## First checkpoint
 
@@ -51,17 +59,20 @@ Existing whole-song WAV export refuses active VSTs exactly as before.
 
 ## Deliberate pending work
 
-App capture-fence integration, production note-ID/MIDI mapping, synchronous Q128
-rendering, post-Process drift rejection, latency trimming, explicit fixed-tail
-review, cancellation during helper setup/render/teardown, existing atomic WAV
-writer reuse, and the user-facing review/action remain separate reviewed stages.
-The existing source remains installed; the eventual operation is a pre-Channel/
-Mixer instrument WAV, not a full mix or automatic project edit.
+The fake-only engine now has source for exact note mapping, Q128 processing,
+metadata/reply rejection, native latency trimming, explicit fixed-tail consent,
+owner-retained cleanup and checked WAV publication. These additions are
+**unvalidated**. They do not connect `offline_instrument.rs` to the renderer.
+The older fresh factory's preparation tests do not establish bounded native
+setup/teardown: inherited cold-load replay, blocking writes, permissive Process
+shape adaptation and unchecked Drop/shutdown remain explicit blockers.
 
+App exact-control/endpoint binding, the strict isolated clone adapter, genuine
+state/audio qualification and user-facing review remain later reviewed stages.
 The preparation bound is 8000–192000 Hz, a requested tail of 0–30 seconds, no more
-than ten minutes of song and 24 million total reserved frames including a maximum
-one-second plug-in-latency allowance. Tail truncation consent and output-format
-review are not implemented yet. Metadata is not binary authentication.
+than ten minutes of song and 24 million reserved frames including a maximum
+one-second native latency allowance. The new engine also checks rounded Q128
+processing frames against 24 million. Metadata is not binary authentication.
 
 ## Verification at checkpoint
 
@@ -287,3 +298,30 @@ ordering review finding and earlier failed source/fixture/provenance receipts ar
 preserved. Exact App control binding and session ownership, cancellation during
 fresh factory/render/teardown, note mapping, WAV output and native/Windows/UI
 qualification remain open. Existing full-song VST export still refuses.
+
+## New pure-renderer source checkpoint (unvalidated)
+
+- Preserve the exact validated `BounceSourceIdentity` in a successful capture;
+  reports never reconstruct it from a later Project.
+- Preflight the complete compiled schedule with a single cursor and per-event
+  cancellation/deadline checks. Require NoteOn before N, matched positive-length
+  NoteOff no later than N, full note source/channel/pitch/track identity, and
+  the existing 512 active ID / 96 Timeline MIDI events per Q128 limits.
+- The fake backend contract validates all Q128 samples and exact channel/frame
+  shape, including discarded latency/padding. Reply/metadata failures win over
+  cancellation observed after a dispatched operation.
+- One worker retains its backend and admission until disposal acknowledges all
+  resources gone. Disposal failure or unwind blocks publication. A dropped
+  receiver cancels but does not release the worker. Pending cleanup retains the
+  owner; this does not claim arbitrary failed OS teardown can be forced closed.
+- WAV staging begins only after backend disposal and Drop. Checked writes retain
+  the original failure plus an abort failure and temporary path. Deadline is
+  checked after sync and immediately before the existing commit CAS; after that
+  CAS, publication may finish even if an OS operation outlasts the deadline.
+  Filesystem cancellation remains cooperative between calls.
+- Source-only fixtures include callback mapper equivalence, actual compiled
+  swing/repeat/source-offset arrangements, latency/tail/mono/stereo output,
+  malformed trimmed/padded samples, fault-versus-cancel precedence, cleanup
+  owner retention, panic, staged I/O errors and cancellation/expiry at commit.
+  No counts here are test results. Save source plus Git bundle, obtain independent
+  frozen review, and coordinate exclusive Cargo ownership before execution.
