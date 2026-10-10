@@ -180,13 +180,20 @@ def prepare(here, repo, manifest_input, lock_input):
             Ok(())
         })
     }''', ['E0505', 'E0507'], ['cannot move out', 'owner'], 'An owned MainThreadPlugin cannot be dropped while its domain-session receiver borrow and callback are active.')
-    for label, ty, field in [('control', 'ControlOps', 'controller'), ('control', 'ControlOps', 'view'), ('processor', 'ProcessorOps', 'processor'), ('processor', 'ProcessorOps', 'runtime')]:
+    for label, ty, field in [('control', 'ControlOps', 'controller'), ('control', 'ControlOps', 'view'), ('processor', 'ProcessorOps', 'core')]:
         case(f'{label}_private_{field}', f'''fn contract(owner: &mut MainThreadPlugin) -> Result<()> {{
         owner.with_domain_session(&mut |control, processor| {{
             let _ = &{label}.{field}; // CONTRACT
             Ok(())
         }})
     }}''', ['E0616'], [f'`{field}`', ty, 'private'], f'The actual {ty} {field} field is private and cannot expose raw COM/runtime state.')
+    for field in ('processor', 'runtime', 'gate'):
+        case(f'processor_no_{field}_field', f'''fn contract(owner: &mut MainThreadPlugin) -> Result<()> {{
+        owner.with_domain_session(&mut |control, processor| {{
+            let _ = &processor.{field}; // CONTRACT
+            Ok(())
+        }})
+    }}''', ['E0609'], [f'`{field}`', 'ProcessorOps', 'no field'], f'The nongeneric ProcessorOps facade exposes no former {field} backing route.')
 
     (HERE / 'cases.json').write_text(json.dumps(cases, indent=2) + '\n')
     manifest = manifest_input.read_text()

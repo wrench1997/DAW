@@ -164,6 +164,7 @@ struct MockState {
     capture_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     process_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     process_entry_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    control_get_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     fail_state: AtomicBool,
     no_alloc_process: AtomicBool,
     realtime_calls: AtomicUsize,
@@ -193,6 +194,7 @@ impl Default for MockState {
             capture_callback: Mutex::new(None),
             process_callback: Mutex::new(None),
             process_entry_callback: Mutex::new(None),
+            control_get_callback: Mutex::new(None),
             fail_state: AtomicBool::new(false),
             no_alloc_process: AtomicBool::new(false),
             realtime_calls: AtomicUsize::new(0),
@@ -609,6 +611,9 @@ impl<const S: bool, const C: bool> IEditControllerTrait for MockPlugin<S, C> {
     }
     unsafe fn getParamNormalized(&self, _id: u32) -> f64 {
         self.probe.record("getParamNormalized");
+        if let Some(callback) = self.state.control_get_callback.lock().unwrap().as_ref() {
+            callback();
+        }
         f64::from_bits(self.state.last_mirrored.load(Ordering::Acquire))
     }
     unsafe fn setParamNormalized(&self, _id: u32, value: f64) -> tresult {
@@ -3241,3 +3246,5 @@ fn combined_reset_gate_is_sdk_scoped_on_success_sdk_error_and_staging_failure() 
         assert!(!host.is_data_exchange_in_process_for_test());
     }
 }
+
+mod runtime_loan_tests;

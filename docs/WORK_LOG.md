@@ -1280,3 +1280,18 @@ helper SHA256 `ca1751af6d848d35a2b0054713d44bb1614d952eb4d280740123c52155dd6b7d`
 These are source/mock/protocol results only. There is no genuine-plugin, native
 GUI, Windows runtime, device-audio or performance acceptance. The production
 helper has no new process capability, mode, worker or metadata policy.
+
+## 2026-10-10 — scoped full-runtime processing preparation (unvalidated)
+
+- Started a separate branch from reviewed test-only capability checkpoint
+  `45620f15868d2cfda3b0200645e743ad3355f586`. Accepted publication remains separate.
+- Split the SDK process-only dependency from lifecycle notification authority,
+  without changing the three existing runtime kernel bodies or public callback/
+  meter envelopes.
+- Added a cfg(test)-only exclusive runtime loan with disjoint loading-thread UI
+  control, one existing SDK gate and no owning COM/buffer movement or rebuild.
+  Full-kernel thread fixtures and compiler contracts require independent unsafe
+  source review and durable source/bundle archival before execution.
+- Retain the explicit retired-host-queue final-Release/free limitation after a
+  main-thread rebuild. No production helper worker, user mode, metadata-policy
+  change, genuine-plugin run or audible-isolation result is introduced here.

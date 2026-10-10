@@ -758,3 +758,47 @@ helper SHA256 `ca1751af6d848d35a2b0054713d44bb1614d952eb4d280740123c52155dd6b7d`
 These are source/mock/protocol results only. There is no genuine-plugin, native
 GUI, Windows runtime, device-audio or performance acceptance. The production
 helper has no new process capability, mode, worker or metadata policy.
+
+## Scoped full-runtime processing preparation (2026-10-10, unvalidated checkpoint)
+
+The production render kernel now depends on `ProcessorProcessCall`, which grants
+only the SDK `process` call. `setProcessing` remains in the separate lifecycle
+`ProcessorCalls` trait. The three runtime render functions use the same bodies,
+queue ordering, zero-sample bus hiding, positive-call history, native staging and
+per-SDK-call acknowledgment, transport advancement, error cleanup, output-loss
+and sticky parameter-output-fault precedence. The existing production
+`ProcessorOps` facade remains non-Send/non-Sync. Public `Plugin` flat/bus process
+wrappers are unchanged: only whole-call success updates levels and invokes the
+arbitrary caller-side audio callback while its existing meter mutex is held.
+
+A separate, entirely `cfg(test)` session loans the already prepared runtime by
+value while the loading thread retains the existing disjoint `ControlOps` view.
+`RuntimeLoan` has one private field and one narrowly audited unsafe Send. Its
+worker adapter exposes only a borrowed processor address with exclusive
+processor/module lifetime; it neither owns/clones a COM reference nor enters the
+process flag. The existing full kernel is the sole owner of the SDK-call gate.
+The owner physically retains all buffer allocations, parameter/event COM
+wrappers, controller, processor, factory and module. No loan operation can
+replace or rebuild those owners. State, setup, reset, lifecycle, metadata and
+destruction require the scoped worker to join and the owner borrow to end.
+
+The concurrent fixture is an ownership/orchestration proof, not helper worker
+activation. Its intended main-thread getter hold lasts at least 350 ms; a generous
+watchdog checks worker completion before release, without asserting a 350 ms
+processing deadline. It uses real host COM mock interfaces and the full runtime,
+but does not qualify arbitrary plug-ins or native windows. Same-thread callback
+metering and controller-mirroring entry points retain their original contracts;
+the runtime-only parameter method remains queue admission without mirroring.
+
+Host-issued queue lifetime is a distinct boundary. During one prepared lifetime,
+container-owned COM references remain live on the main owner. A plug-in can
+legally retain a queue, and after an owner-side rebuild its final later Release
+may free that retired host queue/arena on the processing thread. Join-before-
+rebuild prevents stale-owner access but does not move that final release back to
+the main thread. The fixture will preserve this negative evidence. No universal
+final-release affinity, whole-Process no-allocation/no-free, mutex removal,
+metadata freshness lease, independent IPC, or audible GUI-stall fix is claimed.
+
+This source checkpoint is unvalidated until the separate executed receipt is
+appended. Concurrent invocation requires independent review of both the narrow
+unsafe wrapper and its concrete COM fixture callsites before execution.
