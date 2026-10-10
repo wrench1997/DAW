@@ -454,36 +454,40 @@ def prepare(here, repo, manifest_input, lock_input):
         if len(matches) != 1:
             raise ValueError(f'Unexpected source layout for {name}: {matches}')
         modules.append(str(matches[0]))
-        target_path = here / 'internal.rs' if name == 'internal' else matches[0]
-        return f'#[path = {json.dumps(str(target_path))}]\n{visibility}mod {name};'
+        if name == 'internal':
+            return '__PRIVATE_RUNTIME_CONTRACT_INTERNAL__'
+        return f'#[path = {json.dumps(str(matches[0]))}]\n{visibility}mod {name};'
 
     shim, count = re.subn(r'(?m)^(pub )?mod (\w+);$', rebase, lib)
     if count != 17:
         raise ValueError(f'Unexpected top-level module layout: {count}')
-    # The two kernel traits are intentionally pub(super) inside internal. Put
-    # the fixture in their existing visibility scope, preserving every actual
-    # module path rather than making the traits public or accepting E0603.
+    # Anchor an inline internal module at the original directory and preserve
+    # its declarations verbatim. An absolute #[path] on plugin_impl.rs would
+    # change its children's lookup directory and cause E0583 before contracts
+    # could type-check. The inline anchor retains ordinary nested resolution.
+    # This also places the two pub(super) kernel traits in the fixture's real
+    # visibility scope, without public exports or an accepted E0603 shortcut.
     internal_root = source / 'internal/mod.rs'
+    internal_text = internal_root.read_text(encoding='utf-8')
     internal_modules = []
-
-    def rebase_internal(match):
-        visibility, name = match.group(1) or '', match.group(2)
+    declarations = re.findall(r'(?m)^(pub(?:\([^)]*\))? )?mod (\w+);$', internal_text)
+    if len(declarations) != 10:
+        raise ValueError(f'Unexpected internal module layout: {len(declarations)}')
+    for _, name in declarations:
         matches = [p for p in (source / 'internal' / f'{name}.rs',
                               source / 'internal' / name / 'mod.rs') if p.is_file()]
         if len(matches) != 1:
             raise ValueError(f'Unexpected internal source layout for {name}: {matches}')
         internal_modules.append(str(matches[0]))
-        return f'#[path = {json.dumps(str(matches[0]))}]\n{visibility}mod {name};'
-
-    internal_shim, count = re.subn(r'(?m)^(pub(?:\([^)]*\))? )?mod (\w+);$',
-                                  rebase_internal, internal_root.read_text(encoding='utf-8'))
-    if count != 10:
-        raise ValueError(f'Unexpected internal module layout: {count}')
+    if shim.count('__PRIVATE_RUNTIME_CONTRACT_INTERNAL__') != 1:
+        raise ValueError('Expected exactly one internal module anchor')
     for mode, gate in [('test', '#[cfg(test)]\n'), ('production', '')]:
-        (here / f'lib.{mode}.rs.template').write_text(shim, encoding='utf-8')
-        text = internal_shim + '\n\n// Internal-sibling compile-only fixture; never exported.\n'
-        text += gate + '#[path = "active_fixture.rs"]\nmod private_runtime_loan_contract;\n'
-        (here / f'internal.{mode}.rs.template').write_text(text, encoding='utf-8')
+        text = f'#[path = {json.dumps(str(source / "internal"))}]\nmod internal {{\n'
+        text += internal_text + '\n// Internal-sibling compile-only fixture; never exported.\n'
+        text += gate + f'#[path = {json.dumps(str(here / "active_fixture.rs"))}]\n'
+        text += 'mod private_runtime_loan_contract;\n}\n'
+        (here / f'lib.{mode}.rs.template').write_text(
+            shim.replace('__PRIVATE_RUNTIME_CONTRACT_INTERNAL__', text), encoding='utf-8')
     write_json(here / 'source-map.json', dict(production_root=str(source), modules=modules,
                internal_root=str(internal_root), internal_modules=internal_modules,
                runtime_loan_source=str(source / 'internal/plugin_impl/domain_session.rs'),
@@ -605,8 +609,7 @@ def main():
     logs = run_dir / 'logs'
     logs.mkdir()
     for artifact in ('Cargo.toml', 'Cargo.lock', 'lib.test.rs.template',
-                     'lib.production.rs.template', 'internal.test.rs.template',
-                     'internal.production.rs.template', 'cases.json', 'source-map.json'):
+                     'lib.production.rs.template', 'cases.json', 'source-map.json'):
         shutil.copyfile(here / artifact, run_dir / artifact)
     shutil.copyfile(manifest_input, run_dir / 'input.Cargo.toml')
     shutil.copyfile(source.parent / 'Cargo.toml', run_dir / 'production.Cargo.toml')
@@ -643,11 +646,9 @@ def main():
         for spec in cases:
             name = spec['name']
             shutil.copyfile(here / f'lib.{spec["mode"]}.rs.template', here / 'lib.rs')
-            shutil.copyfile(here / f'internal.{spec["mode"]}.rs.template', here / 'internal.rs')
             shutil.copyfile(here / 'fixtures' / (name + '.rs'), here / 'active_fixture.rs')
             shutil.copyfile(here / 'active_fixture.rs', logs / (name + '.rs'))
             shutil.copyfile(here / 'lib.rs', logs / (name + '.lib.rs'))
-            shutil.copyfile(here / 'internal.rs', logs / (name + '.internal.rs'))
             run_command = command + (['--tests'] if spec['mode'] == 'test' else [])
             write_json(logs / (name + '.command.json'), run_command)
             started = time.monotonic()
@@ -670,7 +671,6 @@ def main():
             (logs / (name + '.diagnostics.txt')).write_text(rendered, encoding='utf-8')
             entry = dict(name=name, mode=spec['mode'], passed=not problems, returncode=result.returncode,
                          command=run_command, shim_sha256=sha256(here / 'lib.rs'),
-                         internal_shim_sha256=sha256(here / 'internal.rs'),
                          fixture_sha256=sha256(here / 'active_fixture.rs'),
                          codes=sorted(str(code) for code in codes), reason=spec['reason'], problems=problems,
                          seconds=round(time.monotonic() - started, 3))
