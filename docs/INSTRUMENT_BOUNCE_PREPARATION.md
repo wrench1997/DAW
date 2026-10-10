@@ -1,8 +1,9 @@
 # Selected-instrument bounce: dormant preparation checkpoint
 
-Status: **DORMANT EXPERIMENTAL PREPARATION**. Plugin-free Rust gates passed at
-`d91cb74`; the final provenance-test correction is pending execution at this
-source freeze. Native bounce, App integration and rendering remain unqualified.
+Status: **DORMANT EXPERIMENTAL PREPARATION, PLUGIN-FREE GATES PASSED**.
+Rust gates passed at `d91cb74`; the unchanged-Rust provenance correction passed
+its Python/package gates at `5a2d0b3`. Native bounce, App integration, capture
+cancellation and rendering remain unqualified.
 This branch starts from published
 `dcdb2c14809b5e6f34af7db071db36f763d757f5`. No new App action is enabled. There is
 no WAV renderer, project replacement, freeze, or complete-song plug-in export.
@@ -186,3 +187,22 @@ all 38 resulting source files matched the vendored source byte-for-byte. The nex
 correction updates the hardcoded test pin and adds the reviewed patch-document pin;
 no Rust or production packaging code changes. Its bounded Python/package rerun is
 still pending at source freeze. All previous failed receipts remain preserved.
+
+## Final preparation checkpoint (2026-10-10)
+
+The bounded provenance rerun at `5a2d0b3` passed all 239 Python tests and 552 package
+input/provenance/document-policy checks. Rust source is unchanged from `d91cb74`:
+1209 App tests, 1186 no-default core tests, 409 available vendor tests, 26 vendor
+doctests, 25 helper tests and 13 transport/editor/reset protocol tests passed.
+Focused coordinator10 and capture/factory/affinity7 are included in the App total.
+App/core/vendor Clippy, formatting and helper build passed. Direct vendor Clippy
+retains the established deprecated/drain_collect baseline allowances. Exactly one
+external SDK-generated metadata fixture remains explicitly excluded.
+
+Source-linked compiler commands, copied executable hashes, 140 source/manifest
+hashes, patch reconstruction and the earlier failures are retained together in the
+checkpoint archive. This final documentation-only freeze does not change tested
+Rust, the helper wire protocol, or packaging behavior. It does not qualify genuine
+VST processing, audible/WAV output, native UI, Windows, cancellation or App actions.
+The next bounded checkpoint must close worker-owned cancellation/deadline admission
+before any App integration or renderer acceptance. Full-song VST export still refuses.
