@@ -576,6 +576,7 @@ EVENT_QA_FILES = frozenset((
 EVENT_INVENTORY_SHA256 = "9bf3d8af3a911286a766b628f547ee4579e2d40ef582b38b6c36254d0e9b8b88"
 # Explicitly reviewed documentation that may land on an independent branch.
 OPTIONAL_SOURCE_FILES = frozenset((
+    "docs/NATIVE_CONTROL_AUTOMATION.md",
     "docs/PROJECT_MEDIA.md", "docs/OFFLINE_EXPORT_WORKFLOW.md", "docs/AUDIO_SPLIT_FIDELITY.md",
     "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md", "docs/LOCAL_SAMPLE_BROWSER.md",
     "docs/HEADLESS_UI_QA.md", "docs/NATIVE_VST3_EDITORS.md", "docs/FL_INSPIRED_NATIVE_THEME.md", "docs/MULTIWINDOW_WORKSPACE.md",

@@ -23,3 +23,9 @@ Reference: [FL Studio Automation Clips manual](https://www.image-line.com/fl-stu
 ## Validation scope
 
 Focused regressions cover native target/value creation, pan extremes, stable reordered Mixer identity, deterministic repeated open, alias/ambiguity handling, invalid input, placement capacity, song-end length, persistence and atomic history. Native Linux pointer/device acceptance remains a separate check; pure model tests do not certify audible or native-window behavior.
+
+### Automated checkpoint (2026-10-10)
+
+Rust/app source at `097ff1f` passed 1,200 all-feature app tests, 1,183 no-default/core tests, 25 helper and 13 protocol tests, both strict all-target Clippy profiles, formatting, all-bin build and helper protocol smoke. Production egui input coverage includes menu dismissal, all four control entry points, repeated open and exact Undo/Redo. The two older generic-Pan-label fixtures failed at `35620ff`; precise target-label selectors were fixed and the full suite rerun. These are headless/source checks, not native window or audible automation acceptance.
+
+The packaging follow-up includes this guide in the preview document allowlist. Actual input/link/provenance validation covers 553 package inputs; the 239 Python cases pass with the built helper and no skips. No Windows executable or release package was produced. Standalone vendor/domain-contract suites and physical/native QA were not rerun for this workflow-only change.
