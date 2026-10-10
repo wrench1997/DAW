@@ -96,3 +96,29 @@ The dormant caller-supplied source stamp still requires an App adapter that bind
 the control to the exact project-session/channel/endpoint probe and revalidates
 that probe on completion; same-instance replacement must not pass by ID alone.
 App integration is intentionally not enabled by this checkpoint.
+
+## Strict audio-bus review correction (still unvalidated)
+
+Review of `e0ea8aa` found that ordinary `AudioBusLayout` describes prepared buffers,
+not a fresh component enumeration. The additive `CheckedAudioBusLayout` query now
+checks actual audio count, index, channel count and main/aux descriptor against
+those prepared buffers. The prepared main/aux descriptor is recorded from the
+same SDK read that established each buffer's channel count; unknown fallback
+metadata cannot attest consistency. The ordinary prepared-layout API is unchanged.
+
+A non-draining restart flag observation rejects pending I/O/reload both before and
+after enumeration. Neither source capture nor candidate admission services that
+work, reconfigures buses, stops/resets the source, or infers active status from
+bus default flags. The synchronous factory uses this strict query after state,
+Start and parameter-base application. Later per-block rendering guards must use
+the same query; no rendering method exists in this checkpoint.
+
+A bounded `MetadataQueryRejection` enum distinguishes explicit Unsupported,
+PendingTopology and InconsistentTopology refusal from faults. Only the new typed
+response may produce harmless rejection. Generic remote Error (including an old
+helper), wrong/malformed reply, SDK error, crash, timeout and poisoned state still
+fail and fault the capture source. No failure can produce a valid layout, clear a
+previous fault, or trigger automatic recovery. Fresh candidate failure disposes
+only the candidate. Plugin-free tests cover Start/SetParameter/type changes,
+unknown activation, pending/reentrant restart without flag drain, SDK errors and
+protocol classification. All new tests remain unexecuted at source freeze.

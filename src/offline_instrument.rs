@@ -96,7 +96,9 @@ impl OfflineInstrument {
                 backend.set_parameter(id, value)?;
             }
         }
-        let metadata = backend.bounce_metadata()?;
+        let metadata = backend
+            .bounce_metadata()
+            .map_err(|error| error.to_string())?;
         metadata.validate(sample_rate)?;
         backend.input_channels = 0;
         backend.output_channels = metadata.output_buses[0].0;
@@ -113,17 +115,17 @@ impl OfflineInstrument {
 
 #[cfg(feature = "vst3")]
 impl Vst3Backend {
-    fn bounce_metadata(&self) -> Result<BouncePluginMetadata, String> {
-        let layout = self
-            .plugin
-            .audio_bus_layout()
-            .map_err(|error| error.to_string())?;
-        let events = self
-            .plugin
-            .event_bus_layout()
-            .map_err(|error| error.to_string())?;
+    fn bounce_metadata(&self) -> vst3_host::Result<BouncePluginMetadata> {
+        let layout = self.plugin.checked_audio_bus_layout()?;
+        if layout.outputs.iter().any(|bus| !bus.is_main) {
+            return Err(vst3_host::Error::MetadataQueryRejected(
+                vst3_host::MetadataQueryRejection::Unsupported,
+            ));
+        }
+        let events = self.plugin.event_bus_layout()?;
         let info = self.plugin.info();
-        let (latency_samples, tail_samples) = self.processing_metadata()?;
+        let latency_samples = self.plugin.try_latency_samples()?;
+        let tail_samples = self.plugin.try_tail_samples()?;
         Ok(BouncePluginMetadata {
             class_uid: info.uid.clone(),
             version: info.version.clone(),
@@ -142,12 +144,12 @@ impl Vst3Backend {
             input_buses: layout
                 .inputs
                 .iter()
-                .map(|bus| (bus.channel_count, bus.active))
+                .map(|bus| (bus.channel_count, bus.active == Some(true)))
                 .collect(),
             output_buses: layout
                 .outputs
                 .iter()
-                .map(|bus| (bus.channel_count, bus.active))
+                .map(|bus| (bus.channel_count, bus.active == Some(true)))
                 .collect(),
             latency_samples,
             tail_samples,
@@ -177,7 +179,7 @@ impl Vst3Backend {
             .plugin
             .native_dirty_revision()
             .map_err(|error| BackendFailed(error.to_string()))?;
-        let metadata = self.bounce_metadata().map_err(BackendFailed)?;
+        let metadata = self.bounce_metadata().map_err(classify_metadata_error)?;
         metadata
             .validate(self.plugin.sample_rate() as u32)
             .map_err(Rejected)?;
@@ -226,7 +228,7 @@ impl Vst3Backend {
         if after.open
             || before.generation != after.generation
             || revision != after_revision
-            || metadata != self.bounce_metadata().map_err(BackendFailed)?
+            || metadata != self.bounce_metadata().map_err(classify_metadata_error)?
         {
             return Err(Rejected("Source native generation, state revision or metadata changed during instrument bounce capture".into()));
         }
@@ -237,5 +239,17 @@ impl Vst3Backend {
             native_generation: before.generation,
             native_dirty_revision: revision,
         })
+    }
+}
+
+/// Only explicit bounded admission refusal is harmless. Never infer it from remote text:
+/// unknown/old helpers, malformed replies, SDK failures and poisoned state remain faults.
+#[cfg(feature = "vst3")]
+fn classify_metadata_error(error: vst3_host::Error) -> BounceCaptureError {
+    match error {
+        vst3_host::Error::MetadataQueryRejected(_) => {
+            BounceCaptureError::Rejected(error.to_string())
+        }
+        _ => BounceCaptureError::BackendFailed(error.to_string()),
     }
 }

@@ -647,16 +647,39 @@ impl PluginInternal for IsolatedPluginImpl {
         }
     }
 
+    fn checked_audio_bus_layout(&self) -> Result<crate::plugin::CheckedAudioBusLayout> {
+        match self.send_command_once(HostCommand::CheckedAudioBusLayout)? {
+            HostResponse::CheckedAudioBusLayout { layout } => {
+                layout.validate()?;
+                Ok(layout)
+            }
+            HostResponse::MetadataQueryRejected { reason } => {
+                Err(Error::MetadataQueryRejected(reason))
+            }
+            HostResponse::Error { message } => Err(Error::ProcessError(format!(
+                "CheckedAudioBusLayout: {message}"
+            ))),
+            _ => Err(Error::ProcessError(
+                "CheckedAudioBusLayout: unexpected response".into(),
+            )),
+        }
+    }
+
     fn event_bus_layout(&self) -> Result<crate::plugin::EventBusLayout> {
         match self.send_command_once(HostCommand::EventBusLayout)? {
             HostResponse::EventBusLayout { layout } => {
                 layout.validate()?;
                 Ok(layout)
             }
-            HostResponse::Error { message } => {
-                Err(Error::Other(format!("EventBusLayout: {message}")))
+            HostResponse::MetadataQueryRejected { reason } => {
+                Err(Error::MetadataQueryRejected(reason))
             }
-            _ => Err(Error::Other("EventBusLayout: unexpected response".into())),
+            HostResponse::Error { message } => {
+                Err(Error::ProcessError(format!("EventBusLayout: {message}")))
+            }
+            _ => Err(Error::ProcessError(
+                "EventBusLayout: unexpected response".into(),
+            )),
         }
     }
 
@@ -2153,6 +2176,70 @@ mod tests {
             assert_eq!(fake.requests().len(), 4);
             assert_eq!(plugin.recovery_count(), 0);
         }
+    }
+
+    #[test]
+    fn checked_audio_layout_query_preserves_typed_refusal_and_never_recovers() {
+        use crate::{
+            plugin::{CheckedAudioBusConfig, CheckedAudioBusLayout},
+            MetadataQueryRejection,
+        };
+        let layout = CheckedAudioBusLayout {
+            inputs: vec![],
+            outputs: vec![CheckedAudioBusConfig {
+                channel_count: 2,
+                is_main: true,
+                active: Some(true),
+            }],
+        };
+        let mut invalid = layout.clone();
+        invalid.outputs[0].channel_count = 0;
+        for (index, reply) in [
+            HostResponse::CheckedAudioBusLayout {
+                layout: layout.clone(),
+            },
+            HostResponse::MetadataQueryRejected {
+                reason: MetadataQueryRejection::Unsupported,
+            },
+            HostResponse::MetadataQueryRejected {
+                reason: MetadataQueryRejection::PendingTopology,
+            },
+            HostResponse::MetadataQueryRejected {
+                reason: MetadataQueryRejection::InconsistentTopology,
+            },
+            HostResponse::Error {
+                message: "unsupported old helper".into(),
+            },
+            HostResponse::Success {
+                message: "wrong reply".into(),
+            },
+            HostResponse::CheckedAudioBusLayout { layout: invalid },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fake = FakeHelper::raw_metadata_reply(
+                &format!("checked_audio_{index}"),
+                "CheckedAudioBusLayout",
+                &serde_json::to_string(&reply).unwrap(),
+            );
+            let mut plugin = isolated(&fake);
+            plugin.auto_recover = true;
+            let result = plugin.checked_audio_bus_layout();
+            match index {
+                0 => assert_eq!(result.unwrap(), layout),
+                1..=3 => assert!(matches!(result, Err(Error::MetadataQueryRejected(_)))),
+                _ => assert!(matches!(result, Err(Error::ProcessError(_)))),
+            }
+            assert_eq!(plugin.recovery_count(), 0);
+            assert_eq!(fake.requests().len(), 1);
+        }
+        let fake = FakeHelper::exit_on("checked_audio_dead", "CheckedAudioBusLayout");
+        let mut plugin = isolated(&fake);
+        plugin.auto_recover = true;
+        assert!(plugin.checked_audio_bus_layout().is_err());
+        assert_eq!(plugin.recovery_count(), 0);
+        assert_eq!(fake.requests().len(), 1);
     }
 
     #[test]

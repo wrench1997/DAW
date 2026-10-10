@@ -311,6 +311,10 @@ struct HostProcessData {
     sample_buffers: HostSampleBuffers,
     input_bus_buffers: Vec<AudioBusBuffers>,
     output_bus_buffers: Vec<AudioBusBuffers>,
+    // Descriptor types from the same SDK reads that established prepared channel counts.
+    // None preserves legacy fallback behavior, but cannot satisfy strict attestation.
+    input_bus_types: Vec<Option<bool>>,
+    output_bus_types: Vec<Option<bool>>,
     process_context: ProcessContext,
     process_context_requirements: Option<u32>,
     transport_tempo: f64,
@@ -1975,6 +1979,8 @@ impl PluginImpl {
                 },
                 input_bus_buffers: Vec::new(),
                 output_bus_buffers: Vec::new(),
+                input_bus_types: Vec::new(),
+                output_bus_types: Vec::new(),
                 process_context: std::mem::zeroed(),
                 process_context_requirements: self.runtime.process_context_requirements,
                 transport_tempo: self.runtime.tempo,
@@ -2061,6 +2067,23 @@ impl PluginImpl {
         }
     }
 
+    fn reject_pending_topology(&self) -> Result<()> {
+        let handler =
+            self.control
+                .component_handler
+                .as_ref()
+                .ok_or(Error::MetadataQueryRejected(
+                    crate::MetadataQueryRejection::Unsupported,
+                ))?;
+        let flags = handler.pending_restart_flags();
+        if flags.io_changed() || flags.reload_component() {
+            return Err(Error::MetadataQueryRejected(
+                crate::MetadataQueryRejection::PendingTopology,
+            ));
+        }
+        Ok(())
+    }
+
     /// Prepare audio buffers based on plugin bus configuration
     unsafe fn prepare_buffers(&mut self, data: &mut HostProcessData) -> Result<()> {
         let input_bus_count = self
@@ -2073,6 +2096,8 @@ impl PluginImpl {
             .getBusCount(kAudio as i32, kOutput as i32);
         data.input_bus_buffers.clear();
         data.output_bus_buffers.clear();
+        data.input_bus_types.clear();
+        data.output_bus_types.clear();
 
         let channel_count = |direction: i32, bus_idx: i32| {
             let mut bus_info: BusInfo = std::mem::zeroed();
@@ -2082,7 +2107,16 @@ impl PluginImpl {
                 .getBusInfo(kAudio as i32, direction, bus_idx, &mut bus_info)
                 == kResultOk
             {
-                return bus_info.channelCount.max(0);
+                let kind = if bus_info.mediaType == kAudio as i32
+                    && bus_info.direction == direction
+                    && (bus_info.busType == BusTypes_::kMain as i32
+                        || bus_info.busType == BusTypes_::kAux as i32)
+                {
+                    Some(bus_info.busType == BusTypes_::kMain as i32)
+                } else {
+                    None
+                };
+                return (bus_info.channelCount.max(0), kind);
             }
             // A failed getBusInfo must not remove the slot and shift every later bus index.
             // Fall back to the processor's arrangement, whose set bits define its channels.
@@ -2093,20 +2127,24 @@ impl PluginImpl {
                 .getBusArrangement(direction, bus_idx, &mut arrangement)
                 == kResultOk
             {
-                arrangement.count_ones() as i32
+                (arrangement.count_ones() as i32, None)
             } else {
-                0
+                (0, None)
             }
         };
 
         for bus_idx in 0..input_bus_count {
             let mut bus: AudioBusBuffers = std::mem::zeroed();
-            bus.numChannels = channel_count(kInput as i32, bus_idx);
+            let (channels, kind) = channel_count(kInput as i32, bus_idx);
+            bus.numChannels = channels;
+            data.input_bus_types.push(kind);
             data.input_bus_buffers.push(bus);
         }
         for bus_idx in 0..output_bus_count {
             let mut bus: AudioBusBuffers = std::mem::zeroed();
-            bus.numChannels = channel_count(kOutput as i32, bus_idx);
+            let (channels, kind) = channel_count(kOutput as i32, bus_idx);
+            bus.numChannels = channels;
+            data.output_bus_types.push(kind);
             data.output_bus_buffers.push(bus);
         }
 
@@ -2881,8 +2919,98 @@ impl PluginInternal for PluginImpl {
     }
 
     #[allow(clippy::unnecessary_cast)]
+    fn checked_audio_bus_layout(&self) -> Result<crate::plugin::CheckedAudioBusLayout> {
+        use crate::MetadataQueryRejection::InconsistentTopology;
+        self.ensure_control_thread("checked audio bus layout")?;
+        self.reject_pending_topology()?;
+        let data = self
+            .runtime
+            .process_data
+            .as_ref()
+            .ok_or(Error::MetadataQueryRejected(InconsistentTopology))?;
+        let side = |direction: i32,
+                    prepared: &[AudioBusBuffers],
+                    kinds: &[Option<bool>],
+                    activation: &[bool]|
+         -> Result<Vec<crate::plugin::CheckedAudioBusConfig>> {
+            unsafe {
+                let count = self.control.component.getBusCount(kAudio as i32, direction);
+                if !(0..=32).contains(&count) {
+                    return Err(Error::InterfaceError(format!(
+                        "Invalid audio-bus count {count}"
+                    )));
+                }
+                if count as usize != prepared.len()
+                    || prepared.len() != kinds.len()
+                    || activation.len() != prepared.len()
+                {
+                    return Err(Error::MetadataQueryRejected(InconsistentTopology));
+                }
+                let mut buses = Vec::with_capacity(count as usize);
+                for index in 0..count {
+                    let mut info: BusInfo = std::mem::zeroed();
+                    let result = self.control.component.getBusInfo(
+                        kAudio as i32,
+                        direction,
+                        index,
+                        &mut info,
+                    );
+                    if result != kResultOk {
+                        return Err(Error::InterfaceError(format!(
+                            "Audio getBusInfo failed ({direction}, {index}): {result:#x}"
+                        )));
+                    }
+                    if info.mediaType != kAudio as i32
+                        || info.direction != direction
+                        || !(1..=256).contains(&info.channelCount)
+                        || (info.busType != BusTypes_::kMain as i32
+                            && info.busType != BusTypes_::kAux as i32)
+                    {
+                        return Err(Error::InterfaceError(
+                            "Invalid component audio-bus descriptor".into(),
+                        ));
+                    }
+                    let is_main = info.busType == BusTypes_::kMain as i32;
+                    let slot = index as usize;
+                    if prepared[slot].numChannels != info.channelCount
+                        || kinds[slot] != Some(is_main)
+                    {
+                        return Err(Error::MetadataQueryRejected(InconsistentTopology));
+                    }
+                    buses.push(crate::plugin::CheckedAudioBusConfig {
+                        channel_count: info.channelCount as usize,
+                        is_main,
+                        // True records successful activateBus; false alone may only record
+                        // that default activation was never requested, so cannot attest false.
+                        active: activation[slot].then_some(true),
+                    });
+                }
+                Ok(buses)
+            }
+        };
+        let layout = crate::plugin::CheckedAudioBusLayout {
+            inputs: side(
+                kInput as i32,
+                &data.input_bus_buffers,
+                &data.input_bus_types,
+                &self.runtime.bus_activation.audio_inputs,
+            )?,
+            outputs: side(
+                kOutput as i32,
+                &data.output_bus_buffers,
+                &data.output_bus_types,
+                &self.runtime.bus_activation.audio_outputs,
+            )?,
+        };
+        self.reject_pending_topology()?;
+        layout.validate()?;
+        Ok(layout)
+    }
+
+    #[allow(clippy::unnecessary_cast)]
     fn event_bus_layout(&self) -> Result<crate::plugin::EventBusLayout> {
         self.ensure_control_thread("event bus layout")?;
+        self.reject_pending_topology()?;
         let side = |direction: i32,
                     activation: &[bool]|
          -> Result<Vec<crate::plugin::EventBusConfig>> {
@@ -2927,6 +3055,7 @@ impl PluginInternal for PluginImpl {
             inputs: side(kInput as i32, &self.runtime.bus_activation.event_inputs)?,
             outputs: side(kOutput as i32, &self.runtime.bus_activation.event_outputs)?,
         };
+        self.reject_pending_topology()?;
         layout.validate()?;
         Ok(layout)
     }

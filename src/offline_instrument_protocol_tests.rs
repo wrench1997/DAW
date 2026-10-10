@@ -35,6 +35,7 @@ log = LOG
 saved = False
 loaded = False
 processing = False
+parameter_applied = False
 uid = 'ABCDEF019182FAEB566D624153675854'
 for line in sys.stdin:
     request = json.loads(line)
@@ -46,6 +47,21 @@ for line in sys.stdin:
         result = {'PluginInfo': {'vendor':'Fixture','name':'Fixture','version':'1.3.4','category':'Instrument|Synth','uid':uid,'has_gui':True,'audio_inputs':0,'audio_outputs':1,'output_channels':2,'has_midi_input':True,'has_midi_output':False}}
     elif name == 'AudioBusLayout':
         result = {'AudioBusLayout': {'layout': {'inputs': [], 'outputs': [{'channel_count':2,'active':True}]}}}
+    elif name == 'CheckedAudioBusLayout':
+        if mode == 'old_audio_helper':
+            result = {'Error': {'message':'unsupported command'}}
+        elif mode == 'audio_wrong_reply':
+            result = {'Success': {'message':'wrong'}}
+        elif mode == 'audio_sdk_error':
+            result = {'Error': {'message':'getBusInfo failed'}}
+        elif mode == 'audio_unsupported':
+            result = {'MetadataQueryRejected': {'reason':'Unsupported'}}
+        elif mode == 'audio_pending':
+            result = {'MetadataQueryRejected': {'reason':'PendingTopology'}}
+        elif (mode == 'audio_changed_on_start' and processing) or (mode == 'audio_changed_on_parameter' and parameter_applied):
+            result = {'MetadataQueryRejected': {'reason':'InconsistentTopology'}}
+        else:
+            result = {'CheckedAudioBusLayout': {'layout': {'inputs': [], 'outputs': [{'channel_count':2,'is_main':True,'active':True}]}}}
     elif name == 'EventBusLayout':
         if mode == 'old_helper':
             result = {'Error': {'message':'unsupported command'}}
@@ -75,6 +91,7 @@ for line in sys.stdin:
         saved = True
         result = {'State': {'data':[] if mode == 'empty_state' else [1,2,3]}}
     elif name in ('SetProcessMode','LoadState','StartProcessing','StopProcessing','SetParameter','Shutdown','UnloadPlugin'):
+        if name == 'SetParameter': parameter_applied = True
         if name == 'LoadState': loaded = True
         if name == 'StartProcessing': processing = True
         if name == 'StopProcessing': processing = False
@@ -190,7 +207,7 @@ fn actual_vst3_capture_queries_closed_state_current_bases_and_all_fences_only() 
         [
             "Editor",
             "NativeDirtyRevision",
-            "AudioBusLayout",
+            "CheckedAudioBusLayout",
             "EventBusLayout",
             "LatencySamples",
             "TailSamples",
@@ -199,7 +216,7 @@ fn actual_vst3_capture_queries_closed_state_current_bases_and_all_fences_only() 
             "GetParameter",
             "Editor",
             "NativeDirtyRevision",
-            "AudioBusLayout",
+            "CheckedAudioBusLayout",
             "EventBusLayout",
             "LatencySamples",
             "TailSamples"
@@ -305,6 +322,59 @@ fn actual_fresh_factory_rejects_post_restore_event_output_and_old_helper() {
         assert!(!names.iter().any(|name| matches!(
             name.as_str(),
             "Process" | "ProcessBuses" | "ProcessResetOrigin" | "SaveState"
+        )));
+    }
+}
+
+#[test]
+fn capture_metadata_typed_refusal_is_harmless_but_unknown_remote_errors_fault() {
+    for (mode, harmless) in [
+        ("audio_unsupported", true),
+        ("audio_pending", true),
+        ("audio_changed_on_start", true),
+        ("old_audio_helper", false),
+        ("old_helper", false),
+        ("audio_wrong_reply", false),
+        ("audio_sdk_error", false),
+    ] {
+        let fake = FakeHelper::new(mode);
+        let mut source = fake.source();
+        let result = source.capture_bounce_state(&[17]);
+        assert!(
+            if harmless {
+                matches!(result, Err(BounceCaptureError::Rejected(_)))
+            } else {
+                matches!(result, Err(BounceCaptureError::BackendFailed(_)))
+            },
+            "{mode}"
+        );
+        assert!(!fake.names().iter().any(|name| name == "SaveState"));
+        assert!(source.prepared);
+    }
+}
+
+#[test]
+fn fresh_factory_rejects_audio_changes_at_start_or_parameter_application_and_sdk_errors() {
+    for mode in [
+        "audio_changed_on_start",
+        "audio_changed_on_parameter",
+        "audio_sdk_error",
+        "audio_wrong_reply",
+        "old_audio_helper",
+        "audio_pending",
+    ] {
+        let fake = FakeHelper::new(mode);
+        let state = capture_state();
+        assert!(
+            OfflineInstrument::load_snapshot(fake.spec(state.opaque_state.clone()), 48_000, &state)
+                .is_err(),
+            "{mode}"
+        );
+        let names = fake.names();
+        assert!(names.iter().any(|name| name == "CheckedAudioBusLayout"));
+        assert!(!names.iter().any(|name| matches!(
+            name.as_str(),
+            "Process" | "ProcessBuses" | "ProcessResetOrigin" | "SaveState" | "Editor"
         )));
     }
 }
