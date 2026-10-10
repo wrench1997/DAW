@@ -4537,3 +4537,85 @@ fn automation_point_blank_insert_and_drag_modifiers_and_cancel() {
         }
     }
 }
+
+#[test]
+fn automation_point_type_value_escape_redo_and_preceding_edit() {
+    let mut ui = automation_point_ui();
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..Default::default()
+    };
+    let original = project_fingerprint(&ui.app.project);
+    let pos = automation_point_position(&ui, 2);
+    automation_secondary_click(&mut ui, pos);
+    ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+    assert_eq!(project_fingerprint(&ui.app.project), original);
+    ui.app.project.swing = 0.25;
+    let preceding = project_fingerprint(&ui.app.project);
+    let pos = automation_point_position(&ui, 2);
+    automation_secondary_click(&mut ui, pos);
+    let edit = ui
+        .nodes
+        .iter()
+        .find(|node| node.role() == Role::TextInput && node.value() == Some("0.5"))
+        .expect("normalized value editor");
+    let b = edit.bounds().unwrap();
+    ui.click_pos(Pos2::new(
+        ((b.x0 + b.x1) / 2.0) as f32,
+        ((b.y0 + b.y1) / 2.0) as f32,
+    ));
+    ui.key(egui::Key::A, command);
+    ui.run(vec![egui::Event::Text("NaN".into())]);
+    ui.settle();
+    assert!(ui.button("Apply value").is_disabled());
+    ui.key(egui::Key::A, command);
+    ui.run(vec![egui::Event::Text("0.75".into())]);
+    ui.click("Apply value");
+    assert_eq!(
+        ui.app.project.automation_lanes[0].lane.points()[1].value,
+        0.5
+    );
+    let edited = project_fingerprint(&ui.app.project);
+    ui.key(egui::Key::Z, command);
+    assert_eq!(project_fingerprint(&ui.app.project), preceding);
+    ui.key(egui::Key::Z, command);
+    assert_eq!(project_fingerprint(&ui.app.project), original);
+    ui.key(egui::Key::Y, command);
+    ui.key(egui::Key::Y, command);
+    assert_eq!(project_fingerprint(&ui.app.project), edited);
+    let pos = automation_point_position(&ui, 2);
+    automation_secondary_click(&mut ui, pos);
+    ui.click("Apply value");
+    assert_eq!(
+        project_fingerprint(&ui.app.project),
+        edited,
+        "repeated identical value is a no-op"
+    );
+    assert_eq!(ui.app.undo_stack.len(), 2);
+}
+
+#[test]
+fn automation_point_source_offset_snaps_to_playlist_grid() {
+    let mut ui = automation_point_ui();
+    let clip = &mut ui.app.project.clips[0];
+    clip.start = 8.0;
+    clip.source_offset = 0.125;
+    ui.app.project.automation_lanes[0].lane.replace_points([
+        AutomationPoint::new(0.125, -0.5),
+        AutomationPoint::new(2.125, 0.0),
+        AutomationPoint::new(4.125, 0.5),
+    ]);
+    let _ = ui.app.playlist_viewport.x.reveal(8.0, 12.0, 0.0);
+    ui.app.sync_history_observer();
+    ui.settle();
+    let left = automation_point_position(&ui, 1);
+    let middle = automation_point_position(&ui, 2);
+    automation_secondary_click(&mut ui, Pos2::new((left.x + middle.x) / 2.0, middle.y));
+    let point = ui.app.project.automation_lanes[0].lane.points()[1];
+    assert!(
+        (point.position - 1.125).abs() < 0.00001,
+        "source offset follows snapped timeline beat"
+    );
+    assert_eq!(ui.app.project.clips[0].start, 8.0);
+}

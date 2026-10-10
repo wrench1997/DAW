@@ -1,15 +1,16 @@
 //! Playlist-only automation gestures. No persisted format or evaluation changes.
 use super::*;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct PointReference {
     pub clip_id: u32,
     pub lane_id: u64,
     pub point: AutomationPoint,
+    pub target: AutomationTarget,
     pub range: crate::automation::AutomationValueRange,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum PointAction {
     Value(PointReference, f64),
     Delete(PointReference),
@@ -22,14 +23,29 @@ pub(super) enum PointAction {
 
 /// A context action resolves the captured value, never a potentially reordered index.
 pub(super) fn candidate(project: &Project, action: PointAction) -> Option<Project> {
-    let (clip_id, lane_id) = match action {
+    let (clip_id, lane_id) = match &action {
         PointAction::Value(reference, _) | PointAction::Delete(reference) => {
             (reference.clip_id, reference.lane_id)
         }
         PointAction::Insert {
             clip_id, lane_id, ..
-        } => (clip_id, lane_id),
+        } => (*clip_id, *lane_id),
     };
+    if project
+        .clips
+        .iter()
+        .filter(|clip| clip.id == clip_id)
+        .count()
+        != 1
+        || project
+            .automation_lanes
+            .iter()
+            .filter(|lane| lane.id == lane_id)
+            .count()
+            != 1
+    {
+        return None;
+    }
     let clip = project.clips.iter().find(|clip| {
         clip.id == clip_id
             && clip.kind == ClipKind::Automation
@@ -46,7 +62,7 @@ pub(super) fn candidate(project: &Project, action: PointAction) -> Option<Projec
             if !normalized.is_finite() || !(0.0..=1.0).contains(&normalized) {
                 return None;
             }
-            if lane.value_range() != reference.range {
+            if lane.value_range() != reference.range || lane.target() != &reference.target {
                 return None;
             }
             let index = lane
@@ -58,7 +74,7 @@ pub(super) fn candidate(project: &Project, action: PointAction) -> Option<Projec
             lane.update_point(index, point).ok()?;
         }
         PointAction::Delete(reference) => {
-            if lane.value_range() != reference.range {
+            if lane.value_range() != reference.range || lane.target() != &reference.target {
                 return None;
             }
             let index = lane
@@ -96,6 +112,7 @@ pub(super) fn dragged_point(
     beat_width: f32,
     height: f32,
     source_start: f32,
+    clip_start: f32,
     length: f32,
     snap: f32,
     modifiers: egui::Modifiers,
@@ -114,7 +131,10 @@ pub(super) fn dragged_point(
     if !modifiers.ctrl {
         position += f64::from(delta.x / beat_width);
         if !modifiers.alt {
-            position = (position / f64::from(snap)).round() * f64::from(snap);
+            let timeline = position - f64::from(source_start) + f64::from(clip_start);
+            position = (timeline / f64::from(snap)).round() * f64::from(snap)
+                - f64::from(clip_start)
+                + f64::from(source_start);
         }
         position = position.clamp(f64::from(source_start), f64::from(source_start + length));
         if index > 0
@@ -180,6 +200,7 @@ mod tests {
             clip_id: 1,
             lane_id: 1,
             point: lane.points()[1],
+            target: lane.target().clone(),
             range: lane.value_range(),
         };
         project.automation_lanes.push(ProjectAutomation {
@@ -219,14 +240,14 @@ mod tests {
             .lane
             .insert_point(AutomationPoint::new(3.0, -0.5))
             .unwrap();
-        let edited = candidate(&project, PointAction::Value(reference, 0.75)).unwrap();
+        let edited = candidate(&project, PointAction::Value(reference.clone(), 0.75)).unwrap();
         assert_eq!(edited.automation_lanes[0].lane.points()[2].value, 0.5);
         assert_eq!(edited.automation_lanes[0].lane.points()[1].value, -0.5);
         for value in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
-            assert!(candidate(&project, PointAction::Value(reference, value)).is_none());
+            assert!(candidate(&project, PointAction::Value(reference.clone(), value)).is_none());
         }
         assert!(
-            candidate(&edited, PointAction::Delete(reference)).is_none(),
+            candidate(&edited, PointAction::Delete(reference.clone())).is_none(),
             "stale captured point cannot delete a changed point"
         );
         let restored: Project =
@@ -273,6 +294,7 @@ mod tests {
                 100.0,
                 100.0,
                 2.0,
+                8.0,
                 4.0,
                 0.25,
                 modifiers,
@@ -295,5 +317,28 @@ mod tests {
             edit(Vec2::new(-300.0, -25.0), egui::Modifiers::NONE).position,
             4.0
         );
+    }
+    #[test]
+    fn point_actions_reject_stale_targets_deleted_and_ambiguous_identity() {
+        let (project, reference) = fixture();
+        let mut changed = project.clone();
+        changed.automation_lanes[0]
+            .lane
+            .set_target(AutomationTarget::ChannelPan { channel: 1 });
+        assert!(candidate(&changed, PointAction::Delete(reference.clone())).is_none());
+        let mut changed = project.clone();
+        changed.clips.push(changed.clips[0].clone());
+        assert!(candidate(&changed, PointAction::Delete(reference.clone())).is_none());
+        let mut changed = project.clone();
+        changed
+            .automation_lanes
+            .push(changed.automation_lanes[0].clone());
+        assert!(candidate(&changed, PointAction::Delete(reference.clone())).is_none());
+        let mut changed = project.clone();
+        changed.clips.clear();
+        assert!(candidate(&changed, PointAction::Delete(reference.clone())).is_none());
+        let mut changed = project;
+        changed.automation_lanes.clear();
+        assert!(candidate(&changed, PointAction::Delete(reference)).is_none());
     }
 }

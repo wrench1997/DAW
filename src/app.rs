@@ -20789,7 +20789,11 @@ impl CitrusApp {
                                     curve_rect.bottom() - normalized * curve_rect.height(),
                                 );
                                 let node_rect = Rect::from_center_size(position, Vec2::splat(12.0));
-                                let node_id = id.with(("automation-point", point_index));
+                                let node_id = id.with((
+                                    "automation-point",
+                                    self.project_session,
+                                    point_index,
+                                ));
                                 let node_response =
                                     ui.interact(node_rect, node_id, Sense::click_and_drag());
                                 canvas_painter.circle_filled(position, 4.0, theme::BG);
@@ -20832,6 +20836,7 @@ impl CitrusApp {
                                         beat_w,
                                         curve_rect.height(),
                                         clip.source_offset,
+                                        clip.start,
                                         clip.length,
                                         self.snap,
                                         ui.input(|i| i.modifiers),
@@ -20852,6 +20857,7 @@ impl CitrusApp {
                                         clip_id: clip.id,
                                         lane_id: automation.id,
                                         point,
+                                        target: automation.lane.target().clone(),
                                         range: value_range,
                                     };
                                     ui.ctx().data_mut(|data| {
@@ -20887,7 +20893,7 @@ impl CitrusApp {
                                     {
                                         automation_point_action =
                                             Some(automation_points::PointAction::Value(
-                                                reference,
+                                                reference.clone(),
                                                 self.automation_point_clipboard.unwrap(),
                                             ));
                                         ui.close();
@@ -20919,7 +20925,7 @@ impl CitrusApp {
                                     {
                                         automation_point_action =
                                             Some(automation_points::PointAction::Value(
-                                                reference,
+                                                reference.clone(),
                                                 parsed.unwrap(),
                                             ));
                                         ui.close();
@@ -20948,9 +20954,11 @@ impl CitrusApp {
                                     + timeline_position
                                     - f64::from(clip.start);
                                 if !bypass_snap {
-                                    source_position = (source_position / f64::from(self.snap))
+                                    source_position = (timeline_position / f64::from(self.snap))
                                         .round()
-                                        * f64::from(self.snap);
+                                        * f64::from(self.snap)
+                                        - f64::from(clip.start)
+                                        + f64::from(clip.source_offset);
                                 }
                                 source_position = source_position.clamp(
                                     f64::from(clip.source_offset),
