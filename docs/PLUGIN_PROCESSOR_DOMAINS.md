@@ -802,3 +802,49 @@ metadata freshness lease, independent IPC, or audible GUI-stall fix is claimed.
 This source checkpoint is unvalidated until the separate executed receipt is
 appended. Concurrent invocation requires independent review of both the narrow
 unsafe wrapper and its concrete COM fixture callsites before execution.
+
+### Executed scoped full-runtime proof (2026-10-10)
+
+The source/COM mock gate now passes. Twenty focused tests exercise the same
+production processing kernel through the test-only loan, including an actual
+main-thread controller getter held for at least 350 ms while the worker completes
+before release. They preserve per-SDK-call native acknowledgment across split
+blocks, zero-flush and positive-attempt history, checked input rollback, explicit
+transport, output loss/fault precedence, caller callback/meter behavior, scoped
+join on Rust panic, and module/reference destruction ordering. The retired-queue
+case intentionally observes final Release returning zero inside a later mocked
+SDK call after owner-side rebuild; that processing-thread free possibility is
+not hidden or treated as a passed no-free guarantee.
+
+- Available vendor suite: 428 passed; the one known absent SDK-generated
+  module-info fixture remains explicitly excluded. Vendor doctests: 26 passed.
+- App suite: 1,188 passed; helper: 25; protocol: 13; Python: 239, including the
+  copied helper's Unix descriptor checks. These use this branch's source, before
+  the separately published piano correction, which must be retained on integration.
+- Compiler contracts: 55 updated domain cases passed. The new runtime corpus has
+  88 unique verified outcomes across an interrupted 85-pass prefix and a six-case
+  rerun (three positive controls plus the corrected/unexecuted cases). Fixture,
+  production-source and lock hashes are compared in the union receipt. The
+  interrupted report remains incomplete; it is not rewritten into a full pass.
+- Strict root Clippy, formatting, vendor test Clippy with only the documented
+  pre-existing deprecated/drain-collect exceptions, 552 package inputs and exact
+  50-file official-crate patch replay passed.
+
+The first compile lacked the test's SDK ownership-trait import and stopped before
+execution. The first compiler-runner positive control failed on generated nested
+module paths; none of its negatives counted. A later detached-thread negative
+was correctly rejected with an unnumbered static-lifetime error rather than the
+runner's anticipated E0521; only that exact diagnostic expectation was corrected.
+All failed/interrupted records and the earlier unexecuted review corrections are
+retained. No production Rust changed during the runner corrections.
+
+The helper is bound to forced current-worktree vendor compilation, exact linked
+rlib/dep-info and a copied executable SHA-256:
+`d0c37d80e03f032004861081a4dd6d8c9a519775a586d9faf43ecaebfb3a42bb`.
+Full structured evidence is delivered with the separate tested source archive.
+No genuine plug-in, native GUI, Windows runtime, device, timing or audible
+isolation acceptance is claimed. No production worker, asynchronous mirror,
+independent IPC/native polling or metadata-policy change is activated. Existing
+strict metadata still blocks publication when its UI-thread queries are blocked.
+The next integration must preserve the accepted piano fix and obtain its own
+combined-source validation.

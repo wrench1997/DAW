@@ -1295,3 +1295,25 @@ helper has no new process capability, mode, worker or metadata policy.
 - Retain the explicit retired-host-queue final-Release/free limitation after a
   main-thread rebuild. No production helper worker, user mode, metadata-policy
   change, genuine-plugin run or audible-isolation result is introduced here.
+
+### Scoped runtime preparation: executed source/mock results
+
+- Twenty full-kernel scoped COM/thread fixtures pass, including completion during
+  a main-thread getter hold of at least 350 ms and explicit retired-queue final-free
+  evidence. No helper worker or user mode is enabled.
+- 428 available vendor tests, 26 doctests,1,188 App, 25 helper, 13 protocol and 239
+  Python checks pass; one known unavailable SDK fixture is separately excluded.
+  Strict root Clippy/fmt, bounded vendor Clippy exceptions, 552 package inputs and
+  exact 50-file upstream patch replay pass.
+- Updated domain compiler contracts pass 55/55. The runtime 88-case corpus is a
+  hash-verified union: 85 passing outcomes from the preserved interrupted run,
+  plus a six-case rerun including three positive controls and all remaining cases.
+  It is not reported as an uninterrupted full 88 run. Production source and every
+  reused fixture/lock are verified unchanged.
+- Preserve initial missing-test-import compile failure, generated-module positive
+  control failure, diagnostic classification mismatch/interruption and unexecuted
+  source-review corrections. Runner corrections changed no production Rust.
+- Current-worktree compiler and copied-helper linkage are retained. Full source
+  and exact Git recovery bundle are archived before each significant gate, with
+  the separate lifecycle branch bundle preserved. This branch has not incorporated
+  the separately accepted piano fix; any integration must preserve that work.
