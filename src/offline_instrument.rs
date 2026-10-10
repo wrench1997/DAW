@@ -23,6 +23,7 @@ pub struct OfflineInstrument {
     #[cfg(feature = "vst3")]
     _backend: Vst3Backend,
     metadata: BouncePluginMetadata,
+    _same_thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
 impl OfflineInstrument {
@@ -105,6 +106,7 @@ impl OfflineInstrument {
         Ok(Self {
             _backend: backend,
             metadata,
+            _same_thread: std::marker::PhantomData,
         })
     }
 
@@ -251,5 +253,28 @@ fn classify_metadata_error(error: vst3_host::Error) -> BounceCaptureError {
             BounceCaptureError::Rejected(error.to_string())
         }
         _ => BounceCaptureError::BackendFailed(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod affinity_tests {
+    use super::OfflineInstrument;
+
+    #[test]
+    fn offline_owner_is_neither_send_nor_sync() {
+        // One candidate impl exists only while the owner excludes each auto trait.
+        // Adding Send/Sync makes type inference ambiguous and fails compilation.
+        trait AmbiguousIfSend<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSend<()> for T {}
+        impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
+        let _ = <OfflineInstrument as AmbiguousIfSend<_>>::check;
+        trait AmbiguousIfSync<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfSync<()> for T {}
+        impl<T: ?Sized + Sync> AmbiguousIfSync<u8> for T {}
+        let _ = <OfflineInstrument as AmbiguousIfSync<_>>::check;
     }
 }

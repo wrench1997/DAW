@@ -372,9 +372,15 @@ fn fresh_factory_rejects_audio_changes_at_start_or_parameter_application_and_sdk
         );
         let names = fake.names();
         assert!(names.iter().any(|name| name == "CheckedAudioBusLayout"));
+        // Existing backend Drop closes the failed fresh candidate; no editor was opened.
+        assert!(fake.requests().iter().all(|request| {
+            request
+                .get("Editor")
+                .is_none_or(|data| data["command"] == "Close")
+        }));
         assert!(!names.iter().any(|name| matches!(
             name.as_str(),
-            "Process" | "ProcessBuses" | "ProcessResetOrigin" | "SaveState" | "Editor"
+            "Process" | "ProcessBuses" | "ProcessResetOrigin" | "SaveState"
         )));
     }
 }

@@ -122,3 +122,9 @@ previous fault, or trigger automatic recovery. Fresh candidate failure disposes
 only the candidate. Plugin-free tests cover Start/SetParameter/type changes,
 unknown activation, pending/reentrant restart without flag drain, SDK errors and
 protocol classification. All new tests remain unexecuted at source freeze.
+
+The follow-on source correction enforces the offline owner's documented !Send/!Sync
+boundary with a private Rc marker and compile-time negative-trait test. Failed fresh
+candidate cleanup may issue the existing backend Drop's Editor Close; no Open/Focus
+or source editor mutation is permitted. The protocol tests distinguish that teardown
+from setup. Malformed audio layout/unknown rejection enums remain protocol faults.

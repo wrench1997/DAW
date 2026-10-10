@@ -2234,6 +2234,18 @@ mod tests {
             assert_eq!(plugin.recovery_count(), 0);
             assert_eq!(fake.requests().len(), 1);
         }
+        for (index, raw) in [
+            r#"{"CheckedAudioBusLayout":{"layout":{"inputs":[],"outputs":[{"channel_count":2,"is_main":true,"active":"yes"}]}}}"#,
+            r#"{"MetadataQueryRejected":{"reason":"SDKFailed"}}"#,
+        ].into_iter().enumerate() {
+            let fake = FakeHelper::raw_metadata_reply(&format!("checked_audio_malformed_{index}"), "CheckedAudioBusLayout", raw);
+            let mut plugin = isolated(&fake);
+            plugin.auto_recover = true;
+            let error = plugin.checked_audio_bus_layout().unwrap_err();
+            assert!(!matches!(error, Error::MetadataQueryRejected(_)));
+            assert_eq!(plugin.recovery_count(), 0);
+            assert_eq!(fake.requests().len(), 1);
+        }
         let fake = FakeHelper::exit_on("checked_audio_dead", "CheckedAudioBusLayout");
         let mut plugin = isolated(&fake);
         plugin.auto_recover = true;
