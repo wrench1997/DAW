@@ -21165,7 +21165,10 @@ impl CitrusApp {
                     }
                 }
             }
-            if response.secondary_clicked() && !clip_consumed_click {
+            if response.secondary_clicked()
+                && !clip_consumed_click
+                && clip.kind != ClipKind::Automation
+            {
                 clip_consumed_click = true;
                 let members = clip_group_members(clip_snapshot, clip.id, grouping_enabled);
                 self.playlist_selection_ids = members.clone();
@@ -21292,12 +21295,7 @@ impl CitrusApp {
         }
         // Discrete edits are complete transactions, just like drag gestures.
         // Otherwise fast consecutive deletes/splits can merge in timed history capture.
-        if split_request.is_some()
-            || delete_clip_ids.is_some()
-            || group_mute_request.is_some()
-            || automation_delete_request.is_some()
-            || automation_insert_request.is_some()
-        {
+        if split_request.is_some() || delete_clip_ids.is_some() || group_mute_request.is_some() {
             project_gesture_started = true;
             project_gesture_stopped = true;
         }
