@@ -16,6 +16,11 @@ use walkdir::{DirEntry, WalkDir};
 #[allow(dead_code)] // public control-plane surface is consumed incrementally by Mixer/UI code
 pub mod plugin_runtime;
 
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[path = "instrument_bounce_strict_backend.rs"]
+#[allow(dead_code)] // Explicit dormant renderer entry only; no App/UI activation.
+pub(crate) mod strict_backend;
+
 #[cfg(all(feature = "vst3", target_os = "windows"))]
 const VST3_HELPER_FILE_NAME: &str = "vst3-host-helper.exe";
 #[cfg(all(feature = "vst3", not(target_os = "windows")))]

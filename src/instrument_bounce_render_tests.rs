@@ -171,6 +171,7 @@ struct Fake {
     cleanup_gate: Arc<AtomicBool>,
     disposed: Arc<AtomicBool>,
     cleanup_panicked: bool,
+    cleanup_failure: Option<BackendFailure>,
     terminal_grace: Arc<Mutex<Option<Arc<JobProgress>>>>,
 }
 impl Fake {
@@ -186,6 +187,7 @@ impl Fake {
             cleanup_gate: Arc::new(AtomicBool::new(true)),
             disposed: Arc::new(AtomicBool::new(false)),
             cleanup_panicked: false,
+            cleanup_failure: None,
             terminal_grace: Arc::new(Mutex::new(None)),
         }
     }
@@ -198,7 +200,7 @@ impl RenderBackend for Fake {
         &mut self,
         capture: &CapturedInstrumentBounce,
         control: &RenderControl,
-    ) -> Result<BouncePluginMetadata, String> {
+    ) -> Result<BouncePluginMetadata, BackendFailure> {
         control.checkpoint().map_err(|e| e.primary)?;
         assert_eq!(capture.state.opaque_state, vec![1]);
         self.log("Prepare");
@@ -207,7 +209,7 @@ impl RenderBackend for Fake {
         }
         Ok(self.meta.clone())
     }
-    fn metadata(&mut self) -> Result<BouncePluginMetadata, String> {
+    fn metadata(&mut self) -> Result<BouncePluginMetadata, BackendFailure> {
         self.query_count += 1;
         self.log("Metadata");
         if matches!(self.fault, Fault::CancelMetadata) {
@@ -219,14 +221,18 @@ impl RenderBackend for Fake {
         }
         Ok(meta)
     }
-    fn send_midi(&mut self, midi: [u8; 3], offset: u16) -> Result<(), String> {
+    fn send_midi(&mut self, midi: [u8; 3], offset: u16) -> Result<(), BackendFailure> {
         self.log(format!("Midi:{}:{midi:?}", self.next + u64::from(offset)));
         if matches!(self.fault, Fault::CancelMidi) {
             self.control.export.cancel();
         }
         Ok(())
     }
-    fn process(&mut self, transport: PluginTransport, frames: usize) -> Result<BlockReply, String> {
+    fn process(
+        &mut self,
+        transport: PluginTransport,
+        frames: usize,
+    ) -> Result<BlockReply, BackendFailure> {
         assert_eq!(frames, 128);
         assert_eq!(transport.sample_position, self.next as i64);
         assert!(transport.playing);
@@ -300,8 +306,11 @@ impl RenderBackend for Fake {
             self.log("DisposePending");
             return DisposalObservation {
                 terminated: false,
-                error: matches!(self.fault, Fault::CleanupFailure)
-                    .then(|| "injected unproven disposal".into()),
+                error: self.cleanup_failure.clone().or_else(|| {
+                    matches!(self.fault, Fault::CleanupFailure)
+                        .then(|| "injected unproven disposal".into())
+                }),
+                diagnostics: Vec::new(),
             };
         }
         if let Some(progress) = self.terminal_grace.lock().unwrap().as_ref() {
@@ -311,8 +320,11 @@ impl RenderBackend for Fake {
         self.disposed.store(true, Ordering::Release);
         DisposalObservation {
             terminated: true,
-            error: matches!(self.fault, Fault::CleanupFailure)
-                .then(|| "injected cleanup failure".into()),
+            error: self.cleanup_failure.clone().or_else(|| {
+                matches!(self.fault, Fault::CleanupFailure)
+                    .then(|| "injected cleanup failure".into())
+            }),
+            diagnostics: Vec::new(),
         }
     }
 }
@@ -491,7 +503,7 @@ fn cancellation_fault_panic_and_cleanup_errors_never_publish() {
             | Fault::CancelProcess => FailureKind::Cancelled,
             Fault::DeadlineProcess => FailureKind::Deadline,
             Fault::InvalidAndCancel => FailureKind::Invalid,
-            Fault::PanicProcess => FailureKind::Panic,
+            Fault::PanicProcess | Fault::CleanupPanic => FailureKind::Panic,
             _ => FailureKind::Backend,
         };
         assert_eq!(error.kind, expected, "{fault:?}: {error:?}");
@@ -500,12 +512,16 @@ fn cancellation_fault_panic_and_cleanup_errors_never_publish() {
             Fault::InvalidAndCancel => "Invalid exact Process",
             Fault::DeadlineProcess => "deadline expired",
             Fault::PanicProcess => "backend panicked",
-            Fault::CleanupFailure | Fault::CleanupPanic => "cleanup failed",
+            Fault::CleanupFailure => "injected cleanup failure",
+            Fault::CleanupPanic => "disposal panicked",
             _ => "cancel",
         };
         assert!(error.primary.contains(reason), "{fault:?}: {error:?}");
-        if matches!(fault, Fault::CleanupFailure | Fault::CleanupPanic) {
-            assert!(!error.cleanup.is_empty());
+        if matches!(fault, Fault::CleanupFailure) {
+            assert_eq!(
+                error.backend.as_ref().unwrap().kind,
+                BackendFailureKind::Backend
+            );
         }
         assert!(!files.output().exists());
         assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 0);
@@ -829,12 +845,8 @@ fn failed_disposal_keeps_receipt_pending_and_preserves_error_after_ack() {
         panic!("failed disposal published")
     };
     assert_eq!(error.kind, FailureKind::Backend);
-    assert!(
-        error
-            .cleanup
-            .iter()
-            .any(|s| s.contains("unproven disposal"))
-    );
+    assert_eq!(error.primary, "injected unproven disposal");
+    assert_eq!(error.backend.as_ref().unwrap().diagnostic(), error.primary);
     assert!(error.cleanup.iter().any(|s| s.contains("cleanup failure")));
     assert!(!files.output().exists());
     assert!(!admission.is_busy());
@@ -1087,7 +1099,15 @@ fn bounded_cleanup_grace_becomes_visible_pending_without_ack_or_owner_release() 
         let RenderOutcome::Failed(error) = outcome(&receipt) else {
             panic!("late cleanup published")
         };
-        assert_eq!(error.kind, FailureKind::Backend);
+        assert_eq!(
+            error.kind,
+            match fault {
+                Fault::None => FailureKind::Cancelled,
+                Fault::CleanupPanic => FailureKind::Panic,
+                _ => FailureKind::Backend,
+            }
+        );
+        assert!(error.cleanup_grace_elapsed);
         assert!(error.cleanup.iter().any(|s| s.contains("grace elapsed")));
         assert_eq!(receipt.status(), RenderStatus::Terminated);
         assert!(!admission.is_busy());
@@ -1160,6 +1180,7 @@ fn first_terminal_disposal_poll_cannot_skip_post_poll_grace_expiry() {
                 panic!("late terminal poll published")
             };
             assert_eq!(error.kind, FailureKind::Backend);
+            assert!(error.cleanup_grace_elapsed);
             assert!(error.cleanup.iter().any(|s| s.contains("grace elapsed")));
             assert!(!files.output().exists());
         } else {
@@ -1171,5 +1192,639 @@ fn first_terminal_disposal_poll_cannot_skip_post_poll_grace_expiry() {
         assert_eq!(log.last().unwrap(), "Dropped");
         assert_eq!(receipt.status(), RenderStatus::Terminated);
         assert!(!admission.is_busy());
+    }
+}
+
+// These fixtures pin renderer precedence, not the strict adapter's protocol. Its
+// separate mock-child acceptance must prove actual Stop/Shutdown/reap ordering.
+struct CleanupStep {
+    label: &'static str,
+    terminated: bool,
+    error: Option<BackendFailure>,
+    diagnostics: Vec<String>,
+    cancel: bool,
+    expire_grace: bool,
+}
+impl CleanupStep {
+    fn new(label: &'static str, terminated: bool, error: Option<BackendFailure>) -> Self {
+        Self {
+            label,
+            terminated,
+            error,
+            diagnostics: Vec::new(),
+            cancel: false,
+            expire_grace: false,
+        }
+    }
+}
+struct TypedFake {
+    fake: Fake,
+    process_error: Option<BackendFailure>,
+    cancel_final_process: bool,
+    cleanup: std::collections::VecDeque<CleanupStep>,
+    progress: Arc<JobProgress>,
+    cancel_on_drop: bool,
+    panic_on_drop: bool,
+}
+impl RenderBackend for TypedFake {
+    fn prepare(
+        &mut self,
+        capture: &CapturedInstrumentBounce,
+        control: &RenderControl,
+    ) -> Result<BouncePluginMetadata, BackendFailure> {
+        self.fake.prepare(capture, control)
+    }
+    fn metadata(&mut self) -> Result<BouncePluginMetadata, BackendFailure> {
+        self.fake.metadata()
+    }
+    fn send_midi(&mut self, midi: [u8; 3], offset: u16) -> Result<(), BackendFailure> {
+        self.fake.send_midi(midi, offset)
+    }
+    fn process(
+        &mut self,
+        transport: PluginTransport,
+        frames: usize,
+    ) -> Result<BlockReply, BackendFailure> {
+        let reply = self.fake.process(transport, frames)?;
+        if self.cancel_final_process && self.fake.next == 256 {
+            self.fake.control.export.cancel();
+        }
+        match self.process_error.take() {
+            Some(error) => Err(error),
+            None => Ok(reply),
+        }
+    }
+    fn dispose(&mut self, _deadline: Instant) -> DisposalObservation {
+        let step = self.cleanup.pop_front().expect("unexpected cleanup poll");
+        self.fake.log(step.label);
+        if step.cancel {
+            self.fake.control.export.cancel();
+        }
+        if step.expire_grace {
+            self.progress
+                .expire_cleanup_grace
+                .store(true, Ordering::Release);
+        }
+        if step.terminated {
+            self.fake.disposed.store(true, Ordering::Release);
+        }
+        DisposalObservation {
+            terminated: step.terminated,
+            error: step.error,
+            diagnostics: step.diagnostics,
+        }
+    }
+}
+impl Drop for TypedFake {
+    fn drop(&mut self) {
+        assert!(
+            self.cleanup.is_empty(),
+            "cleanup finished before scripted reap"
+        );
+        if self.cancel_on_drop {
+            self.fake.control.export.cancel();
+        }
+        assert!(!self.panic_on_drop, "injected destructor panic");
+    }
+}
+fn run_typed_case(
+    process_error: Option<BackendFailure>,
+    cancel_final_process: bool,
+    cleanup: Vec<CleanupStep>,
+    cancel_on_drop: bool,
+    panic_on_drop: bool,
+) -> (RenderOutcome, Vec<String>) {
+    let c = capture(128, 0, 0, 2);
+    let ctl = control();
+    let progress = Arc::new(JobProgress::new());
+    let files = Files::new();
+    std::fs::write(files.output(), b"unchanged destination").unwrap();
+    let fake = Fake::new(c.metadata().clone(), ctl.clone(), Fault::None, 128);
+    let ledger = Arc::clone(&fake.ledger);
+    let typed = TypedFake {
+        fake,
+        process_error,
+        cancel_final_process,
+        cleanup: cleanup.into(),
+        progress: Arc::clone(&progress),
+        cancel_on_drop,
+        panic_on_drop,
+    };
+    let result = run_owned(c, files.output(), true, &ctl, &progress, move || typed);
+    if matches!(result, RenderOutcome::Failed(_)) {
+        assert_eq!(
+            std::fs::read(files.output()).unwrap(),
+            b"unchanged destination"
+        );
+    } else {
+        assert_eq!(
+            crate::wav::read_wav(files.output()).unwrap().frame_count(),
+            128
+        );
+    }
+    assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 1);
+    let ledger = ledger.lock().unwrap().clone();
+    assert_eq!(ledger.last().unwrap(), "Dropped");
+    (result, ledger)
+}
+fn typed_error(kind: BackendFailureKind, delivery: BackendDelivery, text: &str) -> BackendFailure {
+    BackendFailure::new(kind, text).with_delivery(delivery)
+}
+
+#[test]
+fn typed_backend_failure_category_delivery_and_bounded_text_survive_checked_calls() {
+    // Ordinary fake diagnostics cannot imply cancellation by their text.
+    for text in [
+        "Cancelled: fake backend fault",
+        "Deadline: fake backend fault",
+    ] {
+        let failure: BackendFailure = text.into();
+        assert_eq!(failure.kind, BackendFailureKind::Backend);
+        assert_eq!(failure.delivery, None);
+        let rendered = control().call::<()>(|| Err(failure.clone())).unwrap_err();
+        assert_eq!(rendered.kind, FailureKind::Backend);
+        assert_eq!(rendered.backend.as_deref(), Some(&failure));
+    }
+    for (kind, expected) in [
+        (BackendFailureKind::Cancelled, FailureKind::Cancelled),
+        (BackendFailureKind::Deadline, FailureKind::Deadline),
+        (BackendFailureKind::Backend, FailureKind::Backend),
+    ] {
+        for delivery in [BackendDelivery::NotSent, BackendDelivery::MayHaveApplied] {
+            let ctl = control();
+            let error = typed_error(kind, delivery, &"界".repeat(4000));
+            assert!(error.diagnostic().len() <= MAX_BACKEND_DIAGNOSTIC_BYTES);
+            assert_eq!(error.diagnostic().len(), 2046);
+            let result = ctl
+                .call_checked::<()>(
+                    || {
+                        // A real operation failure already established in flight
+                        // keeps its kind even if cancellation is now also sticky.
+                        ctl.export.cancel();
+                        Err(error.clone())
+                    },
+                    |_| panic!("failure cannot be validated as a successful reply"),
+                )
+                .unwrap_err();
+            assert_eq!(result.kind, expected);
+            assert_eq!(result.primary, error.diagnostic());
+            assert_eq!(result.backend.as_deref(), Some(&error));
+            assert!(result.cleanup.is_empty());
+        }
+    }
+}
+
+#[test]
+fn renderer_cleanup_boundary_matrix_preserves_exact_typed_primary_and_destination() {
+    let (success, ledger) = run_typed_case(
+        None,
+        false,
+        vec![CleanupStep::new("HealthyStopShutdownReaped", true, None)],
+        false,
+        false,
+    );
+    assert!(matches!(success, RenderOutcome::Complete(_)));
+    assert_eq!(
+        &ledger[ledger.len() - 2..],
+        ["HealthyStopShutdownReaped", "Dropped"]
+    );
+
+    for (label, delivery) in [
+        ("BeforeStop", BackendDelivery::NotSent),
+        ("DuringStop", BackendDelivery::MayHaveApplied),
+        ("AfterStopBeforeShutdown", BackendDelivery::NotSent),
+        ("PartialShutdown", BackendDelivery::MayHaveApplied),
+    ] {
+        for (kind, expected) in [
+            (BackendFailureKind::Cancelled, FailureKind::Cancelled),
+            (BackendFailureKind::Deadline, FailureKind::Deadline),
+        ] {
+            let error = typed_error(kind, delivery, label);
+            let mut pending = CleanupStep::new(label, false, Some(error.clone()));
+            pending.cancel = kind == BackendFailureKind::Cancelled;
+            let mut reaped = CleanupStep::new("SameOwnerReaped", true, Some(error.clone()));
+            reaped
+                .diagnostics
+                .push("forced termination after sealed exchange".into());
+            let (result, ledger) = run_typed_case(None, false, vec![pending, reaped], false, false);
+            let RenderOutcome::Failed(failure) = result else {
+                panic!("{label} published")
+            };
+            assert_eq!(failure.kind, expected, "{label}");
+            assert_eq!(failure.primary, label);
+            assert_eq!(failure.backend.as_deref(), Some(&error));
+            assert_eq!(
+                failure.cleanup,
+                ["forced termination after sealed exchange"]
+            );
+            assert_eq!(
+                &ledger[ledger.len() - 3..],
+                [label, "SameOwnerReaped", "Dropped"]
+            );
+        }
+    }
+
+    // Cancellation observed after final Process remains the earlier rendering
+    // failure even when disposal subsequently has typed transport evidence.
+    let cleanup_cancel = typed_error(
+        BackendFailureKind::Cancelled,
+        BackendDelivery::NotSent,
+        "Stop rejected after final Process cancellation",
+    );
+    let (result, ledger) = run_typed_case(
+        None,
+        true,
+        vec![CleanupStep::new(
+            "CancelledRenderReaped",
+            true,
+            Some(cleanup_cancel),
+        )],
+        false,
+        false,
+    );
+    let RenderOutcome::Failed(failure) = result else {
+        panic!("final Process cancellation published")
+    };
+    assert_eq!(failure.kind, FailureKind::Cancelled);
+    assert_eq!(failure.backend, None);
+    assert!(failure.primary.contains("cancel"));
+    assert_eq!(
+        failure.cleanup,
+        ["Stop rejected after final Process cancellation"]
+    );
+    assert_eq!(
+        ledger.iter().filter(|s| s.starts_with("Process:")).count(),
+        2
+    );
+
+    // The final publication fence must run after actual backend destruction.
+    let (result, _) = run_typed_case(
+        None,
+        false,
+        vec![CleanupStep::new("HealthyReapBeforeLateCancel", true, None)],
+        true,
+        false,
+    );
+    let RenderOutcome::Failed(failure) = result else {
+        panic!("post-reap cancellation published")
+    };
+    assert_eq!(failure.kind, FailureKind::Cancelled);
+    assert_eq!(failure.backend, None);
+    assert!(failure.cleanup.is_empty());
+}
+
+#[test]
+fn earlier_render_or_cleanup_fault_wins_over_later_cancel_deadline_and_reap_details() {
+    for earlier_render in [false, true] {
+        for later in [BackendFailureKind::Cancelled, BackendFailureKind::Deadline] {
+            let first = typed_error(
+                BackendFailureKind::Backend,
+                BackendDelivery::MayHaveApplied,
+                if earlier_render {
+                    "known Process failure"
+                } else {
+                    "known Stop failure"
+                },
+            );
+            let late = typed_error(
+                later,
+                BackendDelivery::NotSent,
+                "later cleanup interruption",
+            );
+            let mut first_cleanup = CleanupStep::new(
+                "StopObservation",
+                false,
+                (!earlier_render).then(|| first.clone()),
+            );
+            first_cleanup.cancel = true;
+            let mut final_cleanup = CleanupStep::new("Reaped", true, Some(late.clone()));
+            final_cleanup.diagnostics = vec!["kill error".into(), "nonzero child exit".into()];
+            let (result, _) = run_typed_case(
+                earlier_render.then(|| first.clone()),
+                false,
+                vec![first_cleanup, final_cleanup],
+                true,
+                false,
+            );
+            let RenderOutcome::Failed(failure) = result else {
+                panic!("preceding fault published")
+            };
+            assert_eq!(failure.kind, FailureKind::Backend);
+            assert_eq!(failure.primary, first.diagnostic());
+            assert_eq!(failure.backend.as_deref(), Some(&first));
+            assert_eq!(
+                failure.cleanup_backend.as_deref(),
+                Some(if earlier_render { &late } else { &first })
+            );
+            assert_eq!(
+                failure.cleanup,
+                [
+                    "later cleanup interruption",
+                    "kill error",
+                    "nonzero child exit"
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn cleanup_grace_is_secondary_to_later_typed_cancel_or_deadline() {
+    for kind in [BackendFailureKind::Cancelled, BackendFailureKind::Deadline] {
+        let mut grace = CleanupStep::new("PendingPastGrace", false, None);
+        grace.expire_grace = true;
+        let primary = typed_error(
+            kind,
+            BackendDelivery::NotSent,
+            "original protocol budget ended",
+        );
+        let (result, ledger) = run_typed_case(
+            None,
+            false,
+            vec![
+                grace,
+                CleanupStep::new("SameOwnerReaped", true, Some(primary.clone())),
+            ],
+            false,
+            false,
+        );
+        let RenderOutcome::Failed(failure) = result else {
+            panic!("elapsed grace published")
+        };
+        assert_eq!(failure.backend.as_deref(), Some(&primary));
+        assert_eq!(
+            failure.kind,
+            if kind == BackendFailureKind::Cancelled {
+                FailureKind::Cancelled
+            } else {
+                FailureKind::Deadline
+            }
+        );
+        assert!(failure.cleanup_grace_elapsed);
+        assert_eq!(
+            failure.cleanup,
+            ["Cleanup grace elapsed before termination was acknowledged"]
+        );
+        assert_eq!(
+            &ledger[ledger.len() - 3..],
+            ["PendingPastGrace", "SameOwnerReaped", "Dropped"]
+        );
+    }
+}
+
+#[test]
+fn bounded_secondary_evidence_keeps_original_render_fault_and_no_output() {
+    let original: BackendFailure = "original Process fault".into();
+    let mut cleanup = CleanupStep::new(
+        "ReapedWithDetails",
+        true,
+        Some("first cleanup fault".into()),
+    );
+    cleanup.diagnostics = (0..32)
+        .map(|n| format!("detail {n}: {}", "界".repeat(4000)))
+        .collect();
+    let (result, _) = run_typed_case(Some(original.clone()), false, vec![cleanup], false, false);
+    let RenderOutcome::Failed(failure) = result else {
+        panic!("cleanup faults published")
+    };
+    assert_eq!(failure.backend.as_deref(), Some(&original));
+    assert_eq!(failure.cleanup[0], "first cleanup fault");
+    assert_eq!(failure.cleanup.len(), MAX_CLEANUP_DIAGNOSTICS + 1);
+    assert!(
+        failure
+            .cleanup
+            .iter()
+            .all(|s| s.len() <= MAX_BACKEND_DIAGNOSTIC_BYTES)
+    );
+    assert_eq!(
+        failure.cleanup.last().unwrap(),
+        "Additional cleanup diagnostics omitted after the first eight"
+    );
+    let mut duplicates = Vec::new();
+    for _ in 0..32 {
+        record_cleanup_error(&mut duplicates, "same detail".into());
+    }
+    assert_eq!(duplicates, ["same detail"]);
+}
+
+#[test]
+fn destructor_panic_is_real_fault_but_cannot_replace_prior_render_or_cleanup_failure() {
+    for earlier in [None, Some("render"), Some("cleanup")] {
+        let first = typed_error(
+            BackendFailureKind::Backend,
+            BackendDelivery::MayHaveApplied,
+            "earlier fault",
+        );
+        let (result, _) = run_typed_case(
+            (earlier == Some("render")).then(|| first.clone()),
+            false,
+            vec![CleanupStep::new(
+                "ReapedBeforePanic",
+                true,
+                (earlier == Some("cleanup")).then(|| first.clone()),
+            )],
+            true,
+            true,
+        );
+        let RenderOutcome::Failed(failure) = result else {
+            panic!("destructor panic published")
+        };
+        if earlier.is_some() {
+            assert_eq!(failure.kind, FailureKind::Backend);
+            assert_eq!(failure.backend.as_deref(), Some(&first));
+            assert_eq!(failure.cleanup, ["Disposed backend destructor panicked"]);
+        } else {
+            assert_eq!(failure.kind, FailureKind::Panic);
+            assert_eq!(failure.backend, None);
+            assert_eq!(failure.primary, "Disposed backend destructor panicked");
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn strict_failure_conversion_preserves_every_exact_category_and_metadata_refusal() {
+    use vst3_host::{MetadataQueryRejection, strict_offline as strict};
+    let kinds = [
+        strict::FailureKind::UnsupportedRequest,
+        strict::FailureKind::UnsupportedReply,
+        strict::FailureKind::InvalidRequest,
+        strict::FailureKind::MalformedReply,
+        strict::FailureKind::WrongReply,
+        strict::FailureKind::Limit,
+        strict::FailureKind::Shape,
+        strict::FailureKind::Deadline,
+        strict::FailureKind::Cancelled,
+        strict::FailureKind::Allocation,
+        strict::FailureKind::Io(5),
+        strict::FailureKind::Eof,
+        strict::FailureKind::ChildExited,
+        strict::FailureKind::ZeroWrite,
+        strict::FailureKind::Unsolicited,
+        strict::FailureKind::Terminal,
+        strict::FailureKind::Busy,
+        strict::FailureKind::Sigpipe,
+        strict::FailureKind::Spawn,
+        strict::FailureKind::OperationRejected,
+        strict::FailureKind::ReportedCrash,
+        strict::FailureKind::MetadataRejected(MetadataQueryRejection::Unsupported),
+        strict::FailureKind::MetadataRejected(MetadataQueryRejection::PendingTopology),
+        strict::FailureKind::MetadataRejected(MetadataQueryRejection::InconsistentTopology),
+        strict::FailureKind::CleanupNotBegun,
+    ];
+    for kind in kinds {
+        for delivery in [strict::Delivery::NotSent, strict::Delivery::MayHaveApplied] {
+            for diagnostic in [None, Some("界".repeat(4000))] {
+                let failure = BackendFailure::from(strict::Failure {
+                    kind,
+                    delivery,
+                    diagnostic,
+                    diagnostic_unavailable: Some(strict::FailureKind::Allocation),
+                });
+                let ctl = control();
+                let rendered = ctl
+                    .call::<()>(|| {
+                        ctl.export.cancel();
+                        Err(failure.clone())
+                    })
+                    .unwrap_err();
+                let retained = rendered.backend.as_deref().unwrap();
+                assert_eq!(retained, &failure);
+                assert_eq!(retained.strict_kind, Some(kind));
+                assert_eq!(
+                    retained.strict_diagnostic_unavailable,
+                    Some(strict::FailureKind::Allocation)
+                );
+                assert_eq!(
+                    retained.delivery,
+                    Some(match delivery {
+                        strict::Delivery::NotSent => BackendDelivery::NotSent,
+                        strict::Delivery::MayHaveApplied => BackendDelivery::MayHaveApplied,
+                    })
+                );
+                assert_eq!(
+                    rendered.kind,
+                    match kind {
+                        strict::FailureKind::Cancelled => FailureKind::Cancelled,
+                        strict::FailureKind::Deadline => FailureKind::Deadline,
+                        _ => FailureKind::Backend,
+                    }
+                );
+                assert!(rendered.primary.len() <= MAX_BACKEND_DIAGNOSTIC_BYTES);
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_cancel_or_deadline_pending_retains_same_backend_admission_and_no_destination_change() {
+    for (kind, expected) in [
+        (BackendFailureKind::Cancelled, FailureKind::Cancelled),
+        (BackendFailureKind::Deadline, FailureKind::Deadline),
+    ] {
+        let c = capture(128, 0, 0, 2);
+        let ctl = control();
+        let mut fake = Fake::new(c.metadata().clone(), ctl.clone(), Fault::None, 128);
+        let error = typed_error(
+            kind,
+            BackendDelivery::MayHaveApplied,
+            "interrupted cleanup exchange",
+        );
+        fake.cleanup_failure = Some(error.clone());
+        fake.cleanup_gate.store(false, Ordering::Release);
+        let gate = Arc::clone(&fake.cleanup_gate);
+        let disposed = Arc::clone(&fake.disposed);
+        let ledger = Arc::clone(&fake.ledger);
+        let files = Files::new();
+        std::fs::write(files.output(), b"original destination").unwrap();
+        let admission = RenderAdmission::default();
+        let receipt = admission
+            .start(c, files.output(), true, ctl, move || fake)
+            .unwrap();
+        wait_until(|| ledger.lock().unwrap().iter().any(|s| s == "DisposePending"));
+        receipt.expire_cleanup_grace();
+        wait_until(|| matches!(receipt.status(), RenderStatus::CleanupPending { .. }));
+        assert!(!receipt.termination_acknowledged());
+        assert!(matches!(receipt.try_recv(), Err(TryRecvError::Empty)));
+        assert!(admission.is_busy());
+        assert!(!disposed.load(Ordering::Acquire));
+        assert_eq!(
+            std::fs::read(files.output()).unwrap(),
+            b"original destination"
+        );
+        assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 1);
+        let rejected = admission.start(
+            capture(128, 0, 0, 2),
+            files.output(),
+            true,
+            control(),
+            || -> Fake {
+                panic!("typed cancellation cannot release an unreaped owner's admission")
+            },
+        );
+        assert!(rejected.err().unwrap().contains("still owns"));
+        receipt.cancel();
+        gate.store(true, Ordering::Release);
+        let RenderOutcome::Failed(failure) = outcome(&receipt) else {
+            panic!("typed cleanup failure published")
+        };
+        assert_eq!(failure.kind, expected);
+        assert_eq!(failure.backend.as_deref(), Some(&error));
+        assert!(failure.cleanup_grace_elapsed);
+        assert_eq!(
+            failure.cleanup,
+            ["Cleanup grace elapsed before termination was acknowledged"]
+        );
+        assert!(!admission.is_busy());
+        assert!(disposed.load(Ordering::Acquire));
+        let ledger = ledger.lock().unwrap();
+        assert_eq!(ledger.iter().filter(|s| s.as_str() == "Prepare").count(), 1);
+        assert_eq!(&ledger[ledger.len() - 2..], ["Disposed", "Dropped"]);
+        assert_eq!(
+            std::fs::read(files.output()).unwrap(),
+            b"original destination"
+        );
+        assert_eq!(std::fs::read_dir(&files.0).unwrap().count(), 1);
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn preceding_render_fault_keeps_first_exact_strict_cleanup_error_across_later_observations() {
+    use vst3_host::strict_offline as strict;
+    for kind in [
+        strict::FailureKind::Cancelled,
+        strict::FailureKind::Deadline,
+    ] {
+        for delivery in [strict::Delivery::NotSent, strict::Delivery::MayHaveApplied] {
+            let first: BackendFailure = "earlier renderer backend fault".into();
+            let cleanup = BackendFailure::from(strict::Failure {
+                kind,
+                delivery,
+                diagnostic: Some("interrupted strict cleanup".into()),
+                diagnostic_unavailable: None,
+            });
+            let mut pending =
+                CleanupStep::new("PendingStrictCleanup", false, Some(cleanup.clone()));
+            pending.cancel = true;
+            let reap = CleanupStep::new("Reaped", true, Some("later OS fault".into()));
+            let (result, _) = run_typed_case(
+                Some(first.clone()),
+                false,
+                vec![pending, reap],
+                false,
+                false,
+            );
+            let RenderOutcome::Failed(failure) = result else {
+                panic!("strict cleanup interruption published")
+            };
+            assert_eq!(failure.kind, FailureKind::Backend);
+            assert_eq!(failure.backend.as_deref(), Some(&first));
+            assert_eq!(failure.cleanup_backend.as_deref(), Some(&cleanup));
+            assert_eq!(
+                failure.cleanup,
+                ["interrupted strict cleanup", "later OS fault"]
+            );
+        }
     }
 }

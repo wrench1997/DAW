@@ -1603,3 +1603,22 @@ subject to independent frozen-evidence review. Stop B's real clone adapter,
 cancellation registration, typed renderer cleanup, selected-occurrence activation
 and genuine plugin execution remain separate decisions. No user-facing render
 control, strict-default change, tagged IPC or metadata-age policy is enabled.
+
+
+## Strict offline Stop B: unvalidated adapter source
+
+After reviewed Stop A f522d728, prepare a disabled Linux renderer-owned fresh
+clone adapter. It borrows authoritative capture inputs, resolves existing helper
+paths, restores once, validates every base before setters/readback, and checks
+raw main/activation before metadata projection. The dormant renderer retains
+strict metadata before/after Q128 and validates all output including padding.
+No source helper, Project or native window is mutated by this route.
+
+Shared ExportControl cancellation registers only a closed wake with identity-bound
+unregistration. Backend/cleanup errors preserve typed cancellation, deadlines,
+strict failure kind and conservative delivery. Same-child checked disposal gates
+publication; the explicitly revised one-shot oracle is Stop/Shutdown/reap without
+reset audio, while reusable realtime reset is unchanged. Every protocol write
+uses the earlier job/cleanup deadline. The initial source and mock fixtures await
+archive and independent review before execution. No genuine run or App/UI
+activation is authorized by this implementation checkpoint.

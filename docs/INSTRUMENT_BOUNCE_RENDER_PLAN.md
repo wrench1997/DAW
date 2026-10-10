@@ -40,7 +40,7 @@ The runtime owner confirmed the minimal shared seam: off-default fresh-helper fa
 
 The caller transfers immutable capture and cancellation control to one background job; the !Send/!Sync clone is created, used and destroyed there. Cancellation stops new musical/setup requests after the current bounded operation. Dropping a result receiver cannot release the job's lease. The worker acknowledges completion only after all clone resources are disposed; real operation/cleanup failures remain visible.
 
-For a healthy prepared clone, cleanup uses the existing checked reset-origin primitives: stopped transport, panic, exact-class reset256 for Surge XT 1.3.4 or reset128 otherwise, validate the reset report, then Stop and checked disposal. Cleanup output is never appended. Do not call reset_processing unchanged, because it restarts processing. A failed/poisoned transport receives no musical retry or state reload; supervised disposal must prove termination. If termination cannot be proved, the cleanup owner and job admission remain retained/quarantined; a failure report cannot masquerade as a termination acknowledgment or reopen admission. Cancellation does not skip mandatory disposal; cleanup has its own bounded grace budget and failures prevent publication.
+Revised one-shot oracle (approved 2026-10-10): a healthy disposable fresh clone uses checked Stop and reply-free Shutdown followed by proven child reap. It is never reused and has no external MIDI output. This explicitly supersedes the earlier panic/reset128 or Surge256 cleanup requirement for this clone only; no reset audio is sent. Reusable realtime reset behavior is unchanged, and its historical acceptance is not reused as proof of this revised oracle. Both Stop and Shutdown use min(original job deadline, cleanup grace); an expired job sends no new protocol while pipe-close/reap remains mandatory. A failed/poisoned transport receives no musical retry or state reload; supervised disposal must prove termination. If termination cannot be proved, the cleanup owner and job admission remain retained/quarantined; a failure report cannot masquerade as a termination acknowledgment or reopen admission. Cancellation does not skip mandatory disposal; cleanup has its own bounded grace budget and failures prevent publication.
 
 Prefer completing rendering into one bounded stereo allocation, then checked clone cleanup, then the existing staged WAV writer. This avoids exposing a destination while clone teardown can still fail. On cancel/error, discard audio and any temporary file; an existing destination remains byte-identical. The only publication boundary is the existing commit CAS immediately before rename. An accepted cancel before that CAS forbids publication; cancel after commit starts reports too late. Job ownership remains held through final file outcome/cleanup.
 
@@ -51,7 +51,7 @@ Prefer completing rendering into one bounded stereo allocation, then checked clo
 - Audio oracle: a fake fixed-latency impulse instrument for L=0/1/127/128/129 and non-quantum-aligned song lengths, T=0 and explicit T>0. Assert exact output length, first sample placement, closing NoteOff, discarded padding, unity peak, mono duplication, metadata drift and non-finite/short/extra-channel replies.
 - Lifecycle: exact current setup order: Offline -> reset-support query -> captured LoadState -> Start -> native revision -> fresh catalog -> each current base setter -> strict metadata (no positive pre-render Process, reset, editor open or SaveState). Cancel/expire before load, during each setup/base/MIDI/Process/query stage, and after render before cleanup. Assert no later musical request; concurrent real IPC failure wins.
 - Transport prerequisite corpus: a helper that never reads a large LoadState; continuous unsolicited/noise output; crash during cold load; malformed Process output; hanging/failing shutdown; kill/reap failure; inherited open stdout/I/O-worker termination. Assert absolute deadline, no replay, no false successful disposal and no early job admission release.
-- Cleanup/publication: normal and cancelled reset128/reset256, reset/Stop/disposal errors, dropped receiver, attempted immediate retry while teardown waits, error precedence, cancellation during encoding and at the commit race, write/sync/rename failure, existing and absent destinations, and no temporary-file residue on successful abort; injected removal failure must surface the cleanup error and retained path.
+- Cleanup/publication: healthy one-shot Stop/Shutdown/reap, cancellation before/during Stop and before Shutdown, terminal no-protocol cleanup, Stop/disposal errors, dropped receiver, attempted immediate retry while teardown waits, error precedence, cancellation during encoding and at the commit race, write/sync/rename failure, existing and absent destinations, and no temporary-file residue on successful abort; injected removal failure must surface the cleanup error and retained path.
 
 A plugin-free renderer pass proves these mechanics only. Genuine initialized state fidelity, audio audibility/repeatability, platform helper teardown and Windows atomic-output behavior require their own fixed qualification plan. App endpoint/session binding and user review remain later work.
 
@@ -135,5 +135,13 @@ a blocking OS call. The strict adapter supplies actual deadline/reap guarantees.
 
 Writer errors retain typed Cancelled/Deadline categories and the full checked
 abort failure/path chain. Final deadline expiry is checked after sync and before
-commit CAS. Native Offline/state/base/reset128/reset256 order and any real helper
+commit CAS. Native Offline/state/base and the revised one-shot Stop/Shutdown/reap order, plus any real helper
 cleanup remain adapter-only acceptance, not evidence from opaque fake methods.
+
+
+## Strict adapter source stop
+
+The disabled Linux strict adapter is now prepared as unvalidated source under
+[its dedicated contract](STRICT_OFFLINE_ADAPTER.md). Source/mock review and
+archival gate its first execution. Genuine plugin qualification and App/UI
+activation remain separate; the fake-only results above keep their attribution.

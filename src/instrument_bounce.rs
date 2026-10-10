@@ -5,7 +5,7 @@
 //! publications. The caller must keep session actions fenced while this coordinator is pending.
 
 #[path = "instrument_bounce_render.rs"]
-#[allow(dead_code)] // Dormant fake-backend engine; no real clone adapter or App caller.
+#[allow(dead_code)] // Dormant engine; experimental strict clone has no App/UI caller.
 pub(crate) mod render;
 
 use std::{
@@ -371,6 +371,14 @@ impl CapturedInstrumentBounce {
     ) -> Result<crate::plugins::plugin_runtime::OfflineInstrument, String> {
         crate::plugins::plugin_runtime::OfflineInstrument::from_capture(self)
     }
+    /// Borrow only captured load identity and the original requested base-ID set.
+    /// The strict clone borrows authoritative state separately; no source endpoint
+    /// or mutable capture authority escapes and no opaque state is copied here.
+    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    pub(crate) fn strict_load_inputs(&self) -> (&PluginLoadSpec, &[u32]) {
+        (&self.plan.spec, &self.plan.parameter_ids)
+    }
+
     #[cfg(any(feature = "vst3", test))]
     pub(crate) fn render_spec(&self) -> PluginLoadSpec {
         let mut spec = self.plan.spec.clone();
@@ -508,3 +516,7 @@ impl InstrumentBounceCapture {
         }))
     }
 }
+
+#[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
+#[path = "instrument_bounce_strict_backend_tests.rs"]
+mod strict_backend_tests;

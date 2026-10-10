@@ -5,8 +5,9 @@ The current source adds a dormant selected-generator engine, strict fake reply
 validation, and checked float32 WAV staging. Focused gates passed at `b66a9a7`;
 counts and limitations are recorded below. Final documentation does not change
 that tested Rust source.
-Only tests implement its backend contract; there is no real VST render adapter,
-App action, clip conversion, automatic freeze, or full-song plug-in export.
+Those tested bytes had only fake backends. The later disabled Linux strict
+adapter is currently unvalidated source; see [its contract](STRICT_OFFLINE_ADAPTER.md).
+There is no App action, clip conversion, automatic freeze, or full-song plug-in export.
 Existing whole-song WAV export still refuses active VSTs.
 
 The previous capture/cancellation slice was independently accepted at `12af28b`
@@ -56,8 +57,10 @@ sections below retain their original failures and bounded attribution.
 - Actual instrument/MIDI capability metadata is required. No audio input and
   exactly one active mono/stereo output bus are accepted; even inactive extra
   buses are rejected in this first slice. Missing metadata never becomes zero.
-  Prepared maximum is 2048. Future musical rendering is Q128, preserving the
-  existing exact Surge 1.3.4 reset256 rule for clone cleanup when it is added.
+  Prepared maximum is 2048 and musical rendering is Q128. The later approved
+  one-shot clone cleanup uses checked Stop/Shutdown/reap, superseding the earlier
+  reset128/Surge256 requirement for this disposable clone only. Realtime reusable
+  reset remains unchanged.
 
 ## Deliberate pending work
 

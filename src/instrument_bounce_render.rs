@@ -1,5 +1,5 @@
-//! Dormant selected-generator engine. There is deliberately no VST3 backend implementation.
-//! Only tests implement the backend contract until strict isolated lifetime/I/O is qualified.
+//! Dormant selected-generator engine with a closed, typed backend contract.
+//! The opt-in strict adapter remains separate from the public export/UI caller.
 use super::{
     BOUNCE_QUANTUM, BouncePluginMetadata, BounceSourceIdentity, CapturedInstrumentBounce,
     MAX_BOUNCE_FRAMES,
@@ -36,10 +36,113 @@ pub(crate) enum FailureKind {
     Output,
 }
 
+/// Backend errors retain cancellation and transport evidence without parsing diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BackendFailureKind {
+    Cancelled,
+    Deadline,
+    Backend,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BackendDelivery {
+    NotSent,
+    MayHaveApplied,
+}
+
+pub(crate) const MAX_BACKEND_DIAGNOSTIC_BYTES: usize = 2048;
+const MAX_CLEANUP_DIAGNOSTICS: usize = 8;
+fn bounded_diagnostic(message: &str) -> String {
+    let mut end = message.len().min(MAX_BACKEND_DIAGNOSTIC_BYTES);
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message[..end].to_owned()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BackendFailure {
+    pub kind: BackendFailureKind,
+    pub delivery: Option<BackendDelivery>,
+    diagnostic: String,
+    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    pub strict_kind: Option<vst3_host::strict_offline::FailureKind>,
+    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    pub strict_diagnostic_unavailable: Option<vst3_host::strict_offline::FailureKind>,
+}
+impl BackendFailure {
+    pub fn new(kind: BackendFailureKind, diagnostic: impl AsRef<str>) -> Self {
+        Self {
+            kind,
+            delivery: None,
+            diagnostic: bounded_diagnostic(diagnostic.as_ref()),
+            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+            strict_kind: None,
+            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+            strict_diagnostic_unavailable: None,
+        }
+    }
+    pub fn with_delivery(mut self, delivery: BackendDelivery) -> Self {
+        self.delivery = Some(delivery);
+        self
+    }
+    pub fn diagnostic(&self) -> &str {
+        &self.diagnostic
+    }
+}
+impl From<String> for BackendFailure {
+    fn from(value: String) -> Self {
+        Self::new(BackendFailureKind::Backend, value)
+    }
+}
+impl From<&str> for BackendFailure {
+    fn from(value: &str) -> Self {
+        Self::new(BackendFailureKind::Backend, value)
+    }
+}
+impl std::fmt::Display for BackendFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.diagnostic())
+    }
+}
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+impl From<vst3_host::strict_offline::Failure> for BackendFailure {
+    fn from(value: vst3_host::strict_offline::Failure) -> Self {
+        use vst3_host::strict_offline::{Delivery, FailureKind as StrictKind};
+        let kind = match value.kind {
+            StrictKind::Cancelled => BackendFailureKind::Cancelled,
+            StrictKind::Deadline => BackendFailureKind::Deadline,
+            _ => BackendFailureKind::Backend,
+        };
+        let fallback;
+        let diagnostic = match value.diagnostic.as_deref() {
+            Some(diagnostic) => diagnostic,
+            None => {
+                fallback = format!("Strict offline exchange failed: {:?}", value.kind);
+                &fallback
+            }
+        };
+        let mut failure = Self::new(kind, diagnostic).with_delivery(match value.delivery {
+            Delivery::NotSent => BackendDelivery::NotSent,
+            Delivery::MayHaveApplied => BackendDelivery::MayHaveApplied,
+        });
+        failure.strict_kind = Some(value.kind);
+        failure.strict_diagnostic_unavailable = value.diagnostic_unavailable;
+        failure
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RenderFailure {
     pub kind: FailureKind,
     pub primary: String,
+    /// Exact backend evidence for the primary failure, if it came from the backend.
+    /// Boxing keeps the by-value Result envelope small. These bounded evidence
+    /// allocations occur only on the renderer owner's error-reporting path.
+    pub backend: Option<Box<BackendFailure>>,
+    /// First typed disposal error, even when an earlier render fault wins.
+    pub cleanup_backend: Option<Box<BackendFailure>>,
+    /// Independent reporting-grace evidence, never a transport deadline.
+    pub cleanup_grace_elapsed: bool,
     pub cleanup: Vec<String>,
 }
 impl RenderFailure {
@@ -47,6 +150,27 @@ impl RenderFailure {
         Self {
             kind,
             primary: primary.into(),
+            backend: None,
+            cleanup_backend: None,
+            cleanup_grace_elapsed: false,
+            cleanup: Vec::new(),
+        }
+    }
+}
+
+impl From<BackendFailure> for RenderFailure {
+    fn from(failure: BackendFailure) -> Self {
+        let kind = match failure.kind {
+            BackendFailureKind::Cancelled => FailureKind::Cancelled,
+            BackendFailureKind::Deadline => FailureKind::Deadline,
+            BackendFailureKind::Backend => FailureKind::Backend,
+        };
+        Self {
+            kind,
+            primary: failure.diagnostic().to_owned(),
+            backend: Some(Box::new(failure)),
+            cleanup_backend: None,
+            cleanup_grace_elapsed: false,
             cleanup: Vec::new(),
         }
     }
@@ -70,12 +194,15 @@ impl RenderControl {
         }
         Ok(())
     }
-    fn call<T>(&self, call: impl FnOnce() -> Result<T, String>) -> Result<T, RenderFailure> {
+    fn call<T>(
+        &self,
+        call: impl FnOnce() -> Result<T, BackendFailure>,
+    ) -> Result<T, RenderFailure> {
         self.call_checked(call, |_| Ok(()))
     }
     fn call_checked<T>(
         &self,
-        call: impl FnOnce() -> Result<T, String>,
+        call: impl FnOnce() -> Result<T, BackendFailure>,
         validate: impl FnOnce(&T) -> Result<(), RenderFailure>,
     ) -> Result<T, RenderFailure> {
         self.checkpoint()?;
@@ -83,7 +210,7 @@ impl RenderControl {
         // that arrives in flight. Validate before observing the post-call fence.
         let value = catch_unwind(AssertUnwindSafe(call))
             .map_err(|_| RenderFailure::new(FailureKind::Panic, "Instrument backend panicked"))?
-            .map_err(|e| RenderFailure::new(FailureKind::Backend, e))?;
+            .map_err(RenderFailure::from)?;
         validate(&value)?;
         self.checkpoint()?;
         Ok(value)
@@ -342,11 +469,11 @@ fn render_frame_bounds(
 }
 
 fn record_cleanup_error(errors: &mut Vec<String>, message: String) {
-    let bounded: String = message.chars().take(2048).collect();
+    let bounded = bounded_diagnostic(&message);
     if !errors.contains(&bounded) {
-        if errors.len() < 8 {
+        if errors.len() < MAX_CLEANUP_DIAGNOSTICS {
             errors.push(bounded);
-        } else if errors.len() == 8 {
+        } else if errors.len() == MAX_CLEANUP_DIAGNOSTICS {
             errors.push("Additional cleanup diagnostics omitted after the first eight".into());
         }
     }
@@ -361,20 +488,28 @@ pub(crate) struct BlockReply {
 /// A failed cleanup is not necessarily termination. Ownership remains with this backend.
 pub(crate) struct DisposalObservation {
     pub terminated: bool,
-    pub error: Option<String>,
+    /// First observed cleanup failure, preserved across Pending polls. Concrete
+    /// termination is still mandatory, including after Cancelled or Deadline.
+    pub error: Option<BackendFailure>,
+    /// Secondary evidence only. The renderer bounds count and UTF-8 bytes on intake.
+    pub diagnostics: Vec<String>,
 }
 
-/// Only plugin-free fixtures implement this in this checkpoint. A real adapter requires the
-/// separately reviewed strict-isolation contract; ordinary Vst3Backend does not satisfy it.
+/// Closed worker-owned backend seam. Ordinary Vst3Backend does not satisfy the
+/// strict isolation, typed exchange failure and checked disposal contract.
 pub(crate) trait RenderBackend: 'static {
     fn prepare(
         &mut self,
         capture: &CapturedInstrumentBounce,
         control: &RenderControl,
-    ) -> Result<BouncePluginMetadata, String>;
-    fn metadata(&mut self) -> Result<BouncePluginMetadata, String>;
-    fn send_midi(&mut self, midi: [u8; 3], offset: u16) -> Result<(), String>;
-    fn process(&mut self, transport: PluginTransport, frames: usize) -> Result<BlockReply, String>;
+    ) -> Result<BouncePluginMetadata, BackendFailure>;
+    fn metadata(&mut self) -> Result<BouncePluginMetadata, BackendFailure>;
+    fn send_midi(&mut self, midi: [u8; 3], offset: u16) -> Result<(), BackendFailure>;
+    fn process(
+        &mut self,
+        transport: PluginTransport,
+        frames: usize,
+    ) -> Result<BlockReply, BackendFailure>;
     /// Must be idempotently polled; normal cancellation cannot skip cleanup. Pending/failed
     /// disposal retains the owner. Acknowledgment includes all plugin/process/I/O resources.
     /// Each poll must return promptly, honoring this absolute grace deadline;
@@ -490,8 +625,8 @@ impl RenderAdmission {
             .as_ref()
             .map(|job| job.status())
     }
-    /// The factory here creates an empty fixture owner, not a loaded plugin. Strict production
-    /// spawn/load ownership is deliberately absent until its foundation is qualified.
+    /// The factory creates an empty backend on the worker. A loaded plugin/process
+    /// owner must never cross threads; the backend owns spawn/load during prepare.
     pub fn start<B: RenderBackend>(
         &self,
         capture: CapturedInstrumentBounce,
@@ -574,7 +709,7 @@ fn run_owned<B: RenderBackend>(
         }
     };
     // Backend stays outside the unwind scope so every rendering panic still enters disposal.
-    let mut rendered = catch_unwind(AssertUnwindSafe(|| {
+    let rendered = catch_unwind(AssertUnwindSafe(|| {
         render_audio(&capture, &prepared, &mut backend, control)
     }))
     .unwrap_or_else(|_| {
@@ -583,10 +718,16 @@ fn run_owned<B: RenderBackend>(
             "Instrument render panicked",
         ))
     });
+    let (mut audio, mut failure) = match rendered {
+        Ok(audio) => (Some(audio), None),
+        Err(error) => (None, Some(error)),
+    };
     let mut cleanup_errors = Vec::new();
-    // This bounds the grace before reporting nonterminal cleanup trouble; it
-    // does not claim to interrupt a blocking backend/OS call. The real adapter
-    // must supply its separately reviewed bounded exchange/reap semantics.
+    let mut cleanup_primary: Option<RenderFailure> = None;
+    let mut cleanup_backend = None;
+    let mut grace_expired = false;
+    // One independent reporting/reap grace; never renew the caller's protocol
+    // deadline. Pending polls retain the same backend and admission indefinitely.
     let cleanup_deadline = Instant::now() + Duration::from_secs(5);
     progress.set(RenderStatus::Disposing);
     loop {
@@ -594,43 +735,71 @@ fn run_owned<B: RenderBackend>(
         let terminated = match observation {
             Ok(observation) => {
                 if let Some(error) = observation.error {
-                    record_cleanup_error(&mut cleanup_errors, error);
+                    if cleanup_backend.is_none() {
+                        cleanup_backend = Some(Box::new(error.clone()));
+                    }
+                    let error = RenderFailure::from(error);
+                    if cleanup_primary.is_none() {
+                        cleanup_primary = Some(error);
+                    } else if cleanup_primary.as_ref() != Some(&error) {
+                        record_cleanup_error(&mut cleanup_errors, error.primary);
+                    }
+                }
+                for diagnostic in observation.diagnostics {
+                    // A backend must supply the typed first error. Fail closed if
+                    // it returns only diagnostic evidence of cleanup trouble.
+                    if cleanup_primary.is_none() {
+                        cleanup_primary = Some(RenderFailure::from(BackendFailure::from(
+                            "Instrument cleanup reported a diagnostic without a primary failure",
+                        )));
+                    }
+                    record_cleanup_error(&mut cleanup_errors, diagnostic);
                 }
                 observation.terminated
             }
             Err(_) => {
-                let error = "Instrument disposal panicked; termination is unproven".to_owned();
-                record_cleanup_error(&mut cleanup_errors, error);
+                let error = RenderFailure::new(
+                    FailureKind::Panic,
+                    "Instrument disposal panicked; termination is unproven",
+                );
+                if cleanup_primary.is_none() {
+                    cleanup_primary = Some(error);
+                } else {
+                    record_cleanup_error(&mut cleanup_errors, error.primary);
+                }
                 false
             }
         };
-        // Check after every returned poll, including its terminal reply.
+        // Check after every returned poll, including its terminal reply. Elapsed
+        // reporting grace forbids publication but is not a transport Deadline or
+        // an established helper/OS fault that could mask a later typed failure.
         let grace_elapsed = progress.grace_elapsed(cleanup_deadline);
-        if grace_elapsed {
+        if grace_elapsed && !grace_expired {
+            grace_expired = true;
             record_cleanup_error(
                 &mut cleanup_errors,
                 "Cleanup grace elapsed before termination was acknowledged".into(),
             );
-            if !terminated {
-                progress.set(RenderStatus::CleanupPending {
-                    diagnostics: cleanup_errors.clone(),
-                });
-            }
         }
-        if !cleanup_errors.is_empty() && rendered.is_ok() {
-            // Publication is now forbidden. Free the bounded completed audio
-            // while retaining the backend and the original cleanup evidence.
-            rendered = Err(RenderFailure::new(
-                FailureKind::Backend,
-                "Instrument cleanup failed",
-            ));
+        if cleanup_primary.is_some() || grace_expired {
+            // Release completed audio while the backend remains owned until reap.
+            drop(audio.take());
+        }
+        if grace_elapsed && !terminated {
+            let mut diagnostics = Vec::new();
+            if let Some(error) = &cleanup_primary {
+                record_cleanup_error(&mut diagnostics, error.primary.clone());
+            }
+            for error in &cleanup_errors {
+                record_cleanup_error(&mut diagnostics, error.clone());
+            }
+            progress.set(RenderStatus::CleanupPending { diagnostics });
         }
         if terminated {
             break;
         }
-        // Keep the same backend and admission, with visible pending status and
-        // non-busy polling after grace. This is not a completed cancellation,
-        // detached cleanup task, fresh helper retry, or forced lease release.
+        // This is not a completed cancellation, detached cleanup, replacement
+        // helper, or lease release. Post-grace adapter polls must not wait.
         std::thread::sleep(if grace_elapsed {
             Duration::from_millis(250)
         } else {
@@ -638,25 +807,41 @@ fn run_owned<B: RenderBackend>(
         });
     }
     if catch_unwind(AssertUnwindSafe(|| drop(backend))).is_err() {
-        cleanup_errors.push("Disposed backend destructor panicked".into());
+        let error = RenderFailure::new(FailureKind::Panic, "Disposed backend destructor panicked");
+        if cleanup_primary.is_none() {
+            cleanup_primary = Some(error);
+        } else {
+            record_cleanup_error(&mut cleanup_errors, error.primary);
+        }
     }
-    let audio = match rendered {
-        Err(mut error) => {
-            error.cleanup = cleanup_errors;
-            return RenderOutcome::Failed(error);
+    if let Some(cleanup_error) = cleanup_primary {
+        if let Some(render_error) = &mut failure {
+            record_cleanup_error(&mut render_error.cleanup, cleanup_error.primary);
+        } else {
+            failure = Some(cleanup_error);
         }
-        Ok(_) if !cleanup_errors.is_empty() => {
-            return RenderOutcome::Failed(RenderFailure {
-                kind: FailureKind::Backend,
-                primary: "Instrument cleanup failed".into(),
-                cleanup: cleanup_errors,
-            });
+    }
+    // The final fence follows proven termination and backend destruction. Earlier
+    // render or actual cleanup faults win over later flags. A reporting-grace
+    // expiry alone cannot relabel a real cancellation/deadline as Backend.
+    if failure.is_none() {
+        failure = control.checkpoint().err();
+    }
+    if failure.is_none() && grace_expired {
+        failure = Some(RenderFailure::new(
+            FailureKind::Backend,
+            "Instrument cleanup reporting grace elapsed",
+        ));
+    }
+    if let Some(mut error) = failure {
+        error.cleanup_backend = cleanup_backend;
+        error.cleanup_grace_elapsed = grace_expired;
+        for diagnostic in cleanup_errors {
+            record_cleanup_error(&mut error.cleanup, diagnostic);
         }
-        Ok(audio) => audio,
-    };
-    if let Err(error) = control.checkpoint() {
         return RenderOutcome::Failed(error);
     }
+    let audio = audio.expect("successful render and checked disposal retain completed audio");
     let written = catch_unwind(AssertUnwindSafe(|| {
         write_stereo_float32_checked(
             &path,
