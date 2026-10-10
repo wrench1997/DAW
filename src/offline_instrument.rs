@@ -358,6 +358,473 @@ mod fresh_topology_diagnostic {
     }
 }
 
+// Equality-only diagnostics borrow the snapshots already read at the Start fence.
+// They neither query the owner nor participate in the admission decision.
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+mod fresh_metadata_mismatch_diagnostic {
+    use crate::instrument_bounce::{BounceAudioBus, BouncePluginMetadata};
+    use serde::Serialize;
+    use std::io::{self, Write};
+
+    const MAX_BUSES: usize = 16;
+    const MAX_TEXT_BYTES: usize = 256;
+    const MAX_JSON_BYTES: usize = 64 * 1024;
+    const ORIGINAL: &str = "Fresh bounce source topology changed at Start before admission";
+    const MARKER: &str = "\nFreshBounceMetadataMismatchV1=";
+
+    #[derive(Serialize)]
+    struct Text {
+        byte_length: usize,
+        excerpt: String,
+        truncated: bool,
+    }
+
+    impl Text {
+        fn bounded(value: &str) -> Self {
+            let mut end = value.len().min(MAX_TEXT_BYTES);
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            Self {
+                byte_length: value.len(),
+                excerpt: value[..end].to_owned(),
+                truncated: end < value.len(),
+            }
+        }
+    }
+
+    #[derive(Serialize)]
+    struct Bus {
+        channel_count: usize,
+        is_main: bool,
+        active: Option<bool>,
+    }
+
+    #[derive(Serialize)]
+    struct Buses {
+        total_count: usize,
+        truncated: bool,
+        entries: Vec<Bus>,
+    }
+
+    impl Buses {
+        fn bounded<T>(source: &[T], project: impl Fn(&T) -> Bus) -> Self {
+            Self {
+                total_count: source.len(),
+                truncated: source.len() > MAX_BUSES,
+                // Cap before allocating/projecting; keep full-field equality separately.
+                entries: source.iter().take(MAX_BUSES).map(project).collect(),
+            }
+        }
+        fn audio(source: &[BounceAudioBus]) -> Self {
+            Self::bounded(source, |bus| Bus {
+                channel_count: bus.channel_count,
+                is_main: bus.is_main,
+                active: bus.active,
+            })
+        }
+        fn event(source: &[(u32, bool, Option<bool>)]) -> Self {
+            Self::bounded(source, |&(channel_count, is_main, active)| Bus {
+                channel_count: channel_count as usize,
+                is_main,
+                active,
+            })
+        }
+    }
+
+    #[derive(Serialize)]
+    struct Metadata {
+        class_uid: Text,
+        version: Text,
+        name: Text,
+        category: Text,
+        event_input_buses: Buses,
+        event_output_buses: Buses,
+        input_buses: Buses,
+        output_buses: Buses,
+        latency_samples: u32,
+        tail_samples: u32,
+    }
+
+    impl Metadata {
+        fn bounded(source: &BouncePluginMetadata) -> Self {
+            // Exhaustive destructuring makes a future compared field a compile-time
+            // obligation rather than silently omitting it from this evidence schema.
+            let BouncePluginMetadata {
+                class_uid,
+                version,
+                name,
+                category,
+                event_input_buses,
+                event_output_buses,
+                input_buses,
+                output_buses,
+                latency_samples,
+                tail_samples,
+            } = source;
+            Self {
+                class_uid: Text::bounded(class_uid),
+                version: Text::bounded(version),
+                name: Text::bounded(name),
+                category: Text::bounded(category),
+                event_input_buses: Buses::event(event_input_buses),
+                event_output_buses: Buses::event(event_output_buses),
+                input_buses: Buses::audio(input_buses),
+                output_buses: Buses::audio(output_buses),
+                latency_samples: *latency_samples,
+                tail_samples: *tail_samples,
+            }
+        }
+    }
+
+    #[derive(Serialize)]
+    struct Different {
+        class_uid: bool,
+        version: bool,
+        name: bool,
+        category: bool,
+        event_input_buses: bool,
+        event_output_buses: bool,
+        input_buses: bool,
+        output_buses: bool,
+        latency_samples: bool,
+        tail_samples: bool,
+    }
+
+    impl Different {
+        fn full(before: &BouncePluginMetadata, current: &BouncePluginMetadata) -> Self {
+            Self {
+                class_uid: before.class_uid != current.class_uid,
+                version: before.version != current.version,
+                name: before.name != current.name,
+                category: before.category != current.category,
+                event_input_buses: before.event_input_buses != current.event_input_buses,
+                event_output_buses: before.event_output_buses != current.event_output_buses,
+                input_buses: before.input_buses != current.input_buses,
+                output_buses: before.output_buses != current.output_buses,
+                latency_samples: before.latency_samples != current.latency_samples,
+                tail_samples: before.tail_samples != current.tail_samples,
+            }
+        }
+    }
+
+    #[derive(Serialize)]
+    struct Mismatch {
+        schema: u32,
+        kind: &'static str,
+        phase: &'static str,
+        before_start: Metadata,
+        current_after_start: Metadata,
+        different: Different,
+    }
+
+    struct BoundedJson {
+        bytes: Vec<u8>,
+        limit: usize,
+    }
+
+    impl Write for BoundedJson {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let end = self
+                .bytes
+                .len()
+                .checked_add(bytes.len())
+                .filter(|end| *end <= self.limit)
+                .ok_or_else(|| io::Error::other("metadata diagnostic byte limit"))?;
+            // Check the ceiling before reserve/copy. No completed unbounded JSON
+            // String is ever allocated and subsequently truncated.
+            self.bytes
+                .try_reserve_exact(end - self.bytes.len())
+                .map_err(|_| io::Error::other("metadata diagnostic allocation"))?;
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    pub(super) fn error(before: &BouncePluginMetadata, current: &BouncePluginMetadata) -> String {
+        error_with_limit(before, current, MAX_JSON_BYTES)
+    }
+
+    fn error_with_limit(
+        before: &BouncePluginMetadata,
+        current: &BouncePluginMetadata,
+        limit: usize,
+    ) -> String {
+        let record = Mismatch {
+            schema: 1,
+            kind: "fresh_bounce_metadata_mismatch",
+            phase: "post_start",
+            before_start: Metadata::bounded(before),
+            current_after_start: Metadata::bounded(current),
+            different: Different::full(before, current),
+        };
+        let mut sink = BoundedJson {
+            bytes: Vec::new(),
+            limit,
+        };
+        if serde_json::to_writer(&mut sink, &record).is_err() {
+            return ORIGINAL.into();
+        }
+        let Ok(json) = String::from_utf8(sink.bytes) else {
+            return ORIGINAL.into();
+        };
+        let mut result = ORIGINAL.to_owned();
+        if result.try_reserve_exact(MARKER.len() + json.len()).is_err() {
+            return result;
+        }
+        result.push_str(MARKER);
+        result.push_str(&json);
+        result
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::Value;
+        use std::cell::Cell;
+
+        fn metadata() -> BouncePluginMetadata {
+            BouncePluginMetadata {
+                class_uid: "ABCDEF019182FAEB566D624153675854".into(),
+                name: "Surge XT".into(),
+                version: "1.3.4".into(),
+                category: "Instrument|Synth".into(),
+                event_input_buses: vec![(16, true, Some(true))],
+                event_output_buses: vec![],
+                input_buses: vec![BounceAudioBus::new(2, false, Some(true))],
+                output_buses: vec![
+                    BounceAudioBus::new(2, true, Some(true)),
+                    BounceAudioBus::new(2, true, Some(false)),
+                    BounceAudioBus::new(2, true, Some(false)),
+                ],
+                latency_samples: 0,
+                tail_samples: 96_000,
+            }
+        }
+        fn parse(before: &BouncePluginMetadata, current: &BouncePluginMetadata) -> Value {
+            let result = error(before, current);
+            let (prefix, json) = result.split_once(MARKER).unwrap();
+            assert_eq!(prefix, ORIGINAL);
+            assert_eq!(result.matches(MARKER).count(), 1);
+            assert!(json.len() <= MAX_JSON_BYTES);
+            serde_json::from_str(json).unwrap()
+        }
+        fn assert_flags(json: &Value, expected: &[&str]) {
+            let flags = json["different"].as_object().unwrap();
+            assert_eq!(flags.len(), 10);
+            for (field, value) in flags {
+                assert_eq!(
+                    value.as_bool(),
+                    Some(expected.contains(&field.as_str())),
+                    "{field}"
+                );
+            }
+        }
+
+        #[test]
+        fn each_complete_compared_field_has_its_own_exact_flag() {
+            let before = metadata();
+            assert_flags(&parse(&before, &before), &[]);
+            for field in [
+                "class_uid",
+                "version",
+                "name",
+                "category",
+                "input_buses",
+                "output_buses",
+                "event_input_buses",
+                "event_output_buses",
+                "latency_samples",
+                "tail_samples",
+            ] {
+                let mut current = before.clone();
+                match field {
+                    "class_uid" => current.class_uid.push('x'),
+                    "version" => current.version.push('x'),
+                    "name" => current.name.push('x'),
+                    "category" => current.category.push('x'),
+                    "input_buses" => current.input_buses[0].is_main = true,
+                    "output_buses" => current.output_buses[1].channel_count = 1,
+                    "event_input_buses" => current.event_input_buses[0].0 = 1,
+                    "event_output_buses" => current.event_output_buses.push((1, false, None)),
+                    "latency_samples" => current.latency_samples = 1,
+                    "tail_samples" => current.tail_samples = u32::MAX,
+                    _ => unreachable!(),
+                }
+                let json = parse(&before, &current);
+                assert_eq!(json["schema"], 1);
+                assert_eq!(json["kind"], "fresh_bounce_metadata_mismatch");
+                assert_eq!(json["phase"], "post_start");
+                assert_flags(&json, &[field]);
+            }
+        }
+
+        #[test]
+        fn both_operands_preserve_identity_numbers_and_all_bus_evidence() {
+            let mut before = metadata();
+            before.event_output_buses = vec![(1, false, None), (2, true, Some(false))];
+            before.input_buses[0].active = None;
+            let mut current = before.clone();
+            current.input_buses[0].active = Some(false);
+            current.output_buses.swap(0, 1);
+            current.event_input_buses.clear();
+            current.event_output_buses[0] = (16, true, Some(true));
+            current.latency_samples = u32::MAX;
+            current.tail_samples = 0;
+            let json = parse(&before, &current);
+            for (key, source) in [("before_start", &before), ("current_after_start", &current)] {
+                let view = &json[key];
+                for (field, text) in [
+                    ("class_uid", &source.class_uid),
+                    ("version", &source.version),
+                    ("name", &source.name),
+                    ("category", &source.category),
+                ] {
+                    assert_eq!(view[field]["byte_length"], text.len());
+                    assert_eq!(view[field]["excerpt"], text.as_str());
+                    assert_eq!(view[field]["truncated"], false);
+                }
+                assert_eq!(view["latency_samples"], source.latency_samples);
+                assert_eq!(view["tail_samples"], source.tail_samples);
+                for (field, list) in [
+                    ("input_buses", &source.input_buses),
+                    ("output_buses", &source.output_buses),
+                ] {
+                    let entries = view[field]["entries"].as_array().unwrap();
+                    assert_eq!(view[field]["total_count"], list.len());
+                    assert_eq!(view[field]["truncated"], false);
+                    assert_eq!(entries.len(), list.len());
+                    for (entry, bus) in entries.iter().zip(list) {
+                        assert_eq!(entry["channel_count"], bus.channel_count);
+                        assert_eq!(entry["is_main"], bus.is_main);
+                        assert_eq!(entry["active"], serde_json::to_value(bus.active).unwrap());
+                    }
+                }
+                for (field, list) in [
+                    ("event_input_buses", &source.event_input_buses),
+                    ("event_output_buses", &source.event_output_buses),
+                ] {
+                    let entries = view[field]["entries"].as_array().unwrap();
+                    assert_eq!(view[field]["total_count"], list.len());
+                    assert_eq!(view[field]["truncated"], false);
+                    assert_eq!(entries.len(), list.len());
+                    for (entry, &(channels, main, active)) in entries.iter().zip(list) {
+                        assert_eq!(entry["channel_count"], channels);
+                        assert_eq!(entry["is_main"], main);
+                        assert_eq!(entry["active"], serde_json::to_value(active).unwrap());
+                    }
+                }
+            }
+            assert_flags(
+                &json,
+                &[
+                    "input_buses",
+                    "output_buses",
+                    "event_input_buses",
+                    "event_output_buses",
+                    "latency_samples",
+                    "tail_samples",
+                ],
+            );
+        }
+
+        #[test]
+        fn utf8_excerpt_is_byte_bounded_and_same_long_prefix_is_not_equality() {
+            for text in [
+                "x".repeat(255) + "é",
+                "😀".repeat(65),
+                "\0\"\\\n".repeat(100),
+            ] {
+                let bounded = Text::bounded(&text);
+                assert_eq!(bounded.byte_length, text.len());
+                assert!(bounded.excerpt.len() <= MAX_TEXT_BYTES);
+                assert!(text.starts_with(&bounded.excerpt));
+                assert!(bounded.truncated);
+            }
+            let exact = Text::bounded(&"é".repeat(128));
+            assert_eq!(exact.excerpt.len(), 256);
+            assert!(!exact.truncated);
+            let mut before = metadata();
+            before.name = "same".repeat(2_048) + "before";
+            let mut current = before.clone();
+            current.name = "same".repeat(2_048) + "after!";
+            let json = parse(&before, &current);
+            assert_eq!(
+                json["before_start"]["name"],
+                json["current_after_start"]["name"]
+            );
+            assert_eq!(json["before_start"]["name"]["truncated"], true);
+            assert_flags(&json, &["name"]);
+        }
+
+        #[test]
+        fn capped_lists_keep_counts_and_differences_beyond_visible_entries() {
+            let mut before = metadata();
+            before.input_buses = vec![BounceAudioBus::new(2, false, None); 1_000];
+            before.event_output_buses = vec![(2, false, None); 1_000];
+            let mut current = before.clone();
+            current.input_buses[900].active = Some(false);
+            current.event_output_buses[900].0 = 3;
+            let json = parse(&before, &current);
+            for field in ["input_buses", "event_output_buses"] {
+                assert_eq!(
+                    json["before_start"][field],
+                    json["current_after_start"][field]
+                );
+                let view = &json["before_start"][field];
+                assert_eq!(view["total_count"], 1_000);
+                assert_eq!(view["truncated"], true);
+                assert_eq!(view["entries"].as_array().unwrap().len(), MAX_BUSES);
+            }
+            assert_flags(&json, &["input_buses", "event_output_buses"]);
+            let visits = Cell::new(0);
+            let bounded = Buses::bounded(&before.input_buses, |_| {
+                visits.set(visits.get() + 1);
+                Bus {
+                    channel_count: 2,
+                    is_main: false,
+                    active: None,
+                }
+            });
+            assert_eq!(visits.get(), MAX_BUSES);
+            assert_eq!(bounded.entries.len(), MAX_BUSES);
+        }
+
+        #[test]
+        fn maximum_escaped_views_are_bounded_and_limit_failure_keeps_original() {
+            let mut before = metadata();
+            before.class_uid = "\0".repeat(1_000);
+            before.name = before.class_uid.clone();
+            before.version = before.class_uid.clone();
+            before.category = before.class_uid.clone();
+            before.input_buses = vec![BounceAudioBus::new(usize::MAX, true, Some(false)); 1_000];
+            before.output_buses = before.input_buses.clone();
+            before.event_input_buses = vec![(u32::MAX, true, Some(false)); 1_000];
+            before.event_output_buses = before.event_input_buses.clone();
+            let json = parse(&before, &before);
+            assert_flags(&json, &[]);
+            assert_eq!(error_with_limit(&before, &before, 0), ORIGINAL);
+            assert_eq!(error_with_limit(&before, &before, 1), ORIGINAL);
+        }
+
+        #[test]
+        fn serializer_sink_rejects_growth_before_copy_and_retains_exact_boundary() {
+            let mut sink = BoundedJson {
+                bytes: Vec::new(),
+                limit: 3,
+            };
+            sink.write_all(b"abc").unwrap();
+            assert_eq!(sink.bytes, b"abc");
+            assert!(sink.write_all(b"d").is_err());
+            assert_eq!(sink.bytes, b"abc");
+            sink.flush().unwrap();
+        }
+    }
+}
+
 /// Construct and use on the same background owner thread. The backend is deliberately !Send.
 pub struct OfflineInstrument {
     #[cfg(feature = "vst3")]
@@ -591,6 +1058,14 @@ impl Vst3Backend {
             None,
             Some(before_start),
         )
+    }
+
+    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    pub(super) fn fresh_start_metadata_mismatch_error(
+        before_start: &BouncePluginMetadata,
+        current: &BouncePluginMetadata,
+    ) -> String {
+        fresh_metadata_mismatch_diagnostic::error(before_start, current)
     }
 
     pub(super) fn bounce_metadata(

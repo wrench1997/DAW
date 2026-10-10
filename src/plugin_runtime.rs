@@ -5397,9 +5397,10 @@ impl PluginBackend for Vst3Backend {
                     Self::fresh_topology_post_start_error(error, &current, &before_start)
                 })?;
             if current != before_start {
-                return Err(
-                    "Fresh bounce source topology changed at Start before admission".into(),
-                );
+                return Err(Self::fresh_start_metadata_mismatch_error(
+                    &before_start,
+                    &current,
+                ));
             }
         }
         self.max_block_frames = config.max_block_frames;

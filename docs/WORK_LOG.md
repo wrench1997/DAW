@@ -1849,3 +1849,25 @@ qualification_success=false; original genuine001 stays FAILED. Successful actual
 capture, strict clone state/base/MIDI/audio/WAV and cancellation require a separately
 frozen and authorized qualification. Final source/evidence review and durable
 archive precede that preparation.
+
+## 2026-10-10: complete Start metadata mismatch diagnostic, source only
+
+- Base c7a5d432 remains source/mock accepted. Its newly authorized rebound genuine
+  attempt FAILED source_setup at the complete post-Start metadata equality fence;
+  outer b6706556 and events eb86e70a are durable in experimental v104. Nine later
+  stages remain unexecuted. There was one helper source and no capture, generic
+  setter, strict clone, positive audio or WAV. Legacy Joined/PID absence remains
+  qualified; no strict reap claim. No retry or criteria change followed.
+- Root and both reviewers approved diagnostic-only plan a8617cfe. The production
+  delta adds a private capped metadata serializer and changes only the existing
+  inequality Err construction. It preserves all ten exact comparison fields,
+  full-field difference flags, null activation, original error prefix and Ready
+  fence. No extra SDK/IPC calls, policy/dependency/vendor/default changes.
+- Text/list copies are capped before materialization and JSON before emission
+  exceeds64KiB. Full original equality remains authoritative beyond visible caps.
+  Error fallback retains the original refusal; the older validator-refusal record
+  remains unchanged. Cached identity mutation is tested purely, without artificial
+  production owner hooks.
+- This is UNVALIDATED source. Exact source archive/reviews precede bounded compiler
+  and mock gates. No new helper/plugin execution is authorized by this checkpoint;
+  the later one-source observation requires a separate frozen harness and run gate.

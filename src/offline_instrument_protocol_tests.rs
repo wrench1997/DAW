@@ -257,6 +257,8 @@ for line in sys.stdin:
                        extra_main, mode in ('fresh_aux_active_last', 'fresh_main_active_last'), 2, 'Output')]
         if mode == 'fresh_raw_invalid_after_start' and checked and processing:
             outputs[0]['channel_count'] = 4
+        if mode == 'fresh_unknown_after_start' and checked and processing:
+            outputs[1]['active'] = None
         if mode == 'fresh_extra_output': outputs.append(bus(2, False, False, 3, 'Output'))
         if mode == 'fresh_prepared_mismatch' and not checked: outputs[-1]['channel_count'] = 1
         if mode == 'fresh_prepared_count' and not checked: outputs.pop()
@@ -266,11 +268,11 @@ for line in sys.stdin:
         if mode == 'dry_drift' and saved: outputs[-1]['channel_count'] = 1
         if checked:
             if ((mode == 'fresh_input_role_drift' and activation_calls)
-                    or (mode == 'fresh_input_role_on_start' and processing)
+                    or (mode in ('fresh_input_role_on_start', 'fresh_combined_on_start') and processing)
                     or (mode == 'dry_drift_input_role' and saved)):
                 inputs[0]['is_main'] = False
             if ((mode == 'fresh_extra_role_drift' and activation_calls)
-                    or (mode == 'fresh_extra_role_on_start' and processing)
+                    or (mode in ('fresh_extra_role_on_start', 'fresh_combined_on_start') and processing)
                     or (mode == 'dry_drift_extra_role' and saved)):
                 outputs[-1]['is_main'] = True
         result = {name: {'layout': dict(inputs=inputs, outputs=outputs)}}
@@ -290,6 +292,14 @@ for line in sys.stdin:
             if (mode == 'outputs_after_state' and loaded) or (mode == 'metadata_change' and saved): layout['outputs'] = [copy.deepcopy(bus)]
             if mode == 'extra_input': layout['inputs'].append(copy.deepcopy(bus))
             if mode in ('unknown_activation', 'fresh_event_unknown'): bus['active'] = None
+            if mode in ('fresh_event_channels_on_start', 'fresh_combined_on_start') and processing:
+                bus['channel_count'] = 8
+    elif name == 'LatencySamples':
+        if mode in ('fresh_latency_on_start', 'fresh_combined_on_start') and processing:
+            result['LatencySamples']['samples'] = 127
+    elif name == 'TailSamples':
+        if mode in ('fresh_tail_on_start', 'fresh_combined_on_start') and processing:
+            result['TailSamples']['samples'] = 4294967295
     elif name == 'SetBusActive':
         assert dry_shape and not processing and not saved, 'activation outside fresh unpublished setup'
         assert data['media_type'] == 'Audio' and data['active'] is False, data
@@ -1328,6 +1338,237 @@ fn fresh_source_partial_ack_failure_missing_ack_and_drift_never_start_or_retry()
 }
 
 #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn fresh_metadata_mismatch_case(
+    mode: &str,
+) -> (
+    BouncePluginMetadata,
+    BouncePluginMetadata,
+    &'static [&'static str],
+) {
+    let before = dry_metadata();
+    let mut current = before.clone();
+    let different: &'static [&'static str] = match mode {
+        "fresh_input_role_on_start" => {
+            current.input_buses[0].is_main = false;
+            &["input_buses"]
+        }
+        "fresh_extra_role_on_start" => {
+            current.output_buses[2].is_main = true;
+            &["output_buses"]
+        }
+        "fresh_event_channels_on_start" => {
+            current.event_input_buses[0].0 = 8;
+            &["event_input_buses"]
+        }
+        "fresh_latency_on_start" => {
+            current.latency_samples = 127;
+            &["latency_samples"]
+        }
+        "fresh_tail_on_start" => {
+            current.tail_samples = u32::MAX;
+            &["tail_samples"]
+        }
+        "fresh_combined_on_start" => {
+            current.input_buses[0].is_main = false;
+            current.output_buses[2].is_main = true;
+            current.event_input_buses[0].0 = 8;
+            current.latency_samples = 127;
+            current.tail_samples = u32::MAX;
+            &[
+                "input_buses",
+                "output_buses",
+                "event_input_buses",
+                "latency_samples",
+                "tail_samples",
+            ]
+        }
+        _ => panic!("not a Start metadata-mismatch fixture: {mode}"),
+    };
+    // Both complete operands must pass the unmodified validator independently.
+    // These failures therefore exercise equality after validation, not an earlier refusal.
+    before.validate(48_000).unwrap();
+    current.validate(48_000).unwrap();
+    assert_ne!(before, current, "{mode}");
+    (before, current, different)
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn fresh_metadata_json(metadata: &BouncePluginMetadata) -> serde_json::Value {
+    let text = |value: &str| {
+        assert!(value.len() <= 256, "fixture identities are complete views");
+        serde_json::json!({
+            "byte_length": value.len(),
+            "excerpt": value,
+            "truncated": false,
+        })
+    };
+    let buses = |entries: Vec<serde_json::Value>| {
+        assert!(entries.len() <= 16, "fixture bus lists are complete views");
+        serde_json::json!({
+            "total_count": entries.len(),
+            "truncated": false,
+            "entries": entries,
+        })
+    };
+    let audio = |entries: &[BounceAudioBus]| {
+        buses(
+            entries
+                .iter()
+                .map(|bus| {
+                    serde_json::json!({
+                        "channel_count": bus.channel_count,
+                        "is_main": bus.is_main,
+                        "active": bus.active,
+                    })
+                })
+                .collect(),
+        )
+    };
+    let events = |entries: &[(u32, bool, Option<bool>)]| {
+        buses(
+            entries
+                .iter()
+                .map(|&(channel_count, is_main, active)| {
+                    serde_json::json!({
+                        "channel_count": channel_count,
+                        "is_main": is_main,
+                        "active": active,
+                    })
+                })
+                .collect(),
+        )
+    };
+    serde_json::json!({
+        "class_uid": text(&metadata.class_uid),
+        "version": text(&metadata.version),
+        "name": text(&metadata.name),
+        "category": text(&metadata.category),
+        "input_buses": audio(&metadata.input_buses),
+        "output_buses": audio(&metadata.output_buses),
+        "event_input_buses": events(&metadata.event_input_buses),
+        "event_output_buses": events(&metadata.event_output_buses),
+        "latency_samples": metadata.latency_samples,
+        "tail_samples": metadata.tail_samples,
+    })
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn assert_fresh_metadata_mismatch(mode: &str, error: &str) {
+    const MARKER: &str = "\nFreshBounceMetadataMismatchV1=";
+    let (prefix, data) = error.split_once(MARKER).expect("typed mismatch suffix");
+    assert_eq!(
+        prefix, "Fresh bounce source topology changed at Start before admission",
+        "{mode}"
+    );
+    assert_eq!(error.matches(MARKER).count(), 1, "{mode}");
+    assert!(!error.contains("FreshBounceTopologyRefusalV1="), "{mode}");
+    let record: serde_json::Value = serde_json::from_str(data).unwrap();
+    let (before, current, changed_fields) = fresh_metadata_mismatch_case(mode);
+    let different: serde_json::Map<String, serde_json::Value> = [
+        "class_uid",
+        "version",
+        "name",
+        "category",
+        "input_buses",
+        "output_buses",
+        "event_input_buses",
+        "event_output_buses",
+        "latency_samples",
+        "tail_samples",
+    ]
+    .into_iter()
+    .map(|field| (field.to_owned(), changed_fields.contains(&field).into()))
+    .collect();
+    assert_eq!(
+        record,
+        serde_json::json!({
+            "schema": 1,
+            "kind": "fresh_bounce_metadata_mismatch",
+            "phase": "post_start",
+            "before_start": fresh_metadata_json(&before),
+            "current_after_start": fresh_metadata_json(&current),
+            "different": different,
+        }),
+        "exact complete operands and all ten difference flags: {mode}"
+    );
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn assert_fresh_post_start_refusal_ledger(fake: &FakeHelper, restored: bool) {
+    let mut expected = fresh_setup_commands(restored);
+    // A failed prepare drops its unpublished backend before normal native polling.
+    expected.extend(["Editor", "StopProcessing", "Shutdown"]);
+    assert_eq!(
+        fake.names(),
+        expected,
+        "only setup, the complete post-Start metadata fence, and teardown are permitted"
+    );
+    let requests = fake.requests();
+    let activations: Vec<_> = requests
+        .iter()
+        .filter_map(|request| request.get("SetBusActive").cloned())
+        .collect();
+    assert_eq!(
+        activations,
+        [1, 2].map(|index| serde_json::json!({
+            "media_type": "Audio",
+            "direction": "Output",
+            "bus_index": index,
+            "active": false,
+        }))
+    );
+    assert_eq!(
+        requests[requests.len() - 3],
+        serde_json::json!({"Editor": {"command": "Close"}})
+    );
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn assert_fresh_post_start_validation_refusal(mode: &str, error: &str) {
+    let before = dry_metadata();
+    let mut current = before.clone();
+    let expected_prefix = match mode {
+        "fresh_raw_invalid_after_start" => {
+            current.output_buses[0].channel_count = 4;
+            "Instrument bounce requires at most one known mono/stereo input for explicit silence, one known-active main mono/stereo output at index zero, and at most two known-inactive mono/stereo extra outputs"
+        }
+        "fresh_unknown_after_start" => {
+            current.output_buses[1].active = None;
+            "Instrument bounce activation is unknown; a fresh load with explicit inactive-bus acknowledgment is required"
+        }
+        _ => panic!("not a post-Start validation-refusal fixture: {mode}"),
+    };
+    before.validate(48_000).unwrap();
+    assert_eq!(current.validate(48_000).unwrap_err(), expected_prefix);
+    assert!(!error.contains("FreshBounceMetadataMismatchV1="), "{mode}");
+    const MARKER: &str = "\nFreshBounceTopologyRefusalV1=";
+    let (prefix, data) = error.split_once(MARKER).expect("original validator suffix");
+    assert_eq!(prefix, expected_prefix, "{mode}");
+    assert_eq!(error.matches(MARKER).count(), 1, "{mode}");
+    let record: serde_json::Value = serde_json::from_str(data).unwrap();
+    let checked = |metadata| {
+        let all = fresh_metadata_json(metadata);
+        serde_json::json!({"inputs": all["input_buses"], "outputs": all["output_buses"]})
+    };
+    assert_eq!(
+        record,
+        serde_json::json!({
+            "schema": 1,
+            "kind": "fresh_bounce_topology_refusal",
+            "validation_phase": "post_start",
+            "validator_error_excerpt": expected_prefix,
+            "validator_error_truncated": false,
+            "raw_checked": checked(&current),
+            "prepared_observation_phase": null,
+            "prepared": null,
+            "proposal": null,
+            "expected_before_start": checked(&before),
+        }),
+        "earlier validator keeps its original schema and exact attribution: {mode}"
+    );
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
 #[test]
 fn failed_fresh_source_worker_publishes_no_ready_or_active_slot_and_leaves_old_source() {
     use super::super::{PluginChain, RuntimeEvent};
@@ -1339,6 +1580,8 @@ fn failed_fresh_source_worker_publishes_no_ready_or_active_slot_and_leaves_old_s
         "fresh_set_fail2",
         "fresh_ack_missing",
         "fresh_changed_on_start",
+        "fresh_raw_invalid_after_start",
+        "fresh_unknown_after_start",
         "fresh_input_role_on_start",
         "fresh_extra_role_on_start",
     ] {
@@ -1360,9 +1603,15 @@ fn failed_fresh_source_worker_publishes_no_ready_or_active_slot_and_leaves_old_s
                         mode,
                         "fresh_input_role_on_start" | "fresh_extra_role_on_start"
                     ) {
-                        assert_eq!(
-                            message,
-                            "Fresh bounce source topology changed at Start before admission",
+                        assert_fresh_metadata_mismatch(mode, &message);
+                    } else if matches!(
+                        mode,
+                        "fresh_raw_invalid_after_start" | "fresh_unknown_after_start"
+                    ) {
+                        assert_fresh_post_start_validation_refusal(mode, &message);
+                    } else {
+                        assert!(
+                            !message.contains("FreshBounceMetadataMismatchV1="),
                             "{mode}"
                         );
                     }
@@ -1375,6 +1624,7 @@ fn failed_fresh_source_worker_publishes_no_ready_or_active_slot_and_leaves_old_s
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(fault, "candidate must report its failure: {mode}");
+        assert_eq!(control.stats().faults, 1, "{mode}");
         assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 0);
         assert_eq!(worker.join(), super::super::ShutdownOutcome::Joined);
         while let Some(event) = control.try_next_event() {
@@ -1384,10 +1634,112 @@ fn failed_fresh_source_worker_publishes_no_ready_or_active_slot_and_leaves_old_s
             name.as_str(),
             "Process" | "ProcessBuses" | "ProcessResetOrigin" | "ResetOrigin"
         )));
+        if matches!(
+            mode,
+            "fresh_input_role_on_start"
+                | "fresh_extra_role_on_start"
+                | "fresh_raw_invalid_after_start"
+                | "fresh_unknown_after_start"
+        ) {
+            assert_fresh_post_start_refusal_ledger(&fake, true);
+        }
+        assert_eq!(control.stats().faults, 1, "{mode}");
+        assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 0);
         assert!(old_source.prepared && old_source.plugin.is_processing());
         assert!(
             old.names().is_empty(),
             "candidate failure must not touch the existing source"
+        );
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_valid_start_metadata_drifts_report_exact_operands_without_admission() {
+    use super::super::{PluginChain, RuntimeEvent, ShutdownOutcome};
+    use std::time::{Duration, Instant};
+    let old = FakeHelper::new("normal");
+    let old_source = old.source();
+    let old_requests = old.requests();
+    let old_state = (
+        old_source.prepared,
+        old_source.plugin.is_processing(),
+        old_source.input_channels,
+        old_source.output_channels,
+        old_source.native_revision_base,
+    );
+    for mode in [
+        "fresh_input_role_on_start",
+        "fresh_extra_role_on_start",
+        "fresh_event_channels_on_start",
+        "fresh_latency_on_start",
+        "fresh_tail_on_start",
+        "fresh_combined_on_start",
+    ] {
+        let fake = FakeHelper::new(mode);
+        let PluginChain {
+            audio: _audio,
+            mut control,
+            guard,
+        } = PluginChain::spawn_fresh_bounce_source(41, fake.spec(vec![]), fresh_config()).unwrap();
+        let mut worker = FreshSourceWorkerGuard::new(&fake, guard);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut faults = 0;
+        while Instant::now() < deadline {
+            while let Some(event) = control.try_next_event() {
+                match event {
+                    RuntimeEvent::SlotReady { .. } => {
+                        panic!("refused source published Ready: {mode}")
+                    }
+                    RuntimeEvent::SlotFault { slot, message } => {
+                        assert_eq!(slot, 0, "{mode}");
+                        assert_fresh_metadata_mismatch(mode, &message);
+                        faults += 1;
+                    }
+                    _ => {}
+                }
+            }
+            if faults != 0 && control.plugin_latency_snapshot().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(faults, 1, "exactly one pre-join refusal: {mode}");
+        assert_eq!(control.stats().faults, 1, "{mode}");
+        assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 0);
+        assert_eq!(worker.join(), ShutdownOutcome::Joined, "{mode}");
+        while let Some(event) = control.try_next_event() {
+            match event {
+                RuntimeEvent::SlotReady { .. } => {
+                    panic!("refused source published Ready after join: {mode}")
+                }
+                RuntimeEvent::SlotFault { .. } => faults += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(faults, 1, "no second fault after bounded shutdown: {mode}");
+        assert_eq!(control.stats().faults, 1, "{mode}");
+        assert_eq!(control.stats().submitted, 0, "{mode}");
+        assert_eq!(control.stats().completed, 0, "{mode}");
+        assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 0);
+        // This exact ledger excludes state/capture/process calls, native polling,
+        // additional metadata reads, another activation pass, and a second candidate.
+        assert_fresh_post_start_refusal_ledger(&fake, false);
+        assert_eq!(
+            old.requests(),
+            old_requests,
+            "old-source ledger must remain untouched: {mode}"
+        );
+        assert_eq!(
+            (
+                old_source.prepared,
+                old_source.plugin.is_processing(),
+                old_source.input_channels,
+                old_source.output_channels,
+                old_source.native_revision_base
+            ),
+            old_state,
+            "old-source lifecycle and cached state must remain untouched: {mode}"
         );
     }
 }
@@ -1412,18 +1764,18 @@ fn default_source_loader_never_acknowledges_inactive_defaults() {
 }
 
 #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
-fn assert_fresh_setup_fences(fake: &FakeHelper, expected: &BouncePluginMetadata) {
-    let mut setup = vec![
-        "LoadPlugin",
-        "AudioBusLayout",
-        "ResetOriginSupport",
-        "LoadState",
+fn fresh_setup_commands(restored: bool) -> Vec<&'static str> {
+    let mut setup = vec!["LoadPlugin", "AudioBusLayout", "ResetOriginSupport"];
+    if restored {
+        setup.push("LoadState");
+    }
+    setup.extend([
         "CheckedAudioBusLayout",
         "EventBusLayout",
         "LatencySamples",
         "TailSamples",
         "AudioBusLayout",
-    ];
+    ]);
     for _ in 0..2 {
         setup.extend([
             "SetBusActive",
@@ -1446,6 +1798,12 @@ fn assert_fresh_setup_fences(fake: &FakeHelper, expected: &BouncePluginMetadata)
         "LatencySamples",
         "TailSamples",
     ]);
+    setup
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn assert_fresh_setup_fences(fake: &FakeHelper, expected: &BouncePluginMetadata) {
+    let setup = fresh_setup_commands(true);
     let names = fake.names();
     assert!(names.len() >= setup.len(), "incomplete setup: {names:?}");
     assert!(
@@ -1492,6 +1850,61 @@ fn assert_fresh_setup_fences(fake: &FakeHelper, expected: &BouncePluginMetadata)
         [raw, first_ack, known.clone(), known.clone(), known],
         "raw unknowns become false only after each actual mock acknowledgment; all descriptors survive"
     );
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn assert_fresh_success_ledger(fake: &FakeHelper) {
+    let mut expected = fresh_setup_commands(true);
+    // Ready's checked metadata and the initial latency publication are distinct reads.
+    expected.extend([
+        "LatencySamples",
+        "TailSamples",
+        "LatencySamples",
+        "TailSamples",
+    ]);
+    const POLL: &[&str] = &[
+        "Editor",
+        "TakeParameterEdits",
+        "TakeHostNotifications",
+        "ServiceHostRequests",
+        "NativeDirtyRevision",
+        "LatencySamples",
+        "TailSamples",
+    ];
+    const TEARDOWN: &[&str] = &["Editor", "Editor", "StopProcessing", "Shutdown"];
+    let names = fake.names();
+    assert!(
+        names.len() >= expected.len() + POLL.len() + TEARDOWN.len(),
+        "complete native poll required: {names:?}"
+    );
+    let polling_end = names.len() - TEARDOWN.len();
+    let polling = &names[expected.len()..polling_end];
+    assert_eq!(
+        polling.len() % POLL.len(),
+        0,
+        "partial or extra native calls: {names:?}"
+    );
+    for _ in 0..polling.len() / POLL.len() {
+        expected.extend(POLL);
+    }
+    expected.extend(TEARDOWN);
+    assert_eq!(
+        names, expected,
+        "exact setup, Ready reads, native polls, and teardown; no diagnostic-only calls"
+    );
+    let requests = fake.requests();
+    for (index, request) in requests.iter().enumerate() {
+        if let Some(editor) = request.get("Editor") {
+            assert_eq!(
+                editor["command"],
+                if index < polling_end {
+                    "Query"
+                } else {
+                    "Close"
+                }
+            );
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
@@ -1562,6 +1975,7 @@ fn fresh_source_worker_admits_ready_only_after_verified_setup_and_start() {
                 }
                 if matches!(event, RuntimeEvent::SlotReady { slot: 0, .. }) {
                     assert_fresh_setup_fences(&fake, &expected);
+                    assert!(!ready, "one candidate must publish Ready only once: {mode}");
                     ready = true;
                 }
             }
@@ -1620,6 +2034,17 @@ fn fresh_source_worker_admits_ready_only_after_verified_setup_and_start() {
             joined,
             "repeated join preserves the original observation"
         );
+        assert_fresh_success_ledger(&fake);
+        assert_eq!(control.stats().faults, 0, "{mode}");
+        while let Some(event) = control.try_next_event() {
+            assert!(
+                !matches!(
+                    event,
+                    RuntimeEvent::SlotReady { .. } | RuntimeEvent::SlotFault { .. }
+                ),
+                "no later Ready or fault after successful admission: {event:?}"
+            );
+        }
     }
 }
 
@@ -1959,55 +2384,25 @@ fn fresh_source_diagnostic_success_path_adds_no_owner_calls() {
 #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
 #[test]
 fn fresh_source_diagnostic_post_start_failure_does_not_query_prepared_again() {
-    let fake = FakeHelper::new("fresh_raw_invalid_after_start");
-    let mut source =
-        Vst3Backend::load_fresh_bounce_source(fake.spec(vec![]), fresh_config()).unwrap();
-    let error = source.prepare(fresh_config()).unwrap_err();
-    let json = parse_fresh_topology_refusal(&error);
-    assert_eq!(json["validation_phase"], "post_start");
-    assert!(json["prepared"].is_null());
-    assert!(json["prepared_observation_phase"].is_null());
-    assert_eq!(
-        json["raw_checked"]["outputs"]["entries"][0]["channel_count"],
-        4
-    );
-    assert_eq!(
-        json["expected_before_start"]["outputs"]["entries"][0]["channel_count"],
-        2
-    );
-    let names = fake.names();
-    let mut expected = vec![
-        "LoadPlugin",
-        "AudioBusLayout",
-        "ResetOriginSupport",
-        "CheckedAudioBusLayout",
-        "EventBusLayout",
-        "LatencySamples",
-        "TailSamples",
-        "AudioBusLayout",
-    ];
-    for _ in 0..2 {
-        expected.extend([
-            "SetBusActive",
-            "CheckedAudioBusLayout",
-            "EventBusLayout",
-            "LatencySamples",
-            "TailSamples",
-            "AudioBusLayout",
-        ]);
+    for mode in ["fresh_raw_invalid_after_start", "fresh_unknown_after_start"] {
+        let fake = FakeHelper::new(mode);
+        let mut source =
+            Vst3Backend::load_fresh_bounce_source(fake.spec(vec![]), fresh_config()).unwrap();
+        let error = source.prepare(fresh_config()).unwrap_err();
+        assert_fresh_post_start_validation_refusal(mode, &error);
+        assert_eq!(fake.names(), fresh_setup_commands(false), "{mode}");
+        assert!(!source.prepared && source.plugin.is_processing());
+        let requests = fake.requests();
+        assert!(
+            source
+                .prepare(fresh_config())
+                .unwrap_err()
+                .contains("one-shot")
+        );
+        assert_eq!(
+            fake.requests(),
+            requests,
+            "failed candidate may not prepare again: {mode}"
+        );
     }
-    expected.extend([
-        "CheckedAudioBusLayout",
-        "EventBusLayout",
-        "LatencySamples",
-        "TailSamples",
-        "StartProcessing",
-        "NativeDirtyRevision",
-        "CheckedAudioBusLayout",
-        "EventBusLayout",
-        "LatencySamples",
-        "TailSamples",
-    ]);
-    assert_eq!(names, expected);
-    assert!(!source.prepared && source.plugin.is_processing());
 }

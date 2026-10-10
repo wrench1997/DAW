@@ -91,3 +91,52 @@ retaining exact raw/proposal/null distinctions and no-extra-call ledgers. Frozen
 historical diagnostic harnesses and their old-prefix acceptance remain untouched.
 A future genuine qualification must observe fresh actual acknowledgments rather
 than treating this diagnostic's proposal as evidence of inactivity.
+
+## Complete Start equality diagnostics: unvalidated source, 2026-10-10
+
+The rebound genuine attempt on accepted c7a5d432 failed source_setup with
+`Fresh bounce source topology changed at Start before admission`. One source was
+launched; nine later stages, capture, parameter setter, strict clones and audio/WAV
+were unexecuted. Exact failed evidence is durable v104, outer b67065561f6832a62751a0c8ffbea8a26057dcec7a82e6a41178824257371c01.
+Both existing metadata snapshots passed validation before their complete equality
+failed. The trace did not include the operands, so no particular bus, activation,
+identity, latency or tail cause was established. The earlier successful diagnostic
+only observed the separate role-policy refusal and cannot fill this evidence gap.
+
+Approved plan a8617cfec1e9f40dded9d057dfb4e41528a22d5f9922c82e29edf18d18720557
+adds a second, distinct error suffix only to this existing inequality branch:
+`FreshBounceMetadataMismatchV1`. The exact original error prefix, preceding
+validation, complete equality decision, lifecycle order and failed admission stay
+unchanged. No plugin query, acknowledgment, state or processing call is added.
+Existing validator-refusal schemas remain unchanged.
+
+Schema1/kind fresh_bounce_metadata_mismatch/phase post_start labels both actual
+snapshots before_start and current_after_start. Every field compared by
+BouncePluginMetadata is represented: four identity strings, input/output audio and
+event lists, native latency and reported tail. The fixed different object contains
+ten exact full-field comparison flags; neither capped views nor presentation text
+are used to decide them. Exhaustive field destructuring makes a future metadata
+field require an explicit diagnostic update.
+
+Identity text has its complete UTF-8 byte_length, at most256-byte excerpt ending
+at a character boundary, and truncated flag. Each audio/event list retains its
+complete count, truncation and at most16 ordered channel/role/Option-activation
+entries. None stays null and is never converted to false. Both u32 latency/tail
+values are exact. Copy caps apply before projection/allocation; a bounded Write
+sink rejects JSON emission beyond64KiB before reserve/copy, not after allocating
+a complete unbounded String. Serialization/limit failure retains the original
+refusal. The64KiB ceiling bounds serialized bytes, not allocator capacity, and
+fallible sink reservation is not a general OOM-recovery guarantee. No cryptographic
+identity, allocation-free, total-process-memory or universal hard-deadline claim
+is made. Exact comparison can examine complete
+already-owned fields even when diagnostic copying is bounded.
+
+Pure tests cover all ten flags, full scalar/descriptor preservation, Unicode and
+same long prefix with different suffix, differences beyond16 descriptors, capped
+projection visits, worst escaped fields and limit fallback. Actual source worker
+fixtures must prove individually valid metadata drift reaches this equality path,
+with exact operand/flag values and complete no-extra-call ledger, no Ready or
+active slot through Joined shutdown, and unchanged old-source observations. A
+matching control and earlier validation-refusal path remain distinct. These new
+tests have not executed at this source checkpoint. A one-source diagnostic run
+requires separately reviewed source/harness/build/archive and root authorization.
