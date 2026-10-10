@@ -1111,9 +1111,11 @@ fn capture_unknown_audio_activation_requires_fresh_load_without_mutation() {
         if mode == "dry_unknown_observed_roles" {
             assert_eq!(layouts[0]["inputs"][0]["is_main"], false);
             assert_eq!(layouts[0]["inputs"][0]["channel_count"], 2);
-            for index in 0..3 {
-                assert_eq!(layouts[0]["outputs"][index]["is_main"], true);
-                assert_eq!(layouts[0]["outputs"][index]["channel_count"], 2);
+            let outputs = layouts[0]["outputs"].as_array().unwrap();
+            assert_eq!(outputs.len(), 3);
+            for output in outputs {
+                assert_eq!(output["is_main"], true);
+                assert_eq!(output["channel_count"], 2);
             }
         }
         assert!(source.prepared && source.plugin.is_processing());

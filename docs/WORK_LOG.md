@@ -1806,3 +1806,16 @@ The pure diagnostic fixture changes only its test metadata, not serialization.
 All new source/mock/compiler gates remain UNEXECUTED. Full source/recovery archive
 and exact independent source reviews precede execution. Genuine capture/render/WAV
 qualification remains separately frozen and authorized after source/mock closure.
+
+
+### Role-policy test-only Clippy correction — UNVALIDATED
+
+All planned mock executions on 57aedcfb passed: feature offline32/bounce60/runtime77,
+default offline15/bounce43/runtime77, core bounce43/runtime76, helper25 and 21 selected
+vendor cases. The first QA artifact-copy collision and its startup-only helper
+invocation remain preserved with exact artifact attribution. The corrected runner
+then stopped at Clippy's needless_range_loop in a new capture fixture. The sole
+Rust correction iterates the actual output array after asserting exactly 3 outputs,
+keeping every role/channel assertion. Production and all other fixture bodies are
+unchanged. The affected capture fixture and remaining Clippy/fmt/Python/package
+gates await archive and review; prior executed gates retain their original bytes.
