@@ -1,4 +1,6 @@
 mod audio_import;
+#[allow(dead_code)]
+mod clip_render;
 #[cfg(test)]
 mod headless_ui_capture;
 #[cfg(test)]
