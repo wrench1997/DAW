@@ -1027,6 +1027,28 @@ mod tests {
         let (mut observed_engine, mut observed) = TestAudioCallback::new();
         let (mut ordinary_engine, mut ordinary) = TestAudioCallback::new();
         observed.enable_genuine_observation([11; 32]).unwrap();
+        // Admit and observe the same real playing request before the measured
+        // clip on both engines. PlayClip alone deliberately does not start transport.
+        observed_engine.set_playing(true);
+        ordinary_engine.set_playing(true);
+        observed.pump(&observed_engine, 128);
+        ordinary.pump(&ordinary_engine, 128);
+        assert!(observed.genuine_snapshot().playing);
+        assert!(ordinary.genuine_snapshot().playing);
+        assert_eq!(observed.last_output(), ordinary.last_output());
+        assert!(
+            observed
+                .last_output()
+                .iter()
+                .all(|frame| *frame == [0.0; 2])
+        );
+        let admitted = observed.take_genuine_segments();
+        assert_eq!(admitted.len(), 1);
+        assert!(admitted[0].playing && admitted[0].playing_after_render);
+        assert_eq!(
+            admitted[0].request_id,
+            observed_engine.test_transport_request_id()
+        );
         for engine in [&mut observed_engine, &mut ordinary_engine] {
             let operation = AudioAssetOperation {
                 engine_session: engine.engine_session,

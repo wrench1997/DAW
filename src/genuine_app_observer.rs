@@ -918,12 +918,14 @@ mod tests {
         assert_eq!(run.copy_records_since(MAX_RECORD_BATCH).len(), 1);
         assert!(run.copy_records_since(MAX_RECORD_BATCH + 1).is_empty());
         assert!(run.copy_records_since(MAX_RECORD_BATCH + 2).is_empty());
-        run.with_snapshot(|state| {
-            assert_eq!(
-                state.failure,
-                Some("observer copy cursor exceeded record count")
-            )
-        });
+        let finished = run.finish();
+        assert_eq!(finished.records.len(), MAX_RECORD_BATCH + 1);
+        assert_eq!(finished.private_bytes, 3);
+        assert!(Arc::ptr_eq(&first[0], &finished.records[0]));
+        assert_eq!(
+            finished.failure,
+            Some("observer copy cursor exceeded record count")
+        );
     }
     #[test]
     fn record_cap_is_checked_before_payload_copy_and_failure_is_sticky() {
