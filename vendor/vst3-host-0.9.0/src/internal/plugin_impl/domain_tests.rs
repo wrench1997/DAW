@@ -149,6 +149,10 @@ struct OriginCall {
 }
 
 struct MockState {
+    event_inputs: AtomicI32,
+    event_outputs: AtomicI32,
+    event_channels: AtomicI32,
+    expand_events_on_state: AtomicBool,
     capture_origin: AtomicBool,
     origin_calls: Mutex<Vec<OriginCall>>,
     output_buses: AtomicI32,
@@ -178,6 +182,10 @@ struct MockState {
 impl Default for MockState {
     fn default() -> Self {
         Self {
+            event_inputs: AtomicI32::new(0),
+            event_outputs: AtomicI32::new(0),
+            event_channels: AtomicI32::new(16),
+            expand_events_on_state: AtomicBool::new(false),
             capture_origin: AtomicBool::new(false),
             origin_calls: Mutex::new(Vec::new()),
             output_buses: AtomicI32::new(1),
@@ -265,6 +273,10 @@ impl<const S: bool, const C: bool> IComponentTrait for MockPlugin<S, C> {
         self.probe.record("getBusCount");
         if media == kAudio as i32 && direction == kOutput as i32 {
             self.state.output_buses.load(Ordering::Relaxed)
+        } else if media == kEvent as i32 && direction == kInput as i32 {
+            self.state.event_inputs.load(Ordering::Relaxed)
+        } else if media == kEvent as i32 && direction == kOutput as i32 {
+            self.state.event_outputs.load(Ordering::Relaxed)
         } else {
             0
         }
@@ -277,6 +289,26 @@ impl<const S: bool, const C: bool> IComponentTrait for MockPlugin<S, C> {
         info: *mut BusInfo,
     ) -> tresult {
         self.probe.record("getBusInfo");
+        let event_count = if media == kEvent as i32 && direction == kInput as i32 {
+            Some(self.state.event_inputs.load(Ordering::Relaxed))
+        } else if media == kEvent as i32 && direction == kOutput as i32 {
+            Some(self.state.event_outputs.load(Ordering::Relaxed))
+        } else {
+            None
+        };
+        if let Some(count) = event_count {
+            if index < 0 || index >= count {
+                return kInvalidArgument;
+            }
+            let mut bus: BusInfo = std::mem::zeroed();
+            bus.mediaType = media;
+            bus.direction = direction;
+            bus.channelCount = self.state.event_channels.load(Ordering::Relaxed);
+            bus.busType = BusTypes_::kMain as i32;
+            bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
+            *info = bus;
+            return kResultOk;
+        }
         if media != kAudio as i32
             || direction != kOutput as i32
             || index < 0
@@ -330,6 +362,10 @@ impl<const S: bool, const C: bool> IComponentTrait for MockPlugin<S, C> {
         if self.state.expand_on_state.load(Ordering::Relaxed) {
             self.state.output_buses.store(2, Ordering::Relaxed);
             self.state.channels.store(2, Ordering::Relaxed);
+        }
+        if self.state.expand_events_on_state.load(Ordering::Relaxed) {
+            self.state.event_inputs.store(2, Ordering::Relaxed);
+            self.state.event_outputs.store(1, Ordering::Relaxed);
         }
         kResultOk
     }
@@ -1030,6 +1066,57 @@ fn load_state_refreshes_bus_counts_channel_pointers_and_processing_layout() {
         *state.processed_layouts.lock().unwrap(),
         [vec![1], vec![2, 2]]
     );
+}
+
+#[test]
+fn event_bus_query_enumerates_current_component_without_default_active_guess() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    state.event_inputs.store(1, Ordering::Relaxed);
+    let mut plugin = plugin_fixture(&trace, &state);
+    let layout = plugin.event_bus_layout().unwrap();
+    assert_eq!(layout.inputs.len(), 1);
+    assert_eq!(layout.inputs[0].active, Some(true));
+    assert!(layout.outputs.is_empty());
+    plugin.runtime.bus_activation.event_inputs.clear();
+    let layout = plugin.event_bus_layout().unwrap();
+    assert_eq!(layout.inputs[0].active, None);
+    plugin.runtime.bus_activation.event_inputs = vec![false];
+    assert_eq!(plugin.event_bus_layout().unwrap().inputs[0].active, None);
+    state.event_inputs.store(2, Ordering::Relaxed);
+    let layout = plugin.event_bus_layout().unwrap();
+    assert_eq!(layout.inputs.len(), 2);
+    assert!(layout.inputs.iter().all(|bus| bus.active.is_none()));
+    trace.assert_thread(thread::current().id());
+}
+
+#[test]
+fn event_bus_query_observes_post_state_topology_and_rejects_invalid_component_metadata() {
+    let trace = Trace::default();
+    let state = Arc::new(MockState::default());
+    state.event_inputs.store(1, Ordering::Relaxed);
+    let mut plugin = plugin_fixture(&trace, &state);
+    plugin.start_processing().unwrap();
+    assert!(plugin.event_bus_layout().unwrap().outputs.is_empty());
+    state.expand_events_on_state.store(true, Ordering::Relaxed);
+    let snapshot = encode_state_snapshot(&StateSnapshot {
+        component: vec![1],
+        controller: None,
+    })
+    .unwrap();
+    plugin
+        .load_state_with_context(&snapshot, &StateContext::Project)
+        .unwrap();
+    let layout = plugin.event_bus_layout().unwrap();
+    assert_eq!((layout.inputs.len(), layout.outputs.len()), (2, 1));
+    assert!(layout.inputs.iter().all(|bus| bus.active == Some(true)));
+    state.event_channels.store(0, Ordering::Relaxed);
+    assert!(plugin.event_bus_layout().is_err());
+    state.event_channels.store(16, Ordering::Relaxed);
+    state.event_outputs.store(-1, Ordering::Relaxed);
+    assert!(plugin.event_bus_layout().is_err());
+    state.event_outputs.store(33, Ordering::Relaxed);
+    assert!(plugin.event_bus_layout().is_err());
 }
 
 #[test]

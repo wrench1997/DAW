@@ -3568,6 +3568,9 @@ fn capture_instrument_bounce_on_worker(
         // Do not hide a newly observed IPC/backend failure behind the nonmutating rejection path.
         slot.fault = Some(message.clone());
         register_fault(0, message.clone(), events, metrics);
+        // The best-effort SlotFault event may be dropped. Publish the reliable inactive
+        // identity before replying, not at the next periodic poll or later admin command.
+        update_latency_and_tail(slots, events, metrics);
     }
     let state = captured?;
     if requested_epoch.load(Ordering::Acquire) != expected_epoch

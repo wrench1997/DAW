@@ -14,8 +14,8 @@ fn state() -> BouncePluginState {
             version: "1.3.4".into(),
             name: "Fixture".into(),
             category: "Instrument|Synth".into(),
-            has_midi_input: true,
-            has_midi_output: false,
+            event_input_buses: vec![(16, true, Some(true))],
+            event_output_buses: vec![],
             input_buses: vec![],
             output_buses: vec![(2, true)],
             latency_samples: 0,
@@ -70,6 +70,9 @@ impl PluginBackend for CaptureBackend {
     }
     fn tail_samples(&self) -> u32 {
         0
+    }
+    fn midi_capabilities(&self) -> (bool, bool) {
+        (true, false)
     }
     fn capture_instrument_bounce_state(
         &mut self,
@@ -227,6 +230,45 @@ fn bounce_backend_failure_stays_visible_but_capture_rejection_does_not_fault() {
             backend_failed
         );
     }
+}
+
+#[test]
+fn bounce_capture_failure_republishes_inactive_identity_when_fault_event_is_lost() {
+    let mut slots = vec![slot(
+        Err(BounceCaptureError::BackendFailed(
+            "helper transport failed".into(),
+        )),
+        Arc::new(AtomicU64::new(0)),
+        None,
+    )];
+    let metrics = BridgeMetrics::default();
+    let (mut events, mut rx) = RingBuffer::new(1);
+    update_latency_and_tail(&mut slots, &mut events, &metrics);
+    let before = metrics.plugin_latency_snapshot().unwrap();
+    assert_eq!(before.active_mask, 1);
+    assert_eq!(metrics.midi_capabilities.load(Ordering::Acquire), 1);
+    events.push(RuntimeEvent::ShutdownComplete).unwrap();
+    assert!(
+        capture_instrument_bounce_on_worker(
+            7,
+            7,
+            &AtomicU64::new(7),
+            true,
+            &[17],
+            &AtomicU32::new(0),
+            &mut slots,
+            &mut events,
+            &metrics
+        )
+        .is_err()
+    );
+    let after = metrics.plugin_latency_snapshot().unwrap();
+    assert_eq!(after.active_mask, 0);
+    assert!(after.revision > before.revision);
+    assert_eq!(metrics.midi_capabilities.load(Ordering::Acquire), 0);
+    assert_eq!(metrics.event_overflows.load(Ordering::Acquire), 1);
+    assert!(matches!(rx.pop(), Ok(RuntimeEvent::ShutdownComplete)));
+    assert!(rx.pop().is_err());
 }
 
 fn control(capacity: usize) -> (PluginChainControl, Receiver<AdminCommand>) {
@@ -415,7 +457,10 @@ fn bounce_metadata_and_state_policy_rejects_unsupported_inputs_and_empty_state()
             0 => state.opaque_state.clear(),
             1 => state.metadata.input_buses.push((2, false)),
             2 => state.metadata.output_buses.push((2, false)),
-            3 => state.metadata.has_midi_output = true,
+            3 => state
+                .metadata
+                .event_output_buses
+                .push((16, true, Some(false))),
             4 => state.metadata.class_uid = "historical-path-id".into(),
             5 => state.metadata.latency_samples = 48_001,
             6 => {

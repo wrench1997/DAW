@@ -567,6 +567,10 @@ fn handle(
             Ok(layout) => HostResponse::AudioBusLayout { layout },
             Err(e) => err("AudioBusLayout", e),
         }),
+        HostCommand::EventBusLayout => with(plugin, |p| match p.event_bus_layout() {
+            Ok(layout) => HostResponse::EventBusLayout { layout },
+            Err(e) => err("EventBusLayout", e),
+        }),
         HostCommand::SaveState => with(plugin, |p| match p.save_state() {
             Ok(data) => HostResponse::State { data },
             Err(e) => err("SaveState", e),

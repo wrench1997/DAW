@@ -15,6 +15,22 @@
 
 ## Bounded upstream code changes
 
+### Dormant instrument-bounce event-bus query (unvalidated source checkpoint)
+
+Adds `Plugin::event_bus_layout`, its main-thread facade and an unsupported-default
+internal method, plus additive `EventBusLayout` command/response variants. The
+direct implementation enumerates current component event buses on the control
+thread, bounds counts/channels and checks every BusInfo result. Activation is
+reported only from a matching successful host activation record; unknown is
+explicit and `kDefaultActive` is never used as proof. The isolated query is
+fallible and never retries/recovers or substitutes cached PluginInfo MIDI bits.
+Production and vendored helper dispatch run the query on their existing owner.
+Existing wire commands, processing and state methods are unchanged. Plugin-free
+component/protocol tests are added, but no execution or vendor compatibility is
+claimed by this source checkpoint. The application keeps bounce dormant.
+
+### Previously integrated extensions
+
 1. `src/plugin.rs`: additive `IsolatedEditorOwner`, `IsolatedEditorCommand`, and
    `IsolatedEditorState` types; `Plugin::isolated_editor` and an unsupported default internal
    implementation; checked `try_take_parameter_edits`/`try_take_host_notifications` drains so

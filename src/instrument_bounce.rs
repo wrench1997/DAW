@@ -92,8 +92,9 @@ pub struct BouncePluginMetadata {
     pub version: String,
     pub name: String,
     pub category: String,
-    pub has_midi_input: bool,
-    pub has_midi_output: bool,
+    /// Current component event buses: MIDI channel count, main/aux, host-attested activation.
+    pub event_input_buses: Vec<(u32, bool, Option<bool>)>,
+    pub event_output_buses: Vec<(u32, bool, Option<bool>)>,
     /// Preserve every bus, including inactive buses. This first slice rejects extra buses.
     pub input_buses: Vec<(usize, bool)>,
     pub output_buses: Vec<(usize, bool)>,
@@ -110,8 +111,12 @@ impl BouncePluginMetadata {
             .category
             .split('|')
             .any(|token| token.trim() == "Instrument")
-            || !self.has_midi_input
-            || self.has_midi_output
+            || self.event_input_buses.len() != 1
+            || !matches!(
+                self.event_input_buses.first(),
+                Some((1..=16, true, Some(true)))
+            )
+            || !self.event_output_buses.is_empty()
         {
             return Err("Instrument bounce requires an actual VST3 instrument with MIDI input and no MIDI output".into());
         }

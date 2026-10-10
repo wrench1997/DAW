@@ -647,6 +647,19 @@ impl PluginInternal for IsolatedPluginImpl {
         }
     }
 
+    fn event_bus_layout(&self) -> Result<crate::plugin::EventBusLayout> {
+        match self.send_command_once(HostCommand::EventBusLayout)? {
+            HostResponse::EventBusLayout { layout } => {
+                layout.validate()?;
+                Ok(layout)
+            }
+            HostResponse::Error { message } => {
+                Err(Error::Other(format!("EventBusLayout: {message}")))
+            }
+            _ => Err(Error::Other("EventBusLayout: unexpected response".into())),
+        }
+    }
+
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
         let frames = buffers
             .outputs
@@ -2140,6 +2153,77 @@ mod tests {
             assert_eq!(fake.requests().len(), 4);
             assert_eq!(plugin.recovery_count(), 0);
         }
+    }
+
+    #[test]
+    fn checked_event_bus_layout_returns_actual_reply_including_unknown_activation() {
+        let layout = crate::plugin::EventBusLayout {
+            inputs: vec![crate::plugin::EventBusConfig {
+                channel_count: 16,
+                is_main: true,
+                active: None,
+            }],
+            outputs: vec![crate::plugin::EventBusConfig {
+                channel_count: 1,
+                is_main: false,
+                active: Some(false),
+            }],
+        };
+        let fake = FakeHelper::raw_metadata_reply(
+            "event_bus_actual",
+            "EventBusLayout",
+            &serde_json::to_string(&HostResponse::EventBusLayout {
+                layout: layout.clone(),
+            })
+            .unwrap(),
+        );
+        let plugin = isolated(&fake);
+        assert_eq!(plugin.event_bus_layout().unwrap(), layout);
+        assert_eq!(plugin.recovery_count(), 0);
+        assert_eq!(fake.requests().len(), 1);
+    }
+
+    #[test]
+    fn checked_event_bus_layout_rejects_error_wrong_invalid_and_dead_helper_without_recovery() {
+        let invalid = HostResponse::EventBusLayout {
+            layout: crate::plugin::EventBusLayout {
+                inputs: vec![crate::plugin::EventBusConfig {
+                    channel_count: 0,
+                    is_main: true,
+                    active: Some(true),
+                }],
+                outputs: vec![],
+            },
+        };
+        for (index, reply) in [
+            HostResponse::Error {
+                message: "unsupported old helper".into(),
+            },
+            HostResponse::Success {
+                message: "wrong reply".into(),
+            },
+            invalid,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fake = FakeHelper::raw_metadata_reply(
+                &format!("event_bus_failure_{index}"),
+                "EventBusLayout",
+                &serde_json::to_string(&reply).unwrap(),
+            );
+            let mut plugin = isolated(&fake);
+            plugin.auto_recover = true;
+            assert!(plugin.event_bus_layout().is_err());
+            assert_eq!(plugin.recovery_count(), 0);
+            assert_eq!(fake.requests().len(), 1);
+        }
+        let fake = FakeHelper::exit_on("event_bus_dead", "EventBusLayout");
+        let mut plugin = isolated(&fake);
+        plugin.auto_recover = true;
+        assert!(plugin.event_bus_layout().is_err());
+        assert_eq!(plugin.recovery_count(), 0);
+        assert_eq!(fake.requests().len(), 1);
     }
 
     #[test]

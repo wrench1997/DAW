@@ -69,3 +69,30 @@ No genuine plug-in, helper/native editor, OS device or WAV output has been run.
 No previous source's receipts are attributed to this branch. Source plus Git
 bundle must be durably saved and independently reviewed before long tests; native
 plug-in qualification requires its own explicit gate.
+
+## Pre-execution review corrections
+
+The first frozen preparation checkpoint `d8c7bc0` was saved before execution.
+Review found that a capture-time backend fault needed immediate reliable metadata
+publication and that cached `PluginInfo` MIDI bits could not prove post-state bus
+eligibility. Both are corrected in the next still-unvalidated source checkpoint:
+
+- Capture failure republishes active-mask/latency/MIDI capability before its
+  private reply, even if the best-effort SlotFault event ring is full.
+- An additive, fallible `EventBusLayout` command queries actual component bus
+  count/info on the owner thread. Unknown/invalid/unsupported/dead/wrong replies
+  reject; there is no cached capability fallback or automatic recovery. Existing
+  commands are unchanged. Activation is attested only by a matching successful
+  host activation record, never by `kDefaultActive`; otherwise it is unknown.
+- Bounce requires exactly one currently attested active main event-input bus and
+  zero event-output buses, including inactive outputs. Enumeration is repeated
+  after mode/state/base application and at both source capture fences.
+- Added plugin-free component and line-protocol stand-ins exercise the actual
+  new capture/factory sequence, post-state topology changes, unknown activation,
+  missing parameter keys, empty state, and generation/revision changes. Those
+  tests load no vendor plug-in or production helper. They are unexecuted here.
+
+The dormant caller-supplied source stamp still requires an App adapter that binds
+the control to the exact project-session/channel/endpoint probe and revalidates
+that probe on completion; same-instance replacement must not pass by ID alone.
+App integration is intentionally not enabled by this checkpoint.

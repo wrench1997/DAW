@@ -2880,6 +2880,57 @@ impl PluginInternal for PluginImpl {
         self.runtime.current_audio_bus_layout()
     }
 
+    #[allow(clippy::unnecessary_cast)]
+    fn event_bus_layout(&self) -> Result<crate::plugin::EventBusLayout> {
+        self.ensure_control_thread("event bus layout")?;
+        let side = |direction: i32,
+                    activation: &[bool]|
+         -> Result<Vec<crate::plugin::EventBusConfig>> {
+            unsafe {
+                let count = self.control.component.getBusCount(kEvent as i32, direction);
+                if !(0..=32).contains(&count) {
+                    return Err(Error::Other(format!("Invalid event-bus count {count}")));
+                }
+                let mut buses = Vec::with_capacity(count as usize);
+                for index in 0..count {
+                    let mut info: BusInfo = std::mem::zeroed();
+                    let result = self.control.component.getBusInfo(
+                        kEvent as i32,
+                        direction,
+                        index,
+                        &mut info,
+                    );
+                    if result != kResultOk
+                        || info.mediaType != kEvent as i32
+                        || info.direction != direction
+                        || !(1..=16).contains(&info.channelCount)
+                        || (info.busType != BusTypes_::kMain as i32
+                            && info.busType != BusTypes_::kAux as i32)
+                    {
+                        return Err(Error::Other(format!(
+                            "Invalid event-bus metadata at direction {direction}, index {index}"
+                        )));
+                    }
+                    buses.push(crate::plugin::EventBusConfig {
+                        channel_count: info.channelCount as u32,
+                        is_main: info.busType == BusTypes_::kMain as i32,
+                        // Only successful host activation records can attest current state.
+                        // kDefaultActive is a preference, not proof of an active bus.
+                        active: (activation.len() == count as usize && activation[index as usize])
+                            .then_some(true),
+                    });
+                }
+                Ok(buses)
+            }
+        };
+        let layout = crate::plugin::EventBusLayout {
+            inputs: side(kInput as i32, &self.runtime.bus_activation.event_inputs)?,
+            outputs: side(kOutput as i32, &self.runtime.bus_activation.event_outputs)?,
+        };
+        layout.validate()?;
+        Ok(layout)
+    }
+
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
         self.runtime.validate_bus_buffers(buffers)?;
         self.process_buffer_view(&mut CallerAudioBuffers::Buses(buffers))

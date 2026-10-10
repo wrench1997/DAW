@@ -5,6 +5,10 @@
 
 use crate::instrument_bounce::{BouncePluginMetadata, CapturedInstrumentBounce};
 
+#[cfg(all(test, feature = "vst3", unix))]
+#[path = "offline_instrument_protocol_tests.rs"]
+mod protocol_tests;
+
 #[cfg(feature = "vst3")]
 use {
     super::{PluginBackend, PluginPrepareConfig, Vst3Backend},
@@ -31,54 +35,75 @@ impl OfflineInstrument {
         }
         #[cfg(feature = "vst3")]
         {
-            let sample_rate = capture.plan().sample_rate();
-            let ids: Vec<_> = capture.state.parameter_bases.keys().copied().collect();
-            capture.state.validate(&ids, sample_rate)?;
-            let mut spec = capture.render_spec();
-            super::super::prepare_runtime_spec(&mut spec)?;
-            let config = PluginPrepareConfig {
-                sample_rate: f64::from(sample_rate),
-                max_block_frames: BOUNCE_PREPARED_MAXIMUM,
-            }
-            .validate()?;
-            let mut backend = Vst3Backend::load(spec, config)?;
-            let identity = backend.plugin.info();
-            if identity.uid != capture.metadata().class_uid
-                || identity.version != capture.metadata().version
-            {
-                return Err("The installed VST3 class/version differs from the authoritative captured source".into());
-            }
-            // Fresh load is inactive for processing. Set kOffline before restore/start, never
-            // reconfigure the source instance or claim a successful realtime-mode bounce.
-            backend
-                .plugin
-                .set_process_mode(vst3_host::ProcessMode::Offline)
-                .map_err(|error| error.to_string())?;
-            backend.prepare(config)?;
-            if !ids.is_empty() {
-                let (_, catalog) =
-                    super::validate_catalog_snapshot(backend.parameter_catalog_snapshot()?)?;
-                for (&id, &value) in &capture.state.parameter_bases {
-                    if !catalog
-                        .iter()
-                        .any(|parameter| parameter.id == id && !parameter.read_only)
-                    {
-                        return Err(format!(
-                            "Captured parameter base {id} is absent or read-only in the fresh instance"
-                        ));
-                    }
-                    backend.set_parameter(id, value)?;
-                }
-            }
-            let metadata = backend.bounce_metadata()?;
-            metadata.validate(sample_rate)?;
-            backend.input_channels = 0;
-            backend.output_channels = metadata.output_buses[0].0;
-            Ok(Self {
-                _backend: backend,
-                metadata,
+            super::catch_backend(|| {
+                Self::load_snapshot(
+                    capture.render_spec(),
+                    capture.plan().sample_rate(),
+                    &capture.state,
+                )
             })
         }
+    }
+
+    #[cfg(feature = "vst3")]
+    fn load_snapshot(
+        mut spec: super::PluginLoadSpec,
+        sample_rate: u32,
+        state: &BouncePluginState,
+    ) -> Result<Self, String> {
+        let ids: Vec<_> = state.parameter_bases.keys().copied().collect();
+        state.validate(&ids, sample_rate)?;
+        if spec.initial_state != state.opaque_state
+            || spec.class_uid.as_deref() != Some(state.metadata.class_uid.as_str())
+        {
+            return Err(
+                "Fresh bounce load differs from the authoritative captured state/class".into(),
+            );
+        }
+        super::super::prepare_runtime_spec(&mut spec)?;
+        let config = PluginPrepareConfig {
+            sample_rate: f64::from(sample_rate),
+            max_block_frames: BOUNCE_PREPARED_MAXIMUM,
+        }
+        .validate()?;
+        let mut backend = Vst3Backend::load(spec, config)?;
+        let identity = backend.plugin.info();
+        if identity.uid != state.metadata.class_uid || identity.version != state.metadata.version {
+            return Err(
+                "The installed VST3 class/version differs from the authoritative captured source"
+                    .into(),
+            );
+        }
+        // Fresh load is inactive for processing. Set kOffline before restore/start, never
+        // reconfigure the source instance or claim a successful realtime-mode bounce.
+        backend
+            .plugin
+            .set_process_mode(vst3_host::ProcessMode::Offline)
+            .map_err(|error| error.to_string())?;
+        backend.prepare(config)?;
+        if !ids.is_empty() {
+            let (_, catalog) =
+                super::validate_catalog_snapshot(backend.parameter_catalog_snapshot()?)?;
+            for (&id, &value) in &state.parameter_bases {
+                if !catalog
+                    .iter()
+                    .any(|parameter| parameter.id == id && !parameter.read_only)
+                {
+                    return Err(format!(
+                        "Captured parameter base {id} is absent or read-only in the fresh instance"
+                    ));
+                }
+                backend.set_parameter(id, value)?;
+            }
+        }
+        let metadata = backend.bounce_metadata()?;
+        metadata.validate(sample_rate)?;
+        backend.input_channels = 0;
+        backend.output_channels = metadata.output_buses[0].0;
+        Ok(Self {
+            _backend: backend,
+            metadata,
+        })
     }
 
     pub fn metadata(&self) -> &BouncePluginMetadata {
@@ -93,6 +118,10 @@ impl Vst3Backend {
             .plugin
             .audio_bus_layout()
             .map_err(|error| error.to_string())?;
+        let events = self
+            .plugin
+            .event_bus_layout()
+            .map_err(|error| error.to_string())?;
         let info = self.plugin.info();
         let (latency_samples, tail_samples) = self.processing_metadata()?;
         Ok(BouncePluginMetadata {
@@ -100,8 +129,16 @@ impl Vst3Backend {
             version: info.version.clone(),
             name: info.name.clone(),
             category: info.category.clone(),
-            has_midi_input: info.has_midi_input,
-            has_midi_output: info.has_midi_output,
+            event_input_buses: events
+                .inputs
+                .iter()
+                .map(|bus| (bus.channel_count, bus.is_main, bus.active))
+                .collect(),
+            event_output_buses: events
+                .outputs
+                .iter()
+                .map(|bus| (bus.channel_count, bus.is_main, bus.active))
+                .collect(),
             input_buses: layout
                 .inputs
                 .iter()

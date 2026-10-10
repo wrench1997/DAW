@@ -642,6 +642,8 @@ pub enum HostCommand {
     },
     /// Query per-bus channel counts and activation state.
     AudioBusLayout,
+    /// Enumerate current component event buses on the helper's owner thread.
+    EventBusLayout,
     /// Serialize the plugin's current state to an opaque byte blob.
     SaveState,
     /// Restore the plugin's state from a blob previously returned by `SaveState`.
@@ -910,6 +912,11 @@ pub enum HostResponse {
     AudioBusLayout {
         /// Complete input/output layout.
         layout: crate::audio::AudioBusLayout,
+    },
+    /// Current component event buses, with explicit unknown activation when necessary.
+    EventBusLayout {
+        /// Complete current input/output layout.
+        layout: crate::plugin::EventBusLayout,
     },
     /// A single parameter value (normalized).
     ParameterValue {
