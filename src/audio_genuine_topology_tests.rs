@@ -694,6 +694,14 @@ fn genuine_topology_unsolicited_identity_drift_fault_has_no_owned_pair() {
     fixture.accepted(0, 1, 0);
     fixture.activate(true, 11, 3);
     fixture.callback().take_genuine_segments();
+    let submitted_before = fixture.workers[worker]
+        .as_ref()
+        .unwrap()
+        .control
+        .as_ref()
+        .unwrap()
+        .stats()
+        .submitted;
     // Negative injection models corruption, never the accepted/recovery path.
     fixture.callback().dsp.generator_endpoints[0]
         .as_mut()
@@ -711,9 +719,35 @@ fn genuine_topology_unsolicited_identity_drift_fault_has_no_owned_pair() {
         state.fault.unwrap().reason,
         PluginProcessingFaultReason::EndpointChanged
     );
+    // Graph/PDC identity checking precedes callback admission, so this fault
+    // rejects the callback before render_transport_chunk can report FaultSilence.
+    let segments = fixture.callback().take_genuine_segments();
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].frames, 128);
     assert_eq!(
-        fixture.callback().take_genuine_segments()[0].disposition,
-        GenuineSegmentDisposition::FaultSilence
+        segments[0].disposition,
+        GenuineSegmentDisposition::AdmissionRejected
+    );
+    assert_eq!(segments[0].before.fault, state.fault);
+    assert_eq!(segments[0].after.fault, state.fault);
+    assert_eq!(fixture.callback().last_output().len(), 128);
+    assert!(
+        fixture
+            .callback()
+            .last_output()
+            .iter()
+            .all(|frame| *frame == [0.0; 2])
+    );
+    assert_eq!(
+        fixture.workers[worker]
+            .as_ref()
+            .unwrap()
+            .control
+            .as_ref()
+            .unwrap()
+            .stats()
+            .submitted,
+        submitted_before
     );
     fixture.finish();
 }
