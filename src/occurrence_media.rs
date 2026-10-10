@@ -717,9 +717,9 @@ fn checkpoint(cancel: &AtomicBool) -> Result<(), MediaProblem> {
     }
 }
 
-/// Synchronous worker body, never a UI/callback operation. All file/raw-buffer
-/// resources are destroyed before this function returns an outcome. Its caller
-/// retains the worker and acknowledges terminal completion only after joining.
+/// Test-only synchronous access to the same validation body for pure fixtures.
+/// Production callers must use VerificationAdmission and observe finished join;
+/// they cannot bypass retained worker ownership through this wrapper.
 #[cfg(test)]
 #[allow(clippy::result_large_err)] // Pure fixtures only; production must retain/join the worker owner.
 pub(crate) fn verify_published_occurrence(
