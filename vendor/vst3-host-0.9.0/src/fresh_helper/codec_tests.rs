@@ -3,6 +3,7 @@
 use super::super::{budget_test_hooks, pump, Cancellation, MAX_PAYLOAD};
 use super::*;
 use crate::audio::AudioBusConfig;
+use crate::internal::native_edit_transport::tests::allocation_free;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -283,7 +284,7 @@ fn unsupported_requests_and_incompatible_shapes_allocate_nothing() {
     ] {
         let mut budget = new_budget();
         assert_eq!(
-            encode(&command, &ReplyShape::State, &mut budget).unwrap_err(),
+            allocation_free(|| encode(&command, &ReplyShape::State, &mut budget)).unwrap_err(),
             ErrorKind::UnsupportedRequest
         );
         assert_eq!((budget.live, budget.peak), (0, 0));
@@ -298,7 +299,7 @@ fn unsupported_requests_and_incompatible_shapes_allocate_nothing() {
     ] {
         let mut budget = new_budget();
         assert_eq!(
-            encode(&HostCommand::SaveState, &shape, &mut budget).unwrap_err(),
+            allocation_free(|| encode(&HostCommand::SaveState, &shape, &mut budget)).unwrap_err(),
             ErrorKind::Shape
         );
         assert_eq!((budget.live, budget.peak), (0, 0));
@@ -1685,5 +1686,55 @@ fn deterministic_deadline_interrupts_count_emit_preflight_materialize_and_final_
             );
             assert_eq!(budget.live, 0);
         }
+    }
+}
+
+#[test]
+fn preflight_and_representative_rejections_measured_without_heap_activity() {
+    let good = audio_wire(vec![vec![0.25; 4096]; 2]);
+    let shape = ReplyShape::Audio {
+        channels: 2,
+        frames: 4096,
+    };
+    let mut budget = new_budget();
+    assert!(allocation_free(|| preflight(&good, &shape, &mut budget))
+        .unwrap()
+        .is_none());
+    let failure = br#"{"Error":{"message":"valid failure detail"}}"#;
+    let mut budget = new_budget();
+    assert!(
+        allocation_free(|| preflight(failure, &ReplyShape::State, &mut budget))
+            .unwrap()
+            .is_some()
+    );
+    let cases: Vec<(Vec<u8>, ReplyShape, ErrorKind)> = vec![
+        (
+            br#"{"AudioOutput":{"output_events":[{"unparsed": definitely-not-json"#.to_vec(),
+            ReplyShape::Audio {
+                channels: 0,
+                frames: 0,
+            },
+            ErrorKind::UnsupportedReply,
+        ),
+        (
+            audio_wire(vec![vec![0.0; 1]]),
+            ReplyShape::Audio {
+                channels: 1,
+                frames: 2,
+            },
+            ErrorKind::Shape,
+        ),
+        (
+            br#"{"Success":{"message":"bounded","unknown":0}}"#.to_vec(),
+            ReplyShape::Success,
+            ErrorKind::MalformedReply,
+        ),
+    ];
+    for (line, shape, expected) in cases {
+        let mut budget = new_budget();
+        assert_eq!(
+            allocation_free(|| super::decode(&line, &shape, &mut budget)).unwrap_err(),
+            expected
+        );
     }
 }
