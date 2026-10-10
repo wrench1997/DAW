@@ -5,7 +5,8 @@ use crate::project_media::{MediaIdentity, PreparedMediaRelink};
 
 impl CitrusApp {
     pub(super) fn project_media_actions_available(&self) -> bool {
-        self.project_lifecycle.is_idle()
+        !self.clip_operation_fence_active()
+            && self.project_lifecycle.is_idle()
             && !self.project_lifecycle_barriers_active()
             && self.audio_import_receiver.is_none()
             && self.queued_save_after_midi_recording.is_none()
@@ -67,6 +68,10 @@ impl CitrusApp {
     }
 
     fn apply_project_media_candidate(&mut self, prepared: PreparedMediaRelink) {
+        if self.retained_clip_media.contains_key(&prepared.expected.id) {
+            self.project_media.notice = Some("This converted asset is bound to verified session PCM. Its media reference cannot be replaced in this session; Undo keeps the original conversion history.".into());
+            return;
+        }
         if !self.project_media_actions_available() {
             self.project_media.candidate = Some(prepared);
             self.project_media.notice = Some(

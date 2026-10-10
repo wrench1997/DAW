@@ -13,7 +13,7 @@ use crate::{
 use std::io::Write;
 
 #[path = "clip_render_candidate.rs"]
-mod candidate;
+pub(super) mod candidate;
 
 const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OCCURRENCE_FRAMES: u64 = 24_000_000;
@@ -116,7 +116,10 @@ fn serialize_project_bounded(project: &Project) -> Result<Vec<u8>, OccurrenceErr
 /// Exact streaming byte comparison without another canonical snapshot or
 /// decoded Project. Existing serde field encoders may allocate (notably the
 /// persisted opaque-state hex encoder), so this is only a pre-removal step.
-fn project_matches_snapshot(project: &Project, expected: &[u8]) -> Result<bool, OccurrenceError> {
+pub(super) fn project_matches_snapshot(
+    project: &Project,
+    expected: &[u8],
+) -> Result<bool, OccurrenceError> {
     struct Compare<'a> {
         expected: &'a [u8],
         position: usize,
@@ -172,7 +175,7 @@ fn decode_exact_project(bytes: &[u8]) -> Result<Project, OccurrenceError> {
 /// Exact persisted bytes, not a hash-only stale guard. This helper owns one
 /// temporary decoded image, so image preparation calls it only before owning
 /// all three images. The after round-trip itself supplies the third image.
-fn project_snapshot(project: &Project) -> Result<Arc<[u8]>, OccurrenceError> {
+pub(super) fn project_snapshot(project: &Project) -> Result<Arc<[u8]>, OccurrenceError> {
     let bytes = serialize_project_bounded(project)?;
     drop(decode_exact_project(&bytes)?);
     Ok(bytes.into())
@@ -184,7 +187,7 @@ fn snapshot_fingerprint(bytes: &[u8]) -> u64 {
     hasher.finish()
 }
 
-struct OccurrencePlan {
+pub(super) struct OccurrencePlan {
     tail_acknowledgment: Arc<FixedTailAcknowledgment>,
     request: Arc<OccurrenceRenderRequest>,
     snapshot: Arc<[u8]>,
@@ -206,7 +209,11 @@ struct OccurrencePlan {
     local_events: Arc<[TimelineEvent]>,
 }
 impl OccurrencePlan {
-    fn prepare(
+    pub(super) fn request(&self) -> &Arc<OccurrenceRenderRequest> {
+        &self.request
+    }
+
+    pub(super) fn prepare(
         project: &Project,
         context: OccurrenceContext,
         clip_id: u32,

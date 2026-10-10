@@ -445,6 +445,30 @@ impl InstrumentBouncePlan {
     }
 }
 
+/// Typed coordinator outcome for the App insertion owner. The legacy public
+/// string API remains a Display projection of this same ordered result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CapturePollError {
+    Cancelled,
+    Deadline,
+    Stale(String),
+    Invalid(String),
+    Backend(BounceCaptureError),
+    Disconnected,
+}
+impl std::fmt::Display for CapturePollError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => f.write_str("Instrument bounce capture was cancelled"),
+            Self::Deadline => f.write_str("Instrument bounce state capture timed out"),
+            Self::Stale(message) | Self::Invalid(message) => f.write_str(message),
+            Self::Backend(error) => error.fmt(f),
+            Self::Disconnected => f.write_str("Instrument bounce source worker disconnected"),
+        }
+    }
+}
+impl std::error::Error for CapturePollError {}
+
 /// Owns one bounded receipt and an immutable preparation. Dropping/cancelling this value
 /// abandons the reply without publishing captured bytes or mutating the source.
 pub struct InstrumentBounceCapture {
@@ -453,7 +477,7 @@ pub struct InstrumentBounceCapture {
     receiver: Option<BounceStateReceiver>,
     started_at: Instant,
     terminal: bool,
-    abort_reason: Option<String>,
+    abort_reason: Option<CapturePollError>,
 }
 
 pub struct CapturedInstrumentBounce {
@@ -531,7 +555,7 @@ impl InstrumentBounceCapture {
     /// Request cancellation, retaining preparation and source ownership until worker ack.
     /// A future App adapter must retain this coordinator/session fence while poll is pending.
     pub fn cancel(&mut self) {
-        self.request_abort("Instrument bounce capture was cancelled".into());
+        self.request_abort(CapturePollError::Cancelled);
     }
 
     pub fn termination_acknowledged(&self) -> bool {
@@ -544,7 +568,7 @@ impl InstrumentBounceCapture {
         self.abort_reason.is_some() && !self.terminal
     }
 
-    fn request_abort(&mut self, reason: String) {
+    fn request_abort(&mut self, reason: CapturePollError) {
         if !self.terminal && self.abort_reason.is_none() {
             self.abort_reason = Some(reason);
         }
@@ -559,8 +583,20 @@ impl InstrumentBounceCapture {
         status: BounceSourceStatus,
         now: Instant,
     ) -> Result<Option<CapturedInstrumentBounce>, String> {
+        self.poll_typed(identity, status, now)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn poll_typed(
+        &mut self,
+        identity: BounceSourceIdentity,
+        status: BounceSourceStatus,
+        now: Instant,
+    ) -> Result<Option<CapturedInstrumentBounce>, CapturePollError> {
         if self.terminal {
-            return Err("Instrument bounce capture is no longer pending".into());
+            return Err(CapturePollError::Invalid(
+                "Instrument bounce capture is no longer pending".into(),
+            ));
         }
         let result = self.poll_pending(identity, status, now);
         if !matches!(result, Ok(None)) {
@@ -576,47 +612,55 @@ impl InstrumentBounceCapture {
         identity: BounceSourceIdentity,
         status: BounceSourceStatus,
         now: Instant,
-    ) -> Result<Option<CapturedInstrumentBounce>, String> {
+    ) -> Result<Option<CapturedInstrumentBounce>, CapturePollError> {
         if identity != self.identity {
-            self.request_abort("Instrument bounce source changed during capture".into());
+            self.request_abort(CapturePollError::Stale(
+                "Instrument bounce source changed during capture".into(),
+            ));
         }
         if let Err(reason) = status.validate() {
-            self.request_abort(reason);
+            self.request_abort(CapturePollError::Stale(reason));
         }
         if now.saturating_duration_since(self.started_at) >= BOUNCE_CAPTURE_TIMEOUT {
-            self.request_abort("Instrument bounce state capture timed out".into());
+            self.request_abort(CapturePollError::Deadline);
         }
         let receipt = match self
             .receiver
             .as_ref()
-            .ok_or("Instrument bounce capture is unavailable")?
+            .ok_or_else(|| {
+                CapturePollError::Invalid("Instrument bounce capture is unavailable".into())
+            })?
             .try_recv()
         {
             Ok(Err(BounceCaptureError::BackendFailed(message))) => {
                 // The worker already published its real fault; cancellation cannot replace it.
-                return Err(message);
+                return Err(CapturePollError::Backend(
+                    BounceCaptureError::BackendFailed(message),
+                ));
             }
             Ok(result) => {
                 if let Some(reason) = &self.abort_reason {
                     return Err(reason.clone());
                 }
-                result.map_err(|error| error.to_string())?
+                result.map_err(CapturePollError::Backend)?
             }
             Err(TryRecvError::Empty) => return Ok(None),
             Err(TryRecvError::Disconnected) => {
-                return Err("Instrument bounce source worker disconnected".into());
+                return Err(CapturePollError::Disconnected);
             }
         };
         if receipt.epoch != identity.epoch {
-            return Err("Instrument bounce received a stale epoch receipt".into());
+            return Err(CapturePollError::Stale(
+                "Instrument bounce received a stale epoch receipt".into(),
+            ));
         }
-        let plan = self
-            .plan
-            .as_ref()
-            .ok_or("Instrument bounce preparation was cancelled")?;
+        let plan = self.plan.as_ref().ok_or_else(|| {
+            CapturePollError::Invalid("Instrument bounce preparation was cancelled".into())
+        })?;
         receipt
             .state
-            .validate(&plan.parameter_ids, plan.sample_rate)?;
+            .validate(&plan.parameter_ids, plan.sample_rate)
+            .map_err(CapturePollError::Invalid)?;
         Ok(Some(CapturedInstrumentBounce {
             identity: self.identity,
             plan: self.plan.take().expect("checked above"),

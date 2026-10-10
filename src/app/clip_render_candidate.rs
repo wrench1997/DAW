@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// Only this module can construct or alter the admitted Project replacement.
-pub(super) struct PreparedOccurrenceCandidate {
+pub(in crate::app) struct PreparedOccurrenceCandidate {
     expected_snapshot: Arc<[u8]>,
     expected_context: OccurrenceContext,
     authoritative_before: Project,
@@ -24,7 +24,7 @@ pub(super) struct PreparedOccurrenceCandidate {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct OccurrenceHistoryCommit {
+pub(in crate::app) struct OccurrenceHistoryCommit {
     pub source_clip_id: u32,
     pub audio_clip_id: u32,
     pub asset_id: u64,
@@ -36,7 +36,7 @@ fn retain_published_path(mut error: OccurrenceError, path: &Path) -> OccurrenceE
     error
 }
 
-pub(super) fn prepare_rendered_occurrence_candidate(
+pub(in crate::app) fn prepare_rendered_occurrence_candidate(
     project: &Project,
     context: OccurrenceContext,
     plan: &OccurrencePlan,
@@ -508,7 +508,7 @@ fn validate_remaining_events(
 
 /// Prepared entirely before runtime removal. The later App fence must retain
 /// the same Project/history owners until the exact callback removal receipt.
-pub(super) struct PreparedOccurrenceHistory {
+pub(in crate::app) struct PreparedOccurrenceHistory {
     expected_snapshot: Arc<[u8]>,
     expected_context: OccurrenceContext,
     expected_history_fingerprint: u64,
@@ -519,7 +519,7 @@ pub(super) struct PreparedOccurrenceHistory {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn prepare_rendered_occurrence_history_transaction(
+pub(in crate::app) fn prepare_rendered_occurrence_history_transaction(
     context: OccurrenceContext,
     project: &Project,
     history_fingerprint: u64,
@@ -589,11 +589,15 @@ pub(super) fn prepare_rendered_occurrence_history_transaction(
 }
 
 impl PreparedOccurrenceHistory {
+    pub(in crate::app) fn result(&self) -> &OccurrenceHistoryCommit {
+        &self.result
+    }
+
     /// The last fallible comparison belongs BEFORE CommitAccepted/removal.
     /// It serializes into the comparison writer without another canonical
     /// buffer or Project clone. Existing serde-owned field allocations remain
     /// possible, so this never runs after successful callback removal.
-    pub(super) fn revalidate(
+    pub(in crate::app) fn revalidate(
         &self,
         project: &Project,
         context: OccurrenceContext,
@@ -622,7 +626,7 @@ impl PreparedOccurrenceHistory {
     /// The owner invokes this once only after its exact removal acknowledgment.
     /// The held fence and prior revalidate are prerequisites, not inferred here.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn apply(
+    pub(in crate::app) fn apply(
         self,
         project: &mut Project,
         history_snapshot: &mut Project,
@@ -682,7 +686,7 @@ fn commit_rendered_occurrence_history_transaction(
 }
 
 #[cfg(test)]
-pub(super) fn test_commit_verified_occurrence(
+pub(in crate::app) fn test_commit_verified_occurrence(
     project: &mut Project,
     media: &VerifiedOccurrenceMedia,
     source: &MatchedOccurrenceSource,

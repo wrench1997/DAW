@@ -33,9 +33,21 @@ use super::{PluginDescriptor, PluginFormat};
 mod offline_instrument;
 pub use offline_instrument::OfflineInstrument;
 
+#[path = "plugin_source_restoration.rs"]
+mod source_restoration;
+pub(crate) use source_restoration::SourceRestorationExpectation;
+
 #[cfg(test)]
 #[path = "instrument_bounce_tests.rs"]
 mod instrument_bounce_tests;
+
+#[cfg(test)]
+#[path = "plugin_retained_shutdown_tests.rs"]
+mod retained_shutdown_tests;
+
+#[cfg(test)]
+#[path = "plugin_test_capture_source.rs"]
+pub(crate) mod test_capture_source;
 
 /// Maximum block accepted by the plug-in bridge. This matches the Mixer's preallocated blocks.
 pub const MAX_PLUGIN_BLOCK_FRAMES: usize = 2_048;
@@ -843,6 +855,8 @@ impl PluginEndpointSnapshot {
 pub struct BackendSlot {
     pub backend: Box<dyn PluginBackend>,
     pub config: SlotConfig,
+    // Unpublished admission evidence only, discarded after the first coherent snapshot.
+    initial_expected_timing: Option<(u32, u32)>,
 }
 
 impl BackendSlot {
@@ -850,6 +864,7 @@ impl BackendSlot {
         Self {
             backend,
             config: SlotConfig::default(),
+            initial_expected_timing: None,
         }
     }
 }
@@ -2625,6 +2640,25 @@ pub struct PluginWorkerGuard {
     admin: SyncSender<AdminCommand>,
     join: Option<JoinHandle<()>>,
     metrics: Arc<BridgeMetrics>,
+    retained_shutdown: RetainedShutdownState,
+}
+
+/// Nonblocking source-retirement progress for the exact worker owned by this guard.
+///
+/// A terminal result proves this worker thread was joined. It does not prove that a legacy
+/// subprocess helper was reaped; strict-renderer cleanup has its own separate evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RetainedShutdownPoll {
+    Pending,
+    Joined,
+    WorkerPanicked,
+}
+
+enum RetainedShutdownState {
+    NotRequested,
+    WaitingForJoin,
+    Joined,
+    WorkerPanicked,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2635,6 +2669,57 @@ pub enum ShutdownOutcome {
 }
 
 impl PluginWorkerGuard {
+    /// Poll source retirement without relinquishing or blocking on this worker's lifetime.
+    ///
+    /// Each poll attempts at most one nonblocking Shutdown enqueue until it is admitted or the
+    /// receiver disconnects. An admitted command is never replayed. Queue pressure, disconnection
+    /// and a stalled worker all retain the exact JoinHandle until `is_finished` permits joining.
+    /// Terminal results are cached, including a joined worker panic; no timeout detaches here.
+    ///
+    /// The caller must retain this guard and keep polling through cancellation, engine loss and
+    /// ordinary App close while Pending. Dropping it or using either legacy consuming shutdown
+    /// method still has that method's original detaching behavior. This seam belongs on the
+    /// control thread after exact callback removal acknowledgment, never on the audio callback.
+    #[must_use]
+    pub fn poll_shutdown_retained(&mut self) -> RetainedShutdownPoll {
+        match self.retained_shutdown {
+            RetainedShutdownState::Joined => return RetainedShutdownPoll::Joined,
+            RetainedShutdownState::WorkerPanicked => return RetainedShutdownPoll::WorkerPanicked,
+            RetainedShutdownState::NotRequested => {
+                match self.admin.try_send(AdminCommand::Shutdown) {
+                    Ok(()) | Err(TrySendError::Disconnected(_)) => {
+                        self.retained_shutdown = RetainedShutdownState::WaitingForJoin;
+                    }
+                    Err(TrySendError::Full(_)) => {}
+                }
+            }
+            RetainedShutdownState::WaitingForJoin => {}
+        }
+
+        // The only retained path that takes this handle also caches its terminal result below.
+        // The legacy consuming paths cannot leave a live caller with an empty guard.
+        if !self
+            .join
+            .as_ref()
+            .expect("nonterminal retained shutdown owns its worker")
+            .is_finished()
+        {
+            return RetainedShutdownPoll::Pending;
+        }
+        let joined = self
+            .join
+            .take()
+            .expect("finished retained shutdown owns its worker")
+            .join();
+        if joined.is_ok() {
+            self.retained_shutdown = RetainedShutdownState::Joined;
+            RetainedShutdownPoll::Joined
+        } else {
+            self.retained_shutdown = RetainedShutdownState::WorkerPanicked;
+            RetainedShutdownPoll::WorkerPanicked
+        }
+    }
+
     /// Request shutdown without waiting. This has the same nonblocking semantics as `Drop`.
     pub fn shutdown(self) {
         drop(self);
@@ -2731,6 +2816,7 @@ impl PluginChain {
                     load_backend(spec, config).map(|backend| BackendSlot {
                         backend,
                         config: slot_config,
+                        initial_expected_timing: None,
                     })
                 })
                 .collect()
@@ -2768,9 +2854,54 @@ impl PluginChain {
                     load_backend(spec, config).map(|backend| BackendSlot {
                         backend,
                         config: slot_config,
+                        initial_expected_timing: None,
                     })
                 })
                 .collect()
+        })
+    }
+
+    /// Recreate one retained conversion source using its exact session restoration authority.
+    /// The candidate remains unpublished until preparation and both initial timing reads pass.
+    #[cfg(feature = "vst3")]
+    pub(crate) fn spawn_recreated_source(
+        project_session: u64,
+        instance_id: u64,
+        spec: PluginLoadSpec,
+        config: PluginPrepareConfig,
+        expectation: SourceRestorationExpectation,
+        fresh_load: bool,
+    ) -> Result<Self, String> {
+        let config = config.validate()?;
+        expectation.validate_spec(project_session, instance_id, &spec, config)?;
+        #[cfg(not(all(target_os = "linux", feature = "experimental-fresh-helper")))]
+        if fresh_load {
+            return Err(
+                "This build cannot restore the recorded experimental fresh-load intent".into(),
+            );
+        }
+        let manifest = PluginEndpointManifest::identified(&[instance_id])?;
+        let expected_timing = expectation.expected_timing();
+        Self::spawn_loader(config, manifest, move || {
+            let result = (|| {
+                let mut spec = spec;
+                super::prepare_runtime_spec(&mut spec)?;
+                let backend = Vst3Backend::load_with_restoration(spec, config, Some(expectation))?;
+                #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+                let backend = {
+                    let mut backend = backend;
+                    if fresh_load {
+                        backend.fresh_bounce_setup = Some(FreshBounceSourceSetup::Pending);
+                    }
+                    backend
+                };
+                Ok(BackendSlot {
+                    backend: Box::new(backend),
+                    config: SlotConfig::default(),
+                    initial_expected_timing: Some(expected_timing),
+                })
+            })();
+            vec![result]
         })
     }
 
@@ -2929,6 +3060,7 @@ impl PluginChain {
                 admin: admin_tx,
                 join: Some(join),
                 metrics,
+                retained_shutdown: RetainedShutdownState::NotRequested,
             },
         })
     }
@@ -2963,65 +3095,78 @@ fn run_worker(
     requested_epoch: Arc<AtomicU64>,
 ) {
     let mut slots = Vec::with_capacity(loaded.len());
-    for (slot_index, result) in loaded.into_iter().enumerate() {
-        match result {
-            Ok(mut slot) => {
-                slot.config = slot.config.normalized();
-                let prepared = catch_backend(|| slot.backend.prepare(config));
-                match prepared {
-                    Ok(()) => match backend_ready_metadata(slot.backend.as_ref()) {
-                        Ok((name, latency_samples, tail_samples)) => {
-                            let event = RuntimeEvent::SlotReady {
-                                slot: slot_index,
-                                name,
-                                latency_samples,
-                                tail_samples,
-                            };
-                            push_event(&mut events, event, &metrics);
-                            slots.push(WorkerSlot {
-                                backend: Some(slot.backend),
-                                config: slot.config,
-                                fault: None,
-                                parameter_catalog_cache: None,
-                                native_base_ids: Vec::new(),
-                            });
-                        }
+    // This evidence is scoped to initialization; ordinary post-admission timing stays mutable.
+    {
+        let mut initial_expected_timing = [None; MAX_CHAIN_SLOTS];
+        for (slot_index, result) in loaded.into_iter().enumerate() {
+            match result {
+                Ok(mut slot) => {
+                    initial_expected_timing[slot_index] = slot.initial_expected_timing;
+                    slot.config = slot.config.normalized();
+                    let prepared = catch_backend(|| slot.backend.prepare(config));
+                    match prepared {
+                        Ok(()) => match backend_ready_metadata_expected(
+                            slot.backend.as_ref(),
+                            slot.initial_expected_timing,
+                        ) {
+                            Ok((name, latency_samples, tail_samples)) => {
+                                let event = RuntimeEvent::SlotReady {
+                                    slot: slot_index,
+                                    name,
+                                    latency_samples,
+                                    tail_samples,
+                                };
+                                push_event(&mut events, event, &metrics);
+                                slots.push(WorkerSlot {
+                                    backend: Some(slot.backend),
+                                    config: slot.config,
+                                    fault: None,
+                                    parameter_catalog_cache: None,
+                                    native_base_ids: Vec::new(),
+                                });
+                            }
+                            Err(message) => {
+                                register_fault(slot_index, message.clone(), &mut events, &metrics);
+                                slots.push(WorkerSlot {
+                                    backend: Some(slot.backend),
+                                    config: slot.config,
+                                    fault: Some(message),
+                                    parameter_catalog_cache: None,
+                                    native_base_ids: Vec::new(),
+                                });
+                            }
+                        },
                         Err(message) => {
                             register_fault(slot_index, message.clone(), &mut events, &metrics);
                             slots.push(WorkerSlot {
-                                backend: Some(slot.backend),
+                                backend: None,
                                 config: slot.config,
                                 fault: Some(message),
                                 parameter_catalog_cache: None,
                                 native_base_ids: Vec::new(),
                             });
                         }
-                    },
-                    Err(message) => {
-                        register_fault(slot_index, message.clone(), &mut events, &metrics);
-                        slots.push(WorkerSlot {
-                            backend: None,
-                            config: slot.config,
-                            fault: Some(message),
-                            parameter_catalog_cache: None,
-                            native_base_ids: Vec::new(),
-                        });
                     }
                 }
-            }
-            Err(message) => {
-                register_fault(slot_index, message.clone(), &mut events, &metrics);
-                slots.push(WorkerSlot {
-                    backend: None,
-                    config: SlotConfig::default(),
-                    fault: Some(message),
-                    parameter_catalog_cache: None,
-                    native_base_ids: Vec::new(),
-                });
+                Err(message) => {
+                    register_fault(slot_index, message.clone(), &mut events, &metrics);
+                    slots.push(WorkerSlot {
+                        backend: None,
+                        config: SlotConfig::default(),
+                        fault: Some(message),
+                        parameter_catalog_cache: None,
+                        native_base_ids: Vec::new(),
+                    });
+                }
             }
         }
-    }
-    update_latency_and_tail(&mut slots, &mut events, &metrics);
+        update_latency_and_tail_expected(
+            &mut slots,
+            &mut events,
+            &metrics,
+            Some(&initial_expected_timing),
+        );
+    } // Explicit end of the temporary initial-snapshot expectation, before the worker loop.
 
     let mut dry = StereoBlock::silence();
     let mut active_epoch = INITIAL_TRANSPORT_EPOCH;
@@ -3374,8 +3519,16 @@ fn backend_metadata(backend: &dyn PluginBackend) -> Result<(u32, u32), String> {
 }
 
 fn backend_ready_metadata(backend: &dyn PluginBackend) -> Result<(String, u32, u32), String> {
+    backend_ready_metadata_expected(backend, None)
+}
+
+fn backend_ready_metadata_expected(
+    backend: &dyn PluginBackend,
+    expected: Option<(u32, u32)>,
+) -> Result<(String, u32, u32), String> {
     catch_backend(|| {
-        let (latency, tail) = backend.processing_metadata()?;
+        let (latency, tail) =
+            source_restoration::check_initial_timing(backend.processing_metadata()?, expected)?;
         Ok((backend.name().to_owned(), latency, tail))
     })
 }
@@ -4651,6 +4804,15 @@ fn update_latency_and_tail(
     events: &mut Producer<RuntimeEvent>,
     metrics: &BridgeMetrics,
 ) {
+    update_latency_and_tail_expected(slots, events, metrics, None);
+}
+
+fn update_latency_and_tail_expected(
+    slots: &mut [WorkerSlot],
+    events: &mut Producer<RuntimeEvent>,
+    metrics: &BridgeMetrics,
+    initial_expected: Option<&[Option<(u32, u32)>]>,
+) {
     let mut latency = 0u64;
     let mut tail = 0u32;
     let mut active_mask = 0_u16;
@@ -4661,7 +4823,13 @@ fn update_latency_and_tail(
             continue;
         }
         if let Some(backend) = slot.backend.as_ref() {
-            match backend_metadata(backend.as_ref()) {
+            let expected = initial_expected
+                .and_then(|pairs| pairs.get(slot_index))
+                .copied()
+                .flatten();
+            match backend_metadata(backend.as_ref())
+                .and_then(|actual| source_restoration::check_initial_timing(actual, expected))
+            {
                 Ok((plugin_latency, plugin_tail)) => {
                     debug_assert!(slot_index < MAX_PLUGIN_CHAIN_SLOTS);
                     active_mask |= 1_u16 << slot_index;
@@ -5186,6 +5354,8 @@ enum FreshBounceSourceSetup {
 struct Vst3Backend {
     #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
     fresh_bounce_setup: Option<FreshBounceSourceSetup>,
+    restoration: Option<SourceRestorationExpectation>,
+    restoration_consumed: bool,
     last_transport: PluginTransport,
     native_revision_base: u64,
     plugin: vst3_host::Plugin,
@@ -5265,6 +5435,14 @@ impl Vst3Backend {
     }
 
     fn load(spec: PluginLoadSpec, config: PluginPrepareConfig) -> Result<Self, String> {
+        Self::load_with_restoration(spec, config, None)
+    }
+
+    fn load_with_restoration(
+        spec: PluginLoadSpec,
+        config: PluginPrepareConfig,
+        restoration: Option<SourceRestorationExpectation>,
+    ) -> Result<Self, String> {
         validate_vst3_reset_maximum(
             config.max_block_frames,
             crate::plugin_timing::PLUGIN_QUANTUM_FRAMES as usize,
@@ -5303,6 +5481,10 @@ impl Vst3Backend {
                 helper_path.display()
             )
         })?;
+        if let Some(expected) = restoration.as_ref() {
+            let info = plugin.info();
+            expected.check_loaded_identity(&info.uid, &info.version, &info.name, &info.category)?;
+        }
         // Actual identity is available only after loading. Refuse insufficient
         // capacity before pending state, reconfiguration, or prepare lifecycle.
         validate_vst3_reset_maximum(
@@ -5332,6 +5514,8 @@ impl Vst3Backend {
         Ok(Self {
             #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
             fresh_bounce_setup: None,
+            restoration,
+            restoration_consumed: false,
             last_transport: PluginTransport::default(),
             native_revision_base: 0,
             plugin,
@@ -5352,12 +5536,60 @@ impl Vst3Backend {
 }
 
 #[cfg(feature = "vst3")]
+impl source_restoration::RestorationAccess for Vst3Backend {
+    fn restoration_catalog(&self) -> Result<Vec<source_restoration::RestorationParameter>, String> {
+        let parameters = self
+            .plugin
+            .get_parameters()
+            .map_err(|error| error.to_string())?;
+        if parameters.len() > MAX_PLUGIN_PARAMETER_CATALOG_ITEMS {
+            return Err("Recreated-source catalog exceeds the admitted bound".into());
+        }
+        let mut catalog = Vec::new();
+        catalog
+            .try_reserve_exact(parameters.len())
+            .map_err(|_| "Unable to reserve recreated-source catalog admission".to_owned())?;
+        catalog.extend(parameters.into_iter().map(|parameter| {
+            source_restoration::RestorationParameter {
+                id: parameter.id,
+                read_only: parameter.is_read_only,
+            }
+        }));
+        Ok(catalog)
+    }
+
+    fn restoration_set(&mut self, id: u32, value: f64) -> Result<(), String> {
+        self.plugin
+            .set_parameter(id, value)
+            .map_err(|error| error.to_string())
+    }
+
+    fn restoration_get(&self, id: u32) -> Result<f64, String> {
+        self.plugin
+            .get_parameter(id)
+            .map_err(|error| error.to_string())
+    }
+
+    fn restoration_metadata(
+        &self,
+    ) -> Result<crate::instrument_bounce::BouncePluginMetadata, String> {
+        self.bounce_metadata(None)
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(feature = "vst3")]
 impl PluginBackend for Vst3Backend {
     fn name(&self) -> &str {
         &self.name
     }
 
     fn prepare(&mut self, config: PluginPrepareConfig) -> Result<(), String> {
+        if self.restoration_consumed {
+            return Err("Recreated-source preparation is one-shot; load a new candidate".into());
+        }
+        let restoration = self.restoration.take();
+        self.restoration_consumed = restoration.is_some();
         // Consume before any fallible guard: neither failed setup nor a published source
         // may use a later prepare to gain another activation opportunity.
         #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
@@ -5408,6 +5640,9 @@ impl PluginBackend for Vst3Backend {
                 .load_state(&state)
                 .map_err(|error| error.to_string())?;
         }
+        if let Some(expected) = restoration.as_ref() {
+            expected.restore_bases(self)?;
+        }
         #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
         let fresh_metadata = if qualify_fresh_source {
             Some(self.qualify_fresh_bounce_source(config.sample_rate as u32)?)
@@ -5443,6 +5678,9 @@ impl PluginBackend for Vst3Backend {
                 latency_samples: current.latency_samples,
                 tail_samples: current.tail_samples,
             });
+        }
+        if let Some(expected) = restoration.as_ref() {
+            expected.verify_after_start(self)?;
         }
         self.max_block_frames = config.max_block_frames;
         self.prepared = true;
@@ -5884,7 +6122,8 @@ impl Drop for Vst3Backend {
         let _ = self
             .plugin
             .isolated_editor(vst3_host::IsolatedEditorCommand::Close);
-        let should_stop = self.prepared;
+        let should_stop =
+            self.prepared || (self.restoration_consumed && self.plugin.is_processing());
         // A one-shot candidate can fail its post-Start fence before prepared becomes
         // true. Dispose its processing lifecycle without affecting any older source.
         #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]

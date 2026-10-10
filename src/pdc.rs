@@ -1083,6 +1083,19 @@ impl PreparedMixerGraphDelayBank {
             .map(StereoDelayLine::target_delay_samples)
     }
 
+    /// Immutable fixture observation; neither advances nor resets route history.
+    #[cfg(test)]
+    pub(crate) fn test_history_at_tap(
+        &self,
+        runtime_slot: usize,
+        tap: u32,
+    ) -> Option<(u64, [f32; 2])> {
+        self.lines
+            .get(runtime_slot)?
+            .as_ref()
+            .map(|line| line.test_history_at_tap(tap))
+    }
+
     /// Validates every route and target without mutating a delay line.
     pub fn preflight_plan(
         &self,
@@ -1679,6 +1692,13 @@ impl ControlDelayLine {
 }
 
 impl StereoDelayLine {
+    /// Immutable fixture observation of logical history, even when the active tap is zero.
+    #[cfg(test)]
+    pub(crate) fn test_history_at_tap(&self, tap: u32) -> (u64, [f32; 2]) {
+        assert!(tap > 0 && tap <= self.maximum_delay_samples);
+        (self.frames_since_reset, self.read_tap(tap, [0.0; 2]))
+    }
+
     pub fn new(maximum_delay_samples: u32) -> Result<Self, StereoDelayError> {
         if maximum_delay_samples > PDC_HARD_MAX_DELAY_SAMPLES {
             return Err(StereoDelayError::CapacityTooLarge(maximum_delay_samples));

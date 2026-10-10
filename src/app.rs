@@ -2,6 +2,13 @@ mod audio_import;
 mod automation_points;
 #[allow(dead_code)]
 pub(crate) mod clip_render;
+mod clip_render_cache;
+mod clip_render_glue;
+mod clip_render_job;
+mod clip_render_session;
+#[cfg(test)]
+use clip_render_glue::RestorationTestFactory;
+use clip_render_glue::{ClipRenderRestorationBinding, PendingClipRestoration};
 #[cfg(test)]
 mod headless_ui_capture;
 #[cfg(test)]
@@ -5080,6 +5087,10 @@ struct PianoNoteResizeGesture {
 
 pub struct CitrusApp {
     project: Project,
+    clip_render_job: Option<clip_render_job::ClipRenderJob>,
+    next_clip_render_operation_id: u64,
+    clip_render_control_revision: u64,
+    clip_render_model_revision: u64,
     workspace: workspace::Workspace,
     transport_mode: TransportMode,
     transport_mode_dirty: bool,
@@ -5164,6 +5175,22 @@ pub struct CitrusApp {
     plugin_parameter_edit_draft_desired: HashMap<ParameterEditRoute, f32>,
     plugin_picker_target: Option<PluginPickerTarget>,
     plugin_picker_show_all: bool,
+    plugin_picker_fresh_bounce: bool,
+    fresh_bounce_sources: HashMap<u64, (String, PathBuf, String)>,
+    clip_render_restorations: HashMap<u64, ClipRenderRestorationBinding>,
+    retained_clip_media: HashMap<u64, clip_render_cache::RetainedVerifiedClipMedia>,
+    retained_clip_pcm_bytes: usize,
+    pending_clip_restorations: HashMap<u32, PendingClipRestoration>,
+    retired_clip_restorations: Vec<PluginWorkerGuard>,
+    clip_restoration_playback_pending: bool,
+    clip_restoration_failed: bool,
+    clip_restoration_installs: HashMap<u64, (u64, bool)>,
+    clip_restoration_timeline: Option<(u64, u64)>,
+    clip_session_retirement: Option<clip_render_session::ClipSessionRetirement>,
+    #[cfg(test)]
+    clip_restoration_test_factory: Option<RestorationTestFactory>,
+    #[cfg(test)]
+    clip_restoration_event_panic: Option<&'static str>,
     plugin_filter: String,
     plugins: Vec<PluginDescriptor>,
     scan_paths: Vec<PathBuf>,
@@ -5261,6 +5288,8 @@ pub struct CitrusApp {
     project_lifecycle: ProjectLifecycle,
     next_project_lifecycle_operation_id: u64,
     suppress_drop_recovery: bool,
+    /// A dirty Discard+Quit decision is applied only after retained source retirement.
+    pending_discard_quit_session: Option<u64>,
     toast: Option<(String, Instant)>,
     saved_path: Option<PathBuf>,
     master_volume: f32,
@@ -5349,6 +5378,7 @@ impl CitrusApp {
         {
             match AudioEngine::start_with_profile(&attempt.profile) {
                 Ok(mut engine) => {
+                    assert!(engine.set_project_session(1));
                     engine.set_metronome_enabled(audio_preferences.metronome_enabled);
                     if engine.plugin_timing_profile()
                         != audio_preferences.plugin_callback_budget_frames
@@ -5506,11 +5536,31 @@ impl CitrusApp {
                 #[cfg(test)]
                 native_editor_ui_test_snapshot: None,
                 native_editor_seen: HashMap::new(),
+                clip_render_job: None,
+                next_clip_render_operation_id: 1,
+                clip_render_control_revision: 1,
+                clip_render_model_revision: 1,
                 next_plugin_parameter_request_id: 1,
                 plugin_parameter_edits: PluginParameterEditState::default(),
                 plugin_parameter_edit_draft_desired: HashMap::new(),
                 plugin_picker_target: None,
                 plugin_picker_show_all: false,
+                plugin_picker_fresh_bounce: false,
+                fresh_bounce_sources: HashMap::new(),
+                clip_render_restorations: HashMap::new(),
+                retained_clip_media: HashMap::new(),
+                retained_clip_pcm_bytes: 0,
+                pending_clip_restorations: HashMap::new(),
+                retired_clip_restorations: Vec::new(),
+                clip_restoration_playback_pending: false,
+                clip_restoration_failed: false,
+                clip_restoration_installs: HashMap::new(),
+                clip_restoration_timeline: None,
+                clip_session_retirement: None,
+                #[cfg(test)]
+                clip_restoration_test_factory: None,
+                #[cfg(test)]
+                clip_restoration_event_panic: None,
                 plugin_filter: String::new(),
                 plugins: plugin_cache.plugins,
                 plugin_cache_needs_rescan: plugin_cache.needs_rescan,
@@ -5601,6 +5651,7 @@ impl CitrusApp {
                 project_lifecycle: ProjectLifecycle::Idle,
                 next_project_lifecycle_operation_id: 1,
                 suppress_drop_recovery: false,
+                pending_discard_quit_session: None,
                 toast: piano_roll_preferences_error.or_else(|| {
                     plugin_cache.needs_rescan.then(||
                         "VST3 index needs a rescan to replace old filename-based classifications".into())
@@ -5847,6 +5898,9 @@ impl CitrusApp {
     }
 
     fn request_plugin_processing_replan(&mut self, callback_budget_frames: Option<u32>) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         if !self.plugin_processing_change_is_available() {
             self.notify("Wait for the current audio, recording or project operation before changing plug-in timing".into());
             return;
@@ -6127,6 +6181,9 @@ impl CitrusApp {
     }
 
     fn commit_mixer_graph_edit(&mut self, edit: MixerGraphProjectEdit) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         if !self.audio_restart_state.allows_realtime_session_actions() {
             self.notify(
                 "Mixer graph edits are locked until audio restore succeeds or is retried".into(),
@@ -6222,6 +6279,35 @@ impl CitrusApp {
         previous_state: Option<ChannelGeneratorState>,
         prepared: Option<plugins::plugin_runtime::PluginChain>,
     ) -> Result<(), String> {
+        let mut prepared = prepared;
+        let bound = candidate
+            .channels
+            .iter()
+            .find(|item| item.id == channel_id)
+            .and_then(|item| item.instrument_plugin_instance_id)
+            .is_some_and(|id| self.clip_render_restorations.contains_key(&id));
+        if bound && let Some(chain) = prepared.take() {
+            let plugins::plugin_runtime::PluginChain {
+                audio,
+                control,
+                guard,
+            } = chain;
+            drop(audio);
+            drop(control);
+            self.retired_clip_restorations.push(guard);
+            self.clip_restoration_playback_pending = true;
+            self.clip_restoration_failed = true;
+            return Err(
+                "A retained source must use the dedicated unpublished restoration owner".into(),
+            );
+        }
+        if bound {
+            self.retired_clip_restorations
+                .try_reserve(
+                    self.pending_clip_restorations.len() + self.pending_generator_chains.len() + 2,
+                )
+                .map_err(|_| "Unable to reserve bound-source cleanup")?;
+        }
         crate::plugin_midi_routing::compile_midi_port_routes(&candidate)?;
         if !self.audio_restart_state.allows_realtime_session_actions()
             && !self.audio_restart_state.is_restoring()
@@ -6300,7 +6386,10 @@ impl CitrusApp {
         if !restoring_audio_session && prepared.is_none() {
             mark_channel_generator_runtime_pending(&mut candidate, channel_id);
         }
-        let runtime = channel_generator_runtime_spec(&candidate, channel_id)?;
+        let runtime =
+            channel_generator_runtime_spec(&candidate, channel_id)?.filter(|(id, _, spec)| {
+                !self.clip_render_restorations.contains_key(id) || spec.enabled
+            });
         let Some((instance_id, mixer_track, mut spec)) = runtime else {
             let identity = self
                 .running_generator_chains
@@ -6335,10 +6424,8 @@ impl CitrusApp {
                 self.pending_generator_routes.remove(&channel_id);
                 self.pending_generator_note_offs
                     .retain(|pending| pending.channel_id != channel_id);
-            } else {
-                if !restoring_audio_session {
-                    self.project = candidate;
-                }
+            } else if !restoring_audio_session {
+                self.project = candidate;
             }
             return Ok(());
         };
@@ -6355,13 +6442,41 @@ impl CitrusApp {
             .as_ref()
             .map(|audio| audio.snapshot().sample_rate as f32)
             .ok_or_else(|| "the audio engine is unavailable".to_owned())?;
+        if self.clip_render_restorations.contains_key(&instance_id) {
+            self.retired_clip_restorations
+                .try_reserve(self.pending_clip_restorations.len() + 2)
+                .map_err(|_| "Unable to reserve retained restoration cleanup")?;
+            self.pending_clip_restorations
+                .try_reserve(1)
+                .map_err(|_| "Unable to reserve source restoration admission")?;
+        }
         let chain = match prepared {
             Some(chain) => chain,
-            None => self.plugin_host.spawn_identified_chain(
-                vec![(instance_id, spec)],
-                sample_rate,
-                MAX_MIXER_BLOCK_FRAMES as u32,
-            )?,
+            None => {
+                let restore_snapshot = if self.clip_render_restorations.contains_key(&instance_id) {
+                    Some(
+                        clip_render::project_snapshot(&self.project)
+                            .map_err(|error| error.to_string())?,
+                    )
+                } else {
+                    None
+                };
+                let (chain, expected) =
+                    self.spawn_clip_bound_source(instance_id, spec, &candidate, sample_rate)?;
+                if let Some(expected) = expected {
+                    self.defer_clip_restoration(
+                        channel_id,
+                        instance_id,
+                        candidate,
+                        previous_state,
+                        chain,
+                        expected,
+                        restore_snapshot.expect("restoration snapshot prepared before spawn"),
+                    );
+                    return Ok(());
+                }
+                chain
+            }
         };
         let endpoint_id = self.allocate_generator_endpoint_id();
         let plugins::plugin_runtime::PluginChain {
@@ -6423,6 +6538,21 @@ impl CitrusApp {
     }
 
     fn request_channel_generator_rebuild(&mut self, channel_id: u32) {
+        if self.clip_session_retirement_pending() {
+            return;
+        }
+        if !self.retired_clip_restorations.is_empty()
+            && self
+                .project
+                .channels
+                .iter()
+                .find(|channel| channel.id == channel_id)
+                .and_then(|channel| channel.instrument_plugin_instance_id)
+                .is_some_and(|id| self.clip_render_restorations.contains_key(&id))
+        {
+            self.deferred_generator_rebuilds.insert(channel_id);
+            return;
+        }
         if self.pending_generator_chains.contains_key(&channel_id)
             || self.pending_generator_removals.contains_key(&channel_id)
         {
@@ -6645,6 +6775,12 @@ impl CitrusApp {
     }
 
     fn retry_deferred_plugin_rebuilds(&mut self) {
+        if self.clip_session_retirement_pending() {
+            return;
+        }
+        if self.clip_render_fence_active() {
+            return;
+        }
         if !self.audio_restart_state.allows_realtime_session_actions()
             && !self.audio_restart_state.is_restoring()
         {
@@ -6712,6 +6848,9 @@ impl CitrusApp {
         self.pending_insert_chains.clear();
         self.pending_insert_removals.clear();
         self.deferred_insert_rebuilds.clear();
+        self.retain_clip_source_before_engine_loss();
+        self.retain_recreated_sources_before_clear();
+        self.retain_pending_recreated_sources_before_clear();
         self.running_generator_chains.clear();
         self.pending_generator_chains.clear();
         self.pending_generator_removals.clear();
@@ -6798,6 +6937,9 @@ impl CitrusApp {
     }
 
     fn begin_midi_recording(&mut self) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         if self.pending_plugin_slot_config.is_some() {
             self.notify(
                 "Wait for plug-in configuration state capture before recording MIDI".into(),
@@ -7568,6 +7710,9 @@ impl CitrusApp {
     }
 
     fn connect_selected_midi_input(&mut self) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         if self.pending_plugin_slot_config.is_some() {
             self.notify(
                 "Wait for plug-in configuration state capture before connecting MIDI".into(),
@@ -7905,16 +8050,7 @@ impl CitrusApp {
         }
         if let Some(project) = self.deferred_recovery_project_after_midi.take() {
             self.deferred_generator_candidate_after_midi = None;
-            let diagnostic_count = project.migration_diagnostics.len();
-            self.install_project(project, None, true);
-            self.recovery_available = false;
-            if diagnostic_count == 0 {
-                self.notify("Autosave restored - save the project to keep it".into());
-            } else {
-                self.notify(format!(
-                    "Autosave restored with {diagnostic_count} v7 migration diagnostic(s); unresolved Piano routes and audio offsets are highlighted"
-                ));
-            }
+            self.finish_recovery_project(project);
             return;
         }
         if let Some(deferred) = self.deferred_generator_candidate_after_midi.take() {
@@ -7944,6 +8080,9 @@ impl CitrusApp {
     }
 
     fn request_audio_restart(&mut self) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         if self.pending_plugin_slot_config.is_some() {
             self.notify(
                 "Wait for plug-in configuration state capture before changing audio devices".into(),
@@ -8018,6 +8157,7 @@ impl CitrusApp {
         // AudioEngine's shutdown barrier returns callback-owned MIDI
         // receivers before the producer connection is closed below.
         drop(self.audio.take());
+        self.retain_clip_source_before_engine_loss();
         if let Some(owner) = state.owner().cloned() {
             let _ = self
                 .midi_input
@@ -8193,6 +8333,12 @@ impl CitrusApp {
     }
 
     fn drive_audio_restart(&mut self) {
+        if self.clip_session_retirement_pending() {
+            return;
+        }
+        if self.clip_render_fence_active() {
+            return;
+        }
         let state = std::mem::replace(&mut self.audio_restart_state, AudioRestartState::Idle);
         match state {
             AudioRestartState::Idle | AudioRestartState::Degraded { .. } => {
@@ -8441,6 +8587,7 @@ impl CitrusApp {
             plugin_states,
             ..
         } = candidate;
+        assert!(engine.set_project_session(self.project_session));
         engine.set_playing(false);
         engine.set_recording(false);
         engine.set_metronome_enabled(self.audio_preferences.metronome_enabled);
@@ -8812,7 +8959,22 @@ impl CitrusApp {
             let Some(event) = event else {
                 break;
             };
+            if let GeneratorEndpointEvent::Removed {
+                channel_id,
+                endpoint_id,
+                plugin_instance_id,
+            } = event
+                && self.consume_clip_session_removal(channel_id, endpoint_id, plugin_instance_id)
+            {
+                continue;
+            }
+            if self.consume_bound_generator_event(event) {
+                continue;
+            }
             match event {
+                GeneratorEndpointEvent::StampedRemoved { stamp, result } => {
+                    self.consume_clip_render_removal_event(stamp, result);
+                }
                 GeneratorEndpointEvent::Installed {
                     channel_id,
                     endpoint_id,
@@ -8846,6 +9008,13 @@ impl CitrusApp {
                     );
                     debug_assert_eq!(mixer_track, pending.mixer_track);
                     if success {
+                        if confirmation_is_current
+                            && let Some((expected, acknowledged)) =
+                                self.clip_restoration_installs.get_mut(&pending.instance_id)
+                            && *expected == endpoint_id
+                        {
+                            *acknowledged = true;
+                        }
                         if confirmation_is_current {
                             debug_assert_eq!(
                                 replaced_endpoint_id,
@@ -8860,17 +9029,22 @@ impl CitrusApp {
                                     .map(|chain| chain.instance_id)
                             );
                         }
-                        if let Some(old) = self.running_generator_chains.remove(&channel_id) {
+                        if let Some((session, endpoint)) = self
+                            .running_generator_chains
+                            .get(&channel_id)
+                            .map(|old| (old.project_session, old.endpoint_id))
+                        {
                             self.cancel_plugin_parameter_endpoint_edits(
-                                old.project_session,
+                                session,
                                 ParameterEndpoint {
                                     kind: ParameterEndpointKind::Generator,
-                                    id: old.endpoint_id,
+                                    id: endpoint,
                                 },
                                 ParameterEditCancelReason::EndpointReplaced,
                             );
-                            let RunningGeneratorChain { guard, .. } = old;
-                            drop(guard);
+                        }
+                        if let Some(old) = self.running_generator_chains.remove(&channel_id) {
+                            self.retire_clip_bound_generator(old);
                         }
                         let PendingGeneratorChain {
                             project_session,
@@ -8898,7 +9072,7 @@ impl CitrusApp {
                         if self.fault_audio_restart_restore(format!(
                             "Channel {channel_id} generator endpoint was rejected by the replacement callback"
                         )) {
-                            drop(pending.guard);
+                            self.retire_failed_clip_candidate(pending.instance_id, pending.guard);
                         } else if let Some(previous) = &pending.previous_state
                             && channel_generator_matches_state(
                                 &self.project,
@@ -8907,20 +9081,20 @@ impl CitrusApp {
                             )
                         {
                             restore_channel_generator(&mut self.project, previous);
-                            drop(pending.guard);
+                            self.retire_failed_clip_candidate(pending.instance_id, pending.guard);
                         } else {
                             mark_channel_generator_runtime_error(
                                 &mut self.project,
                                 channel_id,
                                 "audio callback rejected the generator endpoint",
                             );
-                            drop(pending.guard);
+                            self.retire_failed_clip_candidate(pending.instance_id, pending.guard);
                         }
                         self.notify(format!(
                             "Channel {channel_id} generator endpoint installation failed"
                         ));
                     } else {
-                        drop(pending.guard);
+                        self.retire_failed_clip_candidate(pending.instance_id, pending.guard);
                     }
                     let had_deferred_rebuild = self.deferred_generator_rebuilds.remove(&channel_id);
                     if plugin_endpoint_confirmation_needs_rebuild(
@@ -8942,7 +9116,11 @@ impl CitrusApp {
                         .is_some_and(|pending| {
                             (pending.endpoint_id == endpoint_id
                                 && pending.plugin_instance_id == plugin_instance_id)
-                                || (endpoint_id.is_none() && plugin_instance_id.is_none())
+                                || (endpoint_id.is_none()
+                                    && plugin_instance_id.is_none()
+                                    && pending.plugin_instance_id.is_none_or(|id| {
+                                        !self.clip_render_restorations.contains_key(&id)
+                                    }))
                         });
                     if matches_pending {
                         let pending = self.pending_generator_removals.remove(&channel_id).unwrap();
@@ -8957,17 +9135,23 @@ impl CitrusApp {
                                         .plugin_instance_id
                                         .is_none_or(|instance_id| chain.instance_id == instance_id)
                             })
-                            && let Some(old) = self.running_generator_chains.remove(&channel_id)
                         {
+                            let old = self
+                                .running_generator_chains
+                                .get(&channel_id)
+                                .expect("matched source");
+                            let (session, endpoint) = (old.project_session, old.endpoint_id);
                             self.cancel_plugin_parameter_endpoint_edits(
-                                old.project_session,
+                                session,
                                 ParameterEndpoint {
                                     kind: ParameterEndpointKind::Generator,
-                                    id: old.endpoint_id,
+                                    id: endpoint,
                                 },
                                 ParameterEditCancelReason::EndpointReplaced,
                             );
-                            drop(old.guard);
+                            if let Some(old) = self.running_generator_chains.remove(&channel_id) {
+                                self.retire_clip_bound_generator(old);
+                            }
                         }
                         if !plugin_runtime_session_is_current(
                             pending.project_session,
@@ -8997,6 +9181,9 @@ impl CitrusApp {
                             ParameterEditCancelReason::EndpointReplaced,
                         );
                     }
+                    self.retain_clip_source_before_engine_loss();
+                    self.retain_recreated_sources_before_clear();
+                    self.retain_pending_recreated_sources_before_clear();
                     self.running_generator_chains.clear();
                     self.pending_generator_chains.clear();
                     self.pending_generator_removals.clear();
@@ -9056,6 +9243,9 @@ impl CitrusApp {
     }
 
     fn sync_generator_routes(&mut self) {
+        if self.clip_operation_fence_active() {
+            return;
+        }
         if !self.audio_restart_state.allows_realtime_session_actions()
             && !self.audio_restart_state.is_restoring()
         {
@@ -9161,6 +9351,9 @@ impl CitrusApp {
     }
 
     fn request_native_editor(&mut self, instance_id: u64, close: bool) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         if self.save_barrier.is_some()
             || self.pending_plugin_slot_config.is_some()
             || self.plugin_topology_is_settling()
@@ -9329,6 +9522,9 @@ impl CitrusApp {
     }
 
     fn poll_native_editor_snapshots(&mut self) {
+        if self.clip_operation_fence_active() {
+            return;
+        }
         let mut updates = Vec::new();
         for chain in self
             .running_insert_chains
@@ -9620,6 +9816,9 @@ impl CitrusApp {
     }
 
     fn request_plugin_parameter_edit(&mut self, route: ParameterEditRoute, normalized: f32) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         if self.pending_plugin_slot_config.is_some() {
             self.set_plugin_parameter_edit_error(
                 route,
@@ -9796,6 +9995,9 @@ impl CitrusApp {
     }
 
     fn drive_plugin_parameter_catalog(&mut self) {
+        if self.clip_operation_fence_active() {
+            return;
+        }
         let current_binding = self
             .plugin_parameter_editor
             .as_ref()
@@ -9935,7 +10137,8 @@ impl CitrusApp {
 
     fn poll_plugin_runtime_events(&mut self) {
         let project_session = self.project_session;
-        let allow_plugin_runtime_commands = self.audio_restart_state.allows_runtime_dispatch();
+        let allow_plugin_runtime_commands = self.audio_restart_state.allows_runtime_dispatch()
+            && !self.clip_operation_fence_active();
         let insert_budget = MAX_PLUGIN_RUNTIME_EVENTS_PER_FRAME / 2;
         let generator_budget = MAX_PLUGIN_RUNTIME_EVENTS_PER_FRAME - insert_budget;
         let mut remaining = insert_budget;
@@ -10014,6 +10217,9 @@ impl CitrusApp {
                     };
                     if allow_plugin_runtime_commands
                         && chain_is_current
+                        && !self
+                            .clip_render_restorations
+                            .contains_key(&chain.instance_id)
                         && let RuntimeEvent::SlotReady { slot, .. } = &event
                     {
                         initialization_failures.add(initialize_ready_plugin_slot(
@@ -10046,6 +10252,9 @@ impl CitrusApp {
                     };
                     if allow_plugin_runtime_commands
                         && chain_is_current
+                        && !self
+                            .clip_render_restorations
+                            .contains_key(&chain.instance_id)
                         && let RuntimeEvent::SlotReady { slot, .. } = &event
                     {
                         initialization_failures.add(initialize_ready_plugin_slot(
@@ -10072,7 +10281,8 @@ impl CitrusApp {
             let event_is_current =
                 plugin_runtime_session_is_current(event_session, project_session);
             let event_instance_id = runtime_event_instance_id(&instance_ids, &event);
-            let guard_project_runtime = self.audio_restart_state.guards_project_runtime();
+            let guard_project_runtime = self.audio_restart_state.guards_project_runtime()
+                || self.clip_operation_fence_active();
             let restoring_audio_session = self.audio_restart_state.is_restoring();
             if let Some(instance_id) = event_instance_id {
                 self.observe_plugin_parameter_catalog_event(
@@ -10294,6 +10504,9 @@ impl CitrusApp {
     }
 
     fn drive_plugin_parameter_edit_drafts(&mut self) {
+        if self.clip_operation_fence_active() {
+            return;
+        }
         if self.plugin_topology_is_settling()
             || !self.audio_restart_state.allows_realtime_session_actions()
         {
@@ -10366,6 +10579,16 @@ impl CitrusApp {
     }
 
     fn apply_plugin_parameter_edit_effect(&mut self, effect: ParameterEditEffect) {
+        if self.clip_operation_fence_active() {
+            if !matches!(effect, ParameterEditEffect::Ignored) {
+                self.advance_clip_control_revision();
+                self.cancel_clip_render_job();
+                self.notify(
+                    "A late parameter receipt was refused while the Project was sealed".into(),
+                );
+            }
+            return;
+        }
         match effect {
             ParameterEditEffect::Ignored | ParameterEditEffect::SubmitNext(_) => {}
             ParameterEditEffect::Failed(failure) => {
@@ -10565,6 +10788,9 @@ impl CitrusApp {
         length_beats: f32,
         mixer_track: usize,
     ) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         let output_port = self
             .project
             .channels
@@ -10696,6 +10922,9 @@ impl CitrusApp {
     }
 
     fn sync_generator_audibility(&mut self) {
+        if self.clip_operation_fence_active() {
+            return;
+        }
         let any_solo = self.project.channels.iter().any(|channel| channel.solo);
         let mut newly_inaudible = Vec::new();
         let mut current_ids = HashSet::new();
@@ -10723,6 +10952,9 @@ impl CitrusApp {
     }
 
     fn apply_automation(&mut self) {
+        if self.clip_operation_fence_active() {
+            return;
+        }
         let allow_runtime_dispatch = self.audio_restart_state.allows_runtime_dispatch();
         let callback_owned = self.callback_timeline_owns_note_clip();
         let desired_timeline = if self.timeline_audio_matches_desired() {
@@ -10998,6 +11230,13 @@ impl CitrusApp {
     }
 
     fn undo(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
+        if self.plugin_topology_is_settling() {
+            self.notify("Wait for source endpoint changes before Undo/Redo".into());
+            return;
+        }
         // A pointer preview owns a pre-press snapshot. Never replace its project
         // from a prior history entry while its origins can still be replayed.
         if self.piano_note_properties.is_some()
@@ -11026,6 +11265,13 @@ impl CitrusApp {
             return;
         }
         self.flush_pending_editor_history();
+        if !self.undo_stack.is_empty()
+            && !self.clip_render_restorations.is_empty()
+            && let Err(error) = self.prepare_clip_history_restoration()
+        {
+            self.notify(error);
+            return;
+        }
         let Some(previous) = self.undo_stack.pop() else {
             self.notify("Nothing to undo".into());
             return;
@@ -11049,6 +11295,13 @@ impl CitrusApp {
     }
 
     fn redo(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
+        if self.plugin_topology_is_settling() {
+            self.notify("Wait for source endpoint changes before Undo/Redo".into());
+            return;
+        }
         // A pointer preview owns a pre-press snapshot. Never replace its project
         // from a prior history entry while its origins can still be replayed.
         if self.piano_note_properties.is_some()
@@ -11076,6 +11329,13 @@ impl CitrusApp {
             self.notify("Redo is unavailable while plug-in state is being saved".into());
             return;
         }
+        if !self.redo_stack.is_empty()
+            && !self.clip_render_restorations.is_empty()
+            && let Err(error) = self.prepare_clip_history_restoration()
+        {
+            self.notify(error);
+            return;
+        }
         let Some(next) = self.redo_stack.pop() else {
             self.notify("Nothing to redo".into());
             return;
@@ -11099,6 +11359,9 @@ impl CitrusApp {
     }
 
     fn add_pattern(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         let id = self
             .project
             .patterns
@@ -11119,6 +11382,9 @@ impl CitrusApp {
     }
 
     fn add_automation_clip(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         let automation_id = self
             .project
             .automation_lanes
@@ -11224,6 +11490,9 @@ impl CitrusApp {
     }
 
     fn capture_history(&mut self) {
+        if self.clip_operation_fence_active() {
+            return;
+        }
         if self.last_history_check.elapsed() < Duration::from_millis(50) {
             return;
         }
@@ -11311,6 +11580,9 @@ impl CitrusApp {
     }
 
     fn set_transport_mode(&mut self, mode: TransportMode) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         if self.pending_plugin_slot_config.is_some() {
             self.notify(
                 "Wait for plug-in configuration state capture before changing transport mode"
@@ -11435,6 +11707,9 @@ impl CitrusApp {
     }
 
     fn publish_transport_seek(&mut self, beat: f64) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         if self.pending_plugin_slot_config.is_some() {
             return;
         }
@@ -11510,6 +11785,9 @@ impl CitrusApp {
     }
 
     fn duplicate_selection(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         if !self.workspace.windows[workspace::index(self.workspace.focused)].visible {
             return;
         }
@@ -11746,6 +12024,9 @@ impl CitrusApp {
     }
 
     fn group_playlist_selection(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         let selected = expand_clip_group_selection(
             &self.project.clips,
             &self.playlist_selection_ids,
@@ -11790,6 +12071,9 @@ impl CitrusApp {
     }
 
     fn ungroup_playlist_selection(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         let selected = expand_clip_group_selection(
             &self.project.clips,
             &self.playlist_selection_ids,
@@ -12182,6 +12466,9 @@ impl CitrusApp {
     }
 
     fn delete_selection(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         if !self.workspace.windows[workspace::index(self.workspace.focused)].visible {
             return;
         }
@@ -12243,6 +12530,13 @@ impl CitrusApp {
     }
 
     fn toggle_play(&mut self) {
+        if self.clip_render_blocks_playback()
+            || self.clip_restoration_playback_pending
+            || self.clip_render_reject_control()
+        {
+            self.notify("Clip conversion or restoration keeps playback paused".into());
+            return;
+        }
         if self.pending_plugin_slot_config.is_some() {
             self.notify("Wait for plug-in configuration state capture; Stop can cancel it".into());
             return;
@@ -12289,6 +12583,16 @@ impl CitrusApp {
     }
 
     fn stop(&mut self) {
+        if self.clip_operation_fence_active() {
+            self.playing = false;
+            self.transport_clock_playing = false;
+            if let Some(audio) = &self.audio {
+                audio.set_playing(false);
+            }
+            self.cancel_clip_render_job();
+            return;
+        }
+        self.advance_clip_control_revision();
         if self.pending_plugin_slot_config.take().is_some() {
             self.notify(
                 "Plug-in configuration change canceled; previous configuration retained".into(),
@@ -12317,6 +12621,9 @@ impl CitrusApp {
     }
 
     fn toggle_record(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         if self.pending_plugin_slot_config.is_some() {
             self.notify("Wait for plug-in configuration state capture before recording".into());
             return;
@@ -12432,6 +12739,9 @@ impl CitrusApp {
     }
 
     fn poll_recording(&mut self) {
+        if self.clip_operation_fence_active() {
+            return;
+        }
         let active_must_stop = self.input_recorder.as_ref().is_some_and(|recorder| {
             let status = recorder.status();
             status.writer_errors != 0 || status.limit_reached
@@ -12458,6 +12768,9 @@ impl CitrusApp {
     }
 
     fn toggle_realtime_master_capture(&mut self) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         if self.master_capture.is_some() {
             self.request_realtime_master_capture_stop();
         } else {
@@ -12466,6 +12779,9 @@ impl CitrusApp {
     }
 
     fn start_realtime_master_capture(&mut self) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         if self.pending_plugin_slot_config.is_some() {
             self.notify(
                 "Wait for plug-in configuration state capture before recording the master".into(),
@@ -12730,14 +13046,21 @@ impl CitrusApp {
     }
 
     fn add_recording_to_project(&mut self, metadata: RecordingMetadata, notify_and_load: bool) {
-        let asset_id = self
+        let Some(asset_id) = self
             .project
             .audio_assets
             .iter()
             .map(|asset| asset.id)
+            .chain(self.retained_clip_media.keys().copied())
             .max()
             .unwrap_or(0)
-            + 1;
+            .checked_add(1)
+        else {
+            self.notify(
+                "Audio asset identities exhausted; recorded file retained without insertion".into(),
+            );
+            return;
+        };
         let clip_id = self
             .project
             .clips
@@ -12837,6 +13160,17 @@ impl CitrusApp {
         modal_at_frame_start: Option<ShortcutModal>,
         blocker_at_frame_start: bool,
     ) {
+        if self.clip_operation_fence_active() {
+            let presses = ctx.input(|input| ShortcutPresses::from_events(&input.events));
+            if presses
+                .chord(ShortcutKey::Escape)
+                .and_then(resolve_global_shortcut)
+                == Some(ShortcutAction::Stop)
+            {
+                self.stop();
+            }
+            return;
+        }
         if self.pending_plugin_slot_config.is_some() {
             let presses = ctx.input(|input| ShortcutPresses::from_events(&input.events));
             if presses
@@ -12877,7 +13211,8 @@ impl CitrusApp {
     }
 
     fn shortcut_blocking_layer_active(&self) -> bool {
-        self.pending_plugin_slot_config.is_some()
+        self.clip_operation_fence_active()
+            || self.pending_plugin_slot_config.is_some()
             || !self.project_lifecycle.is_idle()
             || self.project_media.open
             || self.audio_restart_state.locks_session_actions()
@@ -12916,6 +13251,12 @@ impl CitrusApp {
     }
 
     fn apply_shortcut_action(&mut self, ctx: &egui::Context, action: ShortcutAction) {
+        if self.clip_operation_fence_active() {
+            if action == ShortcutAction::Stop {
+                self.stop();
+            }
+            return;
+        }
         if self.pending_plugin_slot_config.is_some() && action != ShortcutAction::Stop {
             return;
         }
@@ -13390,6 +13731,9 @@ impl CitrusApp {
     }
 
     fn update_project_state(&mut self) {
+        if self.clip_operation_fence_active() {
+            return;
+        }
         // A Piano Roll transform mutates a private preview candidate in `self.project`.
         // Never dirty-check or autosave that candidate before Accept commits it.
         if self.piano_roll_transform.is_some() {
@@ -14315,6 +14659,9 @@ impl CitrusApp {
     }
 
     fn drive_timeline_audio_sync(&mut self) {
+        if self.clip_session_retirement_pending() || !self.clip_render_allows_timeline_dispatch() {
+            return;
+        }
         if self.plugin_processing_retry_required {
             return;
         }
@@ -14382,6 +14729,9 @@ impl CitrusApp {
     }
 
     fn drive_timeline_transport_activation(&mut self) {
+        if self.clip_session_retirement_pending() || !self.clip_render_allows_timeline_dispatch() {
+            return;
+        }
         if !self.timeline_insert_replacements_ready() {
             return;
         }
@@ -14467,6 +14817,9 @@ impl CitrusApp {
     }
 
     fn drive_timeline_loop_chase(&mut self) {
+        if self.clip_session_retirement_pending() || !self.clip_render_allows_timeline_dispatch() {
+            return;
+        }
         let Some(timeline) = self
             .timeline_audio_source
             .as_ref()
@@ -14531,6 +14884,9 @@ impl CitrusApp {
     }
 
     fn drive_timeline_seek_chase(&mut self) {
+        if self.clip_session_retirement_pending() || !self.clip_render_allows_timeline_dispatch() {
+            return;
+        }
         let Some(timeline) = self
             .timeline_audio_source
             .as_ref()
@@ -14646,7 +15002,8 @@ impl CitrusApp {
     /// These operations retain a whole Project that can replace the current one later.
     /// Keep import completion and native editor opening on the same snapshot boundary.
     fn project_snapshot_transition_pending(&self) -> bool {
-        self.pending_plugin_slot_config.is_some()
+        self.clip_operation_fence_active()
+            || self.pending_plugin_slot_config.is_some()
             || !self.project_lifecycle.is_idle()
             || self.deferred_project_intent_after_midi.is_some()
             || self.deferred_recovery_project_after_midi.is_some()
@@ -14654,7 +15011,8 @@ impl CitrusApp {
     }
 
     fn project_lifecycle_barriers_active(&self) -> bool {
-        self.pending_plugin_slot_config.is_some()
+        self.clip_operation_fence_active()
+            || self.pending_plugin_slot_config.is_some()
             || self.audio_restart_state.locks_session_actions()
             || self.save_barrier.is_some()
             || self.queued_save_request.is_some()
@@ -14666,6 +15024,9 @@ impl CitrusApp {
     }
 
     fn request_project_intent(&mut self, intent: ProjectIntent) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         if self.pending_plugin_slot_config.is_some() {
             self.notify(
                 "Wait for plug-in configuration state capture before changing projects or closing"
@@ -14693,6 +15054,7 @@ impl CitrusApp {
             self.notify("Restore or discard the recovery point before changing projects".into());
             return;
         }
+        self.pending_discard_quit_session = None;
         let dirty = self.project_is_dirty_now();
         let barriers_active = self.project_lifecycle_barriers_active();
         if let Some(intent) = self
@@ -14704,6 +15066,9 @@ impl CitrusApp {
     }
 
     fn drive_project_lifecycle(&mut self) {
+        if self.clip_operation_fence_active() {
+            return;
+        }
         let stop_requested = matches!(
             self.project_lifecycle,
             ProjectLifecycle::WaitingForBarriers {
@@ -14801,25 +15166,39 @@ impl CitrusApp {
         let Some(intent) = self.project_lifecycle.discard() else {
             return;
         };
-        let discards_for_quit = matches!(&intent, ProjectIntent::Quit);
-        if was_dirty && discards_for_quit {
+        self.pending_discard_quit_session =
+            (was_dirty && matches!(&intent, ProjectIntent::Quit)).then_some(self.project_session);
+        self.commit_project_intent(intent);
+    }
+
+    fn finish_quit_project_intent(&mut self) {
+        if self.pending_discard_quit_session.take() == Some(self.project_session) {
             if let Some(path) = &self.autosave_path {
                 let _ = std::fs::remove_file(path);
             }
             self.recovery_available = false;
             self.suppress_drop_recovery = true;
         }
-        self.commit_project_intent(intent);
+        self.project_lifecycle.arm_exit();
     }
 
     fn cancel_project_lifecycle(&mut self) {
         if self.project_lifecycle.cancel() {
+            self.pending_discard_quit_session = None;
             self.notify("Project transition canceled".into());
         }
     }
 
     fn intercept_window_close_request(&mut self, ctx: &egui::Context) -> bool {
         let close_requested = ctx.input(|input| input.viewport().close_requested());
+        if close_requested
+            && (self.clip_operation_fence_active() || self.clip_restoration_resources_pending())
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.cancel_clip_render_job();
+            self.notify("Waiting for clip conversion owners to finish before closing".into());
+            return true;
+        }
         if !close_requested || self.project_lifecycle.exit_is_armed() {
             return false;
         }
@@ -14837,6 +15216,11 @@ impl CitrusApp {
     }
 
     fn dispatch_armed_window_close(&mut self, ctx: &egui::Context, canceled_this_frame: bool) {
+        if self.clip_operation_fence_active() || self.clip_restoration_resources_pending() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.cancel_clip_render_job();
+            return;
+        }
         if canceled_this_frame && self.project_lifecycle.exit_is_armed() {
             ctx.request_repaint();
         } else if self.project_lifecycle.mark_close_command_sent() {
@@ -15001,14 +15385,22 @@ impl CitrusApp {
     }
 
     fn commit_project_intent(&mut self, intent: ProjectIntent) {
+        if !matches!(&intent, ProjectIntent::Quit) {
+            self.pending_discard_quit_session = None;
+        }
         if !self.midi_input.state.is_disconnected() {
             self.deferred_project_intent_after_midi = Some(intent);
             self.request_midi_input_disconnect(MidiInputDisconnectReason::ProjectChange);
             return;
         }
+        let Some(intent) = self.defer_clip_session_intent(intent) else {
+            return;
+        };
         match intent {
             ProjectIntent::New => {
-                self.install_project(Project::blank(), None, false);
+                if !self.install_project(Project::blank(), None, false) {
+                    return;
+                }
                 self.project_lifecycle = ProjectLifecycle::Idle;
                 self.notify("Created a new blank project".into());
             }
@@ -15027,42 +15419,80 @@ impl CitrusApp {
                         return;
                     }
                 };
-                let diagnostic_count = project.migration_diagnostics.len();
-                self.install_project(project, Some(path.clone()), false);
-                self.project_lifecycle = ProjectLifecycle::Idle;
-                let midi_warning =
-                    self.project
-                        .migration_diagnostics
-                        .iter()
-                        .find_map(|diagnostic| {
-                            if let crate::model::ProjectMigrationDiagnostic::MidiRoutingDisabled {
-                                reason,
-                            } = diagnostic
-                            {
-                                Some(reason.clone())
-                            } else {
-                                None
-                            }
-                        });
-                if let Some(reason) = midi_warning {
-                    self.notify(format!(
-                        "Opened {}. MIDI routing disabled safely: {reason}",
-                        path.display()
-                    ));
-                } else if diagnostic_count == 0 {
-                    self.notify(format!("Opened {}", path.display()));
-                } else {
-                    self.notify(format!(
-                        "Opened {} with {diagnostic_count} v7 migration diagnostic(s); unresolved Piano routes and audio offsets are highlighted",
-                        path.display()
-                    ));
-                }
+                self.finish_open_project(project, path);
             }
-            ProjectIntent::Quit => self.project_lifecycle.arm_exit(),
+            ProjectIntent::Quit => self.finish_quit_project_intent(),
         }
     }
 
-    fn install_project(&mut self, project: Project, saved_path: Option<PathBuf>, dirty: bool) {
+    pub(super) fn finish_open_project(&mut self, project: Project, path: PathBuf) -> bool {
+        let diagnostic_count = project.migration_diagnostics.len();
+        if !self.install_project(project, Some(path.clone()), false) {
+            return false;
+        }
+        self.project_lifecycle = ProjectLifecycle::Idle;
+        let midi_warning = self
+            .project
+            .migration_diagnostics
+            .iter()
+            .find_map(|diagnostic| {
+                if let crate::model::ProjectMigrationDiagnostic::MidiRoutingDisabled { reason } =
+                    diagnostic
+                {
+                    Some(reason.clone())
+                } else {
+                    None
+                }
+            });
+        if let Some(reason) = midi_warning {
+            self.notify(format!(
+                "Opened {}. MIDI routing disabled safely: {reason}",
+                path.display()
+            ));
+        } else if diagnostic_count == 0 {
+            self.notify(format!("Opened {}", path.display()));
+        } else {
+            self.notify(format!(
+                        "Opened {} with {diagnostic_count} v7 migration diagnostic(s); unresolved Piano routes and audio offsets are highlighted",
+                        path.display()
+                    ));
+        }
+        true
+    }
+
+    fn finish_recovery_project(&mut self, project: Project) -> bool {
+        let diagnostic_count = project.migration_diagnostics.len();
+        if !self.install_project(project, None, true) {
+            return false;
+        }
+        self.recovery_available = false;
+        if diagnostic_count == 0 {
+            self.notify("Autosave restored - save the project to keep it".into());
+        } else {
+            self.notify(format!("Autosave restored with {diagnostic_count} v7 migration diagnostic(s); unresolved Piano routes and audio offsets are highlighted"));
+        }
+        true
+    }
+
+    fn install_project(
+        &mut self,
+        project: Project,
+        saved_path: Option<PathBuf>,
+        dirty: bool,
+    ) -> bool {
+        if self.running_generator_chains.values().any(|source| {
+            self.clip_render_restorations
+                .contains_key(&source.instance_id)
+        }) {
+            self.notify(
+                "Finish retained source shutdown through New/Open before replacing this session"
+                    .into(),
+            );
+            return false;
+        }
+        if self.clip_render_reject_mutation() {
+            return false;
+        }
         debug_assert!(!self.project_lifecycle_barriers_active());
         debug_assert!(self.midi_input.state.is_disconnected());
         self.stop();
@@ -15075,6 +15505,17 @@ impl CitrusApp {
         self.plugin_parameter_edit_draft_desired.clear();
         self.project_media.close();
         self.project_session = next_project_session(self.project_session);
+        if let Some(audio) = &mut self.audio {
+            assert!(audio.set_project_session(self.project_session));
+        }
+        self.fresh_bounce_sources.clear();
+        self.clip_render_restorations.clear();
+        self.retained_clip_media.clear();
+        self.retained_clip_pcm_bytes = 0;
+        self.clip_restoration_installs.clear();
+        self.clip_restoration_timeline = None;
+        self.clip_restoration_playback_pending = false;
+        self.clip_restoration_failed = false;
         self.piano_clipboard.clear();
         self.cached_audio_assets.clear();
         self.pending_generator_routes.clear();
@@ -15136,6 +15577,7 @@ impl CitrusApp {
         self.rebuild_all_generator_chains();
         self.queue_project_audio_assets();
         self.refresh_timeline_fingerprint(Instant::now(), true);
+        true
     }
 
     fn autosave(&mut self) {
@@ -15230,7 +15672,8 @@ impl CitrusApp {
     }
 
     fn plugin_topology_is_settling(&self) -> bool {
-        !self.pending_insert_chains.is_empty()
+        !self.pending_clip_restorations.is_empty()
+            || !self.pending_insert_chains.is_empty()
             || !self.pending_insert_removals.is_empty()
             || !self.deferred_insert_rebuilds.is_empty()
             || !self.pending_generator_chains.is_empty()
@@ -15389,6 +15832,9 @@ impl CitrusApp {
     }
 
     fn poll_save_barrier(&mut self) {
+        if self.clip_operation_fence_active() {
+            return;
+        }
         let Some(mut barrier) = self.save_barrier.take() else {
             return;
         };
@@ -15681,6 +16127,8 @@ impl CitrusApp {
                     });
                     ui.menu_button(RichText::new("EDIT").size(10.0), |ui| {
                         ui.set_min_width(180.0);
+                        self.selected_clip_render_button(ui);
+                        ui.separator();
                         if ui
                             .add_enabled(
                                 !self.undo_stack.is_empty(),
@@ -16372,6 +16820,7 @@ impl CitrusApp {
         if plugin_target_is_valid(&self.project, target) {
             self.plugin_picker_target = Some(target);
             self.plugin_picker_show_all = false;
+            self.plugin_picker_fresh_bounce = false;
             self.show_plugins = true;
         } else {
             self.notify("The selected mixer slot is no longer available".into());
@@ -16383,6 +16832,20 @@ impl CitrusApp {
         descriptor: &PluginDescriptor,
         target: PluginPickerTarget,
     ) -> bool {
+        if self.clip_render_reject_mutation() {
+            return false;
+        }
+        if let PluginPickerTarget::ChannelDevice { channel } = target
+            && self
+                .project
+                .channels
+                .get(channel)
+                .and_then(|channel| channel.instrument_plugin_instance_id)
+                .is_some_and(|id| self.clip_render_restorations.contains_key(&id))
+        {
+            self.notify("Use Undo for this conversion's retained source; replacing its assigned plug-in is unavailable in this session".into());
+            return false;
+        }
         if !self.audio_restart_state.allows_realtime_session_actions() {
             self.notify("Plug-in changes are locked while audio is degraded or restarting".into());
             return false;
@@ -16412,16 +16875,29 @@ impl CitrusApp {
                 };
                 let previous_state = snapshot_channel_generator(&self.project, channel_id);
                 let mut candidate = self.project.clone();
-                commit_loaded_plugin(&mut candidate, target, descriptor).and_then(|_| {
-                    self.queue_channel_generator_candidate(channel_id, candidate, previous_state)
-                })
+                self.commit_plugin_with_reserved_source_ids(&mut candidate, target, descriptor)
+                    .and_then(|instance_id| {
+                        if self.plugin_picker_fresh_bounce {
+                            self.record_fresh_clip_source_for_new_load(instance_id, descriptor)?;
+                        }
+                        let result = self.queue_channel_generator_candidate(
+                            channel_id,
+                            candidate,
+                            previous_state,
+                        );
+                        if result.is_err() {
+                            self.fresh_bounce_sources.remove(&instance_id);
+                        }
+                        result
+                    })
             }
             PluginPickerTarget::MixerSlot { track, .. } => {
                 let previous_state = snapshot_mixer_plugin_track(&self.project, track);
                 let mut candidate = self.project.clone();
-                commit_loaded_plugin(&mut candidate, target, descriptor).and_then(|_| {
-                    self.queue_mixer_track_candidate(track, candidate, Some(previous_state))
-                })
+                self.commit_plugin_with_reserved_source_ids(&mut candidate, target, descriptor)
+                    .and_then(|_| {
+                        self.queue_mixer_track_candidate(track, candidate, Some(previous_state))
+                    })
             }
         };
         match result {
@@ -16448,12 +16924,19 @@ impl CitrusApp {
         bypass: bool,
         wet: f32,
     ) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         if !self.audio_restart_state.allows_realtime_session_actions() {
             self.notify("Plug-in controls are locked while audio is degraded or restarting".into());
             return;
         }
         if self.save_barrier.is_some() {
             self.notify("Plug-in changes are unavailable while state is being saved".into());
+            return;
+        }
+        if self.clip_render_restorations.contains_key(&instance_id) {
+            self.notify("Use Undo to restore this conversion's retained source. Configuration replacement is unavailable for its session-bound restoration identity".into());
             return;
         }
         if !wet.is_finite() {
@@ -16593,6 +17076,9 @@ impl CitrusApp {
     }
 
     fn drive_plugin_slot_config_capture(&mut self) {
+        if self.clip_operation_fence_active() {
+            return;
+        }
         let Some(mut pending) = self.pending_plugin_slot_config.take() else {
             return;
         };
@@ -16769,6 +17255,12 @@ impl CitrusApp {
             .ok_or("audio is unavailable")?
             .snapshot()
             .sample_rate as f32;
+        if ids
+            .iter()
+            .any(|id| self.clip_render_restorations.contains_key(id))
+        {
+            return Err("Use Undo for this retained source; direct configuration replacement is unavailable".into());
+        }
         let chain = self.plugin_host.spawn_identified_chain(
             ids.iter().copied().zip(specs).collect(),
             sample_rate,
@@ -17237,6 +17729,9 @@ impl CitrusApp {
             )
         };
 
+        if kind == ClipKind::Pattern {
+            self.selected_clip_render_button(ui);
+        }
         if kind == ClipKind::Automation {
             self.automation_inspector(ui, automation_id, clip_start, clip_length, source_offset);
         }
@@ -18528,6 +19023,9 @@ impl CitrusApp {
     }
 
     fn save_project(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         if !self.project_lifecycle.is_idle() {
             self.notify("Use the active project transition dialog to save or cancel".into());
             return;
@@ -18551,6 +19049,9 @@ impl CitrusApp {
     }
 
     fn save_project_as(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         if !self.project_lifecycle.is_idle() {
             self.notify("Save As is unavailable during a project transition".into());
             return;
@@ -18573,6 +19074,9 @@ impl CitrusApp {
     }
 
     fn import_audio(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         if self.audio_import_receiver.is_some() {
             return;
         }
@@ -18586,6 +19090,9 @@ impl CitrusApp {
     }
 
     fn start_audio_import_path(&mut self, path: PathBuf) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         if self.audio_import_receiver.is_some() {
             return;
         }
@@ -18625,6 +19132,9 @@ impl CitrusApp {
     }
 
     fn poll_audio_import(&mut self) {
+        if self.clip_operation_fence_active() {
+            return;
+        }
         let Some(receiver) = &self.audio_import_receiver else {
             return;
         };
@@ -18687,6 +19197,10 @@ impl CitrusApp {
             }
         };
         let (asset_id, clip_id) = (prepared.asset_id, prepared.clip_id);
+        if self.retained_clip_media.contains_key(&asset_id) {
+            self.report_audio_import_error("This asset ID is reserved by a converted clip in session history; the imported file and Project are unchanged".into());
+            return;
+        }
         if !commit_explicit_project_history_transaction(
             &mut self.project,
             &mut self.history_snapshot,
@@ -18714,6 +19228,11 @@ impl CitrusApp {
     }
 
     fn queue_audio_asset_load(&self, asset_id: u64, path: PathBuf) {
+        if self.retained_clip_media.contains_key(&asset_id) {
+            // Retained conversions are restored by exact Arc authority upstream.
+            // A generic decoder never gets authority to replace this allocation.
+            return;
+        }
         let sender = self.audio_asset_sender.clone();
         let generation = self.audio_asset_generation;
         std::thread::spawn(move || {
@@ -18739,6 +19258,9 @@ impl CitrusApp {
     }
 
     fn drive_audio_asset_clear(&mut self) {
+        if self.clip_session_retirement_pending() || !self.clip_render_allows_asset_dispatch() {
+            return;
+        }
         if !self.audio_restart_state.allows_runtime_dispatch() {
             return;
         }
@@ -18761,6 +19283,9 @@ impl CitrusApp {
     }
 
     fn drive_prepared_audio_asset_registrations(&mut self) {
+        if self.clip_session_retirement_pending() || !self.clip_render_allows_asset_dispatch() {
+            return;
+        }
         if !self.audio_restart_state.allows_runtime_dispatch() {
             return;
         }
@@ -18921,6 +19446,9 @@ impl CitrusApp {
             ));
         }
         for asset_id in required {
+            // A retained producer binding wins before even a loaded/cache hit.
+            // ID/path/extent drift must not reuse a previously installed asset.
+            self.try_restore_retained_clip_asset(asset_id)?;
             if (self.pending_audio_asset_clear.is_none()
                 && self.loaded_audio_assets.get(&asset_id) == Some(&asset_id)
                 && !self
@@ -19044,6 +19572,9 @@ impl CitrusApp {
             let Some(event) = event else {
                 break;
             };
+            if self.consume_clip_render_asset_event(event) {
+                continue;
+            }
             self.apply_audio_asset_event(event);
         }
         self.drive_audio_asset_clear();
@@ -19051,16 +19582,30 @@ impl CitrusApp {
     }
 
     fn poll_audio_asset_loads(&mut self) {
+        if self.clip_render_fence_active() {
+            for _ in 0..audio::MAX_REGISTERED_AUDIO_ASSETS {
+                if self.audio_asset_receiver.try_recv().is_err() {
+                    break;
+                }
+                self.cancel_clip_render_job();
+            }
+            return;
+        }
         loop {
             match self.audio_asset_receiver.try_recv() {
                 Ok(Ok((generation, asset_id, asset))) => {
-                    if audio_asset_load_is_current(generation, self.audio_asset_generation) {
+                    if audio_asset_load_is_current(generation, self.audio_asset_generation)
+                        && self.loading_audio_assets.get(&asset_id) == Some(&generation)
+                    {
                         self.loading_audio_assets.remove(&asset_id);
                         self.failed_audio_assets.remove(&asset_id);
                         self.register_audio_asset(asset_id, asset);
                     }
                 }
                 Ok(Err(failure)) => {
+                    if self.retained_clip_media.contains_key(&failure.asset_id) {
+                        continue;
+                    }
                     if audio_asset_load_is_current(failure.generation, self.audio_asset_generation)
                     {
                         self.loading_audio_assets.remove(&failure.asset_id);
@@ -19073,6 +19618,19 @@ impl CitrusApp {
     }
 
     fn register_audio_asset(&mut self, asset_id: u64, asset: wav::WavAsset) {
+        if self.retained_clip_media.contains_key(&asset_id) {
+            // The incoming decoder result cannot change Project metadata or PCM.
+            if let Err(error) = self.try_restore_retained_clip_asset(asset_id) {
+                self.clip_restoration_failed = true;
+                self.clip_restoration_playback_pending = true;
+                self.playing = false;
+                if let Some(audio) = &self.audio {
+                    audio.set_playing(false);
+                }
+                self.fault_timeline_audio(error);
+            }
+            return;
+        }
         if asset_id == 0 {
             self.notify("Audio asset 0 is invalid and was not registered".into());
             return;
@@ -19144,6 +19702,9 @@ impl CitrusApp {
     }
 
     fn import_midi(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         if self.pending_midi_import.is_some() || self.pending_midi_export.is_some() {
             self.notify("Finish or cancel the open MIDI routing dialog first".into());
             return;
@@ -19173,6 +19734,9 @@ impl CitrusApp {
     }
 
     fn export_midi(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         if self.pending_midi_import.is_some() || self.pending_midi_export.is_some() {
             self.notify("Finish or cancel the open MIDI routing dialog first".into());
             return;
@@ -19226,6 +19790,9 @@ impl CitrusApp {
     }
 
     fn confirm_midi_import(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         let Some(pending) = self.pending_midi_import.clone() else {
             return;
         };
@@ -19268,6 +19835,9 @@ impl CitrusApp {
     }
 
     fn confirm_midi_export(&mut self) {
+        if self.clip_render_reject_mutation() {
+            return;
+        }
         let Some(pending) = self.pending_midi_export.clone() else {
             return;
         };
@@ -19327,6 +19897,9 @@ impl CitrusApp {
     }
 
     fn export_wav(&mut self) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         if !self.export_dialog.is_open() && !self.export_job.is_running() {
             self.export_error = None;
         }
@@ -19343,6 +19916,9 @@ impl CitrusApp {
     }
 
     fn confirm_wav_export(&mut self) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         let Some(options) = self
             .export_dialog
             .begin_destination(self.project_session, self.export_job.is_running())
@@ -19426,6 +20002,9 @@ impl CitrusApp {
     }
 
     fn open_project(&mut self) {
+        if self.clip_render_reject_control() {
+            return;
+        }
         if !self.project_lifecycle.is_idle() {
             self.notify("Finish or cancel the current project transition first".into());
             return;
@@ -19553,6 +20132,30 @@ impl eframe::App for CitrusApp {
             self.dispatch_armed_window_close(&ctx, close_canceled_this_frame);
             return;
         }
+        if !self.clip_operation_fence_active()
+            && ctx.input(|input| {
+                input.events.iter().any(|event| {
+                    matches!(
+                        event,
+                        egui::Event::PointerButton { pressed: true, .. }
+                            | egui::Event::Key { pressed: true, .. }
+                            | egui::Event::Text(_)
+                    )
+                })
+            })
+        {
+            self.advance_clip_model_revision();
+        }
+        if let Some(reason) = self.clip_session_retirement_reason() {
+            ui.colored_label(Color32::YELLOW, reason);
+            if self.can_cancel_clip_session_retirement()
+                && ui
+                    .button("Cancel session change; keep current Project paused")
+                    .clicked()
+            {
+                self.cancel_clip_session_retirement();
+            }
+        }
         let wide_layout = ui.available_width() >= 1280.0;
         self.poll_audio_device_catalog();
         self.poll_audio_stream_fault();
@@ -19577,6 +20180,8 @@ impl eframe::App for CitrusApp {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
         self.poll_plugin_runtime_events();
+        self.drive_clip_session_retirement();
+        self.poll_clip_restorations();
         self.drive_audio_restart();
         self.poll_plugin_parameter_callback_receipts();
         self.poll_plugin_parameter_worker_receipts();
@@ -19591,6 +20196,7 @@ impl eframe::App for CitrusApp {
         self.poll_timeline_compile(&ctx);
         self.poll_audio_asset_events();
         self.poll_timeline_audio_runtime(&ctx);
+        self.drive_clip_render_job();
         self.drive_plugin_slot_config_capture();
         if self.pending_plugin_slot_config.is_some() {
             ctx.request_repaint_after(Duration::from_millis(8));
@@ -19611,7 +20217,9 @@ impl eframe::App for CitrusApp {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
         self.poll_audio_asset_loads();
-        self.poll_project_media(&ctx);
+        if !self.clip_operation_fence_active() {
+            self.poll_project_media(&ctx);
+        }
         self.drive_audio_asset_clear();
         self.drive_prepared_audio_asset_registrations();
         self.poll_recording();
@@ -19634,6 +20242,7 @@ impl eframe::App for CitrusApp {
             || self.piano_note_properties.is_some()
             || self.project_media.open
             || self.export_dialog.is_open()
+            || self.clip_operation_fence_active()
         {
             // egui publishes a newly-created modal layer at end-of-pass. Disable the root surface
             // as well so the first modal frame cannot pass the same pointer event through.
@@ -19644,7 +20253,10 @@ impl eframe::App for CitrusApp {
             self.dispatch_armed_window_close(&ctx, close_canceled_this_frame);
             return;
         }
-        if self.project_media.open || self.export_dialog.is_open() {
+        if self.project_media.open
+            || self.export_dialog.is_open()
+            || self.clip_operation_fence_active()
+        {
             // A File-menu click can open either modal in this very pass.
             ui.disable();
         }
@@ -19657,13 +20269,20 @@ impl eframe::App for CitrusApp {
         if self.show_inspector && wide_layout {
             self.inspector(ui);
         }
+        if self.clip_operation_fence_active() {
+            ui.disable();
+        }
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(theme::BG))
             .show(ui, |ui| self.editor_workspace(ui));
 
-        let exclusive_project_modal =
-            self.project_lifecycle.is_modal() || self.recovery_available || self.project_media.open;
+        self.clip_render_review_ui(&ctx);
+
+        let exclusive_project_modal = self.project_lifecycle.is_modal()
+            || self.recovery_available
+            || self.project_media.open
+            || self.clip_operation_fence_active();
         if self.project_media.open && !self.project_lifecycle.is_modal() && !self.recovery_available
         {
             self.project_media_dialog(&ctx);
@@ -24894,6 +25513,11 @@ impl CitrusApp {
                         .size(9.0)
                         .color(theme::ORANGE),
                     );
+                    if cfg!(all(target_os = "linux", feature = "experimental-fresh-helper"))
+                        && matches!(target, PluginPickerTarget::ChannelDevice { .. }) {
+                        ui.checkbox(&mut self.plugin_picker_fresh_bounce, "Experimental dry-bounce source (new VST3 load only)")
+                            .on_hover_text("Prepares the newly loaded generator for selected-clip rendering. Existing sources are never silently reconfigured.");
+                    }
                     ui.checkbox(
                         &mut self.plugin_picker_show_all,
                         "Show all classifications (allows scanner override)",
@@ -25002,6 +25626,7 @@ impl CitrusApp {
         if !open {
             self.plugin_picker_target = None;
             self.plugin_picker_show_all = false;
+            self.plugin_picker_fresh_bounce = false;
         }
     }
 
@@ -26712,7 +27337,6 @@ impl CitrusApp {
             let result = self.autosave_path.as_ref().map(|path| Project::load(path));
             match result {
                 Some(Ok(project)) => {
-                    let diagnostic_count = project.migration_diagnostics.len();
                     if !self.midi_input.state.is_disconnected() {
                         self.deferred_recovery_project_after_midi = Some(project);
                         self.request_midi_input_disconnect(
@@ -26720,15 +27344,7 @@ impl CitrusApp {
                         );
                         return;
                     }
-                    self.install_project(project, None, true);
-                    self.recovery_available = false;
-                    if diagnostic_count == 0 {
-                        self.notify("Autosave restored - save the project to keep it".into());
-                    } else {
-                        self.notify(format!(
-                            "Autosave restored with {diagnostic_count} v7 migration diagnostic(s); unresolved Piano routes and audio offsets are highlighted"
-                        ));
-                    }
+                    self.finish_recovery_project(project);
                 }
                 Some(Err(error)) => self.notify(format!("Recovery failed: {error}")),
                 None => self.recovery_available = false,

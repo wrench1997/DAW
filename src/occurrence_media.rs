@@ -197,6 +197,86 @@ impl VerifiedOccurrenceMedia {
     pub(crate) fn into_parts(self) -> (PublishedOccurrenceRender, WavAsset) {
         (self.published, self.asset)
     }
+    /// Consumes the genuine verified buffer. No caller can pair this receipt
+    /// with unrelated samples. This owner's full request graph reference is released here.
+    /// Stable Arc allocation has the same reviewed process-OOM limitation as
+    /// the App's former Vec-to-Arc staging; it is not fallible allocation.
+    pub(crate) fn into_verified_pcm(self) -> VerifiedOccurrencePcm {
+        let proof = self.published.provenance();
+        let request = proof.request();
+        let binding = CompactOccurrenceBinding {
+            stamp: request.stamp(),
+            source: proof.identity(),
+            clip_id: request.clip_id(),
+            pattern_id: request.pattern_id(),
+            start_frame: request.start_frame(),
+            end_frame: request.end_frame(),
+            song_frames: request.song_frames(),
+            tail_frames: request.tail_frames(),
+            sample_rate: request.sample_rate(),
+            native_generation: proof.native_generation(),
+            native_dirty_revision: proof.native_dirty_revision(),
+        };
+        let PublishedOccurrenceRender {
+            provenance,
+            publication,
+        } = self.published;
+        drop(provenance);
+        VerifiedOccurrencePcm {
+            binding,
+            publication,
+            samples: std::sync::Arc::from(self.asset.samples),
+        }
+    }
+}
+
+/// Bounded scalar provenance only: deliberately no request, snapshot, event
+/// schedule, opaque plugin state, metadata strings, or CaptureProof Arc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CompactOccurrenceBinding {
+    pub(crate) stamp: crate::occurrence_request::OccurrenceStamp,
+    pub(crate) source: crate::instrument_bounce::BounceSourceIdentity,
+    pub(crate) clip_id: u32,
+    pub(crate) pattern_id: u32,
+    pub(crate) start_frame: u64,
+    pub(crate) end_frame: u64,
+    pub(crate) song_frames: u64,
+    pub(crate) tail_frames: u32,
+    pub(crate) sample_rate: u32,
+    pub(crate) native_generation: u64,
+    pub(crate) native_dirty_revision: u64,
+}
+
+/// Producer-owned session authority for exactly the verified PCM. Fields and
+/// construction stay private; callers may only share immutable Arc handles.
+#[derive(Debug)]
+pub(crate) struct VerifiedOccurrencePcm {
+    binding: CompactOccurrenceBinding,
+    publication: PublishedFloat32,
+    samples: std::sync::Arc<[f32]>,
+}
+impl VerifiedOccurrencePcm {
+    pub(crate) fn binding(&self) -> CompactOccurrenceBinding {
+        self.binding
+    }
+    pub(crate) fn path(&self) -> &Path {
+        self.publication.path()
+    }
+    pub(crate) fn file_identity(&self) -> PublishedFileIdentity {
+        self.publication.identity()
+    }
+    pub(crate) fn sample_rate(&self) -> u32 {
+        self.publication.sample_rate()
+    }
+    pub(crate) fn channels(&self) -> u16 {
+        2
+    }
+    pub(crate) fn frames(&self) -> usize {
+        self.publication.frames()
+    }
+    pub(crate) fn samples(&self) -> &std::sync::Arc<[f32]> {
+        &self.samples
+    }
 }
 
 #[derive(Debug)]
@@ -466,6 +546,31 @@ pub(crate) struct VerificationReceipt {
 }
 
 impl VerificationAdmission {
+    /// Exact retained ownership, unlike the process-wide busy admission query.
+    /// Used by the App panic/drain path when receipt handoff was interrupted.
+    pub(crate) fn owns_pending(&self) -> bool {
+        VERIFICATION_SLOT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|job| std::sync::Arc::ptr_eq(&job.owner, &self.owner))
+    }
+
+    /// Drain only this owner's abandoned worker using its original ticket.
+    /// Another admission's worker cannot be joined or consumed through this seam.
+    pub(crate) fn poll_abandoned_owned(&self) -> Option<VerificationOutcome> {
+        let ticket = {
+            let slot = VERIFICATION_SLOT
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let job = slot
+                .as_ref()
+                .filter(|job| job.abandoned && std::sync::Arc::ptr_eq(&job.owner, &self.owner))?;
+            std::sync::Arc::clone(&job.ticket)
+        };
+        poll_verifier(Some(&ticket))
+    }
+
     pub(crate) fn is_busy(&self) -> bool {
         VERIFICATION_SLOT
             .lock()

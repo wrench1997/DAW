@@ -507,6 +507,78 @@ impl NativePluginHost {
         )
     }
 
+    /// Explicit new-load opt-in; ordinary identified chains are unchanged.
+    pub(crate) fn spawn_fresh_bounce_source(
+        &self,
+        instance_id: u64,
+        mut spec: plugin_runtime::PluginLoadSpec,
+        sample_rate: f32,
+        max_block_frames: u32,
+    ) -> Result<plugin_runtime::PluginChain, String> {
+        prepare_runtime_spec(&mut spec)?;
+        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        {
+            plugin_runtime::PluginChain::spawn_fresh_bounce_source(
+                instance_id,
+                spec,
+                plugin_runtime::PluginPrepareConfig {
+                    sample_rate: f64::from(sample_rate),
+                    max_block_frames: max_block_frames as usize,
+                },
+            )
+        }
+        #[cfg(not(all(target_os = "linux", feature = "experimental-fresh-helper")))]
+        {
+            let _ = (instance_id, spec, sample_rate, max_block_frames);
+            Err(
+                "Experimental fresh-source loading requires Linux and experimental-fresh-helper"
+                    .into(),
+            )
+        }
+    }
+
+    /// Session-bound recreation from authoritative conversion history.
+    #[allow(clippy::too_many_arguments)] // explicit session/class/source authority
+    pub(crate) fn spawn_recreated_source(
+        &self,
+        project_session: u64,
+        instance_id: u64,
+        mut spec: plugin_runtime::PluginLoadSpec,
+        sample_rate: f32,
+        max_block_frames: u32,
+        expectation: plugin_runtime::SourceRestorationExpectation,
+        fresh_load: bool,
+    ) -> Result<plugin_runtime::PluginChain, String> {
+        prepare_runtime_spec(&mut spec)?;
+        #[cfg(feature = "vst3")]
+        {
+            plugin_runtime::PluginChain::spawn_recreated_source(
+                project_session,
+                instance_id,
+                spec,
+                plugin_runtime::PluginPrepareConfig {
+                    sample_rate: f64::from(sample_rate),
+                    max_block_frames: max_block_frames as usize,
+                },
+                expectation,
+                fresh_load,
+            )
+        }
+        #[cfg(not(feature = "vst3"))]
+        {
+            let _ = (
+                project_session,
+                instance_id,
+                spec,
+                sample_rate,
+                max_block_frames,
+                expectation,
+                fresh_load,
+            );
+            Err("This build does not include VST3 source restoration".into())
+        }
+    }
+
     /// Spawn one ordered chain whose physical slots carry the project's stable,
     /// nonzero plug-in instance identities. This is the production entry point
     /// for chains that may receive compiled Timeline parameter automation.

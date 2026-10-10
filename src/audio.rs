@@ -127,6 +127,17 @@ const TIMELINE_PACKET_CAPACITY: usize = MAX_TIMELINE_PLANNED_EVENTS;
 const TIMELINE_CHANNEL_BASE_TABLE_CAPACITY: usize = 8_192;
 const SYNC_DRIFT_OUTPUT_FRAMES: f64 = 256.0;
 const PDC_TAP_CROSSFADE_FRAMES: u32 = 128;
+// Never reuse an engine identity, including across failed device preparations.
+// Exhaustion refuses a new engine instead of wrapping into an old receipt domain.
+static NEXT_AUDIO_ENGINE_SESSION: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_audio_engine_session() -> Result<u64> {
+    NEXT_AUDIO_ENGINE_SESSION
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| anyhow!("Audio engine session identities are exhausted"))
+}
 
 const _: () = assert!(TRACK_COUNT == PDC_TRACK_COUNT);
 const _: () = assert!(TRACK_COUNT == TIMELINE_MIXER_PAN_RELEASE_TRACKS);
@@ -569,6 +580,8 @@ pub enum AudioCommand {
     RemoveGeneratorEndpoint {
         channel_id: u32,
     },
+    /// Narrow stopped conversion transaction. A successful enqueue is not removal.
+    RemoveGeneratorEndpointStamped(GeneratorRemovalStamp),
     ClearGeneratorEndpoints {
         request_id: u64,
     },
@@ -677,6 +690,45 @@ pub enum InsertEndpointEvent {
     },
 }
 
+/// Complete binding for one stopped conversion's exact runtime endpoint.
+/// The operation ID correlates the receipt with its sole controller owner; all
+/// other identities are independently checked against callback-owned state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeneratorRemovalStamp {
+    pub operation_id: u64,
+    pub engine_session: u64,
+    pub project_session: u64,
+    pub channel_id: u32,
+    pub endpoint_id: u64,
+    pub plugin_instance_id: u64,
+    pub stopped_epoch: u64,
+}
+
+/// One-shot callback admission evidence for a recreated retained generator.
+/// This compares native timing only; it does not install a lifetime timing pin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeneratorInstallTimingExpectation {
+    pub latency_samples: u32,
+    pub tail_samples: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeneratorRemovalRejectReason {
+    InvalidStamp,
+    EngineSessionChanged,
+    ProjectSessionChanged,
+    TransportRunning,
+    TransportRequestPending,
+    TimelineTransitionPending,
+    StoppedEpochChanged,
+    MissingEndpoint,
+    EndpointChanged,
+    PluginInstanceChanged,
+    EndpointProjectChanged,
+    EndpointEpochChanged,
+    EndpointManifestChanged,
+}
+
 /// Callback-confirmed lifecycle for one Channel instrument worker endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GeneratorEndpointEvent {
@@ -693,6 +745,12 @@ pub enum GeneratorEndpointEvent {
         channel_id: u32,
         endpoint_id: Option<u64>,
         plugin_instance_id: Option<u64>,
+    },
+    /// Exclusively owned by the conversion coordinator. Never interpreted as
+    /// legacy channel-only `Removed`, including rejection and missing targets.
+    StampedRemoved {
+        stamp: GeneratorRemovalStamp,
+        result: Result<(), GeneratorRemovalRejectReason>,
     },
     Cleared {
         request_id: u64,
@@ -922,6 +980,10 @@ impl fmt::Debug for AudioCommand {
             Self::RemoveGeneratorEndpoint { channel_id } => formatter
                 .debug_struct("RemoveGeneratorEndpoint")
                 .field("channel_id", channel_id)
+                .finish(),
+            Self::RemoveGeneratorEndpointStamped(stamp) => formatter
+                .debug_tuple("RemoveGeneratorEndpointStamped")
+                .field(stamp)
                 .finish(),
             Self::ClearGeneratorEndpoints { request_id } => formatter
                 .debug_struct("ClearGeneratorEndpoints")
@@ -1252,6 +1314,8 @@ impl DeviceStreamLifecycle {
 }
 
 pub struct AudioEngine {
+    engine_session: u64,
+    project_session: Arc<AtomicU64>,
     stream: Option<Stream>,
     stream_lifecycle: DeviceStreamLifecycle,
     meter_reader: MeterReader,
@@ -1317,6 +1381,8 @@ impl AudioEngine {
         let device_name = resolved.name.clone();
         let device = resolved.device;
 
+        let engine_session = allocate_audio_engine_session()?;
+        let project_session = Arc::new(AtomicU64::new(0));
         let status = Arc::new(AudioStatus::default());
         let transport_mailbox = Arc::new(TransportMailbox::default());
         let callback_telemetry = Arc::new(CallbackTelemetry::default());
@@ -1350,6 +1416,8 @@ impl AudioEngine {
             SampleFormat::F32 => build_stream::<f32>(
                 &device,
                 &config,
+                engine_session,
+                Arc::clone(&project_session),
                 consumer,
                 retired_producer,
                 asset_event_producer,
@@ -1371,6 +1439,8 @@ impl AudioEngine {
             SampleFormat::I16 => build_stream::<i16>(
                 &device,
                 &config,
+                engine_session,
+                Arc::clone(&project_session),
                 consumer,
                 retired_producer,
                 asset_event_producer,
@@ -1392,6 +1462,8 @@ impl AudioEngine {
             SampleFormat::U16 => build_stream::<u16>(
                 &device,
                 &config,
+                engine_session,
+                Arc::clone(&project_session),
                 consumer,
                 retired_producer,
                 asset_event_producer,
@@ -1420,6 +1492,8 @@ impl AudioEngine {
         })?;
 
         Ok(Self {
+            engine_session,
+            project_session,
             stream: Some(stream),
             stream_lifecycle: DeviceStreamLifecycle::Prepared,
             meter_reader,
@@ -1475,6 +1549,28 @@ impl AudioEngine {
     /// The original flexible control-plane request used for this engine.
     pub fn device_profile(&self) -> &AudioDeviceProfile {
         &self.device_profile
+    }
+
+    /// Identity of this actual prepared stream/callback, not an App asset counter.
+    pub fn engine_session(&self) -> u64 {
+        self.engine_session
+    }
+
+    /// Bind the current App project before publishing its endpoints. The App
+    /// fences project transitions while a conversion owns an accepted command.
+    /// Zero is not a project identity and leaves the previous binding untouched.
+    /// This binding affects only the exact stamped conversion path.
+    pub fn set_project_session(&mut self, project_session: u64) -> bool {
+        if project_session == 0 {
+            return false;
+        }
+        self.project_session
+            .store(project_session, Ordering::Release);
+        true
+    }
+
+    pub fn project_session(&self) -> u64 {
+        self.project_session.load(Ordering::Acquire)
     }
 
     /// Exact stable device/configuration selected by negotiation. This is
@@ -1557,6 +1653,12 @@ impl AudioEngine {
     pub(crate) fn test_engine() -> Self {
         let (controller, _) = create_timeline_runtime();
         tests::timeline_test_engine(controller)
+    }
+
+    /// Drives the real callback kernels without creating an OS device or SDK.
+    #[cfg(test)]
+    pub(crate) fn test_engine_with_callback() -> (Self, TestAudioCallback) {
+        TestAudioCallback::new()
     }
 
     #[cfg(test)]
@@ -2068,6 +2170,7 @@ impl AudioEngine {
             plugin_instance_id,
             mixer_track,
             endpoint,
+            None,
         )
     }
 
@@ -2092,6 +2195,34 @@ impl AudioEngine {
             plugin_instance_id,
             mixer_track,
             endpoint,
+            None,
+        )
+    }
+
+    /// Recreated-source admission only. The callback independently re-reads
+    /// exact active endpoint timing before it can touch the previous generator.
+    #[allow(clippy::too_many_arguments)]
+    pub fn install_generator_endpoint_for_project_with_timing(
+        &mut self,
+        project_session: u64,
+        channel_id: u32,
+        endpoint_id: u64,
+        plugin_instance_id: u64,
+        mixer_track: usize,
+        endpoint: AudioThreadEndpoint,
+        expected_timing: GeneratorInstallTimingExpectation,
+    ) -> bool {
+        if project_session == 0 {
+            return false;
+        }
+        self.install_generator_endpoint_inner(
+            project_session,
+            channel_id,
+            endpoint_id,
+            plugin_instance_id,
+            mixer_track,
+            endpoint,
+            Some(expected_timing),
         )
     }
 
@@ -2104,6 +2235,7 @@ impl AudioEngine {
         plugin_instance_id: u64,
         mixer_track: usize,
         endpoint: AudioThreadEndpoint,
+        expected_timing: Option<GeneratorInstallTimingExpectation>,
     ) -> bool {
         if endpoint_id == 0
             || plugin_instance_id == 0
@@ -2116,6 +2248,7 @@ impl AudioEngine {
             return false;
         };
         endpoint.project_session = project_session;
+        endpoint.generator_install_timing = expected_timing;
         let Ok(pdc_delay) = StereoDelayLine::new(PDC_DEFAULT_MAX_DELAY_SAMPLES) else {
             return false;
         };
@@ -2132,6 +2265,12 @@ impl AudioEngine {
     #[allow(dead_code)]
     pub fn remove_generator_endpoint(&mut self, channel_id: u32) -> bool {
         self.command(AudioCommand::RemoveGeneratorEndpoint { channel_id })
+    }
+
+    /// Enqueue only; the conversion must retain its source owner and wait for
+    /// the exact `StampedRemoved` receipt before changing its Project/history.
+    pub fn remove_generator_endpoint_stamped(&mut self, stamp: GeneratorRemovalStamp) -> bool {
+        self.command(AudioCommand::RemoveGeneratorEndpointStamped(stamp))
     }
 
     #[allow(dead_code)]
@@ -2329,6 +2468,11 @@ impl AudioEngine {
         self.status
             .metronome_enabled
             .store(enabled, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_transport_request_id(&self) -> u64 {
+        self.transport_mailbox.control_thread_request_id()
     }
 
     pub fn set_playing(&self, playing: bool) {
@@ -3104,6 +3248,8 @@ fn observe_backend_stream_error(
 fn build_stream<T>(
     device: &cpal::Device,
     config: &StreamConfig,
+    engine_session: u64,
+    project_session: Arc<AtomicU64>,
     mut commands: Consumer<AudioCommand>,
     mut retired_assets: Producer<Arc<[f32]>>,
     mut asset_events: Producer<AudioAssetEvent>,
@@ -3138,6 +3284,9 @@ where
         PDC_DEFAULT_MAX_DELAY_SAMPLES,
         realtime_timeline_runtime,
     )?;
+    dsp.engine_session = engine_session;
+    dsp.project_session = project_session;
+    dsp.removal_transport_mailbox = Some(Arc::clone(&transport_mailbox));
     dsp.meter_publisher = Some(meter_publisher);
     dsp.retired_midi_inputs = Some(retired_midi_inputs);
     dsp.midi_input_route_events = Some(midi_input_route_events);
@@ -3151,6 +3300,7 @@ where
         move |output: &mut [T], _| {
             observe_backend_output_callback(&callback_telemetry, output.len(), channels);
             dsp.set_device_frame(transport.device_frame);
+            dsp.callback_transport_request_id = transport.request.request_id;
             dsp.set_callback_transport_boundary(
                 MidiRecordClockAnchor {
                     device_frame: transport.device_frame,
@@ -3228,6 +3378,368 @@ where
         },
         None,
     )?)
+}
+
+/// Deterministic, device-free callback owner for App transaction tests. The
+/// endpoint, media, Timeline and transport commands still use their real rings.
+#[cfg(test)]
+pub(crate) struct TestAudioCallback {
+    dsp: Box<DspState>,
+    commands: Consumer<AudioCommand>,
+    retired_assets: Producer<Arc<[f32]>>,
+    asset_events: Producer<AudioAssetEvent>,
+    transport: RealtimeTransport,
+    last_output: Vec<[f32; 2]>,
+    last_output_frames: usize,
+}
+
+/// Exact scope of the callback-owned residue fixture; no fixed-quantum FIFO is fabricated.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TestRestorationResidues {
+    pub(crate) raw_track_delays: usize,
+    pub(crate) generator_pdc: bool,
+    pub(crate) active_graph_routes: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TestRestorationResetCoverage {
+    pub(crate) extant: TestRestorationResidues,
+    pub(crate) removed_generator_endpoint: Option<u64>,
+}
+
+#[cfg(test)]
+struct TestRestorationResetArm {
+    channel_id: u32,
+    target_generation: Option<u64>,
+    engine_session: u64,
+    project_session: u64,
+    initial: TestRestorationHistories,
+}
+
+#[cfg(test)]
+struct TestRestorationResetObservation {
+    arm: TestRestorationResetArm,
+    revision: u64,
+    epoch: u64,
+    before: TestRestorationHistories,
+    after_epoch: TestRestorationHistories,
+    after_commit: Option<TestRestorationHistories>,
+}
+
+#[cfg(test)]
+type TestRestorationDelayHistory = (u64, [f32; 2]);
+
+#[cfg(test)]
+struct TestRestorationHistories {
+    engine_session: u64,
+    project_session: u64,
+    transport_epoch: u64,
+    active_voices: usize,
+    active_audio_voices: usize,
+    raw: Vec<TestRestorationDelayHistory>,
+    generator: Option<(u64, TestRestorationDelayHistory)>,
+    graph_fingerprint: Option<u64>,
+    graph: Vec<(usize, TestRestorationDelayHistory)>,
+}
+
+#[cfg(test)]
+impl TestRestorationHistories {
+    fn assert_poisoned(&self) {
+        assert!(self.active_voices > 0);
+        assert!(self.active_audio_voices > 0);
+        assert!(!self.raw.is_empty());
+        for &(age, sample) in self
+            .raw
+            .iter()
+            .chain(self.generator.iter().map(|line| &line.1))
+            .chain(self.graph.iter().map(|line| &line.1))
+        {
+            assert!(age >= 7, "pre-reset history must be readable");
+            assert_eq!(sample, [0.75, -0.75]);
+        }
+    }
+
+    fn assert_cleared(&self) {
+        assert_eq!(self.active_voices, 0);
+        assert_eq!(self.active_audio_voices, 0);
+        for &(age, sample) in self
+            .raw
+            .iter()
+            .chain(self.generator.iter().map(|line| &line.1))
+            .chain(self.graph.iter().map(|line| &line.1))
+        {
+            assert_eq!(age, 0, "real reset must zero history age before rendering");
+            assert_eq!(sample, [0.0; 2]);
+        }
+    }
+
+    fn assert_reset_from(&self, before: &Self) {
+        assert_eq!(self.engine_session, before.engine_session);
+        assert_eq!(self.project_session, before.project_session);
+        assert_eq!(self.raw.len(), before.raw.len());
+        assert_eq!(
+            self.generator.as_ref().map(|line| line.0),
+            before.generator.as_ref().map(|line| line.0)
+        );
+        assert_eq!(self.graph_fingerprint, before.graph_fingerprint);
+        assert_eq!(
+            self.graph.iter().map(|line| line.0).collect::<Vec<_>>(),
+            before.graph.iter().map(|line| line.0).collect::<Vec<_>>()
+        );
+        self.assert_cleared();
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestAudioCallback {
+    fn drop(&mut self) {
+        // This owner is always driven/destroyed on the test control thread.
+        // Production DspState::drop deliberately forgets unexpected live
+        // callback resources, so take them here before that fail-safe runs.
+        for slot in &mut self.dsp.insert_endpoints {
+            drop(slot.take());
+        }
+        for slot in &mut self.dsp.generator_endpoints {
+            drop(slot.take());
+        }
+        drop(self.dsp.master_capture.take());
+        drop(self.dsp.midi_input.take());
+        drop(self.dsp.midi_recording.take());
+        drop(self.dsp.pending_midi_recording_start.take());
+    }
+}
+
+#[cfg(test)]
+impl TestAudioCallback {
+    fn new() -> (AudioEngine, Self) {
+        let (controller, realtime) = create_timeline_runtime();
+        let mut engine = tests::timeline_test_engine(controller);
+        // No actual stream was started; fixture destruction is control-thread
+        // resource destruction, not the live-device shutdown wait contract.
+        engine.stream_lifecycle = DeviceStreamLifecycle::Prepared;
+        engine.status.sample_rate.store(48_000, Ordering::Release);
+        let (producer, commands) = RingBuffer::new(64);
+        engine.producer = producer;
+        let (retired_assets, retired) = RingBuffer::new(64);
+        engine.retired_assets = retired;
+        let (asset_events, events) = RingBuffer::new(64);
+        engine.asset_events = events;
+        let (retired_endpoints, retired) = RingBuffer::new(64);
+        engine.retired_insert_endpoints = retired;
+        let (insert_events, events) = RingBuffer::new(64);
+        engine.insert_endpoint_events = events;
+        let (generator_events, events) = RingBuffer::new(64);
+        engine.generator_endpoint_events = events;
+        let (master_capture_events, events) = RingBuffer::new(16);
+        engine.master_capture_events = events;
+        let mut dsp = Box::write(
+            Box::new_uninit(),
+            DspState::try_new_with_endpoint_io(
+                48_000.0,
+                retired_endpoints,
+                insert_events,
+                generator_events,
+                master_capture_events,
+                8192,
+                realtime,
+            )
+            .unwrap(),
+        );
+        dsp.engine_session = engine.engine_session;
+        dsp.project_session = Arc::clone(&engine.project_session);
+        dsp.removal_transport_mailbox = Some(Arc::clone(&engine.transport_mailbox));
+        let (retired_midi, retired) = RingBuffer::new(16);
+        engine.retired_midi_inputs = retired;
+        dsp.retired_midi_inputs = Some(retired_midi);
+        let (midi_events, events) = RingBuffer::new(16);
+        engine.midi_input_route_events = events;
+        dsp.midi_input_route_events = Some(midi_events);
+        let (recording_events, events) = RingBuffer::new(16);
+        engine.midi_recording_endpoint_events = events;
+        dsp.midi_recording_endpoint_events = Some(recording_events);
+        let (parameter_events, events) = RingBuffer::new(PARAMETER_EDIT_CALLBACK_EVENT_CAPACITY);
+        engine.parameter_edit_callback_events = events;
+        dsp.parameter_edit_callback_events = Some(parameter_events);
+        dsp.parameter_edit_callback_admission =
+            Arc::clone(&engine.parameter_edit_callback_admission);
+        (
+            engine,
+            Self {
+                dsp,
+                commands,
+                retired_assets,
+                asset_events,
+                transport: RealtimeTransport::default(),
+                last_output: vec![[0.0; 2]; MAX_MIXER_BLOCK_FRAMES],
+                last_output_frames: 0,
+            },
+        )
+    }
+
+    pub(crate) fn pump(&mut self, engine: &AudioEngine, frames: usize) {
+        assert_eq!(engine.engine_session, self.dsp.engine_session);
+        assert!(frames > 0 && frames <= MAX_MIXER_BLOCK_FRAMES);
+        self.last_output_frames = frames;
+        self.last_output[..frames].fill([0.0; 2]);
+        let status = &engine.status;
+        observe_backend_output_callback(&engine.callback_telemetry, frames * 2, 2);
+        self.dsp.set_device_frame(self.transport.device_frame);
+        self.dsp.callback_transport_request_id = self.transport.request.request_id;
+        self.dsp.set_callback_transport_boundary(
+            MidiRecordClockAnchor {
+                device_frame: self.transport.device_frame,
+                timeline_frame: self.transport.timeline_frame,
+                transport_epoch: self.transport.epoch,
+                loop_count: self.transport.loop_count,
+            },
+            self.transport.request.playing,
+        );
+        process_commands(
+            &mut self.dsp,
+            &mut self.commands,
+            &mut self.retired_assets,
+            &mut self.asset_events,
+        );
+        self.dsp.raw_callback_frames = frames;
+        self.dsp.requested_plugin_timing_revision = status
+            .plugin_processing
+            .requested_revision
+            .load(Ordering::Acquire);
+        self.dsp.apply_pending_timeline_commands();
+        self.dsp.refresh_pdc_plan(status, frames);
+        self.transport
+            .apply_pending_timeline_activation(status, &mut self.dsp);
+        self.transport
+            .apply_latest_request(&engine.transport_mailbox, status, &mut self.dsp);
+        if !self.dsp.admit_plugin_callback(frames) {
+            self.transport.request.playing = false;
+            self.transport.request.loop_enabled = false;
+            self.transport.device_frame = self.transport.device_frame.saturating_add(frames as u64);
+            self.transport.publish(status);
+            self.dsp.publish_plugin_epoch_status(status);
+            return;
+        }
+        self.dsp.apply_pending_timeline_commands();
+        self.dsp.refresh_pdc_plan(status, frames);
+        self.transport
+            .apply_pending_timeline_activation(status, &mut self.dsp);
+        let last_output = &mut self.last_output;
+        render_transport_chunk(
+            &mut self.dsp,
+            status,
+            &engine.transport_mailbox,
+            &mut self.transport,
+            frames,
+            |offset, output| {
+                last_output[offset..offset + output.len()].copy_from_slice(output);
+            },
+        );
+    }
+
+    pub(crate) fn last_output(&self) -> &[[f32; 2]] {
+        &self.last_output[..self.last_output_frames]
+    }
+
+    /// Poison now for queued/full-ring evidence and arm a separate, one-shot reset-contract
+    /// observation. The latter injects again at the exact real activation boundary: it does not
+    /// claim that this first poison survives arbitrary intervening callback advancement.
+    pub(crate) fn poison_restoration_residues(
+        &mut self,
+        channel_id: u32,
+    ) -> TestRestorationResidues {
+        assert!(self.dsp.test_restoration_reset_arm.is_none());
+        assert!(self.dsp.test_restoration_reset_observation.is_none());
+        let coverage = self.dsp.test_poison_restoration_histories(channel_id);
+        let initial = self.dsp.test_restoration_histories(channel_id);
+        initial.assert_poisoned();
+        self.dsp.test_restoration_reset_arm = Some(TestRestorationResetArm {
+            channel_id,
+            target_generation: None,
+            engine_session: self.dsp.engine_session,
+            project_session: self.dsp.project_session.load(Ordering::Acquire),
+            initial,
+        });
+        coverage
+    }
+
+    /// Bind the observation only after App allocates its exact restoration gate generation.
+    /// Intermediate activations cannot consume the arm; repeated same-generation calls are safe.
+    pub(crate) fn target_restoration_reset_generation(&mut self, generation: u64) {
+        assert_ne!(generation, 0);
+        if let Some(arm) = self.dsp.test_restoration_reset_arm.as_mut() {
+            assert_eq!(*arm.target_generation.get_or_insert(generation), generation);
+        } else {
+            let observed = self
+                .dsp
+                .test_restoration_reset_observation
+                .as_ref()
+                .expect("restoration reset observation must still be retained");
+            assert_eq!(observed.revision, generation);
+        }
+    }
+
+    /// Consume immutable snapshots taken inside the exact activation, before any render.
+    /// No post-render draining, tap changes, or test-side reset can manufacture this evidence.
+    pub(crate) fn assert_restoration_residues_cleared(
+        &mut self,
+        channel_id: u32,
+        expected_generation: u64,
+        expected_epoch: u64,
+    ) -> TestRestorationResetCoverage {
+        assert!(
+            self.dsp.test_restoration_reset_arm.is_none(),
+            "activation was not observed"
+        );
+        let observed = self
+            .dsp
+            .test_restoration_reset_observation
+            .take()
+            .expect("exact Timeline activation observation");
+        assert_eq!(observed.arm.channel_id, channel_id);
+        assert_eq!(observed.arm.engine_session, self.dsp.engine_session);
+        assert_eq!(
+            observed.arm.project_session,
+            self.dsp.project_session.load(Ordering::Acquire)
+        );
+        assert_eq!(observed.arm.target_generation, Some(expected_generation));
+        assert_eq!(observed.revision, expected_generation);
+        assert_eq!(observed.epoch, expected_epoch);
+        assert_eq!(observed.before.engine_session, observed.arm.engine_session);
+        assert_eq!(
+            observed.before.project_session,
+            observed.arm.project_session
+        );
+        assert!(observed.before.transport_epoch < expected_epoch);
+        assert_eq!(observed.after_epoch.transport_epoch, expected_epoch);
+        observed.arm.initial.assert_poisoned();
+        observed.before.assert_poisoned();
+        observed.after_epoch.assert_reset_from(&observed.before);
+        let committed = observed
+            .after_commit
+            .expect("activation completed before receipt");
+        committed.assert_cleared();
+        assert_eq!(committed.engine_session, observed.arm.engine_session);
+        assert_eq!(committed.project_session, observed.arm.project_session);
+        assert_eq!(committed.transport_epoch, expected_epoch);
+        assert_eq!(
+            committed.generator.as_ref().map(|line| line.0),
+            observed.before.generator.as_ref().map(|line| line.0)
+        );
+        let initial_endpoint = observed.arm.initial.generator.as_ref().map(|line| line.0);
+        let current_endpoint = observed.before.generator.as_ref().map(|line| line.0);
+        TestRestorationResetCoverage {
+            extant: TestRestorationResidues {
+                raw_track_delays: observed.before.raw.len(),
+                generator_pdc: current_endpoint.is_some(),
+                // All allocated routes are observed at a nonzero probe tap, including routes
+                // whose audible target is zero in either the outgoing or incoming plan.
+                active_graph_routes: observed.before.graph.len(),
+            },
+            removed_generator_endpoint: initial_endpoint.filter(|id| Some(*id) != current_endpoint),
+        }
+    }
 }
 
 fn process_commands(
@@ -4873,6 +5385,7 @@ pub struct PreparedFixedEndpoint {
     adapter: FixedQuantumAdapter<AudioThreadEndpoint>,
     events: EndpointFrameEvents,
     project_session: u64,
+    generator_install_timing: Option<GeneratorInstallTimingExpectation>,
     manifest: PluginEndpointManifest,
     coherent_latency: Option<PluginLatencySnapshot>,
     health_observed: crate::plugins::plugin_runtime::BridgeStats,
@@ -4900,6 +5413,7 @@ impl PreparedFixedEndpoint {
             midi_port_input: false,
             events: EndpointFrameEvents::new(),
             project_session: 0,
+            generator_install_timing: None,
             manifest,
             coherent_latency,
             health_observed: crate::plugins::plugin_runtime::BridgeStats::default(),
@@ -5650,6 +6164,14 @@ impl MixerGraphEndpointIdentityTable {
 }
 
 struct DspState {
+    #[cfg(test)]
+    test_restoration_reset_arm: Option<TestRestorationResetArm>,
+    #[cfg(test)]
+    test_restoration_reset_observation: Option<TestRestorationResetObservation>,
+    engine_session: u64,
+    project_session: Arc<AtomicU64>,
+    removal_transport_mailbox: Option<Arc<TransportMailbox>>,
+    callback_transport_request_id: u64,
     plugin_timing: PreparedPluginTimingPlan,
     plugin_timing_activation: Option<PreparedPluginTimingPlan>,
     requested_plugin_timing_revision: u64,
@@ -5882,6 +6404,14 @@ impl DspState {
         }
 
         Ok(Self {
+            #[cfg(test)]
+            test_restoration_reset_arm: None,
+            #[cfg(test)]
+            test_restoration_reset_observation: None,
+            engine_session: 0,
+            project_session: Arc::new(AtomicU64::new(0)),
+            removal_transport_mailbox: None,
+            callback_transport_request_id: 0,
             plugin_timing,
             plugin_timing_activation: None,
             requested_plugin_timing_revision: 1,
@@ -7242,6 +7772,9 @@ impl DspState {
             AudioCommand::RemoveGeneratorEndpoint { channel_id } => {
                 self.remove_generator_endpoint(channel_id);
             }
+            AudioCommand::RemoveGeneratorEndpointStamped(stamp) => {
+                self.remove_generator_endpoint_stamped(stamp);
+            }
             AudioCommand::ClearGeneratorEndpoints { request_id } => {
                 self.clear_generator_endpoints(request_id);
             }
@@ -7952,7 +8485,35 @@ impl DspState {
         actual_epoch: u64,
     ) -> CommittedTimelineTransportActivation {
         let spec = ticket.spec();
+        #[cfg(test)]
+        let test_reset_before = if self
+            .test_restoration_reset_arm
+            .as_ref()
+            .is_some_and(|arm| arm.target_generation == Some(spec.revision))
+        {
+            self.test_restoration_reset_arm.take().map(|arm| {
+                // Deterministic reset-contract injection only. No test reset or advancing read
+                // occurs between this positive witness and the production epoch reset below.
+                self.test_poison_restoration_histories(arm.channel_id);
+                let before = self.test_restoration_histories(arm.channel_id);
+                (arm, before)
+            })
+        } else {
+            None
+        };
         self.apply_transport_epoch(status, actual_epoch, spec.beat_q32);
+        #[cfg(test)]
+        if let Some((arm, before)) = test_reset_before {
+            let after_epoch = self.test_restoration_histories(arm.channel_id);
+            self.test_restoration_reset_observation = Some(TestRestorationResetObservation {
+                arm,
+                revision: spec.revision,
+                epoch: actual_epoch,
+                before,
+                after_epoch,
+                after_commit: None,
+            });
+        }
         self.plugin_topology_replan_pending = false;
         self.plugin_timing = self
             .plugin_timing_activation
@@ -8127,6 +8688,19 @@ impl DspState {
         self.timeline_plan_render_active = false;
         self.timeline_transport_beat_q32 = spec.beat_q32;
         self.publish_plugin_epoch_status(status);
+        #[cfg(test)]
+        if let Some(channel) = self
+            .test_restoration_reset_observation
+            .as_ref()
+            .filter(|observed| observed.revision == spec.revision && observed.epoch == actual_epoch)
+            .map(|observed| observed.arm.channel_id)
+        {
+            let after_commit = self.test_restoration_histories(channel);
+            self.test_restoration_reset_observation
+                .as_mut()
+                .unwrap()
+                .after_commit = Some(after_commit);
+        }
         committed
     }
 
@@ -8498,6 +9072,105 @@ impl DspState {
         // transport generation.
         self.reset_voice_and_pdc_state(beat_q32);
         self.publish_plugin_epoch_status(status);
+    }
+
+    #[cfg(test)]
+    fn test_poison_restoration_histories(&mut self, channel_id: u32) -> TestRestorationResidues {
+        let poison = [0.75, -0.75];
+        for delay in &mut self.pdc_raw_track_delays {
+            for _ in 0..16 {
+                let _ = delay.process_sample(poison);
+            }
+        }
+        let mut generator_pdc = false;
+        let mut mixer_track = 1;
+        if let Some(slot) = self
+            .generator_endpoints
+            .iter_mut()
+            .flatten()
+            .find(|slot| slot.channel_id == channel_id)
+        {
+            generator_pdc = true;
+            mixer_track = slot.mixer_track;
+            for _ in 0..16 {
+                let _ = slot.pdc_delay.process_sample(poison);
+            }
+        }
+        let mut graph_routes = 0;
+        if let Some(bank) = self
+            .timeline_runtime
+            .as_mut()
+            .and_then(RealtimeTimelineRuntime::active_mixer_delay_bank_mut)
+        {
+            for route in 0..crate::mixer_graph::MIXER_GRAPH_MAX_EDGES {
+                if let Some(delay) = bank.target_delay_samples(route) {
+                    graph_routes += usize::from(delay > 0);
+                    for _ in 0..16 {
+                        assert!(bank.process_sample(route, poison).is_some());
+                    }
+                }
+            }
+        }
+        self.track_block.fill(poison);
+        self.master_block.fill(poison);
+        self.plugin_input_left.fill(poison[0]);
+        self.plugin_input_right.fill(poison[1]);
+        self.plugin_output_left.fill(poison[0]);
+        self.plugin_output_right.fill(poison[1]);
+        self.voices[0] = Voice {
+            phase: 0.25,
+            phase_step: 0.0,
+            envelope: 1.0,
+            decay: 1.0,
+            active: true,
+            mixer_track,
+            timeline_note_id: Some(1),
+            timeline_channel_id: Some(channel_id),
+        };
+        self.audio_voices[0].active = true;
+        TestRestorationResidues {
+            raw_track_delays: self.pdc_raw_track_delays.len(),
+            generator_pdc,
+            active_graph_routes: graph_routes,
+        }
+    }
+
+    #[cfg(test)]
+    fn test_restoration_histories(&self, channel_id: u32) -> TestRestorationHistories {
+        let bank = self
+            .timeline_runtime
+            .as_ref()
+            .and_then(RealtimeTimelineRuntime::active_mixer_delay_bank);
+        TestRestorationHistories {
+            engine_session: self.engine_session,
+            project_session: self.project_session.load(Ordering::Acquire),
+            transport_epoch: self.transport_epoch,
+            active_voices: self.voices.iter().filter(|voice| voice.active).count(),
+            active_audio_voices: self
+                .audio_voices
+                .iter()
+                .filter(|voice| voice.active)
+                .count(),
+            raw: self
+                .pdc_raw_track_delays
+                .iter()
+                .map(|line| line.test_history_at_tap(7))
+                .collect(),
+            generator: self
+                .generator_endpoints
+                .iter()
+                .flatten()
+                .find(|slot| slot.channel_id == channel_id)
+                .map(|slot| (slot.endpoint_id, slot.pdc_delay.test_history_at_tap(7))),
+            graph_fingerprint: bank.map(|bank| bank.graph_fingerprint()),
+            graph: bank.map_or_else(Vec::new, |bank| {
+                (0..crate::mixer_graph::MIXER_GRAPH_MAX_EDGES)
+                    .filter_map(|route| {
+                        bank.test_history_at_tap(route, 7).map(|line| (route, line))
+                    })
+                    .collect()
+            }),
+        }
     }
 
     fn reset_voice_and_pdc_state(&mut self, beat_q32: u64) {
@@ -9054,6 +9727,10 @@ impl DspState {
                 let retirements = usize::from(self.find_generator_slot(*channel_id).is_some());
                 self.generator_lifecycle_command_ready(retirements)
             }
+            AudioCommand::RemoveGeneratorEndpointStamped(stamp) => {
+                let retirements = usize::from(self.find_generator_slot(stamp.channel_id).is_some());
+                self.generator_lifecycle_command_ready(retirements)
+            }
             AudioCommand::ClearGeneratorEndpoints { .. } => {
                 let retirements = self
                     .generator_endpoints
@@ -9481,6 +10158,36 @@ impl DspState {
         };
 
         endpoint.refresh_latency_snapshot();
+        if let Some(expected) = endpoint.generator_install_timing {
+            // This is a fresh coherent read, never a fallback to the cache
+            // populated above. Only this unpublished incoming endpoint changes.
+            let matches = endpoint.exact_endpoint_snapshot().is_some_and(|actual| {
+                actual.slot_count() == 1
+                    && actual.slot(0).is_some_and(|slot| {
+                        slot.is_active() && slot.instance_id() == plugin_instance_id
+                    })
+                    && actual.latency().total_plugin_latency_samples == expected.latency_samples
+                    && actual.tail_samples() == expected.tail_samples
+            });
+            if !matches {
+                self.retire_endpoint_resource(RetiredEndpointResource {
+                    _endpoint: endpoint,
+                    _pdc_delay: Some(pdc_delay),
+                });
+                self.emit_generator_endpoint_event(GeneratorEndpointEvent::Installed {
+                    channel_id,
+                    endpoint_id,
+                    plugin_instance_id,
+                    mixer_track,
+                    replaced_endpoint_id: None,
+                    replaced_plugin_instance_id: None,
+                    success: false,
+                });
+                return;
+            }
+            // Admission is one-shot, never a post-install lifetime pin.
+            endpoint.generator_install_timing = None;
+        }
         let epoch_sync = synchronize_endpoint_epoch(&mut endpoint, self.transport_epoch);
         if let Some(snapshot) = endpoint.coherent_latency_snapshot() {
             endpoint.set_expected_latency_revision(snapshot.revision);
@@ -9529,6 +10236,113 @@ impl DspState {
             replaced_endpoint_id,
             replaced_plugin_instance_id,
             success: true,
+        });
+    }
+
+    fn validate_generator_removal_stamp(
+        &self,
+        stamp: GeneratorRemovalStamp,
+    ) -> Result<usize, GeneratorRemovalRejectReason> {
+        use GeneratorRemovalRejectReason as Reject;
+        if stamp.operation_id == 0
+            || stamp.engine_session == 0
+            || stamp.project_session == 0
+            || stamp.endpoint_id == 0
+            || stamp.plugin_instance_id == 0
+            || stamp.stopped_epoch == 0
+        {
+            return Err(Reject::InvalidStamp);
+        }
+        if stamp.engine_session != self.engine_session {
+            return Err(Reject::EngineSessionChanged);
+        }
+        if stamp.project_session != self.project_session.load(Ordering::Acquire) {
+            return Err(Reject::ProjectSessionChanged);
+        }
+        if self.callback_transport_playing {
+            return Err(Reject::TransportRunning);
+        }
+        // Lifecycle commands are serviced before the transport mailbox. A
+        // previous stopped boundary alone must not authorize removal when a
+        // newer Play/seek/pause/loop request is already waiting to be applied.
+        let requested = self
+            .removal_transport_mailbox
+            .as_ref()
+            .and_then(|mailbox| mailbox.try_load())
+            .ok_or(Reject::TransportRequestPending)?;
+        if requested.playing {
+            return Err(Reject::TransportRunning);
+        }
+        if requested.request_id != self.callback_transport_request_id {
+            return Err(Reject::TransportRequestPending);
+        }
+        if self.timeline_runtime.as_ref().is_some_and(|runtime| {
+            runtime.pending_commands() != 0 || runtime.pending_transport_activation().is_some()
+        }) {
+            return Err(Reject::TimelineTransitionPending);
+        }
+        if stamp.stopped_epoch != self.transport_epoch
+            || stamp.stopped_epoch != self.callback_transport_anchor.transport_epoch
+        {
+            return Err(Reject::StoppedEpochChanged);
+        }
+        let index = self
+            .find_generator_slot(stamp.channel_id)
+            .ok_or(Reject::MissingEndpoint)?;
+        let slot = self.generator_endpoints[index]
+            .as_ref()
+            .expect("located endpoint remains callback-owned");
+        if slot.endpoint_id != stamp.endpoint_id {
+            return Err(Reject::EndpointChanged);
+        }
+        if slot.plugin_instance_id != stamp.plugin_instance_id {
+            return Err(Reject::PluginInstanceChanged);
+        }
+        if slot.endpoint.project_session != stamp.project_session {
+            return Err(Reject::EndpointProjectChanged);
+        }
+        if slot.endpoint.epoch() != stamp.stopped_epoch {
+            return Err(Reject::EndpointEpochChanged);
+        }
+        if slot.endpoint.manifest.slot_count != 1
+            || slot.endpoint.manifest.instance_id(0) != Some(stamp.plugin_instance_id)
+        {
+            return Err(Reject::EndpointManifestChanged);
+        }
+        Ok(index)
+    }
+
+    fn remove_generator_endpoint_stamped(&mut self, stamp: GeneratorRemovalStamp) {
+        // The queue preflight reserves both destinations before popping. Keep
+        // the mutation kernel safe even when called directly by a test fixture.
+        let retirements = usize::from(self.find_generator_slot(stamp.channel_id).is_some());
+        if !self.generator_lifecycle_command_ready(retirements) {
+            return;
+        }
+        let result = self.validate_generator_removal_stamp(stamp);
+        if let Ok(index) = result {
+            self.begin_plugin_topology_replan();
+            // The confirmed stopped epoch has already invalidated old worker
+            // generations. Reset the callback's remaining histories again at
+            // this exact removal boundary; no stale sample can re-enter a new
+            // topology through raw-track, graph-route, or output scratch.
+            self.reset_voice_and_pdc_state(self.timeline_transport_beat_q32);
+            self.track_block.fill([0.0; 2]);
+            self.master_block.fill([0.0; 2]);
+            self.plugin_input_left.fill(0.0);
+            self.plugin_input_right.fill(0.0);
+            self.plugin_output_left.fill(0.0);
+            self.plugin_output_right.fill(0.0);
+            self.paused_midi_safety[index] = None;
+            let removed = self.generator_endpoints[index]
+                .take()
+                .expect("exact preflight target remains callback-owned");
+            self.clear_timeline_generator_bindings(removed.endpoint_id, removed.plugin_instance_id);
+            self.retire_generator_endpoint(removed);
+        }
+        self.emit_generator_endpoint_event(GeneratorEndpointEvent::StampedRemoved {
+            stamp,
+            result: result.map(|_| ()),
         });
     }
 
@@ -15862,6 +16676,8 @@ mod tests {
         let (_parameter_edit_event_tx, parameter_edit_callback_events) = RingBuffer::new(4);
         let (_capture_event_tx, master_capture_events) = RingBuffer::new(4);
         AudioEngine {
+            engine_session: allocate_audio_engine_session().unwrap(),
+            project_session: Arc::new(AtomicU64::new(0)),
             stream: None,
             stream_lifecycle: DeviceStreamLifecycle::Playing,
             meter_reader: meter_channel().1,
@@ -23595,6 +24411,8 @@ mod tests {
         let (master_capture_event_tx, master_capture_events) = RingBuffer::new(4);
         let (timeline_runtime, realtime_timeline_runtime) = create_timeline_runtime();
         let mut engine = AudioEngine {
+            engine_session: allocate_audio_engine_session().unwrap(),
+            project_session: Arc::new(AtomicU64::new(0)),
             stream: None,
             stream_lifecycle: DeviceStreamLifecycle::Playing,
             meter_reader: meter_channel().1,
@@ -23675,5 +24493,8 @@ mod tests {
     }
     mod midi_routing_tests {
         include!("audio_midi_routing_tests.rs");
+    }
+    mod stamped_generator_removal_tests {
+        include!("audio_stamped_removal_tests.rs");
     }
 }
