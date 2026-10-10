@@ -259,8 +259,8 @@ struct GenuineFixture {
     dumped_records: usize,
     generated_path: Option<PathBuf>,
     original_wav: Option<Vec<u8>>,
-    committed_project: Option<Vec<u8>>,
-    authoritative_before: Option<Vec<u8>>,
+    committed_project: Option<Arc<[u8]>>,
+    authoritative_before: Option<Arc<[u8]>>,
     initial_project: Option<Project>,
     verified_pcm: Option<Arc<[f32]>>,
     asset_id: Option<u64>,
@@ -1497,8 +1497,8 @@ impl GenuineFixture {
             "actual rounded review tail",
         )?;
         let ctx = self.ctx.clone();
-        let _ = ctx.run(egui::RawInput::default(), |ctx| {
-            self.app_mut().clip_render_review_ui(ctx)
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            self.app_mut().clip_render_review_ui(ui.ctx())
         });
         self.accepting_job = self.app_mut().clip_render_job.take();
         // Job stays in the outer retaining owner even if the shared method panics.
