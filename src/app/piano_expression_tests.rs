@@ -675,6 +675,81 @@ fn piano_expression_properties_short_resize_only_note_and_legacy_fields_stay_exa
 }
 
 #[test]
+fn piano_expression_properties_start_only_moves_short_notes_with_one_undo() {
+    for length in [crate::piano_roll::MIN_NOTE_LENGTH_BEATS, 1.0 / 24.0] {
+        let mut ui = fixture();
+        ui.app.piano_roll_state.grouping_enabled = false;
+        ui.app.project.active_pattern_mut().notes[0].length = length;
+        ui.app.sync_history_observer();
+        ui.app.undo_stack.clear();
+        ui.settle();
+        let before = project_fingerprint(&ui.app.project);
+        let edge = ui
+            .ctx
+            .read_response(Id::new(("piano-note", 90001_u64)).with("resize"))
+            .unwrap()
+            .rect
+            .center();
+        double_click(&mut ui, edge);
+        set_number(&mut ui, "Start (beats)", "1.125");
+        ui.click("Apply");
+        assert!(
+            ui.app.piano_note_properties.is_none(),
+            "valid short-note timing must apply"
+        );
+        assert_eq!(
+            (note(&ui, 90001).start, note(&ui, 90001).length),
+            (1.125, length)
+        );
+        assert_eq!(ui.app.undo_stack.len(), 1);
+        let after = project_fingerprint(&ui.app.project);
+        ui.key(egui::Key::Z, piano_clipboard_command());
+        assert_eq!(project_fingerprint(&ui.app.project), before);
+        ui.key(egui::Key::Y, piano_clipboard_command());
+        assert_eq!(project_fingerprint(&ui.app.project), after);
+    }
+}
+
+#[test]
+fn piano_expression_properties_accepts_typed_short_lengths_and_final_legal_start() {
+    for (text, length, start) in [
+        (
+            "0.015625",
+            crate::piano_roll::MIN_NOTE_LENGTH_BEATS,
+            "4095.984375",
+        ),
+        ("0.041666667", 1.0 / 24.0, "1.125"),
+    ] {
+        let mut ui = fixture();
+        ui.app.piano_roll_state.grouping_enabled = false;
+        let before = project_fingerprint(&ui.app.project);
+        let pos = body(&ui, 90001);
+        double_click(&mut ui, pos);
+        set_number(&mut ui, "Length (beats)", text);
+        set_number(&mut ui, "Start (beats)", start);
+        assert_eq!(
+            project_fingerprint(&ui.app.project),
+            before,
+            "numeric edits stay draft-only"
+        );
+        ui.click("Apply");
+        assert!(ui.app.piano_note_properties.is_none());
+        assert_eq!(
+            note(&ui, 90001).length,
+            length,
+            "typed lengths must not clamp to 0.05"
+        );
+        assert_eq!(note(&ui, 90001).start, start.parse::<f32>().unwrap());
+        assert_eq!(ui.app.undo_stack.len(), 1);
+        let after = project_fingerprint(&ui.app.project);
+        ui.key(egui::Key::Z, piano_clipboard_command());
+        assert_eq!(project_fingerprint(&ui.app.project), before);
+        ui.key(egui::Key::Y, piano_clipboard_command());
+        assert_eq!(project_fingerprint(&ui.app.project), after);
+    }
+}
+
+#[test]
 fn piano_expression_double_click_batched_and_resize_modifiers_keep_press_ownership() {
     let mut ui = fixture();
     let before = project_fingerprint(&ui.app.project);

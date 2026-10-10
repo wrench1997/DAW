@@ -55,7 +55,11 @@ short imported note does not silently lengthen it.
   first. Invalid input remains open with an error, ready to fix.
 - Merely opening the editor preserves imported sub-minimum lengths and legacy
   out-of-horizon timing. Velocity-only edits do not rewrite those timing fields.
-  New timing changes must fit the interactive 0–4096-beat horizon.
+  New timing changes use the same 1/64-beat minimum as Draw and resize, and must
+  fit the interactive 0–4096-beat horizon. Start-only edits preserve valid short
+  lengths, including 1/24-beat notes; the final legal minimum-length note starts
+  at 4095.984375 beats. End validation checks the exact stored start and length
+  without allowing f32 addition to conceal an overshoot.
 - Properties never replace the Project with an opening snapshot. Unrelated newer
   project data survives; changed target notes or stale project/pattern/Channel
   identity fail closed. The opening target set remains frozen while the dialog
@@ -69,6 +73,11 @@ pan, pressure, release, probability, timbre, MPE or per-note audio controls. Thi
 slice does not add new synthesis behavior or change the project format.
 
 ## Verification
+
+The short-timing properties correction has source regressions for real numeric
+Start-only edits, typed 1/64- and 1/24-beat lengths, the final legal start, grouped
+Undo/Redo and invalid bounds. This source checkpoint is **unvalidated** until its
+own test results are recorded; the historical results below do not validate it.
 
 `src/app/piano_expression_tests.rs` operates the production app through actual
 egui pointer, key, text and wheel input. Pure candidate regressions cover invalid

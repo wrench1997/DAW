@@ -1,10 +1,12 @@
 //! Note expression uses committed raw-event edits and a separate, draft-only dialog.
 //! No wheel burst retains a Project snapshot that a later save/import could overwrite.
 use super::*;
+use crate::piano_roll::{MAX_PIANO_BEAT, MIN_NOTE_LENGTH_BEATS};
 
 const COARSE: f32 = 0.05;
 const FINE: f32 = 0.01;
 const MAX_WHEEL_UNITS: f32 = 8.0;
+const MAX_NOTE_START_BEATS: f32 = MAX_PIANO_BEAT as f32 - MIN_NOTE_LENGTH_BEATS;
 
 #[derive(Clone)]
 pub(super) struct NoteProperties {
@@ -352,8 +354,8 @@ impl CitrusApp {
             egui::Grid::new("note-properties-fields").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
                 if draft.origins.len() == 1 {
                     property_control(ui, "Pitch (MIDI)", egui::DragValue::new(&mut draft.edited.note).range(0..=127));
-                    property_control(ui, "Start (beats)", egui::DragValue::new(&mut draft.edited.start).range(0.0..=4095.95).clamp_existing_to_range(false).speed(0.05).max_decimals(3));
-                    property_control(ui, "Length (beats)", egui::DragValue::new(&mut draft.edited.length).range(0.05..=4096.0).clamp_existing_to_range(false).speed(0.05).max_decimals(3));
+                    property_control(ui, "Start (beats)", egui::DragValue::new(&mut draft.edited.start).range(0.0..=MAX_NOTE_START_BEATS).clamp_existing_to_range(false).speed(0.05).max_decimals(3));
+                    property_control(ui, "Length (beats)", egui::DragValue::new(&mut draft.edited.length).range(MIN_NOTE_LENGTH_BEATS..=MAX_PIANO_BEAT as f32).clamp_existing_to_range(false).speed(0.05).max_decimals(3));
                     property_control(ui, "Velocity", egui::Slider::new(&mut draft.edited.velocity, 0.0..=1.0).fixed_decimals(3));
                 } else {
                     property_control(ui, "Transpose (semitones)", egui::DragValue::new(&mut draft.transpose).range(-127..=127));
@@ -459,9 +461,9 @@ impl NoteProperties {
             && (edited.start != anchor.start || edited.length != anchor.length)
             && (!edited.start.is_finite()
                 || !edited.length.is_finite()
-                || !(0.0..=4095.95).contains(&edited.start)
-                || !(0.05..=4096.0).contains(&edited.length)
-                || edited.start + edited.length > 4096.0
+                || !(0.0..=MAX_NOTE_START_BEATS).contains(&edited.start)
+                || !(MIN_NOTE_LENGTH_BEATS..=MAX_PIANO_BEAT as f32).contains(&edited.length)
+                || f64::from(edited.start) + f64::from(edited.length) > MAX_PIANO_BEAT
                 || edited.note > 127)
         {
             return Err("Note time must fit within 0–4096 beats with a positive length");
@@ -603,6 +605,51 @@ mod tests {
         assert!(
             d.candidate(&app).is_err(),
             "target ID duplicated across patterns must fail closed"
+        );
+    }
+
+    #[test]
+    fn piano_expression_candidate_uses_canonical_short_timing_bounds() {
+        let mut app = fixture();
+        for length in [MIN_NOTE_LENGTH_BEATS, 1.0 / 24.0] {
+            app.project.active_pattern_mut().notes[0].length = length;
+            let mut d = draft(&app);
+            d.edited.start = 1.125;
+            let candidate = d.candidate(&app).expect("a valid short note can move");
+            assert_eq!(candidate.active_pattern().notes[0].start, 1.125);
+            assert_eq!(candidate.active_pattern().notes[0].length, length);
+        }
+
+        let mut d = draft(&app);
+        d.edited.start = MAX_NOTE_START_BEATS;
+        d.edited.length = MIN_NOTE_LENGTH_BEATS;
+        let candidate = d
+            .candidate(&app)
+            .expect("the final legal minimum note fits");
+        let note = &candidate.active_pattern().notes[0];
+        assert_eq!(
+            f64::from(note.start) + f64::from(note.length),
+            MAX_PIANO_BEAT
+        );
+
+        d.edited.start = MAX_NOTE_START_BEATS.next_up();
+        assert!(
+            d.candidate(&app).is_err(),
+            "start must leave room for the minimum note"
+        );
+        d.edited.start = 1.0;
+        d.edited.length = MIN_NOTE_LENGTH_BEATS.next_down();
+        assert!(
+            d.candidate(&app).is_err(),
+            "new timing cannot create sub-minimum notes"
+        );
+
+        d.edited.start = MAX_NOTE_START_BEATS;
+        d.edited.length = MIN_NOTE_LENGTH_BEATS.next_up();
+        assert_eq!(d.edited.start + d.edited.length, MAX_PIANO_BEAT as f32);
+        assert!(
+            d.candidate(&app).is_err(),
+            "f32 rounding must not conceal an end past the horizon"
         );
     }
 
