@@ -220,8 +220,8 @@ original source hashes.
 - One non-cloneable queued/worker lease owns per-source admission. Receiver drop
   requests cancellation but cannot release that lease. Queue rejection, worker
   teardown and panic use the same RAII release path; an old receiver cannot clear
-  a later job's busy state. Release publishes termination acknowledgment before
-  reopening admission. Replies remain unreadable until that acknowledgment.
+  a later job's busy state. Release reopens admission before publishing termination acknowledgment, so an
+  acknowledged caller can retry immediately. Replies remain unreadable until that acknowledgment.
 - The immutable capture deadline starts at request admission. The shared fence is
   checked before and after editor/native-revision, strict audio/event/latency/tail,
   zero-sample SaveState, catalog and every current-base IPC. An already-dispatched
@@ -252,3 +252,11 @@ from ordinary later source teardown. No vendor module or production helper runs.
 Cancellation during fresh helper construction, restore, rendering and teardown is
 a later stage. This capture-only patch cannot qualify App actions, audible output,
 WAV files, latency trimming, tail consent or native/Windows behavior.
+
+Pre-execution review of `01750d5` found a terminal-publication ordering edge: the
+old lease published acknowledgment just before clearing busy, so an immediate
+retry could spuriously fail. The corrective source releases admission first and
+publishes the Release acknowledgment last. A per-fence test-only barrier forces
+that inter-store boundary and checks both states, then retries after Acquire
+acknowledgment without first joining the worker. The initial checkpoint remains
+preserved; no tests have run on either cancellation source at this correction.

@@ -401,6 +401,41 @@ fn bounce_admission_releases_on_queue_rejection_and_old_receiver_cannot_release_
 }
 
 #[test]
+fn bounce_observed_termination_ack_guarantees_admission_is_already_released() {
+    let (control, commands) = control(1);
+    let first = control
+        .request_instrument_bounce_state(41, 7, vec![17])
+        .unwrap();
+    let AdminCommand::CaptureInstrumentBounce { lease, .. } = commands.try_recv().unwrap() else {
+        panic!("wrong command")
+    };
+    let reached = Arc::new(std::sync::Barrier::new(2));
+    let resume = Arc::new(std::sync::Barrier::new(2));
+    *first.fence.before_ack.lock().unwrap() = Some((Arc::clone(&reached), Arc::clone(&resume)));
+    let worker = std::thread::spawn(move || drop(lease));
+    reached.wait(); // Worker is deterministically between admission release and final ack.
+    let released_before_ack = !control.metrics.bounce_capture_busy.load(Ordering::Acquire);
+    let not_yet_acknowledged = !first.termination_acknowledged();
+    resume.wait(); // Release even if the assertions below discover a regression.
+    assert!(released_before_ack);
+    assert!(not_yet_acknowledged);
+    while !first.termination_acknowledged() {
+        std::thread::yield_now();
+    }
+    // Do not join the worker before the retry: the observed ack itself is the guarantee.
+    let second = control
+        .request_instrument_bounce_state(41, 7, vec![17])
+        .expect("acknowledged old lease must no longer hold admission");
+    worker.join().unwrap();
+    drop(first);
+    assert!(control.metrics.bounce_capture_busy.load(Ordering::Acquire));
+    assert!(!second.termination_acknowledged());
+    drop(commands.try_recv().unwrap());
+    assert!(second.termination_acknowledged());
+    assert!(!control.metrics.bounce_capture_busy.load(Ordering::Acquire));
+}
+
+#[test]
 fn bounce_expired_queued_request_has_no_backend_calls_and_panic_unwinds_lease() {
     let (control, commands) = control(1);
     let receipt = control

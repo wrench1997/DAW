@@ -2052,6 +2052,8 @@ pub struct BounceCaptureFence {
     deadline: Instant,
     cancelled: AtomicBool,
     terminated: AtomicBool,
+    #[cfg(test)]
+    before_ack: Mutex<Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>>,
 }
 
 impl BounceCaptureFence {
@@ -2060,6 +2062,8 @@ impl BounceCaptureFence {
             deadline,
             cancelled: AtomicBool::new(false),
             terminated: AtomicBool::new(false),
+            #[cfg(test)]
+            before_ack: Mutex::new(None),
         }
     }
 
@@ -2092,12 +2096,19 @@ struct BounceCaptureLease {
 
 impl Drop for BounceCaptureLease {
     fn drop(&mut self) {
-        // No capture operation may follow lease destruction. Publish acknowledgment before
-        // reopening admission; cancellation/drop/queue failure/panic all use this one path.
-        self.fence.terminated.store(true, Ordering::Release);
+        // No capture operation may follow lease destruction. Reopen admission first, then
+        // acknowledge termination: an Acquire observer of acknowledgment can retry at once.
+        // Cancellation/drop/queue failure/panic all use this one path.
         self.metrics
             .bounce_capture_busy
             .store(false, Ordering::Release);
+        #[cfg(test)]
+        if let Some((reached, resume)) = self.fence.before_ack.lock().unwrap().as_ref() {
+            // Per-fence test seam forces the inter-store boundary without a global hook.
+            reached.wait();
+            resume.wait();
+        }
+        self.fence.terminated.store(true, Ordering::Release);
     }
 }
 
