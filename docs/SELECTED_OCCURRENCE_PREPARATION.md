@@ -3,15 +3,15 @@
 Reference checkout: `/workspace/shared/DAW-recovered-cbbbe1f`, clean accepted
 `ec47b63fff8bd33b7c09159c190735cde8df5785`. Renderer mechanics remain separately
 accepted at `e79894920204610c4c5ca6d0d1ada1c08dc2fe4b`; do not alter that branch.
-Status: CORRECTED SOURCE, UNVALIDATED. Earlier 7578047 compiled successfully,
-but its focused suite had 21 passes and one failed invalid-gain fixture. The
-current correction has not been compiled or tested. The independently cleared source plan is preserved by SHA-256
+Status: BOUNDED PURE GATES PASS. Rust/manifests were tested at
+`2fd8cd8a4269ec4adf4eb9dcae5913224acf8f84`; the final documentation freeze does
+not change executable source. The independently cleared source plan is preserved by SHA-256
 `c05b8c98d01eb08c0ae895a4b5a99ab2d312bde12183b53c765d63e0d94e1a95`.
 
 Implementation: `src/app/clip_render.rs`, `clip_render_candidate.rs`, and
 `clip_render_tests.rs`, registered as a dormant module in `src/app.rs`.
-Twenty-two plugin-free test functions are present; the corrected source is unexecuted. The source adds
-no App action/call site. The separate e798949 renderer/capture branch is not
+All twenty-two new plugin-free test functions passed in both App and no-default
+core builds. The source adds no App action/call site. The separate e798949 renderer/capture branch is not
 integrated into this ec47b63-based slice.
 
 Exact snapshots are fallibly encoded into at most 64 MiB and must deserialize
@@ -22,8 +22,7 @@ actual endpoint ownership, durable publication bytes, and user transaction gates
 
 Additional explicit admission limits: source length at most ten minutes; rounded
 N + fixed tail + reserved one-second native latency at most 24 million frames;
-Channel volume in 0..=1, the valid source Channel domain, centered
-Channel pan. The original selected schedule preserves its compiled note IDs.
+Channel volume in 0..=1, the valid source Channel domain, and centered pan. The original selected schedule preserves its compiled note IDs.
 Muting a source renumbers later sequential runtime note IDs; the remaining-event
 proof ignores only those transient IDs, retaining complete source identity,
 frame/order, note/channel, velocity/gain and stable routing.
@@ -31,6 +30,29 @@ frame/order, note/channel, velocity/gain and stable routing.
 No native state/history, idle-silence, output files or real audio equivalence is
 qualified by this source checkpoint. Older renderer/capture acceptance and its
 failed attempts remain in their separate durable archives and Git history.
+
+## Executed gates and attribution
+
+At the tested Rust commit 2fd8cd8, all of these gates exited zero:
+- all-feature/all-target compilation and no-default core compilation;
+- occurrence 22/22 in App and core, including 100 exact candidate geometry cases;
+- existing audio-import 10/10, history-filter 27/27 and export-filter 81/81;
+- App/all-target and core/all-target Clippy, plus formatting;
+- Python 239/239 with no skips and the explicitly copied current helper;
+- package input/provenance/linked-document checks for 553 inputs.
+
+The source-bound receipt is `DAW-selected-occurrence-qa/2fd8cd8/RESULTS.json`,
+SHA-256 `a9860270a42bd5c228a5504281b7eac4b0d29dee299442e02132f33c6e19eb82`.
+It records 706 source hashes, five copied binaries/rlib, four dep-info files,
+twelve exact gate logs/commands and environment. The vendor rlib is byte-identical
+to the forced current-worktree 7578047 compilation; no vendor Rust or manifest
+changed between those checkpoints, and its verbose source/link proof is retained.
+The helper Rust test binary was compiled/copied only; it was not run as a suite.
+
+Full App/core aggregate suites and unchanged vendor/helper/protocol Rust suites
+were not rerun. No genuine plugin, real offline adapter, native UI or new App
+button was exercised. The original 7578047 gain-fixture failure remains preserved
+and is superseded only by the explicit source-domain correction and these gates.
 
 ## Preserved pre-execution review finding
 
