@@ -1622,3 +1622,17 @@ reset audio, while reusable realtime reset is unchanged. Every protocol write
 uses the earlier job/cleanup deadline. The initial source and mock fixtures await
 archive and independent review before execution. No genuine run or App/UI
 activation is authorized by this implementation checkpoint.
+
+### Stop B test-only Clippy correction (unvalidated)
+
+The first source-bound runs on `b84466ee` passed all 13 actual strict-adapter
+mock tests and 217 other selected App tests, plus helper/protocol targets. The
+first driver retained its zero-match capture selector refusal; the continuation
+ran the corrected actual capture suite without repeating completed tests.
+Root all-feature Clippy rejected the new WAV assertion's constant
+`chunks_exact(2)` loop. This checkpoint changes only that test to
+`as_chunks::<2>()`, additionally asserting an empty remainder; production
+Rust is unchanged. The failed Clippy log remains evidence. After durable
+preservation and review, rerun the affected success fixture and Clippy, then
+the previously unexecuted default/core, compiler-positive and packaging gates.
+No genuine plugin or UI execution is included.

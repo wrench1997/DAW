@@ -719,7 +719,9 @@ fn strict_clone_success_exact_order_source_identity_and_reap_before_wav() {
         assert_eq!(report.reported_tail, u32::MAX);
         let wav = crate::wav::read_wav(mock.output()).unwrap();
         assert_eq!(wav.frame_count(), 128);
-        for frame in wav.samples.chunks_exact(2) {
+        let (frames, remainder) = wav.samples.as_chunks::<2>();
+        assert!(remainder.is_empty());
+        for frame in frames {
             assert_eq!(frame, &[0.25, if channels == 1 { 0.25 } else { -0.5 }]);
         }
         let mut expected: Vec<String> = [
