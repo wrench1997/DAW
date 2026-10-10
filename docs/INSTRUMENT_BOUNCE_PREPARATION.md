@@ -1,11 +1,11 @@
 # Selected-instrument bounce: dormant preparation checkpoint
 
-Status: **DORMANT CANCELLATION CHECKPOINT, UNVALIDATED**.
-The prior preparation slice was accepted at `0728a8c`: Rust gates passed at
-`d91cb74`, and its unchanged-Rust provenance correction passed Python/package
-gates at `5a2d0b3`. The new cancellation/termination source below has not yet
-been compiled or tested. Native bounce, App integration and rendering remain
-unqualified.
+Status: **DORMANT CAPTURE CANCELLATION, BOUNDED PLUGIN-FREE GATES PASSED**.
+The cancellation/termination source passed its narrow gates at `90795d5`, as
+detailed below. The earlier preparation slice was accepted at `0728a8c`, with
+aggregate Rust receipts at `d91cb74` and provenance receipts at `5a2d0b3`. Those
+older aggregate counts are not attributed to the new source. Native bounce,
+App integration and rendering remain unqualified.
 This branch starts from published
 `dcdb2c14809b5e6f34af7db071db36f763d757f5`. No new App action is enabled. There is
 no WAV renderer, project replacement, freeze, or complete-song plug-in export.
@@ -209,19 +209,19 @@ VST processing, audible/WAV output, native UI, Windows, cancellation or App acti
 The next bounded checkpoint must close worker-owned cancellation/deadline admission
 before any App integration or renderer acceptance. Full-song VST export still refuses.
 
-
-## Cancellation/termination checkpoint (unvalidated source)
+## Cancellation/termination checkpoint (source freeze)
 
 This follow-on changes only the dormant capture coordinator, runtime capture path,
-and plugin-free fixtures. It does not add an App adapter or renderer. No tests for
-this source have run at freeze; earlier accepted receipts remain bound to their
-original source hashes.
+and plugin-free fixtures. It does not add an App adapter or renderer. No tests
+had run at its initial freeze; the later source-bound results are recorded below.
+Earlier accepted receipts remain bound to their original source hashes.
 
 - One non-cloneable queued/worker lease owns per-source admission. Receiver drop
   requests cancellation but cannot release that lease. Queue rejection, worker
   teardown and panic use the same RAII release path; an old receiver cannot clear
-  a later job's busy state. Release reopens admission before publishing termination acknowledgment, so an
-  acknowledged caller can retry immediately. Replies remain unreadable until that acknowledgment.
+  a later job's busy state. Release reopens admission before publishing termination
+  acknowledgment, so an acknowledged caller can retry immediately. Replies remain
+  unreadable until that acknowledgment.
 - The immutable capture deadline starts at request admission. The shared fence is
   checked before and after editor/native-revision, strict audio/event/latency/tail,
   zero-sample SaveState, catalog and every current-base IPC. An already-dispatched
@@ -247,7 +247,8 @@ prefix. A slow successful first base getter crosses the deadline with a second
 base waiting; no second request is permitted. State/getter faults concurrent with
 cancel remain faults. Every group first exercises the successful control sequence.
 The source owner stays alive for ledger assertions, separating capture termination
-from ordinary later source teardown. No vendor module or production helper runs.
+from ordinary later source teardown. These interruption fixtures execute no vendor
+module or production helper.
 
 Cancellation during fresh helper construction, restore, rendering and teardown is
 a later stage. This capture-only patch cannot qualify App actions, audible output,
@@ -259,4 +260,30 @@ retry could spuriously fail. The corrective source releases admission first and
 publishes the Release acknowledgment last. A per-fence test-only barrier forces
 that inter-store boundary and checks both states, then retries after Acquire
 acknowledgment without first joining the worker. The initial checkpoint remains
-preserved; no tests have run on either cancellation source at this correction.
+preserved; no tests had run on either cancellation source at that correction.
+
+
+## Bounded cancellation results at 90795d5 (2026-10-10)
+
+The corrected source passed all-target compilation, 115 runtime-module tests
+(including 15 coordinator/lease and 11 capture/factory/affinity tests), 15 no-default
+core coordinator tests, 25 helper tests and 13 editor/transport/reset protocol
+tests. App and no-default core Clippy and formatting passed. The protocol fixture
+exercised all 15 cancellation stop stages, elapsed-deadline success before a second
+base getter, and real state/getter failures concurrent with cancellation.
+
+The Python rerun passed 239 tests with the copied current helper explicitly bound;
+552 package-input/provenance/document checks passed. An initial Python invocation
+without that binding ran 235 tests with one skipped helper class; its log is
+preserved separately and is not counted as the full pass. No native plug-in was
+loaded. Current source/manifest hashes, seven copied executable hashes, verbose
+current-worktree compiler linkage, dep-info and terminal logs are retained.
+
+Full App/core aggregate and unchanged vendor suites were not repeated for this
+narrow patch. Their older accepted preparation receipts remain separate. This
+final documentation-only freeze does not change Rust, manifests, helper protocol
+or packaging behavior relative to tested `90795d5`. The initial acknowledgment
+ordering review finding and earlier failed source/fixture/provenance receipts are
+preserved. Exact App control binding and session ownership, cancellation during
+fresh factory/render/teardown, note mapping, WAV output and native/Windows/UI
+qualification remain open. Existing full-song VST export still refuses.
