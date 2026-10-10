@@ -1923,6 +1923,14 @@ impl AudioEngine {
             .expect("timeline runtime is available until AudioEngine teardown")
     }
 
+    /// Observes space for one ordinary command without enqueueing or reclaiming.
+    /// The App is the sole producer; until it enqueues again, the consumer can
+    /// only free more slots. This does not certify callback endpoint admission.
+    #[must_use]
+    pub(crate) fn ordinary_command_capacity_available(&self) -> bool {
+        self.producer.slots() > 0
+    }
+
     /// Queues a command without blocking. `false` means the bounded queue was full.
     /// Any rejected command (including a large asset Arc) is released here on the
     /// caller/UI thread rather than by the real-time callback.
@@ -18197,6 +18205,49 @@ mod tests {
             }
         );
         assert!(dsp.find_asset_slot(88).is_none());
+    }
+
+    #[test]
+    fn ordinary_command_capacity_observes_empty_full_and_freed_slot_without_side_effects() {
+        let (mut engine, mut callback) = AudioEngine::test_engine_with_callback();
+        let capacity = engine.producer.buffer().capacity();
+        let full_count = engine.snapshot().command_queue_full;
+        for _ in 0..3 {
+            assert!(engine.ordinary_command_capacity_available());
+            assert_eq!(engine.producer.slots(), capacity);
+            assert_eq!(callback.commands.slots(), 0);
+            assert_eq!(engine.snapshot().command_queue_full, full_count);
+        }
+        for _ in 0..capacity {
+            assert!(engine.command(AudioCommand::SetMaster(1.0)));
+        }
+        for _ in 0..3 {
+            assert!(!engine.ordinary_command_capacity_available());
+            assert_eq!(engine.producer.slots(), 0);
+            assert_eq!(callback.commands.slots(), capacity);
+            assert_eq!(engine.snapshot().command_queue_full, full_count);
+        }
+        // Free exactly one slot with the actual consumer. No callback endpoint
+        // receipt or producer position is manufactured by the capacity probe.
+        assert!(matches!(
+            callback.commands.pop(),
+            Ok(AudioCommand::SetMaster(1.0))
+        ));
+        for _ in 0..3 {
+            assert!(engine.ordinary_command_capacity_available());
+            assert_eq!(engine.producer.slots(), 1);
+            assert_eq!(callback.commands.slots(), capacity - 1);
+            assert_eq!(engine.snapshot().command_queue_full, full_count);
+        }
+        assert!(engine.command(AudioCommand::SetMaster(0.5)));
+        assert!(!engine.ordinary_command_capacity_available());
+        assert_eq!(callback.commands.slots(), capacity);
+        assert_eq!(engine.snapshot().command_queue_full, full_count);
+        callback.pump(&engine, 128);
+        assert_eq!(callback.dsp.master, 0.5);
+        assert_eq!(callback.commands.slots(), 0);
+        assert!(engine.ordinary_command_capacity_available());
+        assert_eq!(engine.snapshot().command_queue_full, full_count);
     }
 
     #[test]

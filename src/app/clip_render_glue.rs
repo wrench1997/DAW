@@ -722,6 +722,16 @@ impl CitrusApp {
         if self.audio.is_none() {
             return Err("Audio disappeared before source admission".into());
         }
+        // Retain this exact ready owner while ordinary commands are backed up.
+        // No other command is produced before the synchronous install below.
+        if !self
+            .audio
+            .as_ref()
+            .expect("audio checked")
+            .ordinary_command_capacity_available()
+        {
+            return Ok(false);
+        }
         let endpoint_id = self.allocate_generator_endpoint_id();
         let PluginChain {
             audio: endpoint,

@@ -657,6 +657,10 @@ thread_local! {
 
 impl RestorationFixture {
     fn new() -> Self {
+        Self::with_max_block_frames(MAX_MIXER_BLOCK_FRAMES)
+    }
+
+    fn with_max_block_frames(max_block_frames: usize) -> Self {
         let deadline = Instant::now() + Duration::from_secs(10);
         let admission = loop {
             assert!(
@@ -700,7 +704,7 @@ impl RestorationFixture {
             source_state(),
             PluginPrepareConfig {
                 sample_rate: 48_000.0,
-                max_block_frames: MAX_MIXER_BLOCK_FRAMES,
+                max_block_frames,
             },
         )
         .unwrap();
@@ -836,6 +840,234 @@ impl Drop for RestorationFixture {
             // Returning normally from Drop preserves the original assertion panic.
         }
     }
+}
+
+fn restoration_owner_ids(pending: &PendingClipRestoration) -> (usize, usize, usize) {
+    let chain = pending.chain.as_ref().expect("exact source still retained");
+    (
+        chain.audio.genuine_snapshot().worker_id,
+        chain.control.genuine_worker_id(),
+        chain.guard.genuine_worker_id(),
+    )
+}
+
+fn assert_one_healthy_restoration_join(
+    observer: &crate::genuine_app_observer::ObservationRun,
+    worker: usize,
+) {
+    use crate::genuine_app_observer::{RecordKind, WorkerJoinOutcome};
+    observer.with_snapshot(|snapshot| {
+        assert!(snapshot.failure.is_none(), "{:?}", snapshot.failure);
+        let joins = snapshot
+            .records
+            .iter()
+            .filter_map(|record| match &record.kind {
+                RecordKind::WorkerJoin { worker_id, outcome } if *worker_id == worker => {
+                    Some(*outcome)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(joins, [WorkerJoinOutcome::Joined]);
+    });
+}
+
+fn assert_restoration_refusal_keeps_exact_cleanup(
+    fixture: &mut RestorationFixture,
+    expected_error: &str,
+    endpoint_id_consumed: bool,
+) {
+    let channel = fixture.app().project.channels[0].id;
+    let owner = restoration_owner_ids(&fixture.app().pending_clip_restorations[&channel]);
+    assert_eq!(owner, (owner.0, owner.0, owner.0));
+    let before = project_and_history(fixture.app());
+    let next_id = fixture.app().next_generator_endpoint_id;
+    let calls = RESTORATION_FACTORY_CALLS.load(Ordering::Acquire);
+    let captures = fixture.source.as_ref().unwrap().capture_count();
+    let callback_before = fixture.callback.as_ref().unwrap().genuine_snapshot();
+    let full_count = fixture
+        .app()
+        .audio
+        .as_ref()
+        .unwrap()
+        .snapshot()
+        .command_queue_full;
+    let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
+    fixture.app_mut().poll_clip_restorations();
+    assert!(fixture.app().pending_clip_restorations.is_empty());
+    assert!(fixture.app().pending_generator_chains.is_empty());
+    assert!(fixture.app().running_generator_chains.is_empty());
+    assert!(fixture.app().clip_restoration_installs.is_empty());
+    assert!(fixture.app().clip_restoration_failed);
+    assert!(fixture.app().clip_restoration_playback_pending);
+    assert!(!fixture.app().playing);
+    assert!(
+        fixture
+            .app()
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains(expected_error)
+    );
+    assert_eq!(project_and_history(fixture.app()), before);
+    assert_eq!(
+        fixture.app().next_generator_endpoint_id,
+        if endpoint_id_consumed {
+            next_id + 1
+        } else {
+            next_id
+        }
+    );
+    assert_eq!(RESTORATION_FACTORY_CALLS.load(Ordering::Acquire), calls);
+    assert_eq!(fixture.source.as_ref().unwrap().capture_count(), captures);
+    let callback_after = fixture.callback.as_ref().unwrap().genuine_snapshot();
+    assert_eq!(
+        callback_after.pending_audio_commands,
+        callback_before.pending_audio_commands
+    );
+    assert_eq!(callback_after.device_frame, callback_before.device_frame);
+    assert!(callback_after.endpoints.is_empty());
+    assert_eq!(
+        fixture
+            .app()
+            .audio
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .command_queue_full,
+        full_count
+    );
+    // The actual poll may already have joined a fast worker. Otherwise every
+    // retained guard must still be this exact owner, until its real join below.
+    assert!(fixture.app().retired_clip_restorations.len() <= 1);
+    for guard in &fixture.app().retired_clip_restorations {
+        assert_eq!(guard.genuine_worker_id(), owner.0);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fixture.app().retired_clip_restorations.is_empty() {
+        fixture.app_mut().poll_clip_restorations();
+        assert!(
+            Instant::now() < deadline,
+            "exact refused source did not join"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_one_healthy_restoration_join(&observer, owner.0);
+    fixture.app_mut().poll_clip_restorations();
+    assert!(fixture.app().clip_restoration_failed);
+    assert!(fixture.app().clip_restoration_playback_pending);
+    assert_eq!(project_and_history(fixture.app()), before);
+    assert_eq!(RESTORATION_FACTORY_CALLS.load(Ordering::Acquire), calls);
+}
+
+fn full_ring_ready_restoration() -> RestorationFixture {
+    let mut fixture = RestorationFixture::new();
+    fixture.wait_for_actual_worker_snapshot();
+    fill_ordinary_ring_and_prove_stop_all_rejected(fixture.app_mut());
+    let channel = fixture.app().project.channels[0].id;
+    let owner = restoration_owner_ids(&fixture.app().pending_clip_restorations[&channel]);
+    let started_at = fixture.app().pending_clip_restorations[&channel].started_at;
+    fixture.app_mut().poll_clip_restorations();
+    let pending = &fixture.app().pending_clip_restorations[&channel];
+    assert!(pending.ready);
+    assert_eq!(restoration_owner_ids(pending), owner);
+    assert_eq!(pending.started_at, started_at);
+    assert!(!fixture.app().clip_restoration_failed);
+    assert_eq!(
+        fixture
+            .callback
+            .as_ref()
+            .unwrap()
+            .genuine_snapshot()
+            .pending_audio_commands,
+        64
+    );
+    fixture
+}
+
+#[test]
+fn ready_restoration_full_ring_expiry_is_terminal_without_resetting_deadline() {
+    let mut fixture = full_ring_ready_restoration();
+    let channel = fixture.app().project.channels[0].id;
+    let owner = restoration_owner_ids(&fixture.app().pending_clip_restorations[&channel]);
+    // Explicit test-only aging crosses the existing 35-second deadline. It
+    // retains the actual prepared owner; production polls never reset its age.
+    fixture
+        .app_mut()
+        .pending_clip_restorations
+        .get_mut(&channel)
+        .unwrap()
+        .started_at = Instant::now() - Duration::from_secs(35);
+    assert_eq!(
+        restoration_owner_ids(&fixture.app().pending_clip_restorations[&channel]),
+        owner
+    );
+    assert_restoration_refusal_keeps_exact_cleanup(&mut fixture, "expired", false);
+}
+
+#[test]
+fn ready_restoration_full_ring_session_change_is_terminal_before_capacity() {
+    let mut fixture = full_ring_ready_restoration();
+    fixture.app_mut().project_session += 1;
+    assert_restoration_refusal_keeps_exact_cleanup(&mut fixture, "changed session", false);
+}
+
+#[test]
+fn ready_restoration_full_ring_live_project_change_is_terminal_before_capacity() {
+    let mut fixture = full_ring_ready_restoration();
+    fixture.app_mut().project.channels[0].name = "Keep the user's new channel name".into();
+    assert_restoration_refusal_keeps_exact_cleanup(&mut fixture, "live Project changed", false);
+}
+
+#[test]
+fn ready_restoration_available_capacity_invalid_quantum_is_terminal_with_exact_cleanup() {
+    // This is valid worker preparation, but too small for the actual Q128
+    // installer. No allocation fault or installer return value is fabricated.
+    let mut fixture = RestorationFixture::with_max_block_frames(1);
+    fixture.wait_for_actual_worker_snapshot();
+    let channel = fixture.app().project.channels[0].id;
+    assert_eq!(
+        fixture.app().pending_clip_restorations[&channel]
+            .chain
+            .as_ref()
+            .unwrap()
+            .audio
+            .max_block_frames(),
+        1
+    );
+    assert!(
+        fixture
+            .app()
+            .audio
+            .as_ref()
+            .unwrap()
+            .ordinary_command_capacity_available()
+    );
+    assert_eq!(
+        fixture
+            .callback
+            .as_ref()
+            .unwrap()
+            .genuine_snapshot()
+            .pending_audio_commands,
+        0
+    );
+    // The existing text is deliberately not interpreted as a typed queue-full
+    // cause: the actual installer rejects this endpoint before any enqueue.
+    assert_restoration_refusal_keeps_exact_cleanup(
+        &mut fixture,
+        "Restoration callback installation queue is full",
+        true,
+    );
+    assert!(
+        fixture
+            .app()
+            .audio
+            .as_ref()
+            .unwrap()
+            .ordinary_command_capacity_available()
+    );
 }
 
 #[test]
@@ -1132,6 +1364,198 @@ fn assert_exclusive_compiled_source(app: &CitrusApp, expect_audio: bool) {
     assert!(!app.playing);
     assert!(!app.audio.as_ref().unwrap().snapshot().transport_playing);
     assert!(app.timeline_audio_matches_desired());
+}
+
+#[test]
+fn actual_ready_restoration_full_ring_retains_owner_until_same_owner_callback_install() {
+    let mut fixture = converted_fixture_with_mock_restoration();
+    let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
+    assert!(fixture.original_source_joined());
+    let channel = fixture.app().project.channels[0].id;
+    fixture.app_mut().undo();
+    wait_for_held_restoration_ready(&fixture, channel);
+    assert_eq!(RESTORATION_FACTORY_CALLS.load(Ordering::Acquire), 1);
+    let pending = &fixture.app().pending_clip_restorations[&channel];
+    let owner = restoration_owner_ids(pending);
+    assert_eq!(owner, (owner.0, owner.0, owner.0));
+    let started_at = pending.started_at;
+    let source_identity = (
+        pending.project_session,
+        pending.engine_session,
+        pending.instance_id,
+    );
+    let timing = pending.expected_timing;
+    let live_revision = pending.live_revision;
+    let live_snapshot = Arc::clone(&pending.live_snapshot);
+    let candidate_channels = pending.candidate.as_ref().unwrap().channels.as_ptr();
+    let previous = pending.previous.clone();
+    let next_id = fixture.app().next_generator_endpoint_id;
+    let before = project_and_history(fixture.app());
+    let callback_before = fixture.callback().genuine_snapshot();
+    assert_eq!(callback_before.pending_audio_commands, 64);
+    assert!(callback_before.endpoints.is_empty());
+    assert!(
+        !fixture
+            .app()
+            .audio
+            .as_ref()
+            .unwrap()
+            .ordinary_command_capacity_available()
+    );
+    let full_count = fixture
+        .app()
+        .audio
+        .as_ref()
+        .unwrap()
+        .snapshot()
+        .command_queue_full;
+    // These are real production polls with no callback drain, reload, capture,
+    // or clock reset. The first consumes the actual queued SlotReady event.
+    fixture.app_mut().poll_clip_restorations();
+    let candidate = clip_render::project_snapshot(
+        fixture.app().pending_clip_restorations[&channel]
+            .candidate
+            .as_ref()
+            .unwrap(),
+    )
+    .unwrap();
+    for _ in 0..3 {
+        fixture.app_mut().poll_clip_restorations();
+        let pending = &fixture.app().pending_clip_restorations[&channel];
+        assert!(pending.ready);
+        assert_eq!(restoration_owner_ids(pending), owner);
+        assert_eq!(pending.started_at, started_at);
+        assert_eq!(
+            (
+                pending.project_session,
+                pending.engine_session,
+                pending.instance_id
+            ),
+            source_identity
+        );
+        assert_eq!(pending.expected_timing, timing);
+        assert_eq!(pending.live_revision, live_revision);
+        assert!(Arc::ptr_eq(&pending.live_snapshot, &live_snapshot));
+        assert_eq!(
+            pending.candidate.as_ref().unwrap().channels.as_ptr(),
+            candidate_channels
+        );
+        assert!(
+            clip_render::project_matches_snapshot(pending.candidate.as_ref().unwrap(), &candidate)
+                .unwrap()
+        );
+        assert_eq!(pending.previous, previous);
+        assert!(pending.transferred_control.is_none());
+        assert!(pending.transferred_guard.is_none());
+        assert_eq!(fixture.app().next_generator_endpoint_id, next_id);
+        assert_eq!(project_and_history(fixture.app()), before);
+        assert_eq!(RESTORATION_FACTORY_CALLS.load(Ordering::Acquire), 1);
+        assert_eq!(fixture.source_handle().capture_count(), 2);
+        assert!(fixture.app().pending_generator_chains.is_empty());
+        assert!(fixture.app().running_generator_chains.is_empty());
+        assert!(fixture.app().retired_clip_restorations.is_empty());
+        assert!(fixture.app().clip_restoration_installs.is_empty());
+        assert!(!fixture.app().clip_restoration_failed);
+        assert!(fixture.app().clip_restoration_playback_pending);
+        assert!(!fixture.app().playing);
+        let callback = fixture.callback().genuine_snapshot();
+        assert_eq!(callback.pending_audio_commands, 64);
+        assert_eq!(callback.device_frame, callback_before.device_frame);
+        assert!(
+            callback.endpoints.is_empty(),
+            "the removed old endpoint must stay absent"
+        );
+        assert_eq!(
+            fixture
+                .app()
+                .audio
+                .as_ref()
+                .unwrap()
+                .snapshot()
+                .command_queue_full,
+            full_count
+        );
+    }
+    fixture.pump_callback_only();
+    assert_eq!(
+        fixture.callback().genuine_snapshot().pending_audio_commands,
+        0
+    );
+    assert!(
+        fixture
+            .app()
+            .audio
+            .as_ref()
+            .unwrap()
+            .ordinary_command_capacity_available()
+    );
+    fixture.app_mut().poll_clip_restorations();
+    assert!(fixture.app().pending_clip_restorations.is_empty());
+    let installed = &fixture.app().pending_generator_chains[&channel];
+    assert_eq!(installed.endpoint_id, next_id);
+    assert_eq!(installed.control.genuine_worker_id(), owner.0);
+    assert_eq!(installed.guard.genuine_worker_id(), owner.0);
+    assert_eq!(fixture.app().next_generator_endpoint_id, next_id + 1);
+    assert_eq!(
+        fixture.app().clip_restoration_installs.get(&41),
+        Some(&(next_id, false))
+    );
+    assert!(fixture.app().running_generator_chains.is_empty());
+    assert!(clip_render::project_matches_snapshot(&fixture.app().project, &candidate).unwrap());
+    assert_eq!(
+        fixture.callback().genuine_snapshot().pending_audio_commands,
+        1
+    );
+    // Re-polling before the real callback receipt cannot install a second copy.
+    fixture.app_mut().poll_clip_restorations();
+    assert_eq!(
+        fixture.callback().genuine_snapshot().pending_audio_commands,
+        1
+    );
+    assert_eq!(fixture.app().next_generator_endpoint_id, next_id + 1);
+    fixture.until(|fixture| {
+        !fixture.app().clip_restoration_playback_pending
+            && !fixture.app().clip_restoration_failed
+            && fixture.app().timeline_audio_matches_desired()
+    });
+    assert_eq!(RESTORATION_FACTORY_CALLS.load(Ordering::Acquire), 1);
+    assert_eq!(fixture.app().running_generator_chains.len(), 1);
+    let running = &fixture.app().running_generator_chains[&channel];
+    assert_eq!(running.endpoint_id, next_id);
+    assert_eq!(running.control.genuine_worker_id(), owner.0);
+    assert_eq!(running.guard.genuine_worker_id(), owner.0);
+    assert_eq!(running.control.stats().detached_workers, 0);
+    assert_eq!(
+        fixture.app().clip_restoration_installs.get(&41),
+        Some(&(next_id, true))
+    );
+    let callback = fixture.callback().genuine_snapshot();
+    assert_eq!(callback.endpoints.len(), 1);
+    assert_eq!(callback.endpoints[0].endpoint_id, next_id);
+    assert_eq!(callback.endpoints[0].fixed.bridge.worker_id, owner.0);
+    observer.with_snapshot(|snapshot| {
+        let installed = snapshot
+            .records
+            .iter()
+            .filter_map(|record| match &record.kind {
+                crate::genuine_app_observer::RecordKind::AppGeneratorEndpointEvent(event)
+                    if matches!(event, GeneratorEndpointEvent::Installed { .. }) =>
+                {
+                    Some(*event)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(installed.len(), 1);
+        assert!(matches!(installed[0], GeneratorEndpointEvent::Installed {
+            channel_id, endpoint_id, plugin_instance_id: 41, success: true,
+            replaced_endpoint_id: None, replaced_plugin_instance_id: None, ..
+        } if channel_id == channel && endpoint_id == next_id));
+    });
+    // Existing bounded Fixture cleanup owns the same restored guard, including
+    // assertion/unwind paths. Its exact join is observed, never inferred.
+    drop(fixture);
+    assert_one_healthy_restoration_join(&observer, owner.0);
 }
 
 #[test]
@@ -1800,7 +2224,7 @@ fn actual_installed_receipt_panic_retains_exact_pending_owner_and_blocks_later_a
     fixture.app_mut().undo();
     wait_for_held_restoration_ready(&fixture, channel);
     // Undo filled the ordinary ring; this test targets receipt consumption,
-    // not the separate queue-full installation-refusal path.
+    // not the separate queue-capacity deferral path.
     assert!(
         fixture
             .app()
