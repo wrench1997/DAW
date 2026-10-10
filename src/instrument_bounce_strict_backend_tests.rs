@@ -507,6 +507,7 @@ impl Mock {
         (
             project,
             CapturedInstrumentBounce {
+                receipt_token: Arc::new(()),
                 identity,
                 plan,
                 state,

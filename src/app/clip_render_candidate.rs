@@ -1,15 +1,22 @@
-//! Pure selected-occurrence reinsertion. A receipt is data, not filesystem attestation.
+//! Pure selected-occurrence reinsertion from a producer-verified media receipt.
 //!
 //! No file is opened, registered, moved, or deleted here. In particular, every
 //! failure returns the published path so its future owner can retain the media.
 
 use super::*;
+use crate::{
+    instrument_bounce::occurrence::MatchedOccurrenceSource,
+    occurrence_media::VerifiedOccurrenceMedia,
+};
 
 /// Only this module can construct or alter the admitted Project replacement.
 pub(super) struct PreparedOccurrenceCandidate {
     expected_snapshot: Arc<[u8]>,
     expected_context: OccurrenceContext,
+    authoritative_before: Project,
     project: Project,
+    next_history_snapshot: Project,
+    after_fingerprint: u64,
     source_clip_id: u32,
     audio_clip_id: u32,
     asset_id: u64,
@@ -33,22 +40,63 @@ pub(super) fn prepare_rendered_occurrence_candidate(
     project: &Project,
     context: OccurrenceContext,
     plan: &OccurrencePlan,
-    media: &RenderedOccurrenceMedia,
+    media: &VerifiedOccurrenceMedia,
+    source: &MatchedOccurrenceSource,
 ) -> Result<PreparedOccurrenceCandidate, OccurrenceError> {
-    prepare_candidate(project, context, plan, media)
-        .map_err(|error| retain_published_path(error, &media.path))
+    prepare_candidate(project, context, plan, media, source)
+        .map_err(|error| retain_published_path(error, media.path()))
 }
 
 fn prepare_candidate(
     project: &Project,
     context: OccurrenceContext,
     plan: &OccurrencePlan,
-    media: &RenderedOccurrenceMedia,
+    media: &VerifiedOccurrenceMedia,
+    source: &MatchedOccurrenceSource,
 ) -> Result<PreparedOccurrenceCandidate, OccurrenceError> {
-    // Admission precedes the sole Project clone. Never turn a stale result into
-    // an edit of the current Project, even when only an unrelated field changed.
+    // Admission precedes all Project image copies. The sealed source exists
+    // only after a distinct second actual capture matched the rendered source.
     plan.check_current(project, context)?;
     validate_rendered_media(plan, media)?;
+    if !media.provenance().same_capture(source.provenance())
+        || !std::ptr::eq(source.provenance().request(), plan.request.as_ref())
+    {
+        return Err(failure(
+            OccurrenceErrorKind::Source,
+            "Authoritative source recapture differs from the rendered capture",
+        ));
+    }
+    let source_instance_index = project
+        .plugin_instances
+        .iter()
+        .position(|instance| instance.id == plan.instance_id)
+        .ok_or_else(|| {
+            failure(
+                OccurrenceErrorKind::Source,
+                "The retained generator is missing",
+            )
+        })?;
+    let existing = &project.plugin_instances[source_instance_index];
+    if source.identity().instance_id != existing.id
+        || existing.parameters.len() != source.parameter_bases().len()
+        || !existing
+            .parameters
+            .keys()
+            .copied()
+            .eq(source.parameter_bases().iter().map(|(id, _)| *id))
+        || source
+            .parameter_bases()
+            .iter()
+            .any(|(_, value)| !value.is_finite() || !(0.0..=1.0).contains(value))
+        || source.opaque_state().is_empty()
+        || source.opaque_state().len() > MAX_SNAPSHOT_BYTES
+    {
+        return Err(failure(
+            OccurrenceErrorKind::Source,
+            "Actual capture must contain exactly the existing generic-base IDs and bounded opaque state",
+        ));
+    }
+
     if !plan.channel_gain.is_finite() || !(0.0..=1.0).contains(&plan.channel_gain) {
         return Err(failure(
             OccurrenceErrorKind::Unsupported,
@@ -113,21 +161,21 @@ fn prepare_candidate(
     }
     let source_timeline = compile_candidate_timeline(project, &plan.tempo_map)?;
     let name = media
-        .path
+        .path()
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("Rendered occurrence.wav")
         .to_owned();
-    let metadata = &media.asset.metadata;
+    let metadata = &media.asset().metadata;
     let asset = AudioAsset {
         id: asset_id,
         name: name.clone(),
-        path: media.path.clone(),
+        path: media.path().to_path_buf(),
         sample_rate: metadata.sample_rate,
         channels: metadata.channels,
         bits_per_sample: metadata.bits_per_sample,
         frames: metadata.frames,
-        waveform_peaks: build_waveform_peaks(&media.asset.samples, metadata.channels, 256),
+        waveform_peaks: build_waveform_peaks(&media.asset().samples, metadata.channels, 256),
     };
     let clip = Clip {
         id: audio_clip_id,
@@ -154,8 +202,61 @@ fn prepare_candidate(
         fade_out: 0.0,
         muted: false,
     };
-    let mut candidate = project.clone();
+    // Image 1: reconcile only this retained instance's actual captured state
+    // and the admitted existing bases. Descriptor UID is never a factory UID.
+    let mut authoritative_before = project.clone();
+    let target = &mut authoritative_before.plugin_instances[source_instance_index];
+    reservation_gate(ReservationSite::AuthoritativeState)?;
+    target.opaque_state.clear();
+    target
+        .opaque_state
+        .try_reserve_exact(source.opaque_state().len())
+        .map_err(|error| failure(OccurrenceErrorKind::Capacity, error.to_string()))?;
+    target.opaque_state.extend_from_slice(source.opaque_state());
+    for &(id, value) in source.parameter_bases() {
+        *target
+            .parameters
+            .get_mut(&id)
+            .expect("exact existing IDs admitted") = value;
+    }
+    let before_timeline = compile_candidate_timeline(&authoritative_before, &plan.tempo_map)?;
+    if before_timeline.events() != source_timeline.events()
+        || before_timeline.audio_clips() != source_timeline.audio_clips()
+        || before_timeline.channel_bases() != source_timeline.channel_bases()
+        || before_timeline.plugin_routes() != source_timeline.plugin_routes()
+        || before_timeline.duration_frames() != source_timeline.duration_frames()
+    {
+        return Err(failure(
+            OccurrenceErrorKind::Timeline,
+            "Actual state reconciliation changes the selected compiled source",
+        ));
+    }
+    // One temporary decode while only the first image is owned. Release the
+    // canonical verification bytes before allocating the next image.
+    let before_bytes = serialize_project_bounded(&authoritative_before)?;
+    drop(decode_exact_project(&before_bytes)?);
+    drop(before_bytes);
+    drop(before_timeline);
+
+    // Image 2 contains exactly the authoritative before-state plus conversion.
+    let mut candidate = authoritative_before.clone();
     candidate.clips[source_index].muted = true;
+    candidate.plugin_instances[source_instance_index].enabled = false;
+    reservation_gate(ReservationSite::CandidateAssets)?;
+    candidate
+        .audio_assets
+        .try_reserve(1)
+        .map_err(|error| failure(OccurrenceErrorKind::Capacity, error.to_string()))?;
+    reservation_gate(ReservationSite::CandidateClips)?;
+    candidate
+        .clips
+        .try_reserve(1)
+        .map_err(|error| failure(OccurrenceErrorKind::Capacity, error.to_string()))?;
+    reservation_gate(ReservationSite::CandidateRoutes)?;
+    candidate
+        .audio_clip_mixer_destinations
+        .try_reserve(1)
+        .map_err(|error| failure(OccurrenceErrorKind::Capacity, error.to_string()))?;
     candidate.audio_assets.push(asset);
     candidate.clips.push(clip);
     candidate
@@ -168,16 +269,34 @@ fn prepare_candidate(
     let timeline = compile_candidate_timeline(&candidate, &plan.tempo_map)?;
     validate_candidate_geometry(&candidate, &timeline, plan, audio_clip_id, asset_id)?;
     validate_remaining_events(&source_timeline, &timeline, plan, audio_clip_id)?;
+    drop(source_timeline);
 
     // A save/reopen must preserve the compiled proof without Project::normalize
     // silently repairing geometry, routing, identities, or source metadata.
-    let bytes = project_snapshot(&candidate)?;
-    let round_tripped: Project = serde_json::from_slice(&bytes).map_err(|error| {
-        failure(
-            OccurrenceErrorKind::Source,
-            format!("The candidate Project cannot round-trip: {error}"),
-        )
-    })?;
+    let bytes = serialize_project_bounded(&candidate)?;
+    let after_fingerprint = snapshot_fingerprint(&bytes);
+    if bytes.as_slice() == plan.snapshot.as_ref() {
+        return Err(failure(
+            OccurrenceErrorKind::History,
+            "The rendered occurrence transaction is a no-op",
+        ));
+    }
+    // Image 3 is the verified decoded after-image. Never create a fourth
+    // temporary Project after this point. Restore nonpersisted runtime fields
+    // from the existing images without changing persisted equality.
+    let mut round_tripped = decode_exact_project(&bytes)?;
+    for (decoded, current) in round_tripped
+        .plugin_instances
+        .iter_mut()
+        .zip(&candidate.plugin_instances)
+    {
+        decoded.runtime_status = current.runtime_status;
+    }
+    round_tripped.piano_notes.clone_from(&candidate.piano_notes);
+    round_tripped
+        .migration_diagnostics
+        .clone_from(&candidate.migration_diagnostics);
+    drop(bytes);
     let restored_map =
         TempoMap::from_project(&round_tripped, plan.sample_rate).map_err(|error| {
             failure(
@@ -202,11 +321,14 @@ fn prepare_candidate(
     Ok(PreparedOccurrenceCandidate {
         expected_snapshot: Arc::clone(&plan.snapshot),
         expected_context: context,
+        authoritative_before,
         project: candidate,
+        next_history_snapshot: round_tripped,
+        after_fingerprint,
         source_clip_id: plan.clip_id,
         audio_clip_id,
         asset_id,
-        published_path: media.path.clone(),
+        published_path: media.path().to_path_buf(),
     })
 }
 
@@ -384,10 +506,147 @@ fn validate_remaining_events(
     Ok(())
 }
 
-/// The App adapter must supply real session/revision tokens and its existing
-/// gesture/save barriers. This pure wrapper does not claim to own that state.
+/// Prepared entirely before runtime removal. The later App fence must retain
+/// the same Project/history owners until the exact callback removal receipt.
+pub(super) struct PreparedOccurrenceHistory {
+    expected_snapshot: Arc<[u8]>,
+    expected_context: OccurrenceContext,
+    expected_history_fingerprint: u64,
+    expected_undo_len: usize,
+    expected_redo_len: usize,
+    history: PreparedExplicitBeforeHistory,
+    result: OccurrenceHistoryCommit,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub(super) fn commit_rendered_occurrence_history_transaction(
+pub(super) fn prepare_rendered_occurrence_history_transaction(
+    context: OccurrenceContext,
+    project: &Project,
+    history_fingerprint: u64,
+    undo_stack: &mut Vec<Project>,
+    redo_stack: &[Project],
+    candidate: PreparedOccurrenceCandidate,
+) -> Result<PreparedOccurrenceHistory, OccurrenceError> {
+    let path = &candidate.published_path;
+    if context != candidate.expected_context {
+        return Err(retain_published_path(
+            failure(
+                OccurrenceErrorKind::Stale,
+                "The exact occurrence source/runtime stamp changed",
+            ),
+            path,
+        ));
+    }
+    if !project_matches_snapshot(project, &candidate.expected_snapshot)
+        .map_err(|error| retain_published_path(error, path))?
+    {
+        return Err(retain_published_path(
+            failure(
+                OccurrenceErrorKind::Stale,
+                "The Project changed after occurrence preparation",
+            ),
+            path,
+        ));
+    }
+    if project_matches_snapshot(&candidate.project, &candidate.expected_snapshot)
+        .map_err(|error| retain_published_path(error, path))?
+    {
+        return Err(retain_published_path(
+            failure(
+                OccurrenceErrorKind::History,
+                "The rendered occurrence transaction is a no-op",
+            ),
+            path,
+        ));
+    }
+    let expected_undo_len = undo_stack.len();
+    let history = prepare_explicit_before_project_history_transaction(
+        snapshot_fingerprint(&candidate.expected_snapshot),
+        history_fingerprint,
+        candidate.after_fingerprint,
+        undo_stack,
+        candidate.authoritative_before,
+        candidate.project,
+        candidate.next_history_snapshot,
+    )
+    .map_err(|reason| {
+        retain_published_path(failure(OccurrenceErrorKind::Capacity, reason), path)
+    })?;
+    Ok(PreparedOccurrenceHistory {
+        expected_snapshot: candidate.expected_snapshot,
+        expected_context: context,
+        expected_history_fingerprint: history_fingerprint,
+        expected_undo_len,
+        expected_redo_len: redo_stack.len(),
+        history,
+        result: OccurrenceHistoryCommit {
+            source_clip_id: candidate.source_clip_id,
+            audio_clip_id: candidate.audio_clip_id,
+            asset_id: candidate.asset_id,
+            published_path: candidate.published_path,
+        },
+    })
+}
+
+impl PreparedOccurrenceHistory {
+    /// The last fallible comparison belongs BEFORE CommitAccepted/removal.
+    /// It serializes into the comparison writer without another canonical
+    /// buffer or Project clone. Existing serde-owned field allocations remain
+    /// possible, so this never runs after successful callback removal.
+    pub(super) fn revalidate(
+        &self,
+        project: &Project,
+        context: OccurrenceContext,
+        history_fingerprint: u64,
+        undo_len: usize,
+        redo_len: usize,
+    ) -> Result<(), OccurrenceError> {
+        if context != self.expected_context
+            || history_fingerprint != self.expected_history_fingerprint
+            || undo_len != self.expected_undo_len
+            || redo_len != self.expected_redo_len
+            || !project_matches_snapshot(project, &self.expected_snapshot)
+                .map_err(|error| retain_published_path(error, &self.result.published_path))?
+        {
+            return Err(retain_published_path(
+                failure(
+                    OccurrenceErrorKind::Stale,
+                    "The prepared conversion or history changed before removal",
+                ),
+                &self.result.published_path,
+            ));
+        }
+        Ok(())
+    }
+
+    /// The owner invokes this once only after its exact removal acknowledgment.
+    /// The held fence and prior revalidate are prerequisites, not inferred here.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn apply(
+        self,
+        project: &mut Project,
+        history_snapshot: &mut Project,
+        history_fingerprint: &mut u64,
+        undo_stack: &mut Vec<Project>,
+        redo_stack: &mut Vec<Project>,
+        dirty: &mut bool,
+    ) -> OccurrenceHistoryCommit {
+        apply_explicit_before_project_history_transaction(
+            project,
+            history_snapshot,
+            history_fingerprint,
+            undo_stack,
+            redo_stack,
+            dirty,
+            self.history,
+        );
+        self.result
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn commit_rendered_occurrence_history_transaction(
     context: OccurrenceContext,
     project: &mut Project,
     history_snapshot: &mut Project,
@@ -397,54 +656,128 @@ pub(super) fn commit_rendered_occurrence_history_transaction(
     dirty: &mut bool,
     candidate: PreparedOccurrenceCandidate,
 ) -> Result<OccurrenceHistoryCommit, OccurrenceError> {
-    let path = &candidate.published_path;
-    if context != candidate.expected_context {
-        return Err(retain_published_path(
-            failure(
-                OccurrenceErrorKind::Stale,
-                "The project session or source/control revision changed",
-            ),
-            path,
-        ));
-    }
-    let snapshot = project_snapshot(project).map_err(|error| retain_published_path(error, path))?;
-    if snapshot != candidate.expected_snapshot {
-        return Err(retain_published_path(
-            failure(
-                OccurrenceErrorKind::Stale,
-                "The Project changed after occurrence preparation",
-            ),
-            path,
-        ));
-    }
-    // The helper rejects a fingerprint no-op before touching Project/history.
-    // A collision therefore fails closed too; exact bytes above are the guard.
-    if !commit_explicit_project_history_transaction(
+    let prepared = prepare_rendered_occurrence_history_transaction(
+        context,
+        project,
+        *history_fingerprint,
+        undo_stack,
+        redo_stack,
+        candidate,
+    )?;
+    prepared.revalidate(
+        project,
+        context,
+        *history_fingerprint,
+        undo_stack.len(),
+        redo_stack.len(),
+    )?;
+    Ok(prepared.apply(
         project,
         history_snapshot,
         history_fingerprint,
         undo_stack,
         redo_stack,
         dirty,
-        candidate.project,
-    ) {
-        return Err(retain_published_path(
-            failure(
-                OccurrenceErrorKind::History,
-                "The rendered occurrence transaction is a no-op",
-            ),
-            path,
-        ));
-    }
-    Ok(OccurrenceHistoryCommit {
-        source_clip_id: candidate.source_clip_id,
-        audio_clip_id: candidate.audio_clip_id,
-        asset_id: candidate.asset_id,
-        published_path: candidate.published_path,
-    })
+    ))
 }
 
 #[cfg(test)]
+pub(super) fn test_commit_verified_occurrence(
+    project: &mut Project,
+    media: &VerifiedOccurrenceMedia,
+    source: &MatchedOccurrenceSource,
+) -> Result<PathBuf, String> {
+    let request = source.provenance().request_handle();
+    let context = request.stamp();
+    let mut plan = OccurrencePlan::prepare(
+        project,
+        context,
+        request.clip_id(),
+        request.sample_rate(),
+        request.tail_frames(),
+        Some(Arc::clone(request.consent())),
+    )
+    .map_err(|error| error.to_string())?;
+    // Reconstruct the entire pure planner proof, then share the already
+    // captured request only after every render-relevant value compares equal.
+    if plan.request.pattern_id() != request.pattern_id()
+        || plan.request.channel_id() != request.channel_id()
+        || plan.request.instance_id() != request.instance_id()
+        || plan.request.start_frame() != request.start_frame()
+        || plan.request.end_frame() != request.end_frame()
+        || plan.request.tempo().to_bits() != request.tempo().to_bits()
+        || plan.request.local_events() != request.local_events()
+    {
+        return Err("Integrated capture request differs from the original pure planner".into());
+    }
+    plan.request = Arc::clone(request);
+    let original = serialize_project_bounded(project).map_err(|error| error.to_string())?;
+    let prepared = prepare_rendered_occurrence_candidate(project, context, &plan, media, source)
+        .map_err(|error| error.to_string())?;
+    assert!(project_matches_snapshot(project, &original).unwrap());
+    let actual_before = serialize_project_bounded(&prepared.authoritative_before).unwrap();
+    let expected_after = serialize_project_bounded(&prepared.project).unwrap();
+    let source_index = project
+        .plugin_instances
+        .iter()
+        .position(|instance| instance.id == request.instance_id())
+        .unwrap();
+    assert_eq!(
+        prepared.authoritative_before.plugin_instances[source_index]
+            .opaque_state
+            .as_slice(),
+        source.opaque_state()
+    );
+    assert!(prepared.authoritative_before.plugin_instances[source_index].enabled);
+    assert!(!prepared.project.plugin_instances[source_index].enabled);
+    for &(id, value) in source.parameter_bases() {
+        assert_eq!(
+            prepared.authoritative_before.plugin_instances[source_index].parameters[&id].to_bits(),
+            value.to_bits()
+        );
+    }
+    let mut history = project.clone();
+    history.name.push_str(" previously observed");
+    let mut fingerprint = project_fingerprint(&history);
+    let pending = serialize_project_bounded(&history).unwrap();
+    let mut undo = Vec::new();
+    let mut redo = vec![project.clone()];
+    let mut dirty = false;
+    let committed = commit_rendered_occurrence_history_transaction(
+        context,
+        project,
+        &mut history,
+        &mut fingerprint,
+        &mut undo,
+        &mut redo,
+        &mut dirty,
+        prepared,
+    )
+    .map_err(|error| error.to_string())?;
+    assert!(dirty);
+    assert!(redo.is_empty());
+    assert_eq!(undo.len(), 2);
+    assert!(project_matches_snapshot(project, &expected_after).unwrap());
+    assert!(project_matches_snapshot(&undo[0], &pending).unwrap());
+    assert_eq!(fingerprint, project_fingerprint(project));
+    let before = undo.pop().unwrap();
+    redo.push(std::mem::replace(project, before));
+    assert!(project_matches_snapshot(project, &actual_before).unwrap());
+    assert!(committed.published_path.exists());
+    let after = redo.pop().unwrap();
+    undo.push(std::mem::replace(project, after));
+    assert!(project_matches_snapshot(project, &expected_after).unwrap());
+    assert!(committed.published_path.exists());
+    let reopened = decode_exact_project(&expected_after).unwrap();
+    assert_eq!(
+        reopened.audio_assets.last().unwrap().path,
+        committed.published_path
+    );
+    assert!(!reopened.plugin_instances[source_index].enabled);
+    Ok(committed.published_path)
+}
+
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
@@ -453,16 +786,20 @@ mod tests {
     fn context() -> OccurrenceContext {
         OccurrenceContext {
             project_session: 19,
-            source_revision: 23,
-            control_revision: 29,
-        }
-    }
-
-    fn published_path() -> PathBuf {
-        if cfg!(windows) {
-            PathBuf::from(r"C:\durable\rendered-occurrence-101.wav")
-        } else {
-            PathBuf::from("/durable/rendered-occurrence-101.wav")
+            project_revision: 23,
+            timeline_revision: 29,
+            epoch: 31,
+            engine_session: 37,
+            endpoint_id: 41,
+            channel_id: 1,
+            instance_id: 71,
+            mixer_track_id: 8,
+            native_generation: 0,
+            app_native_dirty_revision: 0,
+            native_capture_serial: 0,
+            parameter_capture_serial: 0,
+            native_control_request: 0,
+            parameter_control_request: 0,
         }
     }
 
@@ -526,7 +863,23 @@ mod tests {
             fade_out: 0.0,
             muted: false,
         });
+        let mut other_channel = project.channels[0].clone();
+        other_channel.id = 2;
+        other_channel.instrument_plugin_instance_id = None;
+        other_channel.mixer_track = project.mixer_track_id_at_runtime_slot(3).unwrap();
+        project.channels.push(other_channel);
+        project.patterns[0].channel_steps.push([false; 16]);
+        let mut other_pattern = project.patterns[0].clone();
+        other_pattern.id = 88;
+        other_pattern.channel_steps[0] = [false; 16];
+        other_pattern.channel_steps[1][0] = true;
+        for note in &mut other_pattern.notes {
+            note.id += 1;
+            note.channel_id = Some(2);
+        }
+        project.patterns.push(other_pattern);
         let mut other = project.clips[0].clone();
+        other.pattern_id = 88;
         other.id = 12;
         other.start = 2.0;
         other.name = "Same Pattern, untouched".into();
@@ -536,46 +889,102 @@ mod tests {
         project
     }
 
-    fn media(plan: &OccurrencePlan) -> RenderedOccurrenceMedia {
-        let frames = plan.end_frame - plan.start_frame + u64::from(plan.tail_frames);
-        RenderedOccurrenceMedia {
-            snapshot: Arc::clone(&plan.snapshot),
-            context: plan.context,
-            clip_id: plan.clip_id,
-            pattern_id: plan.pattern_id,
-            channel_id: plan.channel_id,
-            instance_id: plan.instance_id,
-            tail_acknowledgment: Some(plan.tail_acknowledgment.clone()),
-            publication_id: 101,
-            path: published_path(),
-            asset: wav::WavAsset {
-                metadata: wav::WavMetadata {
-                    sample_rate: plan.sample_rate,
-                    channels: 2,
-                    encoding: wav::WavSampleEncoding::IeeeFloat,
-                    bits_per_sample: 32,
-                    valid_bits_per_sample: 32,
-                    channel_mask: None,
-                    block_align: 8,
-                    byte_rate: plan.sample_rate * 8,
-                    frames,
-                    duration_seconds: frames as f64 / f64::from(plan.sample_rate),
-                    data_bytes: frames * 8,
-                },
-                samples: vec![0.25; usize::try_from(frames * 2).unwrap()],
-            },
-            prewrite_peak: 0.25,
+    struct FixtureMedia {
+        verified: VerifiedOccurrenceMedia,
+        source: MatchedOccurrenceSource,
+        directory: PathBuf,
+    }
+    impl std::ops::Deref for FixtureMedia {
+        type Target = VerifiedOccurrenceMedia;
+        fn deref(&self) -> &Self::Target {
+            &self.verified
+        }
+    }
+    impl Drop for FixtureMedia {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
+    }
+    fn media(plan: &OccurrencePlan) -> FixtureMedia {
+        let project: Project = serde_json::from_slice(&plan.snapshot).unwrap();
+        let instance = project
+            .plugin_instances
+            .iter()
+            .find(|instance| instance.id == plan.instance_id)
+            .unwrap();
+        media_with_state(
+            plan,
+            instance.opaque_state.clone(),
+            instance
+                .parameters
+                .iter()
+                .map(|(&id, &value)| (id, value))
+                .collect(),
+        )
+    }
+    fn media_with_state(
+        plan: &OccurrencePlan,
+        opaque_state: Vec<u8>,
+        bases: Vec<(u32, f32)>,
+    ) -> FixtureMedia {
+        use crate::{
+            export::StereoFrame,
+            export_job::ExportControl,
+            instrument_bounce::occurrence::test_capture_pair,
+            occurrence_media::{publish_occurrence_render, verify_published_occurrence},
+        };
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        static SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let project: Project = serde_json::from_slice(&plan.snapshot).unwrap();
+        // Fixture captures exercise real attestation comparison with distinct
+        // completed-receipt tokens. No native plug-in is invoked by this test.
+        let (provenance, source) =
+            test_capture_pair(&project, Arc::clone(&plan.request), opaque_state, bases);
+        let directory = std::env::temp_dir().join(format!(
+            "citrus-occurrence-history-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let frames =
+            usize::try_from(plan.end_frame - plan.start_frame + u64::from(plan.tail_frames))
+                .unwrap();
+        let pcm = vec![
+            StereoFrame {
+                left: 0.25,
+                right: 0.25
+            };
+            frames
+        ];
+        let published = publish_occurrence_render(
+            provenance,
+            &directory.join("render.wav"),
+            plan.sample_rate,
+            &pcm,
+            &ExportControl::default(),
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap();
+        drop(pcm);
+        let verified = verify_published_occurrence(published, &AtomicBool::new(false)).unwrap();
+        FixtureMedia {
+            verified,
+            source,
+            directory,
         }
     }
 
     fn admitted_plan(project: &Project, clip_id: u32, tail: u32) -> OccurrencePlan {
-        let acknowledgment = FixedTailAcknowledgment {
-            source_snapshot: project_snapshot(project).unwrap(),
-            context: context(),
-            clip_id,
-            sample_rate: RATE,
-            tail_frames: tail,
-        };
+        let acknowledgment = Arc::new(
+            FixedTailAcknowledgment::review(
+                project_snapshot(project).unwrap(),
+                context(),
+                clip_id,
+                RATE,
+                tail,
+            )
+            .unwrap(),
+        );
         OccurrencePlan::prepare(
             project,
             context(),
@@ -589,7 +998,15 @@ mod tests {
 
     fn prepare(project: &Project, tail: u32) -> PreparedOccurrenceCandidate {
         let plan = admitted_plan(project, project.clips[0].id, tail);
-        prepare_rendered_occurrence_candidate(project, context(), &plan, &media(&plan)).unwrap()
+        let rendered = media(&plan);
+        prepare_rendered_occurrence_candidate(
+            project,
+            context(),
+            &plan,
+            &rendered,
+            &rendered.source,
+        )
+        .unwrap()
     }
 
     fn bytes(project: &Project) -> Vec<u8> {
@@ -615,8 +1032,14 @@ mod tests {
         assert!(plan.local_events.iter().any(|event| matches!(event.kind,
             TimelineEventKind::NoteOn { gain, .. } if gain == 0.4)));
         let rendered = media(&plan);
-        let prepared =
-            prepare_rendered_occurrence_candidate(&project, context(), &plan, &rendered).unwrap();
+        let prepared = prepare_rendered_occurrence_candidate(
+            &project,
+            context(),
+            &plan,
+            &rendered,
+            &rendered.source,
+        )
+        .unwrap();
         assert_eq!(bytes(&project), before);
         let audio = prepared.project.clips.last().unwrap();
         assert_eq!(
@@ -668,7 +1091,7 @@ mod tests {
             }
         )));
         let installed = prepared.project.audio_assets.last().unwrap();
-        assert_eq!(installed.path, rendered.path);
+        assert_eq!(installed.path.as_path(), rendered.path());
         assert_eq!(
             (
                 installed.channels,
@@ -686,6 +1109,7 @@ mod tests {
         restored.audio_assets.pop();
         restored.audio_clip_mixer_destinations.pop();
         restored.clips[0].muted = false;
+        restored.plugin_instances[0].enabled = true;
         assert_eq!(bytes(&restored), before);
     }
 
@@ -706,6 +1130,7 @@ mod tests {
                         context(),
                         &plan,
                         &rendered,
+                        &rendered.source,
                     )
                     .unwrap();
                     let audio = candidate.project.clips.last().unwrap();
@@ -768,6 +1193,7 @@ mod tests {
         assert_eq!(audio.audio_source_offset_frame, Some(0));
         let mut reverted = candidate.project;
         reverted.clips[0].muted = false;
+        reverted.plugin_instances[0].enabled = true;
         reverted.clips.pop();
         reverted.audio_assets.pop();
         reverted.audio_clip_mixer_destinations.pop();
@@ -783,15 +1209,20 @@ mod tests {
             let plan = admitted_plan(&project, 11, 0);
             assert_eq!(plan.end_frame, plan.tempo_map.duration_frames());
             let rendered = media(&plan);
-            let pcm_before = rendered.asset.samples.clone();
-            let candidate =
-                prepare_rendered_occurrence_candidate(&project, context(), &plan, &rendered)
-                    .unwrap();
+            let pcm_before = rendered.asset().samples.clone();
+            let candidate = prepare_rendered_occurrence_candidate(
+                &project,
+                context(),
+                &plan,
+                &rendered,
+                &rendered.source,
+            )
+            .unwrap();
             assert_eq!(
                 candidate.project.clips.last().unwrap().gain.to_bits(),
                 volume.to_bits()
             );
-            assert_eq!(rendered.asset.samples, pcm_before);
+            assert_eq!(rendered.asset().samples, pcm_before);
             assert_eq!(candidate.project.song_length_beats, 8.0);
         }
     }
@@ -819,10 +1250,15 @@ mod tests {
             let plan = admitted_plan(&project, 11, 0);
             let rendered = media(&plan);
             let before = bytes(&project);
-            let error =
-                prepare_rendered_occurrence_candidate(&project, context(), &plan, &rendered)
-                    .err()
-                    .unwrap();
+            let error = prepare_rendered_occurrence_candidate(
+                &project,
+                context(),
+                &plan,
+                &rendered,
+                &rendered.source,
+            )
+            .err()
+            .unwrap();
             assert_eq!(error.kind, OccurrenceErrorKind::Capacity);
             assert_eq!(
                 error.reason,
@@ -832,127 +1268,43 @@ mod tests {
                     "No Playlist clip IDs remain"
                 }
             );
-            assert_eq!(error.published_path.as_ref(), Some(&rendered.path));
+            assert_eq!(error.published_path.as_deref(), Some(rendered.path()));
             assert_eq!(bytes(&project), before);
         }
     }
 
     #[test]
-    fn candidate_failures_retain_published_path_and_never_mutate_source() {
+    fn candidate_refuses_unrelated_capture_or_request_and_retains_real_file() {
         let project = fixture();
         let plan = admitted_plan(&project, 11, 0);
-        let good_media = media(&plan);
-        let _ =
-            prepare_rendered_occurrence_candidate(&project, context(), &plan, &good_media).unwrap();
+        let rendered = media(&plan);
+        let unrelated_capture = media(&plan);
         let before = bytes(&project);
-        for variant in 0..3 {
-            let mut rendered = media(&plan);
-            let mut current_context = context();
-            match variant {
-                0 => current_context.project_session += 1,
-                1 => rendered.publication_id = 0,
-                _ => rendered.prewrite_peak = 1.25,
-            }
-            let error =
-                prepare_rendered_occurrence_candidate(&project, current_context, &plan, &rendered)
-                    .err()
-                    .unwrap();
-            assert_eq!(
-                error.kind,
-                if variant == 0 {
-                    OccurrenceErrorKind::Stale
-                } else {
-                    OccurrenceErrorKind::Media
-                }
-            );
-            assert_eq!(
-                error.reason,
-                match variant {
-                    0 => "The source session or source/control revision changed",
-                    1 => "A uniquely published absolute UTF-8 media path is required",
-                    _ =>
-                        "Dry render headroom exceeds the current lossless WAV import subset; retain the published render",
-                }
-            );
-            assert_eq!(error.published_path.as_ref(), Some(&rendered.path));
-            assert_eq!(bytes(&project), before);
-        }
-    }
-
-    #[test]
-    fn missing_or_wrong_tail_media_acknowledgment_cannot_prepare_or_commit() {
-        for tail in [0, 129] {
-            // Both cutting at the Clip end and a positive fixed tail require
-            // explicit fixture acknowledgment. Establish the working path first.
-            let mut control = fixture();
-            let candidate = prepare(&control, tail);
-            let mut control_history = control.clone();
-            let mut control_fingerprint = project_fingerprint(&control);
-            commit_rendered_occurrence_history_transaction(
-                context(),
-                &mut control,
-                &mut control_history,
-                &mut control_fingerprint,
-                &mut Vec::new(),
-                &mut Vec::new(),
-                &mut false,
-                candidate,
-            )
-            .unwrap();
-
-            for missing in [true, false] {
-                let mut project = fixture();
-                let plan = admitted_plan(&project, 11, tail);
-                let mut rendered = media(&plan);
-                if missing {
-                    rendered.tail_acknowledgment = None;
-                } else {
-                    rendered.tail_acknowledgment.as_mut().unwrap().tail_frames = tail + 1;
-                }
-                let mut history = project.clone();
-                history.name = "Earlier observed snapshot".into();
-                let mut fingerprint = project_fingerprint(&history);
-                let mut undo = vec![history.clone()];
-                let mut redo = vec![project.clone()];
-                let mut dirty = missing;
-                let before = history_bytes(&project, &history, fingerprint, &undo, &redo, dirty);
-                let prepared =
-                    prepare_rendered_occurrence_candidate(&project, context(), &plan, &rendered);
-                assert!(
-                    prepared.is_err(),
-                    "An unacknowledged receipt must produce no candidate"
-                );
-                // Exercise the full prepare-then-commit chain. Its closure must
-                // not run because no admitted candidate exists on this path.
-                let mut commit_attempted = false;
-                let error = prepared
-                    .and_then(|candidate| {
-                        commit_attempted = true;
-                        commit_rendered_occurrence_history_transaction(
-                            context(),
-                            &mut project,
-                            &mut history,
-                            &mut fingerprint,
-                            &mut undo,
-                            &mut redo,
-                            &mut dirty,
-                            candidate,
-                        )
-                    })
-                    .unwrap_err();
-                assert!(!commit_attempted);
-                assert_eq!(error.kind, OccurrenceErrorKind::Media);
-                assert_eq!(
-                    error.reason,
-                    "Rendered media lacks the exact admitted fixed-tail acknowledgment"
-                );
-                assert_eq!(error.published_path.as_ref(), Some(&rendered.path));
-                assert_eq!(
-                    history_bytes(&project, &history, fingerprint, &undo, &redo, dirty),
-                    before
-                );
-            }
-        }
+        let error = prepare_rendered_occurrence_candidate(
+            &project,
+            context(),
+            &plan,
+            &rendered,
+            &unrelated_capture.source,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.kind, OccurrenceErrorKind::Source);
+        assert_eq!(error.published_path.as_deref(), Some(rendered.path()));
+        assert!(rendered.path().exists());
+        let different_request = admitted_plan(&project, 11, 0);
+        let error = prepare_rendered_occurrence_candidate(
+            &project,
+            context(),
+            &different_request,
+            &rendered,
+            &rendered.source,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.kind, OccurrenceErrorKind::Media);
+        assert_eq!(bytes(&project), before);
+        assert!(rendered.path().exists());
     }
 
     #[test]
@@ -1055,8 +1407,8 @@ mod tests {
             let mut now = context();
             match variant {
                 0 => now.project_session += 1,
-                1 => now.source_revision += 1,
-                2 => now.control_revision += 1,
+                1 => now.project_revision += 1,
+                2 => now.parameter_control_request += 1,
                 3 => project.name.push_str(" changed elsewhere"),
                 4 => project.clips[1].gain = 0.75,
                 _ => project.plugin_instances[0].opaque_state.push(99),
@@ -1077,7 +1429,7 @@ mod tests {
             assert_eq!(
                 error.reason,
                 if variant < 3 {
-                    "The project session or source/control revision changed"
+                    "The exact occurrence source/runtime stamp changed"
                 } else {
                     "The Project changed after occurrence preparation"
                 }
@@ -1088,6 +1440,215 @@ mod tests {
                 before
             );
         }
+    }
+
+    #[test]
+    fn authoritative_capture_is_the_one_step_undo_image_and_preserves_pending_edit() {
+        let mut project = fixture();
+        project.plugin_instances[0].parameters.insert(17, 0.25);
+        project.plugin_instances[0].opaque_state = vec![1, 2, 3];
+        let mut history = project.clone();
+        let earlier = bytes(&history);
+        let mut fingerprint = project_fingerprint(&history);
+        project.name = "Pending edit before conversion".into();
+        let original = bytes(&project);
+        let plan = admitted_plan(&project, 11, 129);
+        let rendered = media_with_state(&plan, vec![9, 8, 7, 6], vec![(17, 0.75)]);
+        let candidate = prepare_rendered_occurrence_candidate(
+            &project,
+            context(),
+            &plan,
+            &rendered,
+            &rendered.source,
+        )
+        .unwrap();
+        let expected_before = bytes(&candidate.authoritative_before);
+        let expected_after = bytes(&candidate.project);
+        assert_eq!(bytes(&project), original);
+        assert!(candidate.authoritative_before.plugin_instances[0].enabled);
+        assert!(!candidate.authoritative_before.clips[0].muted);
+        assert!(!candidate.project.plugin_instances[0].enabled);
+        assert_eq!(
+            candidate.project.plugin_instances[0].uid,
+            project.plugin_instances[0].uid
+        );
+        let mut allowed_delta_reversed = candidate.project.clone();
+        allowed_delta_reversed.plugin_instances[0].enabled = true;
+        allowed_delta_reversed.plugin_instances[0].parameters =
+            project.plugin_instances[0].parameters.clone();
+        allowed_delta_reversed.plugin_instances[0].opaque_state =
+            project.plugin_instances[0].opaque_state.clone();
+        allowed_delta_reversed.clips[0].muted = false;
+        allowed_delta_reversed.clips.pop();
+        allowed_delta_reversed.audio_assets.pop();
+        allowed_delta_reversed.audio_clip_mixer_destinations.pop();
+        assert_eq!(bytes(&allowed_delta_reversed), original);
+        drop(allowed_delta_reversed);
+        let mut undo = Vec::new();
+        let mut redo = vec![project.clone()];
+        let mut dirty = false;
+        commit_rendered_occurrence_history_transaction(
+            context(),
+            &mut project,
+            &mut history,
+            &mut fingerprint,
+            &mut undo,
+            &mut redo,
+            &mut dirty,
+            candidate,
+        )
+        .unwrap();
+        assert_eq!(undo.len(), 2);
+        assert!(redo.is_empty());
+        assert!(dirty);
+        assert_eq!(bytes(&project), expected_after);
+        assert_eq!(project.plugin_instances[0].parameters[&17], 0.75);
+        assert_eq!(project.plugin_instances[0].opaque_state, vec![9, 8, 7, 6]);
+        assert_eq!(bytes(&undo[0]), earlier);
+        let before = undo.pop().unwrap();
+        redo.push(std::mem::replace(&mut project, before));
+        assert_eq!(bytes(&project), expected_before);
+        assert!(project.plugin_instances[0].enabled);
+        assert_eq!(project.name, "Pending edit before conversion");
+        assert!(rendered.path().exists());
+        let after = redo.pop().unwrap();
+        undo.push(std::mem::replace(&mut project, after));
+        assert_eq!(bytes(&project), expected_after);
+        assert_eq!(project.audio_assets.last().unwrap().path, rendered.path());
+        let saved: Project = serde_json::from_slice(&bytes(&project)).unwrap();
+        assert_eq!(saved.audio_assets.last().unwrap().path, rendered.path());
+        assert!(rendered.path().exists());
+    }
+
+    #[test]
+    fn all_new_precommit_reservation_failures_preserve_original_history_and_media() {
+        for site in [
+            ReservationSite::AuthoritativeState,
+            ReservationSite::Snapshot,
+            ReservationSite::CandidateAssets,
+            ReservationSite::CandidateClips,
+            ReservationSite::CandidateRoutes,
+            ReservationSite::History,
+        ] {
+            let mut project = fixture();
+            let plan = admitted_plan(&project, 11, 0);
+            let rendered = media_with_state(&plan, vec![7, 8, 9], vec![(17, 0.75)]);
+            let mut history = project.clone();
+            history.name = "Prior snapshot".into();
+            let mut fingerprint = project_fingerprint(&history);
+            let mut undo = vec![history.clone()];
+            let mut redo = vec![project.clone()];
+            let mut dirty = false;
+            let before = history_bytes(&project, &history, fingerprint, &undo, &redo, dirty);
+            RESERVATION_FAILURE.with(|failure| failure.set(Some(site)));
+            let error = prepare_rendered_occurrence_candidate(
+                &project,
+                context(),
+                &plan,
+                &rendered,
+                &rendered.source,
+            )
+            .and_then(|candidate| {
+                commit_rendered_occurrence_history_transaction(
+                    context(),
+                    &mut project,
+                    &mut history,
+                    &mut fingerprint,
+                    &mut undo,
+                    &mut redo,
+                    &mut dirty,
+                    candidate,
+                )
+            })
+            .err()
+            .unwrap();
+            assert_eq!(error.kind, OccurrenceErrorKind::Capacity);
+            assert_eq!(
+                history_bytes(&project, &history, fingerprint, &undo, &redo, dirty),
+                before
+            );
+            assert!(rendered.path().exists());
+            assert!(RESERVATION_FAILURE.with(|failure| failure.get()).is_none());
+        }
+    }
+
+    #[test]
+    fn prepared_history_refuses_edit_away_back_and_history_drift_before_removal() {
+        let project = fixture();
+        let candidate = prepare(&project, 0);
+        let fingerprint = project_fingerprint(&project);
+        let mut undo = Vec::new();
+        let redo = Vec::new();
+        let prepared = prepare_rendered_occurrence_history_transaction(
+            context(),
+            &project,
+            fingerprint,
+            &mut undo,
+            &redo,
+            candidate,
+        )
+        .unwrap();
+        prepared
+            .revalidate(&project, context(), fingerprint, 0, 0)
+            .unwrap();
+        let mut changed = context();
+        changed.project_revision += 2;
+        assert_eq!(
+            prepared
+                .revalidate(&project, changed, fingerprint, 0, 0)
+                .unwrap_err()
+                .kind,
+            OccurrenceErrorKind::Stale
+        );
+        assert_eq!(
+            prepared
+                .revalidate(&project, context(), fingerprint, 1, 0)
+                .unwrap_err()
+                .kind,
+            OccurrenceErrorKind::Stale
+        );
+        assert_eq!(
+            prepared
+                .revalidate(&project, context(), fingerprint + 1, 0, 0)
+                .unwrap_err()
+                .kind,
+            OccurrenceErrorKind::Stale
+        );
+    }
+
+    #[test]
+    fn conversion_preserves_the_existing_bounded_history_limit() {
+        let mut project = fixture();
+        let mut history = project.clone();
+        let mut fingerprint = project_fingerprint(&history);
+        let mut undo = (0..128)
+            .map(|index| {
+                let mut entry = project.clone();
+                entry.name = format!("Old {index}");
+                entry
+            })
+            .collect::<Vec<_>>();
+        project.name = "A preceding unrecorded edit".into();
+        let candidate = prepare(&project, 0);
+        let authoritative_before = bytes(&candidate.authoritative_before);
+        let pending = bytes(&history);
+        let mut redo = Vec::new();
+        let mut dirty = false;
+        commit_rendered_occurrence_history_transaction(
+            context(),
+            &mut project,
+            &mut history,
+            &mut fingerprint,
+            &mut undo,
+            &mut redo,
+            &mut dirty,
+            candidate,
+        )
+        .unwrap();
+        assert_eq!(undo.len(), 128);
+        assert_eq!(undo[0].name, "Old 2");
+        assert_eq!(bytes(&undo[126]), pending);
+        assert_eq!(bytes(&undo[127]), authoritative_before);
     }
 
     #[test]

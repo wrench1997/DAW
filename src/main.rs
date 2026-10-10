@@ -23,6 +23,10 @@ pub mod midi_runtime;
 pub mod mixer_graph;
 mod mixer_meter_ui;
 mod model;
+#[allow(dead_code)] // No App/controller caller in Stop A.
+mod occurrence_media;
+#[allow(dead_code)] // Dormant selected-occurrence worker integration.
+mod occurrence_request;
 pub mod pdc;
 mod piano_roll;
 mod piano_snap;

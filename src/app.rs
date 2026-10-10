@@ -1,7 +1,7 @@
 mod audio_import;
 mod automation_points;
 #[allow(dead_code)]
-mod clip_render;
+pub(crate) mod clip_render;
 #[cfg(test)]
 mod headless_ui_capture;
 #[cfg(test)]
@@ -4190,6 +4190,66 @@ fn commit_explicit_project_history_transaction(
     *history_snapshot = project.clone();
     *dirty = true;
     true
+}
+
+/// Conversion-only explicit before-image. Construction/reservation precedes
+/// callback removal; applying this sealed value performs moves only. Ordinary
+/// explicit history transactions retain their existing independent semantics.
+struct PreparedExplicitBeforeHistory {
+    authoritative_before: Project,
+    after: Project,
+    next_history_snapshot: Project,
+    next_fingerprint: u64,
+    preceding_edit: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_explicit_before_project_history_transaction(
+    original_fingerprint: u64,
+    history_fingerprint: u64,
+    after_fingerprint: u64,
+    undo_stack: &mut Vec<Project>,
+    authoritative_before: Project,
+    after: Project,
+    next_history_snapshot: Project,
+) -> Result<PreparedExplicitBeforeHistory, String> {
+    // Up to two pushes are possible even when bounded retention later evicts
+    // an old entry. Reserve before any Project/history/dirty mutation.
+    clip_render::reservation_gate(clip_render::ReservationSite::History)
+        .map_err(|error| error.to_string())?;
+    undo_stack
+        .try_reserve(2)
+        .map_err(|error| format!("Unable to reserve conversion history: {error}"))?;
+    Ok(PreparedExplicitBeforeHistory {
+        authoritative_before,
+        after,
+        next_history_snapshot,
+        next_fingerprint: after_fingerprint,
+        preceding_edit: original_fingerprint != history_fingerprint,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_explicit_before_project_history_transaction(
+    project: &mut Project,
+    history_snapshot: &mut Project,
+    history_fingerprint: &mut u64,
+    undo_stack: &mut Vec<Project>,
+    redo_stack: &mut Vec<Project>,
+    dirty: &mut bool,
+    prepared: PreparedExplicitBeforeHistory,
+) {
+    let preceding = std::mem::replace(history_snapshot, prepared.next_history_snapshot);
+    if prepared.preceding_edit {
+        push_bounded_project_history(undo_stack, preceding);
+    }
+    // Never push the stale native state from the live Project as this step's
+    // before-image. That Project is replaced, while the actual capture is kept.
+    *project = prepared.after;
+    push_bounded_project_history(undo_stack, prepared.authoritative_before);
+    redo_stack.clear();
+    *history_fingerprint = prepared.next_fingerprint;
+    *dirty = true;
 }
 
 fn mixer_control_commands(project: &Project) -> Vec<AudioCommand> {

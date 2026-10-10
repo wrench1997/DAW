@@ -897,3 +897,7 @@ fn bounce_audio_supported_role_channel_and_order_drift_still_changes_full_receip
         );
     }
 }
+
+#[cfg(target_os = "linux")]
+#[path = "instrument_bounce_occurrence_tests.rs"]
+mod occurrence_join_tests;

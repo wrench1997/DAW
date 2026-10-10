@@ -368,6 +368,7 @@ pub(crate) struct PreparedRender {
     pub identity: BounceSourceIdentity,
     pub metadata: BouncePluginMetadata,
     pub sample_rate: u32,
+    pub origin_frame: u64,
     pub song_frames: u64,
     pub tail_frames: u32,
     pub retained_frames: usize,
@@ -383,6 +384,12 @@ impl PreparedRender {
     ) -> Result<Self, RenderFailure> {
         control.checkpoint()?;
         let plan = capture.plan();
+        if plan.occurrence_request().is_some() {
+            return Err(RenderFailure::new(
+                FailureKind::Invalid,
+                "An occurrence capture requires the occurrence renderer entry point",
+            ));
+        }
         let timeline = plan.timeline();
         let invalid = |s: &str| RenderFailure::new(FailureKind::Invalid, s);
         if !acknowledge_fixed_tail {
@@ -421,11 +428,71 @@ impl PreparedRender {
             identity: capture.identity(),
             metadata: capture.metadata().clone(),
             sample_rate: plan.sample_rate(),
+            origin_frame: 0,
             song_frames,
             tail_frames: plan.tail_frames(),
             retained_frames,
             generated_frames,
             tempo,
+            midi,
+        })
+    }
+
+    pub(crate) fn from_occurrence(
+        capture: &CapturedInstrumentBounce,
+        control: &RenderControl,
+    ) -> Result<Self, RenderFailure> {
+        control.checkpoint()?;
+        let provenance = capture
+            .occurrence_provenance()
+            .map_err(|e| RenderFailure::new(FailureKind::Invalid, e))?;
+        let request = provenance.request();
+        let plan = capture.plan();
+        if !plan.timeline().plugin_routes().iter().any(|route| {
+            route.instance_id == request.instance_id()
+                && route.destination
+                    == (PluginRouteDestination::Generator {
+                        channel_id: request.channel_id(),
+                        slot: 0,
+                    })
+        }) {
+            return Err(RenderFailure::new(
+                FailureKind::Invalid,
+                "Occurrence route differs from captured source",
+            ));
+        }
+        let (retained_frames, generated_frames) = render_frame_bounds(
+            request.song_frames(),
+            request.tail_frames(),
+            capture.metadata().latency_samples,
+        )?;
+        request
+            .start_frame()
+            .checked_add(generated_frames)
+            .filter(|end| *end <= i64::MAX as u64)
+            .ok_or_else(|| {
+                RenderFailure::new(
+                    FailureKind::Invalid,
+                    "Absolute occurrence transport exceeds its signed frame range",
+                )
+            })?;
+        let midi = map_selected_notes(
+            request.local_events(),
+            request.channel_id(),
+            request.song_frames(),
+            control,
+        )?;
+        control.checkpoint()?;
+        Ok(Self {
+            identity: capture.identity(),
+            metadata: capture.metadata().clone(),
+            sample_rate: request.sample_rate(),
+            origin_frame: request.start_frame(),
+            song_frames: request.song_frames(),
+            tail_frames: request.tail_frames(),
+            retained_frames,
+            generated_frames,
+            tempo: request.tempo(),
             midi,
         })
     }
@@ -521,6 +588,8 @@ pub(crate) trait RenderBackend: 'static {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RenderReport {
     pub identity: BounceSourceIdentity,
+    pub origin_frame: u64,
+    pub musical_frames: u64,
     pub frames: usize,
     pub native_latency: u32,
     pub reported_tail: u32,
@@ -699,10 +768,52 @@ fn run_owned<B: RenderBackend>(
             ));
         }
     };
+    let audio = match render_and_dispose(&capture, &prepared, control, progress, fixture_owner) {
+        Ok(audio) => audio,
+        Err(error) => return RenderOutcome::Failed(error),
+    };
+    let written = catch_unwind(AssertUnwindSafe(|| {
+        write_stereo_float32_checked(
+            &path,
+            prepared.sample_rate,
+            &audio,
+            &control.export,
+            control.deadline,
+        )
+    }));
+    match written {
+        Ok(Ok(())) => RenderOutcome::Complete(RenderReport {
+            identity: prepared.identity,
+            origin_frame: prepared.origin_frame,
+            musical_frames: prepared.song_frames,
+            frames: prepared.retained_frames,
+            native_latency: prepared.metadata.latency_samples,
+            reported_tail: prepared.metadata.tail_samples,
+            fixed_tail: prepared.tail_frames,
+            generated_frames: prepared.generated_frames,
+            sample_peak: audio
+                .iter()
+                .fold(0.0_f32, |p, f| p.max(f.left.abs()).max(f.right.abs())),
+        }),
+        Ok(Err(error)) => RenderOutcome::Failed(writer_failure(error)),
+        Err(_) => RenderOutcome::Failed(RenderFailure::new(
+            FailureKind::Panic,
+            "Checked WAV writer panicked",
+        )),
+    }
+}
+
+fn render_and_dispose<B: RenderBackend>(
+    capture: &CapturedInstrumentBounce,
+    prepared: &PreparedRender,
+    control: &RenderControl,
+    progress: &JobProgress,
+    fixture_owner: impl FnOnce() -> B,
+) -> Result<Vec<StereoFrame>, RenderFailure> {
     let mut backend = match catch_unwind(AssertUnwindSafe(fixture_owner)) {
         Ok(backend) => backend,
         Err(_) => {
-            return RenderOutcome::Failed(RenderFailure::new(
+            return Err(RenderFailure::new(
                 FailureKind::Panic,
                 "Empty fixture owner construction panicked",
             ));
@@ -710,7 +821,7 @@ fn run_owned<B: RenderBackend>(
     };
     // Backend stays outside the unwind scope so every rendering panic still enters disposal.
     let rendered = catch_unwind(AssertUnwindSafe(|| {
-        render_audio(&capture, &prepared, &mut backend, control)
+        render_audio(capture, prepared, &mut backend, control)
     }))
     .unwrap_or_else(|_| {
         Err(RenderFailure::new(
@@ -839,36 +950,9 @@ fn run_owned<B: RenderBackend>(
         for diagnostic in cleanup_errors {
             record_cleanup_error(&mut error.cleanup, diagnostic);
         }
-        return RenderOutcome::Failed(error);
+        return Err(error);
     }
-    let audio = audio.expect("successful render and checked disposal retain completed audio");
-    let written = catch_unwind(AssertUnwindSafe(|| {
-        write_stereo_float32_checked(
-            &path,
-            prepared.sample_rate,
-            &audio,
-            &control.export,
-            control.deadline,
-        )
-    }));
-    match written {
-        Ok(Ok(())) => RenderOutcome::Complete(RenderReport {
-            identity: prepared.identity,
-            frames: prepared.retained_frames,
-            native_latency: prepared.metadata.latency_samples,
-            reported_tail: prepared.metadata.tail_samples,
-            fixed_tail: prepared.tail_frames,
-            generated_frames: prepared.generated_frames,
-            sample_peak: audio
-                .iter()
-                .fold(0.0_f32, |p, f| p.max(f.left.abs()).max(f.right.abs())),
-        }),
-        Ok(Err(error)) => RenderOutcome::Failed(writer_failure(error)),
-        Err(_) => RenderOutcome::Failed(RenderFailure::new(
-            FailureKind::Panic,
-            "Checked WAV writer panicked",
-        )),
-    }
+    Ok(audio.expect("successful render and checked disposal retain completed audio"))
 }
 
 fn writer_failure(error: anyhow::Error) -> RenderFailure {
@@ -931,9 +1015,19 @@ fn render_audio<B: RenderBackend>(
             control.call(|| backend.send_midi(event.data, offset))?;
             next += 1;
         }
+        let absolute = prepared
+            .origin_frame
+            .checked_add(start)
+            .and_then(|frame| i64::try_from(frame).ok())
+            .ok_or_else(|| {
+                RenderFailure::new(
+                    FailureKind::Invalid,
+                    "Absolute occurrence transport overflow",
+                )
+            })?;
         let transport = PluginTransport {
-            sample_position: start as i64,
-            quarter_note_position: start as f64 * prepared.tempo
+            sample_position: absolute,
+            quarter_note_position: absolute as f64 * prepared.tempo
                 / (f64::from(prepared.sample_rate) * 60.0),
             tempo: prepared.tempo,
             playing: true,
@@ -991,3 +1085,153 @@ fn render_audio<B: RenderBackend>(
 #[cfg(test)]
 #[path = "instrument_bounce_render_tests.rs"]
 mod tests;
+
+/// The occurrence writer carries its linked-file evidence separately from a
+/// render/backend failure. A successful file is never retroactively cancelled.
+#[derive(Debug)]
+pub(crate) enum OccurrenceRenderOutcome {
+    Complete {
+        report: RenderReport,
+        published: crate::occurrence_media::PublishedOccurrenceRender,
+    },
+    RenderFailed(RenderFailure),
+    PublicationFailed(crate::occurrence_media::OccurrencePublicationFailure),
+}
+
+pub(crate) struct OccurrenceRenderReceipt {
+    receiver: Receiver<OccurrenceRenderOutcome>,
+    control: RenderControl,
+    terminated: Arc<AtomicBool>,
+    progress: Arc<JobProgress>,
+}
+impl OccurrenceRenderReceipt {
+    pub(crate) fn cancel(&self) -> bool {
+        self.control.export.cancel()
+    }
+    pub(crate) fn status(&self) -> RenderStatus {
+        self.progress.status()
+    }
+    pub(crate) fn termination_acknowledged(&self) -> bool {
+        self.terminated.load(Ordering::Acquire)
+    }
+    pub(crate) fn try_recv(&self) -> Result<OccurrenceRenderOutcome, TryRecvError> {
+        if !self.termination_acknowledged() {
+            return Err(TryRecvError::Empty);
+        }
+        self.receiver.try_recv()
+    }
+}
+impl Drop for OccurrenceRenderReceipt {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+impl RenderAdmission {
+    /// Same one-render admission and backend lifetime kernel as whole-song
+    /// rendering. The occurrence writer alone uses create-new publication.
+    pub(crate) fn start_occurrence<B: RenderBackend>(
+        &self,
+        capture: CapturedInstrumentBounce,
+        path: PathBuf,
+        control: RenderControl,
+        factory: impl FnOnce() -> B + Send + 'static,
+    ) -> Result<OccurrenceRenderReceipt, String> {
+        self.0
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "An instrument renderer still owns this job")?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let terminated = Arc::new(AtomicBool::new(false));
+        let ack = Arc::clone(&terminated);
+        let slot = Arc::clone(&self.0);
+        let progress = Arc::new(JobProgress::new());
+        *self.0.job.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&progress));
+        let worker_progress = Arc::clone(&progress);
+        let worker_control = control.clone();
+        let spawn = std::thread::Builder::new()
+            .name("dormant-occurrence-render".into())
+            .spawn(move || {
+                let outcome =
+                    run_occurrence_owned(capture, path, &worker_control, &worker_progress, factory);
+                let _ = sender.try_send(outcome);
+                drop(sender);
+                // The generated PCM and captured state have both been dropped before
+                // this fence. A verifier may now own raw bytes plus decoded PCM.
+                worker_progress.set(RenderStatus::Terminated);
+                slot.busy.store(false, Ordering::Release);
+                ack.store(true, Ordering::Release);
+            });
+        if let Err(error) = spawn {
+            progress.set(RenderStatus::Terminated);
+            self.0.busy.store(false, Ordering::Release);
+            return Err(error.to_string());
+        }
+        Ok(OccurrenceRenderReceipt {
+            receiver,
+            control,
+            terminated,
+            progress,
+        })
+    }
+}
+
+fn run_occurrence_owned<B: RenderBackend>(
+    capture: CapturedInstrumentBounce,
+    path: PathBuf,
+    control: &RenderControl,
+    progress: &JobProgress,
+    factory: impl FnOnce() -> B,
+) -> OccurrenceRenderOutcome {
+    let preflight = catch_unwind(AssertUnwindSafe(|| {
+        let prepared = PreparedRender::from_occurrence(&capture, control)?;
+        let provenance = capture
+            .occurrence_provenance()
+            .map_err(|e| RenderFailure::new(FailureKind::Invalid, e))?;
+        control.checkpoint()?;
+        Ok::<_, RenderFailure>((prepared, provenance))
+    }));
+    let (prepared, provenance) = match preflight {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => return OccurrenceRenderOutcome::RenderFailed(error),
+        Err(_) => {
+            return OccurrenceRenderOutcome::RenderFailed(RenderFailure::new(
+                FailureKind::Panic,
+                "Occurrence render preflight panicked",
+            ));
+        }
+    };
+    let audio = match render_and_dispose(&capture, &prepared, control, progress, factory) {
+        Ok(audio) => audio,
+        Err(error) => return OccurrenceRenderOutcome::RenderFailed(error),
+    };
+    let report = RenderReport {
+        identity: prepared.identity,
+        origin_frame: prepared.origin_frame,
+        musical_frames: prepared.song_frames,
+        frames: prepared.retained_frames,
+        native_latency: prepared.metadata.latency_samples,
+        reported_tail: prepared.metadata.tail_samples,
+        fixed_tail: prepared.tail_frames,
+        generated_frames: prepared.generated_frames,
+        sample_peak: audio.iter().fold(0.0_f32, |peak, frame| {
+            peak.max(frame.left.abs()).max(frame.right.abs())
+        }),
+    };
+    // This producer owns its unwind boundary and typed post-link evidence. Do not
+    // flatten a linked-path failure into the legacy string-only writer envelope.
+    let published = crate::occurrence_media::publish_occurrence_render(
+        provenance,
+        &path,
+        prepared.sample_rate,
+        &audio,
+        &control.export,
+        control.deadline,
+    );
+    drop(audio);
+    drop(capture);
+    match published {
+        Ok(published) => OccurrenceRenderOutcome::Complete { report, published },
+        Err(error) => OccurrenceRenderOutcome::PublicationFailed(error),
+    }
+}

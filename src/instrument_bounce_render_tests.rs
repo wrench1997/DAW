@@ -95,6 +95,7 @@ fn capture_project(
         instance_id: 41,
     };
     CapturedInstrumentBounce {
+        receipt_token: Arc::new(()),
         identity,
         plan,
         state: BouncePluginState {

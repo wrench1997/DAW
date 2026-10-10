@@ -3,6 +3,7 @@
 use super::*;
 use crate::{
     model::{AudioLengthReference, PluginFormat},
+    occurrence_request::{FixedTailAcknowledgment, OccurrenceRenderRequest, OccurrenceStamp},
     tempo_map::TempoMap,
     timeline::{
         CompiledTimeline, NoteSourceDescriptor, TimelineCompileOptions, TimelineEvent,
@@ -17,12 +18,7 @@ mod candidate;
 const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OCCURRENCE_FRAMES: u64 = 24_000_000;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct OccurrenceContext {
-    project_session: u64,
-    source_revision: u64,
-    control_revision: u64,
-}
+type OccurrenceContext = OccurrenceStamp;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OccurrenceErrorKind {
     Source,
@@ -37,7 +33,7 @@ enum OccurrenceErrorKind {
 }
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{reason}")]
-struct OccurrenceError {
+pub(super) struct OccurrenceError {
     kind: OccurrenceErrorKind,
     reason: String,
     published_path: Option<PathBuf>,
@@ -50,9 +46,41 @@ fn failure(kind: OccurrenceErrorKind, reason: impl Into<String>) -> OccurrenceEr
     }
 }
 
-/// Exact persisted bytes, not a hash-only stale guard. Bound encoding before
-/// allocation grows; failed serialization never becomes an empty fingerprint.
-fn project_snapshot(project: &Project) -> Result<Arc<[u8]>, OccurrenceError> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReservationSite {
+    Snapshot,
+    AuthoritativeState,
+    CandidateAssets,
+    CandidateClips,
+    CandidateRoutes,
+    History,
+}
+#[cfg(test)]
+thread_local! {
+    static RESERVATION_FAILURE: std::cell::Cell<Option<ReservationSite>> = const { std::cell::Cell::new(None) };
+}
+pub(super) fn reservation_gate(site: ReservationSite) -> Result<(), OccurrenceError> {
+    #[cfg(test)]
+    if RESERVATION_FAILURE.with(|failure| {
+        if failure.get() == Some(site) {
+            failure.set(None);
+            true
+        } else {
+            false
+        }
+    }) {
+        return Err(failure(
+            OccurrenceErrorKind::Capacity,
+            format!("Injected {site:?} reservation failure"),
+        ));
+    }
+    let _ = site;
+    Ok(())
+}
+
+/// Serialize into one bounded, fallibly grown buffer. Verification uses a
+/// comparison writer rather than retaining a second canonical byte buffer.
+fn serialize_project_bounded(project: &Project) -> Result<Vec<u8>, OccurrenceError> {
     struct Bounded(Vec<u8>);
     impl Write for Bounded {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -74,50 +102,91 @@ fn project_snapshot(project: &Project) -> Result<Arc<[u8]>, OccurrenceError> {
             Ok(())
         }
     }
+    reservation_gate(ReservationSite::Snapshot)?;
     let mut output = Bounded(Vec::new());
-    serde_json::to_writer(&mut output, project).map_err(|e| {
+    serde_json::to_writer(&mut output, project).map_err(|error| {
         failure(
             OccurrenceErrorKind::Source,
-            format!("Unable to capture exact Project snapshot: {e}"),
+            format!("Unable to capture exact Project snapshot: {error}"),
         )
     })?;
-    // serde_json encodes nonfinite floats as null. Refuse a snapshot which
-    // cannot round-trip as a Project instead of treating NaN/Inf as equal nulls.
-    let restored = serde_json::from_slice::<Project>(&output.0).map_err(|e| {
+    Ok(output.0)
+}
+
+/// Exact streaming byte comparison without another canonical snapshot or
+/// decoded Project. Existing serde field encoders may allocate (notably the
+/// persisted opaque-state hex encoder), so this is only a pre-removal step.
+fn project_matches_snapshot(project: &Project, expected: &[u8]) -> Result<bool, OccurrenceError> {
+    struct Compare<'a> {
+        expected: &'a [u8],
+        position: usize,
+        equal: bool,
+    }
+    impl Write for Compare<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            let end = self
+                .position
+                .checked_add(bytes.len())
+                .ok_or_else(|| std::io::Error::other("Snapshot comparison overflow"))?;
+            if end > MAX_SNAPSHOT_BYTES {
+                return Err(std::io::Error::other("Project snapshot exceeds 64 MiB"));
+            }
+            self.equal &= self.expected.get(self.position..end) == Some(bytes);
+            self.position = end;
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut comparison = Compare {
+        expected,
+        position: 0,
+        equal: true,
+    };
+    serde_json::to_writer(&mut comparison, project).map_err(|error| {
         failure(
             OccurrenceErrorKind::Source,
-            format!("Project snapshot is not persistable: {e}"),
+            format!("Unable to compare exact Project snapshot: {error}"),
         )
     })?;
-    let mut reencoded = Bounded(Vec::new());
-    serde_json::to_writer(&mut reencoded, &restored).map_err(|e| {
+    Ok(comparison.equal && comparison.position == expected.len())
+}
+
+fn decode_exact_project(bytes: &[u8]) -> Result<Project, OccurrenceError> {
+    let restored = serde_json::from_slice::<Project>(bytes).map_err(|error| {
         failure(
             OccurrenceErrorKind::Source,
-            format!("Unable to re-encode exact Project snapshot: {e}"),
+            format!("Project snapshot is not persistable: {error}"),
         )
     })?;
-    if output.0 != reencoded.0 {
+    if !project_matches_snapshot(&restored, bytes)? {
         return Err(failure(
             OccurrenceErrorKind::Source,
             "Project snapshot changes during serialization round-trip",
         ));
     }
-    Ok(output.0.into())
+    Ok(restored)
 }
 
-/// Explicit user choice bound to the source shown for the selected cutoff/tail.
-/// A supplied numeric tail alone never constitutes acknowledgment.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct FixedTailAcknowledgment {
-    source_snapshot: Arc<[u8]>,
-    context: OccurrenceContext,
-    clip_id: u32,
-    sample_rate: u32,
-    tail_frames: u32,
+/// Exact persisted bytes, not a hash-only stale guard. This helper owns one
+/// temporary decoded image, so image preparation calls it only before owning
+/// all three images. The after round-trip itself supplies the third image.
+fn project_snapshot(project: &Project) -> Result<Arc<[u8]>, OccurrenceError> {
+    let bytes = serialize_project_bounded(project)?;
+    drop(decode_exact_project(&bytes)?);
+    Ok(bytes.into())
+}
+
+fn snapshot_fingerprint(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 struct OccurrencePlan {
-    tail_acknowledgment: FixedTailAcknowledgment,
+    tail_acknowledgment: Arc<FixedTailAcknowledgment>,
+    request: Arc<OccurrenceRenderRequest>,
     snapshot: Arc<[u8]>,
     context: OccurrenceContext,
     clip_id: u32,
@@ -134,7 +203,7 @@ struct OccurrencePlan {
     channel_gain: f32,
     mixer_track_id: MixerTrackId,
     tempo_map: TempoMap,
-    local_events: Vec<TimelineEvent>,
+    local_events: Arc<[TimelineEvent]>,
 }
 impl OccurrencePlan {
     fn prepare(
@@ -143,38 +212,37 @@ impl OccurrencePlan {
         clip_id: u32,
         sample_rate: u32,
         tail_frames: u32,
-        acknowledgment: Option<FixedTailAcknowledgment>,
+        acknowledgment: Option<Arc<FixedTailAcknowledgment>>,
     ) -> Result<Self, OccurrenceError> {
-        if context.project_session == 0 || context.source_revision == 0 {
-            return Err(failure(
-                OccurrenceErrorKind::Context,
-                "A current Project session and source revision are required",
-            ));
-        }
+        context
+            .validate()
+            .map_err(|reason| failure(OccurrenceErrorKind::Context, reason))?;
         if !(8000..=192000).contains(&sample_rate) || tail_frames > sample_rate.saturating_mul(30) {
             return Err(failure(
                 OccurrenceErrorKind::Range,
                 "Occurrence render requires 8000–192000 Hz and a fixed tail of at most 30 seconds",
             ));
         }
-        let snapshot = project_snapshot(project)?;
         let tail_acknowledgment = acknowledgment.ok_or_else(|| {
             failure(
                 OccurrenceErrorKind::Unsupported,
                 "Explicit fixed-tail truncation acknowledgment is required",
             )
         })?;
-        if tail_acknowledgment.source_snapshot != snapshot
-            || tail_acknowledgment.context != context
-            || tail_acknowledgment.sample_rate != sample_rate
-            || tail_acknowledgment.clip_id != clip_id
-            || tail_acknowledgment.tail_frames != tail_frames
+        if tail_acknowledgment.snapshot().len() > MAX_SNAPSHOT_BYTES
+            || !project_matches_snapshot(project, tail_acknowledgment.snapshot())?
+            || tail_acknowledgment.stamp() != context
+            || tail_acknowledgment.sample_rate() != sample_rate
+            || tail_acknowledgment.clip_id() != clip_id
+            || tail_acknowledgment.tail_frames() != tail_frames
         {
             return Err(failure(
                 OccurrenceErrorKind::Unsupported,
                 "Fixed-tail acknowledgment does not match the exact source/context/tail",
             ));
         }
+        drop(decode_exact_project(tail_acknowledgment.snapshot())?);
+        let snapshot = Arc::clone(tail_acknowledgment.snapshot());
         let clips: Vec<_> = project.clips.iter().filter(|c| c.id == clip_id).collect();
         let [clip] = clips.as_slice() else {
             return Err(failure(
@@ -289,6 +357,16 @@ impl OccurrencePlan {
                 "The source requires an enabled fully-wet unbypassed VST3 generator with monitoring enabled",
             ));
         }
+        if context.channel_id != channel_id
+            || context.instance_id != instance_id
+            || context.mixer_track_id != channel.mixer_track
+        {
+            return Err(failure(
+                OccurrenceErrorKind::Context,
+                "The actual occurrence stamp differs from the selected source/route",
+            ));
+        }
+        validate_sole_generator_use(project, clip.id, channel_id, instance_id)?;
         if project
             .automation_lanes
             .iter()
@@ -380,8 +458,22 @@ impl OccurrencePlan {
             end_frame,
             stop,
         )?;
+        let local_events: Arc<[TimelineEvent]> = local_events.into();
+        let request = OccurrenceRenderRequest::new(
+            Arc::clone(&tail_acknowledgment),
+            pattern.id,
+            channel_id,
+            instance_id,
+            start_frame,
+            end_frame,
+            timeline.duration_frames(),
+            timeline.plugin_transport_tempo(),
+            Arc::clone(&local_events),
+        )
+        .map_err(|reason| failure(OccurrenceErrorKind::Source, reason))?;
         Ok(Self {
             tail_acknowledgment,
+            request,
             snapshot,
             context,
             clip_id,
@@ -409,10 +501,10 @@ impl OccurrencePlan {
         if self.context != context {
             return Err(failure(
                 OccurrenceErrorKind::Stale,
-                "The source session or source/control revision changed",
+                "The exact occurrence source/runtime stamp changed",
             ));
         }
-        if self.snapshot != project_snapshot(project)? {
+        if !project_matches_snapshot(project, &self.snapshot)? {
             return Err(failure(
                 OccurrenceErrorKind::Stale,
                 "The Project changed after occurrence admission",
@@ -420,6 +512,129 @@ impl OccurrencePlan {
         }
         Ok(())
     }
+}
+
+/// Disabling the retained generator may not silently break a latent use.
+/// Inspect persisted references as well as the audible compiled schedule.
+fn validate_sole_generator_use(
+    project: &Project,
+    clip_id: u32,
+    channel_id: u32,
+    instance_id: u64,
+) -> Result<(), OccurrenceError> {
+    if project
+        .channels
+        .iter()
+        .filter(|channel| channel.instrument_plugin_instance_id == Some(instance_id))
+        .count()
+        != 1
+    {
+        return Err(failure(
+            OccurrenceErrorKind::Unsupported,
+            "The retained generator must have exactly one Channel assignment",
+        ));
+    }
+    if project
+        .mixer_insert_slots
+        .iter()
+        .any(|slot| slot.plugin_instance_id == instance_id)
+    {
+        return Err(failure(
+            OccurrenceErrorKind::Unsupported,
+            "The retained generator is also referenced by a Mixer insert",
+        ));
+    }
+    let channel_index = project
+        .channels
+        .iter()
+        .position(|channel| channel.id == channel_id)
+        .ok_or_else(|| failure(OccurrenceErrorKind::Source, "The source Channel is missing"))?;
+    let selected_pattern = project
+        .clips
+        .iter()
+        .find(|clip| clip.id == clip_id)
+        .ok_or_else(|| failure(OccurrenceErrorKind::Source, "The selected Clip is missing"))?
+        .pattern_id;
+    for pattern in project
+        .patterns
+        .iter()
+        .filter(|pattern| pattern.id != selected_pattern)
+    {
+        if pattern.channel_steps.len() != project.channels.len() {
+            return Err(failure(
+                OccurrenceErrorKind::Unsupported,
+                "Another persisted Pattern has ambiguous Channel dependencies",
+            ));
+        }
+        if pattern.channel_steps[channel_index]
+            .iter()
+            .any(|step| *step)
+            || pattern
+                .notes
+                .iter()
+                .any(|note| note.channel_id == Some(channel_id))
+        {
+            return Err(failure(
+                OccurrenceErrorKind::Unsupported,
+                "Another persisted Pattern uses the retained generator, including unplaced or muted notes; sole-use conversion is required",
+            ));
+        }
+        if pattern.notes.iter().any(|note| note.channel_id.is_none()) {
+            return Err(failure(
+                OccurrenceErrorKind::Unsupported,
+                "Another persisted Pattern has an unassigned note dependency",
+            ));
+        }
+    }
+    // Nonpersisted legacy Piano payloads, previews and live input remain the
+    // future App operation fence's responsibility; this is persisted admission.
+    for other in project
+        .clips
+        .iter()
+        .filter(|clip| clip.id != clip_id && clip.kind == ClipKind::Pattern)
+    {
+        let mut matches = project
+            .patterns
+            .iter()
+            .filter(|pattern| pattern.id == other.pattern_id);
+        let Some(pattern) = matches.next() else {
+            return Err(failure(
+                OccurrenceErrorKind::Unsupported,
+                "Another Pattern Clip has an ambiguous missing dependency",
+            ));
+        };
+        if matches.next().is_some() || pattern.channel_steps.len() != project.channels.len() {
+            return Err(failure(
+                OccurrenceErrorKind::Unsupported,
+                "Another Pattern Clip has ambiguous Channel dependencies",
+            ));
+        }
+        // Muted Clips/notes remain latent dependencies. A later unmute must not
+        // appear to restore a musical occurrence whose generator was disabled.
+        if pattern.channel_steps[channel_index]
+            .iter()
+            .any(|step| *step)
+            || pattern
+                .notes
+                .iter()
+                .any(|note| note.channel_id == Some(channel_id))
+        {
+            return Err(failure(
+                OccurrenceErrorKind::Unsupported,
+                "Another active or latent occurrence uses the retained generator; sole-use conversion is required",
+            ));
+        }
+        if pattern.notes.iter().any(|note| note.channel_id.is_none()) {
+            return Err(failure(
+                OccurrenceErrorKind::Unsupported,
+                "Another Pattern Clip has an unassigned note dependency",
+            ));
+        }
+    }
+    if project.automation_lanes.iter().any(|lane| matches!(lane.lane.target(), AutomationTarget::PluginParameter { instance, .. } if *instance == instance_id)) {
+        return Err(failure(OccurrenceErrorKind::Unsupported, "The retained generator has a persisted parameter automation dependency"));
+    }
+    Ok(())
 }
 
 fn source_matches(source: NoteSourceDescriptor, clip_id: u32, pattern_id: u32) -> bool {
@@ -454,7 +669,7 @@ fn select_occurrence_events(
     instance_id: u64,
     start: u64,
     end: u64,
-    tail_end: u64,
+    _tail_end: u64,
 ) -> Result<Vec<TimelineEvent>, OccurrenceError> {
     let generator_channels: HashSet<_> = project
         .channels
@@ -554,10 +769,10 @@ fn select_occurrence_events(
                         "Selected NoteOff crosses its occurrence end",
                     ));
                 }
-                if !belongs && on.frame < tail_end && event.frame > start {
+                if !belongs {
                     return Err(failure(
                         OccurrenceErrorKind::Unsupported,
-                        "Another occurrence of the same generator overlaps or crosses the selected interval/tail",
+                        "Another compiled occurrence uses the retained generator; sole-use conversion is required",
                     ));
                 }
                 belongs
@@ -586,43 +801,17 @@ fn select_occurrence_events(
     Ok(selected)
 }
 
-/// Data-only fixture boundary. No production constructor exists until an
-/// adapter can attest immutable publication, capture identity and exact bytes.
-struct RenderedOccurrenceMedia {
-    tail_acknowledgment: Option<FixedTailAcknowledgment>,
-    snapshot: Arc<[u8]>,
-    context: OccurrenceContext,
-    clip_id: u32,
-    pattern_id: u32,
-    channel_id: u32,
-    instance_id: u64,
-    publication_id: u64,
-    path: PathBuf,
-    asset: wav::WavAsset,
-    prewrite_peak: f32,
-}
 fn validate_rendered_media(
     plan: &OccurrencePlan,
-    media: &RenderedOccurrenceMedia,
+    media: &crate::occurrence_media::VerifiedOccurrenceMedia,
 ) -> Result<(), OccurrenceError> {
     let invalid = |reason| failure(OccurrenceErrorKind::Media, reason);
-    if media.tail_acknowledgment.as_ref() != Some(&plan.tail_acknowledgment) {
+    if !std::ptr::eq(media.provenance().request(), plan.request.as_ref()) {
         return Err(invalid(
-            "Rendered media lacks the exact admitted fixed-tail acknowledgment",
+            "Rendered media belongs to a different sealed occurrence request/capture",
         ));
     }
-    if media.snapshot != plan.snapshot
-        || media.context != plan.context
-        || media.clip_id != plan.clip_id
-        || media.pattern_id != plan.pattern_id
-        || media.channel_id != plan.channel_id
-        || media.instance_id != plan.instance_id
-    {
-        return Err(invalid(
-            "Rendered media belongs to a different source occurrence/context",
-        ));
-    }
-    if media.publication_id == 0 || !media.path.is_absolute() || media.path.to_str().is_none() {
+    if !media.path().is_absolute() || media.path().to_str().is_none() {
         return Err(invalid(
             "A uniquely published absolute UTF-8 media path is required",
         ));
@@ -639,7 +828,7 @@ fn validate_rendered_media(
     let data_bytes = frames
         .checked_mul(8)
         .ok_or_else(|| invalid("Rendered data size overflow"))?;
-    let metadata = &media.asset.metadata;
+    let metadata = &media.asset().metadata;
     if metadata.sample_rate != plan.sample_rate
         || metadata.channels != 2
         || metadata.frames != frames
@@ -652,19 +841,19 @@ fn validate_rendered_media(
         || metadata.data_bytes != data_bytes
         || !metadata.duration_seconds.is_finite()
         || metadata.duration_seconds != frames as f64 / f64::from(plan.sample_rate)
-        || media.asset.samples.len() != samples
+        || media.asset().samples.len() != samples
     {
         return Err(invalid(
             "Rendered stereo Float32 PCM/metadata/extent does not exactly match the occurrence",
         ));
     }
-    if !media.prewrite_peak.is_finite() || !(0.0..=1.0).contains(&media.prewrite_peak) {
+    if !media.prewrite_peak().is_finite() || !(0.0..=1.0).contains(&media.prewrite_peak()) {
         return Err(invalid(
             "Dry render headroom exceeds the current lossless WAV import subset; retain the published render",
         ));
     }
     let mut peak = 0.0_f32;
-    for sample in &media.asset.samples {
+    for sample in &media.asset().samples {
         if !sample.is_finite() || sample.abs() > 1.0 {
             return Err(invalid(
                 "Rendered PCM is nonfinite or would be clipped on reload; retain the published render",
@@ -672,7 +861,7 @@ fn validate_rendered_media(
         }
         peak = peak.max(sample.abs());
     }
-    if peak != media.prewrite_peak {
+    if peak != media.prewrite_peak() {
         return Err(invalid(
             "Rendered PCM peak differs from the prewrite receipt",
         ));
@@ -683,3 +872,45 @@ fn validate_rendered_media(
 #[cfg(test)]
 #[path = "clip_render_tests.rs"]
 mod tests;
+
+/// Test-only bridge for the parent-owned actual coordinator/fake-renderer join.
+/// It consumes genuine producer proof and runs the production candidate/history
+/// path, without exposing constructors for media or capture attestation.
+#[cfg(test)]
+pub(crate) fn test_commit_verified_occurrence(
+    project: &mut Project,
+    media: &crate::occurrence_media::VerifiedOccurrenceMedia,
+    source: &crate::instrument_bounce::occurrence::MatchedOccurrenceSource,
+) -> Result<PathBuf, String> {
+    candidate::test_commit_verified_occurrence(project, media, source)
+}
+
+/// Test-only entry through the same bounded snapshot, explicit consent and
+/// complete pure admission used by the dormant occurrence planner.
+#[cfg(test)]
+pub(crate) fn test_prepare_occurrence_request(
+    project: &Project,
+    stamp: OccurrenceStamp,
+    clip_id: u32,
+    sample_rate: u32,
+    tail_frames: u32,
+) -> Result<Arc<OccurrenceRenderRequest>, String> {
+    let snapshot = project_snapshot(project).map_err(|error| error.to_string())?;
+    let consent = Arc::new(FixedTailAcknowledgment::review(
+        snapshot,
+        stamp,
+        clip_id,
+        sample_rate,
+        tail_frames,
+    )?);
+    OccurrencePlan::prepare(
+        project,
+        stamp,
+        clip_id,
+        sample_rate,
+        tail_frames,
+        Some(consent),
+    )
+    .map(|plan| plan.request)
+    .map_err(|error| error.to_string())
+}

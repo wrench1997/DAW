@@ -4,8 +4,20 @@ use std::collections::BTreeMap;
 fn context() -> OccurrenceContext {
     OccurrenceContext {
         project_session: 1,
-        source_revision: 2,
-        control_revision: 0,
+        project_revision: 2,
+        timeline_revision: 3,
+        epoch: 4,
+        engine_session: 5,
+        endpoint_id: 6,
+        channel_id: 1,
+        instance_id: 41,
+        mixer_track_id: 2,
+        native_generation: 0,
+        app_native_dirty_revision: 0,
+        native_capture_serial: 0,
+        parameter_capture_serial: 0,
+        native_control_request: 0,
+        parameter_control_request: 0,
     }
 }
 fn project() -> Project {
@@ -55,14 +67,17 @@ fn acknowledgment(
     clip_id: u32,
     sample_rate: u32,
     tail_frames: u32,
-) -> FixedTailAcknowledgment {
-    FixedTailAcknowledgment {
-        source_snapshot: serde_json::to_vec(project).unwrap().into(),
-        context,
-        clip_id,
-        sample_rate,
-        tail_frames,
-    }
+) -> Arc<FixedTailAcknowledgment> {
+    Arc::new(
+        FixedTailAcknowledgment::review(
+            serde_json::to_vec(project).unwrap().into(),
+            context,
+            clip_id,
+            sample_rate,
+            tail_frames,
+        )
+        .unwrap(),
+    )
 }
 fn admitted_plan(
     project: &Project,
@@ -71,6 +86,15 @@ fn admitted_plan(
     sample_rate: u32,
     tail_frames: u32,
 ) -> Result<OccurrencePlan, OccurrenceError> {
+    context
+        .validate()
+        .map_err(|reason| failure(OccurrenceErrorKind::Context, reason))?;
+    if !(8000..=192000).contains(&sample_rate) || tail_frames > sample_rate.saturating_mul(30) {
+        return Err(failure(
+            OccurrenceErrorKind::Range,
+            "Occurrence render requires 8000–192000 Hz and a fixed tail of at most 30 seconds",
+        ));
+    }
     OccurrencePlan::prepare(
         project,
         context,
@@ -88,45 +112,6 @@ fn admitted_plan(
 }
 fn plan(project: &Project, tail: u32) -> OccurrencePlan {
     admitted_plan(project, context(), project.clips[0].id, 8000, tail).unwrap()
-}
-fn published_path() -> PathBuf {
-    if cfg!(windows) {
-        PathBuf::from(r"C:\published\occurrence.wav")
-    } else {
-        PathBuf::from("/published/occurrence.wav")
-    }
-}
-fn media(plan: &OccurrencePlan) -> RenderedOccurrenceMedia {
-    let frames = plan.end_frame - plan.start_frame + u64::from(plan.tail_frames);
-    let samples = (0..frames).flat_map(|_| [0.25, -0.5]).collect();
-    RenderedOccurrenceMedia {
-        tail_acknowledgment: Some(plan.tail_acknowledgment.clone()),
-        snapshot: Arc::clone(&plan.snapshot),
-        context: plan.context,
-        clip_id: plan.clip_id,
-        pattern_id: plan.pattern_id,
-        channel_id: plan.channel_id,
-        instance_id: plan.instance_id,
-        publication_id: 9,
-        path: published_path(),
-        asset: wav::WavAsset {
-            metadata: wav::WavMetadata {
-                sample_rate: plan.sample_rate,
-                channels: 2,
-                encoding: wav::WavSampleEncoding::IeeeFloat,
-                bits_per_sample: 32,
-                valid_bits_per_sample: 32,
-                channel_mask: None,
-                block_align: 8,
-                byte_rate: plan.sample_rate * 8,
-                frames,
-                duration_seconds: frames as f64 / f64::from(plan.sample_rate),
-                data_bytes: frames * 8,
-            },
-            samples,
-        },
-        prewrite_peak: 0.5,
-    }
 }
 fn on_frames(plan: &OccurrencePlan) -> Vec<u64> {
     plan.local_events
@@ -317,47 +302,50 @@ fn occurrence_plan_rejects_exact_unsupported_source_cases_without_mutation() {
 }
 
 #[test]
-fn occurrence_plan_rejects_other_generator_overlap_and_tail_but_allows_touching() {
-    // Selected interval is [4000,8000), with a 1000-frame explicit tail.
-    for (start, length, tail, allowed) in [
-        (2.0, 0.25, 0, true),
-        (2.0, 0.25, 1000, false),
-        (2.25, 0.25, 1000, true),
-        (0.75, 0.25, 0, true),
-        (0.75, 0.5, 0, false),
-        (1.5, 0.25, 0, false),
+fn occurrence_plan_rejects_every_other_active_or_latent_generator_use() {
+    for (start, length, muted) in [
+        (0.0, 0.25, false),
+        (0.75, 0.25, false),
+        (1.5, 0.25, false),
+        (2.0, 0.25, false),
+        (9.0, 0.25, false),
+        (9.0, 0.25, true),
     ] {
         let mut p = project();
-        // Use a long Piano note so outside identities can genuinely cross boundaries.
-        p.patterns[0].channel_steps[0] = [false; 16];
-        p.patterns[0].notes = vec![PianoNote {
-            id: 91,
-            channel_id: Some(p.channels[0].id),
-            group_id: None,
-            note: 64,
-            start: 0.0,
-            length: 4.0,
-            velocity: 1.0,
-            selected: false,
-            muted: false,
-        }];
         let mut other = p.clips[0].clone();
         other.id = 55;
         other.start = start;
         other.length = length;
+        other.muted = muted;
         p.clips.push(other);
-        let result = admitted_plan(&p, context(), p.clips[0].id, 8000, tail);
-        if allowed {
-            assert!(
-                result.is_ok(),
-                "{start}/{length}/{tail}: {:?}",
-                result.err()
-            );
+        let error = admitted_plan(&p, context(), p.clips[0].id, 8000, 0)
+            .err()
+            .unwrap();
+        assert_eq!(error.kind, OccurrenceErrorKind::Unsupported);
+        assert!(error.reason.contains("sole-use conversion"));
+    }
+    for insert in [false, true] {
+        let mut p = project();
+        if insert {
+            p.mixer_insert_slots.push(MixerInsertSlotRef {
+                track: p.channels[0].mixer_track,
+                slot: 0,
+                plugin_instance_id: 41,
+            });
         } else {
-            let e = result.err().unwrap();
-            assert_eq!(e.kind, OccurrenceErrorKind::Unsupported);
-            assert!(e.reason.contains("same generator overlaps or crosses"));
+            let mut other = p.channels[0].clone();
+            other.id = 99;
+            p.channels.push(other);
+            p.patterns[0].channel_steps.push([false; 16]);
         }
+        let error = admitted_plan(&p, context(), p.clips[0].id, 8000, 0)
+            .err()
+            .unwrap();
+        assert!(error.reason.contains(if insert {
+            "Mixer insert"
+        } else {
+            "exactly one Channel assignment"
+        }));
     }
 }
 
@@ -377,17 +365,17 @@ fn occurrence_snapshot_and_context_reject_restored_values_after_revision_changes
             ..context()
         },
         OccurrenceContext {
-            source_revision: 3,
+            project_revision: 3,
             ..context()
         },
         OccurrenceContext {
-            control_revision: 1,
+            parameter_control_request: 1,
             ..context()
         },
     ] {
         let e = plan.check_current(&p, changed).unwrap_err();
         assert_eq!(e.kind, OccurrenceErrorKind::Stale);
-        assert!(e.reason.contains("source/control revision"));
+        assert!(e.reason.contains("source/runtime stamp"));
     }
     let mut unpersistable = project();
     unpersistable.patterns[0].notes.push(PianoNote {
@@ -405,64 +393,6 @@ fn occurrence_snapshot_and_context_reject_restored_values_after_revision_changes
         project_snapshot(&unpersistable).unwrap_err().kind,
         OccurrenceErrorKind::Source
     );
-}
-
-#[test]
-fn rendered_media_requires_full_exact_stereo_float_metadata_and_pcm() {
-    let p = project();
-    let plan = plan(&p, 7);
-    validate_rendered_media(&plan, &media(&plan)).unwrap();
-    for case in 0..22 {
-        let mut m = media(&plan);
-        match case {
-            0 => {
-                m.asset.samples.pop().unwrap();
-            }
-            1 => m.asset.metadata.frames += 1,
-            2 => m.asset.metadata.sample_rate += 1,
-            3 => m.asset.metadata.channels = 1,
-            4 => m.asset.metadata.bits_per_sample = 24,
-            5 => m.asset.metadata.valid_bits_per_sample = 24,
-            6 => m.asset.metadata.encoding = wav::WavSampleEncoding::PcmInteger,
-            7 => m.asset.metadata.block_align = 4,
-            8 => m.asset.metadata.byte_rate -= 1,
-            9 => m.asset.metadata.data_bytes -= 8,
-            10 => m.asset.metadata.duration_seconds += 0.1,
-            11 => m.asset.metadata.channel_mask = Some(4),
-            12 => m.asset.samples[0] = f32::NAN,
-            13 => m.asset.samples[0] = 1.01,
-            14 => m.prewrite_peak = 1.01,
-            15 => m.prewrite_peak = f32::NAN,
-            16 => m.prewrite_peak = 0.25,
-            17 => m.path = PathBuf::from("relative.wav"),
-            18 => m.publication_id = 0,
-            19 => m.context.control_revision += 1,
-            20 => m.clip_id += 1,
-            _ => m.snapshot = Arc::from(&b"different source"[..]),
-        }
-        let e = validate_rendered_media(&plan, &m).unwrap_err();
-        assert_eq!(e.kind, OccurrenceErrorKind::Media, "case {case}");
-        let reason = match case {
-            0..=11 => "stereo Float32",
-            12 | 13 => "PCM is nonfinite",
-            14 | 15 => "Dry render headroom",
-            16 => "peak differs",
-            17 | 18 => "published absolute",
-            _ => "different source",
-        };
-        assert!(e.reason.contains(reason), "case {case}: {e:?}");
-        assert_eq!(
-            m.path,
-            if case == 17 {
-                PathBuf::from("relative.wav")
-            } else {
-                published_path()
-            }
-        );
-    }
-    let mut stereo_mask = media(&plan);
-    stereo_mask.asset.metadata.channel_mask = Some(3);
-    validate_rendered_media(&plan, &stereo_mask).unwrap();
 }
 
 #[test]
@@ -571,11 +501,17 @@ fn occurrence_bounds_reject_tail_song_end_rate_context_and_processing_capacity()
             }
             3 => {
                 now.project_session = 0;
-                (OccurrenceErrorKind::Context, "session and source revision")
+                (
+                    OccurrenceErrorKind::Context,
+                    "actual occurrence source/runtime stamp",
+                )
             }
             4 => {
-                now.source_revision = 0;
-                (OccurrenceErrorKind::Context, "session and source revision")
+                now.project_revision = 0;
+                (
+                    OccurrenceErrorKind::Context,
+                    "actual occurrence source/runtime stamp",
+                )
             }
             _ => {
                 rate = 192000;
@@ -614,7 +550,10 @@ fn occurrence_filter_rejects_full_noteoff_identity_and_selected_source_corruptio
             plan.end_frame,
         )
     };
-    assert_eq!(select(timeline.events()).unwrap(), plan.local_events);
+    assert_eq!(
+        select(timeline.events()).unwrap().as_slice(),
+        plan.local_events.as_ref()
+    );
     for case in 0..6 {
         let mut events = timeline.events().to_vec();
         let off = events
@@ -662,16 +601,24 @@ fn occurrence_requires_explicit_source_bound_acknowledgment_even_for_zero_tail()
         let consent = acknowledgment(&p, context(), id, 8000, tail);
         OccurrencePlan::prepare(&p, context(), id, 8000, tail, Some(consent.clone())).unwrap();
         for case in 0..7 {
-            let mut changed = consent.clone();
+            let mut stamp = consent.stamp();
+            let mut clip_id = consent.clip_id();
+            let mut sample_rate = consent.sample_rate();
+            let mut tail_frames = consent.tail_frames();
+            let mut snapshot = Arc::clone(consent.snapshot());
             match case {
                 0 => {}
-                1 => changed.tail_frames += 1,
-                2 => changed.clip_id += 1,
-                3 => changed.context.source_revision += 1,
-                4 => changed.source_snapshot = Arc::from(&b"different acknowledged source"[..]),
-                5 => changed.context.project_session += 1,
-                _ => changed.sample_rate += 1,
+                1 => tail_frames += 1,
+                2 => clip_id += 1,
+                3 => stamp.project_revision += 1,
+                4 => snapshot = Arc::from(&b"different acknowledged source"[..]),
+                5 => stamp.project_session += 1,
+                _ => sample_rate += 1,
             }
+            let changed = Arc::new(
+                FixedTailAcknowledgment::review(snapshot, stamp, clip_id, sample_rate, tail_frames)
+                    .unwrap(),
+            );
             let before = project_snapshot(&p).unwrap();
             let error = OccurrencePlan::prepare(
                 &p,
@@ -744,6 +691,92 @@ fn occurrence_snapshot_rejects_optional_nonfinite_dormant_fade_references() {
                     nonfinite.to_bits()
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn occurrence_request_shares_one_snapshot_and_supports_a_short_clip_in_a_long_song() {
+    let mut project = project();
+    project.song_length_beats = 2000.0;
+    let plan = plan(&project, 129);
+    assert!(plan.tempo_map.duration_frames() > 8000 * 600);
+    assert_eq!(
+        plan.request.song_frames(),
+        plan.end_frame - plan.start_frame
+    );
+    assert!(Arc::ptr_eq(&plan.snapshot, plan.request.snapshot()));
+    assert!(Arc::ptr_eq(
+        &plan.tail_acknowledgment,
+        plan.request.consent()
+    ));
+    assert_eq!(plan.request.local_events(), plan.local_events.as_ref());
+    assert_eq!(plan.request.start_frame(), 4000);
+}
+
+#[test]
+fn every_actual_stamp_component_fences_restored_project_bytes() {
+    let project = project();
+    let plan = plan(&project, 0);
+    for field in 0..15 {
+        let mut changed = context();
+        match field {
+            0 => changed.project_session += 1,
+            1 => changed.project_revision += 2,
+            2 => changed.timeline_revision += 1,
+            3 => changed.epoch += 1,
+            4 => changed.engine_session += 1,
+            5 => changed.endpoint_id += 1,
+            6 => changed.channel_id += 1,
+            7 => changed.instance_id += 1,
+            8 => changed.mixer_track_id += 1,
+            9 => changed.native_generation += 1,
+            10 => changed.app_native_dirty_revision += 1,
+            11 => changed.native_capture_serial += 1,
+            12 => changed.parameter_capture_serial += 1,
+            13 => changed.native_control_request += 1,
+            _ => changed.parameter_control_request += 1,
+        }
+        assert_eq!(
+            plan.check_current(&project, changed).unwrap_err().kind,
+            OccurrenceErrorKind::Stale
+        );
+    }
+}
+
+#[test]
+fn sole_use_refuses_unplaced_patterns_and_their_muted_notes() {
+    for muted in [false, true] {
+        for step in [false, true] {
+            let mut project = project();
+            let mut other = project.patterns[0].clone();
+            other.id = 702;
+            other.channel_steps[0] = [false; 16];
+            if step {
+                other.channel_steps[0][1] = true;
+            } else {
+                other.notes.push(PianoNote {
+                    id: 888,
+                    channel_id: Some(1),
+                    group_id: None,
+                    note: 60,
+                    start: 0.0,
+                    length: 0.25,
+                    velocity: 0.75,
+                    selected: false,
+                    muted,
+                });
+            }
+            project.patterns.push(other);
+            let error = admitted_plan(&project, context(), project.clips[0].id, 8000, 0)
+                .err()
+                .unwrap();
+            assert_eq!(error.kind, OccurrenceErrorKind::Unsupported);
+            assert!(
+                error
+                    .reason
+                    .contains("persisted Pattern uses the retained generator")
+            );
         }
     }
 }

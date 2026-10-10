@@ -8,10 +8,15 @@
 #[allow(dead_code)] // Dormant engine; experimental strict clone has no App/UI caller.
 pub(crate) mod render;
 
+#[path = "instrument_bounce_occurrence.rs"]
+#[allow(dead_code)] // Dormant occurrence/capture join, no App controller.
+pub(crate) mod occurrence;
+pub(crate) use occurrence::OccurrenceRenderProvenance;
+
 use std::{
     collections::BTreeMap,
     hash::{DefaultHasher, Hash, Hasher},
-    sync::mpsc::TryRecvError,
+    sync::{Arc, mpsc::TryRecvError},
     time::{Duration, Instant},
 };
 
@@ -265,6 +270,7 @@ pub struct InstrumentBouncePlan {
     #[cfg(any(feature = "vst3", test))]
     spec: PluginLoadSpec,
     parameter_ids: Vec<u32>,
+    occurrence: Option<Arc<crate::occurrence_request::OccurrenceRenderRequest>>,
 }
 
 impl InstrumentBouncePlan {
@@ -273,6 +279,30 @@ impl InstrumentBouncePlan {
         channel_id: u32,
         sample_rate: u32,
         tail_frames: u32,
+    ) -> Result<Self, String> {
+        Self::prepare_internal(project, channel_id, sample_rate, tail_frames, None)
+    }
+
+    pub(crate) fn prepare_occurrence(
+        project: &Project,
+        request: Arc<crate::occurrence_request::OccurrenceRenderRequest>,
+    ) -> Result<Self, String> {
+        occurrence::check_project_snapshot(project, request.snapshot())?;
+        Self::prepare_internal(
+            project,
+            request.channel_id(),
+            request.sample_rate(),
+            request.tail_frames(),
+            Some(request),
+        )
+    }
+
+    fn prepare_internal(
+        project: &Project,
+        channel_id: u32,
+        sample_rate: u32,
+        tail_frames: u32,
+        occurrence: Option<Arc<crate::occurrence_request::OccurrenceRenderRequest>>,
     ) -> Result<Self, String> {
         if !(8_000..=192_000).contains(&sample_rate)
             || tail_frames > sample_rate.saturating_mul(MAX_BOUNCE_TAIL_SECONDS)
@@ -339,23 +369,36 @@ impl InstrumentBouncePlan {
                 timeline.diagnostics().first()
             ));
         }
-        let total = timeline
-            .duration_frames()
+        if let Some(request) = &occurrence {
+            occurrence::check_compiled_request(request, &timeline, instance_id)?;
+        }
+        let musical_frames = occurrence
+            .as_ref()
+            .map_or_else(|| timeline.duration_frames(), |r| r.song_frames());
+        let total = musical_frames
             .checked_add(u64::from(tail_frames))
             .and_then(|n| n.checked_add(u64::from(sample_rate)))
             .ok_or("Instrument bounce length overflow")?;
-        if timeline.duration_frames() == 0
-            || timeline.duration_frames() > u64::from(sample_rate) * MAX_BOUNCE_SECONDS
+        if musical_frames == 0
+            || musical_frames > u64::from(sample_rate) * MAX_BOUNCE_SECONDS
             || total > MAX_BOUNCE_FRAMES
         {
             return Err("Instrument bounce exceeds its ten-minute / 24-million-frame bound or has zero length".into());
         }
         #[cfg(any(feature = "vst3", test))]
-        let spec = crate::plugins::plugin_load_spec_from_instance(instance);
+        let spec = if occurrence.is_some() {
+            crate::plugins::plugin_load_identity_from_instance(instance)
+        } else {
+            crate::plugins::plugin_load_spec_from_instance(instance)
+        };
         let mut hasher = DefaultHasher::new();
-        serde_json::to_vec(project)
-            .map_err(|error| error.to_string())?
-            .hash(&mut hasher);
+        if let Some(request) = &occurrence {
+            request.snapshot().as_ref().hash(&mut hasher);
+        } else {
+            serde_json::to_vec(project)
+                .map_err(|error| error.to_string())?
+                .hash(&mut hasher);
+        }
         Ok(Self {
             project_fingerprint: hasher.finish(),
             channel_id,
@@ -366,7 +409,19 @@ impl InstrumentBouncePlan {
             #[cfg(any(feature = "vst3", test))]
             spec,
             parameter_ids: instance.parameters.keys().copied().collect(),
+            occurrence,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_project_state_bytes(&self) -> usize {
+        self.spec.initial_state.len()
+    }
+
+    pub(crate) fn occurrence_request(
+        &self,
+    ) -> Option<&Arc<crate::occurrence_request::OccurrenceRenderRequest>> {
+        self.occurrence.as_ref()
     }
 
     pub fn channel_id(&self) -> u32 {
@@ -404,6 +459,8 @@ pub struct CapturedInstrumentBounce {
     identity: BounceSourceIdentity,
     pub(crate) plan: InstrumentBouncePlan,
     pub(crate) state: BouncePluginState,
+    // Identity of this one completed private worker receipt, not a source revision.
+    receipt_token: Arc<()>,
 }
 
 impl CapturedInstrumentBounce {
@@ -563,6 +620,7 @@ impl InstrumentBounceCapture {
             identity: self.identity,
             plan: self.plan.take().expect("checked above"),
             state: receipt.state,
+            receipt_token: Arc::new(()),
         }))
     }
 }

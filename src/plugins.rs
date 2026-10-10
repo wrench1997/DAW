@@ -441,6 +441,16 @@ pub struct NativePluginHost {
 pub(crate) fn plugin_load_spec_from_instance(
     instance: &crate::model::PluginInstance,
 ) -> plugin_runtime::PluginLoadSpec {
+    let mut spec = plugin_load_identity_from_instance(instance);
+    spec.initial_state.clone_from(&instance.opaque_state);
+    spec
+}
+
+/// A captured occurrence restores only its authoritative capture, so preparation
+/// must not retain another copy of the potentially stale Project state.
+pub(crate) fn plugin_load_identity_from_instance(
+    instance: &crate::model::PluginInstance,
+) -> plugin_runtime::PluginLoadSpec {
     use crate::model::{PluginFormat as StoredFormat, PluginRole};
     plugin_runtime::PluginLoadSpec {
         descriptor: PluginDescriptor {
@@ -465,7 +475,7 @@ pub(crate) fn plugin_load_spec_from_instance(
         },
         class_uid: None,
         vst3_helper_path: None,
-        initial_state: instance.opaque_state.clone(),
+        initial_state: Vec::new(),
         enabled: instance.enabled,
         bypassed: instance.bypass,
         wet: instance.wet,

@@ -1025,6 +1025,390 @@ pub(crate) fn write_stereo_float32_checked(
     )
 }
 
+// A separate, closed publication policy. Ordinary exports continue to replace by
+// rename; only occurrence publication can produce this ownership evidence.
+pub(crate) const MAX_OCCURRENCE_MEDIA_FRAMES: usize = 24_000_000;
+const MAX_OCCURRENCE_PATH_BYTES: usize = 4096;
+const MAX_PUBLICATION_DIAGNOSTIC_BYTES: usize = 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PublicationPhase {
+    PreLink,
+    /// The file cancellation CAS won, but no destination ownership is proven.
+    LinkStarted,
+    Linked,
+    FinalizationFailed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PublishedFileIdentity {
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
+    pub(crate) bytes: u64,
+    pub(crate) modified_seconds: i64,
+    pub(crate) modified_nanoseconds: i64,
+}
+
+impl PublishedFileIdentity {
+    pub(crate) fn from_metadata(metadata: &std::fs::Metadata) -> std::io::Result<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if !metadata.is_file() {
+                return Err(std::io::Error::other(
+                    "Occurrence output is not a regular file",
+                ));
+            }
+            Ok(Self {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                bytes: metadata.len(),
+                modified_seconds: metadata.mtime(),
+                modified_nanoseconds: metadata.mtime_nsec(),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = metadata;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Owned occurrence publication requires Linux identity and directory durability",
+            ))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PublicationErrorKind {
+    Cancelled,
+    Deadline,
+    Invalid,
+    Io,
+    Panic,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PublicationOperation {
+    Write,
+    Link,
+    AfterLink,
+    StageUnlink,
+    ParentSync,
+    Abort,
+}
+
+/// Fixed-size diagnostics cannot retain arbitrary panic payloads or grow with
+/// cleanup retries. No audio or captured plug-in state enters this value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PublicationError {
+    pub(crate) kind: PublicationErrorKind,
+    pub(crate) operation: PublicationOperation,
+    pub(crate) io_kind: Option<std::io::ErrorKind>,
+    pub(crate) raw_os_error: Option<i32>,
+    message: [u8; MAX_PUBLICATION_DIAGNOSTIC_BYTES],
+    message_len: usize,
+}
+
+impl PublicationError {
+    fn from_error(error: &anyhow::Error, operation: PublicationOperation) -> Self {
+        let kind = if error.is::<crate::export_job::ExportCancelled>() {
+            PublicationErrorKind::Cancelled
+        } else if error.is::<crate::export_job::ExportDeadlineExceeded>() {
+            PublicationErrorKind::Deadline
+        } else if error.is::<WavStagingPanic>() {
+            PublicationErrorKind::Panic
+        } else if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            if error.kind() == std::io::ErrorKind::Unsupported {
+                PublicationErrorKind::Unsupported
+            } else {
+                PublicationErrorKind::Io
+            }
+        } else {
+            PublicationErrorKind::Invalid
+        };
+        let mut evidence = Self {
+            kind,
+            operation,
+            io_kind: error
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            raw_os_error: error
+                .downcast_ref::<std::io::Error>()
+                .and_then(std::io::Error::raw_os_error),
+            message: [0; MAX_PUBLICATION_DIAGNOSTIC_BYTES],
+            message_len: 0,
+        };
+        use std::fmt::Write as _;
+        let _ = write!(evidence, "{error:#}");
+        evidence
+    }
+
+    pub(crate) fn message(&self) -> &str {
+        // fmt::Write admits only complete UTF-8 boundaries.
+        std::str::from_utf8(&self.message[..self.message_len]).unwrap_or("Publication failure")
+    }
+}
+
+impl std::fmt::Write for PublicationError {
+    fn write_str(&mut self, text: &str) -> std::fmt::Result {
+        let remaining = self.message.len() - self.message_len;
+        let mut count = remaining.min(text.len());
+        while !text.is_char_boundary(count) {
+            count -= 1;
+        }
+        self.message[self.message_len..self.message_len + count]
+            .copy_from_slice(&text.as_bytes()[..count]);
+        self.message_len += count;
+        Ok(())
+    }
+}
+
+impl std::fmt::Display for PublicationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct PublicationEvidence {
+    pub(crate) phase: PublicationPhase,
+    /// Present if and only if this invocation successfully created the link.
+    pub(crate) retained_destination: Option<PathBuf>,
+    pub(crate) retained_stage: Option<PathBuf>,
+    pub(crate) identity: Option<PublishedFileIdentity>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("Occurrence WAV publication failed ({phase:?}): {primary}", phase = .evidence.phase)]
+pub(crate) struct CreateNewFailure {
+    pub(crate) evidence: PublicationEvidence,
+    pub(crate) primary: PublicationError,
+    pub(crate) stage_unlink: Option<PublicationError>,
+    pub(crate) parent_sync: Option<PublicationError>,
+    pub(crate) abort: Option<PublicationError>,
+}
+
+/// Producer-only proof of this writer's successful no-clobber publication and
+/// checked stage removal + directory sync. It is not yet insertion authority.
+#[derive(Debug)]
+pub(crate) struct PublishedFloat32 {
+    path: PathBuf,
+    identity: PublishedFileIdentity,
+    sample_rate: u32,
+    frames: usize,
+    prewrite_peak: f32,
+}
+
+impl PublishedFloat32 {
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+    pub(crate) fn identity(&self) -> PublishedFileIdentity {
+        self.identity
+    }
+    pub(crate) fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+    pub(crate) fn frames(&self) -> usize {
+        self.frames
+    }
+    pub(crate) fn prewrite_peak(&self) -> f32 {
+        self.prewrite_peak
+    }
+}
+
+struct CreateNewPublication {
+    destination: PathBuf,
+    parent: Option<File>,
+    phase: PublicationPhase,
+    identity: Option<PublishedFileIdentity>,
+    retained_stage: Option<PathBuf>,
+    stage_unlink: Option<PublicationError>,
+    parent_sync: Option<PublicationError>,
+    abort: Option<PublicationError>,
+    prewrite_peak: f32,
+}
+
+impl CreateNewPublication {
+    fn fail(self, error: anyhow::Error) -> CreateNewFailure {
+        let operation = match self.phase {
+            PublicationPhase::PreLink => PublicationOperation::Write,
+            PublicationPhase::LinkStarted => PublicationOperation::Link,
+            PublicationPhase::Linked | PublicationPhase::FinalizationFailed => {
+                PublicationOperation::AfterLink
+            }
+        };
+        let linked = matches!(
+            self.phase,
+            PublicationPhase::Linked | PublicationPhase::FinalizationFailed
+        );
+        CreateNewFailure {
+            evidence: PublicationEvidence {
+                phase: if linked {
+                    PublicationPhase::FinalizationFailed
+                } else {
+                    self.phase
+                },
+                retained_destination: linked.then_some(self.destination),
+                retained_stage: self.retained_stage,
+                identity: self.identity,
+            },
+            primary: PublicationError::from_error(&error, operation),
+            stage_unlink: self.stage_unlink,
+            parent_sync: self.parent_sync,
+            abort: self.abort,
+        }
+    }
+
+    fn finish_link(&mut self, staged: &mut StagedOutput, _policy: &WavWritePolicy) -> Result<()> {
+        // Disable implicit Drop cleanup BEFORE either fallible attempt. We make
+        // exactly one observable unlink attempt and retain its path on failure.
+        staged.cleanup_on_drop = false;
+        let unlink = catch_publication_io(|| {
+            #[cfg(test)]
+            _policy.operation(StagedOperation::Unlink)?;
+            std::fs::remove_file(&staged.path)
+        });
+        if let Err(error) = unlink {
+            self.stage_unlink = Some(PublicationError::from_error(
+                &error,
+                PublicationOperation::StageUnlink,
+            ));
+            self.retained_stage = Some(std::mem::take(&mut staged.path));
+        }
+        // Directory sync is required even when unlink failed or panicked. No
+        // unsupported-platform or weaker-durability fallback is admitted.
+        let sync = catch_publication_io(|| {
+            #[cfg(test)]
+            _policy.operation(StagedOperation::ParentSync)?;
+            self.parent
+                .as_ref()
+                .expect("prepared parent directory")
+                .sync_all()
+        });
+        if let Err(error) = sync {
+            self.parent_sync = Some(PublicationError::from_error(
+                &error,
+                PublicationOperation::ParentSync,
+            ));
+        }
+        if self.stage_unlink.is_some() || self.parent_sync.is_some() {
+            self.phase = PublicationPhase::FinalizationFailed;
+            bail!("Linked occurrence WAV retained; checked publication finalization failed");
+        }
+        Ok(())
+    }
+}
+
+fn catch_publication_io(operation: impl FnOnce() -> std::io::Result<()>) -> Result<()> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
+        .map_err(|payload| anyhow::Error::from(WavStagingPanic::from_payload(payload)))?
+        .map_err(Into::into)
+}
+
+/// Closed create-new counterpart to the ordinary replacing writer. The caller
+/// must have finished checked backend destruction. File CAS and App cancellation
+/// are independent: a won file CAS does not prove a link and cannot revoke one.
+pub(crate) fn write_stereo_float32_create_new_checked(
+    path: &Path,
+    sample_rate: u32,
+    stereo: &[StereoFrame],
+    control: &ExportControl,
+    deadline: Instant,
+) -> std::result::Result<PublishedFloat32, Box<CreateNewFailure>> {
+    write_float32_create_new_with_policy(
+        path,
+        sample_rate,
+        stereo,
+        control,
+        WavWritePolicy::checked(deadline),
+    )
+}
+
+fn write_float32_create_new_with_policy(
+    path: &Path,
+    sample_rate: u32,
+    stereo: &[StereoFrame],
+    control: &ExportControl,
+    policy: WavWritePolicy,
+) -> std::result::Result<PublishedFloat32, Box<CreateNewFailure>> {
+    let mut publication = CreateNewPublication {
+        destination: PathBuf::new(),
+        parent: None,
+        phase: PublicationPhase::PreLink,
+        identity: None,
+        retained_stage: None,
+        stage_unlink: None,
+        parent_sync: None,
+        abort: None,
+        prewrite_peak: 0.0,
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<()> {
+        let path_text = path
+            .to_str()
+            .context("Occurrence output path must be UTF-8")?;
+        ensure!(
+            path.is_absolute() && path_text.len() <= MAX_OCCURRENCE_PATH_BYTES,
+            "Occurrence output requires a bounded absolute path"
+        );
+        ensure!(
+            path.components()
+                .all(|component| !matches!(component, std::path::Component::ParentDir)),
+            "Occurrence output cannot contain parent traversal"
+        );
+        let mut owned_path = String::new();
+        owned_path
+            .try_reserve_exact(path_text.len())
+            .context("Unable to reserve occurrence path")?;
+        owned_path.push_str(path_text);
+        publication.destination = PathBuf::from(owned_path);
+        if !cfg!(target_os = "linux") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Create-new occurrence durability is supported only on Linux",
+            )
+            .into());
+        }
+        ensure!(
+            !stereo.is_empty() && stereo.len() <= MAX_OCCURRENCE_MEDIA_FRAMES,
+            "Occurrence PCM extent must be between 1 and 24 million frames"
+        );
+        let parent = path
+            .parent()
+            .context("Occurrence output has no parent directory")?;
+        publication.parent = Some(
+            File::open(parent).context("Unable to open occurrence output directory for sync")?,
+        );
+        write_stereo_wav_kernel(
+            path,
+            WavExportOptions {
+                sample_rate,
+                sample_format: WavSampleFormat::Float32,
+                level_policy: crate::export_options::WavLevelPolicy::PreserveLevel,
+            },
+            stereo,
+            1.0,
+            control,
+            policy,
+            Some(&mut publication),
+        )
+    }))
+    .unwrap_or_else(|payload| Err(WavStagingPanic::from_payload(payload).into()));
+    match result {
+        Err(error) => Err(Box::new(publication.fail(error))),
+        Ok(()) => Ok(PublishedFloat32 {
+            path: publication.destination,
+            identity: publication
+                .identity
+                .expect("successful publication has staged identity"),
+            sample_rate,
+            frames: stereo.len(),
+            prewrite_peak: publication.prewrite_peak,
+        }),
+    }
+}
+
 #[derive(Default)]
 struct WavWritePolicy {
     // None preserves the ordinary writer's original cancellation/Drop behavior.
@@ -1075,6 +1459,8 @@ impl WavWritePolicy {
         );
         if self.fixture.fail == Some(operation)
             || (operation == StagedOperation::Abort && self.fixture.fail_abort)
+            || (operation == StagedOperation::Unlink && self.fixture.fail_unlink)
+            || (operation == StagedOperation::ParentSync && self.fixture.fail_parent_sync)
         {
             return Err(std::io::Error::other(format!(
                 "injected staged {operation:?} failure"
@@ -1093,6 +1479,10 @@ enum StagedOperation {
     Flush,
     Sync,
     Rename,
+    Link,
+    AfterLink,
+    Unlink,
+    ParentSync,
     Abort,
 }
 
@@ -1102,6 +1492,10 @@ struct WavWriteFixture {
     fail: Option<StagedOperation>,
     panic_at: Option<StagedOperation>,
     fail_abort: bool,
+    fail_unlink: bool,
+    fail_parent_sync: bool,
+    cancel_after_cas: bool,
+    cancel_after_link: bool,
     expire_before_commit: bool,
     cancel_before_commit: bool,
 }
@@ -1114,12 +1508,26 @@ fn write_stereo_wav_core(
     control: &ExportControl,
     policy: WavWritePolicy,
 ) -> Result<()> {
+    write_stereo_wav_kernel(path, options, stereo, gain, control, policy, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_stereo_wav_kernel(
+    path: &Path,
+    options: WavExportOptions,
+    stereo: &[StereoFrame],
+    gain: f32,
+    control: &ExportControl,
+    policy: WavWritePolicy,
+    mut publication: Option<&mut CreateNewPublication>,
+) -> Result<()> {
     control.checkpoint(7000)?;
     policy.check(control)?;
     options.validate()?;
     let sample_rate = options.sample_rate;
     let format = options.sample_format;
     ensure!(gain.is_finite(), "WAV export gain must be finite");
+    let mut prewrite_peak = 0.0_f32;
     for (index, frame) in stereo.iter().enumerate() {
         if index % PROGRESS_FRAME_INTERVAL == 0 {
             control.work_progress(index, stereo.len(), 7000, 7500)?;
@@ -1137,6 +1545,12 @@ fn write_stereo_wav_core(
                 || ((frame.left * gain).abs() <= 1.0 && (frame.right * gain).abs() <= 1.0),
             "WAV export would clip integer PCM at frame {index}; the destination was not changed"
         );
+        if publication.is_some() {
+            prewrite_peak = prewrite_peak.max(frame.left.abs()).max(frame.right.abs());
+        }
+    }
+    if let Some(publication) = publication.as_deref_mut() {
+        publication.prewrite_peak = prewrite_peak;
     }
     let channels = 2_u16;
     let bits_per_sample = format.bits();
@@ -1223,13 +1637,40 @@ fn write_stereo_wav_core(
             .get_ref()
             .sync_all()
             .with_context(|| format!("Unable to sync staged WAV for {}", path.display()))?;
+        if let Some(publication) = publication.as_deref_mut() {
+            publication.identity = Some(PublishedFileIdentity::from_metadata(
+                &writer.get_ref().metadata()?,
+            )?);
+        }
         drop(writer);
         // The cancellation/commit CAS makes the final boundary unambiguous even
-        // if the UI requests Cancel concurrently with the worker's rename.
+        // if the UI requests Cancel concurrently with the worker's publication.
         policy.begin_commit(control)?;
-        #[cfg(test)]
-        policy.operation(StagedOperation::Rename)?;
-        staged.commit(path)?;
+        if let Some(publication) = publication.as_deref_mut() {
+            publication.phase = PublicationPhase::LinkStarted;
+            #[cfg(test)]
+            {
+                if policy.fixture.cancel_after_cas {
+                    assert!(!control.cancel());
+                }
+                policy.operation(StagedOperation::Link)?;
+            }
+            std::fs::hard_link(&staged.path, &publication.destination)?;
+            // This assignment MUST be the first operation after successful link.
+            // Paths and identity storage already exist outside the unwind scope.
+            publication.phase = PublicationPhase::Linked;
+            #[cfg(test)]
+            {
+                if policy.fixture.cancel_after_link {
+                    assert!(!control.cancel());
+                }
+                policy.operation(StagedOperation::AfterLink)?;
+            }
+        } else {
+            #[cfg(test)]
+            policy.operation(StagedOperation::Rename)?;
+            staged.commit(path)?;
+        }
         Ok(())
     };
     let result = if policy.deadline.is_some() {
@@ -1240,6 +1681,41 @@ fn write_stereo_wav_core(
     } else {
         write_and_commit()
     };
+    if let Some(publication) = publication {
+        if publication.phase == PublicationPhase::Linked {
+            let finalization = publication.finish_link(&mut staged, &policy);
+            // Preserve an immediately-post-link panic as primary, while keeping
+            // both independent finalization errors in typed evidence.
+            result?;
+            finalization?;
+            control.complete();
+            return Ok(());
+        }
+        return match result {
+            Err(original) => {
+                let error = staged.abort_checked(original, &policy);
+                if let Some(abort) = error.downcast_ref::<StagedOutputAbortFailure>() {
+                    publication.retained_stage = Some(abort.retained_path.clone());
+                    let mut evidence =
+                        PublicationError::from_error(&error, PublicationOperation::Abort);
+                    evidence.io_kind = Some(abort.removal_error.kind());
+                    evidence.raw_os_error = abort.removal_error.raw_os_error();
+                    evidence.kind = if abort
+                        .removal_error
+                        .get_ref()
+                        .is_some_and(|inner| inner.is::<WavStagingPanic>())
+                    {
+                        PublicationErrorKind::Panic
+                    } else {
+                        PublicationErrorKind::Io
+                    };
+                    publication.abort = Some(evidence);
+                }
+                Err(error)
+            }
+            Ok(()) => unreachable!("create-new success requires a linked destination"),
+        };
+    }
     match result {
         Err(original) if policy.deadline.is_some() => Err(staged.abort_checked(original, &policy)),
         Ok(()) => {
@@ -4217,3 +4693,7 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "export_occurrence_tests.rs"]
+mod occurrence_publication_tests;
