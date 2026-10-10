@@ -318,7 +318,7 @@ use crate::internal::plugin_impl::borrowed_processor_fixture; // CONTRACT
         return f'#[path = {json.dumps(str(matches[0]))}]\n{visibility}mod {name};'
 
     shim, count = re.subn(r'(?m)^(pub )?mod (\w+);$', rebase, lib)
-    if count != 18:
+    if count != 19:
         raise ValueError(f'Unexpected top-level module layout: {count}')
     for mode, gate in [('test', '#[cfg(test)]\n'), ('production', '')]:
         text = shim + '\n\n// Crate-internal compile-only QA fixture; never exported.\n'

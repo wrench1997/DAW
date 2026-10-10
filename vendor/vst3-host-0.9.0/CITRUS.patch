@@ -1,22 +1,26 @@
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -67,6 +67,8 @@
+@@ -67,6 +67,10 @@
  ]
  midi-input = ["dep:midir"]
  process-isolation = []
 +# Explicit opt-in; absent from defaults. Scoped worker API is Linux-only.
 +experimental-scoped-worker = []
++# Low-level Linux mock-only transport foundation; absent from defaults.
++experimental-fresh-helper = ["process-isolation"]
  
  [lib]
  name = "vst3_host"
 --- a/Cargo.toml.orig
 +++ b/Cargo.toml.orig
-@@ -80,6 +80,8 @@
+@@ -80,6 +80,10 @@
  default = ["cpal-backend", "process-isolation"]
  cpal-backend = ["cpal"]
  process-isolation = []
 +# Explicit opt-in; absent from defaults. Scoped worker API is Linux-only.
 +experimental-scoped-worker = []
++# Low-level Linux mock-only transport foundation; absent from defaults.
++experimental-fresh-helper = ["process-isolation"]
  egui-widgets = ["egui", "raw-window-handle"]
  # Bind a live MIDI input device (hardware/virtual port) and forward parsed events.
  midi-input = ["dep:midir"]
@@ -183,6 +187,5179 @@
      /// Other errors
      #[error("{0}")]
      Other(String),
+--- a/src/fresh_helper/codec.rs
++++ b/src/fresh_helper/codec.rs
+@@ -0,0 +1,1457 @@
++//! Closed, cooperative, allocation-accounted codec for the fresh-helper subset.
++//!
++//! No legacy serde audio/state decoder and no generic JSON value tree is used.
++//! Encode counts before allocating one output Vec, then emits directly into it.
++//! Decode first validates the complete response without heap allocations, then
++//! materializes exactly that validated shape. Raw base64 is never copied: a small
++//! streaming cursor also handles JSON escapes. The response line, final payload
++//! capacities (including container storage), and request capacity are budgeted;
++//! stack scratch, allocator metadata, caller storage and allocator/RSS behaviour
++//! are not a hard memory bound. Failed codec transactions drop all their values
++//! and restore their starting live charge; peak observations remain.
++
++use super::{Budget, ErrorKind, ReplyShape, MAX_LINE};
++use crate::audio::AudioBusBuffer;
++use crate::discovery::ClassCompatibility;
++use crate::plugin::{ProcessTransport, StateContext};
++use crate::process_isolation::{HostCommand, HostResponse};
++use std::fmt::Write as _;
++
++const MAX_STATE: usize = 64 * 1024 * 1024 + 28;
++const MAX_TEXT: usize = 64 * 1024;
++const MAX_ID: usize = 64;
++const MAX_BUSES: usize = 8;
++const MAX_CHANNELS: usize = 32;
++const MAX_FRAMES: usize = 4096;
++const MAX_COMPAT: usize = 256;
++const MAX_DEPTH: usize = 16;
++// Canonical helper scalar spellings fit in 24 bytes. This explicitly bounded
++// strict subset does not admit arbitrarily padded decimal/exponent spellings.
++const MAX_NUMBER: usize = 128;
++const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++
++type Result<T> = std::result::Result<T, ErrorKind>;
++
++fn limit(value: usize, maximum: usize) -> Result<()> {
++    if value > maximum {
++        Err(ErrorKind::Limit)
++    } else {
++        Ok(())
++    }
++}
++
++fn base64_size(bytes: usize) -> Result<usize> {
++    bytes
++        .checked_add(2)
++        .and_then(|n| (n / 3).checked_mul(4))
++        .ok_or(ErrorKind::Limit)
++}
++
++fn check_shape(shape: &ReplyShape) -> Result<()> {
++    match shape {
++        ReplyShape::Audio { channels, frames } => {
++            limit(*channels, MAX_CHANNELS)?;
++            limit(*frames, MAX_FRAMES)
++        }
++        ReplyShape::Buses { buses, frames } => {
++            limit(buses.len(), MAX_BUSES)?;
++            limit(*frames, MAX_FRAMES)?;
++            let mut total = 0usize;
++            for &(_, channels) in buses {
++                total = total.checked_add(channels).ok_or(ErrorKind::Limit)?;
++                limit(total, MAX_CHANNELS)?;
++            }
++            Ok(())
++        }
++        _ => Ok(()),
++    }
++}
++
++fn check_channels(channels: &[Vec<f32>], frames: usize) -> Result<()> {
++    limit(channels.len(), MAX_CHANNELS)?;
++    for channel in channels {
++        limit(channel.len(), MAX_FRAMES)?;
++        if channel.len() != frames {
++            return Err(ErrorKind::Shape);
++        }
++    }
++    Ok(())
++}
++
++fn check_transport(transport: &Option<ProcessTransport>) -> Result<()> {
++    if let Some(t) = transport {
++        if !t.quarter_note_position.is_finite()
++            || !t.tempo.is_finite()
++            || t.tempo <= 0.0
++            || t.time_sig_numerator <= 0
++            || !matches!(t.time_sig_denominator, 1 | 2 | 4 | 8 | 16)
++        {
++            return Err(ErrorKind::InvalidRequest);
++        }
++    }
++    Ok(())
++}
++
++fn check_request(command: &HostCommand, shape: &ReplyShape) -> Result<()> {
++    // Keep unsupported rejection first, before shape work or any allocation.
++    match command {
++        HostCommand::LoadPlugin { .. }
++        | HostCommand::LoadState { .. }
++        | HostCommand::SaveState
++        | HostCommand::Process { .. }
++        | HostCommand::ProcessBuses { .. }
++        | HostCommand::GetParameter { .. }
++        | HostCommand::LatencySamples
++        | HostCommand::TailSamples => {}
++        _ => return Err(ErrorKind::UnsupportedRequest),
++    }
++    check_shape(shape)?;
++    match (command, shape) {
++        (
++            HostCommand::LoadPlugin {
++                path,
++                block_size,
++                class_id,
++                ..
++            },
++            ReplyShape::PluginInfo,
++        ) => {
++            limit(path.len(), MAX_TEXT)?;
++            limit(*block_size as usize, MAX_FRAMES)?;
++            if let Some(id) = class_id {
++                limit(id.len(), MAX_ID)?;
++            }
++        }
++        (HostCommand::LoadState { data, context }, ReplyShape::Success) => {
++            limit(data.len(), MAX_STATE)?;
++            limit(base64_size(data.len())?, MAX_LINE)?;
++            if let StateContext::Preset { path: Some(path) } = context {
++                limit(path.len(), MAX_TEXT)?;
++            }
++        }
++        (HostCommand::SaveState, ReplyShape::State)
++        | (HostCommand::GetParameter { .. }, ReplyShape::ParameterValue)
++        | (HostCommand::LatencySamples, ReplyShape::LatencySamples)
++        | (HostCommand::TailSamples, ReplyShape::TailSamples) => {}
++        (
++            HostCommand::Process {
++                inputs,
++                frames,
++                transport,
++            },
++            ReplyShape::Audio {
++                frames: expected, ..
++            },
++        ) => {
++            if *frames as usize != *expected {
++                return Err(ErrorKind::Shape);
++            }
++            check_channels(inputs, *expected)?;
++            check_transport(transport)?;
++        }
++        (
++            HostCommand::ProcessBuses {
++                inputs,
++                outputs,
++                frames,
++                transport,
++            },
++            ReplyShape::Buses {
++                buses,
++                frames: expected,
++            },
++        ) => {
++            if *frames as usize != *expected || outputs.len() != buses.len() {
++                return Err(ErrorKind::Shape);
++            }
++            limit(inputs.len(), MAX_BUSES)?;
++            let mut total = 0usize;
++            for bus in inputs {
++                check_channels(&bus.channels, *expected)?;
++                total = total
++                    .checked_add(bus.channels.len())
++                    .ok_or(ErrorKind::Limit)?;
++                limit(total, MAX_CHANNELS)?;
++            }
++            for (output, &(active, channels)) in outputs.iter().zip(buses) {
++                if output.active != active || output.channel_count != channels {
++                    return Err(ErrorKind::Shape);
++                }
++            }
++            check_transport(transport)?;
++        }
++        _ => return Err(ErrorKind::Shape),
++    }
++    Ok(())
++}
++
++struct Writer<'a> {
++    bytes: Option<Vec<u8>>,
++    len: usize,
++    checked: usize,
++    budget: &'a mut Budget,
++}
++
++impl Writer<'_> {
++    fn put(&mut self, data: &[u8]) -> Result<()> {
++        let end = self.len.checked_add(data.len()).ok_or(ErrorKind::Limit)?;
++        limit(end, MAX_LINE)?;
++        for chunk in data.chunks(1024) {
++            if self.len - self.checked + chunk.len() >= 1024 {
++                self.budget.check()?;
++                self.checked = self.len;
++            }
++            if let Some(bytes) = &mut self.bytes {
++                // The counting pass reserved exactly the entire request. Never
++                // let Vec silently grow outside the payload-accounting path.
++                if bytes.len() + chunk.len() > bytes.capacity() {
++                    return Err(ErrorKind::Allocation);
++                }
++                bytes.extend_from_slice(chunk);
++            }
++            self.len += chunk.len();
++        }
++        debug_assert_eq!(self.len, end);
++        Ok(())
++    }
++
++    fn boolean(&mut self, value: bool) -> Result<()> {
++        self.put(if value { b"true" } else { b"false" })
++    }
++
++    fn number(&mut self, value: impl std::fmt::Display) -> Result<()> {
++        struct Stack {
++            bytes: [u8; 768],
++            len: usize,
++        }
++        impl std::fmt::Write for Stack {
++            fn write_str(&mut self, text: &str) -> std::fmt::Result {
++                if text.len() > self.bytes.len() - self.len {
++                    return Err(std::fmt::Error);
++                }
++                self.bytes[self.len..self.len + text.len()].copy_from_slice(text.as_bytes());
++                self.len += text.len();
++                Ok(())
++            }
++        }
++        let mut stack = Stack {
++            bytes: [0; 768],
++            len: 0,
++        };
++        write!(&mut stack, "{value}").map_err(|_| ErrorKind::InvalidRequest)?;
++        self.put(&stack.bytes[..stack.len])
++    }
++
++    fn float(&mut self, value: f64) -> Result<()> {
++        if value.is_nan() {
++            self.put(b"\"NaN\"")
++        } else if value == f64::INFINITY {
++            self.put(b"\"inf\"")
++        } else if value == f64::NEG_INFINITY {
++            self.put(b"\"-inf\"")
++        } else if value == 0.0 && value.is_sign_negative() {
++            self.put(b"-0.0")
++        } else {
++            self.number(format_args!("{value:e}"))
++        }
++    }
++
++    fn text(&mut self, text: &str) -> Result<()> {
++        self.put(b"\"")?;
++        for chunk in text.as_bytes().chunks(1024) {
++            self.budget.check()?;
++            for &byte in chunk {
++                match byte {
++                    b'"' => self.put(b"\\\"")?,
++                    b'\\' => self.put(b"\\\\")?,
++                    0..=31 => {
++                        const HEX: &[u8; 16] = b"0123456789abcdef";
++                        self.put(&[
++                            b'\\',
++                            b'u',
++                            b'0',
++                            b'0',
++                            HEX[(byte >> 4) as usize],
++                            HEX[(byte & 15) as usize],
++                        ])?;
++                    }
++                    _ => self.put(&[byte])?,
++                }
++            }
++        }
++        self.put(b"\"")
++    }
++
++    fn base64(&mut self, len: usize, mut byte_at: impl FnMut(usize) -> u8) -> Result<()> {
++        // No raw sample Vec or intermediate base64 String is constructed.
++        base64_size(len)?;
++        self.put(b"\"")?;
++        for start in (0..len).step_by(3) {
++            let count = (len - start).min(3);
++            let a = byte_at(start);
++            let b = if count > 1 { byte_at(start + 1) } else { 0 };
++            let c = if count > 2 { byte_at(start + 2) } else { 0 };
++            self.put(&[
++                ALPHABET[(a >> 2) as usize],
++                ALPHABET[(((a & 3) << 4) | (b >> 4)) as usize],
++                if count > 1 {
++                    ALPHABET[(((b & 15) << 2) | (c >> 6)) as usize]
++                } else {
++                    b'='
++                },
++                if count > 2 {
++                    ALPHABET[(c & 63) as usize]
++                } else {
++                    b'='
++                },
++            ])?;
++        }
++        self.put(b"\"")
++    }
++
++    fn channels(&mut self, channels: &[Vec<f32>]) -> Result<()> {
++        self.put(b"[")?;
++        for (index, channel) in channels.iter().enumerate() {
++            if index != 0 {
++                self.put(b",")?;
++            }
++            self.base64(
++                channel.len().checked_mul(4).ok_or(ErrorKind::Limit)?,
++                |byte| channel[byte / 4].to_bits().to_le_bytes()[byte % 4],
++            )?;
++        }
++        self.put(b"]")
++    }
++
++    fn transport(&mut self, transport: &Option<ProcessTransport>) -> Result<()> {
++        if let Some(t) = transport {
++            self.put(b",\"transport\":{\"sample_position\":")?;
++            self.number(t.sample_position)?;
++            self.put(b",\"quarter_note_position\":")?;
++            self.float(t.quarter_note_position)?;
++            self.put(b",\"tempo\":")?;
++            self.float(t.tempo)?;
++            self.put(b",\"playing\":")?;
++            self.boolean(t.playing)?;
++            self.put(b",\"time_sig_numerator\":")?;
++            self.number(t.time_sig_numerator)?;
++            self.put(b",\"time_sig_denominator\":")?;
++            self.number(t.time_sig_denominator)?;
++            self.put(b"}")?;
++        }
++        Ok(())
++    }
++
++    fn command(&mut self, command: &HostCommand) -> Result<()> {
++        match command {
++            HostCommand::SaveState => self.put(b"\"SaveState\"")?,
++            HostCommand::LatencySamples => self.put(b"\"LatencySamples\"")?,
++            HostCommand::TailSamples => self.put(b"\"TailSamples\"")?,
++            HostCommand::GetParameter { id } => {
++                self.put(b"{\"GetParameter\":{\"id\":")?;
++                self.number(id)?;
++                self.put(b"}}")?;
++            }
++            HostCommand::LoadPlugin {
++                path,
++                sample_rate,
++                block_size,
++                tempo,
++                time_sig_numerator,
++                time_sig_denominator,
++                class_id,
++            } => {
++                self.put(b"{\"LoadPlugin\":{\"path\":")?;
++                self.text(path)?;
++                self.put(b",\"sample_rate\":")?;
++                self.float(*sample_rate)?;
++                self.put(b",\"block_size\":")?;
++                self.number(block_size)?;
++                self.put(b",\"tempo\":")?;
++                self.float(*tempo)?;
++                self.put(b",\"time_sig_numerator\":")?;
++                self.number(time_sig_numerator)?;
++                self.put(b",\"time_sig_denominator\":")?;
++                self.number(time_sig_denominator)?;
++                self.put(b",\"class_id\":")?;
++                match class_id {
++                    Some(id) => self.text(id)?,
++                    None => self.put(b"null")?,
++                }
++                self.put(b"}}")?;
++            }
++            HostCommand::LoadState { data, context } => {
++                self.put(b"{\"LoadState\":{\"data\":")?;
++                self.base64(data.len(), |index| data[index])?;
++                self.put(b",\"context\":")?;
++                match context {
++                    StateContext::Project => self.put(b"\"Project\"")?,
++                    StateContext::Preset { path } => {
++                        self.put(b"{\"Preset\":{\"path\":")?;
++                        match path {
++                            Some(path) => self.text(path)?,
++                            None => self.put(b"null")?,
++                        }
++                        self.put(b"}}")?;
++                    }
++                }
++                self.put(b"}}")?;
++            }
++            HostCommand::Process {
++                inputs,
++                frames,
++                transport,
++            } => {
++                self.put(b"{\"Process\":{\"inputs\":")?;
++                self.channels(inputs)?;
++                self.put(b",\"frames\":")?;
++                self.number(frames)?;
++                self.transport(transport)?;
++                self.put(b"}}")?;
++            }
++            HostCommand::ProcessBuses {
++                inputs,
++                outputs,
++                frames,
++                transport,
++            } => {
++                self.put(b"{\"ProcessBuses\":{\"inputs\":[")?;
++                for (index, bus) in inputs.iter().enumerate() {
++                    if index != 0 {
++                        self.put(b",")?;
++                    }
++                    self.put(b"{\"active\":")?;
++                    self.boolean(bus.active)?;
++                    self.put(b",\"channels\":")?;
++                    self.channels(&bus.channels)?;
++                    self.put(b"}")?;
++                }
++                self.put(b"],\"outputs\":[")?;
++                for (index, bus) in outputs.iter().enumerate() {
++                    if index != 0 {
++                        self.put(b",")?;
++                    }
++                    self.put(b"{\"channel_count\":")?;
++                    self.number(bus.channel_count)?;
++                    self.put(b",\"active\":")?;
++                    self.boolean(bus.active)?;
++                    self.put(b"}")?;
++                }
++                self.put(b"],\"frames\":")?;
++                self.number(frames)?;
++                self.transport(transport)?;
++                self.put(b"}}")?;
++            }
++            _ => return Err(ErrorKind::UnsupportedRequest),
++        }
++        self.put(b"\n")
++    }
++}
++
++pub(super) fn encode(
++    command: &HostCommand,
++    shape: &ReplyShape,
++    budget: &mut Budget,
++) -> Result<Vec<u8>> {
++    let starting_live = budget.live;
++    let result = (|| {
++        budget.check()?;
++        check_request(command, shape)?;
++        let mut count = Writer {
++            bytes: None,
++            len: 0,
++            checked: 0,
++            budget,
++        };
++        count.command(command)?;
++        let length = count.len;
++        let mut bytes = Vec::new();
++        budget.grow(&mut bytes, length)?;
++        let mut writer = Writer {
++            bytes: Some(bytes),
++            len: 0,
++            checked: 0,
++            budget,
++        };
++        writer.command(command)?;
++        writer.budget.check()?;
++        if writer.len != length {
++            return Err(ErrorKind::InvalidRequest);
++        }
++        Ok(writer.bytes.take().expect("materializing request"))
++    })();
++    if result.is_err() {
++        budget.live = starting_live;
++    }
++    result
++}
++
++#[derive(Clone, Copy)]
++struct Token<'a> {
++    raw: &'a [u8],
++    decoded: usize,
++}
++
++// A single validated UTF-8/JSON string unit; at most twelve source bytes and
++// four decoded bytes. This stack-only routine never traverses an unbounded span.
++fn string_unit(raw: &[u8], position: usize) -> Result<([u8; 4], usize, usize)> {
++    let byte = *raw.get(position).ok_or(ErrorKind::MalformedReply)?;
++    let mut out = [0; 4];
++    if byte == b'\\' {
++        let escaped = *raw.get(position + 1).ok_or(ErrorKind::MalformedReply)?;
++        out[0] = match escaped {
++            b'"' => b'"',
++            b'\\' => b'\\',
++            b'/' => b'/',
++            b'b' => 8,
++            b'f' => 12,
++            b'n' => b'\n',
++            b'r' => b'\r',
++            b't' => b'\t',
++            b'u' => {
++                fn hex(raw: &[u8], start: usize) -> Result<u32> {
++                    let bytes = raw.get(start..start + 4).ok_or(ErrorKind::MalformedReply)?;
++                    let mut value = 0;
++                    for byte in bytes {
++                        value = value * 16
++                            + u32::from(match byte {
++                                b'0'..=b'9' => byte - b'0',
++                                b'a'..=b'f' => byte - b'a' + 10,
++                                b'A'..=b'F' => byte - b'A' + 10,
++                                _ => return Err(ErrorKind::MalformedReply),
++                            });
++                    }
++                    Ok(value)
++                }
++                let high = hex(raw, position + 2)?;
++                let (scalar, consumed) = if (0xd800..=0xdbff).contains(&high) {
++                    if raw.get(position + 6..position + 8) != Some(b"\\u") {
++                        return Err(ErrorKind::MalformedReply);
++                    }
++                    let low = hex(raw, position + 8)?;
++                    if !(0xdc00..=0xdfff).contains(&low) {
++                        return Err(ErrorKind::MalformedReply);
++                    }
++                    (0x10000 + ((high - 0xd800) << 10) + low - 0xdc00, 12)
++                } else {
++                    (high, 6)
++                };
++                let character = char::from_u32(scalar).ok_or(ErrorKind::MalformedReply)?;
++                let count = character.encode_utf8(&mut out).len();
++                return Ok((out, count, consumed));
++            }
++            _ => return Err(ErrorKind::MalformedReply),
++        };
++        return Ok((out, 1, 2));
++    }
++    if byte < 32 || byte == b'"' {
++        return Err(ErrorKind::MalformedReply);
++    }
++    let count = match byte {
++        0x20..=0x7f => 1,
++        0xc2..=0xdf => 2,
++        0xe0..=0xef => 3,
++        0xf0..=0xf4 => 4,
++        _ => return Err(ErrorKind::MalformedReply),
++    };
++    let bytes = raw
++        .get(position..position + count)
++        .ok_or(ErrorKind::MalformedReply)?;
++    std::str::from_utf8(bytes).map_err(|_| ErrorKind::MalformedReply)?;
++    out[..count].copy_from_slice(bytes);
++    Ok((out, count, count))
++}
++
++struct TokenBytes<'a> {
++    token: Token<'a>,
++    position: usize,
++    checked: usize,
++    pending: [u8; 4],
++    offset: usize,
++    count: usize,
++}
++impl<'a> TokenBytes<'a> {
++    fn new(token: Token<'a>) -> Self {
++        Self {
++            token,
++            position: 0,
++            checked: 0,
++            pending: [0; 4],
++            offset: 0,
++            count: 0,
++        }
++    }
++    fn next(&mut self, budget: &Budget) -> Result<Option<u8>> {
++        if self.offset == self.count {
++            if self.position == self.token.raw.len() {
++                return Ok(None);
++            }
++            if self.position - self.checked >= 1024 {
++                budget.check()?;
++                self.checked = self.position;
++            }
++            let (bytes, count, consumed) = string_unit(self.token.raw, self.position)?;
++            self.position += consumed;
++            self.pending = bytes;
++            self.offset = 0;
++            self.count = count;
++        }
++        let value = self.pending[self.offset];
++        self.offset += 1;
++        Ok(Some(value))
++    }
++}
++
++fn walk_base64(token: Token<'_>, budget: &Budget, mut emit: impl FnMut(&[u8])) -> Result<usize> {
++    if token.decoded % 4 != 0 {
++        return Err(ErrorKind::MalformedReply);
++    }
++    fn sextet(byte: u8) -> Result<u8> {
++        Ok(match byte {
++            b'A'..=b'Z' => byte - b'A',
++            b'a'..=b'z' => byte - b'a' + 26,
++            b'0'..=b'9' => byte - b'0' + 52,
++            b'+' => 62,
++            b'/' => 63,
++            _ => return Err(ErrorKind::MalformedReply),
++        })
++    }
++    let mut cursor = TokenBytes::new(token);
++    let mut decoded = 0usize;
++    for group in 0..token.decoded / 4 {
++        if group % 256 == 0 {
++            budget.check()?;
++        }
++        let a = cursor.next(budget)?.ok_or(ErrorKind::MalformedReply)?;
++        let b = cursor.next(budget)?.ok_or(ErrorKind::MalformedReply)?;
++        let c = cursor.next(budget)?.ok_or(ErrorKind::MalformedReply)?;
++        let d = cursor.next(budget)?.ok_or(ErrorKind::MalformedReply)?;
++        let a = sextet(a)?;
++        let b = sextet(b)?;
++        let (c, d, count) = match (c, d) {
++            (b'=', b'=') if b & 15 == 0 => (0, 0, 1),
++            (c, b'=') if c != b'=' => {
++                let c = sextet(c)?;
++                if c & 3 != 0 {
++                    return Err(ErrorKind::MalformedReply);
++                }
++                (c, 0, 2)
++            }
++            (c, d) => (sextet(c)?, sextet(d)?, 3),
++        };
++        if count != 3 && group + 1 != token.decoded / 4 {
++            return Err(ErrorKind::MalformedReply);
++        }
++        let bytes = [(a << 2) | (b >> 4), (b << 4) | (c >> 2), (c << 6) | d];
++        emit(&bytes[..count]);
++        decoded = decoded.checked_add(count).ok_or(ErrorKind::Limit)?;
++    }
++    budget.check()?;
++    Ok(decoded)
++}
++
++struct Key {
++    bytes: [u8; 64],
++    len: usize,
++}
++impl Key {
++    fn is(&self, name: &[u8]) -> bool {
++        &self.bytes[..self.len] == name
++    }
++}
++
++struct Parser<'a, 'b> {
++    bytes: &'a [u8],
++    position: usize,
++    checked: usize,
++    depth: usize,
++    materialize: bool,
++    failure_message: Option<Token<'a>>,
++    budget: &'b mut Budget,
++}
++
++impl<'a> Parser<'a, '_> {
++    fn checkpoint(&mut self) -> Result<()> {
++        if self.position - self.checked >= 1024 {
++            self.budget.check()?;
++            self.checked = self.position;
++        }
++        Ok(())
++    }
++    fn whitespace(&mut self) -> Result<()> {
++        while matches!(
++            self.bytes.get(self.position),
++            Some(b' ' | b'\t' | b'\r' | b'\n')
++        ) {
++            self.position += 1;
++            self.checkpoint()?;
++        }
++        Ok(())
++    }
++    fn peek(&mut self) -> Result<Option<u8>> {
++        self.whitespace()?;
++        Ok(self.bytes.get(self.position).copied())
++    }
++    fn take(&mut self, byte: u8) -> Result<()> {
++        self.whitespace()?;
++        if self.bytes.get(self.position) != Some(&byte) {
++            return Err(ErrorKind::MalformedReply);
++        }
++        self.position += 1;
++        self.checkpoint()
++    }
++    fn open(&mut self, byte: u8) -> Result<()> {
++        self.take(byte)?;
++        self.depth += 1;
++        limit(self.depth, MAX_DEPTH)
++    }
++    fn next(&mut self, first: &mut bool, close: u8) -> Result<bool> {
++        if self.peek()? == Some(close) {
++            self.position += 1;
++            self.depth = self.depth.checked_sub(1).ok_or(ErrorKind::MalformedReply)?;
++            return Ok(false);
++        }
++        if !*first {
++            self.take(b',')?;
++        }
++        *first = false;
++        if self.peek()? == Some(close) {
++            return Err(ErrorKind::MalformedReply);
++        }
++        Ok(true)
++    }
++    fn token(&mut self, maximum: usize) -> Result<Token<'a>> {
++        self.take(b'"')?;
++        let start = self.position;
++        let mut decoded = 0usize;
++        while self.bytes.get(self.position) != Some(&b'"') {
++            let (_, count, consumed) = string_unit(self.bytes, self.position)?;
++            decoded = decoded.checked_add(count).ok_or(ErrorKind::Limit)?;
++            limit(decoded, maximum)?;
++            self.position += consumed;
++            self.checkpoint()?;
++        }
++        let token = Token {
++            raw: &self.bytes[start..self.position],
++            decoded,
++        };
++        self.position += 1;
++        self.checkpoint()?;
++        Ok(token)
++    }
++    fn key(&mut self) -> Result<Key> {
++        let token = self.token(64)?;
++        let mut key = Key {
++            bytes: [0; 64],
++            len: 0,
++        };
++        let mut cursor = TokenBytes::new(token);
++        while let Some(byte) = cursor.next(self.budget)? {
++            key.bytes[key.len] = byte;
++            key.len += 1;
++        }
++        self.take(b':')?;
++        Ok(key)
++    }
++    fn text(&mut self, maximum: usize) -> Result<String> {
++        let token = self.token(maximum)?;
++        if !self.materialize {
++            return Ok(String::new());
++        }
++        owned_text(token, self.budget)
++    }
++
++    fn literal(&mut self, literal: &[u8]) -> Result<()> {
++        self.whitespace()?;
++        if self.bytes.get(self.position..self.position + literal.len()) != Some(literal) {
++            return Err(ErrorKind::MalformedReply);
++        }
++        self.position += literal.len();
++        self.checkpoint()
++    }
++    fn boolean(&mut self) -> Result<bool> {
++        match self.peek()? {
++            Some(b't') => {
++                self.literal(b"true")?;
++                Ok(true)
++            }
++            Some(b'f') => {
++                self.literal(b"false")?;
++                Ok(false)
++            }
++            _ => Err(ErrorKind::MalformedReply),
++        }
++    }
++    fn number(&mut self) -> Result<&'a str> {
++        self.whitespace()?;
++        let start = self.position;
++        while matches!(
++            self.bytes.get(self.position),
++            Some(b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
++        ) {
++            self.position += 1;
++            limit(self.position - start, MAX_NUMBER)?;
++            self.checkpoint()?;
++        }
++        let bytes = &self.bytes[start..self.position];
++        // Validate the JSON grammar independently of Rust's permissive float parser.
++        let mut i = 0;
++        if bytes.get(i) == Some(&b'-') {
++            i += 1;
++        }
++        match bytes.get(i) {
++            Some(b'0') => i += 1,
++            Some(b'1'..=b'9') => {
++                i += 1;
++                while matches!(bytes.get(i), Some(b'0'..=b'9')) {
++                    i += 1;
++                }
++            }
++            _ => return Err(ErrorKind::MalformedReply),
++        }
++        if bytes.get(i) == Some(&b'.') {
++            i += 1;
++            let first = i;
++            while matches!(bytes.get(i), Some(b'0'..=b'9')) {
++                i += 1;
++            }
++            if i == first {
++                return Err(ErrorKind::MalformedReply);
++            }
++        }
++        if matches!(bytes.get(i), Some(b'e' | b'E')) {
++            i += 1;
++            if matches!(bytes.get(i), Some(b'+' | b'-')) {
++                i += 1;
++            }
++            let first = i;
++            while matches!(bytes.get(i), Some(b'0'..=b'9')) {
++                i += 1;
++            }
++            if i == first {
++                return Err(ErrorKind::MalformedReply);
++            }
++        }
++        if i != bytes.len() {
++            return Err(ErrorKind::MalformedReply);
++        }
++        std::str::from_utf8(bytes).map_err(|_| ErrorKind::MalformedReply)
++    }
++    fn u32(&mut self) -> Result<u32> {
++        self.number()?
++            .parse()
++            .map_err(|_| ErrorKind::MalformedReply)
++    }
++    fn count(&mut self, maximum: usize) -> Result<i32> {
++        let count: i32 = self
++            .number()?
++            .parse()
++            .map_err(|_| ErrorKind::MalformedReply)?;
++        if count < 0 {
++            return Err(ErrorKind::Limit);
++        }
++        limit(count as usize, maximum)?;
++        Ok(count)
++    }
++    fn float(&mut self) -> Result<f64> {
++        if self.peek()? == Some(b'"') {
++            let token = self.token(4)?;
++            let mut bytes = [0u8; 4];
++            let mut cursor = TokenBytes::new(token);
++            for byte in &mut bytes[..token.decoded] {
++                *byte = cursor.next(self.budget)?.ok_or(ErrorKind::MalformedReply)?;
++            }
++            return match &bytes[..token.decoded] {
++                b"NaN" => Ok(f64::NAN),
++                b"inf" => Ok(f64::INFINITY),
++                b"-inf" => Ok(f64::NEG_INFINITY),
++                _ => Err(ErrorKind::MalformedReply),
++            };
++        }
++        // Legacy null loses value class and is deliberately not accepted here.
++        let value: f64 = self
++            .number()?
++            .parse()
++            .map_err(|_| ErrorKind::MalformedReply)?;
++        if !value.is_finite() {
++            return Err(ErrorKind::MalformedReply);
++        }
++        Ok(value)
++    }
++    fn state(&mut self) -> Result<Vec<u8>> {
++        if self.peek()? == Some(b'[') {
++            return Err(ErrorKind::UnsupportedReply);
++        }
++        let token = self.token(base64_size(MAX_STATE)?)?;
++        let length = walk_base64(token, self.budget, |_| {})?;
++        limit(length, MAX_STATE)?;
++        let mut state = Vec::new();
++        if self.materialize {
++            self.budget.grow(&mut state, length)?;
++            walk_base64(token, self.budget, |bytes| state.extend_from_slice(bytes))?;
++        }
++        Ok(state)
++    }
++    fn channel(&mut self, frames: usize) -> Result<Vec<f32>> {
++        let token = self.token(base64_size(MAX_FRAMES * 4)?)?;
++        let length = walk_base64(token, self.budget, |_| {})?;
++        if length % 4 != 0 {
++            return Err(ErrorKind::MalformedReply);
++        }
++        if length != frames * 4 {
++            return Err(ErrorKind::Shape);
++        }
++        let mut samples = Vec::new();
++        if self.materialize {
++            self.budget.grow(&mut samples, frames)?;
++            let mut sample = [0u8; 4];
++            let mut used = 0;
++            walk_base64(token, self.budget, |bytes| {
++                for byte in bytes {
++                    sample[used] = *byte;
++                    used += 1;
++                    if used == 4 {
++                        samples.push(f32::from_bits(u32::from_le_bytes(sample)));
++                        used = 0;
++                    }
++                }
++            })?;
++        }
++        Ok(samples)
++    }
++    fn channels(&mut self, expected: usize, frames: usize) -> Result<Vec<Vec<f32>>> {
++        self.open(b'[')?;
++        let mut channels = Vec::new();
++        if self.materialize {
++            self.budget.grow(&mut channels, expected)?;
++        }
++        let mut first = true;
++        let mut count = 0;
++        while self.next(&mut first, b']')? {
++            if count == expected {
++                return Err(ErrorKind::Shape);
++            }
++            let channel = self.channel(frames)?;
++            if self.materialize {
++                channels.push(channel);
++            }
++            count += 1;
++        }
++        if count != expected {
++            return Err(ErrorKind::Shape);
++        }
++        Ok(channels)
++    }
++    fn buses(&mut self, expected: &[(bool, usize)], frames: usize) -> Result<Vec<AudioBusBuffer>> {
++        self.open(b'[')?;
++        let mut buses = Vec::new();
++        if self.materialize {
++            self.budget.grow(&mut buses, expected.len())?;
++        }
++        let mut first = true;
++        let mut count = 0;
++        while self.next(&mut first, b']')? {
++            let &(expected_active, expected_channels) =
++                expected.get(count).ok_or(ErrorKind::Shape)?;
++            self.open(b'{')?;
++            let mut fields = true;
++            let mut seen = 0;
++            let mut active = false;
++            let mut channels = Vec::new();
++            while self.next(&mut fields, b'}')? {
++                let key = self.key()?;
++                if key.is(b"active") {
++                    unique(&mut seen, 1)?;
++                    active = self.boolean()?;
++                } else if key.is(b"channels") {
++                    unique(&mut seen, 2)?;
++                    channels = self.channels(expected_channels, frames)?;
++                } else {
++                    return Err(ErrorKind::MalformedReply);
++                }
++            }
++            required(seen, 3)?;
++            if active != expected_active {
++                return Err(ErrorKind::Shape);
++            }
++            if self.materialize {
++                buses.push(AudioBusBuffer { active, channels });
++            }
++            count += 1;
++        }
++        if count != expected.len() {
++            return Err(ErrorKind::Shape);
++        }
++        Ok(buses)
++    }
++    fn no_events(&mut self) -> Result<()> {
++        self.open(b'[')?;
++        // Examine only the next token. No element payload, JSON nesting, event
++        // kind or potentially enormous pointer-backed data is read or decoded.
++        if self.peek()? != Some(b']') {
++            return Err(ErrorKind::UnsupportedReply);
++        }
++        self.take(b']')?;
++        self.depth -= 1;
++        Ok(())
++    }
++    fn compatibility(&mut self) -> Result<Vec<ClassCompatibility>> {
++        self.open(b'[')?;
++        let mut entries = Vec::new();
++        let mut first = true;
++        let mut count = 0usize;
++        let mut old_total = 0usize;
++        while self.next(&mut first, b']')? {
++            if count == MAX_COMPAT {
++                return Err(ErrorKind::Limit);
++            }
++            self.open(b'{')?;
++            let mut fields = true;
++            let mut seen = 0;
++            let mut new_class_id = String::new();
++            let mut old_class_ids = Vec::new();
++            while self.next(&mut fields, b'}')? {
++                let key = self.key()?;
++                if key.is(b"new_class_id") {
++                    unique(&mut seen, 1)?;
++                    new_class_id = self.text(MAX_ID)?;
++                } else if key.is(b"old_class_ids") {
++                    unique(&mut seen, 2)?;
++                    self.open(b'[')?;
++                    let mut ids_first = true;
++                    let mut old_count = 0;
++                    while self.next(&mut ids_first, b']')? {
++                        if old_count == MAX_COMPAT || old_total == MAX_COMPAT {
++                            return Err(ErrorKind::Limit);
++                        }
++                        let old = self.text(MAX_ID)?;
++                        if self.materialize {
++                            self.budget.grow(&mut old_class_ids, old_count + 1)?;
++                            old_class_ids.push(old);
++                        }
++                        old_count += 1;
++                        old_total += 1;
++                    }
++                } else {
++                    return Err(ErrorKind::MalformedReply);
++                }
++            }
++            required(seen, 3)?;
++            if self.materialize {
++                self.budget.grow(&mut entries, count + 1)?;
++                entries.push(ClassCompatibility {
++                    new_class_id,
++                    old_class_ids,
++                });
++            }
++            count += 1;
++        }
++        Ok(entries)
++    }
++    fn plugin_info(&mut self) -> Result<HostResponse> {
++        self.open(b'{')?;
++        let mut first = true;
++        let mut seen = 0;
++        let (mut vendor, mut name, mut version, mut category, mut uid) = (
++            String::new(),
++            String::new(),
++            String::new(),
++            String::new(),
++            String::new(),
++        );
++        let (mut has_gui, mut has_midi_input, mut has_midi_output) = (false, false, false);
++        let (mut audio_inputs, mut audio_outputs, mut output_channels) = (0, 0, 0);
++        let mut compatibility = Vec::new();
++        while self.next(&mut first, b'}')? {
++            let key = self.key()?;
++            if key.is(b"vendor") {
++                unique(&mut seen, 1)?;
++                vendor = self.text(MAX_TEXT)?;
++            } else if key.is(b"name") {
++                unique(&mut seen, 2)?;
++                name = self.text(MAX_TEXT)?;
++            } else if key.is(b"version") {
++                unique(&mut seen, 4)?;
++                version = self.text(MAX_TEXT)?;
++            } else if key.is(b"category") {
++                unique(&mut seen, 8)?;
++                category = self.text(MAX_TEXT)?;
++            } else if key.is(b"uid") {
++                unique(&mut seen, 16)?;
++                uid = self.text(MAX_ID)?;
++            } else if key.is(b"has_gui") {
++                unique(&mut seen, 32)?;
++                has_gui = self.boolean()?;
++            } else if key.is(b"audio_inputs") {
++                unique(&mut seen, 64)?;
++                audio_inputs = self.count(MAX_BUSES)?;
++            } else if key.is(b"audio_outputs") {
++                unique(&mut seen, 128)?;
++                audio_outputs = self.count(MAX_BUSES)?;
++            } else if key.is(b"output_channels") {
++                unique(&mut seen, 256)?;
++                output_channels = self.count(MAX_CHANNELS)?;
++            } else if key.is(b"has_midi_input") {
++                unique(&mut seen, 512)?;
++                has_midi_input = self.boolean()?;
++            } else if key.is(b"has_midi_output") {
++                unique(&mut seen, 1024)?;
++                has_midi_output = self.boolean()?;
++            } else if key.is(b"compatibility") {
++                unique(&mut seen, 2048)?;
++                compatibility = self.compatibility()?;
++            } else {
++                return Err(ErrorKind::MalformedReply);
++            }
++        }
++        // The existing wire explicitly defaults compatibility; all other fields
++        // are required. Never clamp out-of-range bus/channel metadata.
++        required(seen, 2047)?;
++        Ok(HostResponse::PluginInfo {
++            vendor,
++            name,
++            version,
++            category,
++            uid,
++            has_gui,
++            audio_inputs,
++            audio_outputs,
++            output_channels,
++            has_midi_input,
++            has_midi_output,
++            compatibility,
++        })
++    }
++    fn response(&mut self, shape: &ReplyShape) -> Result<HostResponse> {
++        self.open(b'{')?;
++        let mut outer = true;
++        if !self.next(&mut outer, b'}')? {
++            return Err(ErrorKind::MalformedReply);
++        }
++        let variant = self.key()?;
++        let reply = if variant.is(b"PluginInfo") {
++            if *shape != ReplyShape::PluginInfo {
++                return Err(ErrorKind::WrongReply);
++            }
++            self.plugin_info()?
++        } else if variant.is(b"Error") || variant.is(b"Crashed") || variant.is(b"Success") {
++            if variant.is(b"Success") && *shape != ReplyShape::Success {
++                return Err(ErrorKind::WrongReply);
++            }
++            self.open(b'{')?;
++            let mut first = true;
++            let mut seen = 0;
++            let mut message = String::new();
++            while self.next(&mut first, b'}')? {
++                if !self.key()?.is(b"message") {
++                    return Err(ErrorKind::MalformedReply);
++                }
++                unique(&mut seen, 1)?;
++                if variant.is(b"Error") || variant.is(b"Crashed") {
++                    let token = self.token(MAX_TEXT)?;
++                    self.failure_message = Some(token);
++                    if self.materialize {
++                        message = owned_text(token, self.budget)?;
++                    }
++                } else {
++                    message = self.text(MAX_TEXT)?;
++                }
++            }
++            required(seen, 1)?;
++            if variant.is(b"Error") {
++                HostResponse::Error { message }
++            } else if variant.is(b"Crashed") {
++                HostResponse::Crashed { message }
++            } else {
++                HostResponse::Success { message }
++            }
++        } else if variant.is(b"AudioOutput") || variant.is(b"BusAudioOutput") {
++            let bus_response = variant.is(b"BusAudioOutput");
++            match (bus_response, shape) {
++                (false, ReplyShape::Audio { .. }) | (true, ReplyShape::Buses { .. }) => {}
++                _ => return Err(ErrorKind::WrongReply),
++            }
++            self.open(b'{')?;
++            let mut first = true;
++            let mut seen = 0;
++            let mut outputs = Vec::new();
++            let mut bus_outputs = Vec::new();
++            let mut output_events_lost = false;
++            let mut transport_applied = false;
++            while self.next(&mut first, b'}')? {
++                let key = self.key()?;
++                if key.is(b"outputs") {
++                    unique(&mut seen, 1)?;
++                    match shape {
++                        ReplyShape::Audio { channels, frames } => {
++                            outputs = self.channels(*channels, *frames)?
++                        }
++                        ReplyShape::Buses { buses, frames } => {
++                            bus_outputs = self.buses(buses, *frames)?
++                        }
++                        _ => return Err(ErrorKind::WrongReply),
++                    }
++                } else if key.is(b"output_events") {
++                    unique(&mut seen, 2)?;
++                    self.no_events()?;
++                } else if key.is(b"output_events_lost") {
++                    unique(&mut seen, 4)?;
++                    output_events_lost = self.boolean()?;
++                } else if key.is(b"transport_applied") {
++                    unique(&mut seen, 8)?;
++                    transport_applied = self.boolean()?;
++                } else {
++                    return Err(ErrorKind::MalformedReply);
++                }
++            }
++            // These two flags have explicit legacy false defaults in HostResponse.
++            required(seen, 3)?;
++            if bus_response {
++                HostResponse::BusAudioOutput {
++                    outputs: bus_outputs,
++                    output_events: Vec::new(),
++                    output_events_lost,
++                    transport_applied,
++                }
++            } else {
++                HostResponse::AudioOutput {
++                    outputs,
++                    output_events: Vec::new(),
++                    output_events_lost,
++                    transport_applied,
++                }
++            }
++        } else if variant.is(b"State") {
++            if *shape != ReplyShape::State {
++                return Err(ErrorKind::WrongReply);
++            }
++            self.open(b'{')?;
++            let mut first = true;
++            let mut seen = 0;
++            let mut data = Vec::new();
++            while self.next(&mut first, b'}')? {
++                if !self.key()?.is(b"data") {
++                    return Err(ErrorKind::MalformedReply);
++                }
++                unique(&mut seen, 1)?;
++                data = self.state()?;
++            }
++            required(seen, 1)?;
++            HostResponse::State { data }
++        } else if variant.is(b"ParameterValue") {
++            if *shape != ReplyShape::ParameterValue {
++                return Err(ErrorKind::WrongReply);
++            }
++            self.open(b'{')?;
++            let mut first = true;
++            let mut seen = 0;
++            let mut value = 0.0;
++            while self.next(&mut first, b'}')? {
++                if !self.key()?.is(b"value") {
++                    return Err(ErrorKind::MalformedReply);
++                }
++                unique(&mut seen, 1)?;
++                value = self.float()?;
++            }
++            required(seen, 1)?;
++            HostResponse::ParameterValue { value }
++        } else if variant.is(b"LatencySamples") || variant.is(b"TailSamples") {
++            if !((variant.is(b"LatencySamples") && *shape == ReplyShape::LatencySamples)
++                || (variant.is(b"TailSamples") && *shape == ReplyShape::TailSamples))
++            {
++                return Err(ErrorKind::WrongReply);
++            }
++            self.open(b'{')?;
++            let mut first = true;
++            let mut seen = 0;
++            let mut samples = 0;
++            while self.next(&mut first, b'}')? {
++                if !self.key()?.is(b"samples") {
++                    return Err(ErrorKind::MalformedReply);
++                }
++                unique(&mut seen, 1)?;
++                samples = self.u32()?;
++            }
++            required(seen, 1)?;
++            if variant.is(b"LatencySamples") {
++                HostResponse::LatencySamples { samples }
++            } else {
++                HostResponse::TailSamples { samples }
++            }
++        } else {
++            return Err(ErrorKind::UnsupportedReply);
++        };
++        if self.next(&mut outer, b'}')? {
++            return Err(ErrorKind::MalformedReply);
++        }
++        self.whitespace()?;
++        if self.position != self.bytes.len() || self.depth != 0 {
++            return Err(ErrorKind::MalformedReply);
++        }
++        self.budget.check()?;
++        Ok(reply)
++    }
++}
++
++fn unique(seen: &mut u32, bit: u32) -> Result<()> {
++    if *seen & bit != 0 {
++        return Err(ErrorKind::MalformedReply);
++    }
++    *seen |= bit;
++    Ok(())
++}
++fn required(seen: u32, fields: u32) -> Result<()> {
++    if seen & fields != fields {
++        Err(ErrorKind::MalformedReply)
++    } else {
++        Ok(())
++    }
++}
++
++/// A known helper failure is distinct from an expected successful reply: after
++/// its complete checked preflight, late cancellation cannot erase the category.
++#[derive(Debug)]
++pub(super) enum DecodedReply {
++    Response(HostResponse),
++    KnownFailure {
++        crashed: bool,
++        reported: Option<HostResponse>,
++        diagnostic_unavailable: Option<ErrorKind>,
++    },
++}
++
++fn owned_text(token: Token<'_>, budget: &mut Budget) -> Result<String> {
++    let mut bytes = Vec::new();
++    budget.grow(&mut bytes, token.decoded)?;
++    // Empty conversion preserves the already-accounted Vec capacity without
++    // performing an uncheckpointed full-string UTF-8 validation or any unsafe.
++    let mut text = String::from_utf8(bytes).map_err(|_| ErrorKind::MalformedReply)?;
++    let mut position = 0usize;
++    let mut checked = 0usize;
++    while position < token.raw.len() {
++        if position - checked >= 1024 {
++            budget.check()?;
++            checked = position;
++        }
++        let (unit, count, consumed) = string_unit(token.raw, position)?;
++        let unit = std::str::from_utf8(&unit[..count]).map_err(|_| ErrorKind::MalformedReply)?;
++        text.push_str(unit);
++        position += consumed;
++    }
++    budget.check()?;
++    Ok(text)
++}
++
++// Only preflight constructs this marker, after complete syntax/schema/length
++// validation and its final cancellation/deadline check. It retains only the
++// bounded diagnostic token, never an instruction to reparse the full line.
++struct KnownOperationFailure<'a> {
++    crashed: bool,
++    message: Token<'a>,
++}
++impl KnownOperationFailure<'_> {
++    fn materialize(self, budget: &mut Budget) -> DecodedReply {
++        let starting_live = budget.live;
++        let mut diagnostic = Budget {
++            deadline: budget.deadline,
++            cancel: budget.cancel.clone(),
++            live: starting_live,
++            peak: budget.peak,
++            diagnostic_copy: true,
++        };
++        // This failure-only tail copies <=64 KiB decoded text (<=6 input bytes
++        // per decoded byte). The original normal budget is never relaxed.
++        let result = owned_text(self.message, &mut diagnostic);
++        budget.peak = budget.peak.max(diagnostic.peak);
++        match result {
++            Ok(message) => {
++                budget.live = diagnostic.live;
++                let reported = if self.crashed {
++                    HostResponse::Crashed { message }
++                } else {
++                    HostResponse::Error { message }
++                };
++                DecodedReply::KnownFailure {
++                    crashed: self.crashed,
++                    reported: Some(reported),
++                    diagnostic_unavailable: None,
++                }
++            }
++            Err(error) => {
++                // The failed String/Vec has already been dropped. Allocation or
++                // limit failure can lose the detail, never the known category.
++                budget.live = starting_live;
++                DecodedReply::KnownFailure {
++                    crashed: self.crashed,
++                    reported: None,
++                    diagnostic_unavailable: Some(error),
++                }
++            }
++        }
++    }
++}
++
++fn preflight<'a>(
++    bytes: &'a [u8],
++    shape: &ReplyShape,
++    budget: &mut Budget,
++) -> Result<Option<KnownOperationFailure<'a>>> {
++    budget.check()?;
++    limit(bytes.len(), MAX_LINE)?;
++    check_shape(shape)?;
++    let mut parser = Parser {
++        bytes,
++        position: 0,
++        checked: 0,
++        depth: 0,
++        materialize: false,
++        failure_message: None,
++        budget,
++    };
++    let validated = parser.response(shape)?;
++    parser.budget.check()?;
++    let crashed = match validated {
++        HostResponse::Error { .. } => false,
++        HostResponse::Crashed { .. } => true,
++        _ => return Ok(None),
++    };
++    Ok(Some(KnownOperationFailure {
++        crashed,
++        message: parser.failure_message.ok_or(ErrorKind::MalformedReply)?,
++    }))
++}
++
++pub(super) fn decode(
++    bytes: &[u8],
++    shape: &ReplyShape,
++    budget: &mut Budget,
++) -> Result<DecodedReply> {
++    let starting_live = budget.live;
++    let result = (|| {
++        if let Some(failure) = preflight(bytes, shape, budget)? {
++            return Ok(failure.materialize(budget));
++        }
++        // No final payload allocation occurred until exact shape, required fields,
++        // full base64 validity and the entire closed response were established.
++        let mut parser = Parser {
++            bytes,
++            position: 0,
++            checked: 0,
++            depth: 0,
++            materialize: true,
++            failure_message: None,
++            budget,
++        };
++        let response = parser.response(shape)?;
++        parser.budget.check()?;
++        Ok(DecodedReply::Response(response))
++    })();
++    if result.is_err() {
++        budget.live = starting_live;
++    }
++    result
++}
++
++#[cfg(test)]
++#[path = "codec_tests.rs"]
++mod tests;
+--- a/src/fresh_helper/codec_tests.rs
++++ b/src/fresh_helper/codec_tests.rs
+@@ -0,0 +1,1689 @@
++//! Plugin-free source fixtures. These tests must not be compiled or executed
++//! before the source archive, independent review and explicit execution gate.
++use super::super::{budget_test_hooks, pump, Cancellation, MAX_PAYLOAD};
++use super::*;
++use crate::audio::AudioBusConfig;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::Arc;
++use std::time::{Duration, Instant};
++
++fn new_budget() -> Budget {
++    Budget {
++        deadline: Instant::now() + Duration::from_secs(180),
++        cancel: Arc::new(Cancellation {
++            cancelled: AtomicBool::new(false),
++            wake: pump::new_wake().expect("test cancellation descriptor"),
++            skip_wake: AtomicBool::new(false),
++        }),
++        live: 0,
++        peak: 0,
++        diagnostic_copy: false,
++    }
++}
++
++// Most fixtures inspect ordinary HostResponse values; dedicated failure-marker
++// tests below inspect the richer codec result without this convenience adapter.
++fn decode(bytes: &[u8], shape: &ReplyShape, budget: &mut Budget) -> Result<HostResponse> {
++    match super::decode(bytes, shape, budget)? {
++        DecodedReply::Response(response) => Ok(response),
++        DecodedReply::KnownFailure {
++            reported: Some(response),
++            ..
++        } => Ok(response),
++        DecodedReply::KnownFailure {
++            diagnostic_unavailable: Some(error),
++            ..
++        } => Err(error),
++        _ => panic!("known failure without diagnostic status"),
++    }
++}
++
++fn error(bytes: &[u8], shape: &ReplyShape, expected: ErrorKind) {
++    let mut budget = new_budget();
++    let baseline = 17;
++    budget.reserve(baseline).unwrap();
++    assert_eq!(decode(bytes, shape, &mut budget).unwrap_err(), expected);
++    assert_eq!(
++        budget.live, baseline,
++        "all failed codec allocations are dropped"
++    );
++}
++
++fn load(path: String) -> HostCommand {
++    HostCommand::LoadPlugin {
++        path,
++        sample_rate: 48000.0,
++        block_size: 4096,
++        tempo: 120.0,
++        time_sig_numerator: 4,
++        time_sig_denominator: 4,
++        class_id: Some("0123456789ABCDEF".into()),
++    }
++}
++
++fn info(compatibility: Vec<ClassCompatibility>) -> HostResponse {
++    HostResponse::PluginInfo {
++        vendor: "Vendor".into(),
++        name: "Plugin".into(),
++        version: "1.0".into(),
++        category: "Fx".into(),
++        uid: "id".into(),
++        has_gui: false,
++        audio_inputs: 8,
++        audio_outputs: 8,
++        output_channels: 32,
++        has_midi_input: false,
++        has_midi_output: true,
++        compatibility,
++    }
++}
++
++fn compat(old_count: usize) -> ClassCompatibility {
++    ClassCompatibility {
++        new_class_id: "N".repeat(MAX_ID),
++        old_class_ids: vec!["O".repeat(MAX_ID); old_count],
++    }
++}
++
++fn wire(response: &HostResponse) -> Vec<u8> {
++    serde_json::to_vec(response).unwrap()
++}
++
++fn audio_wire(channels: Vec<Vec<f32>>) -> Vec<u8> {
++    wire(&HostResponse::AudioOutput {
++        outputs: channels,
++        output_events: Vec::new(),
++        output_events_lost: false,
++        transport_applied: true,
++    })
++}
++
++fn assert_command(command: &HostCommand, shape: &ReplyShape) {
++    let mut budget = new_budget();
++    let encoded = encode(command, shape, &mut budget).unwrap();
++    assert_eq!(encoded.last(), Some(&b'\n'));
++    assert_eq!(budget.live, encoded.capacity());
++    let decoded: HostCommand = serde_json::from_slice(&encoded).unwrap();
++    assert_eq!(
++        serde_json::to_vec(command).unwrap(),
++        serde_json::to_vec(&decoded).unwrap()
++    );
++    let capacity = encoded.capacity();
++    drop(encoded);
++    budget.release(capacity);
++    assert_eq!(budget.live, 0);
++}
++
++#[test]
++fn every_supported_request_matches_the_existing_wire() {
++    assert_command(&load("x/\"\\\n\t🦀.vst3".into()), &ReplyShape::PluginInfo);
++    for context in [
++        StateContext::Project,
++        StateContext::Preset { path: None },
++        StateContext::Preset {
++            path: Some("a\\b.vstpreset".into()),
++        },
++    ] {
++        assert_command(
++            &HostCommand::LoadState {
++                data: vec![0, 1, 2, 253, 254, 255],
++                context,
++            },
++            &ReplyShape::Success,
++        );
++    }
++    assert_command(&HostCommand::SaveState, &ReplyShape::State);
++    assert_command(
++        &HostCommand::GetParameter { id: u32::MAX },
++        &ReplyShape::ParameterValue,
++    );
++    assert_command(&HostCommand::LatencySamples, &ReplyShape::LatencySamples);
++    assert_command(&HostCommand::TailSamples, &ReplyShape::TailSamples);
++    let transport = ProcessTransport {
++        sample_position: -900,
++        quarter_note_position: -0.0,
++        tempo: 99.5,
++        playing: true,
++        time_sig_numerator: 7,
++        time_sig_denominator: 8,
++    };
++    assert_command(
++        &HostCommand::Process {
++            inputs: vec![vec![0.0, -0.0, f32::INFINITY, f32::from_bits(0x7fc0_1234)]],
++            frames: 4,
++            transport: Some(transport),
++        },
++        &ReplyShape::Audio {
++            channels: 2,
++            frames: 4,
++        },
++    );
++    assert_command(
++        &HostCommand::Process {
++            inputs: Vec::new(),
++            frames: 0,
++            transport: None,
++        },
++        &ReplyShape::Audio {
++            channels: 0,
++            frames: 0,
++        },
++    );
++    assert_command(
++        &HostCommand::ProcessBuses {
++            inputs: vec![AudioBusBuffer {
++                active: false,
++                channels: vec![vec![1.0; 3]],
++            }],
++            outputs: vec![
++                AudioBusConfig {
++                    active: true,
++                    channel_count: 2,
++                },
++                AudioBusConfig {
++                    active: false,
++                    channel_count: 1,
++                },
++            ],
++            frames: 3,
++            transport: Some(transport),
++        },
++        &ReplyShape::Buses {
++            buses: vec![(true, 2), (false, 1)],
++            frames: 3,
++        },
++    );
++}
++
++#[test]
++fn every_supported_response_matches_the_existing_canonical_wire() {
++    let fixtures = [
++        (
++            HostResponse::Success {
++                message: "ok".into(),
++            },
++            ReplyShape::Success,
++        ),
++        (
++            HostResponse::Error {
++                message: "failed".into(),
++            },
++            ReplyShape::State,
++        ),
++        (
++            HostResponse::Crashed {
++                message: "crashed".into(),
++            },
++            ReplyShape::Audio {
++                channels: 0,
++                frames: 0,
++            },
++        ),
++        (
++            HostResponse::ParameterValue { value: -0.0 },
++            ReplyShape::ParameterValue,
++        ),
++        (
++            HostResponse::LatencySamples { samples: u32::MAX },
++            ReplyShape::LatencySamples,
++        ),
++        (
++            HostResponse::TailSamples { samples: 512 },
++            ReplyShape::TailSamples,
++        ),
++        (
++            HostResponse::State {
++                data: vec![0, 1, 2, 3, 128, 255],
++            },
++            ReplyShape::State,
++        ),
++        (info(vec![compat(2)]), ReplyShape::PluginInfo),
++        (
++            HostResponse::AudioOutput {
++                outputs: vec![vec![1.0, -0.0]],
++                output_events: Vec::new(),
++                output_events_lost: true,
++                transport_applied: false,
++            },
++            ReplyShape::Audio {
++                channels: 1,
++                frames: 2,
++            },
++        ),
++        (
++            HostResponse::BusAudioOutput {
++                outputs: vec![AudioBusBuffer {
++                    active: false,
++                    channels: vec![vec![0.5]],
++                }],
++                output_events: Vec::new(),
++                output_events_lost: false,
++                transport_applied: true,
++            },
++            ReplyShape::Buses {
++                buses: vec![(false, 1)],
++                frames: 1,
++            },
++        ),
++    ];
++    for (response, shape) in fixtures {
++        let original = wire(&response);
++        let decoded = decode(&original, &shape, &mut new_budget()).unwrap();
++        assert_eq!(original, wire(&decoded));
++    }
++}
++
++#[test]
++fn unsupported_requests_and_incompatible_shapes_allocate_nothing() {
++    for command in [
++        HostCommand::Shutdown,
++        HostCommand::UnloadPlugin,
++        HostCommand::StartProcessing,
++        HostCommand::GetAllParameters,
++    ] {
++        let mut budget = new_budget();
++        assert_eq!(
++            encode(&command, &ReplyShape::State, &mut budget).unwrap_err(),
++            ErrorKind::UnsupportedRequest
++        );
++        assert_eq!((budget.live, budget.peak), (0, 0));
++    }
++    for shape in [
++        ReplyShape::Success,
++        ReplyShape::ParameterValue,
++        ReplyShape::Audio {
++            channels: 0,
++            frames: 0,
++        },
++    ] {
++        let mut budget = new_budget();
++        assert_eq!(
++            encode(&HostCommand::SaveState, &shape, &mut budget).unwrap_err(),
++            ErrorKind::Shape
++        );
++        assert_eq!((budget.live, budget.peak), (0, 0));
++    }
++    let command = HostCommand::ProcessBuses {
++        inputs: Vec::new(),
++        outputs: vec![AudioBusConfig {
++            active: true,
++            channel_count: 2,
++        }],
++        frames: 2,
++        transport: None,
++    };
++    for buses in [vec![(false, 2)], vec![(true, 1)], Vec::new()] {
++        assert_eq!(
++            encode(
++                &command,
++                &ReplyShape::Buses { buses, frames: 2 },
++                &mut new_budget()
++            )
++            .unwrap_err(),
++            ErrorKind::Shape
++        );
++    }
++}
++
++#[test]
++fn request_shape_and_fixed_count_boundaries() {
++    let mut command = HostCommand::Process {
++        inputs: vec![vec![0.0; MAX_FRAMES]; MAX_CHANNELS],
++        frames: MAX_FRAMES as u32,
++        transport: None,
++    };
++    let shape = ReplyShape::Audio {
++        channels: MAX_CHANNELS,
++        frames: MAX_FRAMES,
++    };
++    assert_command(&command, &shape);
++    if let HostCommand::Process { inputs, .. } = &mut command {
++        inputs.push(vec![0.0; MAX_FRAMES]);
++    }
++    assert_eq!(
++        encode(&command, &shape, &mut new_budget()).unwrap_err(),
++        ErrorKind::Limit
++    );
++    for frames in [MAX_FRAMES - 1, MAX_FRAMES + 1] {
++        let command = HostCommand::Process {
++            inputs: vec![vec![0.0; frames]],
++            frames: MAX_FRAMES as u32,
++            transport: None,
++        };
++        assert!(matches!(
++            encode(&command, &shape, &mut new_budget()),
++            Err(ErrorKind::Shape | ErrorKind::Limit)
++        ));
++    }
++    assert_eq!(
++        encode(
++            &HostCommand::Process {
++                inputs: Vec::new(),
++                frames: 1,
++                transport: None
++            },
++            &ReplyShape::Audio {
++                channels: 0,
++                frames: 0
++            },
++            &mut new_budget()
++        )
++        .unwrap_err(),
++        ErrorKind::Shape
++    );
++    for shape in [
++        ReplyShape::Audio {
++            channels: MAX_CHANNELS + 1,
++            frames: 0,
++        },
++        ReplyShape::Audio {
++            channels: 0,
++            frames: MAX_FRAMES + 1,
++        },
++        ReplyShape::Buses {
++            buses: vec![(true, 0); MAX_BUSES + 1],
++            frames: 0,
++        },
++    ] {
++        assert_eq!(check_shape(&shape).unwrap_err(), ErrorKind::Limit);
++    }
++    let command = HostCommand::ProcessBuses {
++        inputs: vec![
++            AudioBusBuffer {
++                active: true,
++                channels: vec![Vec::new(); 4]
++            };
++            MAX_BUSES
++        ],
++        outputs: vec![
++            AudioBusConfig {
++                active: false,
++                channel_count: 4
++            };
++            MAX_BUSES
++        ],
++        frames: 0,
++        transport: None,
++    };
++    assert_command(
++        &command,
++        &ReplyShape::Buses {
++            buses: vec![(false, 4); MAX_BUSES],
++            frames: 0,
++        },
++    );
++    let invalid = HostCommand::ProcessBuses {
++        inputs: vec![
++            AudioBusBuffer {
++                active: false,
++                channels: Vec::new()
++            };
++            MAX_BUSES + 1
++        ],
++        outputs: Vec::new(),
++        frames: 0,
++        transport: None,
++    };
++    assert_eq!(
++        encode(
++            &invalid,
++            &ReplyShape::Buses {
++                buses: Vec::new(),
++                frames: 0
++            },
++            &mut new_budget()
++        )
++        .unwrap_err(),
++        ErrorKind::Limit
++    );
++    let invalid = HostCommand::ProcessBuses {
++        inputs: vec![
++            AudioBusBuffer {
++                active: true,
++                channels: vec![Vec::new(); 17]
++            };
++            2
++        ],
++        outputs: Vec::new(),
++        frames: 0,
++        transport: None,
++    };
++    assert_eq!(
++        encode(
++            &invalid,
++            &ReplyShape::Buses {
++                buses: Vec::new(),
++                frames: 0
++            },
++            &mut new_budget()
++        )
++        .unwrap_err(),
++        ErrorKind::Limit
++    );
++}
++
++#[test]
++fn transport_rejects_invalid_scalars_before_allocation() {
++    let valid = ProcessTransport {
++        sample_position: 0,
++        quarter_note_position: 0.0,
++        tempo: 120.0,
++        playing: false,
++        time_sig_numerator: 4,
++        time_sig_denominator: 4,
++    };
++    for transport in [
++        ProcessTransport {
++            tempo: f64::NAN,
++            ..valid
++        },
++        ProcessTransport {
++            quarter_note_position: f64::INFINITY,
++            ..valid
++        },
++        ProcessTransport {
++            tempo: 0.0,
++            ..valid
++        },
++        ProcessTransport {
++            time_sig_denominator: 3,
++            ..valid
++        },
++    ] {
++        let mut budget = new_budget();
++        assert_eq!(
++            encode(
++                &HostCommand::Process {
++                    inputs: Vec::new(),
++                    frames: 0,
++                    transport: Some(transport)
++                },
++                &ReplyShape::Audio {
++                    channels: 0,
++                    frames: 0
++                },
++                &mut budget
++            )
++            .unwrap_err(),
++            ErrorKind::InvalidRequest
++        );
++        assert_eq!(budget.peak, 0);
++    }
++}
++
++#[test]
++fn all_audio_ieee_bits_including_nan_payloads_survive() {
++    let bits = [
++        0,
++        0x8000_0000,
++        1,
++        0x007f_ffff,
++        0x0080_0000,
++        0x3f80_0000,
++        0x7f7f_ffff,
++        0x7f80_0000,
++        0xff80_0000,
++        0x7fc0_1234,
++        0x7f80_0001,
++        0xffc0_5678,
++    ];
++    let samples: Vec<f32> = bits.iter().copied().map(f32::from_bits).collect();
++    let encoded = audio_wire(vec![samples.clone()]);
++    let decoded = decode(
++        &encoded,
++        &ReplyShape::Audio {
++            channels: 1,
++            frames: bits.len(),
++        },
++        &mut new_budget(),
++    )
++    .unwrap();
++    let HostResponse::AudioOutput { outputs, .. } = decoded else {
++        panic!("audio expected")
++    };
++    assert_eq!(
++        outputs[0]
++            .iter()
++            .map(|sample| sample.to_bits())
++            .collect::<Vec<_>>(),
++        bits
++    );
++    assert_command(
++        &HostCommand::Process {
++            inputs: vec![samples],
++            frames: bits.len() as u32,
++            transport: None,
++        },
++        &ReplyShape::Audio {
++            channels: 1,
++            frames: bits.len(),
++        },
++    );
++}
++
++#[test]
++fn parameter_wire_preserves_nonfinite_class_and_finite_bits() {
++    for value in [
++        0.0,
++        -0.0,
++        f64::MIN_POSITIVE,
++        f64::from_bits(1),
++        f64::MAX,
++        f64::INFINITY,
++        f64::NEG_INFINITY,
++        f64::NAN,
++    ] {
++        let decoded = decode(
++            &wire(&HostResponse::ParameterValue { value }),
++            &ReplyShape::ParameterValue,
++            &mut new_budget(),
++        )
++        .unwrap();
++        let HostResponse::ParameterValue { value: actual } = decoded else {
++            panic!("parameter expected")
++        };
++        if value.is_nan() {
++            assert!(actual.is_nan());
++        } else {
++            assert_eq!(actual.to_bits(), value.to_bits());
++        }
++    }
++    for value in [
++        "null",
++        "\"Infinity\"",
++        "\"1.0\"",
++        "1e999",
++        "01",
++        "+1",
++        "1.",
++        ".5",
++        "--1",
++        "1e",
++        "1e+",
++    ] {
++        error(
++            format!("{{\"ParameterValue\":{{\"value\":{value}}}}}").as_bytes(),
++            &ReplyShape::ParameterValue,
++            ErrorKind::MalformedReply,
++        );
++    }
++}
++
++#[test]
++fn malformed_base64_padding_and_partial_sample_are_never_published() {
++    for value in [
++        "A", "AAA", "====", "A===", "AA=A", "AA==AAAA", "AAA=AAAA", "AA?=", "AB==", "AAB=",
++        "////=", "\"", "éAAA",
++    ] {
++        let response = format!(
++            "{{\"State\":{{\"data\":{}}}}}",
++            serde_json::to_string(value).unwrap()
++        );
++        error(
++            response.as_bytes(),
++            &ReplyShape::State,
++            ErrorKind::MalformedReply,
++        );
++    }
++    for value in ["AA==", "AAA=", "AAAA"] {
++        error(
++            format!("{{\"AudioOutput\":{{\"outputs\":[\"{value}\"],\"output_events\":[]}}}}")
++                .as_bytes(),
++            &ReplyShape::Audio {
++                channels: 1,
++                frames: 1,
++            },
++            ErrorKind::MalformedReply,
++        );
++    }
++    let escaped = br#"{"State":{"data":"\u0041Q\u003d\u003d"}}"#;
++    let HostResponse::State { data } =
++        decode(escaped, &ReplyShape::State, &mut new_budget()).unwrap()
++    else {
++        panic!("state expected")
++    };
++    assert_eq!(data, [1]);
++}
++
++#[test]
++fn exact_audio_shapes_reject_short_extra_channels_frames_buses_and_activation() {
++    let shape = ReplyShape::Audio {
++        channels: 2,
++        frames: 2,
++    };
++    for channels in [
++        vec![vec![0.0; 2]],
++        vec![vec![0.0; 2]; 3],
++        vec![vec![0.0; 1]; 2],
++        vec![vec![0.0; 3]; 2],
++    ] {
++        let mut budget = new_budget();
++        assert_eq!(
++            decode(&audio_wire(channels), &shape, &mut budget).unwrap_err(),
++            ErrorKind::Shape
++        );
++        assert_eq!(
++            budget.peak, 0,
++            "shape preflight precedes all final payload allocation"
++        );
++    }
++    let bus_shape = ReplyShape::Buses {
++        buses: vec![(false, 2)],
++        frames: 2,
++    };
++    for outputs in [
++        Vec::new(),
++        vec![
++            AudioBusBuffer {
++                active: false,
++                channels: vec![vec![0.0; 2]; 2]
++            };
++            2
++        ],
++        vec![AudioBusBuffer {
++            active: true,
++            channels: vec![vec![0.0; 2]; 2],
++        }],
++        vec![AudioBusBuffer {
++            active: false,
++            channels: vec![vec![0.0; 2]],
++        }],
++    ] {
++        let response = HostResponse::BusAudioOutput {
++            outputs,
++            output_events: Vec::new(),
++            output_events_lost: false,
++            transport_applied: false,
++        };
++        error(&wire(&response), &bus_shape, ErrorKind::Shape);
++    }
++    let exact = audio_wire(vec![vec![0.0; MAX_FRAMES]; MAX_CHANNELS]);
++    assert!(decode(
++        &exact,
++        &ReplyShape::Audio {
++            channels: MAX_CHANNELS,
++            frames: MAX_FRAMES
++        },
++        &mut new_budget()
++    )
++    .is_ok());
++    let too_many_frames = audio_wire(vec![vec![0.0; MAX_FRAMES + 1]]);
++    error(
++        &too_many_frames,
++        &ReplyShape::Audio {
++            channels: 1,
++            frames: MAX_FRAMES,
++        },
++        ErrorKind::Limit,
++    );
++    let exact_buses = HostResponse::BusAudioOutput {
++        outputs: vec![
++            AudioBusBuffer {
++                active: false,
++                channels: vec![Vec::new(); 4]
++            };
++            MAX_BUSES
++        ],
++        output_events: Vec::new(),
++        output_events_lost: false,
++        transport_applied: false,
++    };
++    assert!(decode(
++        &wire(&exact_buses),
++        &ReplyShape::Buses {
++            buses: vec![(false, 4); MAX_BUSES],
++            frames: 0
++        },
++        &mut new_budget()
++    )
++    .is_ok());
++}
++
++#[test]
++fn duplicate_missing_unknown_and_trailing_fields_fail_closed() {
++    for response in [
++        br#"{"State":{}}"#.as_slice(),
++        br#"{"State":{"data":"","data":""}}"#,
++        br#"{"State":{"data":"","unknown":{"huge":"ignored?"}}}"#,
++        br#"{"State":{"data":""},"State":{"data":""}}"#,
++        br#"{"State":{"data":"",}}"#,
++        br#"{"State":{"data":""},}"#,
++        br#"{"State":{"data":""}}{}"#,
++        br#"{"State":{"data":false}}"#,
++        br#"{"State":{"data":""}"#,
++        b"{}",
++    ] {
++        error(response, &ReplyShape::State, ErrorKind::MalformedReply);
++    }
++    for response in [
++        br#"{"AudioOutput":{"outputs":[]}}"#.as_slice(),
++        br#"{"AudioOutput":{"output_events":[]}}"#,
++        br#"{"AudioOutput":{"outputs":[],"output_events":[],"output_events_lost":false,"output_events_lost":true}}"#,
++        br#"{"AudioOutput":{"outputs":[],"output_events":[],"transport_applied":null}}"#,
++        br#"{"AudioOutput":{"outputs":[],"output_events":[],"unknown":[]}}"#,
++    ] { error(response, &ReplyShape::Audio { channels: 0, frames: 0 }, ErrorKind::MalformedReply); }
++    error(
++        br#"{"TailSamples":{"samples":1}}"#,
++        &ReplyShape::LatencySamples,
++        ErrorKind::WrongReply,
++    );
++    error(
++        br#"{"Parameters":{"params":[]}}"#,
++        &ReplyShape::State,
++        ErrorKind::UnsupportedReply,
++    );
++    error(
++        br#"{"LatencySamples":{"samples":4294967296}}"#,
++        &ReplyShape::LatencySamples,
++        ErrorKind::MalformedReply,
++    );
++    error(
++        br#"{"LatencySamples":{"samples":-1}}"#,
++        &ReplyShape::LatencySamples,
++        ErrorKind::MalformedReply,
++    );
++}
++
++#[test]
++fn reject_events_at_first_element_and_legacy_state_at_array_open() {
++    // The rest is deliberately not even valid JSON, so a parse-first/drop-events
++    // implementation produces MalformedReply instead of the required boundary.
++    for first in [
++        "{\"data\":[[[[[[[[[[[[[[[[",
++        "null",
++        "\"unterminated",
++        "false",
++        "@",
++    ] {
++        let mut budget = new_budget();
++        let response = format!("{{\"AudioOutput\":{{\"output_events\":[{first}");
++        assert_eq!(
++            decode(
++                response.as_bytes(),
++                &ReplyShape::Audio {
++                    channels: 0,
++                    frames: 0
++                },
++                &mut budget
++            )
++            .unwrap_err(),
++            ErrorKind::UnsupportedReply
++        );
++        assert_eq!(budget.peak, 0);
++    }
++    for response in [
++        br#"{"State":{"data":["#.as_slice(),
++        br#"{"State":{"data":[[[[[[[[[["#,
++        br#"{"State":{"data":[]}}"#,
++    ] {
++        error(response, &ReplyShape::State, ErrorKind::UnsupportedReply);
++    }
++    // Unknown fields are also rejected before parsing their nested payload.
++    error(
++        br#"{"State":{"unknown":[[[[[[["#,
++        &ReplyShape::State,
++        ErrorKind::MalformedReply,
++    );
++}
++
++#[test]
++fn empty_events_preserve_both_flags_and_explicit_legacy_defaults() {
++    for lost in [false, true] {
++        for applied in [false, true] {
++            for buses in [false, true] {
++                let variant = if buses {
++                    "BusAudioOutput"
++                } else {
++                    "AudioOutput"
++                };
++                let shape = if buses {
++                    ReplyShape::Buses {
++                        buses: Vec::new(),
++                        frames: 0,
++                    }
++                } else {
++                    ReplyShape::Audio {
++                        channels: 0,
++                        frames: 0,
++                    }
++                };
++                let response = format!("{{\"{variant}\":{{\"output_events_lost\":{lost},\"transport_applied\":{applied},\"output_events\":[],\"outputs\":[]}}}}");
++                let decoded = decode(response.as_bytes(), &shape, &mut new_budget()).unwrap();
++                match decoded {
++                    HostResponse::AudioOutput {
++                        output_events,
++                        output_events_lost,
++                        transport_applied,
++                        ..
++                    }
++                    | HostResponse::BusAudioOutput {
++                        output_events,
++                        output_events_lost,
++                        transport_applied,
++                        ..
++                    } => {
++                        assert!(output_events.is_empty());
++                        assert_eq!(output_events_lost, lost);
++                        assert_eq!(transport_applied, applied);
++                    }
++                    _ => panic!("audio expected"),
++                }
++            }
++        }
++    }
++    let response = decode(
++        br#"{"AudioOutput":{"output_events":[],"outputs":[]}}"#,
++        &ReplyShape::Audio {
++            channels: 0,
++            frames: 0,
++        },
++        &mut new_budget(),
++    )
++    .unwrap();
++    assert!(matches!(
++        response,
++        HostResponse::AudioOutput {
++            output_events_lost: false,
++            transport_applied: false,
++            ..
++        }
++    ));
++}
++
++#[test]
++fn text_and_class_id_limits_are_decoded_byte_limits_with_unicode_validation() {
++    for message in ["x".repeat(MAX_TEXT), "é".repeat(MAX_TEXT / 2)] {
++        let encoded = wire(&HostResponse::Success {
++            message: message.clone(),
++        });
++        let HostResponse::Success { message: actual } =
++            decode(&encoded, &ReplyShape::Success, &mut new_budget()).unwrap()
++        else {
++            panic!("success expected")
++        };
++        assert_eq!(actual, message);
++    }
++    error(
++        &wire(&HostResponse::Success {
++            message: "x".repeat(MAX_TEXT + 1),
++        }),
++        &ReplyShape::Success,
++        ErrorKind::Limit,
++    );
++    let escaped = format!(
++        "{{\"Success\":{{\"message\":\"{}\"}}}}",
++        "\\u0061".repeat(MAX_TEXT)
++    );
++    assert!(decode(escaped.as_bytes(), &ReplyShape::Success, &mut new_budget()).is_ok());
++    let escaped = format!(
++        "{{\"Success\":{{\"message\":\"{}\"}}}}",
++        "\\u0061".repeat(MAX_TEXT + 1)
++    );
++    error(escaped.as_bytes(), &ReplyShape::Success, ErrorKind::Limit);
++    let valid = br#"{"Succ\u0065ss":{"message":"\uD83E\uDD80\n\t\b\f\r\/\\\""}}"#;
++    let HostResponse::Success { message } =
++        decode(valid, &ReplyShape::Success, &mut new_budget()).unwrap()
++    else {
++        panic!("success expected")
++    };
++    assert_eq!(message, "🦀\n\t\u{8}\u{c}\r/\\\"");
++    for value in [
++        "\\uD800",
++        "\\uDC00",
++        "\\uD800\\u0041",
++        "\\uZZZZ",
++        "\\x00",
++        "\n",
++    ] {
++        error(
++            format!("{{\"Success\":{{\"message\":\"{value}\"}}}}").as_bytes(),
++            &ReplyShape::Success,
++            ErrorKind::MalformedReply,
++        );
++    }
++    error(
++        b"{\"Success\":{\"message\":\"\xff\"}}",
++        &ReplyShape::Success,
++        ErrorKind::MalformedReply,
++    );
++    assert_command(&load("x".repeat(MAX_TEXT)), &ReplyShape::PluginInfo);
++    assert_eq!(
++        encode(
++            &load("x".repeat(MAX_TEXT + 1)),
++            &ReplyShape::PluginInfo,
++            &mut new_budget()
++        )
++        .unwrap_err(),
++        ErrorKind::Limit
++    );
++    let mut command = load("x".into());
++    if let HostCommand::LoadPlugin { class_id, .. } = &mut command {
++        *class_id = Some("x".repeat(MAX_ID));
++    }
++    assert_command(&command, &ReplyShape::PluginInfo);
++    if let HostCommand::LoadPlugin { class_id, .. } = &mut command {
++        *class_id = Some("x".repeat(MAX_ID + 1));
++    }
++    assert_eq!(
++        encode(&command, &ReplyShape::PluginInfo, &mut new_budget()).unwrap_err(),
++        ErrorKind::Limit
++    );
++}
++
++#[test]
++fn plugin_counts_are_rejected_rather_than_clamped() {
++    let original = String::from_utf8(wire(&info(Vec::new()))).unwrap();
++    for (from, to) in [
++        ("\"audio_inputs\":8", "\"audio_inputs\":9"),
++        ("\"audio_outputs\":8", "\"audio_outputs\":-1"),
++        ("\"output_channels\":32", "\"output_channels\":33"),
++    ] {
++        error(
++            original.replace(from, to).as_bytes(),
++            &ReplyShape::PluginInfo,
++            ErrorKind::Limit,
++        );
++    }
++    error(
++        original.replace("\"has_gui\":false,", "").as_bytes(),
++        &ReplyShape::PluginInfo,
++        ErrorKind::MalformedReply,
++    );
++    error(
++        original
++            .replace("\"has_gui\":false", "\"has_gui\":false,\"has_gui\":true")
++            .as_bytes(),
++        &ReplyShape::PluginInfo,
++        ErrorKind::MalformedReply,
++    );
++}
++
++#[test]
++fn compatibility_entry_per_entry_aggregate_and_id_boundaries() {
++    for entries in [
++        vec![compat(0); MAX_COMPAT],
++        vec![compat(MAX_COMPAT)],
++        vec![compat(1); MAX_COMPAT],
++    ] {
++        assert!(decode(
++            &wire(&info(entries)),
++            &ReplyShape::PluginInfo,
++            &mut new_budget()
++        )
++        .is_ok());
++    }
++    for entries in [
++        vec![compat(0); MAX_COMPAT + 1],
++        vec![compat(MAX_COMPAT + 1)],
++        vec![compat(128), compat(129)],
++    ] {
++        let mut budget = new_budget();
++        assert_eq!(
++            decode(&wire(&info(entries)), &ReplyShape::PluginInfo, &mut budget).unwrap_err(),
++            ErrorKind::Limit
++        );
++        assert_eq!(budget.peak, 0);
++    }
++    for entry in [
++        ClassCompatibility {
++            new_class_id: "x".repeat(MAX_ID + 1),
++            old_class_ids: Vec::new(),
++        },
++        ClassCompatibility {
++            new_class_id: "x".into(),
++            old_class_ids: vec!["y".repeat(MAX_ID + 1)],
++        },
++    ] {
++        error(
++            &wire(&info(vec![entry])),
++            &ReplyShape::PluginInfo,
++            ErrorKind::Limit,
++        );
++    }
++    let original = String::from_utf8(wire(&info(vec![compat(0)]))).unwrap();
++    for changed in [
++        original.replace(
++            "\"old_class_ids\":[]",
++            "\"old_class_ids\":[],\"old_class_ids\":[]",
++        ),
++        original.replace(",\"old_class_ids\":[]", ""),
++        original.replace("\"old_class_ids\":[]", "\"unknown\":[]"),
++    ] {
++        error(
++            changed.as_bytes(),
++            &ReplyShape::PluginInfo,
++            ErrorKind::MalformedReply,
++        );
++    }
++}
++
++#[test]
++fn scalar_number_and_depth_limits_are_checked_without_generic_recursion() {
++    let at_limit = format!(
++        "{{\"ParameterValue\":{{\"value\":0.{}1}}}}",
++        "0".repeat(MAX_NUMBER - 3)
++    );
++    assert!(decode(
++        at_limit.as_bytes(),
++        &ReplyShape::ParameterValue,
++        &mut new_budget()
++    )
++    .is_ok());
++    let over_limit = format!(
++        "{{\"ParameterValue\":{{\"value\":0.{}1}}}}",
++        "0".repeat(MAX_NUMBER - 2)
++    );
++    error(
++        over_limit.as_bytes(),
++        &ReplyShape::ParameterValue,
++        ErrorKind::Limit,
++    );
++    let bytes = [b'['; MAX_DEPTH + 1];
++    let mut budget = new_budget();
++    let mut parser = Parser {
++        bytes: &bytes,
++        position: 0,
++        checked: 0,
++        depth: 0,
++        materialize: false,
++        failure_message: None,
++        budget: &mut budget,
++    };
++    for _ in 0..MAX_DEPTH {
++        parser.open(b'[').unwrap();
++    }
++    assert_eq!(parser.open(b'[').unwrap_err(), ErrorKind::Limit);
++    assert_eq!(parser.budget.peak, 0);
++}
++
++#[test]
++fn request_and_decoded_payload_account_actual_owned_capacities() {
++    let command = HostCommand::LoadState {
++        data: vec![7; 16384],
++        context: StateContext::Project,
++    };
++    let mut budget = new_budget();
++    budget.reserve(99).unwrap();
++    let request = encode(&command, &ReplyShape::Success, &mut budget).unwrap();
++    assert_eq!(budget.live, 99 + request.capacity());
++    assert_eq!(budget.peak, budget.live);
++    let request_capacity = request.capacity();
++    drop(request);
++    budget.release(request_capacity);
++    assert_eq!(budget.live, 99);
++    let line = wire(&HostResponse::AudioOutput {
++        outputs: vec![vec![1.0; 2]; 2],
++        output_events: Vec::new(),
++        output_events_lost: false,
++        transport_applied: true,
++    });
++    budget.reserve(line.capacity()).unwrap();
++    let response = decode(
++        &line,
++        &ReplyShape::Audio {
++            channels: 2,
++            frames: 2,
++        },
++        &mut budget,
++    )
++    .unwrap();
++    let HostResponse::AudioOutput {
++        outputs,
++        output_events,
++        ..
++    } = response
++    else {
++        panic!("audio expected")
++    };
++    let charge = outputs.capacity() * std::mem::size_of::<Vec<f32>>()
++        + outputs
++            .iter()
++            .map(|c| c.capacity() * std::mem::size_of::<f32>())
++            .sum::<usize>()
++        + output_events.capacity() * std::mem::size_of::<crate::midi::PluginEvent>();
++    assert_eq!(budget.live, 99 + line.capacity() + charge);
++    drop(outputs);
++    drop(output_events);
++    budget.release(charge);
++    assert_eq!(budget.live, 99 + line.capacity());
++    let response = decode(
++        &wire(&info(vec![compat(2)])),
++        &ReplyShape::PluginInfo,
++        &mut budget,
++    )
++    .unwrap();
++    let HostResponse::PluginInfo {
++        vendor,
++        name,
++        version,
++        category,
++        uid,
++        compatibility,
++        ..
++    } = response
++    else {
++        panic!("info expected")
++    };
++    let charge = vendor.capacity()
++        + name.capacity()
++        + version.capacity()
++        + category.capacity()
++        + uid.capacity()
++        + compatibility.capacity() * std::mem::size_of::<ClassCompatibility>()
++        + compatibility
++            .iter()
++            .map(|entry| {
++                entry.new_class_id.capacity()
++                    + entry.old_class_ids.capacity() * std::mem::size_of::<String>()
++                    + entry
++                        .old_class_ids
++                        .iter()
++                        .map(String::capacity)
++                        .sum::<usize>()
++            })
++            .sum::<usize>();
++    assert_eq!(budget.live, 99 + line.capacity() + charge);
++}
++
++#[test]
++fn payload_reservation_limit_rejects_and_failure_rolls_back_live_charge() {
++    let mut budget = new_budget();
++    budget.reserve(MAX_PAYLOAD).unwrap();
++    assert_eq!(
++        encode(&HostCommand::SaveState, &ReplyShape::State, &mut budget).unwrap_err(),
++        ErrorKind::Limit
++    );
++    assert_eq!(budget.live, MAX_PAYLOAD);
++    assert_eq!(
++        decode(
++            br#"{"Success":{"message":"x"}}"#,
++            &ReplyShape::Success,
++            &mut budget
++        )
++        .unwrap_err(),
++        ErrorKind::Limit
++    );
++    assert_eq!(budget.live, MAX_PAYLOAD);
++    // A malformed response never allocates even when valid earlier fields have
++    // large final payloads, because the complete preflight must pass first.
++    let bad = br#"{"Success":{"message":"looks valid","unknown":0}}"#;
++    assert_eq!(
++        decode(bad, &ReplyShape::Success, &mut budget).unwrap_err(),
++        ErrorKind::MalformedReply
++    );
++    assert_eq!(budget.live, MAX_PAYLOAD);
++}
++
++#[test]
++fn deadline_and_sticky_cancel_are_checked_before_codec_work() {
++    let mut expired = new_budget();
++    expired.deadline = Instant::now();
++    assert_eq!(
++        encode(&HostCommand::SaveState, &ReplyShape::State, &mut expired).unwrap_err(),
++        ErrorKind::Deadline
++    );
++    assert_eq!(
++        decode(
++            br#"{"State":{"data":""}}"#,
++            &ReplyShape::State,
++            &mut expired
++        )
++        .unwrap_err(),
++        ErrorKind::Deadline
++    );
++    assert_eq!(expired.peak, 0);
++    let mut cancelled = new_budget();
++    cancelled.cancel.cancelled.store(true, Ordering::Release);
++    assert_eq!(
++        encode(&HostCommand::SaveState, &ReplyShape::State, &mut cancelled).unwrap_err(),
++        ErrorKind::Cancelled
++    );
++    assert_eq!(
++        decode(
++            br#"{"State":{"data":""}}"#,
++            &ReplyShape::State,
++            &mut cancelled
++        )
++        .unwrap_err(),
++        ErrorKind::Cancelled
++    );
++    assert_eq!(cancelled.peak, 0);
++}
++
++#[test]
++fn deterministic_cancellation_interrupts_counting_emission_preflight_and_materialization() {
++    let command = HostCommand::LoadState {
++        data: vec![3; 32768],
++        context: StateContext::Project,
++    };
++    let checkpoints = {
++        let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
++        encode(&command, &ReplyShape::Success, &mut new_budget()).unwrap();
++        budget_test_hooks::checks()
++    };
++    for at in [2, checkpoints / 2, checkpoints - 1, checkpoints] {
++        let _hook = budget_test_hooks::cancel_at_check(at);
++        let mut budget = new_budget();
++        assert_eq!(
++            encode(&command, &ReplyShape::Success, &mut budget).unwrap_err(),
++            ErrorKind::Cancelled
++        );
++        assert_eq!(budget.live, 0);
++    }
++    for line in [
++        wire(&HostResponse::State {
++            data: vec![4; 32768],
++        }),
++        wire(&HostResponse::Success {
++            message: "\n🦀".repeat(4096),
++        }),
++    ] {
++        let shape = if line.starts_with(b"{\"State\"") {
++            ReplyShape::State
++        } else {
++            ReplyShape::Success
++        };
++        let checkpoints = {
++            let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
++            decode(&line, &shape, &mut new_budget()).unwrap();
++            budget_test_hooks::checks()
++        };
++        for at in [2, checkpoints / 2, checkpoints - 1, checkpoints] {
++            let _hook = budget_test_hooks::cancel_at_check(at);
++            let mut budget = new_budget();
++            assert_eq!(
++                decode(&line, &shape, &mut budget).unwrap_err(),
++                ErrorKind::Cancelled
++            );
++            assert_eq!(budget.live, 0);
++        }
++    }
++}
++
++#[test]
++fn bounded_writer_line_boundary_and_size_arithmetic_overflow() {
++    let mut budget = new_budget();
++    let mut writer = Writer {
++        bytes: None,
++        len: MAX_LINE - 1,
++        checked: MAX_LINE - 1,
++        budget: &mut budget,
++    };
++    writer.put(b"\n").unwrap();
++    assert_eq!(writer.len, MAX_LINE);
++    assert_eq!(writer.put(b"x").unwrap_err(), ErrorKind::Limit);
++    assert_eq!(base64_size(usize::MAX).unwrap_err(), ErrorKind::Limit);
++    assert_eq!(writer.budget.peak, 0);
++}
++
++// Kept separate so the independently approved invocation can schedule these
++// larger plugin-free boundary fixtures explicitly and record their memory cost.
++#[test]
++fn large_state_exact_limit_and_plus_one_have_no_eager_base64_scratch() {
++    let mut command = HostCommand::LoadState {
++        data: vec![0; MAX_STATE],
++        context: StateContext::Project,
++    };
++    let mut budget = new_budget();
++    let encoded = encode(&command, &ReplyShape::Success, &mut budget).unwrap();
++    assert!(encoded.len() < MAX_LINE);
++    assert_eq!(budget.live, encoded.capacity());
++    assert_eq!(
++        budget.peak,
++        encoded.capacity(),
++        "one accounted request buffer only"
++    );
++    let capacity = encoded.capacity();
++    drop(encoded);
++    budget.release(capacity);
++    if let HostCommand::LoadState { data, .. } = &mut command {
++        data.push(0);
++    }
++    assert_eq!(
++        encode(&command, &ReplyShape::Success, &mut budget).unwrap_err(),
++        ErrorKind::Limit
++    );
++    assert_eq!(budget.live, 0);
++    drop(command);
++    // The maximum has two final bytes. Construct the known all-zero canonical
++    // fixture directly, so this test does not need the legacy state encoder.
++    let mut line = Vec::with_capacity(base64_size(MAX_STATE).unwrap() + 64);
++    line.extend_from_slice(b"{\"State\":{\"data\":\"");
++    let start = line.len();
++    line.resize(start + base64_size(MAX_STATE).unwrap(), b'A');
++    let last = line.len() - 1;
++    line[last] = b'=';
++    line.extend_from_slice(b"\"}}");
++    let mut budget = new_budget();
++    budget.reserve(line.capacity()).unwrap();
++    let decoded = decode(&line, &ReplyShape::State, &mut budget).unwrap();
++    let HostResponse::State { data } = decoded else {
++        panic!("state expected")
++    };
++    assert_eq!(data.len(), MAX_STATE);
++    assert!(data.iter().all(|&byte| byte == 0));
++    assert_eq!(budget.live, line.capacity() + data.capacity());
++    assert_eq!(budget.peak, budget.live);
++    drop(data);
++    // Removing final padding adds exactly one decoded byte, without increasing
++    // encoded length. The decoded length check must reject before allocation.
++    line[last] = b'A';
++    let mut fresh = new_budget();
++    assert_eq!(
++        decode(&line, &ReplyShape::State, &mut fresh).unwrap_err(),
++        ErrorKind::Limit
++    );
++    assert_eq!(fresh.peak, 0);
++}
++
++#[test]
++fn large_response_line_exact_limit_and_plus_one() {
++    let suffix = br#"{"LatencySamples":{"samples":0}}"#;
++    let mut line = vec![b' '; MAX_LINE - suffix.len()];
++    line.extend_from_slice(suffix);
++    assert!(decode(&line, &ReplyShape::LatencySamples, &mut new_budget()).is_ok());
++    line.push(b' ');
++    let mut budget = new_budget();
++    assert_eq!(
++        decode(&line, &ReplyShape::LatencySamples, &mut budget).unwrap_err(),
++        ErrorKind::Limit
++    );
++    assert_eq!(budget.peak, 0);
++}
++
++#[test]
++fn request_finite_extremes_use_bounded_lossless_scalar_spelling() {
++    for value in [
++        f64::from_bits(1),
++        f64::MIN_POSITIVE,
++        f64::MAX,
++        -f64::MAX,
++        -0.0,
++        f64::INFINITY,
++        f64::NEG_INFINITY,
++        f64::NAN,
++    ] {
++        let mut command = load("x".into());
++        if let HostCommand::LoadPlugin {
++            sample_rate, tempo, ..
++        } = &mut command
++        {
++            *sample_rate = value;
++            *tempo = value;
++        }
++        assert_command(&command, &ReplyShape::PluginInfo);
++        let encoded = encode(&command, &ReplyShape::PluginInfo, &mut new_budget()).unwrap();
++        let json = std::str::from_utf8(&encoded).unwrap();
++        let scalar = json
++            .split("\"sample_rate\":")
++            .nth(1)
++            .unwrap()
++            .split(',')
++            .next()
++            .unwrap();
++        assert!(scalar.len() <= MAX_NUMBER);
++    }
++}
++
++#[test]
++fn complete_failure_preflight_latches_category_before_diagnostic_copy() {
++    for crashed in [false, true] {
++        let source = if crashed {
++            HostResponse::Crashed {
++                message: "detail\n🦀".repeat(4096),
++            }
++        } else {
++            HostResponse::Error {
++                message: "detail\n🦀".repeat(4096),
++            }
++        };
++        let bytes = wire(&source);
++        let mut budget = new_budget();
++        let marker = preflight(&bytes, &ReplyShape::State, &mut budget)
++            .unwrap()
++            .expect("known failure marker");
++        assert_eq!(budget.live, 0);
++        // Both stop conditions arrive strictly after complete checked validation.
++        budget.cancel.cancelled.store(true, Ordering::Release);
++        budget.deadline = Instant::now();
++        let reply = marker.materialize(&mut budget);
++        let DecodedReply::KnownFailure {
++            crashed: actual_crashed,
++            reported: Some(reported),
++            diagnostic_unavailable: None,
++        } = reply
++        else {
++            panic!("failure category and diagnostic must survive")
++        };
++        assert_eq!(actual_crashed, crashed);
++        assert_eq!(wire(&reported), bytes);
++        assert!(
++            !budget.diagnostic_copy,
++            "the normal exchange budget stays strict"
++        );
++        assert_eq!(budget.check().unwrap_err(), ErrorKind::Cancelled);
++    }
++}
++
++#[test]
++fn cancellation_at_last_preflight_check_prevents_known_failure_marker() {
++    let bytes = wire(&HostResponse::Error {
++        message: "x".repeat(16384),
++    });
++    let checkpoints = {
++        let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
++        assert!(preflight(&bytes, &ReplyShape::State, &mut new_budget())
++            .unwrap()
++            .is_some());
++        budget_test_hooks::checks()
++    };
++    let _hook = budget_test_hooks::cancel_at_check(checkpoints);
++    let mut budget = new_budget();
++    assert!(matches!(
++        super::decode(&bytes, &ReplyShape::State, &mut budget),
++        Err(ErrorKind::Cancelled)
++    ));
++    assert_eq!(budget.live, 0);
++}
++
++#[test]
++fn known_failure_survives_diagnostic_allocation_and_budget_failure() {
++    let bytes = wire(&HostResponse::Error {
++        message: "diagnostic".into(),
++    });
++    {
++        let mut budget = new_budget();
++        let _hook = budget_test_hooks::fail_next_allocation();
++        let result = super::decode(&bytes, &ReplyShape::State, &mut budget).unwrap();
++        assert!(matches!(
++            result,
++            DecodedReply::KnownFailure {
++                crashed: false,
++                reported: None,
++                diagnostic_unavailable: Some(ErrorKind::Allocation)
++            }
++        ));
++        assert_eq!(budget.live, 0);
++        assert!(!budget.diagnostic_copy);
++    }
++    {
++        let mut budget = new_budget();
++        budget.reserve(MAX_PAYLOAD).unwrap();
++        let result = super::decode(&bytes, &ReplyShape::State, &mut budget).unwrap();
++        assert!(matches!(
++            result,
++            DecodedReply::KnownFailure {
++                crashed: false,
++                reported: None,
++                diagnostic_unavailable: Some(ErrorKind::Limit)
++            }
++        ));
++        assert_eq!(budget.live, MAX_PAYLOAD);
++    }
++}
++
++#[test]
++fn success_never_uses_the_known_failure_diagnostic_exception() {
++    let bytes = wire(&HostResponse::Success {
++        message: "ok".into(),
++    });
++    let mut budget = new_budget();
++    assert!(preflight(&bytes, &ReplyShape::Success, &mut budget)
++        .unwrap()
++        .is_none());
++    budget.cancel.cancelled.store(true, Ordering::Release);
++    assert!(matches!(
++        super::decode(&bytes, &ReplyShape::Success, &mut budget),
++        Err(ErrorKind::Cancelled)
++    ));
++    assert_eq!(budget.live, 0);
++}
++
++#[test]
++fn preset_path_uid_and_load_block_size_exact_boundaries() {
++    let command = HostCommand::LoadState {
++        data: Vec::new(),
++        context: StateContext::Preset {
++            path: Some("p".repeat(MAX_TEXT)),
++        },
++    };
++    assert_command(&command, &ReplyShape::Success);
++    let command = HostCommand::LoadState {
++        data: Vec::new(),
++        context: StateContext::Preset {
++            path: Some("p".repeat(MAX_TEXT + 1)),
++        },
++    };
++    assert_eq!(
++        encode(&command, &ReplyShape::Success, &mut new_budget()).unwrap_err(),
++        ErrorKind::Limit
++    );
++    let mut response = info(Vec::new());
++    if let HostResponse::PluginInfo { uid, .. } = &mut response {
++        *uid = "x".repeat(MAX_ID);
++    }
++    assert!(decode(&wire(&response), &ReplyShape::PluginInfo, &mut new_budget()).is_ok());
++    if let HostResponse::PluginInfo { uid, .. } = &mut response {
++        uid.push('x');
++    }
++    error(&wire(&response), &ReplyShape::PluginInfo, ErrorKind::Limit);
++    let mut command = load("p".into());
++    if let HostCommand::LoadPlugin { block_size, .. } = &mut command {
++        *block_size = (MAX_FRAMES + 1) as u32;
++    }
++    assert_eq!(
++        encode(&command, &ReplyShape::PluginInfo, &mut new_budget()).unwrap_err(),
++        ErrorKind::Limit
++    );
++}
++
++#[test]
++fn accounting_covers_state_and_escaped_text_without_dynamic_scratch() {
++    let line = br#"{"Success":{"message":"\uD83E\uDD80\u0061\n"}}"#;
++    let mut budget = new_budget();
++    let response = decode(line, &ReplyShape::Success, &mut budget).unwrap();
++    let HostResponse::Success { message } = response else {
++        panic!("success expected")
++    };
++    assert_eq!(budget.live, message.capacity());
++    assert_eq!(budget.peak, message.capacity());
++    let charge = message.capacity();
++    drop(message);
++    budget.release(charge);
++    let response = decode(
++        br#"{"State":{"data":"AQIDBA=="}}"#,
++        &ReplyShape::State,
++        &mut budget,
++    )
++    .unwrap();
++    let HostResponse::State { data } = response else {
++        panic!("state expected")
++    };
++    assert_eq!(budget.live, data.capacity());
++    assert_eq!(data, [1, 2, 3, 4]);
++}
++
++#[test]
++fn deterministic_deadline_interrupts_count_emit_preflight_materialize_and_final_check() {
++    let command = HostCommand::LoadState {
++        data: vec![6; 32768],
++        context: StateContext::Project,
++    };
++    let count_checks = {
++        let _hook = budget_test_hooks::expire_at_check(usize::MAX);
++        let mut budget = new_budget();
++        budget.check().unwrap();
++        check_request(&command, &ReplyShape::Success).unwrap();
++        let mut writer = Writer {
++            bytes: None,
++            len: 0,
++            checked: 0,
++            budget: &mut budget,
++        };
++        writer.command(&command).unwrap();
++        budget_test_hooks::checks()
++    };
++    let encode_checks = {
++        let _hook = budget_test_hooks::expire_at_check(usize::MAX);
++        encode(&command, &ReplyShape::Success, &mut new_budget()).unwrap();
++        budget_test_hooks::checks()
++    };
++    // The first phase counts without allocation; successful grow performs its
++    // two reservation checks before any byte-emission checkpoint.
++    for at in [2, count_checks + 3, encode_checks] {
++        let _hook = budget_test_hooks::expire_at_check(at);
++        let mut budget = new_budget();
++        assert_eq!(
++            encode(&command, &ReplyShape::Success, &mut budget).unwrap_err(),
++            ErrorKind::Deadline
++        );
++        assert_eq!(budget.live, 0);
++        assert_eq!(
++            budget.check().unwrap_err(),
++            ErrorKind::Deadline,
++            "injected expiry remains sticky"
++        );
++    }
++    for (response, shape) in [
++        (
++            HostResponse::State {
++                data: vec![7; 32768],
++            },
++            ReplyShape::State,
++        ),
++        (
++            HostResponse::Success {
++                message: "\n🦀".repeat(4096),
++            },
++            ReplyShape::Success,
++        ),
++    ] {
++        let line = wire(&response);
++        let preflight_checks = {
++            let _hook = budget_test_hooks::expire_at_check(usize::MAX);
++            assert!(preflight(&line, &shape, &mut new_budget())
++                .unwrap()
++                .is_none());
++            budget_test_hooks::checks()
++        };
++        let decode_checks = {
++            let _hook = budget_test_hooks::expire_at_check(usize::MAX);
++            decode(&line, &shape, &mut new_budget()).unwrap();
++            budget_test_hooks::checks()
++        };
++        for at in [
++            2,
++            preflight_checks,
++            preflight_checks + (decode_checks - preflight_checks) / 2,
++            decode_checks,
++        ] {
++            let _hook = budget_test_hooks::expire_at_check(at);
++            let mut budget = new_budget();
++            assert_eq!(
++                decode(&line, &shape, &mut budget).unwrap_err(),
++                ErrorKind::Deadline
++            );
++            assert_eq!(budget.live, 0);
++        }
++    }
++}
+--- a/src/fresh_helper/mod.rs
++++ b/src/fresh_helper/mod.rs
+@@ -0,0 +1,576 @@
++//! Experimental Linux-only, owner-thread fresh-child transport foundation.
++//!
++//! This crate-private module has no production caller. It does not load a plugin by
++//! itself, retry a command, alter SIGPIPE disposition, or create an I/O thread.
++//! The process-wide one-child reservation is deliberately restrictive: caller
++//! integration and simultaneous fresh candidate replacement need a later design.
++
++mod codec;
++mod pump;
++mod quarantine;
++#[cfg(test)]
++mod tests;
++
++use crate::process_isolation::{HostCommand, HostResponse};
++use std::marker::PhantomData;
++use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
++use std::rc::Rc;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::Arc;
++use std::time::Instant;
++
++const MAX_LINE: usize = 96 * 1024 * 1024;
++const MAX_PAYLOAD: usize = 256 * 1024 * 1024;
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum ErrorKind {
++    UnsupportedRequest,
++    UnsupportedReply,
++    InvalidRequest,
++    MalformedReply,
++    WrongReply,
++    Limit,
++    Shape,
++    Deadline,
++    Cancelled,
++    Allocation,
++    Io(i32),
++    Eof,
++    ChildExited,
++    ZeroWrite,
++    Unsolicited,
++    Terminal,
++    Busy,
++    Sigpipe,
++    Spawn,
++    OperationRejected,
++    ReportedCrash,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum Delivery {
++    NotSent,
++    MayHaveApplied,
++}
++
++#[derive(Debug)]
++pub(crate) struct ExchangeFailure {
++    pub(crate) cause: ErrorKind,
++    pub(crate) delivery: Delivery,
++    /// A valid helper operation error is retained; it never proves rollback.
++    pub(crate) reported: Option<Box<HostResponse>>,
++    pub(crate) diagnostic_unavailable: Option<ErrorKind>,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) enum ReplyShape {
++    PluginInfo,
++    Success,
++    State,
++    ParameterValue,
++    LatencySamples,
++    TailSamples,
++    Audio {
++        channels: usize,
++        frames: usize,
++    },
++    Buses {
++        buses: Vec<(bool, usize)>,
++        frames: usize,
++    },
++}
++
++/// One shared FD owns its identity until the final cancellation handle is dropped.
++/// A late cancel therefore cannot write to a recycled raw descriptor.
++struct Cancellation {
++    cancelled: AtomicBool,
++    wake: std::os::fd::OwnedFd,
++    #[cfg(test)]
++    skip_wake: AtomicBool,
++}
++
++#[derive(Clone)]
++pub(crate) struct CancelHandle(Arc<Cancellation>);
++
++impl CancelHandle {
++    pub(crate) fn cancel(&self) {
++        self.0.cancelled.store(true, Ordering::Release);
++        #[cfg(test)]
++        if self.0.skip_wake.swap(false, Ordering::AcqRel) {
++            return;
++        }
++        pump::wake(&self.0.wake);
++    }
++}
++
++/// Counts foundation-owned variable payload, excluding allocator overhead and
++/// caller buffers. Reservations are cooperative; allocation/scheduling are not
++/// universal hard deadlines. Codec and pump check before returning success.
++struct Budget {
++    deadline: Instant,
++    cancel: Arc<Cancellation>,
++    live: usize,
++    peak: usize,
++    /// Only a fully validated known helper failure may use this bounded tail.
++    diagnostic_copy: bool,
++}
++
++impl Budget {
++    fn check(&self) -> Result<(), ErrorKind> {
++        if self.diagnostic_copy {
++            return Ok(());
++        }
++        #[cfg(test)]
++        if budget_test_hooks::should_cancel() {
++            self.cancel.cancelled.store(true, Ordering::Release);
++        }
++        #[cfg(test)]
++        if budget_test_hooks::deadline_should_expire() {
++            return Err(ErrorKind::Deadline);
++        }
++        if self.cancel.cancelled.load(Ordering::Acquire) {
++            return Err(ErrorKind::Cancelled);
++        }
++        if Instant::now() >= self.deadline {
++            return Err(ErrorKind::Deadline);
++        }
++        Ok(())
++    }
++
++    fn reserve(&mut self, bytes: usize) -> Result<(), ErrorKind> {
++        self.check()?;
++        let live = self.live.checked_add(bytes).ok_or(ErrorKind::Limit)?;
++        if live > MAX_PAYLOAD {
++            return Err(ErrorKind::Limit);
++        }
++        self.live = live;
++        self.peak = self.peak.max(live);
++        Ok(())
++    }
++
++    fn grow<T>(&mut self, vec: &mut Vec<T>, new_len: usize) -> Result<(), ErrorKind> {
++        if new_len <= vec.capacity() {
++            return self.check();
++        }
++        let size = std::mem::size_of::<T>();
++        let old = vec.capacity();
++        let minimum = new_len
++            .checked_sub(old)
++            .and_then(|n| n.checked_mul(size))
++            .ok_or(ErrorKind::Limit)?;
++        self.reserve(minimum)?;
++        #[cfg(test)]
++        if budget_test_hooks::allocation_should_fail() {
++            self.release(minimum);
++            return Err(ErrorKind::Allocation);
++        }
++        if vec.try_reserve_exact(new_len - vec.len()).is_err() {
++            self.release(minimum);
++            return Err(ErrorKind::Allocation);
++        }
++        let actual = vec
++            .capacity()
++            .checked_sub(old)
++            .and_then(|n| n.checked_mul(size))
++            .ok_or(ErrorKind::Limit)?;
++        // try_reserve_exact may reserve more than requested. Account that actual
++        // capacity too before admitting the result; allocator internals are not
++        // controlled by this logical payload budget.
++        self.reserve(actual.checked_sub(minimum).ok_or(ErrorKind::Limit)?)?;
++        Ok(())
++    }
++
++    fn release(&mut self, bytes: usize) {
++        self.live = self
++            .live
++            .checked_sub(bytes)
++            .expect("balanced payload accounting");
++    }
++}
++
++struct ChildOwner {
++    child: Child,
++    stdin: Option<ChildStdin>,
++    stdout: Option<ChildStdout>,
++    /// A kill attempt is evidence, not proof of exit or reap.
++    kill_requested: bool,
++    /// First pipe-close grace, never renewed by repeated short cleanup budgets.
++    graceful_until: Option<Instant>,
++    observed_exit: Option<ExitStatus>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum State {
++    Ready,
++    InFlight,
++    Terminal,
++    Reaped,
++}
++
++/// The only owner of one admitted child. No COM object is present here.
++/// Its cleanup permit remains reserved until concrete reap, including on Drop.
++#[must_use = "finish checked disposal; dropping retains the child in quarantine"]
++pub(crate) struct FreshHelperSession {
++    owner: Option<ChildOwner>,
++    permit: Option<quarantine::Permit>,
++    cancel: Arc<Cancellation>,
++    state: State,
++    terminal: Option<ErrorKind>,
++    _owner_thread: PhantomData<Rc<()>>,
++}
++
++pub(crate) struct SpawnFailure {
++    pub(crate) cause: ErrorKind,
++    /// FD setup or post-spawn expiry leaves the real child in guarded ownership.
++    pub(crate) cleanup: Option<Box<FreshHelperSession>>,
++}
++
++#[derive(Debug)]
++pub(crate) enum CleanupState {
++    Reaped(ExitStatus),
++    Pending,
++    /// No abandoned child currently exists; a live session can still hold the slot.
++    Empty,
++    Busy,
++}
++
++#[derive(Debug)]
++#[must_use = "Pending or Busy still blocks a new strict child"]
++pub(crate) struct CleanupReport {
++    pub(crate) state: CleanupState,
++    pub(crate) shutdown_error: Option<ErrorKind>,
++    pub(crate) kill_error: Option<i32>,
++    pub(crate) wait_error: Option<i32>,
++    pub(crate) kill_requested: bool,
++}
++
++impl CleanupReport {
++    fn pending() -> Self {
++        Self {
++            state: CleanupState::Pending,
++            shutdown_error: None,
++            kill_error: None,
++            wait_error: None,
++            kill_requested: false,
++        }
++    }
++}
++
++impl FreshHelperSession {
++    pub(crate) fn spawn(command: &mut Command, deadline: Instant) -> Result<Self, SpawnFailure> {
++        let failure = |cause| SpawnFailure {
++            cause,
++            cleanup: None,
++        };
++        pump::require_ignored_sigpipe().map_err(failure)?;
++        if Instant::now() >= deadline {
++            return Err(failure(ErrorKind::Deadline));
++        }
++        let cancel = Arc::new(Cancellation {
++            cancelled: AtomicBool::new(false),
++            wake: pump::new_wake().map_err(failure)?,
++            #[cfg(test)]
++            skip_wake: AtomicBool::new(false),
++        });
++        let permit = quarantine::reserve().map_err(failure)?;
++        // This path owns every captured pipe. No stderr reader thread is needed.
++        command
++            .stdin(Stdio::piped())
++            .stdout(Stdio::piped())
++            .stderr(Stdio::inherit());
++        let child = match command.spawn() {
++            Ok(child) => child,
++            Err(error) => {
++                drop(permit); // No Child was created; release the reservation.
++                return Err(failure(pump::io_error(error)));
++            }
++        };
++        // From this statement onward unwind always reaches guarded child ownership.
++        // No fallible FD operation precedes construction of this owner.
++        let mut session = Self {
++            owner: Some(ChildOwner {
++                child,
++                stdin: None,
++                stdout: None,
++                kill_requested: false,
++                graceful_until: None,
++                observed_exit: None,
++            }),
++            permit: Some(permit),
++            cancel,
++            state: State::Terminal,
++            terminal: None,
++            _owner_thread: PhantomData,
++        };
++        let result = (|| {
++            let owner = session.owner.as_mut().expect("new child owner");
++            owner.stdin = owner.child.stdin.take();
++            owner.stdout = owner.child.stdout.take();
++            let stdin = owner.stdin.as_ref().ok_or(ErrorKind::Spawn)?;
++            let stdout = owner.stdout.as_ref().ok_or(ErrorKind::Spawn)?;
++            pump::set_nonblocking(stdin)?;
++            pump::set_nonblocking(stdout)?;
++            if Instant::now() >= deadline {
++                return Err(ErrorKind::Deadline);
++            }
++            Ok(())
++        })();
++        match result {
++            Ok(()) => {
++                session.state = State::Ready;
++                Ok(session)
++            }
++            Err(cause) => {
++                session.terminal = Some(cause);
++                Err(SpawnFailure {
++                    cause,
++                    cleanup: Some(Box::new(session)),
++                })
++            }
++        }
++    }
++
++    pub(crate) fn cancellation(&self) -> CancelHandle {
++        CancelHandle(self.cancel.clone())
++    }
++
++    pub(crate) fn exchange(
++        &mut self,
++        command: &HostCommand,
++        expected: ReplyShape,
++        deadline: Instant,
++    ) -> Result<HostResponse, ExchangeFailure> {
++        if self.state != State::Ready {
++            return Err(ExchangeFailure {
++                cause: self.terminal.unwrap_or(ErrorKind::Terminal),
++                delivery: Delivery::NotSent,
++                reported: None,
++                diagnostic_unavailable: None,
++            });
++        }
++        // InFlight is installed before any fallible/allocating codec work. A Rust
++        // unwind cannot make a partially issued exchange reusable.
++        self.state = State::InFlight;
++        let mut delivery = Delivery::NotSent;
++        let mut budget = Budget {
++            deadline,
++            cancel: self.cancel.clone(),
++            live: 0,
++            peak: 0,
++            diagnostic_copy: false,
++        };
++        let result = (|| {
++            budget.check()?;
++            let request = codec::encode(command, &expected, &mut budget)?;
++            let request_charge = request.capacity();
++            let owner = self.owner.as_mut().ok_or(ErrorKind::Terminal)?;
++            pump::ensure_no_reply(owner, &budget)?;
++            pump::write_request(owner, &request, &budget, &mut delivery)?;
++            // Never retain the encoded request during response/decode allocations.
++            drop(request);
++            budget.release(request_charge);
++            let response = pump::read_reply(owner, &mut budget)?;
++            let reply = codec::decode(&response.bytes, &expected, &mut budget)?;
++            let child_exited = if matches!(reply, codec::DecodedReply::Response(_)) {
++                let exited = pump::observe_child(owner)?;
++                budget.check()?;
++                exited
++            } else {
++                false
++            };
++            Ok((reply, response.peer_closed || child_exited, child_exited))
++        })();
++        match result {
++            Ok((
++                codec::DecodedReply::KnownFailure {
++                    crashed,
++                    reported,
++                    diagnostic_unavailable,
++                },
++                _,
++                _,
++            )) => {
++                let cause = if crashed {
++                    ErrorKind::ReportedCrash
++                } else {
++                    ErrorKind::OperationRejected
++                };
++                self.state = State::Terminal;
++                self.terminal = Some(cause);
++                Err(ExchangeFailure {
++                    cause,
++                    delivery,
++                    reported: reported.map(Box::new),
++                    diagnostic_unavailable,
++                })
++            }
++            Ok((codec::DecodedReply::Response(reply), true, child_exited)) => {
++                let cause = if child_exited {
++                    ErrorKind::ChildExited
++                } else {
++                    ErrorKind::Eof
++                };
++                self.state = State::Terminal;
++                self.terminal = Some(cause);
++                Err(ExchangeFailure {
++                    cause,
++                    delivery,
++                    reported: Some(Box::new(reply)),
++                    diagnostic_unavailable: None,
++                })
++            }
++            Ok((codec::DecodedReply::Response(reply), false, _)) => {
++                self.state = State::Ready;
++                Ok(reply)
++            }
++            Err(cause) => {
++                self.state = State::Terminal;
++                self.terminal = Some(cause);
++                Err(ExchangeFailure {
++                    cause,
++                    delivery,
++                    reported: None,
++                    diagnostic_unavailable: None,
++                })
++            }
++        }
++    }
++
++    pub(crate) fn dispose_checked(&mut self, deadline: Instant) -> CleanupReport {
++        let healthy = self.state == State::Ready;
++        self.state = State::Terminal;
++        let Some(owner) = self.owner.as_mut() else {
++            let mut report = CleanupReport::pending();
++            report.state = CleanupState::Empty;
++            return report;
++        };
++        let mut report = CleanupReport::pending();
++        if healthy {
++            let budget = Budget {
++                deadline,
++                cancel: self.cancel.clone(),
++                live: 0,
++                peak: 0,
++                diagnostic_copy: false,
++            };
++            let mut delivery = Delivery::NotSent;
++            report.shutdown_error =
++                pump::write_request(owner, b"\"Shutdown\"\n", &budget, &mut delivery).err();
++        }
++        // No protocol writes after this point, including later disposal attempts.
++        owner.stdin.take();
++        owner.stdout.take();
++        // Pipe closure gets up to 100 ms within the original deadline for normal
++        // main-thread teardown (healthy Shutdown or faulted EOF). A faulted
++        // session never sends Shutdown. This grace budget is not a reap promise.
++        let graceful_until = *owner
++            .graceful_until
++            .get_or_insert_with(|| Instant::now() + std::time::Duration::from_millis(100));
++        pump::reap(owner, deadline, Some(graceful_until), &mut report);
++        if matches!(report.state, CleanupState::Reaped(_)) {
++            self.owner.take();
++            self.permit.take(); // Concrete try_wait success is the release boundary.
++            self.state = State::Reaped;
++        }
++        report
++    }
++
++    pub(crate) fn cleanup_abandoned(deadline: Instant) -> CleanupReport {
++        quarantine::cleanup(deadline)
++    }
++}
++
++impl Drop for FreshHelperSession {
++    fn drop(&mut self) {
++        if let Some(owner) = self.owner.take() {
++            let permit = self
++                .permit
++                .take()
++                .expect("live child has reserved cleanup slot");
++            quarantine::deposit(permit, owner);
++        }
++    }
++}
++
++#[cfg(test)]
++mod budget_test_hooks {
++    use std::cell::Cell;
++    thread_local! {
++        static REMAINING: Cell<Option<usize>> = const { Cell::new(None) };
++        static CHECKS: Cell<usize> = const { Cell::new(0) };
++        static FAIL_ALLOCATION: Cell<bool> = const { Cell::new(false) };
++        static EXPIRE_REMAINING: Cell<Option<usize>> = const { Cell::new(None) };
++        static EXPIRED: Cell<bool> = const { Cell::new(false) };
++    }
++    pub(super) struct Guard;
++    impl Drop for Guard {
++        fn drop(&mut self) {
++            REMAINING.with(|r| r.set(None));
++            FAIL_ALLOCATION.with(|f| f.set(false));
++            EXPIRE_REMAINING.with(|r| r.set(None));
++            EXPIRED.with(|e| e.set(false));
++        }
++    }
++    pub(super) fn cancel_at_check(n: usize) -> Guard {
++        assert!(n > 0);
++        REMAINING.with(|r| {
++            assert!(r.get().is_none());
++            r.set(Some(n));
++        });
++        CHECKS.with(|n| n.set(0));
++        Guard
++    }
++    pub(super) fn expire_at_check(n: usize) -> Guard {
++        assert!(n > 0);
++        EXPIRE_REMAINING.with(|r| {
++            assert!(r.get().is_none());
++            r.set(Some(n));
++        });
++        CHECKS.with(|n| n.set(0));
++        Guard
++    }
++    pub(super) fn deadline_should_expire() -> bool {
++        if EXPIRED.with(Cell::get) {
++            return true;
++        }
++        EXPIRE_REMAINING.with(|r| match r.get() {
++            Some(1) => {
++                r.set(None);
++                EXPIRED.with(|e| e.set(true));
++                true
++            }
++            Some(n) => {
++                r.set(Some(n - 1));
++                false
++            }
++            None => false,
++        })
++    }
++    pub(super) fn fail_next_allocation() -> Guard {
++        FAIL_ALLOCATION.with(|f| {
++            assert!(!f.get());
++            f.set(true);
++        });
++        Guard
++    }
++    pub(super) fn allocation_should_fail() -> bool {
++        FAIL_ALLOCATION.with(|f| f.replace(false))
++    }
++    pub(super) fn checks() -> usize {
++        CHECKS.with(Cell::get)
++    }
++    pub(super) fn should_cancel() -> bool {
++        CHECKS.with(|n| n.set(n.get() + 1));
++        REMAINING.with(|r| match r.get() {
++            Some(1) => {
++                r.set(None);
++                true
++            }
++            Some(n) => {
++                r.set(Some(n - 1));
++                false
++            }
++            None => false,
++        })
++    }
++}
+--- a/src/fresh_helper/pump.rs
++++ b/src/fresh_helper/pump.rs
+@@ -0,0 +1,499 @@
++use super::{Budget, ChildOwner, CleanupReport, CleanupState, Delivery, ErrorKind, MAX_LINE};
++use std::io;
++use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
++use std::time::Instant;
++
++pub(super) fn io_error(error: io::Error) -> ErrorKind {
++    ErrorKind::Io(error.raw_os_error().unwrap_or(libc::EIO))
++}
++fn last_error() -> ErrorKind {
++    io_error(io::Error::last_os_error())
++}
++fn interrupted() -> bool {
++    io::Error::last_os_error().kind() == io::ErrorKind::Interrupted
++}
++fn would_block() -> bool {
++    io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
++}
++
++pub(super) fn require_ignored_sigpipe() -> Result<(), ErrorKind> {
++    let mut disposition = std::mem::MaybeUninit::<libc::sigaction>::uninit();
++    // SAFETY: a null new-action pointer makes this read-only; old-action points
++    // to correctly sized writable storage and is read only on syscall success.
++    if unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), disposition.as_mut_ptr()) } != 0 {
++        return Err(last_error());
++    }
++    // SAFETY: successful sigaction initialized the full old-action structure.
++    if unsafe { disposition.assume_init() }.sa_sigaction != libc::SIG_IGN {
++        return Err(ErrorKind::Sigpipe);
++    }
++    Ok(())
++}
++
++pub(super) fn new_wake() -> Result<OwnedFd, ErrorKind> {
++    // SAFETY: eventfd has no pointer arguments. Atomic flags prevent descriptor
++    // inheritance and blocking wake writes from its first observable instant.
++    let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
++    if fd < 0 {
++        return Err(last_error());
++    }
++    // SAFETY: this call returned a new exclusively owned descriptor.
++    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
++}
++
++pub(super) fn wake(fd: &OwnedFd) {
++    let one = 1u64.to_ne_bytes();
++    // EAGAIN means the counter is already readable. EINTR retries preserve the
++    // sticky cancellation; poll also has a 25 ms fallback recheck interval.
++    for _ in 0..4 {
++        #[cfg(test)]
++        if test_hooks::interrupted_wake() {
++            continue;
++        }
++        // SAFETY: borrowed descriptor is live and the byte slice is valid.
++        let result = unsafe { libc::write(fd.as_raw_fd(), one.as_ptr().cast(), one.len()) };
++        if result >= 0 || !interrupted() {
++            return;
++        }
++    }
++}
++
++pub(super) fn set_nonblocking(fd: &impl AsRawFd) -> Result<(), ErrorKind> {
++    #[cfg(test)]
++    if test_hooks::take(test_hooks::Fault::Setup) {
++        return Err(ErrorKind::Io(libc::EIO));
++    }
++    // SAFETY: descriptor remains owned by the session; F_GETFL has no third arg.
++    let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
++    if flags < 0 {
++        return Err(last_error());
++    }
++    // SAFETY: preserves all existing flags and only adds nonblocking behavior.
++    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
++        return Err(last_error());
++    }
++    Ok(())
++}
++
++fn timeout(deadline: Instant) -> i32 {
++    let remaining = deadline.saturating_duration_since(Instant::now());
++    remaining
++        .as_millis()
++        .saturating_add(u128::from(remaining.subsec_nanos() % 1_000_000 != 0))
++        .min(i32::MAX as u128) as i32
++}
++
++fn poll_fds(
++    fds: &mut [libc::pollfd],
++    budget: &Budget,
++    owner: &mut ChildOwner,
++) -> Result<(), ErrorKind> {
++    loop {
++        budget.check()?;
++        // SAFETY: slice supplies valid pollfd storage for the exact count;
++        // descriptors remain borrowed from their owners for this synchronous call.
++        let result = unsafe {
++            libc::poll(
++                fds.as_mut_ptr(),
++                fds.len() as libc::nfds_t,
++                timeout(budget.deadline).min(25),
++            )
++        };
++        if result < 0 {
++            if interrupted() {
++                continue;
++            }
++            return Err(last_error());
++        }
++        if result == 0 {
++            if observe_child(owner)? {
++                return Err(ErrorKind::ChildExited);
++            }
++            budget.check()?;
++            continue;
++        }
++        // Do not preempt observed descriptor errors with a later cancellation;
++        // caller inspects readiness/error bits, then checks the budget again.
++        return Ok(());
++    }
++}
++
++fn probe_reply(owner: &ChildOwner, budget: &Budget) -> Result<bool, ErrorKind> {
++    let fd = owner
++        .stdout
++        .as_ref()
++        .ok_or(ErrorKind::Terminal)?
++        .as_raw_fd();
++    let mut byte = [0u8; 1];
++    loop {
++        budget.check()?;
++        #[cfg(test)]
++        if test_hooks::take(test_hooks::Fault::ProbeInterrupted) {
++            continue;
++        }
++        // SAFETY: valid owned nonblocking descriptor and one-byte storage.
++        let n = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), byte.len()) };
++        if n > 0 {
++            return Err(ErrorKind::Unsolicited);
++        }
++        if n == 0 {
++            return Ok(true);
++        }
++        if interrupted() {
++            continue;
++        }
++        if would_block() {
++            return Ok(false);
++        }
++        return Err(last_error());
++    }
++}
++
++pub(super) fn ensure_no_reply(owner: &ChildOwner, budget: &Budget) -> Result<(), ErrorKind> {
++    if probe_reply(owner, budget)? {
++        return Err(ErrorKind::Eof);
++    }
++    Ok(())
++}
++
++pub(super) fn write_request(
++    owner: &mut ChildOwner,
++    bytes: &[u8],
++    budget: &Budget,
++    delivery: &mut Delivery,
++) -> Result<(), ErrorKind> {
++    require_ignored_sigpipe()?;
++    let stdin = owner.stdin.as_ref().ok_or(ErrorKind::Terminal)?.as_raw_fd();
++    let stdout = owner
++        .stdout
++        .as_ref()
++        .ok_or(ErrorKind::Terminal)?
++        .as_raw_fd();
++    let mut sent = 0;
++    while sent < bytes.len() {
++        if observe_child(owner)? {
++            return Err(ErrorKind::ChildExited);
++        }
++        budget.check()?;
++        #[cfg(test)]
++        if test_hooks::take(test_hooks::Fault::WriteZero) {
++            return Err(ErrorKind::ZeroWrite);
++        }
++        #[cfg(test)]
++        if test_hooks::take(test_hooks::Fault::WriteInterrupted) {
++            continue;
++        }
++        #[cfg(test)]
++        if sent > 0 && test_hooks::take(test_hooks::Fault::WriteZeroAfterPrefix) {
++            return Err(ErrorKind::ZeroWrite);
++        }
++        let end = sent.saturating_add(4096).min(bytes.len());
++        // SAFETY: stdin is live/nonblocking; bytes is valid for this slice length.
++        // Supported embedding has SIGPIPE ignored and must not change it live.
++        let n = unsafe { libc::write(stdin, bytes[sent..end].as_ptr().cast(), end - sent) };
++        if n > 0 {
++            *delivery = Delivery::MayHaveApplied;
++            sent += n as usize;
++            continue;
++        }
++        if n == 0 {
++            return Err(ErrorKind::ZeroWrite);
++        }
++        if interrupted() {
++            continue;
++        }
++        if !would_block() {
++            return Err(last_error());
++        }
++        let mut fds = [
++            libc::pollfd {
++                fd: stdin,
++                events: libc::POLLOUT,
++                revents: 0,
++            },
++            libc::pollfd {
++                fd: stdout,
++                events: libc::POLLIN,
++                revents: 0,
++            },
++            libc::pollfd {
++                fd: budget.cancel.wake.as_raw_fd(),
++                events: libc::POLLIN,
++                revents: 0,
++            },
++        ];
++        poll_fds(&mut fds, budget, owner)?;
++        if fds[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
++            return Err(ErrorKind::Io(libc::EPIPE));
++        }
++        if fds[1].revents & libc::POLLNVAL != 0 {
++            return Err(ErrorKind::Io(libc::EBADF));
++        }
++        // A reply before the complete request is protocol corruption. This also
++        // prevents a malicious helper filling stdout from deadlocking a write.
++        if fds[1].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
++            ensure_no_reply(owner, budget)?;
++        }
++        budget.check()?;
++    }
++    budget.check()
++}
++
++pub(super) struct ReplyFrame {
++    pub(super) bytes: Vec<u8>,
++    pub(super) peer_closed: bool,
++}
++
++pub(super) fn read_reply(
++    owner: &mut ChildOwner,
++    budget: &mut Budget,
++) -> Result<ReplyFrame, ErrorKind> {
++    let stdout = owner
++        .stdout
++        .as_ref()
++        .ok_or(ErrorKind::Terminal)?
++        .as_raw_fd();
++    #[cfg(test)]
++    if test_hooks::take(test_hooks::Fault::ReadWaitForHup) {
++        loop {
++            budget.check()?;
++            let mut fd = libc::pollfd {
++                fd: stdout,
++                events: 0,
++                revents: 0,
++            };
++            // SAFETY: test-only readiness barrier on the same live pipe.
++            let result = unsafe { libc::poll(&mut fd, 1, 1) };
++            if result < 0 && !interrupted() {
++                return Err(last_error());
++            }
++            if fd.revents & libc::POLLHUP != 0 {
++                break;
++            }
++        }
++    }
++    let mut reply = Vec::new();
++    let mut chunk = [0u8; 4096];
++    loop {
++        // Read readiness/error before checking a simultaneously raised cancel.
++        // SAFETY: live nonblocking descriptor and writable stack buffer.
++        let n = unsafe { libc::read(stdout, chunk.as_mut_ptr().cast(), chunk.len()) };
++        if n > 0 {
++            let bytes = &chunk[..n as usize];
++            let newline = bytes.iter().position(|byte| *byte == b'\n');
++            let used = newline.unwrap_or(bytes.len());
++            let new_len = reply.len().checked_add(used).ok_or(ErrorKind::Limit)?;
++            if new_len > MAX_LINE {
++                return Err(ErrorKind::Limit);
++            }
++            if new_len > reply.capacity() {
++                let target = new_len
++                    .max(reply.capacity().saturating_mul(2))
++                    .max(4096)
++                    .min(MAX_LINE);
++                budget.grow(&mut reply, target)?;
++            }
++            reply.extend_from_slice(&bytes[..used]);
++            if let Some(at) = newline {
++                if at + 1 != bytes.len() {
++                    return Err(ErrorKind::Unsolicited);
++                }
++                // Detect already-buffered extra frames, while accepting final
++                // bytes followed by HUP/EOF as a complete response.
++                let peer_closed = probe_reply(owner, budget)?;
++                budget.check()?;
++                return Ok(ReplyFrame {
++                    bytes: reply,
++                    peer_closed,
++                });
++            }
++            budget.check()?;
++            continue;
++        }
++        if n == 0 {
++            return Err(ErrorKind::Eof);
++        }
++        if interrupted() {
++            budget.check()?;
++            continue;
++        }
++        if !would_block() {
++            return Err(last_error());
++        }
++        let mut fds = [
++            libc::pollfd {
++                fd: stdout,
++                events: libc::POLLIN,
++                revents: 0,
++            },
++            libc::pollfd {
++                fd: budget.cancel.wake.as_raw_fd(),
++                events: libc::POLLIN,
++                revents: 0,
++            },
++        ];
++        poll_fds(&mut fds, budget, owner)?;
++        if fds[0].revents & libc::POLLNVAL != 0 {
++            return Err(ErrorKind::Io(libc::EBADF));
++        }
++        // POLLIN+HUP is deliberately handled by the next read, preserving final
++        // bytes. Cancellation alone cannot keep us spinning on readable eventfd.
++        if fds[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) == 0 {
++            budget.check()?;
++        }
++    }
++}
++
++/// Preserve the direct-child status even if a descendant keeps its pipe open.
++pub(super) fn observe_child(owner: &mut ChildOwner) -> Result<bool, ErrorKind> {
++    if owner.observed_exit.is_some() {
++        return Ok(true);
++    }
++    match owner.child.try_wait() {
++        Ok(Some(status)) => {
++            owner.observed_exit = Some(status);
++            Ok(true)
++        }
++        Ok(None) => Ok(false),
++        Err(error) => Err(io_error(error)),
++    }
++}
++
++pub(super) fn reap(
++    owner: &mut ChildOwner,
++    deadline: Instant,
++    graceful_until: Option<Instant>,
++    report: &mut CleanupReport,
++) {
++    loop {
++        if let Some(status) = owner.observed_exit {
++            report.state = CleanupState::Reaped(status);
++            report.kill_requested = owner.kill_requested;
++            return;
++        }
++        #[cfg(test)]
++        if test_hooks::take(test_hooks::Fault::ReapPanic) {
++            panic!("Rust cleanup observation hook");
++        }
++        #[cfg(test)]
++        if test_hooks::take(test_hooks::Fault::Wait) {
++            report.wait_error = Some(libc::EIO);
++            report.kill_requested = owner.kill_requested;
++            return;
++        }
++        match owner.child.try_wait() {
++            Ok(Some(status)) => {
++                owner.observed_exit = Some(status);
++                report.state = CleanupState::Reaped(status);
++                report.kill_requested = owner.kill_requested;
++                return;
++            }
++            Ok(None) => {}
++            Err(error) => {
++                report.wait_error = Some(error.raw_os_error().unwrap_or(libc::EIO));
++                report.kill_requested = owner.kill_requested;
++                return; // Retain Child; never take/drop it on a wait error.
++            }
++        }
++        if Instant::now() >= deadline {
++            report.kill_requested = owner.kill_requested;
++            return;
++        }
++        if !owner.kill_requested && graceful_until.is_none_or(|until| Instant::now() >= until) {
++            #[cfg(test)]
++            if test_hooks::take(test_hooks::Fault::Kill) {
++                report.kill_error = Some(libc::EPERM);
++                return;
++            }
++            match owner.child.kill() {
++                Ok(()) => {
++                    owner.kill_requested = true;
++                    report.kill_requested = true;
++                }
++                Err(error) => {
++                    report.kill_error = Some(error.raw_os_error().unwrap_or(libc::EIO));
++                    return; // A later checked cleanup may try again.
++                }
++            }
++        }
++        // Bounded cooperative observation delay, no background thread or blocking
++        // Child::wait. Poll interruption never restarts the caller's deadline.
++        #[cfg(test)]
++        if owner.kill_requested && test_hooks::take(test_hooks::Fault::PollAfterKill) {
++            report.wait_error = Some(libc::EIO);
++            return;
++        }
++        let millis = timeout(deadline).min(1);
++        // SAFETY: zero pollfds allows a null pointer and merely waits.
++        let result = unsafe { libc::poll(std::ptr::null_mut(), 0, millis) };
++        if result < 0 && !interrupted() {
++            report.wait_error = Some(
++                io::Error::last_os_error()
++                    .raw_os_error()
++                    .unwrap_or(libc::EIO),
++            );
++            return;
++        }
++    }
++}
++
++#[cfg(test)]
++pub(super) mod test_hooks {
++    use std::cell::Cell;
++    #[derive(Clone, Copy, PartialEq, Eq)]
++    pub(crate) enum Fault {
++        Setup,
++        ProbeInterrupted,
++        WriteZero,
++        WriteZeroAfterPrefix,
++        WriteInterrupted,
++        ReapPanic,
++        Wait,
++        Kill,
++        PollAfterKill,
++        ReadWaitForHup,
++    }
++    thread_local! { static NEXT: Cell<Option<Fault>> = const { Cell::new(None) }; }
++    pub(crate) fn arm(fault: Fault) {
++        NEXT.with(|next| {
++            assert!(next.get().is_none());
++            next.set(Some(fault));
++        });
++    }
++    pub(crate) fn take(fault: Fault) -> bool {
++        NEXT.with(|next| {
++            if next.get() == Some(fault) {
++                next.set(None);
++                true
++            } else {
++                false
++            }
++        })
++    }
++    thread_local! {
++        static WAKE_LEFT: Cell<usize> = const { Cell::new(0) };
++        static WAKE_COUNT: Cell<usize> = const { Cell::new(0) };
++    }
++    pub(crate) fn arm_wake_interrupts(count: usize) {
++        WAKE_LEFT.with(|v| v.set(count));
++        WAKE_COUNT.with(|v| v.set(0));
++    }
++    pub(crate) fn wake_attempts() -> usize {
++        WAKE_COUNT.with(Cell::get)
++    }
++    pub(crate) fn interrupted_wake() -> bool {
++        WAKE_COUNT.with(|v| v.set(v.get() + 1));
++        WAKE_LEFT.with(|v| {
++            if v.get() > 0 {
++                v.set(v.get() - 1);
++                true
++            } else {
++                false
++            }
++        })
++    }
++    pub(crate) fn clear() {
++        NEXT.with(|next| next.set(None));
++        WAKE_LEFT.with(|v| v.set(0));
++    }
++}
+--- a/src/fresh_helper/quarantine.rs
++++ b/src/fresh_helper/quarantine.rs
+@@ -0,0 +1,134 @@
++//! One process-wide reservation, initialized before a child can be spawned.
++//! The slot has process lifetime and no background thread. Its mutex is never
++//! held during spawn, pipe I/O, poll, kill, wait, or a caller callback.
++
++use super::{pump, ChildOwner, CleanupReport, CleanupState, ErrorKind};
++use std::sync::{Mutex, MutexGuard, OnceLock};
++use std::time::Instant;
++
++enum Slot {
++    Empty,
++    Reserved(u64),
++    Abandoned { id: u64, owner: ChildOwner },
++}
++
++struct Registry {
++    next: u64,
++    slot: Slot,
++}
++static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
++
++fn registry() -> MutexGuard<'static, Registry> {
++    REGISTRY
++        .get_or_init(|| {
++            Mutex::new(Registry {
++                next: 0,
++                slot: Slot::Empty,
++            })
++        })
++        .lock()
++        .unwrap_or_else(std::sync::PoisonError::into_inner)
++}
++
++/// Only this module constructs permits. Drop releases only a Reserved slot.
++/// Callers must retain it alongside a child until proven reap or deposit.
++pub(super) struct Permit {
++    id: u64,
++    armed: bool,
++}
++
++pub(super) fn reserve() -> Result<Permit, ErrorKind> {
++    let mut registry = registry();
++    if !matches!(registry.slot, Slot::Empty) {
++        return Err(ErrorKind::Busy);
++    }
++    let id = registry.next.checked_add(1).ok_or(ErrorKind::Limit)?;
++    registry.next = id;
++    registry.slot = Slot::Reserved(id);
++    Ok(Permit { id, armed: true })
++}
++
++impl Drop for Permit {
++    fn drop(&mut self) {
++        if !self.armed {
++            return;
++        }
++        let mut registry = registry();
++        assert!(
++            matches!(registry.slot, Slot::Reserved(id) if id == self.id),
++            "cleanup permit must match its unique reservation"
++        );
++        registry.slot = Slot::Empty;
++    }
++}
++
++pub(super) fn deposit(mut permit: Permit, owner: ChildOwner) {
++    let mut registry = registry();
++    assert!(
++        matches!(registry.slot, Slot::Reserved(id) if id == permit.id),
++        "child transfers only into its pre-reserved cleanup slot"
++    );
++    registry.slot = Slot::Abandoned {
++        id: permit.id,
++        owner,
++    };
++    permit.armed = false;
++    // The disarmed permit cannot reacquire the mutex during destruction.
++}
++
++struct CleanupLoan {
++    owner: Option<ChildOwner>,
++    permit: Option<Permit>,
++}
++impl Drop for CleanupLoan {
++    fn drop(&mut self) {
++        if let Some(owner) = self.owner.take() {
++            deposit(self.permit.take().expect("cleanup loan reservation"), owner);
++        }
++    }
++}
++
++pub(super) fn cleanup(deadline: Instant) -> CleanupReport {
++    let mut report = CleanupReport::pending();
++    let mut loan = {
++        let mut registry = registry();
++        let id = match &registry.slot {
++            Slot::Empty => {
++                report.state = CleanupState::Empty;
++                return report;
++            }
++            Slot::Reserved(_) => {
++                report.state = CleanupState::Busy;
++                return report;
++            }
++            Slot::Abandoned { id, .. } => *id,
++        };
++        let old = std::mem::replace(&mut registry.slot, Slot::Reserved(id));
++        match old {
++            Slot::Abandoned { owner, .. } => CleanupLoan {
++                owner: Some(owner),
++                permit: Some(Permit { id, armed: true }),
++            },
++            _ => unreachable!("slot matched while exclusively locked"),
++        }
++    }; // Global guard ends before any pipe close/kill/wait.
++    let owner = loan.owner.as_mut().expect("abandoned child");
++    owner.stdin.take();
++    owner.stdout.take();
++    pump::reap(owner, deadline, None, &mut report);
++    if matches!(report.state, CleanupState::Reaped(_)) {
++        loan.owner.take();
++        loan.permit.take();
++    }
++    // Pending, OS error, or Rust unwind restores the still-owned child. A second
++    // cleanup cannot concurrently acquire it while the slot is Reserved.
++    report
++}
++
++#[cfg(test)]
++pub(super) fn abandoned_pid() -> Option<u32> {
++    match &registry().slot {
++        Slot::Abandoned { owner, .. } => Some(owner.child.id()),
++        _ => None,
++    }
++}
+--- a/src/fresh_helper/tests.rs
++++ b/src/fresh_helper/tests.rs
+@@ -0,0 +1,800 @@
++use super::*;
++use std::sync::{Mutex, MutexGuard};
++use std::time::Duration;
++
++// Every test that reserves the process-global slot holds this independent lock.
++// Codec tests and cancellation-FD-only tests need no child reservation.
++static CHILD_TESTS: Mutex<()> = Mutex::new(());
++struct TestScope {
++    _serial: MutexGuard<'static, ()>,
++}
++fn serial() -> TestScope {
++    TestScope {
++        _serial: CHILD_TESTS
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner),
++    }
++}
++impl Drop for TestScope {
++    fn drop(&mut self) {
++        pump::test_hooks::clear();
++        let report = FreshHelperSession::cleanup_abandoned(deadline());
++        if !matches!(report.state, CleanupState::Empty | CleanupState::Reaped(_)) {
++            if std::thread::panicking() {
++                eprintln!("cleanup retained unresolved mock child: {report:?}");
++            } else {
++                panic!("cleanup retained unresolved mock child: {report:?}");
++            }
++        }
++    }
++}
++fn deadline() -> Instant {
++    Instant::now() + Duration::from_secs(3)
++}
++fn python(script: &str) -> Command {
++    let mut command = Command::new("python3");
++    command.args(["-u", "-c", script]);
++    command
++}
++fn spawn(script: &str) -> FreshHelperSession {
++    match FreshHelperSession::spawn(&mut python(script), deadline()) {
++        Ok(session) => session,
++        Err(mut failure) => {
++            if let Some(session) = failure.cleanup.as_mut() {
++                let report = session.dispose_checked(deadline());
++                assert!(
++                    matches!(report.state, CleanupState::Reaped(_)),
++                    "setup cleanup: {report:?}"
++                );
++            }
++            panic!("mock spawn: {:?}", failure.cause);
++        }
++    }
++}
++fn finish_forced(session: &mut FreshHelperSession) {
++    let report = session.dispose_checked(deadline());
++    assert!(
++        matches!(report.state, CleanupState::Reaped(_)),
++        "checked cleanup: {report:?}"
++    );
++}
++fn finish(session: &mut FreshHelperSession) {
++    let report = session.dispose_checked(deadline());
++    assert!(
++        matches!(report.state, CleanupState::Reaped(status) if status.success()),
++        "cooperative child failed: {report:?}"
++    );
++    assert!(
++        !report.kill_requested,
++        "child assertion cannot be bypassed by force kill"
++    );
++}
++fn failure_kind(result: Result<HostResponse, ExchangeFailure>) -> ExchangeFailure {
++    match result {
++        Err(failure) => failure,
++        Ok(_) => panic!("expected failed exchange"),
++    }
++}
++fn scalar(session: &mut FreshHelperSession) -> Result<HostResponse, ExchangeFailure> {
++    session.exchange(
++        &HostCommand::LatencySamples,
++        ReplyShape::LatencySamples,
++        deadline(),
++    )
++}
++fn new_budget(deadline: Instant) -> Budget {
++    Budget {
++        deadline,
++        cancel: Arc::new(Cancellation {
++            cancelled: AtomicBool::new(false),
++            wake: pump::new_wake().unwrap(),
++            skip_wake: AtomicBool::new(false),
++        }),
++        live: 0,
++        peak: 0,
++        diagnostic_copy: false,
++    }
++}
++
++#[test]
++fn scalar_roundtrip_then_exact_reply_free_shutdown() {
++    let _serial = serial();
++    let mut session = spawn(
++        r#"
++import sys,json
++assert json.loads(sys.stdin.readline()) == 'LatencySamples'
++print('{"LatencySamples":{"samples":0}}',flush=True)
++assert json.loads(sys.stdin.readline()) == 'Shutdown'
++assert sys.stdin.read() == ''
++"#,
++    );
++    assert!(matches!(
++        scalar(&mut session),
++        Ok(HostResponse::LatencySamples { samples: 0 })
++    ));
++    finish(&mut session);
++}
++
++#[test]
++fn reported_error_seals_without_replay_or_second_shutdown() {
++    let _serial = serial();
++    let mut session = spawn(
++        r#"
++import sys,json
++assert json.loads(sys.stdin.readline()) == 'SaveState'
++print('{"Error":{"message":"operation may have partially applied"}}',flush=True)
++assert sys.stdin.read() == ''
++"#,
++    );
++    let failure =
++        failure_kind(session.exchange(&HostCommand::SaveState, ReplyShape::State, deadline()));
++    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
++    assert!(matches!(
++        failure.reported.as_deref(),
++        Some(HostResponse::Error { .. })
++    ));
++    assert_eq!(
++        failure_kind(scalar(&mut session)).delivery,
++        Delivery::NotSent
++    );
++    finish(&mut session);
++}
++
++#[test]
++fn malformed_wrong_and_extra_frames_are_terminal() {
++    let _serial = serial();
++    for (wire, expected) in [
++        ("not-json\\n", ErrorKind::MalformedReply),
++        (
++            "{\"TailSamples\":{\"samples\":7}}\\n",
++            ErrorKind::WrongReply,
++        ),
++        (
++            "{\"LatencySamples\":{\"samples\":7}}\\n{}\\n",
++            ErrorKind::Unsolicited,
++        ),
++    ] {
++        let script = format!("import sys\nsys.stdin.readline()\nsys.stdout.write({wire:?}.replace('\\\\n','\\n'));sys.stdout.flush()\nsys.stdin.read()\n");
++        let mut session = spawn(&script);
++        let failure = failure_kind(scalar(&mut session));
++        assert_eq!(failure.cause, expected);
++        assert_eq!(failure.delivery, Delivery::MayHaveApplied);
++        assert!(scalar(&mut session).is_err());
++        finish(&mut session);
++    }
++}
++
++#[test]
++fn final_reply_bytes_are_preserved_as_diagnostics_when_peer_closure_is_observed() {
++    let _serial = serial();
++    let mut session = spawn("import sys\nsys.stdin.readline()\nprint('{\"LatencySamples\":{\"samples\":4294967295}}',flush=True)\n");
++    // Closure can become observable after the immediate post-frame read. Both
++    // orders preserve the value, but any observed EOF seals the session.
++    match scalar(&mut session) {
++        Ok(HostResponse::LatencySamples { samples: u32::MAX }) => {}
++        Err(failure) => {
++            assert!(matches!(
++                failure.cause,
++                ErrorKind::Eof | ErrorKind::ChildExited
++            ));
++            assert!(matches!(
++                failure.reported.as_deref(),
++                Some(HostResponse::LatencySamples { samples: u32::MAX })
++            ));
++            assert_eq!(session.state, State::Terminal);
++        }
++        _ => panic!("complete final frame lost"),
++    }
++    finish(&mut session);
++}
++
++#[test]
++fn incomplete_reply_eof_is_not_success() {
++    let _serial = serial();
++    let mut session = spawn("import sys\nsys.stdin.readline()\nsys.stdout.write('{\"LatencySamples\":');sys.stdout.flush()\n");
++    let failure = failure_kind(scalar(&mut session));
++    assert!(matches!(
++        failure.cause,
++        ErrorKind::Eof | ErrorKind::ChildExited
++    ));
++    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
++    finish(&mut session);
++}
++
++#[test]
++fn response_timeout_is_terminal_and_not_retried() {
++    let _serial = serial();
++    let mut session = spawn("import sys,time\nsys.stdin.readline()\ntime.sleep(10)\n");
++    let failure = failure_kind(session.exchange(
++        &HostCommand::LatencySamples,
++        ReplyShape::LatencySamples,
++        Instant::now() + Duration::from_millis(80),
++    ));
++    assert_eq!(failure.cause, ErrorKind::Deadline);
++    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
++    assert_eq!(
++        failure_kind(scalar(&mut session)).cause,
++        ErrorKind::Deadline
++    );
++    finish_forced(&mut session);
++}
++
++#[test]
++fn cancel_wakes_owner_poll_without_session_lock() {
++    let _serial = serial();
++    let mut session = spawn("import sys,time\nsys.stdin.readline()\ntime.sleep(10)\n");
++    let cancel = session.cancellation();
++    let failure = std::thread::scope(|scope| {
++        scope.spawn(|| {
++            std::thread::sleep(Duration::from_millis(50));
++            cancel.cancel();
++        });
++        failure_kind(scalar(&mut session))
++    });
++    assert_eq!(failure.cause, ErrorKind::Cancelled);
++    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
++    finish_forced(&mut session);
++    // Still owns its eventfd, even after child disposal. No recycled fd target.
++    cancel.cancel();
++}
++
++#[test]
++fn expired_and_unsupported_requests_send_nothing() {
++    let _serial = serial();
++    for unsupported in [false, true] {
++        let mut session = spawn("import sys\nassert sys.stdin.read() == ''\n");
++        let result = if unsupported {
++            session.exchange(
++                &HostCommand::GetAllParameters,
++                ReplyShape::ParameterValue,
++                deadline(),
++            )
++        } else {
++            session.exchange(
++                &HostCommand::LatencySamples,
++                ReplyShape::LatencySamples,
++                Instant::now(),
++            )
++        };
++        let failure = failure_kind(result);
++        assert_eq!(failure.delivery, Delivery::NotSent);
++        assert_eq!(
++            failure.cause,
++            if unsupported {
++                ErrorKind::UnsupportedRequest
++            } else {
++                ErrorKind::Deadline
++            }
++        );
++        finish(&mut session);
++    }
++}
++
++#[test]
++fn blocked_stdin_deadline_marks_partial_delivery() {
++    let _serial = serial();
++    let mut session = spawn("import time\ntime.sleep(10)\n");
++    // Larger than the OS pipe and bounded by the strict state limit.
++    let command = HostCommand::LoadState {
++        data: vec![7; 1024 * 1024],
++        context: crate::plugin::StateContext::Project,
++    };
++    let failure = failure_kind(session.exchange(
++        &command,
++        ReplyShape::Success,
++        Instant::now() + Duration::from_millis(300),
++    ));
++    assert_eq!(failure.cause, ErrorKind::Deadline);
++    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
++    finish_forced(&mut session);
++}
++
++#[test]
++fn unresolved_live_and_abandoned_owner_prevent_second_spawn() {
++    let _serial = serial();
++    let session = spawn("import time\ntime.sleep(10)\n");
++    let first_pid = session.owner.as_ref().unwrap().child.id();
++    let refusal = FreshHelperSession::spawn(
++        &mut python("raise AssertionError('must not spawn')"),
++        deadline(),
++    );
++    assert!(matches!(
++        refusal,
++        Err(SpawnFailure {
++            cause: ErrorKind::Busy,
++            cleanup: None
++        })
++    ));
++    drop(session);
++    let refusal = FreshHelperSession::spawn(
++        &mut python("raise AssertionError('must not spawn')"),
++        deadline(),
++    );
++    assert!(matches!(
++        refusal,
++        Err(SpawnFailure {
++            cause: ErrorKind::Busy,
++            cleanup: None
++        })
++    ));
++    let pending = FreshHelperSession::cleanup_abandoned(Instant::now());
++    assert!(matches!(pending.state, CleanupState::Pending));
++    // The same actual child remains owned; cleanup did not evict/overwrite it.
++    assert_eq!(quarantine::abandoned_pid(), Some(first_pid));
++    let reaped = FreshHelperSession::cleanup_abandoned(deadline());
++    assert!(
++        matches!(reaped.state, CleanupState::Reaped(_)),
++        "{reaped:?}"
++    );
++    assert!(matches!(
++        FreshHelperSession::cleanup_abandoned(deadline()).state,
++        CleanupState::Empty
++    ));
++    let mut next = spawn("import sys\nsys.stdin.readline()\n");
++    finish(&mut next);
++}
++
++#[test]
++fn owner_unwind_quarantines_child_without_deadlock() {
++    let _serial = serial();
++    let result = std::panic::catch_unwind(|| {
++        let _session = spawn("import time\ntime.sleep(10)\n");
++        panic!("Rust owner callback failure");
++    });
++    assert!(result.is_err());
++    let reaped = FreshHelperSession::cleanup_abandoned(deadline());
++    assert!(
++        matches!(reaped.state, CleanupState::Reaped(_)),
++        "{reaped:?}"
++    );
++}
++
++#[test]
++fn direct_pending_cleanup_retains_owner_until_reap() {
++    let _serial = serial();
++    let mut session = spawn("import time\ntime.sleep(10)\n");
++    let pid = session.owner.as_ref().unwrap().child.id();
++    let report = session.dispose_checked(Instant::now());
++    assert!(matches!(report.state, CleanupState::Pending));
++    assert_eq!(session.owner.as_ref().unwrap().child.id(), pid);
++    assert_eq!(session.state, State::Terminal);
++    finish_forced(&mut session);
++    assert!(session.owner.is_none());
++}
++
++#[test]
++fn codec_budget_limits_and_final_expiry_are_explicit() {
++    let mut budget = new_budget(deadline());
++    budget.reserve(MAX_PAYLOAD).unwrap();
++    assert_eq!(budget.reserve(1), Err(ErrorKind::Limit));
++    budget.release(MAX_PAYLOAD);
++    budget.deadline = Instant::now();
++    assert_eq!(budget.check(), Err(ErrorKind::Deadline));
++    budget.cancel.cancelled.store(true, Ordering::Release);
++    assert_eq!(budget.check(), Err(ErrorKind::Cancelled));
++}
++
++#[test]
++fn sticky_cancel_is_observed_even_if_wake_write_is_missed() {
++    let _serial = serial();
++    let mut session = spawn("import sys,time\nsys.stdin.readline()\ntime.sleep(10)\n");
++    let cancel = session.cancellation();
++    cancel.0.skip_wake.store(true, Ordering::Release);
++    let start = Instant::now();
++    let failure = std::thread::scope(|scope| {
++        scope.spawn(|| {
++            std::thread::sleep(Duration::from_millis(50));
++            cancel.cancel();
++        });
++        failure_kind(session.exchange(
++            &HostCommand::LatencySamples,
++            ReplyShape::LatencySamples,
++            Instant::now() + Duration::from_secs(5),
++        ))
++    });
++    assert_eq!(failure.cause, ErrorKind::Cancelled);
++    assert!(
++        start.elapsed() < Duration::from_secs(3),
++        "missed wake slept until full deadline"
++    );
++    finish_forced(&mut session);
++}
++
++#[test]
++fn setup_failure_returns_actual_child_for_checked_cleanup() {
++    let _serial = serial();
++    pump::test_hooks::arm(pump::test_hooks::Fault::Setup);
++    let mut failure =
++        match FreshHelperSession::spawn(&mut python("import time\ntime.sleep(10)\n"), deadline()) {
++            Err(failure) => failure,
++            Ok(_) => panic!("injected setup failure missing"),
++        };
++    assert_eq!(failure.cause, ErrorKind::Io(libc::EIO));
++    let session = failure
++        .cleanup
++        .as_mut()
++        .expect("child cannot disappear on setup failure");
++    assert!(session.owner.is_some());
++    finish_forced(session);
++}
++
++#[test]
++fn wait_and_kill_errors_retain_same_child_for_retry_cleanup_only() {
++    let _serial = serial();
++    for (fault, expected_wait, expected_kill) in [
++        (pump::test_hooks::Fault::Wait, Some(libc::EIO), None),
++        (pump::test_hooks::Fault::Kill, None, Some(libc::EPERM)),
++    ] {
++        let mut session = spawn("import time\ntime.sleep(10)\n");
++        let pid = session.owner.as_ref().unwrap().child.id();
++        pump::test_hooks::arm(fault);
++        let report = session.dispose_checked(deadline());
++        assert!(matches!(report.state, CleanupState::Pending));
++        assert_eq!(report.wait_error, expected_wait);
++        assert_eq!(report.kill_error, expected_kill);
++        assert_eq!(session.owner.as_ref().unwrap().child.id(), pid);
++        assert!(scalar(&mut session).is_err());
++        finish_forced(&mut session);
++    }
++}
++
++#[test]
++fn kill_evidence_survives_a_later_observation_error() {
++    let _serial = serial();
++    let mut session = spawn("import time\ntime.sleep(10)\n");
++    pump::test_hooks::arm(pump::test_hooks::Fault::PollAfterKill);
++    let report = session.dispose_checked(deadline());
++    assert_eq!(report.wait_error, Some(libc::EIO));
++    assert!(report.kill_requested);
++    assert!(session.owner.is_some());
++    finish_forced(&mut session);
++}
++
++#[test]
++fn quarantine_cleanup_unwind_restores_exact_owner() {
++    let _serial = serial();
++    let session = spawn("import time\ntime.sleep(10)\n");
++    let pid = session.owner.as_ref().unwrap().child.id();
++    drop(session);
++    pump::test_hooks::arm(pump::test_hooks::Fault::ReapPanic);
++    let result = std::panic::catch_unwind(|| {
++        let _ = FreshHelperSession::cleanup_abandoned(deadline());
++    });
++    assert!(result.is_err());
++    assert_eq!(quarantine::abandoned_pid(), Some(pid));
++    let report = FreshHelperSession::cleanup_abandoned(deadline());
++    assert!(matches!(report.state, CleanupState::Reaped(_)));
++}
++
++#[test]
++fn zero_write_never_claims_delivery_and_interrupted_operations_retry() {
++    let _serial = serial();
++    let mut session = spawn("import sys\nassert sys.stdin.read() == ''\n");
++    pump::test_hooks::arm(pump::test_hooks::Fault::WriteZero);
++    let failure = failure_kind(scalar(&mut session));
++    assert_eq!(failure.cause, ErrorKind::ZeroWrite);
++    assert_eq!(failure.delivery, Delivery::NotSent);
++    finish(&mut session);
++    for fault in [
++        pump::test_hooks::Fault::WriteInterrupted,
++        pump::test_hooks::Fault::ProbeInterrupted,
++    ] {
++        let mut session = spawn("import sys,json\nassert json.loads(sys.stdin.readline()) == 'LatencySamples'\nprint('{\"LatencySamples\":{\"samples\":9}}',flush=True)\nassert json.loads(sys.stdin.readline()) == 'Shutdown'\n");
++        pump::test_hooks::arm(fault);
++        assert!(matches!(
++            scalar(&mut session),
++            Ok(HostResponse::LatencySamples { samples: 9 })
++        ));
++        finish(&mut session);
++    }
++}
++
++#[test]
++fn unsupported_sigpipe_and_epipe_are_confined_to_disposable_hosts() {
++    let _serial = serial();
++    for mode in ["sigpipe-default", "epipe"] {
++        let mut command = Command::new(std::env::current_exe().unwrap());
++        command
++            .args([
++                "--exact",
++                "fresh_helper::tests::disposable_signal_host",
++                "--nocapture",
++            ])
++            .env("CITRUS_STRICT_DISPOSABLE_SIGNAL_TEST", mode);
++        let mut session = match FreshHelperSession::spawn(&mut command, deadline()) {
++            Ok(session) => session,
++            Err(_) => panic!("disposable host spawn"),
++        };
++        // This executable is a bounded unit-test host, not a protocol helper.
++        // Do not write Shutdown into its test runner's stdin.
++        session.state = State::Terminal;
++        // Wait directly for the disposable test to finish, under a separate
++        // deadline; Drop still retains it if an assertion unwinds here.
++        let end = deadline();
++        loop {
++            match session.owner.as_mut().unwrap().child.try_wait().unwrap() {
++                Some(status) => {
++                    assert!(status.success(), "disposable {mode} failed");
++                    break;
++                }
++                None if Instant::now() < end => std::thread::sleep(Duration::from_millis(5)),
++                None => panic!("disposable {mode} exceeded its watchdog"),
++            }
++        }
++        finish(&mut session);
++    }
++}
++
++#[test]
++fn disposable_signal_host() {
++    let Ok(mode) = std::env::var("CITRUS_STRICT_DISPOSABLE_SIGNAL_TEST") else {
++        return;
++    };
++    let _serial = serial();
++    if mode == "sigpipe-default" {
++        // This process exists solely for this test. Production never changes
++        // signal disposition; the ordinary test runner is unaffected.
++        // SAFETY: SIG_DFL is a valid handler value, no Rust callback is installed.
++        unsafe {
++            libc::signal(libc::SIGPIPE, libc::SIG_DFL);
++        }
++        let result = FreshHelperSession::spawn(
++            &mut python("raise AssertionError('must not spawn')"),
++            deadline(),
++        );
++        assert!(matches!(
++            result,
++            Err(SpawnFailure {
++                cause: ErrorKind::Sigpipe,
++                cleanup: None
++            })
++        ));
++        return;
++    }
++    assert_eq!(mode, "epipe");
++    let mut session = spawn("import os,time\nos.close(0)\ntime.sleep(10)\n");
++    // A nonblocking POLLERR is the actual pipe-reader-closed condition, so no
++    // scheduling sleep is treated as proof that the child closed its descriptor.
++    use std::os::fd::AsRawFd;
++    let fd = session
++        .owner
++        .as_ref()
++        .unwrap()
++        .stdin
++        .as_ref()
++        .unwrap()
++        .as_raw_fd();
++    let end = deadline();
++    loop {
++        let mut descriptor = libc::pollfd {
++            fd,
++            events: libc::POLLOUT,
++            revents: 0,
++        };
++        // SAFETY: exactly one valid pollfd and a live borrowed descriptor.
++        let result = unsafe { libc::poll(&mut descriptor, 1, 10) };
++        assert!(result >= 0);
++        if descriptor.revents & libc::POLLERR != 0 {
++            break;
++        }
++        assert!(Instant::now() < end, "pipe did not report reader closure");
++    }
++    let failure = failure_kind(scalar(&mut session));
++    assert_eq!(failure.cause, ErrorKind::Io(libc::EPIPE));
++    assert_eq!(failure.delivery, Delivery::NotSent);
++    finish_forced(&mut session);
++}
++
++#[test]
++fn cancellation_wake_retries_are_finite_under_interrupt_storm() {
++    let budget = new_budget(deadline());
++    let cancel = CancelHandle(budget.cancel.clone());
++    pump::test_hooks::arm_wake_interrupts(1000);
++    cancel.cancel();
++    assert_eq!(pump::test_hooks::wake_attempts(), 4);
++    assert_eq!(budget.check(), Err(ErrorKind::Cancelled));
++    pump::test_hooks::clear();
++}
++
++#[test]
++fn already_closed_final_reply_is_terminal_and_retained() {
++    let _serial = serial();
++    let mut session = spawn("import sys\nsys.stdin.readline()\nprint('{\"LatencySamples\":{\"samples\":23}}',flush=True)\n");
++    pump::test_hooks::arm(pump::test_hooks::Fault::ReadWaitForHup);
++    let failure = failure_kind(scalar(&mut session));
++    assert!(matches!(
++        failure.cause,
++        ErrorKind::Eof | ErrorKind::ChildExited
++    ));
++    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
++    assert!(matches!(
++        failure.reported.as_deref(),
++        Some(HostResponse::LatencySamples { samples: 23 })
++    ));
++    assert_eq!(session.state, State::Terminal);
++    assert!(scalar(&mut session).is_err());
++    finish(&mut session);
++}
++
++#[test]
++fn zero_write_after_prefix_keeps_may_have_applied_and_no_shutdown() {
++    let _serial = serial();
++    let mut session = spawn("import sys\ndata=sys.stdin.buffer.read()\nassert len(data)==4096\nassert b'Shutdown' not in data\n");
++    pump::test_hooks::arm(pump::test_hooks::Fault::WriteZeroAfterPrefix);
++    let command = HostCommand::LoadState {
++        data: vec![1; 8192],
++        context: crate::plugin::StateContext::Project,
++    };
++    let failure = failure_kind(session.exchange(&command, ReplyShape::Success, deadline()));
++    assert_eq!(failure.cause, ErrorKind::ZeroWrite);
++    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
++    finish(&mut session);
++}
++
++#[test]
++fn oversized_unterminated_pipe_reply_is_rejected_at_the_line_limit() {
++    let _serial = serial();
++    let mut session = spawn("import sys\nsys.stdin.readline()\nchunk=b'x'*4096\nfor _ in range(24577): sys.stdout.buffer.write(chunk)\nsys.stdout.buffer.flush()\nsys.stdin.read()\n");
++    let failure = failure_kind(session.exchange(
++        &HostCommand::LatencySamples,
++        ReplyShape::LatencySamples,
++        Instant::now() + Duration::from_secs(20),
++    ));
++    assert_eq!(failure.cause, ErrorKind::Limit);
++    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
++    finish_forced(&mut session);
++}
++
++#[test]
++fn observed_fault_is_sticky_when_cancel_is_published_later() {
++    let _serial = serial();
++    let mut session = spawn(
++        "import sys\nsys.stdin.readline()\nprint('malformed',flush=True)\nsys.stdin.read()\n",
++    );
++    let failure = failure_kind(scalar(&mut session));
++    assert_eq!(failure.cause, ErrorKind::MalformedReply);
++    session.cancellation().cancel();
++    assert_eq!(
++        failure_kind(scalar(&mut session)).cause,
++        ErrorKind::MalformedReply
++    );
++    finish(&mut session);
++}
++
++#[test]
++fn cold_load_crash_is_one_attempt_and_no_implicit_replay() {
++    let _serial = serial();
++    let mut session = spawn("import sys,json\nrequest=json.loads(sys.stdin.readline())\nassert list(request)==['LoadPlugin']\nprint('{\"Crashed\":{\"message\":\"mock cold-load failure\"}}',flush=True)\nassert sys.stdin.read()==''\n");
++    let command = HostCommand::LoadPlugin {
++        path: "mock-only.vst3".into(),
++        sample_rate: 48000.0,
++        block_size: 128,
++        tempo: 120.0,
++        time_sig_numerator: 4,
++        time_sig_denominator: 4,
++        class_id: None,
++    };
++    let failure = failure_kind(session.exchange(&command, ReplyShape::PluginInfo, deadline()));
++    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
++    assert!(matches!(
++        failure.reported.as_deref(),
++        Some(HostResponse::Crashed { .. })
++    ));
++    assert_eq!(
++        failure_kind(session.exchange(&command, ReplyShape::PluginInfo, deadline())).delivery,
++        Delivery::NotSent
++    );
++    finish(&mut session);
++}
++
++#[test]
++fn repeated_short_cleanup_does_not_renew_first_grace() {
++    let _serial = serial();
++    let mut session = spawn("import time\ntime.sleep(10)\n");
++    let pid = session.owner.as_ref().unwrap().child.id();
++    let first = session.dispose_checked(Instant::now() + Duration::from_millis(5));
++    assert!(matches!(first.state, CleanupState::Pending));
++    let grace = session.owner.as_ref().unwrap().graceful_until.unwrap();
++    let second = session.dispose_checked(Instant::now() + Duration::from_millis(5));
++    assert!(matches!(second.state, CleanupState::Pending));
++    assert_eq!(session.owner.as_ref().unwrap().child.id(), pid);
++    assert_eq!(session.owner.as_ref().unwrap().graceful_until, Some(grace));
++    assert!(session.owner.as_ref().unwrap().stdin.is_none());
++    std::thread::sleep(grace.saturating_duration_since(Instant::now()) + Duration::from_millis(1));
++    let final_report = session.dispose_checked(deadline());
++    assert!(matches!(final_report.state, CleanupState::Reaped(_)));
++    assert!(final_report.kill_requested);
++}
++
++#[test]
++fn cancellation_handle_has_only_independent_send_sync_authority() {
++    fn assert_send_sync<T: Send + Sync>() {}
++    assert_send_sync::<CancelHandle>();
++    // Negative auto-trait checks use ambiguous inference if the forbidden trait
++    // is implemented; they exercise the real private type rather than imports.
++    trait AmbiguousIfSend<A> {
++        fn marker() {}
++    }
++    impl<T: ?Sized> AmbiguousIfSend<()> for T {}
++    impl<T: ?Sized + Send> AmbiguousIfSend<u8> for T {}
++    let _ = <FreshHelperSession as AmbiguousIfSend<_>>::marker;
++    trait AmbiguousIfSync<A> {
++        fn marker() {}
++    }
++    impl<T: ?Sized> AmbiguousIfSync<()> for T {}
++    impl<T: ?Sized + Sync> AmbiguousIfSync<u8> for T {}
++    let _ = <FreshHelperSession as AmbiguousIfSync<_>>::marker;
++}
++
++#[test]
++fn direct_child_exit_is_detected_while_a_separate_writer_holds_stdout_open() {
++    let _serial = serial();
++    use std::os::fd::{FromRawFd, OwnedFd};
++    pump::require_ignored_sigpipe().unwrap();
++    let permit = quarantine::reserve().unwrap();
++    let cancel = Arc::new(Cancellation {
++        cancelled: AtomicBool::new(false),
++        wake: pump::new_wake().unwrap(),
++        skip_wake: AtomicBool::new(false),
++    });
++    let mut fds = [-1; 2];
++    // SAFETY: pipe2 writes exactly two new descriptors; atomic CLOEXEC prevents
++    // unintended inheritance. Each descriptor is immediately given one owner.
++    assert_eq!(
++        unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) },
++        0
++    );
++    // SAFETY: fresh successful pipe2 descriptors, transferred exactly once.
++    let read = unsafe { OwnedFd::from_raw_fd(fds[0]) };
++    let extra_writer = unsafe { OwnedFd::from_raw_fd(fds[1]) };
++    let mut command = python("import sys\nsys.stdin.readline()\n");
++    command
++        .stdin(Stdio::piped())
++        .stdout(Stdio::from(extra_writer.try_clone().unwrap()))
++        .stderr(Stdio::inherit());
++    let child = command.spawn().unwrap();
++    // Install the returned child in guarded ownership before any fallible setup.
++    let mut session = FreshHelperSession {
++        owner: Some(ChildOwner {
++            child,
++            stdin: None,
++            stdout: Some(ChildStdout::from(read)),
++            kill_requested: false,
++            graceful_until: None,
++            observed_exit: None,
++        }),
++        permit: Some(permit),
++        cancel,
++        state: State::Ready,
++        terminal: None,
++        _owner_thread: PhantomData,
++    };
++    let owner = session.owner.as_mut().unwrap();
++    owner.stdin = owner.child.stdin.take();
++    pump::set_nonblocking(owner.stdin.as_ref().unwrap()).unwrap();
++    let start = Instant::now();
++    let failure = failure_kind(scalar(&mut session));
++    assert_eq!(failure.cause, ErrorKind::ChildExited);
++    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
++    assert!(start.elapsed() < Duration::from_secs(2));
++    assert!(session
++        .owner
++        .as_ref()
++        .unwrap()
++        .observed_exit
++        .unwrap()
++        .success());
++    // The independently held write FD is still alive: EOF was not the evidence.
++    // Even a subsequent valid-looking reply cannot resurrect a dead candidate.
++    use std::io::Write;
++    let mut writer = std::fs::File::from(extra_writer);
++    writer
++        .write_all(b"{\"LatencySamples\":{\"samples\":17}}\n")
++        .unwrap();
++    let later = failure_kind(scalar(&mut session));
++    assert_eq!(later.cause, ErrorKind::ChildExited);
++    assert_eq!(later.delivery, Delivery::NotSent);
++    assert_eq!(session.state, State::Terminal);
++    drop(writer);
++    finish(&mut session);
++}
 --- a/src/host.rs
 +++ b/src/host.rs
 @@ -222,6 +222,41 @@
@@ -6296,7 +11473,7 @@
 +pub(crate) mod processor_lease;
 +
 +pub(crate) mod native_edit_transport;
---- /dev/null
+--- a/src/internal/native_edit_transport.rs
 +++ b/src/internal/native_edit_transport.rs
 @@ -0,0 +1,1223 @@
 +//! Bounded native-editor intent transport, separate from display notifications.
@@ -11310,7 +16487,7 @@
 +        Ok(())
 +    }
 +}
---- /dev/null
+--- a/src/internal/plugin_impl/borrowed_processor_fixture.rs
 +++ b/src/internal/plugin_impl/borrowed_processor_fixture.rs
 @@ -0,0 +1,131 @@
 +//! TEST-ONLY processor capability/lifetime proof. The entire module is cfg(test).
@@ -11444,7 +16621,7 @@
 +    assert!(result.is_err());
 +    assert!(!active.load(Ordering::Acquire));
 +}
---- /dev/null
+--- a/src/internal/plugin_impl/domain_session.rs
 +++ b/src/internal/plugin_impl/domain_session.rs
 @@ -0,0 +1,382 @@
 +//! Scoped, same-thread capabilities. The aggregate remains exclusively borrowed and owns
@@ -11829,7 +17006,7 @@
 +        Ok(accepted)
 +    }
 +}
---- /dev/null
+--- a/src/internal/plugin_impl/domain_session/runtime_loan_fixture.rs
 +++ b/src/internal/plugin_impl/domain_session/runtime_loan_fixture.rs
 @@ -0,0 +1,173 @@
 +//! TEST-ONLY concurrent use of the complete existing processing kernel.
@@ -12005,7 +17182,7 @@
 +        self.inner.take_output_events_with_loss()
 +    }
 +}
---- /dev/null
+--- a/src/internal/plugin_impl/domain_session/scoped_worker.rs
 +++ b/src/internal/plugin_impl/domain_session/scoped_worker.rs
 @@ -0,0 +1,462 @@
 +//! Disabled-feature library session. Owning COM references and prepared storage remain
@@ -12470,7 +17647,7 @@
 +        })
 +    })
 +}
---- /dev/null
+--- a/src/internal/plugin_impl/domain_tests.rs
 +++ b/src/internal/plugin_impl/domain_tests.rs
 @@ -0,0 +1,3254 @@
 +//! Synchronous ownership/lifecycle regression tests using real VST3 COM interfaces.
@@ -15727,7 +20904,7 @@
 +
 +#[cfg(all(feature = "experimental-scoped-worker", target_os = "linux"))]
 +mod scoped_worker_tests;
---- /dev/null
+--- a/src/internal/plugin_impl/domain_tests/borrowed_processor_tests.rs
 +++ b/src/internal/plugin_impl/domain_tests/borrowed_processor_tests.rs
 @@ -0,0 +1,335 @@
 +//! Thread/lifetime proof using allocating, locking COM mocks, not native plug-ins or RT tests.
@@ -16065,7 +21242,7 @@
 +        owner.control.control_thread = main;
 +    }
 +}
---- /dev/null
+--- a/src/internal/plugin_impl/domain_tests/runtime_loan_tests.rs
 +++ b/src/internal/plugin_impl/domain_tests/runtime_loan_tests.rs
 @@ -0,0 +1,1072 @@
 +//! Full-kernel scoped-runtime evidence with allocating, locking COM mocks.
@@ -17140,7 +22317,7 @@
 +        0.75
 +    );
 +}
---- /dev/null
+--- a/src/internal/plugin_impl/domain_tests/scoped_worker_tests.rs
 +++ b/src/internal/plugin_impl/domain_tests/scoped_worker_tests.rs
 @@ -0,0 +1,1731 @@
 +//! Disabled-feature full-kernel session evidence using allocating, locking COM mocks.
@@ -18874,7 +24051,7 @@
 +        assert_teardown_before_module(&trace);
 +    }
 +}
---- /dev/null
+--- a/src/internal/plugin_impl/domain_tests/session_tests.rs
 +++ b/src/internal/plugin_impl/domain_tests/session_tests.rs
 @@ -0,0 +1,377 @@
 +//! Real same-thread capability tests. Rust callback unwind is not foreign COM unwind recovery.
@@ -19254,7 +24431,7 @@
 +    assert!(result.unwrap_err().to_string().contains("unsupported"));
 +    assert!(!invoked);
 +}
---- /dev/null
+--- a/src/internal/processor_lease.rs
 +++ b/src/internal/processor_lease.rs
 @@ -0,0 +1,68 @@
 +//! Narrow, borrowed access to the VST3 processing interface.
@@ -19337,7 +24514,18 @@
  pub mod discovery;
  
  #[cfg(feature = "egui-widgets")]
-@@ -111,9 +114,11 @@
+@@ -75,6 +78,10 @@
+ pub mod backends;
+ 
+ pub mod process_isolation;
++
++#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
++#[allow(dead_code)] // Deliberately private foundation; caller integration is a later checkpoint.
++mod fresh_helper;
+ 
+ #[cfg(feature = "midi-input")]
+ pub mod midi_input;
+@@ -111,9 +118,11 @@
      RtAudioHandle,
  };
  pub use plugin::{
@@ -19352,7 +24540,7 @@
  };
  pub use realtime::{RealtimePluginRunner, RtControl};
  pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
-@@ -142,8 +147,8 @@
+@@ -142,8 +151,8 @@
          plugin::{
              AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification,
              OutputEventConsumer, OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin,
@@ -21451,7 +26639,7 @@
 +            .contains("could not isolate helper protocol output"));
 +    }
 +}
---- /dev/null
+--- a/src/scoped_worker.rs
 +++ b/src/scoped_worker.rs
 @@ -0,0 +1,948 @@
 +//! Owned messages and borrowed ports for an opt-in, library-owned scoped worker.

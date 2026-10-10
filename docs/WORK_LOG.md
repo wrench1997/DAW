@@ -1440,3 +1440,17 @@ The feature remains disabled by default. No helper/wire/App activation, strict
 metadata-policy change, native/genuine-plugin run, device/performance claim or
 publication is included. A fixed fresh-initialized-Surge test proposal requires
 separate approval after this source/mock checkpoint is reviewed and archived.
+
+## Strict fresh-helper foundation: unvalidated first low-level source checkpoint
+
+A separate disabled Linux feature prepares a crate-private, one-request fresh-child
+transport with checkpointed bounded codecs, exact response shape and checked cleanup.
+The initial subset, single process-wide cleanup reservation and supported-host
+SIGPIPE precondition are described in `STRICT_HELPER_FOUNDATION.md`.
+
+This checkpoint has no production caller and has not been compiled or tested yet.
+The source will be archived before execution and receives independent syscall,
+codec, ownership and mock-callsite review. Existing worker genuine acceptance
+remains the separately retained initialized/headless library qualification;
+this transport source does not extend that acceptance. No App/helper/bounce
+wiring, tagged transport or metadata-policy activation is included.

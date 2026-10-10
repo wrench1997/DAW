@@ -395,3 +395,16 @@ teardown. No helper/wire/App activation or metadata policy changes are included.
 Ordinary MIDI admission is mechanically shared with the owner, with the same
 public scalar validation before worker bookkeeping; mapped MIDI remains main-side.
 New source/COM/compiler fixtures require review and archival before execution.
+
+## Disabled strict fresh-helper foundation (source checkpoint; unvalidated)
+
+`experimental-fresh-helper` compiles a Linux-only crate-private `fresh_helper`
+module for low-level codec/pump/cleanup mock validation. It has no production
+caller. The legacy process-isolation implementation, wire variants, retries and
+serde behavior are unchanged. New files implement a closed eight-operation
+subset, strict bounded payload handling and exact audio shape, cooperative
+whole-exchange deadlines, owner-thread nonblocking I/O and cancellation, and
+retained Child ownership through a single reserved process-wide quarantine.
+No real plugin/COM authority is added. Full limits and the deliberate restrictions
+on nonempty event replies, legacy state arrays, SIGPIPE and concurrent strict
+sessions are documented in the repository's strict-foundation guide.
