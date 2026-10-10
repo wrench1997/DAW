@@ -278,7 +278,7 @@ fn rejected(error: Error) -> ScopedWorkerError {
     }
 }
 
-pub(super) fn run(
+pub(in crate::internal::plugin_impl) fn run(
     owner: &mut PluginImpl,
     levels: &Mutex<crate::audio::AudioLevels>,
     body: &mut ScopedWorkerCallback<'_>,
@@ -361,6 +361,9 @@ fn run_inner(
     let status = Arc::new(WorkerStatus::new());
     let first_error = Arc::new(Mutex::new(None));
     thread::scope(|scope| {
+        // The UI dispatch anchor outlives the branded port's Drop. Neither its
+        // control borrow nor the port can escape the session callback.
+        let mut dispatch = |request| ui_request(&mut control, editor_scale_factor, request);
         // Declared INSIDE scope: Drop closes the unique sender before scope's implicit join
         // on every unwind path. No owned sender or join handle reaches caller code.
         let (mut io, commands, replies) = WorkerIo::channel(Arc::clone(&status));
@@ -394,7 +397,6 @@ fn run_inner(
                 secondary_worker: None,
                 unconsumed_reply: None,
             })?;
-        let mut dispatch = |request| ui_request(&mut control, editor_scale_factor, request);
         let mut ui = AttachedUiBridge::new(&mut dispatch, Arc::clone(&status));
         let body_result = catch_unwind(AssertUnwindSafe(|| body(&mut ui, &mut io)));
         io.close();

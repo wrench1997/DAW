@@ -1361,3 +1361,15 @@ wire change, metadata mode or genuine-plugin execution is present in this baseli
   join on error/unwind; no detached worker or hidden recovery is introduced.
 - Source tests, compiler contracts and exact unsafe callsites remain unexecuted
   until independent review and a new durable source/Git-bundle checkpoint.
+
+### Scoped worker first compile correction (unvalidated)
+
+The initial QA manifest incorrectly retained upstream example-only development
+dependencies; offline resolution stopped before compilation. The established
+standalone library harness corrected that QA-only setup. The first actual feature
+compile then found a private entry visibility error and a reverse-drop-order
+lifetime error. The entry is now visible only within its owning plugin_impl module,
+and the UI dispatch anchor is declared before the branded port inside the same
+scope. No public authority or execution policy changes. All original logs are
+retained; no feature test has run yet. Corrected source requires its new recovery
+archive and review before rerun.

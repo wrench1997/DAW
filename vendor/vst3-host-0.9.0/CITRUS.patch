@@ -12007,7 +12007,7 @@
 +}
 --- /dev/null
 +++ b/src/internal/plugin_impl/domain_session/scoped_worker.rs
-@@ -0,0 +1,457 @@
+@@ -0,0 +1,459 @@
 +//! Disabled-feature library session. Owning COM references and prepared storage remain
 +//! in the loading-thread owner. Only the fixed processing dispatcher crosses threads.
 +
@@ -12288,7 +12288,7 @@
 +    }
 +}
 +
-+pub(super) fn run(
++pub(in crate::internal::plugin_impl) fn run(
 +    owner: &mut PluginImpl,
 +    levels: &Mutex<crate::audio::AudioLevels>,
 +    body: &mut ScopedWorkerCallback<'_>,
@@ -12371,6 +12371,9 @@
 +    let status = Arc::new(WorkerStatus::new());
 +    let first_error = Arc::new(Mutex::new(None));
 +    thread::scope(|scope| {
++        // The UI dispatch anchor outlives the branded port's Drop. Neither its
++        // control borrow nor the port can escape the session callback.
++        let mut dispatch = |request| ui_request(&mut control, editor_scale_factor, request);
 +        // Declared INSIDE scope: Drop closes the unique sender before scope's implicit join
 +        // on every unwind path. No owned sender or join handle reaches caller code.
 +        let (mut io, commands, replies) = WorkerIo::channel(Arc::clone(&status));
@@ -12404,7 +12407,6 @@
 +                secondary_worker: None,
 +                unconsumed_reply: None,
 +            })?;
-+        let mut dispatch = |request| ui_request(&mut control, editor_scale_factor, request);
 +        let mut ui = AttachedUiBridge::new(&mut dispatch, Arc::clone(&status));
 +        let body_result = catch_unwind(AssertUnwindSafe(|| body(&mut ui, &mut io)));
 +        io.close();
