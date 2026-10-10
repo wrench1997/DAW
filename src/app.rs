@@ -17090,6 +17090,17 @@ impl CitrusApp {
             );
             return;
         };
+        if self.project.clips[index].kind == ClipKind::Automation
+            && !automation_points::valid_clip_span(&self.project.clips[index])
+        {
+            inspector_section(ui, "AUTOMATION", |ui| {
+                ui.colored_label(
+                    theme::AMBER,
+                    "This automation clip has invalid timing and cannot be edited.",
+                );
+            });
+            return;
+        }
         let (
             kind,
             automation_id,
@@ -20849,8 +20860,9 @@ impl CitrusApp {
                                         Some((automation.id, point_index, edited));
                                 }
                                 if node_response.drag_stopped() {
+                                    // egui also reports drag_stopped on Escape. Preserve cancellation
+                                    // eligibility until the final transaction branch below.
                                     project_gesture_stopped = true;
-                                    self.automation_point_drag_active = false;
                                     ui.ctx().data_mut(|data| {
                                         data.remove::<AutomationPoint>(node_id.with("origin"));
                                     });
@@ -20871,77 +20883,84 @@ impl CitrusApp {
                                         );
                                     });
                                 }
-                                node_response.context_menu(|ui| {
-                                    let reference = ui.ctx().data(|data| {
-                                        data.get_temp::<automation_points::PointReference>(
-                                            node_id.with("menu-point"),
-                                        )
+                                egui::Popup::context_menu(&node_response)
+                                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                                    .show(|ui| {
+                                        let reference = ui.ctx().data(|data| {
+                                            data.get_temp::<automation_points::PointReference>(
+                                                node_id.with("menu-point"),
+                                            )
+                                        });
+                                        let Some(reference) = reference else {
+                                            ui.close();
+                                            return;
+                                        };
+                                        ui.label(format!(
+                                            "Native value: {:.6}",
+                                            reference.point.value
+                                        ));
+                                        if ui.button("Copy value").clicked() {
+                                            self.automation_point_clipboard = Some(
+                                                reference.range.normalize(reference.point.value),
+                                            );
+                                            ui.close();
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                self.automation_point_clipboard.is_some(),
+                                                egui::Button::new("Paste value"),
+                                            )
+                                            .clicked()
+                                        {
+                                            automation_point_action =
+                                                Some(automation_points::PointAction::Value(
+                                                    reference.clone(),
+                                                    self.automation_point_clipboard.unwrap(),
+                                                ));
+                                            ui.close();
+                                        }
+                                        ui.label("Type value (0–1)");
+                                        let mut text = ui
+                                            .ctx()
+                                            .data(|data| {
+                                                data.get_temp::<String>(node_id.with("value-text"))
+                                            })
+                                            .unwrap_or_default();
+                                        ui.add(
+                                            egui::TextEdit::singleline(&mut text)
+                                                .hint_text("Normalized value"),
+                                        );
+                                        let parsed = text
+                                            .parse::<f64>()
+                                            .ok()
+                                            .filter(|v| v.is_finite() && (0.0..=1.0).contains(v));
+                                        ui.ctx().data_mut(|data| {
+                                            data.insert_temp(node_id.with("value-text"), text)
+                                        });
+                                        if ui
+                                            .add_enabled(
+                                                parsed.is_some(),
+                                                egui::Button::new("Apply value"),
+                                            )
+                                            .clicked()
+                                        {
+                                            automation_point_action =
+                                                Some(automation_points::PointAction::Value(
+                                                    reference.clone(),
+                                                    parsed.unwrap(),
+                                                ));
+                                            ui.close();
+                                        }
+                                        if ui.button("Delete point").clicked() {
+                                            automation_point_action = Some(
+                                                automation_points::PointAction::Delete(reference),
+                                            );
+                                            ui.close();
+                                        }
+                                        if ui.button("Cancel").clicked() {
+                                            ui.close();
+                                        }
                                     });
-                                    let Some(reference) = reference else {
-                                        ui.close();
-                                        return;
-                                    };
-                                    ui.label(format!("Native value: {:.6}", reference.point.value));
-                                    if ui.button("Copy value").clicked() {
-                                        self.automation_point_clipboard =
-                                            Some(reference.range.normalize(reference.point.value));
-                                        ui.close();
-                                    }
-                                    if ui
-                                        .add_enabled(
-                                            self.automation_point_clipboard.is_some(),
-                                            egui::Button::new("Paste value"),
-                                        )
-                                        .clicked()
-                                    {
-                                        automation_point_action =
-                                            Some(automation_points::PointAction::Value(
-                                                reference.clone(),
-                                                self.automation_point_clipboard.unwrap(),
-                                            ));
-                                        ui.close();
-                                    }
-                                    ui.label("Type value (0–1)");
-                                    let mut text = ui
-                                        .ctx()
-                                        .data(|data| {
-                                            data.get_temp::<String>(node_id.with("value-text"))
-                                        })
-                                        .unwrap_or_default();
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut text)
-                                            .hint_text("Normalized value"),
-                                    );
-                                    let parsed = text
-                                        .parse::<f64>()
-                                        .ok()
-                                        .filter(|v| v.is_finite() && (0.0..=1.0).contains(v));
-                                    ui.ctx().data_mut(|data| {
-                                        data.insert_temp(node_id.with("value-text"), text)
-                                    });
-                                    if ui
-                                        .add_enabled(
-                                            parsed.is_some(),
-                                            egui::Button::new("Apply value"),
-                                        )
-                                        .clicked()
-                                    {
-                                        automation_point_action =
-                                            Some(automation_points::PointAction::Value(
-                                                reference.clone(),
-                                                parsed.unwrap(),
-                                            ));
-                                        ui.close();
-                                    }
-                                    if ui.button("Delete point").clicked() {
-                                        automation_point_action =
-                                            Some(automation_points::PointAction::Delete(reference));
-                                        ui.close();
-                                    }
-                                    if ui.button("Cancel").clicked() {
-                                        ui.close();
-                                    }
-                                });
                             }
                             if (response.secondary_clicked() || response.double_clicked())
                                 && !clip_consumed_click
