@@ -1041,6 +1041,18 @@ fn wait_for_held_restoration_ready(fixture: &Fixture, channel: u32) {
     }
 }
 
+fn assert_ordinary_ring_full_before_handoff(fixture: &mut Fixture) {
+    assert!(
+        !fixture
+            .app_mut()
+            .audio
+            .as_mut()
+            .unwrap()
+            .command(AudioCommand::SetMaster(1.0)),
+        "actual ordinary command enqueue must reject before this callback drain"
+    );
+}
+
 fn assert_exclusive_compiled_source(app: &CitrusApp, expect_audio: bool) {
     let (_, timeline) = app
         .latest_compiled_timeline()
@@ -1181,6 +1193,22 @@ fn actual_conversion_undo_ready_install_new_timeline_and_redo_preserve_authorita
     assert_eq!(RESTORATION_FACTORY_CALLS.load(Ordering::Acquire), 1);
     // The real worker is prepared; only actual App polling and callback receipt
     // may transfer this owner and subsequently release the playback barrier.
+    // Drain Undo's ordinary mixer commands before testing successful admission.
+    // No installation is queued yet and no generator receipt is consumed here.
+    assert!(
+        fixture
+            .app()
+            .pending_clip_restorations
+            .contains_key(&channel)
+    );
+    assert!(
+        !fixture
+            .app()
+            .pending_generator_chains
+            .contains_key(&channel)
+    );
+    assert_ordinary_ring_full_before_handoff(&mut fixture);
+    fixture.pump_callback_only();
     fixture.app_mut().poll_clip_restorations();
     let restored_endpoint = fixture.app().pending_generator_chains[&channel].endpoint_id;
     assert!(fixture.app().pending_clip_restorations.is_empty());
@@ -1232,6 +1260,18 @@ fn actual_conversion_undo_ready_install_new_timeline_and_redo_preserve_authorita
     assert!(
         clip_render::project_matches_snapshot(&fixture.app().project, &committed_project).unwrap()
     );
+    // Redo's mixer commands can defer removal behind the real bounded ring.
+    // Drain them and issue the real retry without consuming its later receipt.
+    assert!(
+        !fixture
+            .app()
+            .pending_generator_removals
+            .contains_key(&channel)
+    );
+    assert!(fixture.app().deferred_generator_rebuilds.contains(&channel));
+    assert_ordinary_ring_full_before_handoff(&mut fixture);
+    fixture.pump_callback_only();
+    fixture.app_mut().poll_clip_restorations();
     assert!(
         fixture
             .app()
@@ -1723,6 +1763,22 @@ fn actual_installed_receipt_panic_retains_exact_pending_owner_and_blocks_later_a
     let channel = fixture.app().project.channels[0].id;
     fixture.app_mut().undo();
     wait_for_held_restoration_ready(&fixture, channel);
+    // Undo filled the ordinary ring; this test targets receipt consumption,
+    // not the separate queue-full installation-refusal path.
+    assert!(
+        fixture
+            .app()
+            .pending_clip_restorations
+            .contains_key(&channel)
+    );
+    assert!(
+        !fixture
+            .app()
+            .pending_generator_chains
+            .contains_key(&channel)
+    );
+    assert_ordinary_ring_full_before_handoff(&mut fixture);
+    fixture.pump_callback_only();
     fixture.app_mut().poll_clip_restorations();
     assert!(fixture.app().pending_clip_restorations.is_empty());
     let pending = &fixture.app().pending_generator_chains[&channel];
@@ -1787,6 +1843,18 @@ fn actual_removed_receipt_panic_retains_exact_running_owner_and_blocks_later_adm
     let exact_guard = &running.guard as *const PluginWorkerGuard;
     assert!(!running.control.stats().stopped);
     fixture.app_mut().redo();
+    // Admit the deferred removal after draining Redo's ordinary commands.
+    // Leave generator receipt polling to the panic-armed Fixture tick below.
+    assert!(
+        !fixture
+            .app()
+            .pending_generator_removals
+            .contains_key(&channel)
+    );
+    assert!(fixture.app().deferred_generator_rebuilds.contains(&channel));
+    assert_ordinary_ring_full_before_handoff(&mut fixture);
+    fixture.pump_callback_only();
+    fixture.app_mut().poll_clip_restorations();
     let removal = &fixture.app().pending_generator_removals[&channel];
     assert_eq!(
         (
