@@ -1246,3 +1246,37 @@ The new full-source compile-contract runner checks the actual test-only private
 types and a positive scoped use before asserting the borrow/visibility/auto-trait
 failures. At this recovery boundary compilation and execution remain pending;
 the exact unsafe call sites require independent review before execution.
+
+
+### Executed borrowed-capability proof (2026-10-10)
+
+Independent unsafe-boundary review preceded execution. All 8 new mock-thread
+fixtures and all 52 private compiler contracts pass. The latter include positive
+scoped transfer/rejoin and production-owner controls, then independent production
+exclusion, mutable/unsafe-call, authority, lifetime and borrow-failure checks. The
+350 ms fixture establishes completion before release of a main-thread hold lasting
+at least 350 ms, with a generous watchdog; it is not a 350 ms execution deadline.
+The same-thread case is a sequential-call structural control, not an execution of
+the actual helper dispatcher. Detached-thread exclusion is for a nonstatic owner
+loan; a deliberately leaked static owner is outside the tested teardown contract.
+
+Fresh source gates pass 408 available vendor tests (one known absent SDK fixture
+excluded), 26 doctests, 1,188 App tests, 25 helper tests, 13 protocol tests and 239
+Python tests. Root strict all-feature Clippy, formatting and the vendor test
+Clippy check pass; the latter retains only the already documented deprecated and
+drain_collect exceptions. Package closure checks 552 inputs and the upstream
+patch replays 48 files exactly. The separately archived lifecycle branch's two
+additional tests are not part of this branch or its 1,188 count.
+
+The first compiler-runner input was rejected before Cargo because it contained
+two binary targets. A separate QA library-only manifest removes only those two
+sections, preserving dependencies, features and the exact lock. The first ad hoc
+package-input check passed paths where bytes were required; its retained failure
+and corrected 552-input pass changed no source. All Rust bytes remain identical
+to the durably archived, independently reviewed pretest checkpoint.
+
+A forced current-worktree vendor compile and exact rlib link produced the copied
+helper SHA256 `ca1751af6d848d35a2b0054713d44bb1614d952eb4d280740123c52155dd6b7d`.
+These are source/mock/protocol results only. There is no genuine-plugin, native
+GUI, Windows runtime, device-audio or performance acceptance. The production
+helper has no new process capability, mode, worker or metadata policy.
