@@ -3,6 +3,7 @@ mod audio_import;
 mod headless_ui_capture;
 #[cfg(test)]
 mod headless_ui_tests;
+mod native_automation;
 mod piano_clipboard;
 mod piano_expression;
 mod piano_mouse;
@@ -21665,6 +21666,7 @@ impl CitrusApp {
             usize::MAX
         };
         let mut audition = Vec::new();
+        let mut automation_request = None;
         let notes = [36_u8, 39, 54, 43, 64];
         let mixer_track_ids_by_runtime_slot = (0..crate::mixer_graph::MIXER_GRAPH_MAX_NODES)
             .map(|runtime_slot| self.project.mixer_track_id_at_runtime_slot(runtime_slot))
@@ -21758,7 +21760,7 @@ impl CitrusApp {
                                 if solo.clicked() {
                                     channel.solo = !channel.solo;
                                 }
-                                knob(
+                                let pan_response = knob(
                                     ui,
                                     &mut channel.pan,
                                     -1.0..=1.0,
@@ -21766,8 +21768,23 @@ impl CitrusApp {
                                     theme::color(channel.color),
                                 )
                                 .on_hover_text("Pan");
-                                knob(ui, &mut channel.volume, 0.0..=1.0, 24.0, theme::ORANGE)
-                                    .on_hover_text("Volume");
+                                native_automation::control_menu(
+                                    &pan_response,
+                                    AutomationTarget::ChannelPan {
+                                        channel: channel.id,
+                                    },
+                                    &mut automation_request,
+                                );
+                                let volume_response =
+                                    knob(ui, &mut channel.volume, 0.0..=1.0, 24.0, theme::ORANGE)
+                                        .on_hover_text("Volume; right-click for automation");
+                                native_automation::control_menu(
+                                    &volume_response,
+                                    AutomationTarget::ChannelVolume {
+                                        channel: channel.id,
+                                    },
+                                    &mut automation_request,
+                                );
                                 let mut mixer_runtime_slot = mixer_track_ids_by_runtime_slot
                                     .iter()
                                     .position(|track_id| *track_id == Some(channel.mixer_track))
@@ -21873,6 +21890,9 @@ impl CitrusApp {
                     ui.add(egui::Slider::new(&mut self.project.swing, 0.0..=1.0).show_value(false));
                 });
             });
+        if let Some(target) = automation_request {
+            self.create_or_open_native_automation(target);
+        }
         for (channel_id, note, velocity, mixer_track) in audition {
             let Some(mixer_track) = self.project.mixer_runtime_slot(mixer_track) else {
                 continue;
@@ -23667,6 +23687,7 @@ impl CitrusApp {
             ((ui.available_width() - 196.0) / self.project.mixer_tracks.len().max(1) as f32 - 14.0)
                 .clamp(62.0, 88.0);
         let mut clicked_runtime_slot = None;
+        let mut automation_request = None;
         let mut reset_meter = None;
         let mut audio_commands = Vec::new();
         let mut rack_action = None;
@@ -23941,6 +23962,11 @@ impl CitrusApp {
                                             &mut track.pan,
                                             theme::color(track.color),
                                         );
+                                        native_automation::control_menu(
+                                            &pan,
+                                            AutomationTarget::MixerPan { track: track.id },
+                                            &mut automation_request,
+                                        );
                                         if pan.dragged() || pan.clicked() {
                                             audio_commands.push(AudioCommand::SetTrackPan {
                                                 track: runtime_slot,
@@ -24006,6 +24032,11 @@ impl CitrusApp {
                                             &mut track.volume,
                                             (mixer_height - 280.0).max(70.0),
                                         );
+                                        native_automation::control_menu(
+                                            &fader,
+                                            AutomationTarget::MixerVolume { track: track.id },
+                                            &mut automation_request,
+                                        );
                                         if fader.dragged() || fader.clicked() {
                                             audio_commands.push(AudioCommand::SetTrackGain {
                                                 track: runtime_slot,
@@ -24059,6 +24090,9 @@ impl CitrusApp {
                     });
                 });
         });
+        if let Some(target) = automation_request {
+            self.create_or_open_native_automation(target);
+        }
         if let Some((slot, id)) = reset_meter
             && let Some(audio) = self.audio.as_mut()
         {

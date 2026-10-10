@@ -250,3 +250,7 @@ note bookkeeping only after acceptance. Rejected note-offs/panic suffixes remain
 retryable obligations. Payload allocation/free and mutexes remain; admission is
 not SDK delivery. No reset-policy, App/wire/timing or DSP-thread change is included.
 Exact owner/native/default2048 acceptance is distinct from pending combined/CI gates.
+
+## Native volume/pan automation entry points
+
+[Channel Rack and Mixer context-menu automation](NATIVE_CONTROL_AUTOMATION.md) creates or opens target-linked Playlist clips with current-value endpoints, stable identities and atomic creation undo. Existing plug-in parameter AUTOMATE remains unchanged. This is a workflow addition; UI-rate Mixer/Master timing, generator-backed Channel limitations and offline non-Tempo automation refusal remain. Native Linux interactive acceptance is not implied by model regressions.

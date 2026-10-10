@@ -236,3 +236,7 @@ The output callback is designed not to wait on locks, perform filesystem I/O, ca
 Citrus Studio does not contain Image-Line source code, artwork, icons, samples, presets, project data, branding, or copied pixel geometry. FL Studio and related names are used only to describe compatibility goals and workflow references. Citrus Studio is an independent project and is not affiliated with or endorsed by Image-Line. Comparable capability must be implemented and tested independently.
 
 The Citrus Studio source is distributed under the [MIT License](LICENSE). Third-party components and plugin SDK bindings remain subject to their own licenses and trademarks.
+
+## Native volume/pan automation entry points
+
+[Channel Rack and Mixer context-menu automation](docs/NATIVE_CONTROL_AUTOMATION.md) creates or opens target-linked Playlist clips with current-value endpoints, stable identities and atomic creation undo. Existing plug-in parameter AUTOMATE remains unchanged. This is a workflow addition; UI-rate Mixer/Master timing, generator-backed Channel limitations and offline non-Tempo automation refusal remain. Native Linux interactive acceptance is not implied by model regressions.

@@ -298,3 +298,7 @@ Prioritize subsequent work from observed workflow failures and reproducible acce
 ## Documentation contract
 
 Update [DEV_STATE.md](../DEV_STATE.md) and the README at material implementation/integration/test changes. Append aggregate dated [WORK_LOG.md](WORK_LOG.md) entries without rewriting historical outcomes. Record exact revision or worktree, command and result as **passed**, **failed**, **blocked before execution**, or **not run**. Never convert test attributes, planned cases, source inspection or another revision's results into fresh passing evidence.
+
+## Native volume/pan automation entry points
+
+[Channel Rack and Mixer context-menu automation](NATIVE_CONTROL_AUTOMATION.md) creates or opens target-linked Playlist clips with current-value endpoints, stable identities and atomic creation undo. Existing plug-in parameter AUTOMATE remains unchanged. This is a workflow addition; UI-rate Mixer/Master timing, generator-backed Channel limitations and offline non-Tempo automation refusal remain. Native Linux interactive acceptance is not implied by model regressions.
