@@ -55,7 +55,17 @@ pub(crate) struct GenuineLifecycleState {
     pub(crate) candidate_plugin_automation_bindings: usize,
     pub(crate) compiled_midi_routes: usize,
     pub(crate) generator_endpoints: usize,
+    // Retained in every test profile; the Linux genuine ledger consumes this count.
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "experimental-fresh-helper")),
+        allow(dead_code)
+    )]
     pub(crate) insert_endpoints: usize,
+    // Retained in every test profile; the Linux genuine ledger binds this revision.
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "experimental-fresh-helper")),
+        allow(dead_code)
+    )]
     pub(crate) pdc_revision: u64,
 }
 
