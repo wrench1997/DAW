@@ -10,7 +10,7 @@ Repeating the command opens the existing target's earliest placement (start time
 
 ## Editing and playback
 
-With the selected clip and Select tool, double-click to insert a point, drag a point to change time/value, and right-click a point to delete it. The inspector provides precise position, value and tension edits, and Linear, Tension or Hold curves. Playlist move, split and Slip retain source-relative envelope positions. Save the project to retain the lane and clip; undo/redo restores creation together.
+With the selected clip and Select tool, right-click a blank part of the curve (or double-click it) to insert a point. Right-click a point for Copy value, Paste value, precise normalized value entry, or Delete point. Cancel/Escape dismisses the menu without edits. The inspector provides precise position, value and tension edits, and Linear, Tension or Hold curves. Playlist move, split and Slip retain source-relative envelope positions. Save the project to retain the lane and clip; undo/redo restores creation together.
 
 Use SONG mode to hear Playlist automation. PAT mode intentionally excludes it. Mixer/Master volume and pan use the existing UI-rate compatibility dispatcher, not sample-accurate callback automation. Native Channel targets are sample-exact only for internal Channels without compiled Generator routes. Channel volume/pan creation is rejected for plug-in-backed Channels with guidance to automate the assigned Mixer track or a plug-in parameter instead.
 
@@ -29,3 +29,13 @@ Focused regressions cover native target/value creation, pan extremes, stable reo
 Rust/app source at `097ff1f` passed 1,200 all-feature app tests, 1,183 no-default/core tests, 25 helper and 13 protocol tests, both strict all-target Clippy profiles, formatting, all-bin build and helper protocol smoke. Production egui input coverage includes menu dismissal, all four control entry points, repeated open and exact Undo/Redo. The two older generic-Pan-label fixtures failed at `35620ff`; precise target-label selectors were fixed and the full suite rerun. These are headless/source checks, not native window or audible automation acceptance.
 
 The packaging follow-up includes this guide in the preview document allowlist. Actual input/link/provenance validation covers 553 package inputs; the 239 Python cases pass with the built helper and no skips. No Windows executable or release package was produced. Standalone vendor/domain-contract suites and physical/native QA were not rerun for this workflow-only change.
+
+### FL-style point editing contract
+
+Clipboard and typed values use a normalized 0–1 range. For pan, 0 is fully left (-1 native), 0.5 is center (0 native), and 1 is fully right (+1 native). The menu also shows the captured native value. Typed NaN, infinity and out-of-range values cannot be applied. The clipboard is internal to this application and is not the system clipboard.
+
+Drag a point with Shift to lock value, Ctrl to lock time, or Alt to bypass snap. Times remain in the visible clip's source span, including split/slipped clips. Points cannot cross or overwrite their neighbours: a colliding horizontal move retains the last valid time while vertical editing remains possible. Inserting at an occupied time does nothing. A menu action resolves its captured point and range again before changing anything; stale edits are discarded.
+
+Each point action and completed drag is one undo transaction, separate from an immediately preceding project edit. Escape during a point drag restores its pre-drag project state; release outside the editor still finishes the transaction. Point/menu input does not invoke the Playlist's generic right-click clip deletion. Clipboard copy and canceled/no-op actions do not create history entries.
+
+This bounded UI pass does not add Step/Slide drawing, tension handles, segment-specific curve types, song-range creation, unique copies, multi-target binding, output-range scaling or LFOs. Source checkpoint tests are included; native-window/audio acceptance and actual execution results are reported separately.

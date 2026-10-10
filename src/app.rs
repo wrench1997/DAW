@@ -1,4 +1,5 @@
 mod audio_import;
+mod automation_points;
 #[cfg(test)]
 mod headless_ui_capture;
 #[cfg(test)]
@@ -5070,6 +5071,8 @@ pub struct CitrusApp {
     playlist_gesture_before: Option<Project>,
     playlist_viewport: Viewport2D,
     show_playlist_fades: bool,
+    automation_point_clipboard: Option<f64>,
+    automation_point_drag_active: bool,
     piano_viewport: Viewport2D,
     piano_roll_state: PianoRollState,
     piano_clipboard: piano_clipboard::PianoClipboard,
@@ -5417,6 +5420,8 @@ impl CitrusApp {
                 playlist_selection_ids: HashSet::new(),
                 playlist_gesture_before: None,
                 playlist_viewport,
+                automation_point_clipboard: None,
+                automation_point_drag_active: false,
                 show_playlist_fades: true,
                 piano_viewport,
                 piano_roll_state: PianoRollState::from_preferences(piano_roll_preferences),
@@ -11818,6 +11823,7 @@ impl CitrusApp {
     }
 
     fn finish_playlist_gesture(&mut self) {
+        self.automation_point_drag_active = false;
         let Some(before) = self.playlist_gesture_before.take() else {
             return;
         };
@@ -20504,8 +20510,7 @@ impl CitrusApp {
         let automation_lanes = &gesture_snapshot.automation_lanes;
         let audio_assets = self.project.audio_assets.clone();
         let mut automation_update_request = None;
-        let mut automation_delete_request = None;
-        let mut automation_insert_request = None;
+        let mut automation_point_action = None;
         for clip in &mut self.project.clips {
             if clip.track >= PLAYLIST_TRACK_COUNT
                 || !content_span_is_visible(
@@ -20793,71 +20798,177 @@ impl CitrusApp {
                                     4.0,
                                     Stroke::new(2.0, Color32::WHITE),
                                 );
+                                node_response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::WidgetType::Slider,
+                                        true,
+                                        format!("Automation point {}", point_index + 1),
+                                    )
+                                });
+                                if node_response.clicked()
+                                    || node_response.secondary_clicked()
+                                    || node_response.dragged()
+                                {
+                                    clip_consumed_click = true;
+                                }
                                 if node_response.drag_started() {
                                     project_gesture_started = true;
+                                    self.automation_point_drag_active = true;
                                     clip_consumed_click = true;
                                     ui.ctx().data_mut(|data| {
                                         data.insert_temp(node_id.with("origin"), point)
                                     });
                                 }
                                 if node_response.dragged()
-                                    && let Some(drag_delta) = node_response.total_drag_delta()
+                                    && let Some(delta) = node_response.total_drag_delta()
                                     && let Some(origin) = ui.ctx().data(|data| {
                                         data.get_temp::<AutomationPoint>(node_id.with("origin"))
                                     })
-                                {
-                                    let position = ((origin.position as f32
-                                        + drag_delta.x / beat_w)
-                                        / self.snap)
-                                        .round()
-                                        * self.snap;
-                                    let normalized = (value_range.normalize(origin.value) as f32
-                                        - drag_delta.y / curve_rect.height())
-                                    .clamp(0.0, 1.0);
-                                    automation_update_request = Some((
-                                        automation.id,
+                                    && let Some(edited) = automation_points::dragged_point(
+                                        &automation.lane,
                                         point_index,
-                                        AutomationPoint::with_tension(
-                                            f64::from(position.clamp(
-                                                clip.source_offset,
-                                                clip.source_offset + clip.length,
-                                            )),
-                                            value_range.denormalize(f64::from(normalized)),
-                                            origin.tension,
-                                        ),
-                                    ));
+                                        origin,
+                                        delta,
+                                        beat_w,
+                                        curve_rect.height(),
+                                        clip.source_offset,
+                                        clip.length,
+                                        self.snap,
+                                        ui.input(|i| i.modifiers),
+                                    )
+                                {
+                                    automation_update_request =
+                                        Some((automation.id, point_index, edited));
                                 }
                                 if node_response.drag_stopped() {
                                     project_gesture_stopped = true;
+                                    self.automation_point_drag_active = false;
                                     ui.ctx().data_mut(|data| {
                                         data.remove::<AutomationPoint>(node_id.with("origin"));
                                     });
                                 }
                                 if node_response.secondary_clicked() {
-                                    clip_consumed_click = true;
-                                    automation_delete_request = Some((automation.id, point_index));
+                                    let reference = automation_points::PointReference {
+                                        clip_id: clip.id,
+                                        lane_id: automation.id,
+                                        point,
+                                        range: value_range,
+                                    };
+                                    ui.ctx().data_mut(|data| {
+                                        data.insert_temp(node_id.with("menu-point"), reference);
+                                        data.insert_temp(
+                                            node_id.with("value-text"),
+                                            value_range.normalize(point.value).to_string(),
+                                        );
+                                    });
                                 }
+                                node_response.context_menu(|ui| {
+                                    let reference = ui.ctx().data(|data| {
+                                        data.get_temp::<automation_points::PointReference>(
+                                            node_id.with("menu-point"),
+                                        )
+                                    });
+                                    let Some(reference) = reference else {
+                                        ui.close();
+                                        return;
+                                    };
+                                    ui.label(format!("Native value: {:.6}", reference.point.value));
+                                    if ui.button("Copy value").clicked() {
+                                        self.automation_point_clipboard =
+                                            Some(reference.range.normalize(reference.point.value));
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            self.automation_point_clipboard.is_some(),
+                                            egui::Button::new("Paste value"),
+                                        )
+                                        .clicked()
+                                    {
+                                        automation_point_action =
+                                            Some(automation_points::PointAction::Value(
+                                                reference,
+                                                self.automation_point_clipboard.unwrap(),
+                                            ));
+                                        ui.close();
+                                    }
+                                    ui.label("Type value (0–1)");
+                                    let mut text = ui
+                                        .ctx()
+                                        .data(|data| {
+                                            data.get_temp::<String>(node_id.with("value-text"))
+                                        })
+                                        .unwrap_or_default();
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut text)
+                                            .hint_text("Normalized value"),
+                                    );
+                                    let parsed = text
+                                        .parse::<f64>()
+                                        .ok()
+                                        .filter(|v| v.is_finite() && (0.0..=1.0).contains(v));
+                                    ui.ctx().data_mut(|data| {
+                                        data.insert_temp(node_id.with("value-text"), text)
+                                    });
+                                    if ui
+                                        .add_enabled(
+                                            parsed.is_some(),
+                                            egui::Button::new("Apply value"),
+                                        )
+                                        .clicked()
+                                    {
+                                        automation_point_action =
+                                            Some(automation_points::PointAction::Value(
+                                                reference,
+                                                parsed.unwrap(),
+                                            ));
+                                        ui.close();
+                                    }
+                                    if ui.button("Delete point").clicked() {
+                                        automation_point_action =
+                                            Some(automation_points::PointAction::Delete(reference));
+                                        ui.close();
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        ui.close();
+                                    }
+                                });
                             }
-                            if response.double_clicked()
+                            if (response.secondary_clicked() || response.double_clicked())
+                                && !clip_consumed_click
                                 && let Some(pointer) = response.interact_pointer_pos()
+                                && curve_rect.contains(pointer)
                             {
-                                let position = (self
+                                clip_consumed_click = true;
+                                let timeline_position = self
                                     .playlist_viewport
                                     .x
-                                    .content_at_pixel(f64::from(pointer.x - canvas.left()))
-                                    as f32)
-                                    .clamp(clip.start, clip.start + clip.length);
-                                let source_position = clip.source_offset + (position - clip.start);
-                                let normalized = ((curve_rect.bottom() - pointer.y)
-                                    / curve_rect.height())
+                                    .content_at_pixel(f64::from(pointer.x - canvas.left()));
+                                let mut source_position = f64::from(clip.source_offset)
+                                    + timeline_position
+                                    - f64::from(clip.start);
+                                if !bypass_snap {
+                                    source_position = (source_position / f64::from(self.snap))
+                                        .round()
+                                        * f64::from(self.snap);
+                                }
+                                source_position = source_position.clamp(
+                                    f64::from(clip.source_offset),
+                                    f64::from(clip.source_offset + clip.length),
+                                );
+                                let normalized = f64::from(
+                                    (curve_rect.bottom() - pointer.y) / curve_rect.height(),
+                                )
                                 .clamp(0.0, 1.0);
-                                automation_insert_request = Some((
-                                    automation.id,
-                                    AutomationPoint::new(
-                                        f64::from(source_position),
-                                        value_range.denormalize(f64::from(normalized)),
-                                    ),
-                                ));
+                                automation_point_action =
+                                    Some(automation_points::PointAction::Insert {
+                                        clip_id: clip.id,
+                                        lane_id: automation.id,
+                                        point: AutomationPoint::new(
+                                            source_position,
+                                            value_range.denormalize(normalized),
+                                        ),
+                                    });
                             }
                         }
                     }
@@ -20988,7 +21099,7 @@ impl CitrusApp {
                     });
                 }
             }
-            if response.clicked() {
+            if response.clicked() && !clip_consumed_click {
                 clip_consumed_click = true;
                 match self.tool_mode {
                     ToolMode::Select | ToolMode::Draw | ToolMode::Paint | ToolMode::Slip => {
@@ -21054,7 +21165,7 @@ impl CitrusApp {
                     }
                 }
             }
-            if response.secondary_clicked() {
+            if response.secondary_clicked() && !clip_consumed_click {
                 clip_consumed_click = true;
                 let members = clip_group_members(clip_snapshot, clip.id, grouping_enabled);
                 self.playlist_selection_ids = members.clone();
@@ -21073,6 +21184,7 @@ impl CitrusApp {
             }
             let move_key = id.with("move-or-slip-origin");
             if response.drag_started()
+                && !clip_consumed_click
                 && matches!(
                     self.tool_mode,
                     ToolMode::Select | ToolMode::Draw | ToolMode::Slip
@@ -21335,32 +21447,18 @@ impl CitrusApp {
                 .retain(|clip_id| !clip_ids.contains(clip_id));
             self.selected_clip = self.playlist_selection_ids.iter().copied().min();
         }
-        if let Some((automation_id, point_index)) = automation_delete_request {
+        if let Some((automation_id, point_index, point)) = automation_update_request {
             if let Some(automation) = self
                 .project
                 .automation_lanes
                 .iter_mut()
-                .find(|automation| automation.id == automation_id)
-            {
-                let _ = automation.lane.delete_point(point_index);
-            }
-        } else if let Some((automation_id, point_index, point)) = automation_update_request {
-            if let Some(automation) = self
-                .project
-                .automation_lanes
-                .iter_mut()
-                .find(|automation| automation.id == automation_id)
+                .find(|lane| lane.id == automation_id)
             {
                 let _ = automation.lane.update_point(point_index, point);
             }
-        } else if let Some((automation_id, point)) = automation_insert_request
-            && let Some(automation) = self
-                .project
-                .automation_lanes
-                .iter_mut()
-                .find(|automation| automation.id == automation_id)
-        {
-            let _ = automation.lane.insert_point(point);
+        }
+        if let Some(action) = automation_point_action {
+            self.commit_automation_point_action(action);
         }
         if let Some((clip_id, beat)) = split_request
             && let Some(index) = self
@@ -21622,7 +21720,21 @@ impl CitrusApp {
             self.playlist_gesture_before =
                 Some(gesture_snapshot.restore_into(self.project.clone()));
         }
-        if project_gesture_stopped {
+        let cancel_point_drag = self.automation_point_drag_active
+            && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        if cancel_point_drag {
+            if let Some(before) = self.playlist_gesture_before.take() {
+                self.project = before;
+                self.automation_evaluator.reset();
+                self.refresh_timeline_fingerprint(Instant::now(), true);
+            }
+            self.automation_point_drag_active = false;
+            ui.ctx().stop_dragging();
+        } else if project_gesture_stopped
+            || (self.automation_point_drag_active
+                && !ui.input(|input| input.pointer.primary_down()))
+        {
+            self.automation_point_drag_active = false;
             self.finish_playlist_gesture();
         }
 

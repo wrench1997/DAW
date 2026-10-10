@@ -4377,3 +4377,163 @@ fn native_automation_context_menu_dismiss_create_and_reopen() {
         );
     }
 }
+
+fn automation_point_ui() -> UiHarness {
+    let mut ui = UiHarness::new();
+    ui.app.install_project(Project::blank(), None, false);
+    ui.app
+        .create_or_open_native_automation(AutomationTarget::MasterPan);
+    ui.app.project.automation_lanes[0].lane.replace_points([
+        AutomationPoint::new(0.0, -0.5),
+        AutomationPoint::new(2.0, 0.0),
+        AutomationPoint::new(4.0, 0.5),
+    ]);
+    ui.app.sync_history_observer();
+    ui.app.undo_stack.clear();
+    ui.app.redo_stack.clear();
+    ui.settle();
+    ui
+}
+
+fn automation_point_position(ui: &UiHarness, index: usize) -> Pos2 {
+    let label = format!("Automation point {index}");
+    let node = ui
+        .nodes
+        .iter()
+        .find(|node| node.label() == Some(label.as_str()))
+        .expect("automation point accessibility");
+    let bounds = node.bounds().unwrap();
+    Pos2::new(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    )
+}
+
+fn automation_secondary_click(ui: &mut UiHarness, pos: Pos2) {
+    for pressed in [true, false] {
+        ui.run(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+    }
+    ui.settle();
+}
+
+#[test]
+fn automation_point_menu_cancel_copy_paste_delete_atomic_history() {
+    let mut ui = automation_point_ui();
+    let before = project_fingerprint(&ui.app.project);
+    let pos = automation_point_position(&ui, 2);
+    automation_secondary_click(&mut ui, pos);
+    ui.click("Cancel");
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert!(ui.app.undo_stack.is_empty());
+    let pos = automation_point_position(&ui, 2);
+    automation_secondary_click(&mut ui, pos);
+    ui.click("Copy value");
+    assert_eq!(ui.app.automation_point_clipboard, Some(0.5));
+    assert!(ui.app.undo_stack.is_empty());
+    let pos = automation_point_position(&ui, 3);
+    automation_secondary_click(&mut ui, pos);
+    ui.click("Paste value");
+    assert_eq!(
+        ui.app.project.automation_lanes[0].lane.points()[2].value,
+        0.0
+    );
+    assert_eq!(ui.app.project.clips.len(), 1);
+    assert_eq!(ui.app.undo_stack.len(), 1);
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..Default::default()
+    };
+    ui.key(egui::Key::Z, command);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    let pos = automation_point_position(&ui, 2);
+    automation_secondary_click(&mut ui, pos);
+    ui.click("Delete point");
+    assert_eq!(ui.app.project.automation_lanes[0].lane.points().len(), 2);
+    assert_eq!(ui.app.project.clips.len(), 1);
+    ui.key(egui::Key::Z, command);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+}
+
+#[test]
+fn automation_point_blank_insert_and_drag_modifiers_and_cancel() {
+    let mut ui = automation_point_ui();
+    let middle = automation_point_position(&ui, 2);
+    let left = automation_point_position(&ui, 1);
+    automation_secondary_click(&mut ui, Pos2::new((middle.x + left.x) / 2.0, middle.y));
+    assert_eq!(ui.app.project.automation_lanes[0].lane.points().len(), 4);
+    assert_eq!(ui.app.project.clips.len(), 1);
+    assert_eq!(ui.app.undo_stack.len(), 1);
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..Default::default()
+    };
+    ui.key(egui::Key::Z, command);
+    let before = project_fingerprint(&ui.app.project);
+    for (modifiers, cancel) in [
+        (egui::Modifiers::CTRL, false),
+        (egui::Modifiers::SHIFT, false),
+        (egui::Modifiers::ALT, true),
+    ] {
+        let start = automation_point_position(&ui, 2);
+        let end = start + Vec2::new(19.0, -7.0);
+        ui.run_with_modifiers(
+            vec![
+                egui::Event::PointerMoved(start),
+                egui::Event::PointerButton {
+                    pos: start,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers,
+                },
+            ],
+            modifiers,
+        );
+        ui.run_with_modifiers(vec![egui::Event::PointerMoved(end)], modifiers);
+        ui.run_with_modifiers(vec![egui::Event::PointerMoved(end)], modifiers);
+        if cancel {
+            ui.run(vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]);
+        }
+        ui.run_with_modifiers(
+            vec![egui::Event::PointerButton {
+                pos: end,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers,
+            }],
+            modifiers,
+        );
+        ui.settle();
+        if cancel {
+            assert_eq!(project_fingerprint(&ui.app.project), before);
+        } else {
+            let point = ui.app.project.automation_lanes[0].lane.points()[1];
+            if modifiers.ctrl {
+                assert_eq!(point.position, 2.0);
+                assert_ne!(point.value, 0.0);
+            }
+            if modifiers.shift {
+                assert_eq!(point.value, 0.0);
+                assert_ne!(point.position, 2.0);
+            }
+            assert_eq!(ui.app.undo_stack.len(), 1);
+            ui.key(egui::Key::Z, command);
+            assert_eq!(project_fingerprint(&ui.app.project), before);
+        }
+    }
+}
