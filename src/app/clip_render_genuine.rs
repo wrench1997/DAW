@@ -33,6 +33,8 @@ use std::{
 mod health;
 #[path = "clip_render_genuine_oracles.rs"]
 mod oracles;
+#[path = "clip_render_genuine_review.rs"]
+mod review;
 #[path = "clip_render_genuine_startup.rs"]
 mod startup;
 #[path = "clip_render_genuine_support.rs"]
@@ -1708,13 +1710,19 @@ impl GenuineFixture {
     fn convert(&mut self) -> Check {
         self.stage(3, Stage::Conversion)?;
         self.hooks()?;
+        let review_before = review::observe(self.app(), None);
+        self.journal
+            .emit("selected_review_before", review_before.evidence.clone())?;
         self.app_mut().open_selected_clip_render_review();
+        let review_after = review::observe(self.app(), Some(&review_before));
+        self.journal
+            .emit("selected_review_after", review_after.evidence.clone())?;
         let directory = self.binding.output_directory.to_string_lossy().into_owned();
         let job = self
             .app_mut()
             .clip_render_job
             .as_mut()
-            .ok_or("actual selected review refused")?;
+            .ok_or_else(|| review_after.missing_job_error())?;
         require(
             job.phase == ClipRenderPhase::Review && job.render_starter.is_none(),
             "review/factory mismatch",
