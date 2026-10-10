@@ -6,6 +6,7 @@ pub(super) fn control_menu(
     target: AutomationTarget,
     request: &mut Option<AutomationTarget>,
 ) {
+    let target = canonicalize_automation_target(target);
     response.widget_info(|| {
         egui::WidgetInfo::labeled(
             egui::WidgetType::Slider,

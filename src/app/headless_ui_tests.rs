@@ -1467,12 +1467,14 @@ fn floating_workspace_unfocused_resize_and_knob_drag_work_on_first_press() {
     assert_eq!(ui.app.workspace.focused, StudioView::Mixer);
     ui.key(egui::Key::F7, egui::Modifiers::NONE);
     let mixer = ui.editor_rect(StudioView::Mixer);
-    let node = ui
-        .nodes
-        .iter()
-        .find(|node| {
-            node.label() == Some("Pan")
-                && node.bounds().is_some_and(|bounds| {
+    let node =
+        ui.nodes
+            .iter()
+            .find(|node| {
+                node.label().is_some_and(|label| {
+                    label == "Master · Pan"
+                        || (label.starts_with("Mixer ") && label.ends_with(" · Pan"))
+                }) && node.bounds().is_some_and(|bounds| {
                     let pos = Pos2::new(
                         ((bounds.x0 + bounds.x1) / 2.0) as f32,
                         ((bounds.y0 + bounds.y1) / 2.0) as f32,
@@ -1482,8 +1484,8 @@ fn floating_workspace_unfocused_resize_and_knob_drag_work_on_first_press() {
                             layer.id == workspace::window_id(StudioView::Mixer)
                         })
                 })
-        })
-        .unwrap();
+            })
+            .unwrap();
     let bounds = node.bounds().unwrap();
     let pos = Pos2::new(
         ((bounds.x0 + bounds.x1) / 2.0) as f32,
@@ -1611,13 +1613,15 @@ fn floating_workspace_hide_separates_rack_and_mixer_undo_transactions() {
         .nodes
         .iter()
         .find(|node| {
-            node.label() == Some("Pan")
-                && node.bounds().is_some_and(|bounds| {
-                    mixer.contains(Pos2::new(
-                        ((bounds.x0 + bounds.x1) / 2.0) as f32,
-                        ((bounds.y0 + bounds.y1) / 2.0) as f32,
-                    ))
-                })
+            node.label().is_some_and(|label| {
+                label == "Master · Pan"
+                    || (label.starts_with("Mixer ") && label.ends_with(" · Pan"))
+            }) && node.bounds().is_some_and(|bounds| {
+                mixer.contains(Pos2::new(
+                    ((bounds.x0 + bounds.x1) / 2.0) as f32,
+                    ((bounds.y0 + bounds.y1) / 2.0) as f32,
+                ))
+            })
         })
         .unwrap();
     let bounds = node.bounds().unwrap();
@@ -4288,12 +4292,12 @@ fn native_automation_context_menu_dismiss_create_and_reopen() {
         ),
         (
             StudioView::Mixer,
-            format!("Mixer {MASTER_MIXER_TRACK_ID:02} · Volume"),
+            "Master · Volume".into(),
             AutomationTarget::MasterVolume,
         ),
         (
             StudioView::Mixer,
-            format!("Mixer {MASTER_MIXER_TRACK_ID:02} · Pan"),
+            "Master · Pan".into(),
             AutomationTarget::MasterPan,
         ),
     ] {
@@ -4354,5 +4358,22 @@ fn native_automation_context_menu_dismiss_create_and_reopen() {
         assert_eq!(ui.app.selected_clip, Some(clip_id));
         assert_eq!(project_fingerprint(&ui.app.project), fingerprint);
         assert_eq!(ui.app.undo_stack.len(), undo_len);
+        let command = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        ui.key(egui::Key::Z, command);
+        assert_eq!(
+            project_fingerprint(&ui.app.project),
+            before,
+            "Undo removes only this lane and clip"
+        );
+        ui.key(egui::Key::Y, command);
+        assert_eq!(
+            project_fingerprint(&ui.app.project),
+            fingerprint,
+            "Redo restores the exact lane and clip"
+        );
     }
 }
