@@ -38,6 +38,15 @@ const APP_COMMIT_ACCEPTED: u8 = 2;
 const RENDER_BUDGET: Duration = Duration::from_secs(300);
 const STOP_BUDGET: Duration = Duration::from_secs(35);
 
+fn bounded_clip_timeline_text(text: &str) -> String {
+    let mut chars = text.chars();
+    let mut bounded = chars.by_ref().take(256).collect::<String>();
+    if chars.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
+
 /// One checked policy for review wording, acknowledgment, and the actual token.
 fn checked_fixed_tail_frames(seconds: f64, sample_rate: u32) -> Result<u32, String> {
     if !seconds.is_finite()
@@ -166,12 +175,14 @@ struct Review {
 
 /// Typed failures remain owned alongside any successfully published destination.
 /// UI diagnostics never flatten a failed link into a claimed retained file.
+/// Payloads intentionally retain typed failure/ownership evidence after the
+/// bounded visible message is produced; no dummy read or payload erasure.
 enum JobFailureEvidence {
-    Capture(CapturePollError),
-    Render(crate::instrument_bounce::render::RenderFailure),
-    Publication(OccurrencePublicationFailure),
-    Verification(crate::occurrence_media::MediaVerificationFailure),
-    VerificationWorker(crate::occurrence_media::RetainedMediaEvidence),
+    Capture(#[allow(dead_code)] CapturePollError),
+    Render(#[allow(dead_code)] crate::instrument_bounce::render::RenderFailure),
+    Publication(#[allow(dead_code)] OccurrencePublicationFailure),
+    Verification(#[allow(dead_code)] crate::occurrence_media::MediaVerificationFailure),
+    VerificationWorker(#[allow(dead_code)] crate::occurrence_media::RetainedMediaEvidence),
 }
 
 pub(super) struct ClipRenderJob {
@@ -264,6 +275,7 @@ impl ClipRenderJob {
         }
         self.phase.label()
     }
+    #[cfg(test)]
     pub(super) fn phase(&self) -> ClipRenderPhase {
         self.phase
     }
@@ -682,12 +694,7 @@ impl CitrusApp {
             .ok_or("The exact Timeline has not been acknowledged")?;
         if !self.timeline_audio_matches_desired()
             || self.timeline_audio_source.as_ref().is_none_or(|source| {
-                source.fingerprint
-                    != timeline_playback_fingerprint(
-                        &self.project,
-                        self.transport_mode,
-                        self.timeline_sample_rate(),
-                    )
+                source.fingerprint != self.clip_timeline_fingerprint(self.timeline_sample_rate())
             })
         {
             return Err("Wait for the exact current Project Timeline acknowledgment".into());
@@ -1919,6 +1926,22 @@ impl CitrusApp {
             job.phase = ClipRenderPhase::CommittedPlaybackFailedPaused;
             return;
         }
+        if self.timeline_audio_sync.phase == TimelineAudioSyncPhase::Faulted {
+            let detail = self
+                .timeline_audio_sync
+                .last_error
+                .as_deref()
+                .map(bounded_clip_timeline_text)
+                .unwrap_or_else(|| {
+                    "The Timeline runtime faulted during committed playback admission".into()
+                });
+            job.fail(format!(
+                "The conversion is committed, but the Timeline runtime faulted during playback admission: {detail}"
+            ));
+            self.pause_failed_clip_render(job);
+            job.phase = ClipRenderPhase::CommittedPlaybackFailedPaused;
+            return;
+        }
         let binding = job.binding.expect("committed source binding");
         let operation = job.asset_operation.expect("preissued media registration");
         if self.project_session != binding.stamp.project_session
@@ -1990,11 +2013,7 @@ impl CitrusApp {
             && self.timeline_audio_source.as_ref().is_some_and(|source| {
                 source.generation == generation
                     && source.fingerprint
-                        == timeline_playback_fingerprint(
-                            &self.project,
-                            self.transport_mode,
-                            self.timeline_sample_rate(),
-                        )
+                        == self.clip_timeline_fingerprint(self.timeline_sample_rate())
                     && source
                         .timeline
                         .audio_clips()

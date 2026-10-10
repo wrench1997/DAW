@@ -388,13 +388,89 @@ impl Fixture {
         }
         assert!(
             condition(self),
-            "bounded mock App condition failed; phase={:?}, error={:?}",
-            self.app.clip_render_job.as_ref().map(|job| job.phase),
-            self.app
-                .clip_render_job
-                .as_ref()
-                .and_then(|job| job.failure.as_deref())
+            "bounded mock App condition failed; {}",
+            self.timeout_metadata()
         );
+    }
+    fn timeout_metadata(&self) -> String {
+        // Only bounded control metadata. Never format Project, PCM, native
+        // state, captured parameters, or any producer-owned receipt payload.
+        fn ids<'a>(values: impl Iterator<Item = &'a u64>) -> Vec<u64> {
+            let mut ids = values.take(16).copied().collect::<Vec<_>>();
+            ids.sort_unstable();
+            ids
+        }
+        let job = self.app.clip_render_job.as_ref();
+        let route = self.app.timeline_audio_source.as_ref().map(|source| {
+            match self.app.timeline_generator_routes_state(&source.timeline) {
+                RequiredGeneratorRouteState::Ready => "Ready".to_owned(),
+                RequiredGeneratorRouteState::Pending {
+                    channel_id,
+                    plugin_instance_id,
+                } => format!("Pending(channel={channel_id}, instance={plugin_instance_id})"),
+                RequiredGeneratorRouteState::Failed(error) => {
+                    format!("Failed({})", bounded_clip_timeline_text(&error))
+                }
+            }
+        });
+        format!(
+            "phase={:?}, error={:?}, asset(queued,ack,operation)={:?}, source_joined={:?}, expected_generation={:?}, desired={}, compiled={:?}, source={:?}, confirmed={:?}, sync={:?}, sync_error={:?}, synchronized={:?}, needs_resync={:?}, route={:?}, loaded(count,ids)={:?}, prepared(count,ids)={:?}, registering(count,ids)={:?}, unregistering(count,ids)={:?}, loading(count,ids)={:?}, clearing={:?}, retry={}",
+            job.map(|job| job.phase),
+            job.and_then(|job| job.failure.as_deref())
+                .map(bounded_clip_timeline_text),
+            job.map(|job| (job.asset_queued, job.asset_ack, job.asset_operation)),
+            job.map(|job| job.source_joined),
+            job.and_then(|job| job.expected_timeline_generation),
+            self.app.timeline_desired_generation,
+            self.app.timeline_compiled_generation,
+            self.app
+                .timeline_audio_source
+                .as_ref()
+                .map(|source| source.generation),
+            self.app
+                .audio
+                .as_ref()
+                .and_then(AudioEngine::confirmed_timeline_identity),
+            self.app.timeline_audio_sync.phase,
+            self.app
+                .timeline_audio_sync
+                .last_error
+                .as_deref()
+                .map(bounded_clip_timeline_text),
+            self.app
+                .audio
+                .as_ref()
+                .map(AudioEngine::timeline_runtime_is_synchronized),
+            self.app
+                .audio
+                .as_ref()
+                .map(AudioEngine::timeline_runtime_needs_resync),
+            route,
+            (
+                self.app.loaded_audio_assets.len(),
+                ids(self.app.loaded_audio_assets.keys())
+            ),
+            (
+                self.app.prepared_audio_asset_registrations.len(),
+                ids(self.app.prepared_audio_asset_registrations.keys())
+            ),
+            (
+                self.app.pending_audio_asset_registrations.len(),
+                ids(self.app.pending_audio_asset_registrations.keys())
+            ),
+            (
+                self.app.pending_audio_asset_unregistrations.len(),
+                ids(self.app.pending_audio_asset_unregistrations.keys())
+            ),
+            (
+                self.app.loading_audio_assets.len(),
+                ids(self.app.loading_audio_assets.keys())
+            ),
+            self.app
+                .pending_audio_asset_clear
+                .map(|pending| (pending.queued, pending.operation)),
+            self.app.plugin_processing_retry_required,
+        )
     }
     pub(in crate::app) fn begin(&mut self) {
         let mut job = self.app.prepare_clip_render_review().unwrap();
@@ -1308,7 +1384,8 @@ fn actual_coincident_timeline_readiness_cannot_clear_committed_playback_drift_fa
     while !fixture.app.timeline_audio_matches_desired() {
         assert!(
             Instant::now() < deadline,
-            "actual final Timeline did not become ready"
+            "actual final Timeline did not become ready; {}",
+            fixture.timeout_metadata()
         );
         fixture.pump_callback_only();
         fixture.app.poll_timeline_compile(&fixture.ctx);
@@ -1341,6 +1418,95 @@ fn actual_coincident_timeline_readiness_cannot_clear_committed_playback_drift_fa
         fixture.app.clip_render_job.as_ref().unwrap().phase,
         ClipRenderPhase::CommittedPlaybackFailedPaused
     );
+}
+
+#[test]
+fn actual_final_timeline_route_failure_is_sticky_after_commit_and_source_join() {
+    let mut fixture = Fixture::new();
+    fixture.begin();
+    fixture.until(|fixture| {
+        fixture.app.clip_render_job.as_ref().is_some_and(|job| {
+            job.phase == ClipRenderPhase::CommittedPlaybackPending
+                && job.expected_timeline_generation.is_some()
+        })
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fixture.app.timeline_audio_matches_desired() {
+        assert!(
+            Instant::now() < deadline,
+            "actual final Timeline did not become ready; {}",
+            fixture.timeout_metadata()
+        );
+        fixture.pump_callback_only();
+        fixture.app.poll_timeline_compile(&fixture.ctx);
+        fixture.app.poll_audio_asset_events();
+        fixture.app.poll_timeline_audio_runtime(&fixture.ctx);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(fixture.original_source_joined());
+    let job = fixture.app.clip_render_job.as_ref().unwrap();
+    assert_eq!(job.asset_ack, Some(true));
+    let asset_id = job.commit.as_ref().unwrap().asset_id;
+    let pcm = Arc::clone(&fixture.app.cached_audio_assets[&asset_id].samples);
+    let before = fixture.bytes();
+
+    // Compile the real persisted source assignment without the session playback
+    // projection. Its actual missing endpoint must fail the ordinary route gate.
+    // This reproduces the diagnosed fault without forged readiness or phase bits.
+    let map = TempoMap::from_project(&fixture.app.project, 48_000).unwrap();
+    let orphaned = CompiledTimeline::from_project(
+        &fixture.app.project,
+        &map,
+        TimelineCompileOptions::default(),
+    )
+    .unwrap();
+    assert!(orphaned.plugin_routes().iter().any(|route| {
+        route.instance_id == 41
+            && matches!(route.destination, PluginRouteDestination::Generator { .. })
+    }));
+    assert!(
+        !fixture
+            .app
+            .ensure_timeline_generator_routes_ready(&orphaned)
+    );
+    assert!(matches!(
+        fixture.app.timeline_audio_sync.phase,
+        TimelineAudioSyncPhase::FaultClearReady { .. }
+    ));
+    fixture.app.drive_clip_render_job();
+    let job = fixture.app.clip_render_job.as_ref().unwrap();
+    assert_eq!(job.phase, ClipRenderPhase::CommittedPlaybackPending);
+    assert!(job.failure.is_none(), "callback clear is still pending");
+    fixture.until(|fixture| {
+        fixture
+            .app
+            .clip_render_job
+            .as_ref()
+            .is_some_and(|job| job.phase == ClipRenderPhase::CommittedPlaybackFailedPaused)
+    });
+    assert_eq!(
+        fixture.app.timeline_audio_sync.phase,
+        TimelineAudioSyncPhase::Faulted
+    );
+    let job = fixture.app.clip_render_job.as_ref().unwrap();
+    let failure = job.failure.as_deref().unwrap().to_owned();
+    assert!(failure.contains("no callback-confirmed Running endpoint"));
+    assert!(fixture.original_source_joined());
+    assert_eq!(fixture.bytes(), before);
+    assert!(Arc::ptr_eq(
+        &pcm,
+        &fixture.app.cached_audio_assets[&asset_id].samples
+    ));
+    assert!(fixture.app.retained_clip_media.contains_key(&asset_id));
+    assert!(!fixture.app.playing);
+    assert!(fixture.app.clip_render_blocks_playback());
+    fixture.app.clip_render_job.as_mut().unwrap().status_visible = false;
+    fixture.tick();
+    let job = fixture.app.clip_render_job.as_ref().unwrap();
+    assert_eq!(job.phase, ClipRenderPhase::CommittedPlaybackFailedPaused);
+    assert_eq!(job.failure.as_deref(), Some(failure.as_str()));
+    assert_eq!(fixture.bytes(), before);
+    assert!(fixture.app.clip_render_blocks_playback());
 }
 
 #[test]

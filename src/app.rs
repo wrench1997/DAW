@@ -5,6 +5,7 @@ pub(crate) mod clip_render;
 mod clip_render_cache;
 mod clip_render_glue;
 mod clip_render_job;
+mod clip_render_playback;
 mod clip_render_session;
 #[cfg(test)]
 use clip_render_glue::RestorationTestFactory;
@@ -5178,6 +5179,7 @@ pub struct CitrusApp {
     plugin_picker_fresh_bounce: bool,
     fresh_bounce_sources: HashMap<u64, (String, PathBuf, String)>,
     clip_render_restorations: HashMap<u64, ClipRenderRestorationBinding>,
+    clip_timeline_projection_revision: u64,
     retained_clip_media: HashMap<u64, clip_render_cache::RetainedVerifiedClipMedia>,
     retained_clip_pcm_bytes: usize,
     pending_clip_restorations: HashMap<u32, PendingClipRestoration>,
@@ -5548,6 +5550,7 @@ impl CitrusApp {
                 plugin_picker_fresh_bounce: false,
                 fresh_bounce_sources: HashMap::new(),
                 clip_render_restorations: HashMap::new(),
+                clip_timeline_projection_revision: 0,
                 retained_clip_media: HashMap::new(),
                 retained_clip_pcm_bytes: 0,
                 pending_clip_restorations: HashMap::new(),
@@ -7151,8 +7154,7 @@ impl CitrusApp {
             && source.generation == context.stamp.timeline_revision
             && source.fingerprint == context.timeline_fingerprint
             && source.sample_rate == context.tempo_map.sample_rate()
-            && timeline_playback_fingerprint(&self.project, self.transport_mode, source.sample_rate)
-                == context.timeline_fingerprint
+            && self.clip_timeline_fingerprint(source.sample_rate) == context.timeline_fingerprint
             && transport_tempo_map_fingerprint(&self.project, self.transport_mode)
                 == context.tempo_map_project_fingerprint
             && self.timeline_audio_matches_desired()
@@ -9453,12 +9455,8 @@ impl CitrusApp {
         let Some(source) = &self.timeline_audio_source else {
             return false;
         };
-        let fingerprint_current = source.fingerprint
-            == timeline_playback_fingerprint(
-                &self.project,
-                self.transport_mode,
-                self.timeline_sample_rate(),
-            );
+        let fingerprint_current =
+            source.fingerprint == self.clip_timeline_fingerprint(self.timeline_sample_rate());
         native_timeline_editor_allowed(self.timeline_audio_matches_desired(), fingerprint_current,
             source.timeline.driven_automation_targets(), instance_id)
             && !self.automation_evaluator.previous().is_some_and(|frame| frame.ordered_values().iter()
@@ -10789,6 +10787,13 @@ impl CitrusApp {
         mixer_track: usize,
     ) {
         if self.clip_render_reject_control() {
+            return;
+        }
+        if self.clip_dormant_channel_audition_refused(channel_id) {
+            self.notify(
+                "This converted generator is retained silently; Undo the conversion to audition it"
+                    .into(),
+            );
             return;
         }
         let output_port = self
@@ -13766,11 +13771,7 @@ impl CitrusApp {
             return;
         }
         self.timeline_last_fingerprint_check = now;
-        let fingerprint = timeline_playback_fingerprint(
-            &self.project,
-            self.transport_mode,
-            self.timeline_sample_rate(),
-        );
+        let fingerprint = self.clip_timeline_fingerprint(self.timeline_sample_rate());
         if fingerprint == self.timeline_observed_fingerprint {
             return;
         }
@@ -13891,11 +13892,20 @@ impl CitrusApp {
             && self.timeline_last_enqueued_generation != Some(self.timeline_desired_generation)
             && now >= self.timeline_compile_deadline;
         if needs_enqueue && self.timeline_deferred_job.is_none() {
+            let playback = match self.clip_timeline_playback_project() {
+                Ok(playback) => playback,
+                Err(error) => {
+                    self.timeline_compile_error = Some(error.clone());
+                    self.timeline_last_enqueued_generation = Some(self.timeline_desired_generation);
+                    self.fault_timeline_audio(error);
+                    return;
+                }
+            };
             self.timeline_deferred_job = Some(TimelineCompileJob {
                 generation: self.timeline_desired_generation,
                 fingerprint: self.timeline_observed_fingerprint,
                 sample_rate: self.timeline_sample_rate(),
-                project: transport_playback_project(&self.project, self.transport_mode),
+                project: playback,
                 options: transport_timeline_compile_options(&self.project, self.transport_mode),
             });
         }
@@ -15510,6 +15520,7 @@ impl CitrusApp {
         }
         self.fresh_bounce_sources.clear();
         self.clip_render_restorations.clear();
+        self.clip_timeline_projection_revision = 0;
         self.retained_clip_media.clear();
         self.retained_clip_pcm_bytes = 0;
         self.clip_restoration_installs.clear();
@@ -19420,12 +19431,7 @@ impl CitrusApp {
             .timeline_audio_source
             .as_ref()
             .filter(|source| {
-                source.fingerprint
-                    == timeline_playback_fingerprint(
-                        &self.project,
-                        self.transport_mode,
-                        source.sample_rate,
-                    )
+                source.fingerprint == self.clip_timeline_fingerprint(source.sample_rate)
             })
             .map(|source| Arc::clone(&source.timeline));
         if let Some(timeline) = current_timeline

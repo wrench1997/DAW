@@ -28,6 +28,18 @@ impl ClipRenderRestorationBinding {
     pub(super) fn project_session(&self) -> u64 {
         self.project_session
     }
+    pub(super) fn matches_playback_instance(
+        &self,
+        session: u64,
+        instance: &PluginInstance,
+    ) -> bool {
+        self.project_session == session
+            && self.instance_id == instance.id
+            && self.descriptor_id == instance.uid
+            && self.module_path == instance.path
+            && instance.format == ProjectPluginFormat::Vst3
+            && instance.role == PluginRole::Instrument
+    }
 }
 
 pub(super) struct PendingClipRestoration {
@@ -213,6 +225,11 @@ impl CitrusApp {
         instance_id: u64,
         metadata: &BouncePluginMetadata,
     ) -> Result<ClipRenderRestorationBinding, String> {
+        if self.clip_timeline_projection_revision == u64::MAX {
+            return Err(
+                "Converted playback projection identities are exhausted; open a new session".into(),
+            );
+        }
         let instance = self
             .project
             .plugin_instances
@@ -262,6 +279,10 @@ impl CitrusApp {
         // no opaque state. The authoritative history images own that state.
         self.clip_render_restorations
             .insert(binding.instance_id, binding);
+        self.clip_timeline_projection_revision = self
+            .clip_timeline_projection_revision
+            .checked_add(1)
+            .expect("projection identity preflighted before CommitAccepted");
     }
     pub(super) fn clip_operation_fence_active(&self) -> bool {
         self.clip_session_retirement_pending()
@@ -554,11 +575,8 @@ impl CitrusApp {
                     return;
                 };
                 self.timeline_desired_generation = generation;
-                self.timeline_observed_fingerprint = timeline_playback_fingerprint(
-                    &self.project,
-                    self.transport_mode,
-                    self.timeline_sample_rate(),
-                );
+                self.timeline_observed_fingerprint =
+                    self.clip_timeline_fingerprint(self.timeline_sample_rate());
                 self.timeline_compile_deadline = Instant::now();
                 self.timeline_deferred_job = None;
                 self.invalidate_pending_timeline_audio_generation();
