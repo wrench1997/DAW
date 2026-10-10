@@ -2027,8 +2027,268 @@ impl GenuineFixture {
     }
 }
 fn snapshot_summary(s: &GenuineCallbackSnapshot) -> Value {
-    json!({"engine":s.engine_session,"project":s.project_session,"plugin_topology_revision":s.plugin_topology_revision,"plugin_topology_replan_pending":s.plugin_topology_replan_pending,"timeline_execution_failures":s.timeline_execution_failures,"needs_resync":s.timeline_stats.is_some_and(|stats| stats.ownership_needs_resync),"suspended":s.suspended,"graph_was_activated":s.graph_was_activated,"graph_binding_exact":s.graph_binding_exact,"channel_binding_revision":s.channel_binding_revision,"channel_binding_epoch":s.channel_binding_epoch,"active_plugin_automation_bindings":s.active_plugin_automation_bindings,"candidate_plugin_automation_bindings":s.candidate_plugin_automation_bindings,"compiled_midi_routes":s.compiled_midi_routes,"lifecycle_observed_count":s.lifecycle_observed_count,"lifecycle_overflowed":s.lifecycle_overflowed,"lifecycle_inconsistent_pair":s.lifecycle_inconsistent_pair,"generation":s.generation,"active_epoch":s.active_epoch,"epoch":s.epoch,"frame":s.start_frame,"playing":s.playing,"loop_count":s.loop_count,"pending_audio":s.pending_audio_commands,"pending_timeline":s.pending_timeline_commands,"pending_activation":s.pending_timeline_activation,"endpoints":s.endpoints.iter().map(|e|json!({"id":e.endpoint_id,"instance":e.plugin_instance_id,"mixer_track":e.mixer_track,"stopped_epoch_safety":startup::stopped_epoch_safety_evidence(e.stopped_epoch_safety_epoch,e.stopped_epoch_safety_remaining_frames,e.stopped_epoch_safety_failed),"fixed":format!("{:?}",e.fixed),"exact":format!("{:?}",e.exact_snapshot),"latency":format!("{:?}",e.coherent_latency)})).collect::<Vec<_>>(),"assets":s.assets.iter().map(|a|json!({"id":a.id,"rate":a.sample_rate,"channels":a.channels,"frames":a.frames,"arc_address":Arc::as_ptr(&a.samples) as *const f32 as usize})).collect::<Vec<_>>(),"native_voices":s.native_voices.len(),"audio_voices":s.audio_voices.len(),"zero_pdc":s.zero_pdc,"pdc_revision":s.pdc_revision,"graph_identity":s.graph_identity,"graph_pdc":format!("{:?}",s.graph_pdc),"raw_delays":format!("{:?}",s.raw_delays),"raw_delay_active":s.raw_delay_active,"legacy_pdc_active":s.legacy_pdc_active,"route_delays":format!("{:?}",s.route_delays),"master_gain":s.master_gain,"master_pan":s.master_pan,"track1_gain":s.track_gains[1],"track1_pan":s.track_pans[1]})
+    // Keep the original flat evidence schema, but bound each json! expansion.
+    // The three fixed inventories are disjoint; reject a duplicate before it
+    // can overwrite evidence rather than relying on Map::extend semantics.
+    let parts = [
+        json!({
+            "engine":s.engine_session,
+            "project":s.project_session,
+            "plugin_topology_revision":s.plugin_topology_revision,
+            "plugin_topology_replan_pending":s.plugin_topology_replan_pending,
+            "timeline_execution_failures":s.timeline_execution_failures,
+            "needs_resync":s.timeline_stats.is_some_and(|stats| stats.ownership_needs_resync),
+            "suspended":s.suspended,
+            "graph_was_activated":s.graph_was_activated,
+            "graph_binding_exact":s.graph_binding_exact,
+            "channel_binding_revision":s.channel_binding_revision,
+            "channel_binding_epoch":s.channel_binding_epoch,
+            "active_plugin_automation_bindings":s.active_plugin_automation_bindings,
+            "candidate_plugin_automation_bindings":s.candidate_plugin_automation_bindings,
+            "compiled_midi_routes":s.compiled_midi_routes
+        }),
+        json!({
+            "lifecycle_observed_count":s.lifecycle_observed_count,
+            "lifecycle_overflowed":s.lifecycle_overflowed,
+            "lifecycle_inconsistent_pair":s.lifecycle_inconsistent_pair,
+            "generation":s.generation,
+            "active_epoch":s.active_epoch,
+            "epoch":s.epoch,
+            "frame":s.start_frame,
+            "playing":s.playing,
+            "loop_count":s.loop_count,
+            "pending_audio":s.pending_audio_commands,
+            "pending_timeline":s.pending_timeline_commands,
+            "pending_activation":s.pending_timeline_activation,
+            "endpoints":s.endpoints.iter().map(|e|json!({"id":e.endpoint_id,"instance":e.plugin_instance_id,"mixer_track":e.mixer_track,"stopped_epoch_safety":startup::stopped_epoch_safety_evidence(e.stopped_epoch_safety_epoch,e.stopped_epoch_safety_remaining_frames,e.stopped_epoch_safety_failed),"fixed":format!("{:?}",e.fixed),"exact":format!("{:?}",e.exact_snapshot),"latency":format!("{:?}",e.coherent_latency)})).collect::<Vec<_>>(),
+            "assets":s.assets.iter().map(|a|json!({"id":a.id,"rate":a.sample_rate,"channels":a.channels,"frames":a.frames,"arc_address":Arc::as_ptr(&a.samples) as *const f32 as usize})).collect::<Vec<_>>()
+        }),
+        json!({
+            "native_voices":s.native_voices.len(),
+            "audio_voices":s.audio_voices.len(),
+            "zero_pdc":s.zero_pdc,
+            "pdc_revision":s.pdc_revision,
+            "graph_identity":s.graph_identity,
+            "graph_pdc":format!("{:?}",s.graph_pdc),
+            "raw_delays":format!("{:?}",s.raw_delays),
+            "raw_delay_active":s.raw_delay_active,
+            "legacy_pdc_active":s.legacy_pdc_active,
+            "route_delays":format!("{:?}",s.route_delays),
+            "master_gain":s.master_gain,
+            "master_pan":s.master_pan,
+            "track1_gain":s.track_gains[1],
+            "track1_pan":s.track_pans[1]
+        }),
+    ];
+    let mut summary = serde_json::Map::new();
+    for part in parts {
+        let Value::Object(part) = part else {
+            unreachable!("snapshot summary parts are fixed object literals");
+        };
+        for (key, value) in part {
+            match summary.entry(key) {
+                serde_json::map::Entry::Vacant(entry) => {
+                    entry.insert(value);
+                }
+                serde_json::map::Entry::Occupied(entry) => {
+                    panic!("duplicate snapshot summary key: {}", entry.key());
+                }
+            }
+        }
+    }
+    Value::Object(summary)
 }
+
+#[test]
+fn snapshot_summary_preserves_flat_keys_values_and_explicit_nulls() {
+    // Device-free read only: no callback pump, worker, source load or plugin.
+    let (_engine, callback) = AudioEngine::test_engine_with_callback();
+    let sampled = callback.genuine_snapshot();
+    let mut nondefault = sampled.clone();
+    nondefault.plugin_topology_revision = 4;
+    nondefault.plugin_topology_replan_pending = true;
+    nondefault.timeline_execution_failures = 4;
+    nondefault.timeline_stats = Some(Default::default());
+    nondefault
+        .timeline_stats
+        .as_mut()
+        .unwrap()
+        .ownership_needs_resync = true;
+    nondefault.suspended = true;
+    nondefault.graph_was_activated = true;
+    nondefault.graph_binding_exact = false;
+    nondefault.channel_binding_revision = Some(37);
+    nondefault.channel_binding_epoch = Some(41);
+    nondefault.active_plugin_automation_bindings = 2;
+    nondefault.candidate_plugin_automation_bindings = 3;
+    nondefault.compiled_midi_routes = 1;
+    nondefault.lifecycle_observed_count = 16;
+    nondefault.lifecycle_overflowed = true;
+    nondefault.lifecycle_inconsistent_pair = true;
+    nondefault.generation = Some(37);
+    nondefault.active_epoch = Some(41);
+    nondefault.epoch = 41;
+    nondefault.start_frame = 43;
+    nondefault.playing = true;
+    nondefault.loop_count = 47;
+    nondefault.pending_audio_commands = 1;
+    nondefault.pending_timeline_commands = 2;
+    nondefault.pending_timeline_activation = true;
+    nondefault.graph_identity = Some((37, 41, 53));
+    nondefault.pdc_revision = 59;
+    nondefault.master_gain = 0.75;
+    nondefault.master_pan = -0.25;
+    nondefault.track_gains[1] = 0.5;
+    nondefault.track_pans[1] = 0.25;
+    nondefault
+        .assets
+        .push(crate::audio::genuine_observation::GenuineAssetObservation {
+            slot: 0,
+            id: 61,
+            samples: Arc::from([0.25_f32, -0.25, 0.5, -0.5]),
+            sample_rate: 48_000,
+            channels: 2,
+            frames: 2,
+        });
+    let mut nulls = nondefault.clone();
+    nulls.channel_binding_revision = None;
+    nulls.channel_binding_epoch = None;
+    nulls.generation = None;
+    nulls.active_epoch = None;
+    nulls.graph_identity = None;
+    nulls.timeline_stats = None;
+    let keys = [
+        "engine",
+        "project",
+        "plugin_topology_revision",
+        "plugin_topology_replan_pending",
+        "timeline_execution_failures",
+        "needs_resync",
+        "suspended",
+        "graph_was_activated",
+        "graph_binding_exact",
+        "channel_binding_revision",
+        "channel_binding_epoch",
+        "active_plugin_automation_bindings",
+        "candidate_plugin_automation_bindings",
+        "compiled_midi_routes",
+        "lifecycle_observed_count",
+        "lifecycle_overflowed",
+        "lifecycle_inconsistent_pair",
+        "generation",
+        "active_epoch",
+        "epoch",
+        "frame",
+        "playing",
+        "loop_count",
+        "pending_audio",
+        "pending_timeline",
+        "pending_activation",
+        "endpoints",
+        "assets",
+        "native_voices",
+        "audio_voices",
+        "zero_pdc",
+        "pdc_revision",
+        "graph_identity",
+        "graph_pdc",
+        "raw_delays",
+        "raw_delay_active",
+        "legacy_pdc_active",
+        "route_delays",
+        "master_gain",
+        "master_pan",
+        "track1_gain",
+        "track1_pan",
+    ];
+    let expected_keys = keys.into_iter().collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(expected_keys.len(), 42);
+    for s in [&sampled, &nondefault, &nulls] {
+        // Independent flat construction: one bounded json! per original value,
+        // no production parts, merge, key inventory or duplicate guard reused.
+        let entries = [
+            ("engine",json!(s.engine_session)),
+            ("project",json!(s.project_session)),
+            ("plugin_topology_revision",json!(s.plugin_topology_revision)),
+            ("plugin_topology_replan_pending",json!(s.plugin_topology_replan_pending)),
+            ("timeline_execution_failures",json!(s.timeline_execution_failures)),
+            ("needs_resync",json!(s.timeline_stats.is_some_and(|stats| stats.ownership_needs_resync))),
+            ("suspended",json!(s.suspended)),
+            ("graph_was_activated",json!(s.graph_was_activated)),
+            ("graph_binding_exact",json!(s.graph_binding_exact)),
+            ("channel_binding_revision",json!(s.channel_binding_revision)),
+            ("channel_binding_epoch",json!(s.channel_binding_epoch)),
+            ("active_plugin_automation_bindings",json!(s.active_plugin_automation_bindings)),
+            ("candidate_plugin_automation_bindings",json!(s.candidate_plugin_automation_bindings)),
+            ("compiled_midi_routes",json!(s.compiled_midi_routes)),
+            ("lifecycle_observed_count",json!(s.lifecycle_observed_count)),
+            ("lifecycle_overflowed",json!(s.lifecycle_overflowed)),
+            ("lifecycle_inconsistent_pair",json!(s.lifecycle_inconsistent_pair)),
+            ("generation",json!(s.generation)),
+            ("active_epoch",json!(s.active_epoch)),
+            ("epoch",json!(s.epoch)),
+            ("frame",json!(s.start_frame)),
+            ("playing",json!(s.playing)),
+            ("loop_count",json!(s.loop_count)),
+            ("pending_audio",json!(s.pending_audio_commands)),
+            ("pending_timeline",json!(s.pending_timeline_commands)),
+            ("pending_activation",json!(s.pending_timeline_activation)),
+            ("endpoints",json!(s.endpoints.iter().map(|e|json!({"id":e.endpoint_id,"instance":e.plugin_instance_id,"mixer_track":e.mixer_track,"stopped_epoch_safety":startup::stopped_epoch_safety_evidence(e.stopped_epoch_safety_epoch,e.stopped_epoch_safety_remaining_frames,e.stopped_epoch_safety_failed),"fixed":format!("{:?}",e.fixed),"exact":format!("{:?}",e.exact_snapshot),"latency":format!("{:?}",e.coherent_latency)})).collect::<Vec<_>>())),
+            ("assets",json!(s.assets.iter().map(|a|json!({"id":a.id,"rate":a.sample_rate,"channels":a.channels,"frames":a.frames,"arc_address":Arc::as_ptr(&a.samples) as *const f32 as usize})).collect::<Vec<_>>())),
+            ("native_voices",json!(s.native_voices.len())),
+            ("audio_voices",json!(s.audio_voices.len())),
+            ("zero_pdc",json!(s.zero_pdc)),
+            ("pdc_revision",json!(s.pdc_revision)),
+            ("graph_identity",json!(s.graph_identity)),
+            ("graph_pdc",json!(format!("{:?}",s.graph_pdc))),
+            ("raw_delays",json!(format!("{:?}",s.raw_delays))),
+            ("raw_delay_active",json!(s.raw_delay_active)),
+            ("legacy_pdc_active",json!(s.legacy_pdc_active)),
+            ("route_delays",json!(format!("{:?}",s.route_delays))),
+            ("master_gain",json!(s.master_gain)),
+            ("master_pan",json!(s.master_pan)),
+            ("track1_gain",json!(s.track_gains[1])),
+            ("track1_pan",json!(s.track_pans[1]))
+        ];
+        let expected = Value::Object(
+            entries
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value))
+                .collect(),
+        );
+        let actual = snapshot_summary(s);
+        assert_eq!(actual, expected);
+        let object = actual.as_object().unwrap();
+        assert_eq!(object.len(), 42);
+        assert_eq!(
+            object
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected_keys
+        );
+    }
+    let explicit_nulls = snapshot_summary(&nulls);
+    for key in [
+        "channel_binding_revision",
+        "channel_binding_epoch",
+        "generation",
+        "active_epoch",
+        "graph_identity",
+    ] {
+        assert_eq!(
+            explicit_nulls.as_object().unwrap().get(key),
+            Some(&Value::Null)
+        );
+    }
+    let changed = snapshot_summary(&nondefault);
+    assert_eq!(changed["plugin_topology_revision"], 4);
+    assert_eq!(changed["timeline_execution_failures"], 4);
+    assert_eq!(changed["lifecycle_observed_count"], 16);
+    assert_eq!(changed["needs_resync"], true);
+    assert_eq!(changed["assets"].as_array().unwrap().len(), 1);
+}
+
 impl GenuineFixture {
     fn audit_media_and_history(&mut self) -> Check {
         self.stage(4, Stage::Conversion)?;
