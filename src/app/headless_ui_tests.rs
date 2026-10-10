@@ -4664,3 +4664,252 @@ fn automation_point_invalid_source_span_has_no_editable_nodes_or_mutation() {
     automation_secondary_click(&mut ui, pos);
     assert_eq!(project_fingerprint(&ui.app.project), before);
 }
+
+fn automation_tension_ui() -> UiHarness {
+    let mut ui = automation_point_ui();
+    ui.app.project.automation_lanes[0]
+        .lane
+        .set_curve(AutomationCurve::Tension);
+    ui.app.sync_history_observer();
+    ui.app.project_fingerprint = project_fingerprint(&ui.app.project);
+    ui.app.dirty = false;
+    ui.settle();
+    ui
+}
+
+fn automation_tension_position(ui: &UiHarness, index: usize) -> Option<Pos2> {
+    let label = format!("Automation tension {index}");
+    let node = ui
+        .nodes
+        .iter()
+        .find(|node| node.label() == Some(label.as_str()))?;
+    let bounds = node.bounds()?;
+    Some(Pos2::new(
+        ((bounds.x0 + bounds.x1) / 2.0) as f32,
+        ((bounds.y0 + bounds.y1) / 2.0) as f32,
+    ))
+}
+
+fn automation_tension_pointer(
+    ui: &mut UiHarness,
+    pos: Pos2,
+    pressed: bool,
+    modifiers: egui::Modifiers,
+) {
+    ui.run_with_modifiers(
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers,
+            },
+        ],
+        modifiers,
+    );
+}
+
+#[test]
+fn automation_tension_drag_reset_and_exact_history() {
+    let mut ui = automation_tension_ui();
+    let before = project_fingerprint(&ui.app.project);
+    let points = ui.app.project.automation_lanes[0].lane.points().to_vec();
+    let pos = automation_tension_position(&ui, 1).unwrap();
+    let end = pos + Vec2::new(13.0, 20.0);
+    automation_tension_pointer(&mut ui, pos, true, egui::Modifiers::NONE);
+    ui.run(vec![egui::Event::PointerMoved(end)]);
+    ui.run(vec![egui::Event::PointerMoved(end)]);
+    automation_tension_pointer(&mut ui, end, false, egui::Modifiers::NONE);
+    ui.settle();
+    let edited = project_fingerprint(&ui.app.project);
+    let lane = &ui.app.project.automation_lanes[0].lane;
+    assert!((lane.points()[0].tension - 0.2).abs() < 1e-6);
+    assert_eq!(lane.points()[0].position, points[0].position);
+    assert_eq!(lane.points()[0].value, points[0].value);
+    assert_eq!(&lane.points()[1..], &points[1..]);
+    assert_eq!(ui.app.undo_stack.len(), 1);
+    assert!(ui.app.dirty);
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..Default::default()
+    };
+    ui.key(egui::Key::Z, command);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    ui.key(egui::Key::Y, command);
+    assert_eq!(project_fingerprint(&ui.app.project), edited);
+    let pos = automation_tension_position(&ui, 1).unwrap();
+    automation_secondary_click(&mut ui, pos);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert_eq!(ui.app.project.clips.len(), 1);
+    assert_eq!(
+        ui.app.project.automation_lanes[0].lane.points().len(),
+        points.len()
+    );
+    assert_eq!(ui.app.undo_stack.len(), 2);
+    assert!(
+        !ui.nodes
+            .iter()
+            .any(|node| node.label() == Some("Copy value"))
+    );
+    ui.key(egui::Key::Z, command);
+    assert_eq!(project_fingerprint(&ui.app.project), edited);
+}
+
+#[test]
+fn automation_tension_cancel_and_noop_preserve_saved_state_and_redo() {
+    let mut ui = automation_tension_ui();
+    // An existing redo must survive no-op reset and a canceled gesture.
+    let mut future = ui.app.project.clone();
+    future.swing = 0.25;
+    ui.app.redo_stack.push(future);
+    let before = project_fingerprint(&ui.app.project);
+    let redo = project_fingerprint(&ui.app.redo_stack[0]);
+    let pos = automation_tension_position(&ui, 1).unwrap();
+    automation_secondary_click(&mut ui, pos);
+    assert!(!ui.app.dirty);
+    assert!(ui.app.undo_stack.is_empty());
+    assert_eq!(ui.app.redo_stack.len(), 1);
+    assert_eq!(project_fingerprint(&ui.app.redo_stack[0]), redo);
+    automation_tension_pointer(&mut ui, pos, true, egui::Modifiers::NONE);
+    let end = pos + Vec2::new(0.0, -20.0);
+    ui.run(vec![egui::Event::PointerMoved(end)]);
+    ui.run(vec![egui::Event::PointerMoved(end)]);
+    assert_ne!(project_fingerprint(&ui.app.project), before);
+    ui.key(egui::Key::Escape, egui::Modifiers::NONE);
+    automation_tension_pointer(&mut ui, end, false, egui::Modifiers::NONE);
+    ui.settle();
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert!(!ui.app.dirty);
+    assert!(ui.app.undo_stack.is_empty());
+    assert_eq!(ui.app.redo_stack.len(), 1);
+    assert_eq!(project_fingerprint(&ui.app.redo_stack[0]), redo);
+    // A horizontal-only held gesture is also a no-op.
+    let pos = automation_tension_position(&ui, 1).unwrap();
+    automation_tension_pointer(&mut ui, pos, true, egui::Modifiers::NONE);
+    let end = pos + Vec2::new(30.0, 0.0);
+    ui.run(vec![egui::Event::PointerMoved(end)]);
+    automation_tension_pointer(&mut ui, end, false, egui::Modifiers::NONE);
+    ui.settle();
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert!(!ui.app.dirty);
+    assert!(ui.app.undo_stack.is_empty());
+    assert_eq!(ui.app.redo_stack.len(), 1);
+}
+
+#[test]
+fn automation_tension_ctrl_switch_and_outside_release_preserve_preceding_edit() {
+    let mut ui = automation_tension_ui();
+    let original = project_fingerprint(&ui.app.project);
+    ui.app.project.swing = 0.25;
+    let preceding = project_fingerprint(&ui.app.project);
+    let pos = automation_tension_position(&ui, 1).unwrap();
+    automation_tension_pointer(&mut ui, pos, true, egui::Modifiers::NONE);
+    let end = pos + Vec2::new(0.0, 20.0);
+    ui.run(vec![egui::Event::PointerMoved(end)]);
+    let coarse = ui.app.project.automation_lanes[0].lane.points()[0].tension;
+    ui.run_with_modifiers(vec![egui::Event::PointerMoved(end)], egui::Modifiers::CTRL);
+    assert_eq!(
+        ui.app.project.automation_lanes[0].lane.points()[0].tension,
+        coarse
+    );
+    let fine_end = end + Vec2::new(0.0, 10.0);
+    ui.run_with_modifiers(
+        vec![egui::Event::PointerMoved(fine_end)],
+        egui::Modifiers::CTRL,
+    );
+    assert!(
+        (ui.app.project.automation_lanes[0].lane.points()[0].tension - coarse - 0.01).abs() < 1e-6
+    );
+    let limit = pos + Vec2::new(0.0, 300.0);
+    ui.run(vec![egui::Event::PointerMoved(limit)]);
+    assert_eq!(
+        ui.app.project.automation_lanes[0].lane.points()[0].tension,
+        1.0
+    );
+    let reversed = limit - Vec2::new(0.0, 1.0);
+    ui.run(vec![egui::Event::PointerMoved(reversed)]);
+    assert!((ui.app.project.automation_lanes[0].lane.points()[0].tension - 0.99).abs() < 1e-6);
+    // Leave horizontally, without introducing another vertical edit.
+    let outside = Pos2::new(-100.0, reversed.y);
+    automation_tension_pointer(&mut ui, outside, false, egui::Modifiers::CTRL);
+    ui.settle();
+    assert!(ui.app.playlist_gesture_before.is_none());
+    assert_eq!(ui.app.undo_stack.len(), 2);
+    let edited = project_fingerprint(&ui.app.project);
+    let command = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..Default::default()
+    };
+    ui.key(egui::Key::Z, command);
+    assert_eq!(project_fingerprint(&ui.app.project), preceding);
+    ui.key(egui::Key::Z, command);
+    assert_eq!(project_fingerprint(&ui.app.project), original);
+    ui.key(egui::Key::Y, command);
+    ui.key(egui::Key::Y, command);
+    assert_eq!(project_fingerprint(&ui.app.project), edited);
+}
+
+#[test]
+fn automation_tension_visibility_and_clipped_midpoint_alignment() {
+    let mut ui = automation_tension_ui();
+    let left = automation_point_position(&ui, 1);
+    let right = automation_point_position(&ui, 2);
+    let handle = automation_tension_position(&ui, 1).unwrap();
+    assert!((handle.x - (left.x + right.x) / 2.0).abs() < 0.01);
+    assert!((handle.y - (left.y + right.y) / 2.0).abs() < 0.01);
+    for mode in [AutomationCurve::Linear, AutomationCurve::Hold] {
+        ui.app.project.automation_lanes[0].lane.set_curve(mode);
+        ui.settle();
+        assert!(automation_tension_position(&ui, 1).is_none());
+    }
+    ui.app.project.automation_lanes[0]
+        .lane
+        .set_curve(AutomationCurve::Tension);
+    ui.app.tool_mode = ToolMode::Draw;
+    ui.settle();
+    assert!(automation_tension_position(&ui, 1).is_none());
+    ui.app.tool_mode = ToolMode::Select;
+    ui.app.playlist_selection_ids.clear();
+    ui.app.selected_clip = None;
+    ui.settle();
+    assert!(automation_tension_position(&ui, 1).is_none());
+    let clip_id = ui.app.project.clips[0].id;
+    ui.app.select_playlist_clip_only(clip_id);
+    ui.app.project.automation_lanes[0].lane.replace_points([
+        AutomationPoint::new(0.0, -1.0),
+        AutomationPoint::new(8.0, 1.0),
+    ]);
+    ui.app.project.clips[0].source_offset = 2.0;
+    ui.app.project.clips[0].length = 2.0;
+    ui.settle();
+    assert!(!ui.nodes.iter().any(|node| {
+        node.label()
+            .is_some_and(|label| label.starts_with("Automation point "))
+    }));
+    // The clipped source midpoint is 3, corresponding to Playlist beat 1.
+    let clipped = automation_tension_position(&ui, 1).unwrap();
+    assert!((clipped.x - handle.x).abs() < 0.01);
+    // Scroll past the fixed source midpoint while a tail of the clip remains visible.
+    let beat_width = right.x - left.x;
+    ui.app
+        .playlist_viewport
+        .x
+        .scroll_by_pixels(f64::from(beat_width * 0.75))
+        .unwrap();
+    ui.settle();
+    assert!(automation_tension_position(&ui, 1).is_none());
+    ui.app
+        .playlist_viewport
+        .x
+        .scroll_by_pixels(-f64::from(beat_width * 0.75))
+        .unwrap();
+    ui.settle();
+    let restored = automation_tension_position(&ui, 1).unwrap();
+    assert!((restored.x - clipped.x).abs() < 0.01);
+    ui.app.project.automation_lanes[0].lane.set_enabled(false);
+    ui.settle();
+    assert!(automation_tension_position(&ui, 1).is_none());
+}

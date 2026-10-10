@@ -14,6 +14,7 @@ pub(super) struct PointReference {
 pub(super) enum PointAction {
     Value(PointReference, f64),
     Delete(PointReference),
+    Tension(TensionReference, f64),
     Insert {
         clip_id: u32,
         lane_id: u64,
@@ -41,6 +42,7 @@ pub(super) fn candidate(project: &Project, action: PointAction) -> Option<Projec
         PointAction::Insert {
             clip_id, lane_id, ..
         } => (*clip_id, *lane_id),
+        PointAction::Tension(reference, _) => (reference.left.clip_id, reference.left.lane_id),
     };
     if project
         .clips
@@ -65,6 +67,11 @@ pub(super) fn candidate(project: &Project, action: PointAction) -> Option<Projec
     if !valid_clip_span(clip) {
         return None;
     }
+    if let PointAction::Tension(reference, _) = &action
+        && !reference.matches_clip(clip)
+    {
+        return None;
+    }
     let mut result = project.clone();
     let lane = &mut result
         .automation_lanes
@@ -72,6 +79,15 @@ pub(super) fn candidate(project: &Project, action: PointAction) -> Option<Projec
         .find(|lane| lane.id == lane_id)?
         .lane;
     match action {
+        PointAction::Tension(reference, tension) => {
+            if !tension.is_finite() || !(-1.0..=1.0).contains(&tension) {
+                return None;
+            }
+            let index = reference.resolve(lane)?;
+            let mut point = reference.left.point;
+            point.tension = tension;
+            lane.update_point(index, point).ok()?;
+        }
         PointAction::Value(reference, normalized) => {
             if !normalized.is_finite() || !(0.0..=1.0).contains(&normalized) {
                 return None;
@@ -114,6 +130,123 @@ pub(super) fn candidate(project: &Project, action: PointAction) -> Option<Projec
         }
     }
     Some(result)
+}
+
+/// Captures the outgoing segment, including the placement that exposes it.
+/// Never infer a new neighbour or silently convert a lane-wide curve mode.
+#[derive(Clone, Debug)]
+pub(super) struct TensionReference {
+    pub left: PointReference,
+    pub right: AutomationPoint,
+    pub clip_start: f32,
+    pub source_offset: f32,
+    pub length: f32,
+}
+
+impl TensionReference {
+    pub fn matches_clip(&self, clip: &Clip) -> bool {
+        valid_clip_span(clip)
+            && clip.id == self.left.clip_id
+            && clip.automation_id == Some(self.left.lane_id)
+            && clip.kind == ClipKind::Automation
+            && clip.start == self.clip_start
+            && clip.source_offset == self.source_offset
+            && clip.length == self.length
+    }
+
+    pub fn resolve(&self, lane: &AutomationLane) -> Option<usize> {
+        if !lane.is_enabled()
+            || lane.curve() != AutomationCurve::Tension
+            || lane.target() != &self.left.target
+            || lane.value_range() != self.left.range
+        {
+            return None;
+        }
+        lane.points()
+            .windows(2)
+            .position(|pair| pair[0] == self.left.point && pair[1] == self.right)
+    }
+}
+
+/// The midpoint of the segment's *clip* intersection, never its viewport
+/// intersection. Scrolling may hide a handle but cannot move its source time.
+pub(super) fn tension_handle(
+    lane: &AutomationLane,
+    index: usize,
+    clip: &Clip,
+    pixels_per_beat: f32,
+) -> Option<(f64, f64)> {
+    if !valid_clip_span(clip)
+        || !lane.is_enabled()
+        || lane.curve() != AutomationCurve::Tension
+        || !pixels_per_beat.is_finite()
+        || pixels_per_beat <= 0.0
+    {
+        return None;
+    }
+    let left = *lane.points().get(index)?;
+    let right = *lane.points().get(index + 1)?;
+    if ![
+        left.position,
+        right.position,
+        left.value,
+        right.value,
+        left.tension,
+    ]
+    .iter()
+    .all(|value| value.is_finite())
+        || right.position - left.position <= crate::automation::AUTOMATION_POSITION_EPSILON
+        || left.value == right.value
+    {
+        return None;
+    }
+    let start = left.position.max(f64::from(clip.source_offset));
+    let end = right
+        .position
+        .min(f64::from(clip.source_offset + clip.length));
+    if (end - start) * f64::from(pixels_per_beat) < 24.0 {
+        return None;
+    }
+    let source = start + (end - start) * 0.5;
+    let progress = (source - left.position) / (right.position - left.position);
+    let value = left.value
+        + (right.value - left.value)
+            * crate::automation::sample_curve_progress(
+                AutomationCurve::Tension,
+                progress,
+                left.tension,
+            );
+    (source.is_finite() && value.is_finite()).then_some((source, value))
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct TensionDrag {
+    pub reference: TensionReference,
+    pub last_delta_y: f32,
+}
+
+impl TensionDrag {
+    /// Integrate motion, rather than rescaling the total on Ctrl changes.
+    /// Clamp every increment so reversing away from a limit responds immediately.
+    pub fn advance(
+        &mut self,
+        lane: &AutomationLane,
+        total_delta_y: f32,
+        fine: bool,
+    ) -> Option<(usize, AutomationPoint)> {
+        let index = self.reference.resolve(lane)?;
+        if !total_delta_y.is_finite() || !self.last_delta_y.is_finite() {
+            return None;
+        }
+        let mut point = self.reference.left.point;
+        let direction = (self.reference.right.value - point.value).signum();
+        let delta = f64::from(total_delta_y) - f64::from(self.last_delta_y);
+        point.tension =
+            (point.tension + direction * delta * if fine { 0.001 } else { 0.01 }).clamp(-1.0, 1.0);
+        self.last_delta_y = total_delta_y;
+        self.reference.left.point = point;
+        Some((index, point))
+    }
 }
 
 /// Points cannot cross/overwrite their neighbours. A colliding time stays at its
@@ -261,6 +394,165 @@ mod tests {
         });
         (project, reference)
     }
+    fn tension_fixture() -> (Project, TensionReference) {
+        let (mut project, mut left) = fixture();
+        project.automation_lanes[0]
+            .lane
+            .set_curve(AutomationCurve::Tension);
+        left.point = project.automation_lanes[0].lane.points()[0];
+        let reference = TensionReference {
+            left,
+            right: project.automation_lanes[0].lane.points()[1],
+            clip_start: 8.0,
+            source_offset: 2.0,
+            length: 4.0,
+        };
+        (project, reference)
+    }
+
+    #[test]
+    fn tension_midpoint_uses_original_curve_and_clipped_source_interval() {
+        let (mut project, _) = tension_fixture();
+        let lane = &mut project.automation_lanes[0].lane;
+        lane.replace_points([
+            AutomationPoint::with_tension(0.0, -1.0, 0.5),
+            AutomationPoint::new(8.0, 1.0),
+        ]);
+        let clip = &project.clips[0]; // source 2..6, neither original endpoint visible
+        let (source, native) = tension_handle(lane, 0, clip, 100.0).unwrap();
+        assert_eq!(source, 4.0);
+        assert_eq!(native, lane.evaluate_unlooped(source).unwrap());
+        assert_eq!(native, -0.875); // p=.5, exponent=4, native pan range
+        let mut clipped = clip.clone();
+        clipped.source_offset = 3.0;
+        clipped.length = 1.0;
+        let (source, native) = tension_handle(lane, 0, &clipped, 100.0).unwrap();
+        assert_eq!(source, 3.5);
+        assert_eq!(native, lane.evaluate_unlooped(source).unwrap());
+        // No viewport is an input: scroll must never relocate this midpoint.
+        assert_eq!(tension_handle(lane, 0, &clipped, 24.0).unwrap().0, 3.5);
+        assert!(tension_handle(lane, 0, &clipped, 23.0).is_none());
+    }
+
+    #[test]
+    fn tension_visibility_rejects_ignored_modes_flat_invalid_and_missing_segments() {
+        let (mut project, _) = tension_fixture();
+        let clip = &project.clips[0];
+        let lane = &mut project.automation_lanes[0].lane;
+        for curve in [AutomationCurve::Linear, AutomationCurve::Hold] {
+            lane.set_curve(curve);
+            assert!(tension_handle(lane, 0, clip, 100.0).is_none());
+        }
+        lane.set_curve(AutomationCurve::Tension);
+        lane.set_enabled(false);
+        assert!(tension_handle(lane, 0, clip, 100.0).is_none());
+        lane.set_enabled(true);
+        assert!(tension_handle(lane, 2, clip, 100.0).is_none());
+        for scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(tension_handle(lane, 0, clip, scale).is_none());
+        }
+        let mut invalid = clip.clone();
+        invalid.source_offset = f32::NAN;
+        assert!(tension_handle(lane, 0, &invalid, 100.0).is_none());
+        lane.replace_points([
+            AutomationPoint::new(2.0, 0.0),
+            AutomationPoint::new(4.0, 0.0),
+        ]);
+        assert!(tension_handle(lane, 0, clip, 100.0).is_none());
+    }
+
+    #[test]
+    fn tension_drag_ctrl_transitions_and_clamp_reversal_are_incremental() {
+        let (mut project, reference) = tension_fixture();
+        let lane = &mut project.automation_lanes[0].lane;
+        let original = lane.points().to_vec();
+        let mut drag = TensionDrag {
+            reference,
+            last_delta_y: 0.0,
+        };
+        for (total, fine, expected) in [
+            (20.0, false, 0.2),
+            (20.0, true, 0.2), // modifier-only frame cannot jump
+            (30.0, true, 0.21),
+            (30.0, false, 0.21),
+            (40.0, false, 0.31),
+            (500.0, false, 1.0),
+            (499.0, false, 0.99), // immediate response, no overshoot debt
+            (-500.0, false, -1.0),
+            (-499.0, true, -0.999),
+        ] {
+            let (index, point) = drag.advance(lane, total, fine).unwrap();
+            assert!((point.tension - expected).abs() < 1e-12);
+            assert_eq!(
+                (point.position, point.value),
+                (original[0].position, original[0].value)
+            );
+            lane.update_point(index, point).unwrap();
+            assert_eq!(&lane.points()[1..], &original[1..]);
+        }
+        assert!(drag.advance(lane, f32::NAN, false).is_none());
+        let saved = lane.points()[0];
+        lane.update_point(
+            0,
+            AutomationPoint::with_tension(saved.position, saved.value + 0.1, saved.tension),
+        )
+        .unwrap();
+        assert!(drag.advance(lane, -498.0, false).is_none());
+    }
+
+    #[test]
+    fn tension_drag_follows_vertical_direction_for_falling_native_values() {
+        let (mut project, mut reference) = tension_fixture();
+        let lane = &mut project.automation_lanes[0].lane;
+        lane.replace_points([
+            AutomationPoint::new(2.0, 1.0),
+            AutomationPoint::new(4.0, -1.0),
+        ]);
+        reference.left.point = lane.points()[0];
+        reference.right = lane.points()[1];
+        let mut drag = TensionDrag {
+            reference,
+            last_delta_y: 0.0,
+        };
+        let before = lane.evaluate_unlooped(3.0).unwrap();
+        let (index, point) = drag.advance(lane, -20.0, false).unwrap();
+        assert_eq!(point.tension, 0.2);
+        lane.update_point(index, point).unwrap();
+        assert!(lane.evaluate_unlooped(3.0).unwrap() > before);
+    }
+
+    #[test]
+    fn tension_actions_revalidate_segment_mode_placement_and_persist() {
+        let (project, reference) = tension_fixture();
+        let edited = candidate(&project, PointAction::Tension(reference.clone(), 0.75)).unwrap();
+        assert_eq!(edited.automation_lanes[0].lane.points()[0].tension, 0.75);
+        assert_eq!(
+            &edited.automation_lanes[0].lane.points()[1..],
+            &project.automation_lanes[0].lane.points()[1..]
+        );
+        let restored: Project =
+            serde_json::from_slice(&serde_json::to_vec(&edited).unwrap()).unwrap();
+        assert_eq!(project_fingerprint(&edited), project_fingerprint(&restored));
+        assert!(candidate(&edited, PointAction::Tension(reference.clone(), 0.0)).is_none());
+        for value in [f64::NAN, f64::INFINITY, -1.01, 1.01] {
+            assert!(candidate(&project, PointAction::Tension(reference.clone(), value)).is_none());
+        }
+        let mut changed = project.clone();
+        changed.automation_lanes[0]
+            .lane
+            .insert_point(AutomationPoint::new(3.0, -0.5))
+            .unwrap();
+        assert!(candidate(&changed, PointAction::Tension(reference.clone(), 0.0)).is_none());
+        changed = project.clone();
+        changed.automation_lanes[0]
+            .lane
+            .set_curve(AutomationCurve::Linear);
+        assert!(candidate(&changed, PointAction::Tension(reference.clone(), 0.0)).is_none());
+        changed = project.clone();
+        changed.clips[0].source_offset += 1.0;
+        assert!(candidate(&changed, PointAction::Tension(reference, 0.0)).is_none());
+    }
+
     #[test]
     fn point_actions_normalize_pan_reject_nonfinite_and_resolve_stale_index() {
         let (mut project, reference) = fixture();

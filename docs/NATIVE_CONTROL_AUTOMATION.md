@@ -38,4 +38,17 @@ Drag a point with Shift to lock value, Ctrl to lock time, or Alt to bypass snap.
 
 Each point action and completed drag is one undo transaction, separate from an immediately preceding project edit. Escape during a point drag restores its pre-drag project state; release outside the editor still finishes the transaction. Automation clips do not invoke the Playlist's generic right-click clip deletion; use the ordinary Delete command to remove a clip. Clipboard copy and canceled/no-op actions do not create history entries.
 
-This bounded UI pass does not add Step/Slide drawing, tension handles, segment-specific curve types, song-range creation, unique copies, multi-target binding, output-range scaling or LFOs. Source checkpoint tests are included; native-window/audio acceptance and actual execution results are reported separately.
+This bounded UI pass does not add Step/Slide drawing, segment-specific curve types, song-range creation, unique copies, multi-target binding, output-range scaling or LFOs. Source checkpoint tests are included; native-window/audio acceptance and actual execution results are reported separately.
+
+
+### On-curve tension handles
+
+Set the lane to **Tension** in the inspector, then select its clip with the Select tool. A diamond on each non-flat, sufficiently wide segment adjusts the left point's outgoing tension. Linear and Hold modes have no tension handles; this gesture never changes the lane's curve mode.
+
+Drag a diamond vertically to bend the displayed curve in that direction. Horizontal movement is ignored. Hold Ctrl for ten-times finer adjustment; pressing or releasing Ctrl while holding still does not jump the curve. Tension stays within -1 to +1 and responds immediately when dragging back from a limit. Right-click a diamond to reset its outgoing tension to zero. The tooltip and active-drag readout show tension, the sampled native value and its native range (for example, pan -1 to +1).
+
+For split or slipped clips, the diamond is at the midpoint of the segment's intersection with the clip's source span. Its value is sampled from the original segment, including when both original endpoints are outside that span. Scrolling hides an offscreen diamond rather than moving it to a new source time. Flat, disabled, invalid or narrower-than-24-pixel segments have no handles; handles do not overlap editable point hit areas. Curve drawing, point nodes and handles use the same Playlist-time X mapping.
+
+A completed drag or reset is one Undo step, separate from a preceding edit. Escape restores the pre-drag project; releasing outside the Playlist still completes the drag. No-op gestures and reset-at-zero leave history, redo and saved-state status unchanged. This is a UI-only use of the existing outgoing tension data and curve evaluation. No project-format, engine or segment-specific interpolation changes are included.
+
+Source tests cover mapping, source clipping, ignored modes, stale captures, Ctrl transitions, limit reversal, persistence and production egui pointer/history flows. Execution and native-window/audio acceptance must be reported separately for the exact checkpoint.

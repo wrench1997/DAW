@@ -20766,8 +20766,24 @@ impl CitrusApp {
                             .find(|automation| automation.id == automation_id)
                     }) {
                         let curve_rect = Rect::from_min_max(
-                            Pos2::new(clip_rect.left() + 5.0, clip_rect.top() + 18.0),
-                            Pos2::new(clip_rect.right() - 5.0, clip_rect.bottom() - 6.0),
+                            Pos2::new(
+                                canvas.left()
+                                    + self
+                                        .playlist_viewport
+                                        .x
+                                        .pixel_for_content(f64::from(visible_start))
+                                        as f32,
+                                clip_rect.top() + 18.0,
+                            ),
+                            Pos2::new(
+                                canvas.left()
+                                    + self
+                                        .playlist_viewport
+                                        .x
+                                        .pixel_for_content(f64::from(visible_end))
+                                        as f32,
+                                clip_rect.bottom() - 6.0,
+                            ),
                         );
                         draw_automation_curve(
                             &canvas_painter,
@@ -20961,6 +20977,167 @@ impl CitrusApp {
                                             ui.close();
                                         }
                                     });
+                            }
+                            // Register after points, but never let a handle overlap a
+                            // node's hit area. A held handle retains its gesture identity.
+                            for (point_index, pair) in
+                                automation.lane.points().windows(2).enumerate()
+                            {
+                                if curve_rect.width() < 2.0
+                                    || curve_rect.height() < 2.0
+                                    || clip_snapshot
+                                        .iter()
+                                        .filter(|other| other.id == clip.id)
+                                        .count()
+                                        != 1
+                                    || automation_lanes
+                                        .iter()
+                                        .filter(|other| other.id == automation.id)
+                                        .count()
+                                        != 1
+                                {
+                                    continue;
+                                }
+                                let handle_id = id.with((
+                                    "automation-tension",
+                                    self.project_session,
+                                    point_index,
+                                ));
+                                let drag_key = handle_id.with("drag");
+                                let held = ui
+                                    .ctx()
+                                    .data(|data| {
+                                        data.get_temp::<automation_points::TensionDrag>(drag_key)
+                                    })
+                                    .filter(|_| self.automation_point_drag_active);
+                                let Some((source, value)) = automation_points::tension_handle(
+                                    &automation.lane,
+                                    point_index,
+                                    clip,
+                                    beat_w,
+                                ) else {
+                                    continue;
+                                };
+                                let timeline =
+                                    f64::from(clip.start) + source - f64::from(clip.source_offset);
+                                let position = Pos2::new(
+                                    canvas.left()
+                                        + self.playlist_viewport.x.pixel_for_content(timeline)
+                                            as f32,
+                                    curve_rect.bottom()
+                                        - value_range.normalize(value) as f32 * curve_rect.height(),
+                                );
+                                let hit = Rect::from_center_size(position, Vec2::splat(12.0));
+                                if !canvas.contains_rect(hit) && held.is_none() {
+                                    continue;
+                                }
+                                let overlaps_node = automation.lane.points().iter().any(|point| {
+                                    let time = f64::from(clip.start) + point.position
+                                        - f64::from(clip.source_offset);
+                                    if time < f64::from(visible_start)
+                                        || time > f64::from(visible_end)
+                                    {
+                                        return false;
+                                    }
+                                    let node = Pos2::new(
+                                        canvas.left()
+                                            + self.playlist_viewport.x.pixel_for_content(time)
+                                                as f32,
+                                        curve_rect.bottom()
+                                            - value_range.normalize(point.value) as f32
+                                                * curve_rect.height(),
+                                    );
+                                    hit.intersects(Rect::from_center_size(node, Vec2::splat(12.0)))
+                                });
+                                if overlaps_node && held.is_none() {
+                                    continue;
+                                }
+                                let handle_response =
+                                    ui.interact(hit, handle_id, Sense::click_and_drag());
+                                let reference = automation_points::TensionReference {
+                                    left: automation_points::PointReference {
+                                        clip_id: clip.id,
+                                        lane_id: automation.id,
+                                        point: pair[0],
+                                        target: automation.lane.target().clone(),
+                                        range: value_range,
+                                    },
+                                    right: pair[1],
+                                    clip_start: clip.start,
+                                    source_offset: clip.source_offset,
+                                    length: clip.length,
+                                };
+                                canvas_painter.add(egui::Shape::convex_polygon(
+                                    vec![
+                                        position + Vec2::new(0.0, -4.0),
+                                        position + Vec2::new(4.0, 0.0),
+                                        position + Vec2::new(0.0, 4.0),
+                                        position + Vec2::new(-4.0, 0.0),
+                                    ],
+                                    theme::BG,
+                                    Stroke::new(1.5, Color32::WHITE),
+                                ));
+                                handle_response.widget_info(|| {
+                                    egui::WidgetInfo::slider(
+                                        true,
+                                        pair[0].tension,
+                                        format!("Automation tension {}", point_index + 1),
+                                    )
+                                });
+                                if handle_response.clicked()
+                                    || handle_response.secondary_clicked()
+                                    || handle_response.dragged()
+                                    || handle_response.drag_started()
+                                {
+                                    clip_consumed_click = true;
+                                }
+                                let mut drag = held;
+                                if handle_response.drag_started_by(egui::PointerButton::Primary) {
+                                    project_gesture_started = true;
+                                    self.automation_point_drag_active = true;
+                                    drag = Some(automation_points::TensionDrag {
+                                        reference: reference.clone(),
+                                        last_delta_y: 0.0,
+                                    });
+                                }
+                                if handle_response.dragged_by(egui::PointerButton::Primary)
+                                    && let Some(state) = &mut drag
+                                    && state.reference.matches_clip(clip)
+                                    && let Some(delta) = handle_response.total_drag_delta()
+                                    && let Some((index, point)) = state.advance(
+                                        &automation.lane,
+                                        delta.y,
+                                        ui.input(|input| input.modifiers.ctrl),
+                                    )
+                                {
+                                    automation_update_request = Some((automation.id, index, point));
+                                }
+                                if handle_response.drag_stopped_by(egui::PointerButton::Primary) {
+                                    project_gesture_stopped = true;
+                                    drag = None;
+                                }
+                                ui.ctx().data_mut(|data| {
+                                    if let Some(drag) = drag {
+                                        data.insert_temp(drag_key, drag);
+                                    } else {
+                                        data.remove::<automation_points::TensionDrag>(drag_key);
+                                    }
+                                });
+                                if handle_response.secondary_clicked()
+                                    && !self.automation_point_drag_active
+                                {
+                                    automation_point_action = Some(
+                                        automation_points::PointAction::Tension(reference, 0.0),
+                                    );
+                                }
+                                let tooltip = format!(
+                                    "Tension {:+.3}\nValue {:.4} (native {:.4}…{:.4})\nDrag vertically · Ctrl: fine · Right-click: reset",
+                                    pair[0].tension, value, value_range.min, value_range.max,
+                                );
+                                if handle_response.dragged() {
+                                    handle_response.show_tooltip_text(&tooltip);
+                                }
+                                handle_response.on_hover_text(tooltip);
                             }
                             if (response.secondary_clicked() || response.double_clicked())
                                 && !clip_consumed_click
