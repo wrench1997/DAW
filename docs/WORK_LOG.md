@@ -1708,3 +1708,16 @@ The corrected source must be archived and reviewed before fresh offline tests
 and previously unexecuted gates. Earlier passes remain bound to 3868c2fb with
 explicit unchanged-vendor/unchanged-test attribution; no whole-App or genuine
 qualification is claimed. No retry or criterion relaxation occurred in production.
+
+### Dry-topology core-only helper cfg correction (unvalidated continuation)
+
+The archived fb86e1aa correction passed all 24 offline/capture tests, including
+normal polling and intentional unwind, plus current runtime/export/helper/protocol
+and default/core bounce/export suites. Feature/default Clippy passed. Core Clippy
+then rejected two unused convenience helpers in the no-VST3, non-test binary.
+The exact correction adds cfg(any(feature = "vst3", test)) to BounceAudioBus::new
+and participating_input_channels only. Their bodies, shared DTO/validator and all
+existing VST3/test callers remain unchanged. The original core Clippy failure is
+retained. This revision is unexecuted until source persistence/review; only core
+Clippy, affected pure topology tests and remaining compiler/package gates need
+fresh execution. Previously passing runs keep their original source attribution.

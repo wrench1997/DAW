@@ -101,6 +101,7 @@ pub struct BounceAudioBus {
 }
 
 impl BounceAudioBus {
+    #[cfg(any(feature = "vst3", test))]
     pub(crate) const fn new(channel_count: usize, is_main: bool, active: Option<bool>) -> Self {
         Self {
             channel_count,
@@ -155,6 +156,7 @@ pub struct BouncePluginMetadata {
 
 impl BouncePluginMetadata {
     /// Flat input storage contains only participating channels; no external audio is read.
+    #[cfg(any(feature = "vst3", test))]
     pub(crate) fn participating_input_channels(&self) -> usize {
         self.input_buses
             .iter()
