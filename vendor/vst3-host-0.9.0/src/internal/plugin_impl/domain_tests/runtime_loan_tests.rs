@@ -1062,9 +1062,10 @@ fn caller_envelope_parameter_callback_asymmetry_remains_unchanged() {
         *state.processed_parameters.lock().unwrap(),
         [vec![(1, 0, 0.25), (2, 3, 0.5), (3, 7, 0.75)]]
     );
-    // Only setters mirror the controller; queue-only admission leaves the last mirror intact.
+    // Preserve the legacy public queue method's main-thread mirroring behavior.
+    // Internal RuntimeLoan/ProcessorOps admission is separately processor-only.
     assert_eq!(
         f64::from_bits(state.last_mirrored.load(Ordering::Acquire)),
-        0.5
+        0.75
     );
 }

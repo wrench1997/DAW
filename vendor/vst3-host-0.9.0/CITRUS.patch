@@ -15398,7 +15398,7 @@
 +}
 --- /dev/null
 +++ b/src/internal/plugin_impl/domain_tests/runtime_loan_tests.rs
-@@ -0,0 +1,1070 @@
+@@ -0,0 +1,1071 @@
 +//! Full-kernel scoped-runtime evidence with allocating, locking COM mocks.
 +//! Completion during a held UI call is not an audio deadline or native-plug-in guarantee.
 +//! Rust unwind tests never panic through a COM vtable.
@@ -16463,10 +16463,11 @@
 +        *state.processed_parameters.lock().unwrap(),
 +        [vec![(1, 0, 0.25), (2, 3, 0.5), (3, 7, 0.75)]]
 +    );
-+    // Only setters mirror the controller; queue-only admission leaves the last mirror intact.
++    // Preserve the legacy public queue method's main-thread mirroring behavior.
++    // Internal RuntimeLoan/ProcessorOps admission is separately processor-only.
 +    assert_eq!(
 +        f64::from_bits(state.last_mirrored.load(Ordering::Acquire)),
-+        0.5
++        0.75
 +    );
 +}
 --- /dev/null
