@@ -294,8 +294,7 @@ pub(super) fn read_reply(
             if new_len > reply.capacity() {
                 let target = new_len
                     .max(reply.capacity().saturating_mul(2))
-                    .max(4096)
-                    .min(MAX_LINE);
+                    .clamp(4096, MAX_LINE);
                 budget.grow(&mut reply, target)?;
             }
             reply.extend_from_slice(&bytes[..used]);

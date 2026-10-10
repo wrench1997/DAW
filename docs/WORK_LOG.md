@@ -1465,3 +1465,11 @@ and the complete pipe/cancellation/quarantine/cleanup tests passed. The failed
 run remains unchanged. Independent review approved splitting only this test
 expectation; no production parser behavior changed. The corrected revision is
 unvalidated pending the archived rerun and remaining source gates.
+
+### Strict-foundation Clippy correction (preserved failure)
+
+The corrected scalar test passed on121429af. Strict vendor Clippy then stopped
+on a manual-clamp style lint in reply-capacity growth, before the full suite ran.
+The reviewed replacement uses `clamp(4096, MAX_LINE)` with the same fixed bounds
+and arithmetic, preserving capacity and budget semantics. The original Clippy
+log is retained; this expression revision awaits its archived validation run.

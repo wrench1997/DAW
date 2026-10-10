@@ -3970,7 +3970,7 @@
 +}
 --- a/src/fresh_helper/pump.rs
 +++ b/src/fresh_helper/pump.rs
-@@ -0,0 +1,513 @@
+@@ -0,0 +1,512 @@
 +use super::{Budget, ChildOwner, CleanupReport, CleanupState, Delivery, ErrorKind, MAX_LINE};
 +use std::io;
 +use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -4267,8 +4267,7 @@
 +            if new_len > reply.capacity() {
 +                let target = new_len
 +                    .max(reply.capacity().saturating_mul(2))
-+                    .max(4096)
-+                    .min(MAX_LINE);
++                    .clamp(4096, MAX_LINE);
 +                budget.grow(&mut reply, target)?;
 +            }
 +            reply.extend_from_slice(&bytes[..used]);
