@@ -440,3 +440,15 @@ retained Child ownership through a single reserved process-wide quarantine.
 No real plugin/COM authority is added. Full limits and the deliberate restrictions
 on nonempty event replies, legacy state arrays, SIGPIPE and concurrent strict
 sessions are documented in the repository's strict-foundation guide.
+
+## Closed strict offline client (Stop A source checkpoint; unvalidated)
+
+Extend the disabled Linux fresh-helper feature with a doc-hidden, typed, non-Send
+client and synchronous borrowed request view. Ten existing metadata/lifecycle/
+ordinary-note operations receive bounded closed codecs; full parameter fields,
+raw checked layouts and typed metadata refusals survive unchanged. No generic
+protocol/owner extraction or caller activation is exported. Split protocol/reap
+deadlines and a nonwaiting retained-owner cleanup continuation share the original
+teardown kernel, preserve first error evidence and cache proven exit status.
+The repository's STRICT_OFFLINE_CLIENT.md records limits and the separately
+gated future one-shot adapter; no real plugin or App integration is included.

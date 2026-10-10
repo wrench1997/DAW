@@ -245,7 +245,7 @@ fn expired_and_unsupported_requests_send_nothing() {
         let mut session = spawn("import sys\nassert sys.stdin.read() == ''\n");
         let result = if unsupported {
             session.exchange(
-                &HostCommand::GetAllParameters,
+                &HostCommand::CreateGui,
                 ReplyShape::ParameterValue,
                 deadline(),
             )
@@ -788,11 +788,13 @@ fn direct_child_exit_is_detected_while_a_separate_writer_holds_stdout_open() {
             kill_requested: false,
             graceful_until: None,
             observed_exit: None,
+            cleanup_report: CleanupReport::pending(),
         }),
         permit: Some(permit),
         cancel,
         state: State::Ready,
         terminal: None,
+        completed_cleanup: None,
         _owner_thread: PhantomData,
     };
     let owner = session.owner.as_mut().unwrap();
@@ -840,3 +842,110 @@ fn expiry_during_encoding_is_not_sent_and_child_observes_no_bytes() {
     assert_eq!(failure.delivery, Delivery::NotSent);
     finish(&mut session);
 }
+
+#[test]
+fn separate_protocol_expiry_closes_without_shutdown_then_proves_reap() {
+    let _serial = serial();
+    let mut session = spawn("import sys\nassert sys.stdin.read()==''\n");
+    let report = session.dispose_with_deadlines(Instant::now(), deadline());
+    assert_eq!(report.shutdown_error, Some(ErrorKind::Deadline));
+    assert_eq!(report.shutdown_delivery, Some(Delivery::NotSent));
+    assert!(matches!(report.state, CleanupState::Reaped(s) if s.success()));
+    assert!(!report.kill_requested);
+    let repeated = session.continue_cleanup().unwrap();
+    assert_eq!(repeated.shutdown_error, report.shutdown_error);
+    assert_eq!(repeated.shutdown_delivery, report.shutdown_delivery);
+    assert!(matches!(repeated.state, CleanupState::Reaped(s) if s.success()));
+}
+
+#[test]
+fn cleanup_continuation_rejects_before_disposal_without_mutation() {
+    let _serial = serial();
+    let mut session = spawn("import json,sys\nassert json.loads(sys.stdin.readline())=='LatencySamples'\nprint('{\"LatencySamples\":{\"samples\":7}}',flush=True)\nassert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''\n");
+    let pid = session.owner.as_ref().unwrap().child.id();
+    assert_eq!(
+        session.continue_cleanup().unwrap_err(),
+        ErrorKind::CleanupNotBegun
+    );
+    assert_eq!(session.state, State::Ready);
+    assert_eq!(session.owner.as_ref().unwrap().child.id(), pid);
+    assert!(matches!(
+        scalar(&mut session),
+        Ok(HostResponse::LatencySamples { samples: 7 })
+    ));
+    finish(&mut session);
+}
+
+#[test]
+fn nonwaiting_cleanup_retries_kill_after_expiry_and_preserves_first_evidence() {
+    let _serial = serial();
+    let mut session = spawn("import time\ntime.sleep(30)\n");
+    let pid = session.owner.as_ref().unwrap().child.id();
+    let first = session.dispose_with_deadlines(Instant::now(), Instant::now());
+    assert!(matches!(first.state, CleanupState::Pending));
+    assert_eq!(first.shutdown_error, Some(ErrorKind::Deadline));
+    // Test-only clock positioning; no scheduling threshold is an acceptance gate.
+    session.owner.as_mut().unwrap().graceful_until = Some(Instant::now());
+    let first_grace = session.owner.as_ref().unwrap().graceful_until;
+    for fault in [
+        pump::test_hooks::Fault::Kill,
+        pump::test_hooks::Fault::Kill,
+        pump::test_hooks::Fault::Wait,
+    ] {
+        pump::test_hooks::arm(fault);
+        let report = session.continue_cleanup().unwrap();
+        assert!(matches!(report.state, CleanupState::Pending));
+        assert_eq!(report.kill_error, Some(libc::EPERM));
+        assert_eq!(session.owner.as_ref().unwrap().child.id(), pid);
+        assert_eq!(session.owner.as_ref().unwrap().graceful_until, first_grace);
+    }
+    let killed = session.continue_cleanup().unwrap();
+    assert!(matches!(killed.state, CleanupState::Pending));
+    assert!(killed.kill_requested); // One successful kill is not yet a reap result.
+    assert_eq!(killed.kill_error, Some(libc::EPERM));
+    assert_eq!(killed.wait_error, Some(libc::EIO));
+    assert_eq!(killed.shutdown_error, Some(ErrorKind::Deadline));
+    let end = deadline();
+    let final_report = loop {
+        let report = session.continue_cleanup().unwrap();
+        if matches!(report.state, CleanupState::Reaped(_)) {
+            break report;
+        }
+        assert!(Instant::now() < end, "mock reap watchdog");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(final_report.kill_requested);
+    assert_eq!(final_report.kill_error, Some(libc::EPERM));
+    assert_eq!(final_report.wait_error, Some(libc::EIO));
+    let cached = session.dispose_checked(Instant::now());
+    assert!(matches!(cached.state, CleanupState::Reaped(_)));
+    assert_eq!(cached.kill_error, final_report.kill_error);
+    assert_eq!(cached.wait_error, final_report.wait_error);
+    assert_eq!(cached.shutdown_error, final_report.shutdown_error);
+}
+
+#[test]
+fn pending_cleanup_evidence_travels_with_abandoned_owner() {
+    let _serial = serial();
+    let mut session = spawn("import time\ntime.sleep(30)\n");
+    let pid = session.owner.as_ref().unwrap().child.id();
+    let _ = session.dispose_with_deadlines(Instant::now(), Instant::now());
+    session.owner.as_mut().unwrap().graceful_until = Some(Instant::now());
+    pump::test_hooks::arm(pump::test_hooks::Fault::Wait);
+    let report = session.continue_cleanup().unwrap();
+    assert_eq!(report.wait_error, Some(libc::EIO));
+    drop(session);
+    assert_eq!(quarantine::abandoned_pid(), Some(pid));
+    pump::test_hooks::arm(pump::test_hooks::Fault::ReapPanic);
+    assert!(
+        std::panic::catch_unwind(|| FreshHelperSession::cleanup_abandoned(deadline())).is_err()
+    );
+    assert_eq!(quarantine::abandoned_pid(), Some(pid));
+    let final_report = FreshHelperSession::cleanup_abandoned(deadline());
+    assert!(matches!(final_report.state, CleanupState::Reaped(_)));
+    assert_eq!(final_report.wait_error, Some(libc::EIO));
+    assert_eq!(final_report.shutdown_error, Some(ErrorKind::Deadline));
+}
+
+#[path = "client_tests.rs"]
+mod client_tests;

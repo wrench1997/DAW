@@ -4,6 +4,8 @@ use super::super::{budget_test_hooks, pump, Cancellation, MAX_PAYLOAD};
 use super::*;
 use crate::audio::AudioBusConfig;
 use crate::internal::native_edit_transport::tests::allocation_free;
+use crate::midi::MidiChannel;
+use crate::plugin::StateContext;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,6 +29,9 @@ fn new_budget() -> Budget {
 fn decode(bytes: &[u8], shape: &ReplyShape, budget: &mut Budget) -> Result<HostResponse> {
     match super::decode(bytes, shape, budget)? {
         DecodedReply::Response(response) => Ok(response),
+        DecodedReply::MetadataRejected(reason) => {
+            Ok(HostResponse::MetadataQueryRejected { reason })
+        }
         DecodedReply::KnownFailure {
             reported: Some(response),
             ..
@@ -279,8 +284,8 @@ fn unsupported_requests_and_incompatible_shapes_allocate_nothing() {
     for command in [
         HostCommand::Shutdown,
         HostCommand::UnloadPlugin,
-        HostCommand::StartProcessing,
-        HostCommand::GetAllParameters,
+        HostCommand::CreateGui,
+        HostCommand::MidiPanic,
     ] {
         let mut budget = new_budget();
         assert_eq!(
@@ -1610,14 +1615,16 @@ fn deterministic_deadline_interrupts_count_emit_preflight_materialize_and_final_
         let _hook = budget_test_hooks::expire_at_check(usize::MAX);
         let mut budget = new_budget();
         budget.check().unwrap();
-        check_request(&command, &ReplyShape::Success).unwrap();
+        let view = RequestView::try_from(&command).unwrap();
+        budget.check().unwrap();
+        check_request(&view, &ReplyShape::Success).unwrap();
         let mut writer = Writer {
             bytes: None,
             len: 0,
             checked: 0,
             budget: &mut budget,
         };
-        writer.command(&command).unwrap();
+        writer.command(&view).unwrap();
         budget_test_hooks::checks()
     };
     let encode_checks = {
@@ -1733,4 +1740,1028 @@ fn preflight_and_representative_rejections_measured_without_heap_activity() {
             expected
         );
     }
+}
+
+#[test]
+fn offline_additions_emit_the_existing_wire_and_borrowed_path_matches() {
+    for (command, shape) in [
+        (
+            HostCommand::SetProcessMode {
+                mode: ProcessMode::Offline,
+            },
+            ReplyShape::Success,
+        ),
+        (
+            HostCommand::ResetOriginSupport,
+            ReplyShape::ResetOriginSupport,
+        ),
+        (HostCommand::StartProcessing, ReplyShape::Success),
+        (HostCommand::StopProcessing, ReplyShape::Success),
+        (
+            HostCommand::NativeDirtyRevision,
+            ReplyShape::NativeDirtyRevision,
+        ),
+        (HostCommand::GetAllParameters, ReplyShape::Parameters),
+        (
+            HostCommand::CheckedAudioBusLayout,
+            ReplyShape::CheckedAudioBusLayout,
+        ),
+        (HostCommand::EventBusLayout, ReplyShape::EventBusLayout),
+    ] {
+        assert_command(&command, &shape);
+        let view = allocation_free(|| RequestView::try_from(&command)).unwrap();
+        assert_eq!(
+            encode(&command, &shape, &mut new_budget()).unwrap(),
+            encode_view(&view, &shape, &mut new_budget()).unwrap(),
+        );
+        let mut budget = new_budget();
+        assert_eq!(
+            allocation_free(|| encode(&command, &ReplyShape::State, &mut budget)).unwrap_err(),
+            ErrorKind::Shape,
+        );
+        assert_eq!((budget.live, budget.peak), (0, 0));
+    }
+    for value in [-0.0, 0.0, f64::from_bits(1), 0.5, 1.0] {
+        assert_command(
+            &HostCommand::SetParameter {
+                id: u32::MAX,
+                value,
+            },
+            &ReplyShape::Success,
+        );
+    }
+    for channel_index in 0..16 {
+        let channel = MidiChannel::from_index(channel_index).unwrap();
+        for note in [0, 127] {
+            for velocity in [0, 127] {
+                for event in [
+                    MidiEvent::NoteOn {
+                        channel,
+                        note,
+                        velocity,
+                    },
+                    MidiEvent::NoteOff {
+                        channel,
+                        note,
+                        velocity,
+                    },
+                ] {
+                    for sample_offset in [0, 127] {
+                        assert_command(
+                            &HostCommand::SendMidiAt {
+                                event,
+                                sample_offset,
+                            },
+                            &ReplyShape::Success,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn offline_setter_mode_and_note_admission_reject_before_allocating() {
+    let reject = |command: HostCommand| {
+        let mut budget = new_budget();
+        assert_eq!(
+            allocation_free(|| encode(&command, &ReplyShape::Success, &mut budget)).unwrap_err(),
+            ErrorKind::InvalidRequest,
+        );
+        assert_eq!((budget.live, budget.peak), (0, 0));
+    };
+    for mode in [ProcessMode::Realtime, ProcessMode::Prefetch] {
+        reject(HostCommand::SetProcessMode { mode });
+    }
+    for value in [
+        -f64::from_bits(1),
+        1.0 + f64::EPSILON,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        reject(HostCommand::SetParameter { id: 0, value });
+    }
+    let channel = MidiChannel::Ch1;
+    for event in [
+        MidiEvent::NoteOn {
+            channel,
+            note: 128,
+            velocity: 127,
+        },
+        MidiEvent::NoteOn {
+            channel,
+            note: 127,
+            velocity: 128,
+        },
+        MidiEvent::NoteOff {
+            channel,
+            note: 255,
+            velocity: 0,
+        },
+        MidiEvent::NoteOff {
+            channel,
+            note: 0,
+            velocity: 255,
+        },
+        MidiEvent::ControlChange {
+            channel,
+            controller: 1,
+            value: 1,
+        },
+        MidiEvent::ProgramChange {
+            channel,
+            program: 0,
+        },
+        MidiEvent::PitchBend {
+            channel,
+            value: 8192,
+        },
+        MidiEvent::ChannelAftertouch {
+            channel,
+            pressure: 0,
+        },
+        MidiEvent::PolyAftertouch {
+            channel,
+            note: 0,
+            pressure: 0,
+        },
+    ] {
+        reject(HostCommand::SendMidiAt {
+            event,
+            sample_offset: 0,
+        });
+    }
+    for sample_offset in [-1, 128, i32::MIN, i32::MAX] {
+        reject(HostCommand::SendMidiAt {
+            event: MidiEvent::NoteOn {
+                channel,
+                note: 60,
+                velocity: 100,
+            },
+            sample_offset,
+        });
+    }
+}
+
+#[test]
+fn borrowed_large_state_preexpired_and_early_cancel_have_no_copy_or_mutation() {
+    let state = vec![0xa5; 64 * 1024 * 1024];
+    let pointer = state.as_ptr();
+    let capacity = state.capacity();
+    let request = RequestView::LoadState {
+        data: &state,
+        context: StateContextView::Project,
+    };
+    let mut budget = new_budget();
+    budget.deadline = Instant::now();
+    assert_eq!(
+        allocation_free(|| encode_view(&request, &ReplyShape::Success, &mut budget)).unwrap_err(),
+        ErrorKind::Deadline,
+    );
+    assert_eq!((budget.live, budget.peak), (0, 0));
+    for check in [1, 2, 3, 4] {
+        let mut budget = new_budget();
+        let _hook = budget_test_hooks::cancel_at_check(check);
+        assert_eq!(
+            allocation_free(|| encode_view(&request, &ReplyShape::Success, &mut budget))
+                .unwrap_err(),
+            ErrorKind::Cancelled,
+        );
+        assert_eq!((budget.live, budget.peak), (0, 0));
+    }
+    assert_eq!(state.as_ptr(), pointer);
+    assert_eq!(state.capacity(), capacity);
+    assert!(state.iter().all(|&byte| byte == 0xa5));
+}
+
+#[test]
+fn request_view_preserves_text_state_and_audio_storage_identity() {
+    let command = load("borrowed/🦀.vst3".into());
+    let view = allocation_free(|| RequestView::try_from(&command)).unwrap();
+    let (
+        HostCommand::LoadPlugin { path, class_id, .. },
+        RequestView::LoadPlugin {
+            path: borrowed,
+            class_id: id,
+            ..
+        },
+    ) = (&command, view)
+    else {
+        panic!("load view")
+    };
+    assert_eq!(path.as_ptr(), borrowed.as_ptr());
+    assert_eq!(class_id.as_ref().unwrap().as_ptr(), id.unwrap().as_ptr());
+    let command = HostCommand::LoadState {
+        data: vec![0, 1, 255],
+        context: StateContext::Preset {
+            path: Some("preset".into()),
+        },
+    };
+    let view = allocation_free(|| RequestView::try_from(&command)).unwrap();
+    let (
+        HostCommand::LoadState {
+            data,
+            context: StateContext::Preset { path },
+        },
+        RequestView::LoadState {
+            data: borrowed,
+            context: StateContextView::Preset {
+                path: borrowed_path,
+            },
+        },
+    ) = (&command, view)
+    else {
+        panic!("state view")
+    };
+    assert_eq!(data.as_ptr(), borrowed.as_ptr());
+    assert_eq!(
+        path.as_ref().unwrap().as_ptr(),
+        borrowed_path.unwrap().as_ptr()
+    );
+    let samples = vec![vec![f32::from_bits(0x7fc0_1234), -0.0]];
+    let view = RequestView::Process {
+        inputs: &samples,
+        frames: 2,
+        transport: None,
+    };
+    let encoded = encode_view(
+        &view,
+        &ReplyShape::Audio {
+            channels: 1,
+            frames: 2,
+        },
+        &mut new_budget(),
+    )
+    .unwrap();
+    let HostCommand::Process { inputs, .. } = serde_json::from_slice(&encoded).unwrap() else {
+        panic!("process wire")
+    };
+    assert_eq!(inputs[0][0].to_bits(), samples[0][0].to_bits());
+    assert_eq!(inputs[0][1].to_bits(), samples[0][1].to_bits());
+    assert_eq!(samples[0][0].to_bits(), 0x7fc0_1234);
+    assert_eq!(samples[0][1].to_bits(), (-0.0f32).to_bits());
+}
+
+fn catalog_parameter(id: u32) -> Parameter {
+    Parameter {
+        id,
+        name: "Gain\n🦀".into(),
+        value: 0.25,
+        min: -0.0,
+        max: 1.0,
+        default: 0.75,
+        unit: "dB\t".into(),
+        step_count: i32::MAX,
+        can_automate: true,
+        is_read_only: false,
+        is_bypass: true,
+        flags: u32::MAX,
+    }
+}
+
+#[test]
+fn catalog_preserves_every_field_and_charges_actual_payload_capacities() {
+    let mut second = catalog_parameter(u32::MAX);
+    second.value = f64::from_bits(1);
+    second.default = -0.0;
+    second.step_count = i32::MIN;
+    second.can_automate = false;
+    second.is_read_only = true;
+    second.is_bypass = false;
+    second.flags = 0;
+    let source = HostResponse::Parameters {
+        params: vec![catalog_parameter(0), second],
+    };
+    let bytes = wire(&source);
+    let mut budget = new_budget();
+    assert!(
+        allocation_free(|| preflight(&bytes, &ReplyShape::Parameters, &mut budget))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!((budget.live, budget.peak), (0, 0));
+    let decoded = decode(&bytes, &ReplyShape::Parameters, &mut budget).unwrap();
+    assert_eq!(wire(&decoded), bytes);
+    let HostResponse::Parameters { params } = decoded else {
+        panic!("catalog")
+    };
+    assert_eq!(params[0].min.to_bits(), (-0.0f64).to_bits());
+    assert_eq!(params[1].default.to_bits(), (-0.0f64).to_bits());
+    let charge = params.capacity() * std::mem::size_of::<Parameter>()
+        + params
+            .iter()
+            .map(|p| p.name.capacity() + p.unit.capacity())
+            .sum::<usize>();
+    assert_eq!(budget.live, charge);
+    assert_eq!(budget.peak, charge);
+}
+
+#[test]
+fn catalog_exact_entry_limit_and_plus_one_and_duplicate_ids_are_preflight_only() {
+    let mut params: Vec<_> = (0..MAX_PARAMETERS)
+        .map(|id| {
+            let mut parameter = catalog_parameter(id as u32);
+            parameter.name.clear();
+            parameter.unit.clear();
+            parameter
+        })
+        .collect();
+    let bytes = wire(&HostResponse::Parameters {
+        params: params.clone(),
+    });
+    let mut budget = new_budget();
+    assert!(
+        allocation_free(|| preflight(&bytes, &ReplyShape::Parameters, &mut budget))
+            .unwrap()
+            .is_none()
+    );
+    let decoded = decode(&bytes, &ReplyShape::Parameters, &mut new_budget()).unwrap();
+    assert!(
+        matches!(decoded, HostResponse::Parameters { params } if params.len() == MAX_PARAMETERS)
+    );
+    params.push(catalog_parameter(MAX_PARAMETERS as u32));
+    let bytes = wire(&HostResponse::Parameters {
+        params: params.clone(),
+    });
+    let mut budget = new_budget();
+    assert_eq!(
+        allocation_free(|| decode(&bytes, &ReplyShape::Parameters, &mut budget)).unwrap_err(),
+        ErrorKind::Limit
+    );
+    assert_eq!(budget.peak, 0);
+    params.pop();
+    // A nonadjacent duplicate near the end is caught before any earlier titles
+    // or descriptors are materialized. No partial catalog escapes to setters.
+    params[MAX_PARAMETERS - 1].id = params[0].id;
+    let bytes = wire(&HostResponse::Parameters { params });
+    let mut budget = new_budget();
+    assert_eq!(
+        allocation_free(|| decode(&bytes, &ReplyShape::Parameters, &mut budget)).unwrap_err(),
+        ErrorKind::MalformedReply
+    );
+    assert_eq!((budget.live, budget.peak), (0, 0));
+}
+
+#[test]
+fn catalog_utf8_text_exact_limits_and_aggregate_boundary() {
+    let mut parameter = catalog_parameter(0);
+    parameter.name = "🦀".repeat(MAX_PARAMETER_TEXT / 4);
+    parameter.unit = "u".repeat(MAX_PARAMETER_TEXT);
+    let bytes = wire(&HostResponse::Parameters {
+        params: vec![parameter.clone()],
+    });
+    assert!(decode(&bytes, &ReplyShape::Parameters, &mut new_budget()).is_ok());
+    for field in ["name", "unit"] {
+        let mut invalid = parameter.clone();
+        if field == "name" {
+            invalid.name.push('x');
+        } else {
+            invalid.unit.push('x');
+        }
+        let bytes = wire(&HostResponse::Parameters {
+            params: vec![invalid],
+        });
+        let mut budget = new_budget();
+        assert_eq!(
+            allocation_free(|| decode(&bytes, &ReplyShape::Parameters, &mut budget)).unwrap_err(),
+            ErrorKind::Limit
+        );
+        assert_eq!(budget.peak, 0);
+    }
+    let params: Vec<_> = (0..MAX_PARAMETERS)
+        .map(|id| {
+            let mut p = parameter.clone();
+            p.id = id as u32;
+            p
+        })
+        .collect();
+    assert_eq!(
+        params
+            .iter()
+            .map(|p| p.name.len() + p.unit.len())
+            .sum::<usize>(),
+        MAX_CATALOG_TEXT
+    );
+    let bytes = wire(&HostResponse::Parameters { params });
+    let mut budget = new_budget();
+    assert!(
+        allocation_free(|| preflight(&bytes, &ReplyShape::Parameters, &mut budget))
+            .unwrap()
+            .is_none()
+    );
+    let decoded = decode(&bytes, &ReplyShape::Parameters, &mut budget).unwrap();
+    assert_eq!(wire(&decoded), bytes);
+    // With 4096 entries and two 1024-byte strings, aggregate+1 on a wire also
+    // violates an earlier limit. Exercise the aggregate guard independently.
+    let mut fresh = new_budget();
+    let mut parser = Parser {
+        bytes: br#""x""#,
+        position: 0,
+        checked: 0,
+        depth: 0,
+        materialize: true,
+        failure_message: None,
+        budget: &mut fresh,
+    };
+    let mut total = MAX_CATALOG_TEXT;
+    assert_eq!(
+        allocation_free(|| parser.catalog_text(&mut total)).unwrap_err(),
+        ErrorKind::Limit
+    );
+    assert_eq!(fresh.peak, 0);
+}
+
+#[test]
+fn catalog_closed_schema_rejects_missing_unknown_duplicate_and_invalid_fields() {
+    let parameter = catalog_parameter(7);
+    let source = serde_json::to_value(&parameter).unwrap();
+    let fields = [
+        "id",
+        "name",
+        "value",
+        "min",
+        "max",
+        "default",
+        "unit",
+        "step_count",
+        "can_automate",
+        "is_read_only",
+        "is_bypass",
+        "flags",
+    ];
+    let reject = |parameter: serde_json::Value| {
+        let line =
+            serde_json::to_vec(&serde_json::json!({"Parameters":{"params":[parameter]}})).unwrap();
+        let mut budget = new_budget();
+        assert_eq!(
+            allocation_free(|| decode(&line, &ReplyShape::Parameters, &mut budget)).unwrap_err(),
+            ErrorKind::MalformedReply
+        );
+        assert_eq!((budget.live, budget.peak), (0, 0));
+    };
+    for field in fields {
+        let mut missing = source.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        reject(missing);
+        let field_json = serde_json::to_string(&source[field]).unwrap();
+        let object = serde_json::to_string(&source).unwrap();
+        let duplicate = format!("{{\"{field}\":{field_json},{}", &object[1..]);
+        let line = format!("{{\"Parameters\":{{\"params\":[{duplicate}]}}}}");
+        let mut budget = new_budget();
+        assert_eq!(
+            allocation_free(|| decode(line.as_bytes(), &ReplyShape::Parameters, &mut budget))
+                .unwrap_err(),
+            ErrorKind::MalformedReply
+        );
+        assert_eq!(budget.peak, 0);
+    }
+    let mut unknown = source.clone();
+    unknown["unknown"] = serde_json::json!({"nested":[[[]]]});
+    reject(unknown);
+    for field in ["value", "min", "max", "default"] {
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!("NaN"),
+            serde_json::json!("inf"),
+            serde_json::json!("0.5"),
+            serde_json::json!(false),
+        ] {
+            let mut invalid = source.clone();
+            invalid[field] = value;
+            reject(invalid);
+        }
+        let original = serde_json::to_string(&source).unwrap();
+        let needle = format!(
+            "\"{field}\":{}",
+            serde_json::to_string(&source[field]).unwrap()
+        );
+        let invalid = original.replacen(&needle, &format!("\"{field}\":1e309"), 1);
+        let line = format!("{{\"Parameters\":{{\"params\":[{invalid}]}}}}");
+        error(
+            line.as_bytes(),
+            &ReplyShape::Parameters,
+            ErrorKind::MalformedReply,
+        );
+    }
+    for (field, value) in [
+        ("id", serde_json::json!(-1)),
+        ("id", serde_json::json!(4294967296u64)),
+        ("id", serde_json::json!(1.5)),
+        ("flags", serde_json::json!(4294967296u64)),
+        ("flags", serde_json::json!(-1)),
+        ("step_count", serde_json::json!(2147483648u64)),
+        ("step_count", serde_json::json!(-2147483649i64)),
+        ("step_count", serde_json::json!(1.5)),
+        ("name", serde_json::json!(0)),
+        ("unit", serde_json::Value::Null),
+        ("can_automate", serde_json::json!(1)),
+        ("is_read_only", serde_json::json!("false")),
+        ("is_bypass", serde_json::Value::Null),
+    ] {
+        let mut invalid = source.clone();
+        invalid[field] = value;
+        reject(invalid);
+    }
+    for line in [
+        br#"{"Parameters":{"params":null}}"#.as_slice(),
+        br#"{"Parameters":{"params":{}}}"#.as_slice(),
+        br#"{"Parameters":{"params":[[]]}}"#.as_slice(),
+        br#"{"Parameters":{"params":[],"params":[]}}"#.as_slice(),
+        br#"{"Parameters":{"params":[],"unknown":0}}"#.as_slice(),
+        br#"{"Parameters":{}}"#.as_slice(),
+    ] {
+        error(line, &ReplyShape::Parameters, ErrorKind::MalformedReply);
+    }
+}
+
+#[test]
+fn new_scalar_metadata_responses_preserve_exact_values_and_schema() {
+    for source in [
+        HostResponse::ResetOriginSupport {
+            support: ResetOriginSupport {
+                contract_version: u32::MAX,
+                max_block_frames: u32::MAX,
+                processing: true,
+            },
+        },
+        HostResponse::ResetOriginSupport {
+            support: ResetOriginSupport {
+                contract_version: 1,
+                max_block_frames: 2048,
+                processing: false,
+            },
+        },
+        HostResponse::NativeDirtyRevision { revision: u64::MAX },
+        HostResponse::NativeDirtyRevision { revision: 0 },
+    ] {
+        let shape = if matches!(source, HostResponse::NativeDirtyRevision { .. }) {
+            ReplyShape::NativeDirtyRevision
+        } else {
+            ReplyShape::ResetOriginSupport
+        };
+        let bytes = wire(&source);
+        let mut budget = new_budget();
+        let response = allocation_free(|| decode(&bytes, &shape, &mut budget)).unwrap();
+        assert_eq!(wire(&response), bytes);
+        assert_eq!((budget.live, budget.peak), (0, 0));
+        error(&bytes, &ReplyShape::Success, ErrorKind::WrongReply);
+    }
+    for bytes in [
+        br#"{"NativeDirtyRevision":{"revision":18446744073709551616}}"#.as_slice(),
+        br#"{"NativeDirtyRevision":{"revision":-1}}"#.as_slice(),
+        br#"{"NativeDirtyRevision":{"revision":"1"}}"#.as_slice(),
+        br#"{"NativeDirtyRevision":{"revision":1.0}}"#.as_slice(),
+        br#"{"NativeDirtyRevision":{"revision":1,"revision":2}}"#.as_slice(),
+        br#"{"NativeDirtyRevision":{"unknown":0}}"#.as_slice(),
+        br#"{"NativeDirtyRevision":{}}"#.as_slice(),
+    ] {
+        error(
+            bytes,
+            &ReplyShape::NativeDirtyRevision,
+            ErrorKind::MalformedReply,
+        );
+    }
+    for bytes in [
+        br#"{"ResetOriginSupport":{"support":{"contract_version":1,"max_block_frames":2048}}}"#.as_slice(),
+        br#"{"ResetOriginSupport":{"support":{"contract_version":1,"max_block_frames":2048,"processing":null}}}"#.as_slice(),
+        br#"{"ResetOriginSupport":{"support":{"contract_version":-1,"max_block_frames":2048,"processing":false}}}"#.as_slice(),
+        br#"{"ResetOriginSupport":{"support":{"contract_version":1,"max_block_frames":4294967296,"processing":false}}}"#.as_slice(),
+        br#"{"ResetOriginSupport":{"support":{"contract_version":1,"max_block_frames":2048,"processing":false,"unknown":0}}}"#.as_slice(),
+        br#"{"ResetOriginSupport":{"support":{"contract_version":1,"contract_version":1,"max_block_frames":2048,"processing":false}}}"#.as_slice(),
+        br#"{"ResetOriginSupport":{"support":null}}"#.as_slice(),
+    ] { error(bytes, &ReplyShape::ResetOriginSupport, ErrorKind::MalformedReply); }
+}
+
+fn layout_wire(audio: bool, input_count: usize, output_count: usize, channels: usize) -> Vec<u8> {
+    let buses = |count: usize| -> Vec<serde_json::Value> {
+        (0..count)
+            .map(|index| {
+                serde_json::json!({
+                    "channel_count": channels, "is_main": index % 2 == 0,
+                    "active": match index % 3 { 0 => Some(true), 1 => Some(false), _ => None },
+                })
+            })
+            .collect()
+    };
+    let name = if audio {
+        "CheckedAudioBusLayout"
+    } else {
+        "EventBusLayout"
+    };
+    serde_json::to_vec(&serde_json::json!({name: {"layout": {"inputs": buses(input_count), "outputs": buses(output_count)}}})).unwrap()
+}
+
+#[test]
+fn complete_layouts_preserve_order_channels_main_aux_and_unknown_activation() {
+    for audio in [false, true] {
+        let shape = if audio {
+            ReplyShape::CheckedAudioBusLayout
+        } else {
+            ReplyShape::EventBusLayout
+        };
+        let maximum = if audio { 256 } else { 16 };
+        for channels in [1, maximum] {
+            let bytes = layout_wire(audio, MAX_LAYOUT_BUSES, MAX_LAYOUT_BUSES, channels);
+            let mut budget = new_budget();
+            assert!(allocation_free(|| preflight(&bytes, &shape, &mut budget))
+                .unwrap()
+                .is_none());
+            assert_eq!(budget.peak, 0);
+            let decoded = decode(&bytes, &shape, &mut budget).unwrap();
+            let expected: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(serde_json::to_value(&decoded).unwrap(), expected);
+            match decoded {
+                HostResponse::CheckedAudioBusLayout { layout } => {
+                    assert_eq!(layout.inputs.len(), 32);
+                    assert_eq!(layout.outputs.len(), 32);
+                    assert!(layout.inputs[0].is_main);
+                    assert!(!layout.inputs[1].is_main);
+                    assert_eq!(layout.inputs[0].active, Some(true));
+                    assert_eq!(layout.inputs[1].active, Some(false));
+                    assert_eq!(layout.inputs[2].active, None);
+                    assert_eq!(
+                        budget.live,
+                        (layout.inputs.capacity() + layout.outputs.capacity())
+                            * std::mem::size_of::<CheckedAudioBusConfig>()
+                    );
+                }
+                HostResponse::EventBusLayout { layout } => {
+                    assert_eq!(layout.inputs.len(), 32);
+                    assert_eq!(layout.outputs.len(), 32);
+                    assert!(layout.inputs[0].is_main);
+                    assert!(!layout.inputs[1].is_main);
+                    assert_eq!(layout.inputs[0].active, Some(true));
+                    assert_eq!(layout.inputs[1].active, Some(false));
+                    assert_eq!(layout.inputs[2].active, None);
+                    assert_eq!(
+                        budget.live,
+                        (layout.inputs.capacity() + layout.outputs.capacity())
+                            * std::mem::size_of::<EventBusConfig>()
+                    );
+                }
+                _ => panic!("raw typed layout"),
+            }
+        }
+        for (inputs, outputs, channels) in [(33, 0, 1), (0, 33, 1), (1, 0, maximum + 1), (0, 1, 0)]
+        {
+            let bytes = layout_wire(audio, inputs, outputs, channels);
+            let mut budget = new_budget();
+            assert_eq!(
+                allocation_free(|| decode(&bytes, &shape, &mut budget)).unwrap_err(),
+                ErrorKind::Limit
+            );
+            assert_eq!((budget.live, budget.peak), (0, 0));
+        }
+        assert!(decode(&layout_wire(audio, 0, 0, 1), &shape, &mut new_budget()).is_ok());
+        error(
+            &layout_wire(audio, 0, 0, 1),
+            &ReplyShape::Parameters,
+            ErrorKind::WrongReply,
+        );
+    }
+}
+
+#[test]
+fn layout_raw_distinctions_survive_before_any_lossy_projection() {
+    let bytes = br#"{"CheckedAudioBusLayout":{"layout":{"inputs":[],"outputs":[{"channel_count":2,"is_main":true,"active":true}]}}}"#;
+    let HostResponse::CheckedAudioBusLayout { layout: original } =
+        decode(bytes, &ReplyShape::CheckedAudioBusLayout, &mut new_budget()).unwrap()
+    else {
+        panic!("layout")
+    };
+    for changed in [
+        std::str::from_utf8(bytes)
+            .unwrap()
+            .replace("\"is_main\":true", "\"is_main\":false"),
+        std::str::from_utf8(bytes)
+            .unwrap()
+            .replace("\"active\":true", "\"active\":null"),
+        std::str::from_utf8(bytes)
+            .unwrap()
+            .replace("\"active\":true", "\"active\":false"),
+    ] {
+        let HostResponse::CheckedAudioBusLayout { layout } = decode(
+            changed.as_bytes(),
+            &ReplyShape::CheckedAudioBusLayout,
+            &mut new_budget(),
+        )
+        .unwrap() else {
+            panic!("layout")
+        };
+        assert_eq!(
+            original.outputs[0].channel_count,
+            layout.outputs[0].channel_count
+        );
+        assert_ne!(
+            original, layout,
+            "main/aux and unknown activation cannot be discarded"
+        );
+    }
+}
+
+#[test]
+fn layouts_reject_all_malformed_or_missing_raw_fields_before_materialization() {
+    for variant in ["CheckedAudioBusLayout", "EventBusLayout"] {
+        let shape = if variant == "CheckedAudioBusLayout" {
+            ReplyShape::CheckedAudioBusLayout
+        } else {
+            ReplyShape::EventBusLayout
+        };
+        for bus in [
+            r#"{"channel_count":2,"is_main":true}"#,
+            r#"{"channel_count":2,"active":true}"#,
+            r#"{"is_main":true,"active":true}"#,
+            r#"{"channel_count":2,"is_main":true,"active":1}"#,
+            r#"{"channel_count":2,"is_main":null,"active":true}"#,
+            r#"{"channel_count":2,"is_main":"true","active":true}"#,
+            r#"{"channel_count":-1,"is_main":true,"active":true}"#,
+            r#"{"channel_count":1.5,"is_main":true,"active":true}"#,
+            r#"{"channel_count":"2","is_main":true,"active":true}"#,
+            r#"{"channel_count":2,"is_main":true,"active":true,"active":false}"#,
+            r#"{"channel_count":2,"channel_count":2,"is_main":true,"active":true}"#,
+            r#"{"channel_count":2,"is_main":true,"is_main":false,"active":true}"#,
+            r#"{"channel_count":2,"is_main":true,"active":true,"extra":[]}"#,
+            "null",
+            "[]",
+        ] {
+            let line =
+                format!("{{\"{variant}\":{{\"layout\":{{\"inputs\":[{bus}],\"outputs\":[]}}}}}}");
+            let mut budget = new_budget();
+            assert_eq!(
+                allocation_free(|| decode(line.as_bytes(), &shape, &mut budget)).unwrap_err(),
+                ErrorKind::MalformedReply
+            );
+            assert_eq!(budget.peak, 0);
+        }
+        for layout in [
+            r#"{"inputs":[]}"#,
+            r#"{"outputs":[]}"#,
+            r#"{"inputs":[],"outputs":[],"extra":0}"#,
+            r#"{"inputs":[],"inputs":[],"outputs":[]}"#,
+            r#"{"inputs":[],"outputs":[],"outputs":[]}"#,
+            r#"{"inputs":null,"outputs":[]}"#,
+        ] {
+            let line = format!("{{\"{variant}\":{{\"layout\":{layout}}}}}");
+            error(line.as_bytes(), &shape, ErrorKind::MalformedReply);
+        }
+    }
+}
+
+#[test]
+fn typed_metadata_refusals_preserve_every_reason_and_late_stop_precedence() {
+    for reason in [
+        MetadataQueryRejection::Unsupported,
+        MetadataQueryRejection::PendingTopology,
+        MetadataQueryRejection::InconsistentTopology,
+    ] {
+        let bytes = wire(&HostResponse::MetadataQueryRejected { reason });
+        for shape in [
+            ReplyShape::CheckedAudioBusLayout,
+            ReplyShape::EventBusLayout,
+        ] {
+            let mut budget = new_budget();
+            let marker = allocation_free(|| preflight(&bytes, &shape, &mut budget))
+                .unwrap()
+                .expect("known refusal");
+            assert_eq!((budget.live, budget.peak), (0, 0));
+            budget.cancel.cancelled.store(true, Ordering::Release);
+            budget.deadline = Instant::now();
+            let decoded = allocation_free(|| marker.materialize(&mut budget));
+            assert!(matches!(decoded, DecodedReply::MetadataRejected(actual) if actual == reason));
+            assert!(!budget.diagnostic_copy);
+            assert_eq!((budget.live, budget.peak), (0, 0));
+
+            // A typed finite refusal needs no diagnostic allocation even when
+            // the charged scope is full or the next allocation would fail.
+            let mut budget = new_budget();
+            budget.reserve(MAX_PAYLOAD).unwrap();
+            let _hook = budget_test_hooks::fail_next_allocation();
+            assert!(matches!(
+                allocation_free(|| super::decode(&bytes, &shape, &mut budget)).unwrap(),
+                DecodedReply::MetadataRejected(actual) if actual == reason
+            ));
+            assert_eq!(budget.live, MAX_PAYLOAD);
+        }
+        for shape in [
+            ReplyShape::Success,
+            ReplyShape::Parameters,
+            ReplyShape::ResetOriginSupport,
+            ReplyShape::NativeDirtyRevision,
+        ] {
+            error(&bytes, &shape, ErrorKind::WrongReply);
+        }
+    }
+}
+
+#[test]
+fn metadata_refusal_cannot_latch_until_the_complete_bounded_reply_is_validated() {
+    let good = br#"{"MetadataQueryRejected":{"reason":"PendingTopology"}}"#;
+    let shape = ReplyShape::CheckedAudioBusLayout;
+    let checks = {
+        let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
+        assert!(preflight(good, &shape, &mut new_budget())
+            .unwrap()
+            .is_some());
+        budget_test_hooks::checks()
+    };
+    for check in [1, checks] {
+        let mut budget = new_budget();
+        let _hook = budget_test_hooks::cancel_at_check(check);
+        assert_eq!(
+            allocation_free(|| super::decode(good, &shape, &mut budget)).unwrap_err(),
+            ErrorKind::Cancelled
+        );
+        assert_eq!(budget.peak, 0);
+    }
+    {
+        let mut budget = new_budget();
+        let _hook = budget_test_hooks::expire_at_check(checks);
+        assert_eq!(
+            allocation_free(|| super::decode(good, &shape, &mut budget)).unwrap_err(),
+            ErrorKind::Deadline
+        );
+    }
+    for malformed in [
+        br#"{"MetadataQueryRejected":{"reason":"FutureReason"}}"#.as_slice(),
+        br#"{"MetadataQueryRejected":{"reason":null}}"#.as_slice(),
+        br#"{"MetadataQueryRejected":{"reason":{"Unsupported":null}}}"#.as_slice(),
+        br#"{"MetadataQueryRejected":{"reason":"PendingTopology","reason":"Unsupported"}}"#
+            .as_slice(),
+        br#"{"MetadataQueryRejected":{"reason":"PendingTopology","other":0}}"#.as_slice(),
+        br#"{"MetadataQueryRejected":{}}"#.as_slice(),
+        br#"{"MetadataQueryRejected":{"reason":"PendingTopology"},"Error":{"message":"no"}}"#
+            .as_slice(),
+        br#"{"MetadataQueryRejected":{"reason":"PendingTopology"}}x"#.as_slice(),
+        br#"{"MetadataQueryRejected":{"reason":"PendingTopology"}"#.as_slice(),
+    ] {
+        let mut budget = new_budget();
+        assert_eq!(
+            allocation_free(|| super::decode(malformed, &shape, &mut budget)).unwrap_err(),
+            ErrorKind::MalformedReply
+        );
+        assert_eq!((budget.live, budget.peak), (0, 0));
+    }
+    let escaped = br#"{"MetadataQueryRejected":{"reason":"\u0055nsupported"}}"#;
+    assert!(matches!(
+        super::decode(escaped, &shape, &mut new_budget()).unwrap(),
+        DecodedReply::MetadataRejected(MetadataQueryRejection::Unsupported)
+    ));
+}
+
+#[test]
+fn ordinary_error_and_crash_remain_distinct_from_metadata_refusal() {
+    for shape in [
+        ReplyShape::Parameters,
+        ReplyShape::CheckedAudioBusLayout,
+        ReplyShape::EventBusLayout,
+    ] {
+        for crashed in [false, true] {
+            let source = if crashed {
+                HostResponse::Crashed {
+                    message: "remote crash".into(),
+                }
+            } else {
+                HostResponse::Error {
+                    message: "operation error".into(),
+                }
+            };
+            let line = wire(&source);
+            let mut budget = new_budget();
+            let marker = preflight(&line, &shape, &mut budget).unwrap().unwrap();
+            budget.cancel.cancelled.store(true, Ordering::Release);
+            let reply = marker.materialize(&mut budget);
+            let DecodedReply::KnownFailure {
+                crashed: actual,
+                reported: Some(reported),
+                diagnostic_unavailable: None,
+            } = reply
+            else {
+                panic!("ordinary known failure")
+            };
+            assert_eq!(actual, crashed);
+            assert_eq!(wire(&reported), line);
+        }
+    }
+}
+
+#[test]
+fn catalog_and_layout_stop_checks_cover_preflight_materialization_and_final_return() {
+    let params = (0..64)
+        .map(|id| {
+            let mut p = catalog_parameter(id);
+            p.name = "🦀".repeat(256);
+            p
+        })
+        .collect();
+    for (line, shape) in [
+        (
+            wire(&HostResponse::Parameters { params }),
+            ReplyShape::Parameters,
+        ),
+        (
+            layout_wire(true, 32, 32, 256),
+            ReplyShape::CheckedAudioBusLayout,
+        ),
+        (layout_wire(false, 32, 32, 16), ReplyShape::EventBusLayout),
+    ] {
+        let preflight_checks = {
+            let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
+            let mut budget = new_budget();
+            assert!(allocation_free(|| preflight(&line, &shape, &mut budget))
+                .unwrap()
+                .is_none());
+            budget_test_hooks::checks()
+        };
+        let total_checks = {
+            let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
+            decode(&line, &shape, &mut new_budget()).unwrap();
+            budget_test_hooks::checks()
+        };
+        for check in [
+            1,
+            preflight_checks / 2,
+            preflight_checks - 1,
+            preflight_checks,
+            preflight_checks + 1,
+            total_checks - 1,
+            total_checks,
+        ] {
+            for deadline in [false, true] {
+                let mut budget = new_budget();
+                let _hook = if deadline {
+                    budget_test_hooks::expire_at_check(check)
+                } else {
+                    budget_test_hooks::cancel_at_check(check)
+                };
+                let expected = if deadline {
+                    ErrorKind::Deadline
+                } else {
+                    ErrorKind::Cancelled
+                };
+                assert_eq!(decode(&line, &shape, &mut budget).unwrap_err(), expected);
+                assert_eq!(budget.live, 0);
+                if check <= preflight_checks {
+                    assert_eq!(budget.peak, 0);
+                }
+            }
+        }
+        let mut budget = new_budget();
+        let _hook = budget_test_hooks::fail_next_allocation();
+        assert_eq!(
+            decode(&line, &shape, &mut budget).unwrap_err(),
+            ErrorKind::Allocation
+        );
+        assert_eq!(budget.live, 0);
+    }
+}
+
+#[test]
+fn scalar_readback_retains_raw_f64_at_captured_f32_boundaries() {
+    let captured = 0.5f32;
+    let next = f32::from_bits(captured.to_bits() + 1);
+    let midpoint = (f64::from(captured) + f64::from(next)) / 2.0;
+    for raw in [
+        -0.0,
+        f64::from_bits(1),
+        f64::from(captured),
+        f64::from_bits(midpoint.to_bits() - 1),
+        midpoint,
+        f64::from_bits(midpoint.to_bits() + 1),
+        f64::from(next),
+        1.0,
+        -f64::from_bits(1),
+        1.0 + f64::EPSILON,
+    ] {
+        let bytes = wire(&HostResponse::ParameterValue { value: raw });
+        let HostResponse::ParameterValue { value } =
+            decode(&bytes, &ReplyShape::ParameterValue, &mut new_budget()).unwrap()
+        else {
+            panic!("raw readback")
+        };
+        assert_eq!(
+            value.to_bits(),
+            raw.to_bits(),
+            "codec must not clamp or project raw readback"
+        );
+    }
+    assert_eq!(
+        (f64::from_bits(midpoint.to_bits() - 1) as f32).to_bits(),
+        captured.to_bits()
+    );
+    assert_eq!((midpoint as f32).to_bits(), captured.to_bits());
+    assert_eq!(
+        (f64::from_bits(midpoint.to_bits() + 1) as f32).to_bits(),
+        next.to_bits()
+    );
+    assert_eq!(
+        -0.0f32, 0.0f32,
+        "caller base matching uses numeric equality"
+    );
+    // A negative raw value can project to signed zero but still fails the
+    // caller's required finite [0,1] guard before its deliberate f32 projection.
+    let below_zero = -f64::from_bits(1);
+    assert_eq!(below_zero as f32, 0.0f32);
+    assert!(!(0.0..=1.0).contains(&below_zero));
 }

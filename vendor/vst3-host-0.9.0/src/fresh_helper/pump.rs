@@ -1,4 +1,4 @@
-use super::{Budget, ChildOwner, CleanupReport, CleanupState, Delivery, ErrorKind, MAX_LINE};
+use super::{Budget, ChildOwner, CleanupState, Delivery, ErrorKind, MAX_LINE};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::time::Instant;
@@ -188,6 +188,13 @@ pub(super) fn write_request(
             return Err(ErrorKind::ZeroWrite);
         }
         let end = sent.saturating_add(4096).min(bytes.len());
+        #[cfg(test)]
+        let end = if sent == 0 && test_hooks::take(test_hooks::Fault::WriteShortThenZero) {
+            test_hooks::arm(test_hooks::Fault::WriteZeroAfterPrefix);
+            end.min(2)
+        } else {
+            end
+        };
         // SAFETY: stdin is live/nonblocking; bytes is valid for this slice length.
         // Supported embedding has SIGPIPE ignored and must not change it live.
         let n = unsafe { libc::write(stdin, bytes[sent..end].as_ptr().cast(), end - sent) };
@@ -363,75 +370,90 @@ pub(super) fn observe_child(owner: &mut ChildOwner) -> Result<bool, ErrorKind> {
     }
 }
 
-pub(super) fn reap(
+/// Returns whether observation may continue. All evidence is kept on the same
+/// child even if a subsequent Rust test hook unwinds or Drop quarantines it.
+fn cleanup_observation(
     owner: &mut ChildOwner,
-    deadline: Instant,
     graceful_until: Option<Instant>,
-    report: &mut CleanupReport,
-) {
-    loop {
-        if let Some(status) = owner.observed_exit {
-            report.state = CleanupState::Reaped(status);
-            report.kill_requested = owner.kill_requested;
-            return;
+    kill_deadline: Option<Instant>,
+) -> bool {
+    owner.cleanup_report.kill_requested = owner.kill_requested;
+    if let Some(status) = owner.observed_exit {
+        owner.cleanup_report.state = CleanupState::Reaped(status);
+        return false;
+    }
+    #[cfg(test)]
+    if test_hooks::take(test_hooks::Fault::ReapPanic) {
+        panic!("Rust cleanup observation hook");
+    }
+    #[cfg(test)]
+    if test_hooks::take(test_hooks::Fault::Wait) {
+        owner.cleanup_report.wait_error.get_or_insert(libc::EIO);
+        return false;
+    }
+    match owner.child.try_wait() {
+        Ok(Some(status)) => {
+            owner.observed_exit = Some(status);
+            owner.cleanup_report.state = CleanupState::Reaped(status);
+            return false;
         }
+        Ok(None) => {}
+        Err(error) => {
+            owner
+                .cleanup_report
+                .wait_error
+                .get_or_insert(error.raw_os_error().unwrap_or(libc::EIO));
+            return false;
+        }
+    }
+    if !owner.kill_requested
+        && kill_deadline.is_none_or(|limit| Instant::now() < limit)
+        && graceful_until.is_none_or(|until| Instant::now() >= until)
+    {
         #[cfg(test)]
-        if test_hooks::take(test_hooks::Fault::ReapPanic) {
-            panic!("Rust cleanup observation hook");
+        if test_hooks::take(test_hooks::Fault::Kill) {
+            owner.cleanup_report.kill_error.get_or_insert(libc::EPERM);
+            return false;
         }
-        #[cfg(test)]
-        if test_hooks::take(test_hooks::Fault::Wait) {
-            report.wait_error = Some(libc::EIO);
-            report.kill_requested = owner.kill_requested;
-            return;
-        }
-        match owner.child.try_wait() {
-            Ok(Some(status)) => {
-                owner.observed_exit = Some(status);
-                report.state = CleanupState::Reaped(status);
-                report.kill_requested = owner.kill_requested;
-                return;
+        match owner.child.kill() {
+            Ok(()) => {
+                owner.kill_requested = true;
+                owner.cleanup_report.kill_requested = true;
             }
-            Ok(None) => {}
             Err(error) => {
-                report.wait_error = Some(error.raw_os_error().unwrap_or(libc::EIO));
-                report.kill_requested = owner.kill_requested;
-                return; // Retain Child; never take/drop it on a wait error.
+                owner
+                    .cleanup_report
+                    .kill_error
+                    .get_or_insert(error.raw_os_error().unwrap_or(libc::EIO));
+                return false;
             }
         }
-        if Instant::now() >= deadline {
-            report.kill_requested = owner.kill_requested;
+    }
+    true
+}
+
+/// One observation and at most one eligible kill. A kill is never a reap result.
+pub(super) fn reap_once(owner: &mut ChildOwner, graceful_until: Option<Instant>) {
+    cleanup_observation(owner, graceful_until, None);
+}
+
+pub(super) fn reap(owner: &mut ChildOwner, deadline: Instant, graceful_until: Option<Instant>) {
+    loop {
+        if !cleanup_observation(owner, graceful_until, Some(deadline)) || Instant::now() >= deadline
+        {
             return;
         }
-        if !owner.kill_requested && graceful_until.is_none_or(|until| Instant::now() >= until) {
-            #[cfg(test)]
-            if test_hooks::take(test_hooks::Fault::Kill) {
-                report.kill_error = Some(libc::EPERM);
-                return;
-            }
-            match owner.child.kill() {
-                Ok(()) => {
-                    owner.kill_requested = true;
-                    report.kill_requested = true;
-                }
-                Err(error) => {
-                    report.kill_error = Some(error.raw_os_error().unwrap_or(libc::EIO));
-                    return; // A later checked cleanup may try again.
-                }
-            }
-        }
-        // Bounded cooperative observation delay, no background thread or blocking
-        // Child::wait. Poll interruption never restarts the caller's deadline.
+        // Original deadline only; no background reaper or blocking Child::wait.
         #[cfg(test)]
         if owner.kill_requested && test_hooks::take(test_hooks::Fault::PollAfterKill) {
-            report.wait_error = Some(libc::EIO);
+            owner.cleanup_report.wait_error.get_or_insert(libc::EIO);
             return;
         }
         let millis = timeout(deadline).min(1);
         // SAFETY: zero pollfds allows a null pointer and merely waits.
         let result = unsafe { libc::poll(std::ptr::null_mut(), 0, millis) };
         if result < 0 && !interrupted() {
-            report.wait_error = Some(
+            owner.cleanup_report.wait_error.get_or_insert(
                 io::Error::last_os_error()
                     .raw_os_error()
                     .unwrap_or(libc::EIO),
@@ -450,6 +472,7 @@ pub(super) mod test_hooks {
         ProbeInterrupted,
         WriteZero,
         WriteZeroAfterPrefix,
+        WriteShortThenZero,
         ExpireBlockedWrite,
         WriteInterrupted,
         ReapPanic,

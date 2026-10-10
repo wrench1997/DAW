@@ -1538,3 +1538,22 @@ production activation is included. The reviewed next plan uses synchronous
 borrowed state/audio/text requests, retains one-shot checked cleanup ownership,
 and bounds both Stop and Shutdown protocol writes by the earlier job/cleanup
 deadline. StopB and genuine execution still need their separate approvals.
+
+## Strict offline caller Stop A: unvalidated source
+
+After the reviewed/durably preserved combined baseline0363923, add a disabled
+Linux closed strict_offline client over the same private foundation. Borrowed
+RequestView removes eager state copying; bounded full catalogs and raw checked
+layouts retain exact fields and typed metadata refusals. Cleanup separates the
+protocol-write and reap deadlines, retains first evidence with the same Child
+through quarantine, caches proven reap, and offers a one-observation/one-eligible-
+kill continuation without protocol or wait loops. Existing private cleanup uses
+the same kernel. The new public seam exports no generic protocol/owner authority.
+
+Source-visible codec, public-client, cleanup and external compiler fixtures are
+prepared for independent review and durable archival before execution. The
+original accepted metadata/reset/source state policy is retained. The future
+one-shot clone's reset-free checked Stop/Shutdown/reap oracle is documented
+explicitly; no RenderBackend, native plugin, UI/device or tagged-mode activation
+is part of this source checkpoint. See docs/STRICT_OFFLINE_CLIENT.md for exact
+bounds, cooperative timing, global reservation and deferred acceptance limits.

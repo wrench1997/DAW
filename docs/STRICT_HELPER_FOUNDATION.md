@@ -158,3 +158,12 @@ source-checkpoint sections remain historical records.
 These results qualify this private Linux foundation and mocks only. No genuine
 plugin, bounce adapter, parallel helper sessions, tagged transport or production
 audio path uses this module yet. No Windows source or runtime acceptance is added.
+
+## Following Stop A source checkpoint
+
+The original eight-operation source/mock qualification above remains historical.
+The following closed offline client and ten additional existing wire operations
+are currently **unvalidated source**; see [Strict offline client](STRICT_OFFLINE_CLIENT.md).
+It adds synchronous borrowed requests and retained nonwaiting cleanup, with no
+App/RenderBackend or real-plugin activation. Its new results require their own
+frozen source/mock receipt rather than inheriting the first foundation pass.

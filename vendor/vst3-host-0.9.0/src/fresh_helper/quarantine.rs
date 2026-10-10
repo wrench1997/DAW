@@ -115,7 +115,8 @@ pub(super) fn cleanup(deadline: Instant) -> CleanupReport {
     let owner = loan.owner.as_mut().expect("abandoned child");
     owner.stdin.take();
     owner.stdout.take();
-    pump::reap(owner, deadline, None, &mut report);
+    pump::reap(owner, deadline, None);
+    report = owner.cleanup_report.clone();
     if matches!(report.state, CleanupState::Reaped(_)) {
         loan.owner.take();
         loan.permit.take();

@@ -10,11 +10,18 @@
 //! are not a hard memory bound. Failed codec transactions drop all their values
 //! and restore their starting live charge; peak observations remain.
 
+use super::request::{RequestView, StateContextView};
 use super::{Budget, ErrorKind, ReplyShape, MAX_LINE};
 use crate::audio::AudioBusBuffer;
 use crate::discovery::ClassCompatibility;
-use crate::plugin::{ProcessTransport, StateContext};
+use crate::midi::MidiEvent;
+use crate::parameters::Parameter;
+use crate::plugin::{
+    CheckedAudioBusConfig, CheckedAudioBusLayout, EventBusConfig, EventBusLayout, ProcessMode,
+    ProcessTransport, ResetOriginSupport,
+};
 use crate::process_isolation::{HostCommand, HostResponse};
+use crate::MetadataQueryRejection;
 use std::fmt::Write as _;
 
 const MAX_STATE: usize = 64 * 1024 * 1024 + 28;
@@ -25,6 +32,10 @@ const MAX_CHANNELS: usize = 32;
 const MAX_FRAMES: usize = 4096;
 const MAX_COMPAT: usize = 256;
 const MAX_DEPTH: usize = 16;
+const MAX_PARAMETERS: usize = 4096;
+const MAX_PARAMETER_TEXT: usize = 1024;
+const MAX_CATALOG_TEXT: usize = 8 * 1024 * 1024;
+const MAX_LAYOUT_BUSES: usize = 32;
 // Canonical helper scalar spellings fit in 24 bytes. This explicitly bounded
 // strict subset does not admit arbitrarily padded decimal/exponent spellings.
 const MAX_NUMBER: usize = 128;
@@ -92,23 +103,11 @@ fn check_transport(transport: &Option<ProcessTransport>) -> Result<()> {
     Ok(())
 }
 
-fn check_request(command: &HostCommand, shape: &ReplyShape) -> Result<()> {
-    // Keep unsupported rejection first, before shape work or any allocation.
-    match command {
-        HostCommand::LoadPlugin { .. }
-        | HostCommand::LoadState { .. }
-        | HostCommand::SaveState
-        | HostCommand::Process { .. }
-        | HostCommand::ProcessBuses { .. }
-        | HostCommand::GetParameter { .. }
-        | HostCommand::LatencySamples
-        | HostCommand::TailSamples => {}
-        _ => return Err(ErrorKind::UnsupportedRequest),
-    }
+fn check_request(command: &RequestView<'_>, shape: &ReplyShape) -> Result<()> {
     check_shape(shape)?;
     match (command, shape) {
         (
-            HostCommand::LoadPlugin {
+            RequestView::LoadPlugin {
                 path,
                 block_size,
                 class_id,
@@ -122,19 +121,59 @@ fn check_request(command: &HostCommand, shape: &ReplyShape) -> Result<()> {
                 limit(id.len(), MAX_ID)?;
             }
         }
-        (HostCommand::LoadState { data, context }, ReplyShape::Success) => {
+        (RequestView::LoadState { data, context }, ReplyShape::Success) => {
             limit(data.len(), MAX_STATE)?;
             limit(base64_size(data.len())?, MAX_LINE)?;
-            if let StateContext::Preset { path: Some(path) } = context {
+            if let StateContextView::Preset { path: Some(path) } = context {
                 limit(path.len(), MAX_TEXT)?;
             }
         }
-        (HostCommand::SaveState, ReplyShape::State)
-        | (HostCommand::GetParameter { .. }, ReplyShape::ParameterValue)
-        | (HostCommand::LatencySamples, ReplyShape::LatencySamples)
-        | (HostCommand::TailSamples, ReplyShape::TailSamples) => {}
+        (RequestView::SaveState, ReplyShape::State)
+        | (RequestView::GetParameter { .. }, ReplyShape::ParameterValue)
+        | (RequestView::LatencySamples, ReplyShape::LatencySamples)
+        | (RequestView::TailSamples, ReplyShape::TailSamples)
+        | (RequestView::StartProcessing | RequestView::StopProcessing, ReplyShape::Success)
+        | (RequestView::ResetOriginSupport, ReplyShape::ResetOriginSupport)
+        | (RequestView::NativeDirtyRevision, ReplyShape::NativeDirtyRevision)
+        | (RequestView::GetAllParameters, ReplyShape::Parameters)
+        | (RequestView::CheckedAudioBusLayout, ReplyShape::CheckedAudioBusLayout)
+        | (RequestView::EventBusLayout, ReplyShape::EventBusLayout) => {}
+        (RequestView::SetProcessMode { mode }, ReplyShape::Success) => {
+            if *mode != ProcessMode::Offline {
+                return Err(ErrorKind::InvalidRequest);
+            }
+        }
+        (RequestView::SetParameter { value, .. }, ReplyShape::Success) => {
+            if !value.is_finite() || !(0.0..=1.0).contains(value) {
+                return Err(ErrorKind::InvalidRequest);
+            }
+        }
         (
-            HostCommand::Process {
+            RequestView::SendMidiAt {
+                event,
+                sample_offset,
+            },
+            ReplyShape::Success,
+        ) => {
+            if !(0..128).contains(sample_offset) {
+                return Err(ErrorKind::InvalidRequest);
+            }
+            match event {
+                MidiEvent::NoteOn {
+                    channel,
+                    note,
+                    velocity,
+                }
+                | MidiEvent::NoteOff {
+                    channel,
+                    note,
+                    velocity,
+                } if channel.as_index() < 16 && *note < 128 && *velocity < 128 => {}
+                _ => return Err(ErrorKind::InvalidRequest),
+            }
+        }
+        (
+            RequestView::Process {
                 inputs,
                 frames,
                 transport,
@@ -150,7 +189,7 @@ fn check_request(command: &HostCommand, shape: &ReplyShape) -> Result<()> {
             check_transport(transport)?;
         }
         (
-            HostCommand::ProcessBuses {
+            RequestView::ProcessBuses {
                 inputs,
                 outputs,
                 frames,
@@ -166,7 +205,7 @@ fn check_request(command: &HostCommand, shape: &ReplyShape) -> Result<()> {
             }
             limit(inputs.len(), MAX_BUSES)?;
             let mut total = 0usize;
-            for bus in inputs {
+            for bus in inputs.iter() {
                 check_channels(&bus.channels, *expected)?;
                 total = total
                     .checked_add(bus.channels.len())
@@ -342,17 +381,66 @@ impl Writer<'_> {
         Ok(())
     }
 
-    fn command(&mut self, command: &HostCommand) -> Result<()> {
+    fn command(&mut self, command: &RequestView<'_>) -> Result<()> {
         match command {
-            HostCommand::SaveState => self.put(b"\"SaveState\"")?,
-            HostCommand::LatencySamples => self.put(b"\"LatencySamples\"")?,
-            HostCommand::TailSamples => self.put(b"\"TailSamples\"")?,
-            HostCommand::GetParameter { id } => {
+            RequestView::SaveState => self.put(b"\"SaveState\"")?,
+            RequestView::LatencySamples => self.put(b"\"LatencySamples\"")?,
+            RequestView::TailSamples => self.put(b"\"TailSamples\"")?,
+            RequestView::StartProcessing => self.put(b"\"StartProcessing\"")?,
+            RequestView::StopProcessing => self.put(b"\"StopProcessing\"")?,
+            RequestView::ResetOriginSupport => self.put(b"\"ResetOriginSupport\"")?,
+            RequestView::NativeDirtyRevision => self.put(b"\"NativeDirtyRevision\"")?,
+            RequestView::GetAllParameters => self.put(b"\"GetAllParameters\"")?,
+            RequestView::CheckedAudioBusLayout => self.put(b"\"CheckedAudioBusLayout\"")?,
+            RequestView::EventBusLayout => self.put(b"\"EventBusLayout\"")?,
+            RequestView::SetProcessMode {
+                mode: ProcessMode::Offline,
+            } => {
+                self.put(b"{\"SetProcessMode\":{\"mode\":\"Offline\"}}")?;
+            }
+            RequestView::SetProcessMode { .. } => return Err(ErrorKind::InvalidRequest),
+            RequestView::SetParameter { id, value } => {
+                self.put(b"{\"SetParameter\":{\"id\":")?;
+                self.number(id)?;
+                self.put(b",\"value\":")?;
+                self.float(*value)?;
+                self.put(b"}}")?;
+            }
+            RequestView::SendMidiAt {
+                event,
+                sample_offset,
+            } => {
+                let (kind, channel, note, velocity) = match event {
+                    MidiEvent::NoteOn {
+                        channel,
+                        note,
+                        velocity,
+                    } => ("NoteOn", channel, note, velocity),
+                    MidiEvent::NoteOff {
+                        channel,
+                        note,
+                        velocity,
+                    } => ("NoteOff", channel, note, velocity),
+                    _ => return Err(ErrorKind::InvalidRequest),
+                };
+                self.put(b"{\"SendMidiAt\":{\"event\":{")?;
+                self.text(kind)?;
+                self.put(b":{\"channel\":\"Ch")?;
+                self.number(channel.as_index() + 1)?;
+                self.put(b"\",\"note\":")?;
+                self.number(note)?;
+                self.put(b",\"velocity\":")?;
+                self.number(velocity)?;
+                self.put(b"}},\"sample_offset\":")?;
+                self.number(sample_offset)?;
+                self.put(b"}}")?;
+            }
+            RequestView::GetParameter { id } => {
                 self.put(b"{\"GetParameter\":{\"id\":")?;
                 self.number(id)?;
                 self.put(b"}}")?;
             }
-            HostCommand::LoadPlugin {
+            RequestView::LoadPlugin {
                 path,
                 sample_rate,
                 block_size,
@@ -380,13 +468,13 @@ impl Writer<'_> {
                 }
                 self.put(b"}}")?;
             }
-            HostCommand::LoadState { data, context } => {
+            RequestView::LoadState { data, context } => {
                 self.put(b"{\"LoadState\":{\"data\":")?;
                 self.base64(data.len(), |index| data[index])?;
                 self.put(b",\"context\":")?;
                 match context {
-                    StateContext::Project => self.put(b"\"Project\"")?,
-                    StateContext::Preset { path } => {
+                    StateContextView::Project => self.put(b"\"Project\"")?,
+                    StateContextView::Preset { path } => {
                         self.put(b"{\"Preset\":{\"path\":")?;
                         match path {
                             Some(path) => self.text(path)?,
@@ -397,7 +485,7 @@ impl Writer<'_> {
                 }
                 self.put(b"}}")?;
             }
-            HostCommand::Process {
+            RequestView::Process {
                 inputs,
                 frames,
                 transport,
@@ -409,7 +497,7 @@ impl Writer<'_> {
                 self.transport(transport)?;
                 self.put(b"}}")?;
             }
-            HostCommand::ProcessBuses {
+            RequestView::ProcessBuses {
                 inputs,
                 outputs,
                 frames,
@@ -442,7 +530,6 @@ impl Writer<'_> {
                 self.transport(transport)?;
                 self.put(b"}}")?;
             }
-            _ => return Err(ErrorKind::UnsupportedRequest),
         }
         self.put(b"\n")
     }
@@ -450,6 +537,18 @@ impl Writer<'_> {
 
 pub(super) fn encode(
     command: &HostCommand,
+    shape: &ReplyShape,
+    budget: &mut Budget,
+) -> Result<Vec<u8>> {
+    // Preserve unsupported-before-shape rejection without allocating or copying
+    // caller payloads. Both entry points check before any payload traversal.
+    budget.check()?;
+    let command = RequestView::try_from(command)?;
+    encode_view(&command, shape, budget)
+}
+
+pub(super) fn encode_view(
+    command: &RequestView<'_>,
     shape: &ReplyShape,
     budget: &mut Budget,
 ) -> Result<Vec<u8>> {
@@ -878,6 +977,247 @@ impl<'a> Parser<'a, '_> {
         }
         Ok(value)
     }
+    fn finite_number(&mut self) -> Result<f64> {
+        // Parameter descriptors use ordinary JSON f64 fields, unlike the
+        // lossless-f64 scalar ParameterValue response. Strings and null are not
+        // valid metadata, and an overflowing exponent must not become infinity.
+        let value: f64 = self
+            .number()?
+            .parse()
+            .map_err(|_| ErrorKind::MalformedReply)?;
+        if !value.is_finite() {
+            return Err(ErrorKind::MalformedReply);
+        }
+        Ok(value)
+    }
+    fn catalog_text(&mut self, total: &mut usize) -> Result<String> {
+        let token = self.token(MAX_PARAMETER_TEXT)?;
+        *total = total.checked_add(token.decoded).ok_or(ErrorKind::Limit)?;
+        limit(*total, MAX_CATALOG_TEXT)?;
+        if self.materialize {
+            owned_text(token, self.budget)
+        } else {
+            Ok(String::new())
+        }
+    }
+    fn parameter(&mut self, text_total: &mut usize) -> Result<Parameter> {
+        self.open(b'{')?;
+        let mut first = true;
+        let mut seen = 0;
+        let mut parameter = Parameter {
+            id: 0,
+            name: String::new(),
+            value: 0.0,
+            min: 0.0,
+            max: 0.0,
+            default: 0.0,
+            unit: String::new(),
+            step_count: 0,
+            can_automate: false,
+            is_read_only: false,
+            is_bypass: false,
+            flags: 0,
+        };
+        while self.next(&mut first, b'}')? {
+            let key = self.key()?;
+            if key.is(b"id") {
+                unique(&mut seen, 1)?;
+                parameter.id = self.u32()?;
+            } else if key.is(b"name") {
+                unique(&mut seen, 2)?;
+                parameter.name = self.catalog_text(text_total)?;
+            } else if key.is(b"value") {
+                unique(&mut seen, 4)?;
+                parameter.value = self.finite_number()?;
+            } else if key.is(b"min") {
+                unique(&mut seen, 8)?;
+                parameter.min = self.finite_number()?;
+            } else if key.is(b"max") {
+                unique(&mut seen, 16)?;
+                parameter.max = self.finite_number()?;
+            } else if key.is(b"default") {
+                unique(&mut seen, 32)?;
+                parameter.default = self.finite_number()?;
+            } else if key.is(b"unit") {
+                unique(&mut seen, 64)?;
+                parameter.unit = self.catalog_text(text_total)?;
+            } else if key.is(b"step_count") {
+                unique(&mut seen, 128)?;
+                parameter.step_count = self
+                    .number()?
+                    .parse()
+                    .map_err(|_| ErrorKind::MalformedReply)?;
+            } else if key.is(b"can_automate") {
+                unique(&mut seen, 256)?;
+                parameter.can_automate = self.boolean()?;
+            } else if key.is(b"is_read_only") {
+                unique(&mut seen, 512)?;
+                parameter.is_read_only = self.boolean()?;
+            } else if key.is(b"is_bypass") {
+                unique(&mut seen, 1024)?;
+                parameter.is_bypass = self.boolean()?;
+            } else if key.is(b"flags") {
+                unique(&mut seen, 2048)?;
+                parameter.flags = self.u32()?;
+            } else {
+                return Err(ErrorKind::MalformedReply);
+            }
+        }
+        required(seen, 4095)?;
+        Ok(parameter)
+    }
+    fn parameters(&mut self) -> Result<Vec<Parameter>> {
+        self.open(b'[')?;
+        let mut first = true;
+        let mut count = 0;
+        let mut text_total = 0;
+        let mut parameters = Vec::new();
+        // Fixed stack storage, never a heap set. The complete first pass proves
+        // ID uniqueness before any catalog payload or container is allocated.
+        let mut ids = [0u32; MAX_PARAMETERS];
+        while self.next(&mut first, b']')? {
+            if count == MAX_PARAMETERS {
+                return Err(ErrorKind::Limit);
+            }
+            self.budget.check()?;
+            let parameter = self.parameter(&mut text_total)?;
+            ids[count] = parameter.id;
+            if self.materialize {
+                self.budget.grow(&mut parameters, count + 1)?;
+                parameters.push(parameter);
+            }
+            count += 1;
+        }
+        self.budget.check()?;
+        ids[..count].sort_unstable();
+        let duplicate = ids[..count].windows(2).any(|pair| pair[0] == pair[1]);
+        self.budget.check()?;
+        if duplicate {
+            return Err(ErrorKind::MalformedReply);
+        }
+        Ok(parameters)
+    }
+    fn optional_boolean(&mut self) -> Result<Option<bool>> {
+        if self.peek()? == Some(b'n') {
+            self.literal(b"null")?;
+            Ok(None)
+        } else {
+            self.boolean().map(Some)
+        }
+    }
+    fn layout_buses<T>(
+        &mut self,
+        maximum_channels: usize,
+        bus: fn(usize, bool, Option<bool>) -> T,
+    ) -> Result<Vec<T>> {
+        self.open(b'[')?;
+        let mut first = true;
+        let mut count = 0;
+        let mut buses = Vec::new();
+        while self.next(&mut first, b']')? {
+            if count == MAX_LAYOUT_BUSES {
+                return Err(ErrorKind::Limit);
+            }
+            self.open(b'{')?;
+            let mut fields = true;
+            let mut seen = 0;
+            let (mut channels, mut is_main, mut active) = (0usize, false, None);
+            while self.next(&mut fields, b'}')? {
+                let key = self.key()?;
+                if key.is(b"channel_count") {
+                    unique(&mut seen, 1)?;
+                    channels = self
+                        .number()?
+                        .parse()
+                        .map_err(|_| ErrorKind::MalformedReply)?;
+                    limit(channels, maximum_channels)?;
+                    if channels == 0 {
+                        return Err(ErrorKind::Limit);
+                    }
+                } else if key.is(b"is_main") {
+                    unique(&mut seen, 2)?;
+                    is_main = self.boolean()?;
+                } else if key.is(b"active") {
+                    unique(&mut seen, 4)?;
+                    active = self.optional_boolean()?;
+                } else {
+                    return Err(ErrorKind::MalformedReply);
+                }
+            }
+            required(seen, 7)?;
+            if self.materialize {
+                self.budget.grow(&mut buses, count + 1)?;
+                buses.push(bus(channels, is_main, active));
+            }
+            count += 1;
+        }
+        Ok(buses)
+    }
+    fn layout<T>(
+        &mut self,
+        maximum_channels: usize,
+        bus: fn(usize, bool, Option<bool>) -> T,
+    ) -> Result<(Vec<T>, Vec<T>)> {
+        self.open(b'{')?;
+        let mut first = true;
+        let mut seen = 0;
+        let (mut inputs, mut outputs) = (Vec::new(), Vec::new());
+        while self.next(&mut first, b'}')? {
+            let key = self.key()?;
+            if key.is(b"inputs") {
+                unique(&mut seen, 1)?;
+                inputs = self.layout_buses(maximum_channels, bus)?;
+            } else if key.is(b"outputs") {
+                unique(&mut seen, 2)?;
+                outputs = self.layout_buses(maximum_channels, bus)?;
+            } else {
+                return Err(ErrorKind::MalformedReply);
+            }
+        }
+        required(seen, 3)?;
+        Ok((inputs, outputs))
+    }
+    fn reset_support(&mut self) -> Result<ResetOriginSupport> {
+        self.open(b'{')?;
+        let mut first = true;
+        let mut seen = 0;
+        let mut support = ResetOriginSupport {
+            contract_version: 0,
+            max_block_frames: 0,
+            processing: false,
+        };
+        while self.next(&mut first, b'}')? {
+            let key = self.key()?;
+            if key.is(b"contract_version") {
+                unique(&mut seen, 1)?;
+                support.contract_version = self.u32()?;
+            } else if key.is(b"max_block_frames") {
+                unique(&mut seen, 2)?;
+                support.max_block_frames = self.u32()?;
+            } else if key.is(b"processing") {
+                unique(&mut seen, 4)?;
+                support.processing = self.boolean()?;
+            } else {
+                return Err(ErrorKind::MalformedReply);
+            }
+        }
+        required(seen, 7)?;
+        Ok(support)
+    }
+    fn metadata_rejection(&mut self) -> Result<MetadataQueryRejection> {
+        let token = self.token(32)?;
+        let mut bytes = [0u8; 32];
+        let mut cursor = TokenBytes::new(token);
+        for byte in &mut bytes[..token.decoded] {
+            *byte = cursor.next(self.budget)?.ok_or(ErrorKind::MalformedReply)?;
+        }
+        match &bytes[..token.decoded] {
+            b"Unsupported" => Ok(MetadataQueryRejection::Unsupported),
+            b"PendingTopology" => Ok(MetadataQueryRejection::PendingTopology),
+            b"InconsistentTopology" => Ok(MetadataQueryRejection::InconsistentTopology),
+            _ => Err(ErrorKind::MalformedReply),
+        }
+    }
     fn state(&mut self) -> Result<Vec<u8>> {
         if self.peek()? == Some(b'[') {
             return Err(ErrorKind::UnsupportedReply);
@@ -1134,6 +1474,88 @@ impl<'a> Parser<'a, '_> {
                 return Err(ErrorKind::WrongReply);
             }
             self.plugin_info()?
+        } else if variant.is(b"Parameters")
+            || variant.is(b"ResetOriginSupport")
+            || variant.is(b"NativeDirtyRevision")
+            || variant.is(b"CheckedAudioBusLayout")
+            || variant.is(b"EventBusLayout")
+            || variant.is(b"MetadataQueryRejected")
+        {
+            let expected = match shape {
+                ReplyShape::Parameters => b"Parameters".as_slice(),
+                ReplyShape::ResetOriginSupport => b"ResetOriginSupport".as_slice(),
+                ReplyShape::NativeDirtyRevision => b"NativeDirtyRevision".as_slice(),
+                ReplyShape::CheckedAudioBusLayout => b"CheckedAudioBusLayout".as_slice(),
+                ReplyShape::EventBusLayout => b"EventBusLayout".as_slice(),
+                _ => return Err(ErrorKind::WrongReply),
+            };
+            if variant.is(b"MetadataQueryRejected") {
+                if !matches!(
+                    shape,
+                    ReplyShape::CheckedAudioBusLayout | ReplyShape::EventBusLayout
+                ) {
+                    return Err(ErrorKind::WrongReply);
+                }
+            } else if !variant.is(expected) {
+                return Err(ErrorKind::WrongReply);
+            }
+            self.open(b'{')?;
+            let mut first = true;
+            let mut seen = 0;
+            let mut response = None;
+            while self.next(&mut first, b'}')? {
+                let key = self.key()?;
+                unique(&mut seen, 1)?;
+                response = Some(if variant.is(b"Parameters") && key.is(b"params") {
+                    HostResponse::Parameters {
+                        params: self.parameters()?,
+                    }
+                } else if variant.is(b"ResetOriginSupport") && key.is(b"support") {
+                    HostResponse::ResetOriginSupport {
+                        support: self.reset_support()?,
+                    }
+                } else if variant.is(b"NativeDirtyRevision") && key.is(b"revision") {
+                    HostResponse::NativeDirtyRevision {
+                        revision: self
+                            .number()?
+                            .parse()
+                            .map_err(|_| ErrorKind::MalformedReply)?,
+                    }
+                } else if variant.is(b"CheckedAudioBusLayout") && key.is(b"layout") {
+                    let (inputs, outputs) =
+                        self.layout(256, |channel_count, is_main, active| {
+                            CheckedAudioBusConfig {
+                                channel_count,
+                                is_main,
+                                active,
+                            }
+                        })?;
+                    HostResponse::CheckedAudioBusLayout {
+                        layout: CheckedAudioBusLayout { inputs, outputs },
+                    }
+                } else if variant.is(b"EventBusLayout") && key.is(b"layout") {
+                    let (inputs, outputs) = self.layout(16, |channel_count, is_main, active| {
+                        // The checked maximum above makes this widening-domain
+                        // conversion exact; no raw channel value is truncated.
+                        EventBusConfig {
+                            channel_count: channel_count as u32,
+                            is_main,
+                            active,
+                        }
+                    })?;
+                    HostResponse::EventBusLayout {
+                        layout: EventBusLayout { inputs, outputs },
+                    }
+                } else if variant.is(b"MetadataQueryRejected") && key.is(b"reason") {
+                    HostResponse::MetadataQueryRejected {
+                        reason: self.metadata_rejection()?,
+                    }
+                } else {
+                    return Err(ErrorKind::MalformedReply);
+                });
+            }
+            required(seen, 1)?;
+            response.ok_or(ErrorKind::MalformedReply)?
         } else if variant.is(b"Error") || variant.is(b"Crashed") || variant.is(b"Success") {
             if variant.is(b"Success") && *shape != ReplyShape::Success {
                 return Err(ErrorKind::WrongReply);
@@ -1313,6 +1735,9 @@ fn required(seen: u32, fields: u32) -> Result<()> {
 #[derive(Debug)]
 pub(super) enum DecodedReply {
     Response(HostResponse),
+    /// Fully validated known admission refusal. It terminates this candidate
+    /// without reclassifying the original finite reason as a crash or fault.
+    MetadataRejected(MetadataQueryRejection),
     KnownFailure {
         crashed: bool,
         reported: Option<HostResponse>,
@@ -1344,13 +1769,18 @@ fn owned_text(token: Token<'_>, budget: &mut Budget) -> Result<String> {
 
 // Only preflight constructs this marker, after complete syntax/schema/length
 // validation and its final cancellation/deadline check. It retains only the
-// bounded diagnostic token, never an instruction to reparse the full line.
-struct KnownOperationFailure<'a> {
-    crashed: bool,
-    message: Token<'a>,
+// bounded diagnostic token or finite typed metadata reason, never an
+// instruction to reparse the full line.
+enum KnownOperationFailure<'a> {
+    Message { crashed: bool, message: Token<'a> },
+    MetadataRejected(MetadataQueryRejection),
 }
 impl KnownOperationFailure<'_> {
     fn materialize(self, budget: &mut Budget) -> DecodedReply {
+        let (crashed, message) = match self {
+            Self::MetadataRejected(reason) => return DecodedReply::MetadataRejected(reason),
+            Self::Message { crashed, message } => (crashed, message),
+        };
         let starting_live = budget.live;
         let mut diagnostic = Budget {
             deadline: budget.deadline,
@@ -1361,18 +1791,18 @@ impl KnownOperationFailure<'_> {
         };
         // This failure-only tail copies <=64 KiB decoded text (<=6 input bytes
         // per decoded byte). The original normal budget is never relaxed.
-        let result = owned_text(self.message, &mut diagnostic);
+        let result = owned_text(message, &mut diagnostic);
         budget.peak = budget.peak.max(diagnostic.peak);
         match result {
             Ok(message) => {
                 budget.live = diagnostic.live;
-                let reported = if self.crashed {
+                let reported = if crashed {
                     HostResponse::Crashed { message }
                 } else {
                     HostResponse::Error { message }
                 };
                 DecodedReply::KnownFailure {
-                    crashed: self.crashed,
+                    crashed,
                     reported: Some(reported),
                     diagnostic_unavailable: None,
                 }
@@ -1382,7 +1812,7 @@ impl KnownOperationFailure<'_> {
                 // limit failure can lose the detail, never the known category.
                 budget.live = starting_live;
                 DecodedReply::KnownFailure {
-                    crashed: self.crashed,
+                    crashed,
                     reported: None,
                     diagnostic_unavailable: Some(error),
                 }
@@ -1413,9 +1843,12 @@ fn preflight<'a>(
     let crashed = match validated {
         HostResponse::Error { .. } => false,
         HostResponse::Crashed { .. } => true,
+        HostResponse::MetadataQueryRejected { reason } => {
+            return Ok(Some(KnownOperationFailure::MetadataRejected(reason)));
+        }
         _ => return Ok(None),
     };
-    Ok(Some(KnownOperationFailure {
+    Ok(Some(KnownOperationFailure::Message {
         crashed,
         message: parser.failure_message.ok_or(ErrorKind::MalformedReply)?,
     }))

@@ -8,6 +8,8 @@
 mod codec;
 mod pump;
 mod quarantine;
+mod request;
+pub(crate) use request::{RequestView, StateContextView};
 #[cfg(test)]
 mod tests;
 
@@ -45,6 +47,8 @@ pub(crate) enum ErrorKind {
     Spawn,
     OperationRejected,
     ReportedCrash,
+    MetadataRejected(crate::MetadataQueryRejection),
+    CleanupNotBegun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +74,11 @@ pub(crate) enum ReplyShape {
     ParameterValue,
     LatencySamples,
     TailSamples,
+    ResetOriginSupport,
+    NativeDirtyRevision,
+    Parameters,
+    CheckedAudioBusLayout,
+    EventBusLayout,
     Audio {
         channels: usize,
         frames: usize,
@@ -197,6 +206,8 @@ struct ChildOwner {
     /// First pipe-close grace, never renewed by repeated short cleanup budgets.
     graceful_until: Option<Instant>,
     observed_exit: Option<ExitStatus>,
+    /// Bounded first cleanup evidence travels with the child into quarantine.
+    cleanup_report: CleanupReport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +227,8 @@ pub(crate) struct FreshHelperSession {
     cancel: Arc<Cancellation>,
     state: State,
     terminal: Option<ErrorKind>,
+    /// Preserve proven reap and original cleanup evidence after releasing Child.
+    completed_cleanup: Option<CleanupReport>,
     _owner_thread: PhantomData<Rc<()>>,
 }
 
@@ -225,7 +238,7 @@ pub(crate) struct SpawnFailure {
     pub(crate) cleanup: Option<Box<FreshHelperSession>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum CleanupState {
     Reaped(ExitStatus),
     Pending,
@@ -234,11 +247,12 @@ pub(crate) enum CleanupState {
     Busy,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[must_use = "Pending or Busy still blocks a new strict child"]
 pub(crate) struct CleanupReport {
     pub(crate) state: CleanupState,
     pub(crate) shutdown_error: Option<ErrorKind>,
+    pub(crate) shutdown_delivery: Option<Delivery>,
     pub(crate) kill_error: Option<i32>,
     pub(crate) wait_error: Option<i32>,
     pub(crate) kill_requested: bool,
@@ -249,6 +263,7 @@ impl CleanupReport {
         Self {
             state: CleanupState::Pending,
             shutdown_error: None,
+            shutdown_delivery: None,
             kill_error: None,
             wait_error: None,
             kill_requested: false,
@@ -295,11 +310,13 @@ impl FreshHelperSession {
                 kill_requested: false,
                 graceful_until: None,
                 observed_exit: None,
+                cleanup_report: CleanupReport::pending(),
             }),
             permit: Some(permit),
             cancel,
             state: State::Terminal,
             terminal: None,
+            completed_cleanup: None,
             _owner_thread: PhantomData,
         };
         let result = (|| {
@@ -340,6 +357,33 @@ impl FreshHelperSession {
         expected: ReplyShape,
         deadline: Instant,
     ) -> Result<HostResponse, ExchangeFailure> {
+        self.exchange_inner(expected, deadline, || RequestView::try_from(command))
+    }
+
+    pub(crate) fn exchange_view(
+        &mut self,
+        request: RequestView<'_>,
+        expected: ReplyShape,
+        deadline: Instant,
+    ) -> Result<HostResponse, ExchangeFailure> {
+        self.exchange_inner(expected, deadline, || Ok(request))
+    }
+
+    pub(crate) fn reject_request(
+        &mut self,
+        cause: ErrorKind,
+        deadline: Instant,
+    ) -> ExchangeFailure {
+        self.exchange_inner(ReplyShape::Success, deadline, || Err(cause))
+            .expect_err("explicit rejected request cannot succeed")
+    }
+
+    fn exchange_inner<'a>(
+        &mut self,
+        expected: ReplyShape,
+        deadline: Instant,
+        request: impl FnOnce() -> Result<RequestView<'a>, ErrorKind>,
+    ) -> Result<HostResponse, ExchangeFailure> {
         if self.state != State::Ready {
             return Err(ExchangeFailure {
                 cause: self.terminal.unwrap_or(ErrorKind::Terminal),
@@ -361,7 +405,7 @@ impl FreshHelperSession {
         };
         let result = (|| {
             budget.check()?;
-            let request = codec::encode(command, &expected, &mut budget)?;
+            let request = codec::encode_view(&request()?, &expected, &mut budget)?;
             let request_charge = request.capacity();
             let owner = self.owner.as_mut().ok_or(ErrorKind::Terminal)?;
             pump::ensure_no_reply(owner, &budget)?;
@@ -381,6 +425,17 @@ impl FreshHelperSession {
             Ok((reply, response.peer_closed || child_exited, child_exited))
         })();
         match result {
+            Ok((codec::DecodedReply::MetadataRejected(reason), _, _)) => {
+                let cause = ErrorKind::MetadataRejected(reason);
+                self.state = State::Terminal;
+                self.terminal = Some(cause);
+                Err(ExchangeFailure {
+                    cause,
+                    delivery,
+                    reported: None,
+                    diagnostic_unavailable: None,
+                })
+            }
             Ok((
                 codec::DecodedReply::KnownFailure {
                     crashed,
@@ -436,7 +491,21 @@ impl FreshHelperSession {
         }
     }
 
+    /// Compatibility wrapper for the original private foundation mocks.
     pub(crate) fn dispose_checked(&mut self, deadline: Instant) -> CleanupReport {
+        self.dispose_with_deadlines(deadline, deadline)
+    }
+
+    /// A job expiry cannot grant more protocol time merely because reap has a
+    /// separate grace. The single optional Shutdown write uses the earlier limit.
+    pub(crate) fn dispose_with_deadlines(
+        &mut self,
+        protocol_deadline: Instant,
+        cleanup_deadline: Instant,
+    ) -> CleanupReport {
+        if let Some(report) = &self.completed_cleanup {
+            return report.clone();
+        }
         let healthy = self.state == State::Ready;
         self.state = State::Terminal;
         let Some(owner) = self.owner.as_mut() else {
@@ -444,30 +513,53 @@ impl FreshHelperSession {
             report.state = CleanupState::Empty;
             return report;
         };
-        let mut report = CleanupReport::pending();
         if healthy {
             let budget = Budget {
-                deadline,
+                deadline: protocol_deadline.min(cleanup_deadline),
                 cancel: self.cancel.clone(),
                 live: 0,
                 peak: 0,
                 diagnostic_copy: false,
             };
             let mut delivery = Delivery::NotSent;
-            report.shutdown_error =
-                pump::write_request(owner, b"\"Shutdown\"\n", &budget, &mut delivery).err();
+            let error = pump::write_request(owner, b"\"Shutdown\"\n", &budget, &mut delivery).err();
+            owner.cleanup_report.shutdown_error = error;
+            owner.cleanup_report.shutdown_delivery = Some(delivery);
         }
-        // No protocol writes after this point, including later disposal attempts.
+        // No later cleanup attempt can send protocol or renew the first grace.
         owner.stdin.take();
         owner.stdout.take();
-        // Pipe closure gets up to 100 ms within the original deadline for normal
-        // main-thread teardown (healthy Shutdown or faulted EOF). A faulted
-        // session never sends Shutdown. This grace budget is not a reap promise.
         let graceful_until = *owner
             .graceful_until
             .get_or_insert_with(|| Instant::now() + std::time::Duration::from_millis(100));
-        pump::reap(owner, deadline, Some(graceful_until), &mut report);
+        pump::reap(owner, cleanup_deadline, Some(graceful_until));
+        self.finish_cleanup_observation()
+    }
+
+    /// Nonwaiting continuation only after disposal began. At most one try_wait
+    /// and one eligible kill attempt; no renewed budget, write, poll or sleep.
+    pub(crate) fn continue_cleanup(&mut self) -> Result<CleanupReport, ErrorKind> {
+        if let Some(report) = &self.completed_cleanup {
+            return Ok(report.clone());
+        }
+        let owner = self.owner.as_mut().ok_or(ErrorKind::CleanupNotBegun)?;
+        let until = owner.graceful_until.ok_or(ErrorKind::CleanupNotBegun)?;
+        if owner.stdin.is_some() || owner.stdout.is_some() {
+            return Err(ErrorKind::CleanupNotBegun);
+        }
+        pump::reap_once(owner, Some(until));
+        Ok(self.finish_cleanup_observation())
+    }
+
+    fn finish_cleanup_observation(&mut self) -> CleanupReport {
+        let report = self
+            .owner
+            .as_ref()
+            .expect("cleanup child owner")
+            .cleanup_report
+            .clone();
         if matches!(report.state, CleanupState::Reaped(_)) {
+            self.completed_cleanup = Some(report.clone());
             self.owner.take();
             self.permit.take(); // Concrete try_wait success is the release boundary.
             self.state = State::Reaped;

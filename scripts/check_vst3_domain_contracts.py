@@ -227,7 +227,7 @@ def prepare(here, repo, manifest_input, lock_input):
         modules.append(str(matches[0]))
         return f'#[path = {json.dumps(str(matches[0]))}]\n{visibility}mod {name};'
     shim, count = re.subn(r'(?m)^(pub )?mod (\w+);$', rebase, lib)
-    assert count == 19, f'Unexpected top-level module layout: {count}'
+    assert count == 20, f'Unexpected top-level module layout: {count}'
     (HERE / 'lib.rs.template').write_text(shim + '\n\n// Crate-internal QA fixture, never exported.\n#[path = "active_fixture.rs"]\nmod private_domain_contract;\n')
     (HERE / 'source-map.json').write_text(json.dumps({'production_root': str(SOURCE), 'modules': modules}, indent=2) + '\n')
 
