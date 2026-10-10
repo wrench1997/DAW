@@ -1473,3 +1473,23 @@ on a manual-clamp style lint in reply-capacity growth, before the full suite ran
 The reviewed replacement uses `clamp(4096, MAX_LINE)` with the same fixed bounds
 and arithmetic, preserving capacity and budget semantics. The original Clippy
 log is retained; this expression revision awaits its archived validation run.
+
+### Strict-foundation source/mock validation
+
+Archived927ef43b passes the current 532 available vendor tests, including all63
+foundation tests, with one explicit unavailable SDK fixture exclusion;26 doctests;
+77 runtime,25 helper and13 protocol tests; three root Clippy profiles and direct
+vendor Clippy; formatting;239 Python tests without skips; and553 package inputs.
+All six old compiler positive controls were rebuilt after the source-linked
+runtime-only manifest correction. Prior negative compiler and full App/core
+results are reused with their existing source/feature qualifications, not labeled
+fresh executions. Current all-feature callers compile/link successfully.
+
+Current-source forced linking reproduces the prior default helper exactly
+(SHA-256 d325d65df4267f8b4bff07701971596a042dc61a56671bd3cdf2af91e03fb64c).
+The new feature remains disabled and crate-private. Both source-test failures and
+the external QA invocation/skip are retained with their corrected outcomes.
+The complete source/bundle/evidence archive will preserve the bounded working-set,
+cooperative deadline, SIGPIPE embedding and one-slot quarantine limitations.
+No caller integration, plugin execution, metadata change or accepted publication
+is part of this checkpoint.

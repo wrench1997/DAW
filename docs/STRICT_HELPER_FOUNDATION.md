@@ -1,6 +1,6 @@
 # Experimental strict fresh-helper foundation
 
-Status: **UNVALIDATED SOURCE**, first low-level Linux transport/mock checkpoint.
+Status: **SOURCE/MOCK TESTED**, first low-level Linux transport/mock checkpoint.
 The feature is disabled by default and has no App, helper factory, bounce, or
 plugin adapter caller. Existing strict metadata and legacy transport behavior
 remain as before. This work follows the reviewed scoped-worker library checkpoint;
@@ -117,9 +117,44 @@ exit successfully without force-kill, so Python assertion failures cannot pass
 as merely reaped. Deliberately hung/faulted child cases use separately labeled
 force-cleanup assertions. Disposable host tests isolate unsupported SIGPIPE and
 actual EPIPE conditions. Test unwind cleanup retains and reaps mock children
-without a second panic. Codec/pump/cleanup fault tests and current-source
-linkage remain pending until the frozen source is durably saved and independently
-reviewed.
+without a second panic. Codec/pump/cleanup fault tests and current-source linkage passed on the
+archived source revision described below.
 
 No genuine-plugin, native editor, audio-device, performance, bounce-rendering,
 tagged transport, or observed-age metadata acceptance is implied.
+
+## Executed checkpoint and retained qualifications
+
+Source revision `927ef43b` passed all 532 available vendor tests, including all
+63 new codec, pipe, cancellation, failure-precedence and retained-cleanup tests.
+The one existing SDK-generated module-info fixture was explicitly excluded because
+its external bundle is unavailable. Current gates also passed 26 doctests,
+77 runtime tests, 25 helper tests, 13 protocol tests, all-feature/default/core
+Clippy, formatting, 239 Python tests with no skips, and the 553-input package
+closure/source-provenance gate. Upstream patch reconstruction has zero mismatches.
+
+The three older private compiler corpora retain their qualified prior outcomes
+under the disabled-feature boundary. Their six positive controls were rebuilt
+on this source using the corrected 19-module shims; negative diagnostics are
+reused, not newly executed. Prior full App/core executions retain their original
+source and feature attribution. Current all-feature callers were freshly compiled
+and linked, and the runtime/helper/protocol tests above were freshly executed.
+
+Forced current-worktree compilation binds both the vendor feature test executable
+and the linked default helper. The default helper SHA-256 is
+`d325d65df4267f8b4bff07701971596a042dc61a56671bd3cdf2af91e03fb64c`,
+byte-identical to the previous default helper. Its features exclude both
+experimental worker and fresh-helper paths. This byte identity does not replace
+the separately recorded new feature mock results.
+
+All intermediate evidence is retained: the initial 62/63 result with the wrong
+`"Infinity"` negative expectation, the later manual-clamp Clippy failure, the
+compiler runner's rejected binary-bearing QA manifest, and the first Python run
+that explicitly skipped its unset helper path. The corrected runs are separately
+recorded. The first two source corrections preserved parser/growth behavior; the
+remaining corrections changed only external QA inputs. Historical unvalidated
+source-checkpoint sections remain historical records.
+
+These results qualify this private Linux foundation and mocks only. No genuine
+plugin, bounce adapter, parallel helper sessions, tagged transport or production
+audio path uses this module yet. No Windows source or runtime acceptance is added.
