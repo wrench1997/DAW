@@ -1767,3 +1767,17 @@ prefix/admission and all SDK call ordering are preserved. Five pure and three
 actual worker/backend fixtures cover bounds, attribution and exact ledgers. This
 source is unvalidated until archived/reviewed mock gates execute. No new genuine
 attempt or topology-policy relaxation is authorized by this entry.
+
+### Diagnostic-only source/mock gates executed
+
+First-run0956a567 gates all passed without correction: all-feature all-target
+compile; offline32, bounce59 and runtime77; all-feature/default/core Clippy; fmt;
+Python239/package557. The eight new pure/worker diagnostic fixtures passed,
+including bounded projection, exact unchanged success/refusal/post-Start request
+ledgers and no Ready/active publication on refusal. Source-before/after maps match.
+Current-worktree App/helper linkage and copied artifacts are retained in the QA
+receipt05f0981f…. Ordinary helper remains exact bafce0dc…. No full-App/vendor rerun
+is claimed. Vendor/shared-validator/helper bytes remain equal to dabcd337. This
+appendix and the diagnostic result appendix are the only post-test source edits.
+The historical genuine001 failure is preserved; a new one-source diagnostic run
+still requires its own frozen harness/review/archive and root authorization.

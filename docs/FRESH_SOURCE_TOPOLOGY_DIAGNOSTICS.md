@@ -45,3 +45,22 @@ A future one-source-only diagnostic attempt needs a separately frozen harness,
 archive, independent review and root authorization. It may collect actual rejected
 descriptors; it cannot qualify capture, current bases, strict clones or WAV output.
 Any later role-versus-participation policy change remains a separate decision.
+
+## Executed source/mock result, 2026-10-10
+
+The first bounded gate on0956a567 passed: current all-feature/all-target test
+compilation; offline32 (24 existing plus5 pure/3 worker-backend diagnostic cases),
+instrument-bounce59 and runtime77; strict all-feature/default/core Clippy; fmt;
+Python239 and package557. No source or test correction was needed. Per-run source
+maps are equal. Current-worktree verbose compiler records bind the App and ordinary
+helper to their exact fresh vendor rlibs and copied dep-info. Ordinary helper SHA
+bafce0dcf4c24411651d84df0877638b77b051019002a6cfbb06ce38ec96b76d
+matches the previous topology helper, as expected from unchanged helper/vendor
+bytes. Link receipt:05f0981f7432287e8d318d692dfc9176bc51876808ee716a93293d66df7c1dd0.
+
+These are selected source/mock/compiler outcomes, not a fresh whole-App or vendor
+corpus execution. Vendor, helper, shared validator and protocol bytes are unchanged
+from dabcd337; earlier broad evidence remains historical and is not counted here.
+The only post-test repository changes are this result appendix and WORK_LOG.
+Genuine001 remains failed; no additional plugin instance, diagnostic attempt,
+capture, clone or WAV qualification was performed for this checkpoint.
