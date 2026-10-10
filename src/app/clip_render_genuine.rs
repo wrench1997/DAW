@@ -33,6 +33,8 @@ use std::{
 mod health;
 #[path = "clip_render_genuine_oracles.rs"]
 mod oracles;
+#[path = "clip_render_genuine_startup.rs"]
+mod startup;
 #[path = "clip_render_genuine_support.rs"]
 mod support;
 use health::{HealthClass, HealthStatus};
@@ -959,22 +961,7 @@ impl GenuineFixture {
                 })
                 .ok_or("initial source owner missing before runtime event poll")?,
         );
-        self.until(0, 30, "source SlotReady/install/current Timeline", |f| {
-            let app = f.app();
-            let channel = app.project.channels[0].id;
-            f.exact_paused().is_some()
-                && app
-                    .running_generator_chains
-                    .get(&channel)
-                    .is_some_and(|source| {
-                        source.control.native_editor_snapshot(0).is_some_and(|s| {
-                            s.capture_serial > 0
-                                && !s.capture_in_progress
-                                && s.pending_request.is_none()
-                        })
-                    })
-                && app.clip_render_observe(channel).is_ok()
-        })?;
+        self.wait_initial_source_ready()?;
         let s = self.snapshot();
         require(
             s.endpoints.len() == 1
@@ -1011,7 +998,7 @@ impl GenuineFixture {
                     .filter(|r| matches!(&r.kind, RecordKind::OrdinaryState { .. }))
                     .count()
             }) == 1,
-            "exact initial request0 State missing after native startup capture settled",
+            "exact initial request0 State missing after startup readiness",
         )?;
         // Setup-only intentionally stale Project; no later direct model mutation.
         let app = self.app_mut();
@@ -1046,6 +1033,124 @@ impl GenuineFixture {
             json!({"phase":"initial_source","evidence":"slot_ready_and_installed"}),
         )?;
         self.passed()
+    }
+    fn wait_initial_source_ready(&mut self) -> Check {
+        let deadline = (Instant::now() + Duration::from_secs(30)).min(self.outer);
+        let mut previous_evidence = None;
+        loop {
+            let health = self.healthy()?;
+            let (ready, evidence, complete) = self.initial_source_readiness()?;
+            if previous_evidence.as_ref() != Some(&evidence) {
+                self.journal
+                    .emit("initial_source_readiness", evidence.clone())?;
+                previous_evidence = Some(evidence);
+            }
+            require(
+                complete,
+                "initial source readiness diagnostic inventory exceeded its bound",
+            )?;
+            if health.admits_condition(ready) {
+                return Ok(());
+            }
+            require(
+                Instant::now() < deadline,
+                "bounded wait failed: source SlotReady/install/current Timeline",
+            )?;
+            // The original control path, cadence and source-load ceiling remain
+            // authoritative. Observational pending bits never grant a pump.
+            self.control_tick(0, "source SlotReady/install/current Timeline")?;
+        }
+    }
+    fn initial_source_readiness(&self) -> Check<(bool, Value, bool)> {
+        let app = self.app();
+        let (endpoint, session, instance) = self
+            .initial_state_identity
+            .ok_or("initial startup receipt identity missing")?;
+        let channel = app
+            .project
+            .channels
+            .first()
+            .ok_or("initial channel missing")?;
+        let mixer = app
+            .project
+            .mixer_runtime_slot(channel.mixer_track)
+            .ok_or("initial source mixer route missing")?;
+        let expected = startup::StartupIdentity {
+            endpoint,
+            session,
+            instance,
+            channel: channel.id,
+            mixer,
+        };
+        let receipts = self.observer.with_snapshot(|s| {
+            let mut counts = startup::ReceiptCounts::default();
+            for record in &s.records {
+                counts.observe(record, expected);
+            }
+            counts
+        });
+        // Sample once per operand. The production live-binding check retains its
+        // own coherent endpoint/native barrier; never call it again for logging.
+        let source = app.running_generator_chains.get(&channel.id);
+        let native = source.and_then(|source| source.control.native_editor_snapshot(0));
+        let live = app.clip_render_observe(channel.id);
+        let snapshot = self.snapshot();
+        let audio = app.audio.as_ref().ok_or("initial source audio missing")?;
+        let confirmed = audio.confirmed_timeline_identity();
+        let matches_desired = app.timeline_audio_matches_desired();
+        let exact_paused = confirmed.is_some_and(|pair| {
+            matches_desired
+                && pair.0 == app.timeline_desired_generation
+                && snapshot.generation == Some(pair.0)
+                && snapshot.active_epoch == Some(pair.1)
+                && snapshot.epoch == pair.1
+                && !snapshot.playing
+                && snapshot.start_frame == 0
+                && !app.playing
+        });
+        let running_owner_exact = source.is_some_and(|source| {
+            source.endpoint_id == endpoint
+                && source.project_session == session
+                && source.instance_id == instance
+                && source.mixer_track == mixer
+        }) && app.running_generator_chains.len() == 1
+            && app.project_session == session
+            && audio.project_session() == session
+            && channel.instrument_plugin_instance_id == Some(instance);
+        let complete = startup::diagnostic_inventory_complete(&snapshot)
+            && app.running_generator_chains.len() <= 16;
+        let operands = startup::ReadyOperands {
+            exact_paused,
+            running_owner_exact,
+            coherent_live_binding: live.is_ok(),
+            diagnostics_complete: complete,
+        };
+        let ready = startup::ready(operands, receipts, native.as_ref());
+        let live_evidence = match live {
+            Ok(binding) => json!({"ok":true,"stamp":format!("{:?}",binding.stamp),
+                "sample_rate":binding.sample_rate,"control_revision":binding.control_revision,
+                "asset_generation":binding.asset_generation,"engine_session":binding.stamp.engine_session,
+                "endpoint_manifest":format!("{:?}",binding.endpoint.manifest())}),
+            Err(reason) => json!({"ok":false,"error":startup::text_evidence(&reason)}),
+        };
+        let evidence = json!({"ready":ready,"operands":operands,"receipts":receipts,
+            "expected":{"endpoint":endpoint,"session":session,"instance":instance,"channel":channel.id,"mixer_track":mixer},
+            "engine_session":audio.engine_session(),"audio_project_session":audio.project_session(),
+            "app_project_session":app.project_session,"project_instance":channel.instrument_plugin_instance_id,
+            "running_count":app.running_generator_chains.len(),
+            "running":source.map(|s|json!({"endpoint":s.endpoint_id,"session":s.project_session,
+                "instance":s.instance_id,"mixer_track":s.mixer_track})),
+            "native":startup::native_evidence(native.as_ref()),"live_binding":live_evidence,
+            "timeline":{"matches_desired":matches_desired,"confirmed":confirmed,
+                "desired_generation":app.timeline_desired_generation,"compiled_generation":app.timeline_compiled_generation,
+                "compiled_fingerprint":app.timeline_compiled_fingerprint,"observed_fingerprint":app.timeline_observed_fingerprint,
+                "source":app.timeline_audio_source.as_ref().map(|s|json!({"generation":s.generation,
+                    "fingerprint":s.fingerprint,"sample_rate":s.sample_rate})),
+                "app_playing":app.playing,"callback_generation":snapshot.generation,
+                "callback_active_epoch":snapshot.active_epoch,"callback_epoch":snapshot.epoch,
+                "callback_playing":snapshot.playing,"callback_frame":snapshot.start_frame},
+            "callback_work":startup::callback_evidence(&snapshot,audio.test_transport_request_id())});
+        Ok((ready, evidence, complete))
     }
     fn require_source_owner_binding(
         &self,
