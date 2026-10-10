@@ -18,6 +18,8 @@ struct Shared {
     capture_resume: Condvar,
     capture_failure_after_gate: Mutex<Option<String>>,
     panic_on_backend_drop: AtomicBool,
+    prepare_paused: Mutex<bool>,
+    prepare_resume: Condvar,
 }
 
 /// Control handle for a deterministic backend used by the actual worker/capture machinery.
@@ -31,6 +33,26 @@ impl TestCaptureSource {
         instance_id: u64,
         state: BouncePluginState,
         config: PluginPrepareConfig,
+    ) -> Result<(PluginChain, Self), String> {
+        Self::new_with_prepare_gate(instance_id, state, config, false)
+    }
+
+    /// Explicit plugin-free seam: keep the real worker's preparation pending
+    /// until released. No callback state, receipt or readiness is fabricated.
+    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    pub(crate) fn new_with_held_prepare(
+        instance_id: u64,
+        state: BouncePluginState,
+        config: PluginPrepareConfig,
+    ) -> Result<(PluginChain, Self), String> {
+        Self::new_with_prepare_gate(instance_id, state, config, true)
+    }
+
+    fn new_with_prepare_gate(
+        instance_id: u64,
+        state: BouncePluginState,
+        config: PluginPrepareConfig,
+        prepare_paused: bool,
     ) -> Result<(PluginChain, Self), String> {
         let name = state.metadata.name.clone();
         let feedback = NativeEditorFeedback {
@@ -49,6 +71,8 @@ impl TestCaptureSource {
             capture_resume: Condvar::new(),
             capture_failure_after_gate: Mutex::new(None),
             panic_on_backend_drop: AtomicBool::new(false),
+            prepare_paused: Mutex::new(prepare_paused),
+            prepare_resume: Condvar::new(),
         });
         let worker_shared = Arc::clone(&shared);
         let chain = PluginChain::spawn_identified_with_backend_factory(
@@ -96,12 +120,22 @@ impl TestCaptureSource {
     }
 
     pub(crate) fn release_gates(&self) {
+        self.release_prepare();
         *self
             .shared
             .capture_paused
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
         self.shared.capture_resume.notify_all();
+    }
+
+    pub(crate) fn release_prepare(&self) {
+        *self
+            .shared
+            .prepare_paused
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+        self.shared.prepare_resume.notify_all();
     }
 }
 
@@ -135,6 +169,15 @@ impl PluginBackend for CaptureBackend {
     }
 
     fn prepare(&mut self, _: PluginPrepareConfig) -> Result<(), String> {
+        let paused = self.shared.prepare_paused.lock().unwrap();
+        let (paused, timeout) = self
+            .shared
+            .prepare_resume
+            .wait_timeout_while(paused, CAPTURE_GATE_BUDGET, |paused| *paused)
+            .unwrap();
+        if timeout.timed_out() && *paused {
+            return Err("Capture fixture preparation exceeded its bounded test budget".into());
+        }
         Ok(())
     }
 

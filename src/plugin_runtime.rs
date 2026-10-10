@@ -2235,6 +2235,13 @@ impl Drop for BounceStateReceiver {
 }
 
 impl PluginChainControl {
+    /// Test-profile identity observation of the already retained metrics owner.
+    /// This does not poll, command, clone, prepare, or alter the worker lifetime.
+    #[cfg(test)]
+    pub(crate) fn genuine_worker_id(&self) -> usize {
+        Arc::as_ptr(&self.metrics) as usize
+    }
+
     /// One source generator, one private bounded receipt. No normal save/native publication.
     pub fn request_instrument_bounce_state(
         &self,
@@ -2757,6 +2764,13 @@ pub enum ShutdownOutcome {
 }
 
 impl PluginWorkerGuard {
+    /// Test-profile identity observation of the already retained metrics owner.
+    /// This does not poll, command, clone, prepare, or alter the worker lifetime.
+    #[cfg(test)]
+    pub(crate) fn genuine_worker_id(&self) -> usize {
+        Arc::as_ptr(&self.metrics) as usize
+    }
+
     /// Poll source retirement without relinquishing or blocking on this worker's lifetime.
     ///
     /// Each poll attempts at most one nonblocking Shutdown enqueue until it is admitted or the

@@ -2,6 +2,9 @@
 //! identified worker with a deterministic PluginBackend; the callback, dedicated
 //! captures, renderer owner, create-new writer, verifier, and history seam are real.
 //! No SDK, helper process, device, editor, or genuine plugin is invoked.
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[path = "clip_render_genuine_topology_app_tests.rs"]
+mod genuine_topology_app_tests;
 use super::*;
 use crate::instrument_bounce::render::{
     BackendFailure, BlockReply, DisposalObservation, RenderBackend,
@@ -209,6 +212,7 @@ pub(in crate::app) struct Fixture {
     directory: PathBuf,
     verifier_guard: Option<crate::occurrence_media::VerificationTestGuard>,
     admission_guard: Option<std::sync::MutexGuard<'static, ()>>,
+    cleanup_budget: Duration,
 }
 impl Fixture {
     pub(in crate::app) fn app(&self) -> &CitrusApp {
@@ -323,6 +327,7 @@ impl Fixture {
             directory,
             verifier_guard: Some(verifier_guard),
             admission_guard: Some(admission),
+            cleanup_budget: Duration::from_secs(10),
         };
         let project_session = fixture.app.project_session;
         assert!(
@@ -503,7 +508,9 @@ impl Fixture {
         // Tests may exercise recovery policy, but fixture destruction must not
         // spawn/drop-save work or recreate diagnostic files after cleanup.
         self.app.autosave_path = None;
-        self.source.release_gates();
+        if let Some(source) = self.source.0.as_ref() {
+            source.release_gates();
+        }
         if let Some(stage) = &mut self.app.clip_session_retirement {
             stage.abandon_test_intent();
         }
@@ -586,9 +593,11 @@ impl Drop for Fixture {
         let was_panicking = std::thread::panicking();
         // Release gates before any potentially panicking App poll. Cleanup has
         // a bounded observation budget and never substitutes timeout for join.
-        self.source.release_gates();
+        if let Some(source) = self.source.0.as_ref() {
+            source.release_gates();
+        }
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.drain_retained(Instant::now() + Duration::from_secs(10))
+            self.drain_retained(Instant::now() + self.cleanup_budget)
         }));
         if !matches!(result, Ok(Ok(()))) {
             FIXTURE_POISONED.store(true, Ordering::Release);

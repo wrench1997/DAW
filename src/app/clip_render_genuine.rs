@@ -39,8 +39,11 @@ mod review;
 mod startup;
 #[path = "clip_render_genuine_support.rs"]
 mod support;
+#[path = "clip_render_genuine_topology.rs"]
+pub(crate) mod topology;
 use health::{HealthClass, HealthStatus};
 use support::*;
+use topology::{OwnedTopologyKind, OwnedTopologyLedger, PumpPurpose, TopologyPumpRole};
 const GLOBAL_VOLUME: u32 = 1_336_600_346;
 const SET_REQUEST: u64 = 0xA660_0002;
 const QUERY_REQUEST: u64 = 0xA660_0003;
@@ -279,6 +282,9 @@ struct GenuineFixture {
     undo_worker: Option<usize>,
     initial_asset_operation: Option<AudioAssetOperation>,
     last_health_evidence: Option<Value>,
+    topology: OwnedTopologyLedger,
+    topology_records: usize,
+    last_topology_health_evidence: Option<Value>,
 }
 impl GenuineFixture {
     fn new(binding: RunBinding, token: [u8; 32], entered: Instant) -> Check<Self> {
@@ -320,6 +326,9 @@ impl GenuineFixture {
             undo_worker: None,
             initial_asset_operation: None,
             last_health_evidence: None,
+            topology: OwnedTopologyLedger::new(token),
+            topology_records: 0,
+            last_topology_health_evidence: None,
         };
         let (engine, callback) = AudioEngine::test_engine_with_callback();
         f.callback = Some(callback);
@@ -350,6 +359,10 @@ impl GenuineFixture {
                     .iter()
                     .all(|s| *s == "completed"),
             "declared stage order",
+        )?;
+        require(
+            self.topology.clear(),
+            "stage entry has unresolved owned topology",
         )?;
         self.active_stage = Some(index);
         self.stage_results[index] = "incomplete";
@@ -451,13 +464,7 @@ impl GenuineFixture {
             )?;
         }
         let snapshot = self.snapshot();
-        require(
-            snapshot.fault.is_none()
-                && !snapshot.suspended
-                && snapshot.timeline_execution_failures == 0
-                && snapshot.timeline_missing_assets == 0,
-            "actual callback fault",
-        )?;
+        self.topology.snapshot(&snapshot)?;
         for endpoint in &snapshot.endpoints {
             let b = &endpoint.fixed.bridge.stats;
             require(
@@ -504,7 +511,10 @@ impl GenuineFixture {
                 _=>{}
             }} Ok(())
         })?;
-        Ok(observed.status)
+        self.refresh_owned_topology(observed.status.class == HealthClass::Clear)?;
+        Ok(observed
+            .status
+            .with_owned_topology_wait(!self.topology.clear()))
     }
     fn pace(&mut self, cadence: Cadence, deadline: Instant) -> Check {
         if let Some(outer) = self.launch["watchdog_deadline_monotonic_ns"].as_u64() {
@@ -532,18 +542,28 @@ impl GenuineFixture {
         app.drive_clip_render_job();
         self.journal.emit("controller_poll",json!({"ordinal":self.budget.polls,"reason":reason,"stage":self.active_stage,"phase":format!("{:?}",self.app().clip_render_job.as_ref().map(|j|j.phase)),"desired_generation":self.app().timeline_desired_generation,"confirmed":self.app().audio.as_ref().and_then(AudioEngine::confirmed_timeline_identity)}))?;
         self.persist_new_observations()?;
+        self.consume_owned_topology_poll()?;
         self.healthy()
     }
-    fn pump(&mut self, cadence: Cadence) -> Check<(GenuineSegmentObservation, Vec<f32>)> {
+    fn pump(
+        &mut self,
+        cadence: Cadence,
+        purpose: PumpPurpose,
+    ) -> Check<(GenuineSegmentObservation, Vec<f32>)> {
         require(
             self.budget.total < MAX_PUMPS,
             "total pump ceiling before callback",
         )?;
         self.pace(cadence, self.outer)?;
+        let role = self.prepare_owned_topology_pump(purpose)?;
         let app = self.app.as_ref().unwrap();
         let callback = self.callback.as_mut().unwrap();
         callback.pump(app.audio.as_ref().unwrap(), 128);
         let segments = callback.take_genuine_segments();
+        let receipts = callback.take_genuine_lifecycle_receipts();
+        // Every actual invocation consumes exactly one budget charge even if
+        // the immutable evidence is subsequently rejected.
+        self.budget.charge(purpose.charge(segments.first()))?;
         let output = callback
             .last_output()
             .iter()
@@ -551,8 +571,15 @@ impl GenuineFixture {
             .collect::<Vec<_>>();
         // Persist actual raw segment stamps before interpreting acceptance.
         for s in &segments {
-            self.journal.emit("callback_segment",json!({"pump":s.pump_ordinal,"segment":s.segment_ordinal,"stage":self.active_stage,"start":s.start_frame,"frames":s.frames,"device_offset":s.device_offset,"device_frame":s.device_frame,"playing":s.playing,"timeline_ready":s.timeline_ready,"generation":s.generation,"active_epoch":s.active_epoch,"epoch":s.epoch,"request_id":s.request_id,"loop_count":s.loop_count,"loop_enabled":s.loop_enabled,"loop_start":s.loop_start_frame,"loop_end":s.loop_end_frame,"disposition":format!("{:?}",s.disposition),"before":format!("{:?}",s.before),"after":format!("{:?}",s.after)}))?;
+            self.journal.emit("callback_segment",json!({"pump":s.pump_ordinal,"segment":s.segment_ordinal,"stage":self.active_stage,"start":s.start_frame,"frames":s.frames,"device_offset":s.device_offset,"device_frame":s.device_frame,"playing":s.playing,"timeline_ready":s.timeline_ready,"generation":s.generation,"active_epoch":s.active_epoch,"epoch":s.epoch,"request_id":s.request_id,"loop_count":s.loop_count,"loop_enabled":s.loop_enabled,"loop_start":s.loop_start_frame,"loop_end":s.loop_end_frame,"disposition":format!("{:?}",s.disposition),"before":topology::segment_state_evidence(s.before),"after":topology::segment_state_evidence(s.after)}))?;
         }
+        for receipt in &receipts {
+            self.journal.emit(
+                "callback_lifecycle_receipt",
+                topology::receipt_evidence(*receipt),
+            )?;
+        }
+        self.journal.emit("callback_attempt_accounting", json!({"total":self.budget.total,"controls":self.budget.controls,"playing":self.budget.playing,"stopped":self.budget.stopped,"role":format!("{role:?}")}))?;
         require(
             segments.len() == 1,
             "pump did not produce exactly one accounted Q128 segment",
@@ -562,16 +589,14 @@ impl GenuineFixture {
             segment.frames == 128 && segment.device_offset == 0 && output.len() == 256,
             "Q128 output extent mismatch",
         )?;
-        require(
-            segment.disposition == GenuineSegmentDisposition::Rendered
-                && segment.before.fault.is_none()
-                && segment.after.fault.is_none()
-                && !segment.before.suspended
-                && !segment.after.suspended
-                && !segment.before.needs_resync
-                && !segment.after.needs_resync,
-            "callback segment fault/resync",
-        )?;
+        self.topology
+            .callback_receipts(&receipts, segment.pump_ordinal, self.budget.polls + 1)?;
+        if !receipts.is_empty() {
+            self.journal
+                .emit("owned_topology_callback", self.topology.evidence())?;
+        }
+        self.topology.segment(&segment, &output, role)?;
+        self.topology.snapshot(&self.snapshot())?;
         Ok((segment, output))
     }
     fn control_tick(&mut self, control: usize, reason: &str) -> Check {
@@ -588,8 +613,7 @@ impl GenuineFixture {
                 self.budget.controls[control] < CONTROL_CEILINGS[control],
                 "control stage pump ceiling before callback",
             )?;
-            let (segment, _) = self.pump(Cadence::Control)?;
-            self.budget.charge(Charge::Control(control))?;
+            let (segment, _) = self.pump(Cadence::Control, PumpPurpose::Control(control))?;
             require(
                 !segment.playing,
                 "unaccounted musical output during control wait",
@@ -727,7 +751,14 @@ impl GenuineFixture {
                     json!({"type":"app_asset_event","event":format!("{event:?}")})
                 }
                 RecordKind::AppGeneratorEndpointEvent(event) => {
-                    json!({"type":"app_generator_event","event":format!("{event:?}")})
+                    json!({"type":"app_generator_event","event":topology::lifecycle_event_evidence(*event)})
+                }
+                RecordKind::AppTimelineRuntimeEvent {
+                    event,
+                    before,
+                    after,
+                } => {
+                    json!({"type":"app_timeline_runtime_event","event":topology::timeline_event_evidence(*event),"before":topology::timeline_state_evidence(*before),"after":topology::timeline_state_evidence(*after)})
                 }
                 RecordKind::WorkerJoin { worker_id, outcome } => {
                     json!({"type":"worker_join","worker_id":worker_id,"outcome":format!("{outcome:?}")})
@@ -1250,7 +1281,8 @@ impl GenuineFixture {
             coherent_live_binding: live.is_ok(),
             diagnostics_complete: complete,
         };
-        let ready = startup::ready(operands, receipts, native.as_ref());
+        let source_ready_without_topology = startup::ready(operands, receipts, native.as_ref());
+        let ready = self.topology.clear() && source_ready_without_topology;
         let live_evidence = match live {
             Ok(binding) => json!({"ok":true,"stamp":format!("{:?}",binding.stamp),
                 "sample_rate":binding.sample_rate,"control_revision":binding.control_revision,
@@ -1258,7 +1290,7 @@ impl GenuineFixture {
                 "endpoint_manifest":format!("{:?}",binding.endpoint.manifest())}),
             Err(reason) => json!({"ok":false,"error":startup::text_evidence(&reason)}),
         };
-        let evidence = json!({"ready":ready,"operands":operands,"receipts":receipts,
+        let evidence = json!({"ready":ready,"source_ready_without_topology":source_ready_without_topology,"owned_topology_settled":self.topology.clear(),"operands":operands,"receipts":receipts,
             "expected":{"endpoint":endpoint,"session":session,"instance":instance,"channel":channel.id,"mixer_track":mixer},
             "engine_session":audio.engine_session(),"audio_project_session":audio.project_session(),
             "app_project_session":app.project_session,"project_instance":channel.instrument_plugin_instance_id,
@@ -1517,6 +1549,7 @@ impl GenuineFixture {
         let mut output = Vec::with_capacity(count * 256);
         let mut active = None;
         let mut pending_activation_ack = None;
+        let settled_topology = self.topology.settled_baseline()?;
         let baseline = self.snapshot();
         let loop_count = baseline.loop_count;
         self.app_mut().toggle_play();
@@ -1556,14 +1589,20 @@ impl GenuineFixture {
                 .as_ref()
                 .unwrap()
                 .test_transport_request_id();
-            let (segment, samples) = self.pump(if active.is_some() {
-                Cadence::Measured
-            } else {
-                Cadence::Control
-            })?;
+            let (segment, samples) = self.pump(
+                if active.is_some() {
+                    Cadence::Measured
+                } else {
+                    Cadence::Control
+                },
+                PumpPurpose::Playing {
+                    pass,
+                    control,
+                    already_active: active.is_some(),
+                },
+            )?;
             if !segment.playing {
                 require(active.is_none(), "playing pass unexpectedly paused")?;
-                self.budget.charge(Charge::Control(control))?;
                 continue;
             }
             if active.is_none() {
@@ -1583,8 +1622,7 @@ impl GenuineFixture {
             )?;
             // The activation segment is first measured output and is charged
             // once here, never as both a control and musical segment.
-            let index = self.budget.playing[pass];
-            self.budget.charge(Charge::Playing(pass))?;
+            let index = self.budget.playing[pass] - 1;
             require(
                 segment.timeline_ready
                     && segment.timeline_render_active
@@ -1615,7 +1653,9 @@ impl GenuineFixture {
                     state.fixed_quantum_bridge_gaps == baseline.fixed_quantum_bridge_gaps
                         && state.fixed_quantum_output_underflow_frames
                             == baseline.fixed_quantum_output_underflow_frames
-                        && state.timeline_execution_failures == 0
+                        && state.timeline_execution_failures == settled_topology.failures
+                        && state.plugin_topology_revision == settled_topology.revision
+                        && !state.plugin_topology_replan_pending
                         && !state.metronome_enabled
                         && !state.recording
                         && !state.midi_input_present
@@ -1681,6 +1721,8 @@ impl GenuineFixture {
         Ok(output)
     }
     fn stop_window(&mut self, pass: usize, control: usize, previous_epoch: u64) -> Check {
+        let settled_topology = self.topology.settled_baseline()?;
+        let stopped_baseline = self.snapshot();
         let mut identity = None;
         let mut pending_activation_ack = None;
         let mut loop_count = None;
@@ -1722,11 +1764,32 @@ impl GenuineFixture {
                 .as_ref()
                 .unwrap()
                 .test_transport_request_id();
-            let (segment, samples) = self.pump(if identity.is_some() {
-                Cadence::Measured
-            } else {
-                Cadence::Control
-            })?;
+            let (segment, samples) = self.pump(
+                if identity.is_some() {
+                    Cadence::Measured
+                } else {
+                    Cadence::Control
+                },
+                PumpPurpose::Stopped {
+                    pass,
+                    control,
+                    previous_epoch,
+                    generation: self.app().timeline_desired_generation,
+                    already_active: identity.is_some(),
+                },
+            )?;
+            require(
+                [segment.before, segment.after].iter().all(|state| {
+                    state.plugin_topology_revision == settled_topology.revision
+                        && state.timeline_execution_failures == settled_topology.failures
+                        && state.fixed_quantum_bridge_gaps
+                            == stopped_baseline.fixed_quantum_bridge_gaps
+                        && state.fixed_quantum_output_underflow_frames
+                            == stopped_baseline.fixed_quantum_output_underflow_frames
+                        && !state.plugin_topology_replan_pending
+                }),
+                "fixed stopped topology/counter baseline changed",
+            )?;
             require(
                 !segment.playing && !segment.playing_after_render,
                 "unaccounted playing segment after actual Stop",
@@ -1737,7 +1800,6 @@ impl GenuineFixture {
                 && segment.epoch > previous_epoch;
             if !exact {
                 require(identity.is_none(), "stopped identity regressed")?;
-                self.budget.charge(Charge::Control(control))?;
                 continue;
             }
             if identity.is_none() {
@@ -1757,7 +1819,6 @@ impl GenuineFixture {
                 ),
                 "first stopped activation has non-activation pending work or wrong acknowledgment identity",
             )?;
-            self.budget.charge(Charge::Stopped(pass))?;
             if let Some(pair) = identity {
                 require(
                     pair == (segment.generation, segment.epoch),
@@ -1966,7 +2027,7 @@ impl GenuineFixture {
     }
 }
 fn snapshot_summary(s: &GenuineCallbackSnapshot) -> Value {
-    json!({"engine":s.engine_session,"project":s.project_session,"generation":s.generation,"active_epoch":s.active_epoch,"epoch":s.epoch,"frame":s.start_frame,"playing":s.playing,"loop_count":s.loop_count,"pending_audio":s.pending_audio_commands,"pending_timeline":s.pending_timeline_commands,"pending_activation":s.pending_timeline_activation,"endpoints":s.endpoints.iter().map(|e|json!({"id":e.endpoint_id,"instance":e.plugin_instance_id,"mixer_track":e.mixer_track,"stopped_epoch_safety":startup::stopped_epoch_safety_evidence(e.stopped_epoch_safety_epoch,e.stopped_epoch_safety_remaining_frames,e.stopped_epoch_safety_failed),"fixed":format!("{:?}",e.fixed),"exact":format!("{:?}",e.exact_snapshot),"latency":format!("{:?}",e.coherent_latency)})).collect::<Vec<_>>(),"assets":s.assets.iter().map(|a|json!({"id":a.id,"rate":a.sample_rate,"channels":a.channels,"frames":a.frames,"arc_address":Arc::as_ptr(&a.samples) as *const f32 as usize})).collect::<Vec<_>>(),"native_voices":s.native_voices.len(),"audio_voices":s.audio_voices.len(),"zero_pdc":s.zero_pdc,"pdc_revision":s.pdc_revision,"graph_identity":s.graph_identity,"graph_pdc":format!("{:?}",s.graph_pdc),"raw_delays":format!("{:?}",s.raw_delays),"raw_delay_active":s.raw_delay_active,"legacy_pdc_active":s.legacy_pdc_active,"route_delays":format!("{:?}",s.route_delays),"master_gain":s.master_gain,"master_pan":s.master_pan,"track1_gain":s.track_gains[1],"track1_pan":s.track_pans[1]})
+    json!({"engine":s.engine_session,"project":s.project_session,"plugin_topology_revision":s.plugin_topology_revision,"plugin_topology_replan_pending":s.plugin_topology_replan_pending,"timeline_execution_failures":s.timeline_execution_failures,"needs_resync":s.timeline_stats.is_some_and(|stats| stats.ownership_needs_resync),"suspended":s.suspended,"graph_was_activated":s.graph_was_activated,"graph_binding_exact":s.graph_binding_exact,"channel_binding_revision":s.channel_binding_revision,"channel_binding_epoch":s.channel_binding_epoch,"active_plugin_automation_bindings":s.active_plugin_automation_bindings,"candidate_plugin_automation_bindings":s.candidate_plugin_automation_bindings,"compiled_midi_routes":s.compiled_midi_routes,"lifecycle_observed_count":s.lifecycle_observed_count,"lifecycle_overflowed":s.lifecycle_overflowed,"lifecycle_inconsistent_pair":s.lifecycle_inconsistent_pair,"generation":s.generation,"active_epoch":s.active_epoch,"epoch":s.epoch,"frame":s.start_frame,"playing":s.playing,"loop_count":s.loop_count,"pending_audio":s.pending_audio_commands,"pending_timeline":s.pending_timeline_commands,"pending_activation":s.pending_timeline_activation,"endpoints":s.endpoints.iter().map(|e|json!({"id":e.endpoint_id,"instance":e.plugin_instance_id,"mixer_track":e.mixer_track,"stopped_epoch_safety":startup::stopped_epoch_safety_evidence(e.stopped_epoch_safety_epoch,e.stopped_epoch_safety_remaining_frames,e.stopped_epoch_safety_failed),"fixed":format!("{:?}",e.fixed),"exact":format!("{:?}",e.exact_snapshot),"latency":format!("{:?}",e.coherent_latency)})).collect::<Vec<_>>(),"assets":s.assets.iter().map(|a|json!({"id":a.id,"rate":a.sample_rate,"channels":a.channels,"frames":a.frames,"arc_address":Arc::as_ptr(&a.samples) as *const f32 as usize})).collect::<Vec<_>>(),"native_voices":s.native_voices.len(),"audio_voices":s.audio_voices.len(),"zero_pdc":s.zero_pdc,"pdc_revision":s.pdc_revision,"graph_identity":s.graph_identity,"graph_pdc":format!("{:?}",s.graph_pdc),"raw_delays":format!("{:?}",s.raw_delays),"raw_delay_active":s.raw_delay_active,"legacy_pdc_active":s.legacy_pdc_active,"route_delays":format!("{:?}",s.route_delays),"master_gain":s.master_gain,"master_pan":s.master_pan,"track1_gain":s.track_gains[1],"track1_pan":s.track_pans[1]})
 }
 impl GenuineFixture {
     fn audit_media_and_history(&mut self) -> Check {
@@ -2734,6 +2795,10 @@ impl GenuineFixture {
         Ok(())
     }
     fn final_audit(&mut self) -> Check {
+        require(
+            self.topology.complete(),
+            "all four exact owned topology slots must settle",
+        )?;
         self.stage(9, Stage::Cleanup)?;
         self.hooks()?;
         self.no_source_audio_shape()?;
@@ -2903,13 +2968,29 @@ impl GenuineFixture {
                 for segment in segments {
                     self.journal.emit(
                         "failure_cleanup_segment",
-                        json!({"segment":format!("{segment:?}")}),
+                        json!({"segment":format!("{segment:?}"),"before":topology::segment_state_evidence(segment.before),"after":topology::segment_state_evidence(segment.after),"qualification":"failed_cleanup_only"}),
                     )?;
+                }
+                for receipt in self
+                    .callback
+                    .as_mut()
+                    .unwrap()
+                    .take_genuine_lifecycle_receipts()
+                {
+                    self.journal.emit("failure_cleanup_lifecycle_receipt",json!({"qualification":"failed_cleanup_only","receipt":topology::receipt_evidence(receipt)}))?;
                 }
             }
         }
         // No ambiguous queued callback removal is discarded. After that gate,
         // releasing the callback disconnects endpoint ownership before shutdown.
+        for receipt in self
+            .callback
+            .as_mut()
+            .unwrap()
+            .take_genuine_lifecycle_receipts()
+        {
+            self.journal.emit("failure_cleanup_lifecycle_receipt",json!({"qualification":"failed_cleanup_only","receipt":topology::receipt_evidence(receipt)}))?;
+        }
         self.callback.take();
         loop {
             require(

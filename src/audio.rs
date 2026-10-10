@@ -10286,6 +10286,18 @@ impl DspState {
         mut endpoint: PreparedFixedEndpoint,
         pdc_delay: StereoDelayLine,
     ) {
+        #[cfg(test)]
+        if self.test_genuine_observation.is_some() {
+            self.genuine_lifecycle_operand(
+                genuine_observation::GenuineLifecycleKind::Install,
+                Some(endpoint.genuine_lifecycle_endpoint(
+                    channel_id,
+                    endpoint_id,
+                    plugin_instance_id,
+                    mixer_track,
+                )),
+            );
+        }
         if endpoint_id == 0
             || plugin_instance_id == 0
             || mixer_track >= TRACK_COUNT
@@ -10382,6 +10394,20 @@ impl DspState {
             return;
         }
 
+        #[cfg(test)]
+        if self.test_genuine_observation.is_some() {
+            self.genuine_begin_lifecycle_mutation(
+                genuine_observation::GenuineLifecycleKind::Install,
+                Some(endpoint.genuine_lifecycle_endpoint(
+                    channel_id,
+                    endpoint_id,
+                    plugin_instance_id,
+                    mixer_track,
+                )),
+                self.genuine_generator_identity(channel_id),
+                None,
+            );
+        }
         self.begin_plugin_topology_replan();
         let replaced = self.generator_endpoints[target].take();
         let replaced_endpoint_id = replaced.as_ref().map(|slot| slot.endpoint_id);
@@ -10491,8 +10517,24 @@ impl DspState {
         if !self.generator_lifecycle_command_ready(retirements) {
             return;
         }
+        #[cfg(test)]
+        if self.test_genuine_observation.is_some() {
+            self.genuine_lifecycle_operand(
+                genuine_observation::GenuineLifecycleKind::StampedRemove,
+                self.genuine_generator_identity(stamp.channel_id),
+            );
+        }
         let result = self.validate_generator_removal_stamp(stamp);
         if let Ok(index) = result {
+            #[cfg(test)]
+            if self.test_genuine_observation.is_some() {
+                self.genuine_begin_lifecycle_mutation(
+                    genuine_observation::GenuineLifecycleKind::StampedRemove,
+                    self.genuine_generator_identity(stamp.channel_id),
+                    None,
+                    Some(stamp),
+                );
+            }
             self.begin_plugin_topology_replan();
             // The confirmed stopped epoch has already invalidated old worker
             // generations. Reset the callback's remaining histories again at
@@ -10519,7 +10561,23 @@ impl DspState {
     }
 
     fn remove_generator_endpoint(&mut self, channel_id: u32) {
+        #[cfg(test)]
+        if self.test_genuine_observation.is_some() {
+            self.genuine_lifecycle_operand(
+                genuine_observation::GenuineLifecycleKind::Remove,
+                self.genuine_generator_identity(channel_id),
+            );
+        }
         if self.find_generator_slot(channel_id).is_some() {
+            #[cfg(test)]
+            if self.test_genuine_observation.is_some() {
+                self.genuine_begin_lifecycle_mutation(
+                    genuine_observation::GenuineLifecycleKind::Remove,
+                    self.genuine_generator_identity(channel_id),
+                    None,
+                    None,
+                );
+            }
             self.begin_plugin_topology_replan();
         }
         let removed = self
@@ -10652,9 +10710,18 @@ impl DspState {
     }
 
     fn emit_generator_endpoint_event(&mut self, event: GeneratorEndpointEvent) {
+        #[cfg(test)]
+        let mut publication = (false, false);
         if let Some(events) = self.generator_endpoint_events.as_mut() {
+            #[cfg(not(test))]
             let _ = events.push(event);
+            #[cfg(test)]
+            {
+                publication = (true, events.push(event).is_ok());
+            }
         }
+        #[cfg(test)]
+        self.genuine_finish_lifecycle(event, publication.0, publication.1);
     }
 
     fn exact_midi_generator_index(&self, stamp: MidiGeneratorRouteStamp) -> Option<usize> {
@@ -24864,5 +24931,8 @@ mod tests {
     }
     mod stamped_generator_removal_tests {
         include!("audio_stamped_removal_tests.rs");
+    }
+    mod genuine_topology_tests {
+        include!("audio_genuine_topology_tests.rs");
     }
 }

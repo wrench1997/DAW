@@ -8,6 +8,82 @@ use super::*;
 use crate::mixer_graph::{CompiledMixerNode, CompiledMixerRoute, MIXER_GRAPH_MAX_EDGES};
 
 pub(crate) const GENUINE_SEGMENT_CAPACITY: usize = 8192;
+pub(crate) const GENUINE_LIFECYCLE_CAPACITY: usize = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GenuineLifecycleKind {
+    Install,
+    StampedRemove,
+    Remove,
+    Clear,
+    RouteSet,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GenuineLifecycleEndpoint {
+    pub(crate) channel_id: u32,
+    pub(crate) endpoint_id: u64,
+    pub(crate) plugin_instance_id: u64,
+    pub(crate) mixer_track: usize,
+    pub(crate) project_session: u64,
+    pub(crate) worker_id: usize,
+    pub(crate) epoch: u64,
+}
+
+/// Literal scalar state at the mutation boundary, not the preceding pump's state.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GenuineLifecycleState {
+    pub(crate) engine_session: u64,
+    pub(crate) project_session: u64,
+    pub(crate) transport_epoch: u64,
+    pub(crate) legacy_request_barrier: u64,
+    pub(crate) playing: bool,
+    pub(crate) generation: Option<u64>,
+    pub(crate) active_epoch: Option<u64>,
+    pub(crate) plugin_topology_revision: u64,
+    pub(crate) plugin_topology_replan_pending: bool,
+    pub(crate) timeline_execution_failures: u64,
+    pub(crate) fault: Option<PluginProcessingFault>,
+    pub(crate) needs_resync: bool,
+    pub(crate) suspended: bool,
+    pub(crate) graph_was_activated: bool,
+    pub(crate) graph_binding_exact: bool,
+    pub(crate) graph_identity: Option<(u64, u64, u64)>,
+    pub(crate) channel_binding_revision: Option<u64>,
+    pub(crate) channel_binding_epoch: Option<u64>,
+    pub(crate) active_plugin_automation_bindings: usize,
+    pub(crate) candidate_plugin_automation_bindings: usize,
+    pub(crate) compiled_midi_routes: usize,
+    pub(crate) generator_endpoints: usize,
+    pub(crate) insert_endpoints: usize,
+    pub(crate) pdc_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GenuineLifecycleObservation {
+    pub(crate) run_binding: [u8; 32],
+    pub(crate) pump_ordinal: u64,
+    pub(crate) record_ordinal: u64,
+    pub(crate) kind: GenuineLifecycleKind,
+    pub(crate) event: GeneratorEndpointEvent,
+    pub(crate) producer_present: bool,
+    pub(crate) enqueue_success: bool,
+    pub(crate) affected: Option<GenuineLifecycleEndpoint>,
+    pub(crate) replaced: Option<GenuineLifecycleEndpoint>,
+    /// Only accepted install/stamped removal/physical removal have a pair.
+    pub(crate) pre: Option<GenuineLifecycleState>,
+    pub(crate) post: GenuineLifecycleState,
+}
+
+#[derive(Clone, Copy)]
+struct GenuineLifecycleMutation {
+    kind: GenuineLifecycleKind,
+    affected: GenuineLifecycleEndpoint,
+    replaced: Option<GenuineLifecycleEndpoint>,
+    pre: GenuineLifecycleState,
+    stamp: Option<GeneratorRemovalStamp>,
+    pump_ordinal: u64,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum GenuineSegmentDisposition {
@@ -62,6 +138,15 @@ pub(crate) struct GenuineSegmentState {
     pub(crate) suspended: bool,
     pub(crate) needs_resync: bool,
     pub(crate) graph_identity: Option<(u64, u64, u64)>,
+    pub(crate) graph_was_activated: bool,
+    pub(crate) graph_binding_exact: bool,
+    pub(crate) channel_binding_revision: Option<u64>,
+    pub(crate) channel_binding_epoch: Option<u64>,
+    pub(crate) plugin_topology_revision: u64,
+    pub(crate) plugin_topology_replan_pending: bool,
+    pub(crate) active_plugin_automation_bindings: usize,
+    pub(crate) candidate_plugin_automation_bindings: usize,
+    pub(crate) compiled_midi_routes: usize,
     pub(crate) pdc_revision: u64,
     pub(crate) zero_pdc: bool,
     pub(crate) paused_safety_services: usize,
@@ -88,6 +173,14 @@ pub(super) struct GenuineObservationBuffer {
     overflowed: bool,
     pump_ordinal: u64,
     segment_ordinal: u64,
+    lifecycle_records: [Option<GenuineLifecycleObservation>; GENUINE_LIFECYCLE_CAPACITY],
+    lifecycle_len: usize,
+    lifecycle_drained: usize,
+    lifecycle_observed_count: u64,
+    lifecycle_overflowed: bool,
+    lifecycle_inconsistent_pair: bool,
+    lifecycle_mutation: Option<GenuineLifecycleMutation>,
+    lifecycle_operand: Option<(GenuineLifecycleKind, Option<GenuineLifecycleEndpoint>)>,
 }
 
 impl GenuineObservationBuffer {
@@ -99,6 +192,14 @@ impl GenuineObservationBuffer {
             overflowed: false,
             pump_ordinal: 0,
             segment_ordinal: 0,
+            lifecycle_records: [None; GENUINE_LIFECYCLE_CAPACITY],
+            lifecycle_len: 0,
+            lifecycle_drained: 0,
+            lifecycle_observed_count: 0,
+            lifecycle_overflowed: false,
+            lifecycle_inconsistent_pair: false,
+            lifecycle_mutation: None,
+            lifecycle_operand: None,
         }
     }
 
@@ -112,6 +213,19 @@ impl GenuineObservationBuffer {
         }
         self.records[self.len] = Some(record);
         self.len += 1;
+    }
+
+    fn push_lifecycle(&mut self, mut record: GenuineLifecycleObservation) {
+        record.run_binding = self.run_binding;
+        record.pump_ordinal = self.pump_ordinal;
+        record.record_ordinal = self.lifecycle_observed_count;
+        self.lifecycle_observed_count = self.lifecycle_observed_count.saturating_add(1);
+        if self.lifecycle_len == GENUINE_LIFECYCLE_CAPACITY {
+            self.lifecycle_overflowed = true;
+            return;
+        }
+        self.lifecycle_records[self.lifecycle_len] = Some(record);
+        self.lifecycle_len += 1;
     }
 }
 
@@ -221,6 +335,9 @@ pub(crate) struct GenuineCallbackSnapshot {
     pub(crate) project_session: u64,
     pub(crate) run_binding: Option<[u8; 32]>,
     pub(crate) observation_overflowed: bool,
+    pub(crate) lifecycle_observed_count: u64,
+    pub(crate) lifecycle_overflowed: bool,
+    pub(crate) lifecycle_inconsistent_pair: bool,
     pub(crate) pump_ordinal: u64,
     pub(crate) start_frame: u64,
     pub(crate) device_frame: u64,
@@ -258,6 +375,12 @@ pub(crate) struct GenuineCallbackSnapshot {
     pub(crate) graph_identity: Option<(u64, u64, u64)>,
     pub(crate) graph_was_activated: bool,
     pub(crate) graph_binding_exact: bool,
+    pub(crate) channel_binding_revision: Option<u64>,
+    pub(crate) channel_binding_epoch: Option<u64>,
+    pub(crate) plugin_topology_revision: u64,
+    pub(crate) plugin_topology_replan_pending: bool,
+    pub(crate) active_plugin_automation_bindings: usize,
+    pub(crate) candidate_plugin_automation_bindings: usize,
     pub(crate) graph_fingerprint: u64,
     pub(crate) nodes: Vec<CompiledMixerNode>,
     pub(crate) routes: Vec<CompiledMixerRoute>,
@@ -296,6 +419,24 @@ pub(crate) struct GenuineCallbackSnapshot {
 }
 
 impl PreparedFixedEndpoint {
+    pub(super) fn genuine_lifecycle_endpoint(
+        &self,
+        channel_id: u32,
+        endpoint_id: u64,
+        plugin_instance_id: u64,
+        mixer_track: usize,
+    ) -> GenuineLifecycleEndpoint {
+        GenuineLifecycleEndpoint {
+            channel_id,
+            endpoint_id,
+            plugin_instance_id,
+            mixer_track,
+            project_session: self.project_session,
+            worker_id: self.adapter.genuine_snapshot().bridge.worker_id,
+            epoch: self.epoch(),
+        }
+    }
+
     fn genuine_hooks_inactive(&self) -> bool {
         self.fresh_snapshot_script_len == 0
             && self.fresh_snapshot_script_cursor == 0
@@ -345,6 +486,210 @@ impl PreparedFixedEndpoint {
 }
 
 impl DspState {
+    pub(super) fn genuine_generator_identity(
+        &self,
+        channel_id: u32,
+    ) -> Option<GenuineLifecycleEndpoint> {
+        let slot = self.generator_endpoints[self.find_generator_slot(channel_id)?].as_ref()?;
+        Some(slot.endpoint.genuine_lifecycle_endpoint(
+            slot.channel_id,
+            slot.endpoint_id,
+            slot.plugin_instance_id,
+            slot.mixer_track,
+        ))
+    }
+
+    fn genuine_lifecycle_state(&self) -> GenuineLifecycleState {
+        let runtime = self.timeline_runtime.as_ref();
+        GenuineLifecycleState {
+            engine_session: self.engine_session,
+            project_session: self.project_session.load(Ordering::Acquire),
+            transport_epoch: self.transport_epoch,
+            legacy_request_barrier: self.callback_transport_request_id,
+            playing: self.callback_transport_playing,
+            generation: runtime.and_then(RealtimeTimelineRuntime::active_revision),
+            active_epoch: runtime.and_then(RealtimeTimelineRuntime::active_epoch),
+            plugin_topology_revision: self.plugin_topology_revision,
+            plugin_topology_replan_pending: self.plugin_topology_replan_pending,
+            timeline_execution_failures: self.timeline_execution_failures,
+            fault: self.plugin_fault,
+            needs_resync: runtime.is_some_and(|runtime| runtime.stats().ownership_needs_resync),
+            suspended: self.plugin_processing_suspended(),
+            graph_was_activated: self.mixer_graph_was_activated,
+            graph_binding_exact: self.mixer_graph_binding_is_exact(),
+            graph_identity: self
+                .mixer_graph_identity
+                .map(|identity| (identity.revision, identity.epoch, identity.fingerprint)),
+            channel_binding_revision: self.timeline_channel_revision,
+            channel_binding_epoch: self.timeline_channel_epoch,
+            active_plugin_automation_bindings: self.timeline_plugin_automation_bindings.len,
+            candidate_plugin_automation_bindings: self
+                .timeline_activation_plugin_automation_bindings
+                .len,
+            compiled_midi_routes: runtime
+                .and_then(RealtimeTimelineRuntime::active_timeline)
+                .map_or(0, |timeline| timeline.midi_port_routes().len()),
+            generator_endpoints: self.generator_endpoints.iter().flatten().count(),
+            insert_endpoints: self.insert_endpoints.iter().flatten().count(),
+            pdc_revision: self.pdc_plan_revision,
+        }
+    }
+
+    pub(super) fn genuine_lifecycle_operand(
+        &mut self,
+        kind: GenuineLifecycleKind,
+        affected: Option<GenuineLifecycleEndpoint>,
+    ) {
+        if let Some(observer) = self.test_genuine_observation.as_mut() {
+            if observer.lifecycle_operand.is_some() || observer.lifecycle_mutation.is_some() {
+                observer.lifecycle_inconsistent_pair = true;
+            }
+            observer.lifecycle_operand = Some((kind, affected));
+        }
+    }
+
+    /// Called immediately before the actual accepted kernel's first topology mutation.
+    pub(super) fn genuine_begin_lifecycle_mutation(
+        &mut self,
+        kind: GenuineLifecycleKind,
+        affected: Option<GenuineLifecycleEndpoint>,
+        replaced: Option<GenuineLifecycleEndpoint>,
+        stamp: Option<GeneratorRemovalStamp>,
+    ) {
+        if self.test_genuine_observation.is_none() {
+            return;
+        }
+        let pre = self.genuine_lifecycle_state();
+        let observer = self.test_genuine_observation.as_mut().unwrap();
+        let Some(affected) = affected else {
+            observer.lifecycle_inconsistent_pair = true;
+            return;
+        };
+        if observer.lifecycle_mutation.is_some() {
+            observer.lifecycle_inconsistent_pair = true;
+        }
+        observer.lifecycle_mutation = Some(GenuineLifecycleMutation {
+            kind,
+            affected,
+            replaced,
+            pre,
+            stamp,
+            pump_ordinal: observer.pump_ordinal,
+        });
+    }
+
+    /// Taps the immutable event and the outcome of its sole original push.
+    pub(super) fn genuine_finish_lifecycle(
+        &mut self,
+        event: GeneratorEndpointEvent,
+        producer_present: bool,
+        enqueue_success: bool,
+    ) {
+        if self.test_genuine_observation.is_none() {
+            return;
+        }
+        let (kind, event_channel) = match event {
+            GeneratorEndpointEvent::Installed { channel_id, .. } => {
+                (GenuineLifecycleKind::Install, Some(channel_id))
+            }
+            GeneratorEndpointEvent::StampedRemoved { stamp, .. } => {
+                (GenuineLifecycleKind::StampedRemove, Some(stamp.channel_id))
+            }
+            GeneratorEndpointEvent::Removed { channel_id, .. } => {
+                (GenuineLifecycleKind::Remove, Some(channel_id))
+            }
+            GeneratorEndpointEvent::Cleared { .. } => (GenuineLifecycleKind::Clear, None),
+            GeneratorEndpointEvent::RouteSet { channel_id, .. } => {
+                (GenuineLifecycleKind::RouteSet, Some(channel_id))
+            }
+        };
+        let current_affected =
+            event_channel.and_then(|channel| self.genuine_generator_identity(channel));
+        let post = self.genuine_lifecycle_state();
+        let observer = self.test_genuine_observation.as_mut().unwrap();
+        let operand = observer.lifecycle_operand.take();
+        let mutation = observer.lifecycle_mutation.take();
+        let accepted_event = matches!(
+            event,
+            GeneratorEndpointEvent::Installed { success: true, .. }
+                | GeneratorEndpointEvent::StampedRemoved { result: Ok(()), .. }
+                | GeneratorEndpointEvent::Removed {
+                    endpoint_id: Some(_),
+                    plugin_instance_id: Some(_),
+                    ..
+                }
+        );
+        let pair_matches = mutation.is_some_and(|pair| {
+            pair.kind == kind
+                && pair.pump_ordinal == observer.pump_ordinal
+                && match event {
+                    GeneratorEndpointEvent::Installed {
+                        channel_id,
+                        endpoint_id,
+                        plugin_instance_id,
+                        mixer_track,
+                        replaced_endpoint_id,
+                        replaced_plugin_instance_id,
+                        success,
+                    } => {
+                        success
+                            && pair.stamp.is_none()
+                            && pair.affected.channel_id == channel_id
+                            && pair.affected.endpoint_id == endpoint_id
+                            && pair.affected.plugin_instance_id == plugin_instance_id
+                            && pair.affected.mixer_track == mixer_track
+                            && pair.replaced.map(|value| value.endpoint_id) == replaced_endpoint_id
+                            && pair.replaced.map(|value| value.plugin_instance_id)
+                                == replaced_plugin_instance_id
+                    }
+                    GeneratorEndpointEvent::StampedRemoved { stamp, result } => {
+                        result.is_ok()
+                            && pair.stamp == Some(stamp)
+                            && pair.replaced.is_none()
+                            && pair.affected.channel_id == stamp.channel_id
+                            && pair.affected.endpoint_id == stamp.endpoint_id
+                            && pair.affected.plugin_instance_id == stamp.plugin_instance_id
+                            && pair.affected.project_session == stamp.project_session
+                            && pair.affected.epoch == stamp.stopped_epoch
+                    }
+                    GeneratorEndpointEvent::Removed {
+                        channel_id,
+                        endpoint_id,
+                        plugin_instance_id,
+                    } => {
+                        pair.stamp.is_none()
+                            && pair.replaced.is_none()
+                            && pair.affected.channel_id == channel_id
+                            && Some(pair.affected.endpoint_id) == endpoint_id
+                            && Some(pair.affected.plugin_instance_id) == plugin_instance_id
+                    }
+                    _ => false,
+                }
+        });
+        if accepted_event != pair_matches
+            || mutation.is_some() != pair_matches
+            || operand.is_some_and(|(operand_kind, _)| operand_kind != kind)
+        {
+            observer.lifecycle_inconsistent_pair = true;
+        }
+        observer.push_lifecycle(GenuineLifecycleObservation {
+            run_binding: observer.run_binding,
+            pump_ordinal: observer.pump_ordinal,
+            record_ordinal: 0,
+            kind,
+            event,
+            producer_present,
+            enqueue_success,
+            affected: mutation
+                .map(|pair| pair.affected)
+                .or_else(|| operand.and_then(|(_, affected)| affected))
+                .or(current_affected),
+            replaced: mutation.and_then(|pair| pair.replaced),
+            pre: mutation.filter(|_| pair_matches).map(|pair| pair.pre),
+            post,
+        });
+    }
+
     fn genuine_stopped_epoch_safety(&self) -> impl Iterator<Item = StoppedEpochSafetyService> + '_ {
         self.generator_endpoints
             .iter()
@@ -476,6 +821,17 @@ impl DspState {
             graph_identity: self
                 .mixer_graph_identity
                 .map(|identity| (identity.revision, identity.epoch, identity.fingerprint)),
+            graph_was_activated: self.mixer_graph_was_activated,
+            graph_binding_exact: self.mixer_graph_binding_is_exact(),
+            channel_binding_revision: self.timeline_channel_revision,
+            channel_binding_epoch: self.timeline_channel_epoch,
+            plugin_topology_revision: self.plugin_topology_revision,
+            plugin_topology_replan_pending: self.plugin_topology_replan_pending,
+            active_plugin_automation_bindings: self.timeline_plugin_automation_bindings.len,
+            candidate_plugin_automation_bindings: self
+                .timeline_activation_plugin_automation_bindings
+                .len,
+            compiled_midi_routes: compiled.map_or(0, |timeline| timeline.midi_port_routes().len()),
             pdc_revision: self.pdc_plan_revision,
             zero_pdc: self.genuine_zero_pdc(),
             paused_safety_services: self.paused_midi_safety.iter().flatten().count()
@@ -501,6 +857,9 @@ impl DspState {
 
     pub(super) fn genuine_begin_pump(&mut self) {
         if let Some(observer) = self.test_genuine_observation.as_mut() {
+            if observer.lifecycle_mutation.is_some() || observer.lifecycle_operand.is_some() {
+                observer.lifecycle_inconsistent_pair = true;
+            }
             observer.pump_ordinal = observer.pump_ordinal.saturating_add(1);
         }
     }
@@ -597,7 +956,26 @@ impl TestAudioCallback {
         self.dsp
             .test_genuine_observation
             .as_ref()
-            .is_some_and(|observer| observer.overflowed)
+            .is_some_and(|observer| {
+                observer.overflowed
+                    || observer.lifecycle_overflowed
+                    || observer.lifecycle_inconsistent_pair
+            })
+    }
+
+    /// Driver-only drain cursor. Stored records and the lifetime count never reset.
+    pub(crate) fn take_genuine_lifecycle_receipts(&mut self) -> Vec<GenuineLifecycleObservation> {
+        let Some(observer) = self.dsp.test_genuine_observation.as_mut() else {
+            return Vec::new();
+        };
+        let records = observer.lifecycle_records
+            [observer.lifecycle_drained..observer.lifecycle_len]
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        observer.lifecycle_drained = observer.lifecycle_len;
+        records
     }
 
     /// Driver-thread allocation only. Draining never clears the sticky overflow flag.
@@ -661,6 +1039,18 @@ impl TestAudioCallback {
                 .as_ref()
                 .map(|observer| observer.run_binding),
             observation_overflowed: self.genuine_observation_overflowed(),
+            lifecycle_observed_count: dsp
+                .test_genuine_observation
+                .as_ref()
+                .map_or(0, |observer| observer.lifecycle_observed_count),
+            lifecycle_overflowed: dsp
+                .test_genuine_observation
+                .as_ref()
+                .is_some_and(|observer| observer.lifecycle_overflowed),
+            lifecycle_inconsistent_pair: dsp
+                .test_genuine_observation
+                .as_ref()
+                .is_some_and(|observer| observer.lifecycle_inconsistent_pair),
             pump_ordinal: dsp
                 .test_genuine_observation
                 .as_ref()
@@ -752,6 +1142,14 @@ impl TestAudioCallback {
                 .map(|identity| (identity.revision, identity.epoch, identity.fingerprint)),
             graph_was_activated: dsp.mixer_graph_was_activated,
             graph_binding_exact: dsp.mixer_graph_binding_is_exact(),
+            channel_binding_revision: dsp.timeline_channel_revision,
+            channel_binding_epoch: dsp.timeline_channel_epoch,
+            plugin_topology_revision: dsp.plugin_topology_revision,
+            plugin_topology_replan_pending: dsp.plugin_topology_replan_pending,
+            active_plugin_automation_bindings: dsp.timeline_plugin_automation_bindings.len,
+            candidate_plugin_automation_bindings: dsp
+                .timeline_activation_plugin_automation_bindings
+                .len,
             graph_fingerprint: dsp.mixer_graph_plan.fingerprint(),
             nodes: (0..MIXER_GRAPH_MAX_NODES)
                 .filter_map(|slot| dsp.mixer_graph_plan.node_at_runtime_slot(slot as u8))

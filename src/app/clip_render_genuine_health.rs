@@ -19,6 +19,13 @@ pub(super) struct HealthStatus {
     non_phase_pending: bool,
 }
 impl HealthStatus {
+    pub(super) fn with_owned_topology_wait(mut self, unresolved: bool) -> Self {
+        if unresolved && self.class != HealthClass::Failed {
+            self.class = HealthClass::Wait;
+            self.non_phase_pending = true;
+        }
+        self
+    }
     pub fn admits_condition(self, condition: bool) -> bool {
         self.class == HealthClass::Clear && condition
     }

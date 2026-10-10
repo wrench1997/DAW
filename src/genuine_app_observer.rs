@@ -22,6 +22,7 @@ use std::{
 
 pub(crate) const MAX_RECORDS: usize = 32_768;
 pub(crate) const MAX_RECORD_BATCH: usize = 64;
+pub(crate) const MAX_TIMELINE_EVENTS: usize = 256;
 // Cumulative copied payload accounting; this is not an allocator/RSS limit.
 pub(crate) const MAX_PRIVATE_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const MAX_STATE_BYTES: usize = 64 * 1024 * 1024;
@@ -118,6 +119,92 @@ pub(crate) enum WorkerJoinOutcome {
     WorkerPanicked,
 }
 
+/// A literal, copy-only mirror of the App confirmation phase. Request IDs,
+/// generations, seek serials and epochs remain separate identity domains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "experimental-fresh-helper")),
+    allow(dead_code)
+)]
+// Every phase operand is retained evidence; the complete consumer is feature-gated.
+pub(crate) enum TimelinePhase {
+    Unavailable,
+    InstallReady,
+    InstallQueued {
+        request_id: u64,
+        generation: u64,
+    },
+    LoopReady,
+    LoopQueued {
+        request_id: u64,
+        generation: u64,
+        frame: u64,
+    },
+    SeekReady,
+    SeekQueued {
+        request_id: u64,
+        generation: u64,
+        seek_serial: u64,
+        epoch: u64,
+        frame: u64,
+    },
+    AwaitingActivation {
+        generation: u64,
+        seek_serial: u64,
+        epoch: u64,
+        frame: u64,
+        activation_request_id: u64,
+    },
+    Active {
+        generation: u64,
+        epoch: u64,
+    },
+    AssetHandoffClearReady {
+        revision: u64,
+    },
+    AssetHandoffClearQueued {
+        request_id: u64,
+        revision: u64,
+    },
+    FaultClearReady {
+        revision: u64,
+    },
+    FaultClearQueued {
+        request_id: u64,
+        revision: u64,
+    },
+    Faulted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(all(target_os = "linux", feature = "experimental-fresh-helper")),
+    allow(dead_code)
+)]
+// These exact identity domains are intentionally copied even in core test profiles.
+pub(crate) struct TimelineAppState {
+    pub phase: TimelinePhase,
+    pub project_session: u64,
+    pub engine_session: Option<u64>,
+    pub sync_session: u64,
+    pub desired_generation: u64,
+    pub observed_fingerprint: u64,
+    pub compiled_generation: Option<u64>,
+    pub compiled_fingerprint: Option<u64>,
+    pub source_generation: Option<u64>,
+    pub source_fingerprint: Option<u64>,
+    pub sync_source_generation: Option<u64>,
+    pub desired_seek_serial: u64,
+    pub desired_seek_frame: u64,
+    pub loop_token: Option<u64>,
+    pub loop_disable_request: Option<u64>,
+    pub retry_count: u64,
+    pub stale_confirmations: u64,
+    pub confirmed_identity: Option<(u64, u64)>,
+    pub retry_required: bool,
+    pub retry_pending: Option<(u64, u64)>,
+}
+
 // Intentionally no Debug on payload-bearing records: opaque/PCM must never
 // accidentally enter the public evidence archive through a formatted snapshot.
 #[allow(dead_code)] // Raw evidence fields are retained even when the fixed oracle reads a subset.
@@ -171,6 +258,11 @@ pub(crate) enum RecordKind {
     },
     AppAudioAssetEvent(AudioAssetEvent),
     AppGeneratorEndpointEvent(GeneratorEndpointEvent),
+    AppTimelineRuntimeEvent {
+        event: crate::timeline_runtime::TimelineRuntimeEvent,
+        before: TimelineAppState,
+        after: TimelineAppState,
+    },
     WorkerJoin {
         worker_id: usize,
         outcome: WorkerJoinOutcome,
@@ -241,6 +333,7 @@ pub(crate) struct ObservationSnapshot {
     pub private_bytes: usize,
     pub source_positive_attempts: usize,
     pub clone_replies: usize,
+    pub timeline_events: usize,
     stage: Stage,
     next_instance: u64,
     phases: [bool; 3],
@@ -259,6 +352,7 @@ impl ObservationSnapshot {
             private_bytes: 0,
             source_positive_attempts: 0,
             clone_replies: 0,
+            timeline_events: 0,
             stage: Stage::Preflight,
             next_instance: 1,
             phases: [false; 3],
@@ -268,6 +362,25 @@ impl ObservationSnapshot {
     }
     fn fail(&mut self, failure: &'static str) {
         self.failure.get_or_insert(failure);
+    }
+    fn timeline_event(
+        &mut self,
+        event: crate::timeline_runtime::TimelineRuntimeEvent,
+        before: TimelineAppState,
+        after: TimelineAppState,
+    ) {
+        // This lifetime count is never reset by copying/draining records.
+        // Overflow is sticky evidence, never input to the App handler.
+        if self.timeline_events >= MAX_TIMELINE_EVENTS {
+            self.fail("observer Timeline event cap exceeded");
+            return;
+        }
+        self.timeline_events += 1;
+        self.push(None, 0, || RecordKind::AppTimelineRuntimeEvent {
+            event,
+            before,
+            after,
+        });
     }
     // Cap BEFORE invoking build, so even an overflowing copy closure is not run.
     fn push(
@@ -854,6 +967,13 @@ pub(crate) fn record_app_asset_event(event: AudioAssetEvent) {
 pub(crate) fn record_app_generator_event(event: GeneratorEndpointEvent) {
     with_active(|state| state.push(None, 0, || RecordKind::AppGeneratorEndpointEvent(event)));
 }
+pub(crate) fn record_app_timeline_event(
+    event: crate::timeline_runtime::TimelineRuntimeEvent,
+    before: TimelineAppState,
+    after: TimelineAppState,
+) {
+    with_active(|state| state.timeline_event(event, before, after));
+}
 pub(crate) fn record_worker_join(worker_id: usize, outcome: WorkerJoinOutcome) {
     with_active(|state| state.push(None, 0, || RecordKind::WorkerJoin { worker_id, outcome }));
 }
@@ -968,6 +1088,78 @@ pub(crate) fn record_runtime_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn timeline_state(phase: TimelinePhase) -> TimelineAppState {
+        TimelineAppState {
+            phase,
+            project_session: 7,
+            engine_session: Some(11),
+            sync_session: 3,
+            desired_generation: 5,
+            observed_fingerprint: 101,
+            compiled_generation: Some(5),
+            compiled_fingerprint: Some(101),
+            source_generation: Some(5),
+            source_fingerprint: Some(101),
+            sync_source_generation: Some(5),
+            desired_seek_serial: 13,
+            desired_seek_frame: 0,
+            loop_token: Some(17),
+            loop_disable_request: None,
+            retry_count: 0,
+            stale_confirmations: 0,
+            confirmed_identity: Some((4, 19)),
+            retry_required: false,
+            retry_pending: None,
+        }
+    }
+    #[test]
+    fn timeline_event_cap_is_lifetime_bounded_and_charged_to_total_records() {
+        use crate::timeline_runtime::TimelineRuntimeEvent;
+        let before = timeline_state(TimelinePhase::InstallQueued {
+            request_id: 23,
+            generation: 5,
+        });
+        let after = timeline_state(TimelinePhase::LoopReady);
+        let event = TimelineRuntimeEvent::Installed {
+            request_id: 23,
+            revision: 5,
+        };
+        let mut state = ObservationSnapshot::new(MAX_RECORDS, 0).unwrap();
+        for _ in 0..MAX_TIMELINE_EVENTS {
+            state.timeline_event(event, before, after);
+        }
+        assert_eq!(state.records.len(), MAX_TIMELINE_EVENTS);
+        assert_eq!(state.timeline_events, MAX_TIMELINE_EVENTS);
+        assert!(state.failure.is_none());
+        let run = ObservationRun {
+            state: Arc::new(Mutex::new(state)),
+        };
+        assert_eq!(run.copy_records_since(0).len(), MAX_RECORD_BATCH);
+        with_run(&run.state, |state| {
+            state.timeline_event(event, before, after)
+        });
+        let state = run.finish();
+        assert_eq!(state.records.len(), MAX_TIMELINE_EVENTS);
+        assert_eq!(state.timeline_events, MAX_TIMELINE_EVENTS);
+        assert_eq!(state.failure, Some("observer Timeline event cap exceeded"));
+        match state.records[0].kind {
+            RecordKind::AppTimelineRuntimeEvent {
+                event: actual,
+                before: actual_before,
+                after: actual_after,
+            } => {
+                assert_eq!(actual, event);
+                assert_eq!(actual_before, before);
+                assert_eq!(actual_after, after);
+            }
+            _ => panic!("expected exact Timeline consumption record"),
+        }
+        let mut total_limited = ObservationSnapshot::new(1, 0).unwrap();
+        total_limited.push(None, 0, || RecordKind::Lifecycle("prior record"));
+        total_limited.timeline_event(event, before, after);
+        assert_eq!(total_limited.records.len(), 1);
+        assert_eq!(total_limited.failure, Some("observer record cap exceeded"));
+    }
     #[test]
     fn inactive_observer_never_enters_record_builder() {
         InstanceObserver::default().with(|_, _| panic!("inactive observer must not record"));

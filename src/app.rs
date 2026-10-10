@@ -14228,7 +14228,15 @@ impl CitrusApp {
             events.push(event);
         }
         for event in events {
+            #[cfg(test)]
+            let observed_before = self.genuine_timeline_app_state();
             self.handle_timeline_runtime_event(event);
+            #[cfg(test)]
+            crate::genuine_app_observer::record_app_timeline_event(
+                event,
+                observed_before,
+                self.genuine_timeline_app_state(),
+            );
         }
 
         if self.plugin_processing_retry_required {
@@ -14246,6 +14254,116 @@ impl CitrusApp {
                 | TimelineAudioSyncPhase::Faulted
         ) {
             ctx.request_repaint_after(Duration::from_millis(8));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn genuine_timeline_app_state(
+        &self,
+    ) -> crate::genuine_app_observer::TimelineAppState {
+        use crate::genuine_app_observer::{TimelineAppState, TimelinePhase};
+        let phase = match self.timeline_audio_sync.phase {
+            TimelineAudioSyncPhase::Unavailable => TimelinePhase::Unavailable,
+            TimelineAudioSyncPhase::InstallReady => TimelinePhase::InstallReady,
+            TimelineAudioSyncPhase::InstallQueued {
+                request_id,
+                generation,
+            } => TimelinePhase::InstallQueued {
+                request_id,
+                generation,
+            },
+            TimelineAudioSyncPhase::LoopReady => TimelinePhase::LoopReady,
+            TimelineAudioSyncPhase::LoopQueued {
+                request_id,
+                generation,
+                frame,
+            } => TimelinePhase::LoopQueued {
+                request_id,
+                generation,
+                frame,
+            },
+            TimelineAudioSyncPhase::SeekReady => TimelinePhase::SeekReady,
+            TimelineAudioSyncPhase::SeekQueued {
+                request_id,
+                generation,
+                seek_serial,
+                epoch,
+                frame,
+            } => TimelinePhase::SeekQueued {
+                request_id,
+                generation,
+                seek_serial,
+                epoch,
+                frame,
+            },
+            TimelineAudioSyncPhase::AwaitingActivation {
+                generation,
+                seek_serial,
+                epoch,
+                frame,
+                activation_request_id,
+            } => TimelinePhase::AwaitingActivation {
+                generation,
+                seek_serial,
+                epoch,
+                frame,
+                activation_request_id,
+            },
+            TimelineAudioSyncPhase::Active { generation, epoch } => {
+                TimelinePhase::Active { generation, epoch }
+            }
+            TimelineAudioSyncPhase::AssetHandoffClearReady { revision } => {
+                TimelinePhase::AssetHandoffClearReady { revision }
+            }
+            TimelineAudioSyncPhase::AssetHandoffClearQueued {
+                request_id,
+                revision,
+            } => TimelinePhase::AssetHandoffClearQueued {
+                request_id,
+                revision,
+            },
+            TimelineAudioSyncPhase::FaultClearReady { revision } => {
+                TimelinePhase::FaultClearReady { revision }
+            }
+            TimelineAudioSyncPhase::FaultClearQueued {
+                request_id,
+                revision,
+            } => TimelinePhase::FaultClearQueued {
+                request_id,
+                revision,
+            },
+            TimelineAudioSyncPhase::Faulted => TimelinePhase::Faulted,
+        };
+        TimelineAppState {
+            phase,
+            project_session: self.project_session,
+            engine_session: self.audio.as_ref().map(AudioEngine::engine_session),
+            sync_session: self.timeline_audio_sync.session,
+            desired_generation: self.timeline_desired_generation,
+            observed_fingerprint: self.timeline_observed_fingerprint,
+            compiled_generation: self.timeline_compiled_generation,
+            compiled_fingerprint: self.timeline_compiled_fingerprint,
+            source_generation: self
+                .timeline_audio_source
+                .as_ref()
+                .map(|source| source.generation),
+            source_fingerprint: self
+                .timeline_audio_source
+                .as_ref()
+                .map(|source| source.fingerprint),
+            sync_source_generation: self.timeline_audio_sync.source_generation,
+            desired_seek_serial: self.timeline_audio_sync.desired_seek.serial,
+            desired_seek_frame: self.timeline_audio_sync.desired_seek.frame,
+            loop_token: self.timeline_audio_sync.loop_token,
+            loop_disable_request: self.timeline_audio_sync.loop_disable_request,
+            retry_count: self.timeline_audio_sync.retry_count,
+            stale_confirmations: self.timeline_audio_sync.stale_confirmations,
+            confirmed_identity: self
+                .audio
+                .as_ref()
+                .and_then(AudioEngine::confirmed_timeline_identity),
+            retry_required: self.plugin_processing_retry_required,
+            retry_pending: self.plugin_processing_retry_pending,
         }
     }
 

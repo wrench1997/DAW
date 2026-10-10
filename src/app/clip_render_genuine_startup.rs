@@ -185,6 +185,13 @@ pub(super) fn callback_evidence(snapshot: &GenuineCallbackSnapshot, mailbox_barr
         "admitted_live_edit_endpoints":snapshot.admitted_live_edit_endpoints,
         "parameter_edit_admission":snapshot.parameter_edit_admission,
         "generation":snapshot.generation,"active_epoch":snapshot.active_epoch,"epoch":snapshot.epoch,
+        "plugin_topology_revision":snapshot.plugin_topology_revision,"plugin_topology_replan_pending":snapshot.plugin_topology_replan_pending,
+        "timeline_execution_failures":snapshot.timeline_execution_failures,"needs_resync":snapshot.timeline_stats.is_some_and(|stats| stats.ownership_needs_resync),"suspended":snapshot.suspended,
+        "graph_was_activated":snapshot.graph_was_activated,"graph_binding_exact":snapshot.graph_binding_exact,
+        "channel_binding_revision":snapshot.channel_binding_revision,"channel_binding_epoch":snapshot.channel_binding_epoch,
+        "active_plugin_automation_bindings":snapshot.active_plugin_automation_bindings,"candidate_plugin_automation_bindings":snapshot.candidate_plugin_automation_bindings,
+        "compiled_midi_routes":snapshot.compiled_midi_routes,"lifecycle_observed_count":snapshot.lifecycle_observed_count,
+        "lifecycle_overflowed":snapshot.lifecycle_overflowed,"lifecycle_inconsistent_pair":snapshot.lifecycle_inconsistent_pair,
         "frame":snapshot.start_frame,"playing":snapshot.playing,
         "endpoint_count":snapshot.endpoints.len(),"endpoint_limit":ENDPOINT_LIMIT,
         "endpoints_truncated":snapshot.endpoints.len()>ENDPOINT_LIMIT,"endpoints":endpoints})
