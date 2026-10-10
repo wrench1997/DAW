@@ -1,9 +1,138 @@
-//! Driver-only evidence around the single actual review entry. No preparation,
-//! admission replay, runtime query, callback work, or replacement App state.
+//! Private bounded review evidence and full-schema Mixer setup helpers. Review
+//! observations never replay admission or query a runtime. Genuine setup drains
+//! remain in the existing driver; the separate device-free command test has no
+//! plugin endpoint and provides no genuine source or App execution evidence.
 use super::*;
 
 const TEXT_BYTES: usize = 1024;
 const SELECTION_IDS: usize = 16;
+const MIXER_BATCH_COMMANDS: usize = 32;
+const MIXER_NODES: usize = 32;
+const MIXER_ROUTES: usize = 128;
+
+pub(super) fn mixer_command_batches(
+    commands: Vec<AudioCommand>,
+) -> impl Iterator<Item = Vec<AudioCommand>> {
+    let mut commands = commands.into_iter();
+    std::iter::from_fn(move || {
+        let batch = commands
+            .by_ref()
+            .take(MIXER_BATCH_COMMANDS)
+            .collect::<Vec<_>>();
+        (!batch.is_empty()).then_some(batch)
+    })
+}
+pub(super) fn admit_mixer_batch(
+    batch: Vec<AudioCommand>,
+    mut admit: impl FnMut(AudioCommand) -> bool,
+) -> Check {
+    require(
+        !batch.is_empty() && batch.len() <= MIXER_BATCH_COMMANDS,
+        "initial mixer command batch is empty or exceeds 32",
+    )?;
+    for (index, command) in batch.into_iter().enumerate() {
+        require(
+            admit(command),
+            &format!("initial mixer command {index} refused; no retry"),
+        )?;
+    }
+    Ok(())
+}
+pub(super) fn require_fixture_graph(
+    nodes: &[crate::mixer_graph::CompiledMixerNode],
+    routes: &[crate::mixer_graph::CompiledMixerRoute],
+) -> Check {
+    require(
+        nodes.len() == MIXER_NODES
+            && (0..MIXER_NODES).all(|slot| {
+                nodes
+                    .iter()
+                    .filter(|node| {
+                        node.id == crate::model::mixer_track_id_for_runtime_slot(slot as u8)
+                            && usize::from(node.runtime_slot) == slot
+                            && node.project_index == slot
+                    })
+                    .count()
+                    == 1
+            }),
+        "actual full32 unique stable Mixer node/slot mapping differs",
+    )?;
+    require(
+        routes.len() == 1,
+        "actual sole audible Mixer route count differs",
+    )?;
+    let route = &routes[0];
+    require(
+        route.id == 1
+            && route.runtime_slot == 0
+            && route.source_id == 1
+            && route.destination_id == MASTER_MIXER_TRACK_ID
+            && route.source_runtime_slot == 1
+            && route.destination_runtime_slot == 0
+            && route.source_dense == 1
+            && route.destination_dense == 0
+            && route.tap == MixerRouteTap::PostFader
+            && route.gain.to_bits() == 1.0_f32.to_bits(),
+        "actual unity source-to-master route differs",
+    )
+}
+pub(super) fn require_mixer_controls(
+    project: &Project,
+    snapshot: &GenuineCallbackSnapshot,
+) -> Check {
+    require(
+        project.mixer_tracks.len() == MIXER_NODES,
+        "full32 Mixer Project controls absent",
+    )?;
+    for (slot, track) in project.mixer_tracks.iter().enumerate() {
+        require(
+            usize::from(track.runtime_slot) == slot
+                && track.id == crate::model::mixer_track_id_for_runtime_slot(slot as u8)
+                && snapshot.track_gains[slot].to_bits() == track.volume.to_bits()
+                && snapshot.track_pans[slot].to_bits() == track.pan.to_bits()
+                && snapshot.track_muted[slot] == track.muted
+                && snapshot.track_solo[slot] == track.solo,
+            &format!("actual Mixer slot {slot} gain/pan/mute/solo differs from Project"),
+        )?;
+    }
+    require(
+        snapshot.master_gain.to_bits() == project.mixer_tracks[0].volume.to_bits()
+            && snapshot.master_pan.to_bits() == project.mixer_tracks[0].pan.to_bits(),
+        "actual Master gain/pan differs from Project",
+    )
+}
+pub(super) fn mixer_evidence(snapshot: &GenuineCallbackSnapshot) -> Value {
+    let nodes = snapshot.nodes.iter().take(MIXER_NODES).map(|node| {
+        json!({"id":node.id,"runtime_slot":node.runtime_slot,"project_index":node.project_index})
+    }).collect::<Vec<_>>();
+    let routes = snapshot
+        .routes
+        .iter()
+        .take(MIXER_ROUTES)
+        .map(|route| {
+            json!({"id":route.id,"runtime_slot":route.runtime_slot,
+            "source_id":route.source_id,"destination_id":route.destination_id,
+            "source_dense":route.source_dense,"destination_dense":route.destination_dense,
+            "source_runtime_slot":route.source_runtime_slot,
+            "destination_runtime_slot":route.destination_runtime_slot,
+            "tap":format!("{:?}",route.tap),"gain_bits":route.gain.to_bits()})
+        })
+        .collect::<Vec<_>>();
+    let controls = (0..MIXER_NODES)
+        .map(|slot| {
+            json!({"runtime_slot":slot,"gain_bits":snapshot.track_gains[slot].to_bits(),
+            "pan_bits":snapshot.track_pans[slot].to_bits(),
+            "muted":snapshot.track_muted[slot],"solo":snapshot.track_solo[slot]})
+        })
+        .collect::<Vec<_>>();
+    json!({"node_count":snapshot.nodes.len(),"nodes":nodes,
+        "node_overflow":snapshot.nodes.len().saturating_sub(MIXER_NODES),
+        "route_count":snapshot.routes.len(),"routes":routes,
+        "route_overflow":snapshot.routes.len().saturating_sub(MIXER_ROUTES),
+        "controls":controls,"master_gain_bits":snapshot.master_gain.to_bits(),
+        "master_pan_bits":snapshot.master_pan.to_bits(),
+        "pending_audio_commands":snapshot.pending_audio_commands})
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct TextObservation {
@@ -164,6 +293,158 @@ pub(super) fn observe(app: &CitrusApp, before: Option<&ReviewObservation>) -> Re
 mod tests {
     use super::*;
     use crate::timeline::{NoteSourceDescriptor, TimelineEvent, TimelineEventKind};
+
+    fn command_key(command: &AudioCommand) -> (u8, usize, u32) {
+        match command {
+            AudioCommand::SetTrackGain { track, gain } => (0, *track, gain.to_bits()),
+            AudioCommand::SetTrackPan { track, pan } => (1, *track, pan.to_bits()),
+            AudioCommand::SetTrackMuted { track, muted } => (2, *track, u32::from(*muted)),
+            AudioCommand::SetTrackSolo { track, solo } => (3, *track, u32::from(*solo)),
+            AudioCommand::SetMaster(gain) => (4, 0, gain.to_bits()),
+            AudioCommand::SetMasterPan(pan) => (5, 0, pan.to_bits()),
+            _ => panic!("unexpected non-Mixer production command"),
+        }
+    }
+
+    #[test]
+    fn full_mixer_commands_use_five_checked_batches_without_retry() -> Check {
+        let project = fixture_project();
+        let commands = mixer_control_commands(&project);
+        assert_eq!(commands.len(), 130);
+        let mut expected = Vec::new();
+        for (slot, track) in project.mixer_tracks.iter().enumerate() {
+            expected.extend([
+                (0, slot, track.volume.to_bits()),
+                (1, slot, track.pan.to_bits()),
+                (2, slot, u32::from(track.muted)),
+                (3, slot, u32::from(track.solo)),
+            ]);
+        }
+        expected.extend([(4, 0, 1.0_f32.to_bits()), (5, 0, 0.0_f32.to_bits())]);
+        let mut admitted = Vec::new();
+        let mut sizes = Vec::new();
+        for batch in mixer_command_batches(commands) {
+            sizes.push(batch.len());
+            admit_mixer_batch(batch, |command| {
+                admitted.push(command_key(&command));
+                true
+            })?;
+        }
+        assert_eq!(sizes, [32, 32, 32, 32, 2]);
+        assert_eq!(admitted, expected);
+        let mut attempts = 0;
+        let batch = mixer_command_batches(mixer_control_commands(&project))
+            .next()
+            .unwrap();
+        let failed = admit_mixer_batch(batch, |_| {
+            attempts += 1;
+            attempts != 3
+        });
+        assert_eq!(
+            attempts, 3,
+            "a refusal must not retry or submit later commands"
+        );
+        assert_eq!(
+            failed.unwrap_err(),
+            "initial mixer command 2 refused; no retry"
+        );
+        assert!(admit_mixer_batch(Vec::new(), |_| panic!("empty batch admission")).is_err());
+        assert!(
+            admit_mixer_batch(mixer_control_commands(&project), |_| panic!(
+                "oversized batch admission"
+            ))
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn full_mixer_graph_keeps_32_unique_nodes_and_one_audible_route() -> Check {
+        let project = fixture_project();
+        project.validate_mixer_graph().map_err(error)?;
+        let graph = crate::mixer_graph::compile_mixer_graph(&project).map_err(error)?;
+        require_fixture_graph(graph.nodes(), graph.routes())?;
+        assert!(require_fixture_graph(&graph.nodes()[..31], graph.routes()).is_err());
+        let mut nodes = graph.nodes().to_vec();
+        nodes[31] = nodes[30];
+        assert!(require_fixture_graph(&nodes, graph.routes()).is_err());
+        nodes = graph.nodes().to_vec();
+        nodes.push(nodes[0]);
+        assert!(require_fixture_graph(&nodes, graph.routes()).is_err());
+        let mut routes = graph.routes().to_vec();
+        routes.push(routes[0]);
+        assert!(require_fixture_graph(graph.nodes(), &routes).is_err());
+        routes.pop();
+        routes[0].gain = 0.5;
+        assert!(require_fixture_graph(graph.nodes(), &routes).is_err());
+        routes[0] = graph.routes()[0];
+        routes[0].source_id = 2;
+        assert!(require_fixture_graph(graph.nodes(), &routes).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn full_mixer_real_callback_drains_commands_and_reads_all_controls_without_plugins() -> Check {
+        // Device-free command-path evidence only, not a genuine App or source run.
+        let project = fixture_project();
+        let (mut engine, mut callback) = AudioEngine::test_engine_with_callback();
+        callback
+            .enable_genuine_observation([41; 32])
+            .map_err(error)?;
+        assert!(engine.command(AudioCommand::SetTrackGain {
+            track: 1,
+            gain: 0.5
+        }));
+        let mut pumps = 0;
+        let mut admitted = 0;
+        for batch in mixer_command_batches(mixer_control_commands(&project)) {
+            if callback.genuine_snapshot().pending_audio_commands != 0 {
+                callback.pump(&engine, 128);
+                pumps += 1;
+                assert_eq!(callback.genuine_snapshot().pending_audio_commands, 0);
+            }
+            admitted += batch.len();
+            admit_mixer_batch(batch, |command| engine.command(command))?;
+            assert!(callback.genuine_snapshot().pending_audio_commands <= MIXER_BATCH_COMMANDS);
+        }
+        assert_eq!(callback.genuine_snapshot().pending_audio_commands, 2);
+        callback.pump(&engine, 128);
+        pumps += 1;
+        let snapshot = callback.genuine_snapshot();
+        assert_eq!(
+            pumps, 6,
+            "one pre-existing command drain plus five production batches"
+        );
+        assert_eq!(admitted, 130);
+        assert_eq!(engine.snapshot().command_queue_full, 0);
+        assert_eq!(snapshot.pending_audio_commands, 0);
+        assert!(snapshot.endpoints.is_empty() && snapshot.native_voices.is_empty());
+        assert!(!snapshot.playing);
+        let segments = callback.take_genuine_segments();
+        assert_eq!(segments.len(), pumps);
+        assert!(segments.iter().all(|segment| !segment.playing
+            && segment.frames == 128
+            && segment.disposition == GenuineSegmentDisposition::Rendered
+            && segment.before.fault.is_none()
+            && segment.after.fault.is_none()));
+        require_mixer_controls(&project, &snapshot)?;
+        let evidence = mixer_evidence(&snapshot);
+        assert_eq!(evidence["controls"].as_array().unwrap().len(), 32);
+        let mutations: [fn(&mut GenuineCallbackSnapshot); 6] = [
+            |s| s.track_gains[31] = 0.0,
+            |s| s.track_pans[31] = 0.5,
+            |s| s.track_muted[31] = true,
+            |s| s.track_solo[31] = true,
+            |s| s.master_gain = 0.0,
+            |s| s.master_pan = 0.5,
+        ];
+        for mutate in mutations {
+            let mut changed = snapshot.clone();
+            mutate(&mut changed);
+            assert!(require_mixer_controls(&project, &changed).is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn review_text_observation_is_utf8_bounded_with_exact_length() {

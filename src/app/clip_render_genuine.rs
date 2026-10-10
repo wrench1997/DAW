@@ -134,7 +134,6 @@ fn fixture_project() -> Project {
     p.channels.truncate(1);
     p.patterns.truncate(1);
     p.clips.truncate(1);
-    p.mixer_tracks.truncate(2);
     p.plugin_instances.clear();
     p.mixer_insert_slots.clear();
     p.automation_lanes.clear();
@@ -182,9 +181,9 @@ fn fixture_project() -> Project {
     clip.audio_asset_id = None;
     clip.automation_id = None;
     clip.pattern_id = p.patterns[0].id;
-    for (i, track) in p.mixer_tracks.iter_mut().enumerate() {
-        track.id = if i == 0 { MASTER_MIXER_TRACK_ID } else { 1 };
-        track.runtime_slot = i as u8;
+    // Keep the schema's 32 unique stable IDs/runtime slots. Only these two
+    // tracks contribute to the sole route; other default tracks are disconnected.
+    for track in p.mixer_tracks.iter_mut().take(2) {
         track.volume = 1.0;
         track.pan = 0.0;
         track.muted = false;
@@ -922,11 +921,11 @@ impl GenuineFixture {
             "initial actual project-session command refused",
         )?;
         app.rebuild_tempo_map();
-        app.sync_mixer_to_audio();
         app.request_immediate_timeline_compile();
+        self.setup_mixer_controls()?;
         // Picker opt-in is the existing production admission. No manually built
         // RunningGeneratorChain, mock source or injected readiness is involved.
-        app.plugin_picker_fresh_bounce = true;
+        self.app_mut().plugin_picker_fresh_bounce = true;
         self.permit("initial_source")?;
         require(
             self.app_mut().load_plugin_into_target(
@@ -964,6 +963,7 @@ impl GenuineFixture {
                 .ok_or("initial source owner missing before runtime event poll")?,
         );
         self.wait_initial_source_ready()?;
+        self.require_mixer_readback("initial_source_ready")?;
         let s = self.snapshot();
         require(
             s.endpoints.len() == 1
@@ -1035,6 +1035,129 @@ impl GenuineFixture {
             json!({"phase":"initial_source","evidence":"slot_ready_and_installed"}),
         )?;
         self.passed()
+    }
+    fn require_initial_mixer_source_absent(&self) -> Check {
+        let app = self.app();
+        require(
+            app.project.plugin_instances.is_empty()
+                && app.running_generator_chains.is_empty()
+                && app.pending_generator_chains.is_empty()
+                && app.pending_generator_removals.is_empty()
+                && app.pending_generator_routes.is_empty()
+                && app.deferred_generator_rebuilds.is_empty()
+                && app.running_insert_chains.is_empty()
+                && app.pending_insert_chains.is_empty()
+                && app.pending_insert_removals.is_empty()
+                && app.deferred_insert_rebuilds.is_empty()
+                && app.pending_clip_restorations.is_empty()
+                && app.retired_clip_restorations.is_empty()
+                && self.snapshot().endpoints.is_empty()
+                && self.observer.with_snapshot(|s| {
+                    s.source_positive_attempts == 0
+                        && s.clone_replies == 0
+                        && s.records.iter().all(|r| {
+                            r.instance.is_none()
+                                && !matches!(
+                                    &r.kind,
+                                    RecordKind::Call { .. }
+                                        | RecordKind::Worker { .. }
+                                        | RecordKind::StateLoad { .. }
+                                        | RecordKind::OrdinaryState { .. }
+                                        | RecordKind::Lifecycle("instance construction observed")
+                                )
+                        })
+                }),
+            "initial mixer setup observed a source owner/endpoint/plugin operation",
+        )
+    }
+    fn drain_initial_mixer_commands(&mut self, before_batch: usize) -> Check {
+        self.require_initial_mixer_source_absent()?;
+        let pending = self.snapshot().pending_audio_commands;
+        self.journal.emit(
+            "initial_mixer_drain",
+            json!({"before_batch":before_batch,
+            "pending_audio_commands":pending,"controls_used":self.budget.controls[0],
+            "command_queue_full":self.app().audio.as_ref().unwrap().snapshot().command_queue_full}),
+        )?;
+        while self.snapshot().pending_audio_commands != 0 {
+            // All callbacks use the existing pending-work decision, pacer and
+            // nontransferable control0/total/outer budgets. No hidden warmup.
+            self.control_tick(0, "initial full-schema mixer command drain")?;
+            self.require_initial_mixer_source_absent()?;
+        }
+        require(
+            self.app()
+                .audio
+                .as_ref()
+                .unwrap()
+                .snapshot()
+                .command_queue_full
+                == 0,
+            "initial mixer setup audio command queue overflowed",
+        )
+    }
+    fn setup_mixer_controls(&mut self) -> Check {
+        self.require_initial_mixer_source_absent()?;
+        self.record_mixer_evidence("initial_setup_before")?;
+        require(
+            self.app()
+                .audio
+                .as_ref()
+                .unwrap()
+                .snapshot()
+                .command_queue_full
+                == 0,
+            "initial mixer setup began with a command queue overflow",
+        )?;
+        let commands = mixer_control_commands(&self.app().project);
+        require(
+            commands.len() == 130,
+            "initial full-schema mixer command count differs",
+        )?;
+        let mut admitted = 0;
+        let mut batches = 0;
+        for (index, batch) in review::mixer_command_batches(commands).enumerate() {
+            self.drain_initial_mixer_commands(index)?;
+            let count = batch.len();
+            let result = review::admit_mixer_batch(batch, |command| {
+                self.app_mut().audio.as_mut().unwrap().command(command)
+            });
+            self.journal.emit("initial_mixer_batch", json!({"batch":index,
+                "command_count":count,"admitted":result.is_ok(),"error":result.as_ref().err(),
+                "pending_audio_commands":self.snapshot().pending_audio_commands,
+                "command_queue_full":self.app().audio.as_ref().unwrap().snapshot().command_queue_full}))?;
+            result?;
+            admitted += count;
+            batches += 1;
+        }
+        self.drain_initial_mixer_commands(batches)?;
+        let snapshot = self.snapshot();
+        self.record_mixer_snapshot("initial_setup_after", &snapshot)?;
+        require(
+            admitted == 130 && batches == 5,
+            "initial mixer batch extent differs",
+        )?;
+        review::require_mixer_controls(&self.app().project, &snapshot)
+    }
+    fn record_mixer_evidence(&mut self, boundary: &str) -> Check {
+        let snapshot = self.snapshot();
+        self.record_mixer_snapshot(boundary, &snapshot)
+    }
+    fn record_mixer_snapshot(
+        &mut self,
+        boundary: &str,
+        snapshot: &GenuineCallbackSnapshot,
+    ) -> Check {
+        self.journal.emit("mixer_readback", json!({"boundary":boundary,
+            "command_queue_full":self.app().audio.as_ref().unwrap().snapshot().command_queue_full,
+            "dispatch_claim":"initial batches require individual admission; later repeated App dispatch admission is not inferred from readback",
+            "actual":review::mixer_evidence(snapshot)}))
+    }
+    fn require_mixer_readback(&mut self, boundary: &str) -> Check {
+        let snapshot = self.snapshot();
+        self.record_mixer_snapshot(boundary, &snapshot)?;
+        review::require_fixture_graph(&snapshot.nodes, &snapshot.routes)?;
+        review::require_mixer_controls(&self.app().project, &snapshot)
     }
     fn wait_initial_source_ready(&mut self) -> Check {
         let deadline = (Instant::now() + Duration::from_secs(30)).min(self.outer);
@@ -1345,25 +1468,8 @@ impl GenuineFixture {
                 && s.compiled_audio_clips == 1,
             "audio-only exact endpoint/PDC/compiled source shape mismatch",
         )?;
-        require(
-            s.nodes.len() == 2
-                && s.nodes
-                    .iter()
-                    .any(|n| n.id == MASTER_MIXER_TRACK_ID && n.runtime_slot == 0)
-                && s.nodes.iter().any(|n| n.id == 1 && n.runtime_slot == 1)
-                && s.routes.len() == 1,
-            "actual two-node route shape mismatch",
-        )?;
-        let route = &s.routes[0];
-        require(
-            route.source_id == 1
-                && route.destination_id == MASTER_MIXER_TRACK_ID
-                && route.source_runtime_slot == 1
-                && route.destination_runtime_slot == 0
-                && route.tap == MixerRouteTap::PostFader
-                && route.gain.to_bits() == 1.0_f32.to_bits(),
-            "actual unity source-to-master route mismatch",
-        )?;
+        review::require_fixture_graph(&s.nodes, &s.routes)?;
+        review::require_mixer_controls(&app.project, &s)?;
         require(
             s.master_gain.to_bits() == 1.0_f32.to_bits()
                 && s.master_pan == 0.0
@@ -1400,6 +1506,7 @@ impl GenuineFixture {
             self.healthy()?.class == HealthClass::Clear,
             "Play requested while App health remains pending",
         )?;
+        self.require_mixer_readback("before_fixed_playback")?;
         let before = self
             .exact_paused()
             .ok_or("Play lacks confirmed frame-zero paused identity")?;
@@ -1692,7 +1799,8 @@ impl GenuineFixture {
         require(
             self.exact_paused() == Some((pair.0.unwrap(), pair.1)),
             "actual exact Stop acknowledgment missing",
-        )
+        )?;
+        self.require_mixer_readback("after_fixed_stop")
     }
     fn audition_source_and_base(&mut self) -> Check {
         self.stage(2, Stage::SourceAudibility)?;
@@ -1793,6 +1901,7 @@ impl GenuineFixture {
         self.hooks()?;
         self.permit("success_clone")?;
         self.until(2,45,"two actual captures through strict render, verifier, removal, join, media and Timeline",|f|f.app().clip_render_job.as_ref().is_some_and(|j|j.phase==ClipRenderPhase::Complete))?;
+        self.require_mixer_readback("conversion_complete")?;
         require(
             self.observer.with_snapshot(|s| {
                 s.records.iter().any(|r| {
@@ -2239,8 +2348,10 @@ impl GenuineFixture {
         self.stage(6, Stage::Undo)?;
         self.hooks()?;
         let previous = self.exact_paused().ok_or("Undo missing exact stop")?;
+        self.record_mixer_evidence("undo_before_App_call")?;
         self.permit("undo_source")?;
         self.app_mut().undo();
+        self.record_mixer_evidence("undo_after_App_call")?;
         require(
             self.app().clip_restoration_playback_pending
                 && self.app().running_generator_chains.is_empty(),
@@ -2262,6 +2373,7 @@ impl GenuineFixture {
         self.until(4, 5, "Undo fixed source settlement", |f| {
             f.snapshot().paused_work_quiescent(pair.0, pair.1)
         })?;
+        self.require_mixer_readback("undo_ready")?;
         require(
             clip_render::project_matches_snapshot(
                 &self.app().project,
@@ -2413,7 +2525,9 @@ impl GenuineFixture {
                     .count(),
             )
         });
+        self.record_mixer_evidence("redo_before_App_call")?;
         self.app_mut().redo();
+        self.record_mixer_evidence("redo_after_App_call")?;
         self.until(
             5,
             20,
@@ -2428,6 +2542,7 @@ impl GenuineFixture {
                     && f.app().retired_clip_restorations.is_empty()
             },
         )?;
+        self.require_mixer_readback("redo_ready")?;
         require(
             clip_render::project_matches_snapshot(
                 &self.app().project,
