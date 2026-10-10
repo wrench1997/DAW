@@ -591,29 +591,31 @@ fn run_owned<B: RenderBackend>(
     progress.set(RenderStatus::Disposing);
     loop {
         let observation = catch_unwind(AssertUnwindSafe(|| backend.dispose(cleanup_deadline)));
-        match observation {
+        let terminated = match observation {
             Ok(observation) => {
                 if let Some(error) = observation.error {
                     record_cleanup_error(&mut cleanup_errors, error);
                 }
-                if observation.terminated {
-                    break;
-                }
+                observation.terminated
             }
             Err(_) => {
                 let error = "Instrument disposal panicked; termination is unproven".to_owned();
                 record_cleanup_error(&mut cleanup_errors, error);
+                false
             }
-        }
+        };
+        // Check after every returned poll, including its terminal reply.
         let grace_elapsed = progress.grace_elapsed(cleanup_deadline);
         if grace_elapsed {
             record_cleanup_error(
                 &mut cleanup_errors,
-                "Cleanup grace elapsed; termination remains unproven".into(),
+                "Cleanup grace elapsed before termination was acknowledged".into(),
             );
-            progress.set(RenderStatus::CleanupPending {
-                diagnostics: cleanup_errors.clone(),
-            });
+            if !terminated {
+                progress.set(RenderStatus::CleanupPending {
+                    diagnostics: cleanup_errors.clone(),
+                });
+            }
         }
         if !cleanup_errors.is_empty() && rendered.is_ok() {
             // Publication is now forbidden. Free the bounded completed audio
@@ -622,6 +624,9 @@ fn run_owned<B: RenderBackend>(
                 FailureKind::Backend,
                 "Instrument cleanup failed",
             ));
+        }
+        if terminated {
+            break;
         }
         // Keep the same backend and admission, with visible pending status and
         // non-busy polling after grace. This is not a completed cancellation,

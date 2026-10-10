@@ -347,3 +347,10 @@ cleanup trouble. The next source correction remains **unvalidated**:
   OS call; strict bounded exchange/reap semantics are still an adapter gate.
 - Fake preparation/disposal are opaque fixture calls. These tests do not prove
   Offline/state/base application or reset128/reset256 native sequencing.
+
+A second source review at unexecuted `4729274` found that the terminal disposal
+reply bypassed the post-poll grace check. The subsequent correction checks expiry
+after every poll, including a terminal one. Expiry stays a publication-blocking
+diagnostic; CleanupPending is shown only while termination remains unproven.
+A deterministic first-terminal-poll fixture and nonexpired control cover this
+boundary. Both unexecuted source checkpoints remain in Git/archive history.

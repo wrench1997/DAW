@@ -169,6 +169,7 @@ struct Fake {
     cleanup_gate: Arc<AtomicBool>,
     disposed: Arc<AtomicBool>,
     cleanup_panicked: bool,
+    terminal_grace: Arc<Mutex<Option<Arc<JobProgress>>>>,
 }
 impl Fake {
     fn new(meta: BouncePluginMetadata, control: RenderControl, fault: Fault, end: u64) -> Self {
@@ -183,6 +184,7 @@ impl Fake {
             cleanup_gate: Arc::new(AtomicBool::new(true)),
             disposed: Arc::new(AtomicBool::new(false)),
             cleanup_panicked: false,
+            terminal_grace: Arc::new(Mutex::new(None)),
         }
     }
     fn log(&self, s: impl Into<String>) {
@@ -299,6 +301,9 @@ impl RenderBackend for Fake {
                 error: matches!(self.fault, Fault::CleanupFailure)
                     .then(|| "injected unproven disposal".into()),
             };
+        }
+        if let Some(progress) = self.terminal_grace.lock().unwrap().as_ref() {
+            progress.expire_cleanup_grace.store(true, Ordering::Release);
         }
         self.log("Disposed");
         self.disposed.store(true, Ordering::Release);
@@ -1120,6 +1125,49 @@ fn bounded_cleanup_grace_becomes_visible_pending_without_ack_or_owner_release() 
         assert_eq!(next.status(), RenderStatus::Disposing);
         next_gate.store(true, Ordering::Release);
         assert!(matches!(outcome(&next), RenderOutcome::Complete(_)));
+        assert!(!admission.is_busy());
+    }
+}
+
+#[test]
+fn first_terminal_disposal_poll_cannot_skip_post_poll_grace_expiry() {
+    for expire in [false, true] {
+        let c = capture(128, 0, 0, 2);
+        let ctl = control();
+        let fake = Fake::new(c.metadata().clone(), ctl.clone(), Fault::None, 128);
+        fake.cleanup_gate.store(false, Ordering::Release);
+        let gate = Arc::clone(&fake.cleanup_gate);
+        let terminal_grace = Arc::clone(&fake.terminal_grace);
+        let ledger = Arc::clone(&fake.ledger);
+        let files = Files::new();
+        let admission = RenderAdmission::default();
+        let receipt = admission
+            .start(c, files.output(), true, ctl, move || fake)
+            .unwrap();
+        wait_until(|| ledger.lock().unwrap().iter().any(|s| s == "DisposePending"));
+        assert_eq!(receipt.status(), RenderStatus::Disposing);
+        if expire {
+            // Only the first terminal poll trips the synthetic clock boundary.
+            // Prior nonterminal polls remain within the grace.
+            *terminal_grace.lock().unwrap() = Some(Arc::clone(&receipt.progress));
+        }
+        gate.store(true, Ordering::Release);
+        let result = outcome(&receipt);
+        if expire {
+            let RenderOutcome::Failed(error) = result else {
+                panic!("late terminal poll published")
+            };
+            assert_eq!(error.kind, FailureKind::Backend);
+            assert!(error.cleanup.iter().any(|s| s.contains("grace elapsed")));
+            assert!(!files.output().exists());
+        } else {
+            assert!(matches!(result, RenderOutcome::Complete(_)));
+            assert!(files.output().exists());
+        }
+        let log = ledger.lock().unwrap();
+        assert_eq!(log.iter().filter(|s| s.as_str() == "Disposed").count(), 1);
+        assert_eq!(log.last().unwrap(), "Dropped");
+        assert_eq!(receipt.status(), RenderStatus::Terminated);
         assert!(!admission.is_busy());
     }
 }
