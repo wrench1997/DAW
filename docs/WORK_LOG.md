@@ -1636,3 +1636,27 @@ Rust is unchanged. The failed Clippy log remains evidence. After durable
 preservation and review, rerun the affected success fixture and Clippy, then
 the previously unexecuted default/core, compiler-positive and packaging gates.
 No genuine plugin or UI execution is included.
+
+### Stop B bounded source/mock results
+
+Source `b84466ee` passed 230 distinct selected all-feature App tests, including
+all 13 actual strict-adapter mock fixtures and their 104 stage-fault scenarios,
+plus helper25/protocol13. A QA zero-match capture selector was preserved, then
+only its unexecuted suites continued with the actual capture test path. Clippy's
+single new test-expression lint was corrected at `8c657fc9`; production Rust
+remained byte-identical. The affected success fixture, all-feature/default/core
+Clippy and current compilation passed. Feature-off/core renderer/export coverage
+passed92; two current client positives, Python239/no skips, formatting and source
+package556 passed. Forced current-worktree rlib/helper provenance is copied;
+default helper remains `78658763…`. No full App/core suite is claimed.
+
+Vendor575/docs26/direct Clippy and prior client68 unique outcomes are explicitly
+reused under their exact historical standalone dependency/feature profile, with
+all App/full-input differences disclosed. The original67/68 plus targeted3/3
+compiler evidence remains unchanged. Ten QA-only nested-bin source snapshots
+omitted from an earlier evidence subset were recovered and matched to the old
+full-source archive and sealed hashes; source was never lost. The initial QA
+binding-schema failure is retained. Current tests and historical reuse remain
+separately labeled. Target is released; result docs/hash review and durable tested
+archive close this stop. No real plugin, native UI, selected-occurrence integration
+or user-facing render activation occurred.

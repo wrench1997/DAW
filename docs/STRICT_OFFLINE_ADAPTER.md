@@ -120,3 +120,55 @@ Stop A's deterministic partial-write, kill/wait-error, spawn-setup ownership and
 quarantine syscall fixtures remain separately attributed. This adapter does not
 add public FD/process authority merely to reproduce those injections. The final
 receipt will identify executed cases and unexercised OS/platform paths explicitly.
+
+## Executed Stop B source/mock checkpoint
+
+The unvalidated source above is now exercised within its dormant Linux/mock
+boundary. The first source-bound runs on `b84466ee` passed 230 distinct selected
+all-feature App tests: 13 actual-adapter mock-child tests (including the 104-case
+preparation/processing fault matrix), 24 typed renderer tests, 24 export-control
+and registration tests, 60 ordinary-export tests, three option tests, 15 capture
+runtime tests, three MIDI-equivalence tests, 11 offline factory tests and 77
+runtime tests. Helper 25 and protocol 13 also passed. Those are focused selections,
+not a complete App-suite result.
+
+The first QA driver deliberately rejected a zero-match capture selector; its
+continuation selected the actual `instrument_bounce_tests::` suite and ran only
+unexecuted gates. All-feature Clippy then rejected one new test's constant
+`chunks_exact(2)` expression. Both failures remain in the evidence. The sole Rust
+correction at `8c657fc9` uses `as_chunks::<2>()` and explicitly rejects a remainder;
+production Rust is identical. That exact success fixture was freshly rerun, and
+current all-feature/default/core Clippy, all-target compilation and formatting
+passed. A separate current feature-off/core build passed 92 selected tests:
+renderer 22, export control seven, ordinary export 60 and options three.
+
+The same corrected revision passed two fresh external client positive controls,
+239 Python tests (zero skips), and the 556-input source/package closure. Forced
+current-worktree vendor compilation, exact rlib linkage and copied test/helper
+identities are retained. The default helper SHA-256 remains
+`7865876366d2eb608fc2b685d79256b71ca4d9d27683a3e33ec7afa2469b3f69`,
+identical to Stop A and the combined baseline.
+
+Unchanged vendor 575 tests, 26 docs, direct vendor Clippy and the prior 68-unique
+client compiler outcomes are qualified historical reuse, not new executions.
+The receipt retains the vendor harness's standalone 190-package lock/profile,
+all 64 vendor files, 62 relevant dependency/fixture inputs and 68 fixture byte
+sequences. It explicitly lists changed App sources and eight differences in the
+old full compiler input map. The original compiler report remains failed 67/68;
+the preserved targeted 3/3 produces the already-reviewed 65+3 unique union.
+Fresh current App linkage and client positives are recorded separately.
+
+The evidence verifier recovered ten nested `bin/*.rs` QA snapshots omitted by an
+older evidence-copy filter. Every recovered copy matches the sealed hash and the
+original archive's full-source member; the source itself was already preserved.
+The new copier retains source directories named `bin` and excludes only actual
+compiled-artifact directories. Its initial report-schema mismatch is retained
+alongside the corrected successful binding; no test was rerun for that QA fix.
+
+This closes only the source/mock adapter gate. The actual child is a deterministic
+mock helper, not a VST3 plugin. Injected low-level spawn/partial-write/kill/wait
+faults remain Stop A evidence; adapter-level ownership, cancellation, cleanup and
+publication paths are fresh mock evidence. Genuine plugin sound/state fidelity,
+selected-occurrence/media/history integration and any UI/device activation still
+require separately reviewed qualification. Cooperative deadline, single global
+strict-child reservation and checked-reap limits remain in force.
