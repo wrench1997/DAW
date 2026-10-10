@@ -8961,6 +8961,8 @@ impl CitrusApp {
             let Some(event) = event else {
                 break;
             };
+            #[cfg(test)]
+            crate::genuine_app_observer::record_app_generator_event(event);
             if let GeneratorEndpointEvent::Removed {
                 channel_id,
                 endpoint_id,
@@ -10279,6 +10281,15 @@ impl CitrusApp {
             let event_is_current =
                 plugin_runtime_session_is_current(event_session, project_session);
             let event_instance_id = runtime_event_instance_id(&instance_ids, &event);
+            #[cfg(test)]
+            if let Some(instance_id) = event_instance_id {
+                crate::genuine_app_observer::record_runtime_event(
+                    endpoint_id,
+                    event_session,
+                    instance_id,
+                    &event,
+                );
+            }
             let guard_project_runtime = self.audio_restart_state.guards_project_runtime()
                 || self.clip_operation_fence_active();
             let restoring_audio_session = self.audio_restart_state.is_restoring();
@@ -19578,6 +19589,8 @@ impl CitrusApp {
             let Some(event) = event else {
                 break;
             };
+            #[cfg(test)]
+            crate::genuine_app_observer::record_app_asset_event(event);
             if self.consume_clip_render_asset_event(event) {
                 continue;
             }

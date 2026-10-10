@@ -1221,67 +1221,78 @@ impl Vst3Backend {
         &self,
         fence: Option<&BounceCaptureFence>,
     ) -> Result<BouncePluginMetadata, BounceCaptureError> {
-        let layout = capture_call(fence, || {
-            self.plugin
-                .checked_audio_bus_layout()
-                .map_err(classify_metadata_error)
-        })?;
-        let events = capture_call(fence, || {
-            self.plugin
-                .event_bus_layout()
-                .map_err(classify_metadata_error)
-        })?;
-        let info = self.plugin.info();
-        let latency_samples = capture_call(fence, || {
-            let value = self
-                .plugin
-                .try_latency_samples()
-                .map_err(classify_metadata_error)?;
-            // A returned drift is an observed backend fault, even if cancellation
-            // arrives before capture_call's subsequent successful-call checkpoint.
-            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
-            self.validate_fresh_latency(value)
-                .map_err(BounceCaptureError::BackendFailed)?;
-            Ok(value)
-        })?;
-        let tail_samples = capture_call(fence, || {
-            let value = self
-                .plugin
-                .try_tail_samples()
-                .map_err(classify_metadata_error)?;
-            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
-            self.validate_fresh_tail(value)
-                .map_err(BounceCaptureError::BackendFailed)?;
-            Ok(value)
-        })?;
-        Ok(BouncePluginMetadata {
-            class_uid: info.uid.clone(),
-            version: info.version.clone(),
-            name: info.name.clone(),
-            category: info.category.clone(),
-            event_input_buses: events
-                .inputs
-                .iter()
-                .map(|bus| (bus.channel_count, bus.is_main, bus.active))
-                .collect(),
-            event_output_buses: events
-                .outputs
-                .iter()
-                .map(|bus| (bus.channel_count, bus.is_main, bus.active))
-                .collect(),
-            input_buses: layout
-                .inputs
-                .iter()
-                .map(|bus| BounceAudioBus::new(bus.channel_count, bus.is_main, bus.active))
-                .collect(),
-            output_buses: layout
-                .outputs
-                .iter()
-                .map(|bus| BounceAudioBus::new(bus.channel_count, bus.is_main, bus.active))
-                .collect(),
-            latency_samples,
-            tail_samples,
-        })
+        let result = (|| {
+            let layout = capture_call(fence, || {
+                self.plugin
+                    .checked_audio_bus_layout()
+                    .map_err(classify_metadata_error)
+            })?;
+            let events = capture_call(fence, || {
+                self.plugin
+                    .event_bus_layout()
+                    .map_err(classify_metadata_error)
+            })?;
+            let info = self.plugin.info();
+            let latency_samples = capture_call(fence, || {
+                let value = self
+                    .plugin
+                    .try_latency_samples()
+                    .map_err(classify_metadata_error)?;
+                // A returned drift is an observed backend fault, even if cancellation
+                // arrives before capture_call's subsequent successful-call checkpoint.
+                #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+                self.validate_fresh_latency(value)
+                    .map_err(BounceCaptureError::BackendFailed)?;
+                Ok(value)
+            })?;
+            let tail_samples = capture_call(fence, || {
+                let value = self
+                    .plugin
+                    .try_tail_samples()
+                    .map_err(classify_metadata_error)?;
+                #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+                self.validate_fresh_tail(value)
+                    .map_err(BounceCaptureError::BackendFailed)?;
+                Ok(value)
+            })?;
+            Ok(BouncePluginMetadata {
+                class_uid: info.uid.clone(),
+                version: info.version.clone(),
+                name: info.name.clone(),
+                category: info.category.clone(),
+                event_input_buses: events
+                    .inputs
+                    .iter()
+                    .map(|bus| (bus.channel_count, bus.is_main, bus.active))
+                    .collect(),
+                event_output_buses: events
+                    .outputs
+                    .iter()
+                    .map(|bus| (bus.channel_count, bus.is_main, bus.active))
+                    .collect(),
+                input_buses: layout
+                    .inputs
+                    .iter()
+                    .map(|bus| BounceAudioBus::new(bus.channel_count, bus.is_main, bus.active))
+                    .collect(),
+                output_buses: layout
+                    .outputs
+                    .iter()
+                    .map(|bus| BounceAudioBus::new(bus.channel_count, bus.is_main, bus.active))
+                    .collect(),
+                latency_samples,
+                tail_samples,
+            })
+        })();
+        #[cfg(test)]
+        self.observation.metadata(
+            "Vst3Backend actual bounce_metadata",
+            result.as_ref().map_err(|e| match e {
+                BounceCaptureError::Rejected(message)
+                | BounceCaptureError::BackendFailed(message) => message.as_str(),
+            }),
+        );
+        result
     }
 
     pub(super) fn capture_bounce_state(

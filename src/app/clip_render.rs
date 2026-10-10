@@ -59,6 +59,10 @@ pub(super) enum ReservationSite {
 thread_local! {
     static RESERVATION_FAILURE: std::cell::Cell<Option<ReservationSite>> = const { std::cell::Cell::new(None) };
 }
+#[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
+pub(super) fn genuine_hooks_inactive() -> bool {
+    RESERVATION_FAILURE.with(|failure| failure.get().is_none())
+}
 pub(super) fn reservation_gate(site: ReservationSite) -> Result<(), OccurrenceError> {
     #[cfg(test)]
     if RESERVATION_FAILURE.with(|failure| {

@@ -384,6 +384,23 @@ impl ClipRenderJob {
 }
 
 impl CitrusApp {
+    /// Inspect only the existing behavior-changing App test hooks.
+    #[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
+    fn genuine_hooks_inactive(&self) -> bool {
+        self.native_editor_ui_test_snapshot.is_none()
+            && self.clip_restoration_test_factory.is_none()
+            && self.clip_restoration_event_panic.is_none()
+            && clip_render::genuine_hooks_inactive()
+            && super::clip_render_cache::genuine_hooks_inactive()
+            && crate::occurrence_media::genuine_hooks_inactive()
+            && self.clip_render_job.as_ref().is_none_or(|job| {
+                job.render_starter.is_none()
+                    && job
+                        .render
+                        .as_ref()
+                        .is_none_or(|render| render.genuine_hooks_inactive())
+            })
+    }
     /// Engine-loss teardown transfers the exact source owner here instead of
     /// dropping its guard. The callback outcome remains unknown until its receipt.
     // Refusal returns the same worker guard; boxing would allocate during teardown.
@@ -1305,6 +1322,15 @@ impl CitrusApp {
             }
             Ok(Some(captured)) => captured,
         };
+        #[cfg(test)]
+        crate::genuine_app_observer::record_capture(
+            if job.phase == ClipRenderPhase::RecapturingSource {
+                crate::genuine_app_observer::CaptureLabel::Final
+            } else {
+                crate::genuine_app_observer::CaptureLabel::Initial
+            },
+            &captured,
+        );
         job.capture = None;
         if job.aborted() {
             drop(captured);
@@ -1404,6 +1430,10 @@ impl CitrusApp {
         };
         // The original receipt/control is retained through the complete typed file outcome.
         job.render = None;
+        #[cfg(test)]
+        if let OccurrenceRenderOutcome::Complete { report, .. } = &outcome {
+            crate::genuine_app_observer::record_render_report(report);
+        }
         match outcome {
             OccurrenceRenderOutcome::Complete { published, .. } => {
                 job.retained_path = Some(published.path().to_path_buf());
@@ -2073,3 +2103,7 @@ fn start_occurrence_renderer(
 #[cfg(test)]
 #[path = "clip_render_job_tests.rs"]
 pub(in crate::app) mod tests;
+
+#[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
+#[path = "clip_render_genuine.rs"]
+mod genuine;

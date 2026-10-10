@@ -1,0 +1,20 @@
+[
+  {
+    "kind": "phase",
+    "phase": "initial_source",
+    "ordinal": 0,
+    "permit_path": "/synthetic/run/launch-permit-initial_source.json"
+  },
+  {
+    "kind": "phase",
+    "phase": "success_clone",
+    "ordinal": 1,
+    "permit_path": "/synthetic/run/launch-permit-success_clone.json"
+  },
+  {
+    "kind": "phase",
+    "phase": "undo_source",
+    "ordinal": 2,
+    "permit_path": "/synthetic/run/launch-permit-undo_source.json"
+  }
+]

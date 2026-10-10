@@ -23,6 +23,11 @@ use std::{
 
 use rtrb::{Consumer, PopError, Producer, PushError, RingBuffer};
 
+#[cfg(test)]
+use crate::genuine_app_observer as genuine_observer;
+#[cfg(all(test, feature = "vst3"))]
+use crate::genuine_app_observer::{Boundary, InstanceObserver, InstancePhase, Operation};
+
 use crate::instrument_bounce::{BounceCaptureError, BouncePluginState, BounceStateReceipt};
 
 #[cfg(feature = "vst3")]
@@ -1101,7 +1106,69 @@ pub struct AudioThreadEndpoint {
     parameter_edit_failures: Producer<DeferredParameterEditFailure>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // Keep complete bounded bridge evidence even when a profile reads only a subset.
+pub(crate) struct GenuineBridgeSnapshot {
+    pub worker_id: usize,
+    pub next_sequence: u64,
+    pub expected_sequence: u64,
+    pub stats: BridgeStats,
+    pub input_pending: usize,
+    pub output_owned: usize,
+    pub future_output_owned: usize,
+    pub delayed_dry_frames: usize,
+    pub delayed_dry_submitted: bool,
+    pub pending_inline_events: usize,
+    pub parameter_edits_admitted: u32,
+    pub input_consumed: u64,
+    pub operations_completed: u64,
+    pub worker_busy: u32,
+    pub worker_epoch: u64,
+    pub capture_busy: bool,
+    pub bridge_lookahead_quanta: usize,
+    pub strict_timing: bool,
+}
+
 impl AudioThreadEndpoint {
+    /// Fixed-size read-only snapshot; safe for the test callback to copy. Output
+    /// ownership is reported independently and is not a quiescence requirement.
+    #[cfg(test)]
+    pub(crate) fn genuine_snapshot(&self) -> GenuineBridgeSnapshot {
+        GenuineBridgeSnapshot {
+            worker_id: Arc::as_ptr(&self.metrics) as usize,
+            next_sequence: self.next_sequence,
+            expected_sequence: self.expected_sequence(),
+            stats: self.metrics.snapshot(),
+            input_pending: self.input.buffer().capacity() - self.input.slots(),
+            output_owned: self.output.slots(),
+            future_output_owned: self
+                .scratch
+                .future_output_valid
+                .iter()
+                .filter(|v| **v)
+                .count(),
+            delayed_dry_frames: if self.scratch.delayed_dry.valid {
+                usize::from(self.scratch.delayed_dry.frames)
+            } else {
+                0
+            },
+            delayed_dry_submitted: self.scratch.delayed_dry.valid
+                && self.scratch.delayed_dry.submitted,
+            pending_inline_events: usize::from(self.scratch.pending_rt_event_count),
+            parameter_edits_admitted: self.parameter_edit_admission.load(Ordering::Acquire),
+            input_consumed: self.metrics.genuine_input_consumed.load(Ordering::Acquire),
+            operations_completed: self
+                .metrics
+                .genuine_operations_completed
+                .load(Ordering::Acquire),
+            worker_busy: self.metrics.genuine_worker_busy.load(Ordering::Acquire),
+            worker_epoch: self.metrics.genuine_worker_epoch.load(Ordering::Acquire),
+            capture_busy: self.metrics.bounce_capture_busy.load(Ordering::Acquire),
+            bridge_lookahead_quanta: self.scratch.bridge_lookahead_quanta,
+            strict_timing: self.scratch.strict_timing,
+        }
+    }
     /// Stable creation-time slot identity. This is a plain fixed-size copy on the callback.
     #[must_use]
     pub const fn plugin_endpoint_manifest(&self) -> PluginEndpointManifest {
@@ -2082,6 +2149,14 @@ impl BounceCaptureFence {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn genuine_hooks_inactive(&self) -> bool {
+        self.before_ack
+            .lock()
+            .map(|hook| hook.is_none())
+            .unwrap_or(false)
+    }
+
     /// Check before and after every bounded IPC operation, never instead of its error result.
     pub fn checkpoint(&self) -> Result<(), BounceCaptureError> {
         if self.cancelled.load(Ordering::Acquire) {
@@ -2217,6 +2292,11 @@ impl PluginChainControl {
         }
         let (reply, receiver) = mpsc::sync_channel(1);
         let fence = Arc::new(BounceCaptureFence::new(deadline));
+        #[cfg(test)]
+        genuine_observer::record_hooks(
+            "BounceCaptureFence before admission",
+            fence.genuine_hooks_inactive(),
+        );
         let lease = BounceCaptureLease {
             fence: Arc::clone(&fence),
             metrics: Arc::clone(&self.metrics),
@@ -2451,6 +2531,14 @@ fn manifest_accepts_slot(manifest: PluginEndpointManifest, slot: usize) -> bool 
 
 #[derive(Default)]
 struct BridgeMetrics {
+    #[cfg(test)]
+    genuine_input_consumed: AtomicU64,
+    #[cfg(test)]
+    genuine_operations_completed: AtomicU64,
+    #[cfg(test)]
+    genuine_worker_busy: AtomicU32,
+    #[cfg(test)]
+    genuine_worker_epoch: AtomicU64,
     bounce_capture_busy: AtomicBool,
     midi_capabilities: AtomicU32,
     midi_blocked: AtomicBool,
@@ -2711,6 +2799,15 @@ impl PluginWorkerGuard {
             .take()
             .expect("finished retained shutdown owns its worker")
             .join();
+        #[cfg(test)]
+        genuine_observer::record_worker_join(
+            Arc::as_ptr(&self.metrics) as usize,
+            if joined.is_ok() {
+                genuine_observer::WorkerJoinOutcome::Joined
+            } else {
+                genuine_observer::WorkerJoinOutcome::WorkerPanicked
+            },
+        );
         if joined.is_ok() {
             self.retained_shutdown = RetainedShutdownState::Joined;
             RetainedShutdownPoll::Joined
@@ -3013,6 +3110,9 @@ impl PluginChain {
         let join = thread::Builder::new()
             .name("citrus-plugin-chain".into())
             .spawn(move || {
+                #[cfg(test)]
+                let _observation_worker =
+                    genuine_observer::enter_worker(Arc::as_ptr(&worker_metrics) as usize, manifest);
                 let slots = match panic::catch_unwind(AssertUnwindSafe(loader)) {
                     Ok(slots) => slots,
                     Err(payload) => vec![Err(format!(
@@ -3168,6 +3268,10 @@ fn run_worker(
         );
     } // Explicit end of the temporary initial-snapshot expectation, before the worker loop.
 
+    #[cfg(test)]
+    metrics
+        .genuine_worker_epoch
+        .store(INITIAL_TRANSPORT_EPOCH, Ordering::Release);
     let mut dry = StereoBlock::silence();
     let mut active_epoch = INITIAL_TRANSPORT_EPOCH;
     let mut shutdown = false;
@@ -3280,6 +3384,8 @@ fn run_worker(
         }
         match input.pop() {
             Ok(mut block) => {
+                #[cfg(test)]
+                let _observed_input = GenuineWorkerOperation::new(&metrics, true);
                 let requested = requested_epoch.load(Ordering::Acquire);
                 if block.epoch == 0 || block.epoch != requested {
                     fail_parameter_edits_from_worker_block(
@@ -3389,6 +3495,8 @@ fn run_worker(
 
     drain_parameter_edit_failures(&mut parameter_edit_failures, &mut parameter_edit_receipts);
     while let Ok(block) = input.pop() {
+        #[cfg(test)]
+        let _observed_input = GenuineWorkerOperation::new(&metrics, true);
         fail_parameter_edits_from_worker_block(
             &block,
             ParameterEditFailureReason::WorkerStopped,
@@ -3468,12 +3576,55 @@ fn catch_backend<T>(operation: impl FnOnce() -> Result<T, String>) -> Result<T, 
     }
 }
 
+/// Test-only completion accounting at actual worker ownership boundaries.
+/// A popped input reaches exactly one terminal outcome, including discard,
+/// output overflow or unwind. This is separate from successful output.push.
+#[cfg(test)]
+struct GenuineWorkerOperation<'a> {
+    metrics: &'a BridgeMetrics,
+    input: bool,
+}
+#[cfg(test)]
+impl<'a> GenuineWorkerOperation<'a> {
+    fn new(metrics: &'a BridgeMetrics, input: bool) -> Self {
+        metrics.genuine_worker_busy.fetch_add(1, Ordering::AcqRel);
+        if input {
+            metrics
+                .genuine_input_consumed
+                .fetch_add(1, Ordering::Release);
+        }
+        Self { metrics, input }
+    }
+}
+#[cfg(test)]
+impl Drop for GenuineWorkerOperation<'_> {
+    fn drop(&mut self) {
+        if self.input {
+            self.metrics
+                .genuine_operations_completed
+                .fetch_add(1, Ordering::Release);
+        }
+        self.metrics
+            .genuine_worker_busy
+            .fetch_sub(1, Ordering::Release);
+    }
+}
+
 fn reset_worker_epoch(
     epoch: u64,
     slots: &mut [WorkerSlot],
     events: &mut Producer<RuntimeEvent>,
     metrics: &BridgeMetrics,
 ) {
+    #[cfg(test)]
+    let _observed_reset = GenuineWorkerOperation::new(metrics, false);
+    #[cfg(test)]
+    genuine_observer::record_worker(
+        "reset_worker_epoch attempt",
+        epoch,
+        None,
+        metrics.snapshot(),
+    );
     for (slot_index, slot) in slots.iter_mut().enumerate() {
         if slot.fault.is_some() {
             continue;
@@ -3511,6 +3662,16 @@ fn reset_worker_epoch(
             metrics.reset_faults.fetch_add(1, Ordering::Relaxed);
             register_fault(slot_index, message, events, metrics);
         }
+    }
+    #[cfg(test)]
+    {
+        metrics.genuine_worker_epoch.store(epoch, Ordering::Release);
+        genuine_observer::record_worker(
+            "reset_worker_epoch returned",
+            epoch,
+            None,
+            metrics.snapshot(),
+        );
     }
 }
 
@@ -3568,6 +3729,13 @@ fn process_chain(
             .saturating_sub(i64::from(latency_prefix));
         transport.quarter_note_position -=
             f64::from(latency_prefix) * transport.tempo / (60.0 * sample_rate);
+        #[cfg(test)]
+        genuine_observer::record_worker(
+            "process_chain attempt",
+            block.epoch,
+            Some(block.sequence),
+            metrics.snapshot(),
+        );
         let result = catch_backend(|| {
             backend.set_transport(transport)?;
             backend.process(
@@ -3578,6 +3746,13 @@ fn process_chain(
             backend.drain_midi_output(&mut block.midi_output, slot_index as u8, frames);
             Ok(())
         });
+        #[cfg(test)]
+        genuine_observer::record_worker(
+            "process_chain returned",
+            block.epoch,
+            Some(block.sequence),
+            metrics.snapshot(),
+        );
         let finite = block.left[..frames]
             .iter()
             .chain(&block.right[..frames])
@@ -5352,6 +5527,8 @@ enum FreshBounceSourceSetup {
 
 #[cfg(feature = "vst3")]
 struct Vst3Backend {
+    #[cfg(test)]
+    observation: InstanceObserver,
     #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
     fresh_bounce_setup: Option<FreshBounceSourceSetup>,
     restoration: Option<SourceRestorationExpectation>,
@@ -5443,95 +5620,115 @@ impl Vst3Backend {
         config: PluginPrepareConfig,
         restoration: Option<SourceRestorationExpectation>,
     ) -> Result<Self, String> {
-        validate_vst3_reset_maximum(
-            config.max_block_frames,
-            crate::plugin_timing::PLUGIN_QUANTUM_FRAMES as usize,
-        )?;
-        let helper_path = match spec.vst3_helper_path {
-            Some(path) if path.is_file() => path,
-            Some(path) => {
-                return Err(format!(
-                    "VST3 isolation helper does not exist: '{}'",
-                    path.display()
-                ));
+        #[cfg(test)]
+        let observation = InstanceObserver::new(if restoration.is_some() {
+            InstancePhase::UndoSource
+        } else {
+            InstancePhase::InitialSource
+        });
+        #[cfg(test)]
+        observation.call(Operation::SourceLoad, Boundary::Attempt, None, None, None);
+        let result = (|| {
+            validate_vst3_reset_maximum(
+                config.max_block_frames,
+                crate::plugin_timing::PLUGIN_QUANTUM_FRAMES as usize,
+            )?;
+            let helper_path = match spec.vst3_helper_path {
+                Some(path) if path.is_file() => path,
+                Some(path) => {
+                    return Err(format!(
+                        "VST3 isolation helper does not exist: '{}'",
+                        path.display()
+                    ));
+                }
+                None => installed_vst3_helper_path()?,
+            };
+            let mut host = vst3_host::Vst3Host::builder()
+                .sample_rate(config.sample_rate)
+                .block_size(config.max_block_frames)
+                .with_process_isolation(true)
+                .auto_recover_plugins(false)
+                .helper_path(&helper_path)
+                .build()
+                .map_err(|error| {
+                    format!(
+                        "unable to initialize isolated VST3 host with '{}': {error}",
+                        helper_path.display()
+                    )
+                })?;
+            let plugin = match spec.class_uid.as_deref() {
+                Some(uid) => host.load_plugin_class(&spec.descriptor.path, uid),
+                None => host.load_plugin(&spec.descriptor.path),
             }
-            None => installed_vst3_helper_path()?,
-        };
-        let mut host = vst3_host::Vst3Host::builder()
-            .sample_rate(config.sample_rate)
-            .block_size(config.max_block_frames)
-            .with_process_isolation(true)
-            .auto_recover_plugins(false)
-            .helper_path(&helper_path)
-            .build()
             .map_err(|error| {
                 format!(
-                    "unable to initialize isolated VST3 host with '{}': {error}",
+                    "unable to load VST3 plug-in '{}' through '{}': {error}",
+                    spec.descriptor.path.display(),
                     helper_path.display()
                 )
             })?;
-        let plugin = match spec.class_uid.as_deref() {
-            Some(uid) => host.load_plugin_class(&spec.descriptor.path, uid),
-            None => host.load_plugin(&spec.descriptor.path),
-        }
-        .map_err(|error| {
-            format!(
-                "unable to load VST3 plug-in '{}' through '{}': {error}",
-                spec.descriptor.path.display(),
-                helper_path.display()
-            )
-        })?;
-        if let Some(expected) = restoration.as_ref() {
-            let info = plugin.info();
-            expected.check_loaded_identity(&info.uid, &info.version, &info.name, &info.category)?;
-        }
-        // Actual identity is available only after loading. Refuse insufficient
-        // capacity before pending state, reconfiguration, or prepare lifecycle.
-        validate_vst3_reset_maximum(
-            config.max_block_frames,
-            vst3_reset_origin_frames(&plugin.info().uid, &plugin.info().version),
-        )?;
-        let layout = plugin
-            .audio_bus_layout()
-            .map_err(|error| format!("unable to query VST3 audio bus layout: {error}"))?;
-        let input_channels = layout
-            .inputs
-            .iter()
-            .filter(|bus| bus.active)
-            .map(|bus| bus.channel_count)
-            .sum();
-        let output_channels = layout
-            .outputs
-            .iter()
-            .filter(|bus| bus.active)
-            .map(|bus| bus.channel_count)
-            .sum();
-        let name = if plugin.info().vendor.trim().is_empty() {
-            plugin.info().name.clone()
-        } else {
-            format!("{} — {}", plugin.info().name, plugin.info().vendor)
-        };
-        Ok(Self {
-            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
-            fresh_bounce_setup: None,
-            restoration,
-            restoration_consumed: false,
-            last_transport: PluginTransport::default(),
-            native_revision_base: 0,
-            plugin,
-            buffers: vst3_host::AudioBuffers::new(
-                2,
-                2,
+            if let Some(expected) = restoration.as_ref() {
+                let info = plugin.info();
+                expected.check_loaded_identity(
+                    &info.uid,
+                    &info.version,
+                    &info.name,
+                    &info.category,
+                )?;
+            }
+            // Actual identity is available only after loading. Refuse insufficient
+            // capacity before pending state, reconfiguration, or prepare lifecycle.
+            validate_vst3_reset_maximum(
                 config.max_block_frames,
-                config.sample_rate,
-            ),
-            name,
-            pending_state: spec.initial_state,
-            prepared: false,
-            max_block_frames: config.max_block_frames,
-            input_channels,
-            output_channels,
-        })
+                vst3_reset_origin_frames(&plugin.info().uid, &plugin.info().version),
+            )?;
+            let layout = plugin
+                .audio_bus_layout()
+                .map_err(|error| format!("unable to query VST3 audio bus layout: {error}"))?;
+            let input_channels = layout
+                .inputs
+                .iter()
+                .filter(|bus| bus.active)
+                .map(|bus| bus.channel_count)
+                .sum();
+            let output_channels = layout
+                .outputs
+                .iter()
+                .filter(|bus| bus.active)
+                .map(|bus| bus.channel_count)
+                .sum();
+            let name = if plugin.info().vendor.trim().is_empty() {
+                plugin.info().name.clone()
+            } else {
+                format!("{} — {}", plugin.info().name, plugin.info().vendor)
+            };
+            Ok(Self {
+                #[cfg(test)]
+                observation: observation.clone(),
+                #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+                fresh_bounce_setup: None,
+                restoration,
+                restoration_consumed: false,
+                last_transport: PluginTransport::default(),
+                native_revision_base: 0,
+                plugin,
+                buffers: vst3_host::AudioBuffers::new(
+                    2,
+                    2,
+                    config.max_block_frames,
+                    config.sample_rate,
+                ),
+                name,
+                pending_state: spec.initial_state,
+                prepared: false,
+                max_block_frames: config.max_block_frames,
+                input_channels,
+                output_channels,
+            })
+        })();
+        #[cfg(test)]
+        observation.string_result(Operation::SourceLoad, None, None, &result);
+        result
     }
 }
 
@@ -5565,9 +5762,13 @@ impl source_restoration::RestorationAccess for Vst3Backend {
     }
 
     fn restoration_get(&self, id: u32) -> Result<f64, String> {
-        self.plugin
+        let result = self
+            .plugin
             .get_parameter(id)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string());
+        #[cfg(test)]
+        self.observation.base_read("restoration_get", id, &result);
+        result
     }
 
     fn restoration_metadata(
@@ -5585,106 +5786,144 @@ impl PluginBackend for Vst3Backend {
     }
 
     fn prepare(&mut self, config: PluginPrepareConfig) -> Result<(), String> {
-        if self.restoration_consumed {
-            return Err("Recreated-source preparation is one-shot; load a new candidate".into());
-        }
-        let restoration = self.restoration.take();
-        self.restoration_consumed = restoration.is_some();
-        // Consume before any fallible guard: neither failed setup nor a published source
-        // may use a later prepare to gain another activation opportunity.
-        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
-        let qualify_fresh_source = match self.fresh_bounce_setup {
-            None => false,
-            Some(FreshBounceSourceSetup::Pending) => {
-                self.fresh_bounce_setup = Some(FreshBounceSourceSetup::Consumed);
-                true
-            }
-            Some(FreshBounceSourceSetup::Consumed | FreshBounceSourceSetup::Pinned { .. }) => {
+        #[cfg(test)]
+        let observation = self.observation.clone();
+        #[cfg(test)]
+        observation.call(
+            Operation::SourcePrepare,
+            Boundary::Attempt,
+            None,
+            None,
+            None,
+        );
+        let result = (|| {
+            if self.restoration_consumed {
                 return Err(
-                    "Fresh bounce source preparation is one-shot; load a new candidate".into(),
+                    "Recreated-source preparation is one-shot; load a new candidate".into(),
                 );
             }
-        };
-        validate_vst3_reset_maximum(config.max_block_frames, self.reset_origin_frames())?;
-        // Negotiate before reset-specific lifecycle/state changes. A loaded old helper may
-        // have initialized the plugin, but it cannot receive panic or a fallback Process.
-        let support = self
-            .plugin
-            .reset_origin_support()
-            .map_err(|error| error.to_string())?;
-        if support.contract_version != 1 {
-            return Err("VST3 helper does not support reset-origin contract version 1".into());
-        }
-        // The helper's actual prepared capacity must already support this
-        // identity's cleanup before any state/lifecycle mutation. The DAW never
-        // loaded this identity with a smaller supported maximum in the first place.
-        validate_vst3_reset_maximum(
-            support.max_block_frames as usize,
-            self.reset_origin_frames(),
-        )?;
-        if self.prepared {
-            self.plugin
-                .stop_processing()
+            let restoration = self.restoration.take();
+            self.restoration_consumed = restoration.is_some();
+            // Consume before any fallible guard: neither failed setup nor a published source
+            // may use a later prepare to gain another activation opportunity.
+            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+            let qualify_fresh_source = match self.fresh_bounce_setup {
+                None => false,
+                Some(FreshBounceSourceSetup::Pending) => {
+                    self.fresh_bounce_setup = Some(FreshBounceSourceSetup::Consumed);
+                    true
+                }
+                Some(FreshBounceSourceSetup::Consumed | FreshBounceSourceSetup::Pinned { .. }) => {
+                    return Err(
+                        "Fresh bounce source preparation is one-shot; load a new candidate".into(),
+                    );
+                }
+            };
+            validate_vst3_reset_maximum(config.max_block_frames, self.reset_origin_frames())?;
+            // Negotiate before reset-specific lifecycle/state changes. A loaded old helper may
+            // have initialized the plugin, but it cannot receive panic or a fallback Process.
+            let support = self
+                .plugin
+                .reset_origin_support()
                 .map_err(|error| error.to_string())?;
-        }
-        if self.plugin.sample_rate() != config.sample_rate
-            || self.plugin.block_size() != config.max_block_frames
-        {
-            self.plugin
-                .reconfigure(config.sample_rate, config.max_block_frames)
-                .map_err(|error| error.to_string())?;
-        }
-        if !self.pending_state.is_empty() {
-            let state = std::mem::take(&mut self.pending_state);
-            self.plugin
-                .load_state(&state)
-                .map_err(|error| error.to_string())?;
-        }
-        if let Some(expected) = restoration.as_ref() {
-            expected.restore_bases(self)?;
-        }
-        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
-        let fresh_metadata = if qualify_fresh_source {
-            Some(self.qualify_fresh_bounce_source(config.sample_rate as u32)?)
-        } else {
-            None
-        };
-        self.plugin
-            .start_processing()
-            .map_err(|error| error.to_string())?;
-        self.native_revision_base = self
-            .plugin
-            .native_dirty_revision()
-            .map_err(|error| error.to_string())?;
-        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
-        if let Some(before_start) = fresh_metadata {
-            let current = self
-                .bounce_metadata(None)
-                .map_err(|error| error.to_string())?;
-            current
-                .validate(config.sample_rate as u32)
-                .map_err(|error| {
-                    Self::fresh_topology_post_start_error(error, &current, &before_start)
-                })?;
-            // Tail may settle only across this first unpublished Start. Every other
-            // field remains exact; preserve both original operands for diagnostics.
-            if !Self::fresh_start_metadata_compatible(&before_start, &current) {
-                return Err(Self::fresh_start_metadata_mismatch_error(
-                    &before_start,
-                    &current,
-                ));
+            if support.contract_version != 1 {
+                return Err("VST3 helper does not support reset-origin contract version 1".into());
             }
-            self.fresh_bounce_setup = Some(FreshBounceSourceSetup::Pinned {
-                latency_samples: current.latency_samples,
-                tail_samples: current.tail_samples,
-            });
-        }
-        if let Some(expected) = restoration.as_ref() {
-            expected.verify_after_start(self)?;
-        }
-        self.max_block_frames = config.max_block_frames;
-        self.prepared = true;
-        Ok(())
+            // The helper's actual prepared capacity must already support this
+            // identity's cleanup before any state/lifecycle mutation. The DAW never
+            // loaded this identity with a smaller supported maximum in the first place.
+            validate_vst3_reset_maximum(
+                support.max_block_frames as usize,
+                self.reset_origin_frames(),
+            )?;
+            if self.prepared {
+                self.plugin
+                    .stop_processing()
+                    .map_err(|error| error.to_string())?;
+            }
+            if self.plugin.sample_rate() != config.sample_rate
+                || self.plugin.block_size() != config.max_block_frames
+            {
+                self.plugin
+                    .reconfigure(config.sample_rate, config.max_block_frames)
+                    .map_err(|error| error.to_string())?;
+            }
+            if !self.pending_state.is_empty() {
+                let state = std::mem::take(&mut self.pending_state);
+                let loaded = self
+                    .plugin
+                    .load_state(&state)
+                    .map_err(|error| error.to_string());
+                #[cfg(test)]
+                self.observation.state_load(&state, &loaded);
+                loaded?;
+            }
+            if let Some(expected) = restoration.as_ref() {
+                expected.restore_bases(self)?;
+            }
+            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+            let fresh_metadata = if qualify_fresh_source {
+                Some(self.qualify_fresh_bounce_source(config.sample_rate as u32)?)
+            } else {
+                None
+            };
+            #[cfg(test)]
+            observation.call(
+                Operation::StartProcessing,
+                Boundary::Attempt,
+                None,
+                Some(self.last_transport),
+                None,
+            );
+            let start_result = self
+                .plugin
+                .start_processing()
+                .map_err(|error| error.to_string());
+            #[cfg(test)]
+            observation.string_result(
+                Operation::StartProcessing,
+                None,
+                Some(self.last_transport),
+                &start_result,
+            );
+            start_result?;
+            self.native_revision_base = self
+                .plugin
+                .native_dirty_revision()
+                .map_err(|error| error.to_string())?;
+            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+            if let Some(before_start) = fresh_metadata {
+                let current = self
+                    .bounce_metadata(None)
+                    .map_err(|error| error.to_string())?;
+                current
+                    .validate(config.sample_rate as u32)
+                    .map_err(|error| {
+                        Self::fresh_topology_post_start_error(error, &current, &before_start)
+                    })?;
+                // Tail may settle only across this first unpublished Start. Every other
+                // field remains exact; preserve both original operands for diagnostics.
+                if !Self::fresh_start_metadata_compatible(&before_start, &current) {
+                    return Err(Self::fresh_start_metadata_mismatch_error(
+                        &before_start,
+                        &current,
+                    ));
+                }
+                self.fresh_bounce_setup = Some(FreshBounceSourceSetup::Pinned {
+                    latency_samples: current.latency_samples,
+                    tail_samples: current.tail_samples,
+                });
+            }
+            if let Some(expected) = restoration.as_ref() {
+                expected.verify_after_start(self)?;
+            }
+            self.max_block_frames = config.max_block_frames;
+            self.prepared = true;
+            Ok(())
+        })();
+        #[cfg(test)]
+        observation.string_result(Operation::SourcePrepare, None, None, &result);
+        result
     }
 
     fn process(
@@ -5693,44 +5932,66 @@ impl PluginBackend for Vst3Backend {
         right: &mut [f32],
         frames: usize,
     ) -> Result<(), String> {
-        if !self.prepared || frames > self.max_block_frames {
-            return Err("invalid VST3 process block".into());
-        }
-        for channel in &mut self.buffers.inputs {
-            channel.resize(frames, 0.0);
-            channel.fill(0.0);
-        }
-        for channel in &mut self.buffers.outputs {
-            channel.resize(frames, 0.0);
-            channel.fill(0.0);
-        }
-        if self.input_channels == 1 {
-            for frame in 0..frames {
-                self.buffers.inputs[0][frame] = (left[frame] + right[frame]) * 0.5;
+        #[cfg(test)]
+        let observation = self.observation.clone();
+        #[cfg(test)]
+        let observed_transport = self.last_transport;
+        #[cfg(test)]
+        observation.call(
+            Operation::OrdinaryProcess,
+            Boundary::Attempt,
+            Some(frames),
+            Some(observed_transport),
+            None,
+        );
+        let result = (|| {
+            if !self.prepared || frames > self.max_block_frames {
+                return Err("invalid VST3 process block".into());
             }
-        } else if self.input_channels > 1 {
-            self.buffers.inputs[0][..frames].copy_from_slice(&left[..frames]);
-            self.buffers.inputs[1][..frames].copy_from_slice(&right[..frames]);
-        }
-        self.buffers.block_size = frames;
-        self.plugin
-            .process_audio(&mut self.buffers)
-            .map_err(|error| error.to_string())?;
-        match self.output_channels {
-            0 => {
-                left[..frames].fill(0.0);
-                right[..frames].fill(0.0);
+            for channel in &mut self.buffers.inputs {
+                channel.resize(frames, 0.0);
+                channel.fill(0.0);
             }
-            1 => {
-                left[..frames].copy_from_slice(&self.buffers.outputs[0][..frames]);
-                right[..frames].copy_from_slice(&self.buffers.outputs[0][..frames]);
+            for channel in &mut self.buffers.outputs {
+                channel.resize(frames, 0.0);
+                channel.fill(0.0);
             }
-            _ => {
-                left[..frames].copy_from_slice(&self.buffers.outputs[0][..frames]);
-                right[..frames].copy_from_slice(&self.buffers.outputs[1][..frames]);
+            if self.input_channels == 1 {
+                for frame in 0..frames {
+                    self.buffers.inputs[0][frame] = (left[frame] + right[frame]) * 0.5;
+                }
+            } else if self.input_channels > 1 {
+                self.buffers.inputs[0][..frames].copy_from_slice(&left[..frames]);
+                self.buffers.inputs[1][..frames].copy_from_slice(&right[..frames]);
             }
-        }
-        Ok(())
+            self.buffers.block_size = frames;
+            self.plugin
+                .process_audio(&mut self.buffers)
+                .map_err(|error| error.to_string())?;
+            match self.output_channels {
+                0 => {
+                    left[..frames].fill(0.0);
+                    right[..frames].fill(0.0);
+                }
+                1 => {
+                    left[..frames].copy_from_slice(&self.buffers.outputs[0][..frames]);
+                    right[..frames].copy_from_slice(&self.buffers.outputs[0][..frames]);
+                }
+                _ => {
+                    left[..frames].copy_from_slice(&self.buffers.outputs[0][..frames]);
+                    right[..frames].copy_from_slice(&self.buffers.outputs[1][..frames]);
+                }
+            }
+            Ok(())
+        })();
+        #[cfg(test)]
+        observation.string_result(
+            Operation::OrdinaryProcess,
+            Some(frames),
+            Some(observed_transport),
+            &result,
+        );
+        result
     }
 
     fn send_midi(&mut self, message: MidiMessage) -> Result<(), String> {
@@ -6023,7 +6284,25 @@ impl PluginBackend for Vst3Backend {
     }
 
     fn save_state(&mut self) -> Result<Vec<u8>, String> {
-        self.plugin.save_state().map_err(|error| error.to_string())
+        #[cfg(test)]
+        let observation = self.observation.clone();
+        #[cfg(test)]
+        observation.call(
+            Operation::SaveState,
+            Boundary::Attempt,
+            Some(0),
+            Some(self.last_transport),
+            None,
+        );
+        let result = self.plugin.save_state().map_err(|error| error.to_string());
+        #[cfg(test)]
+        observation.string_result(
+            Operation::SaveState,
+            Some(0),
+            Some(self.last_transport),
+            &result,
+        );
+        result
     }
 
     fn capture_instrument_bounce_state(
@@ -6031,13 +6310,24 @@ impl PluginBackend for Vst3Backend {
         parameter_ids: &[u32],
         fence: &BounceCaptureFence,
     ) -> Result<BouncePluginState, BounceCaptureError> {
+        #[cfg(test)]
+        genuine_observer::record_hooks(
+            "BounceCaptureFence actual capture",
+            fence.genuine_hooks_inactive(),
+        );
         self.capture_bounce_state(parameter_ids, fence)
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), String> {
-        self.plugin
+        #[cfg(test)]
+        let observation = self.observation.clone();
+        let result = self
+            .plugin
             .load_state(state)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string());
+        #[cfg(test)]
+        observation.state_load(state, &result);
+        result
     }
 
     fn preflight_reset_processing(&self) -> Result<(), String> {
@@ -6054,29 +6344,116 @@ impl PluginBackend for Vst3Backend {
     }
 
     fn reset_processing(&mut self) -> Result<(), String> {
-        self.preflight_reset_processing()?;
-        // Native releases are necessary when CC mapping is absent. The origin-only reset
-        // preserves old one-frame input ordering. The exact Surge XT 1.3.4
-        // instrument uses its bounded 256-frame CC120 cleanup; all others use
-        // Q128. This is one admitted operation, never an extra warmup Process.
-        self.plugin
-            .midi_panic()
-            .map_err(|error| error.to_string())?;
-        let transport = self.stopped_reset_transport();
-        let report = self
-            .plugin
-            .process_reset_origin(self.reset_origin_frames(), transport)
-            .map_err(|error| error.to_string())?;
-        self.last_transport.playing = false;
-        report
-            .ensure_success()
-            .map_err(|error| format!("{error}; reset report: {report:?}"))?;
-        self.plugin
-            .stop_processing()
-            .map_err(|error| error.to_string())?;
-        self.plugin
-            .start_processing()
-            .map_err(|error| error.to_string())
+        #[cfg(test)]
+        let observation = self.observation.clone();
+        #[cfg(test)]
+        observation.call(
+            Operation::Reset,
+            Boundary::Attempt,
+            None,
+            Some(self.last_transport),
+            None,
+        );
+        let result = (|| {
+            self.preflight_reset_processing()?;
+            // Native releases are necessary when CC mapping is absent. The origin-only reset
+            // preserves old one-frame input ordering. The exact Surge XT 1.3.4
+            // instrument uses its bounded 256-frame CC120 cleanup; all others use
+            // Q128. This is one admitted operation, never an extra warmup Process.
+            #[cfg(test)]
+            observation.call(
+                Operation::MidiPanic,
+                Boundary::Attempt,
+                None,
+                Some(self.last_transport),
+                None,
+            );
+            let panic_result = self.plugin.midi_panic().map_err(|error| error.to_string());
+            #[cfg(test)]
+            observation.string_result(
+                Operation::MidiPanic,
+                None,
+                Some(self.last_transport),
+                &panic_result,
+            );
+            panic_result?;
+            let transport = self.stopped_reset_transport();
+            let reset_frames = self.reset_origin_frames();
+            #[cfg(test)]
+            let reset_transport = PluginTransport {
+                playing: false,
+                ..self.last_transport
+            };
+            #[cfg(test)]
+            observation.call(
+                Operation::ResetOrigin,
+                Boundary::Attempt,
+                Some(reset_frames),
+                Some(reset_transport),
+                None,
+            );
+            let reset_result = self
+                .plugin
+                .process_reset_origin(reset_frames, transport)
+                .map_err(|error| error.to_string());
+            #[cfg(test)]
+            observation.string_result(
+                Operation::ResetOrigin,
+                Some(reset_frames),
+                Some(reset_transport),
+                &reset_result,
+            );
+            let report = reset_result?;
+            #[cfg(test)]
+            observation.reset_report(&report);
+            self.last_transport.playing = false;
+            report
+                .ensure_success()
+                .map_err(|error| format!("{error}; reset report: {report:?}"))?;
+            #[cfg(test)]
+            observation.call(
+                Operation::StopProcessing,
+                Boundary::Attempt,
+                None,
+                Some(self.last_transport),
+                None,
+            );
+            let stop_result = self
+                .plugin
+                .stop_processing()
+                .map_err(|error| error.to_string());
+            #[cfg(test)]
+            observation.string_result(
+                Operation::StopProcessing,
+                None,
+                Some(self.last_transport),
+                &stop_result,
+            );
+            stop_result?;
+            #[cfg(test)]
+            observation.call(
+                Operation::StartProcessing,
+                Boundary::Attempt,
+                None,
+                Some(self.last_transport),
+                None,
+            );
+            let start_result = self
+                .plugin
+                .start_processing()
+                .map_err(|error| error.to_string());
+            #[cfg(test)]
+            observation.string_result(
+                Operation::StartProcessing,
+                None,
+                Some(self.last_transport),
+                &start_result,
+            );
+            start_result
+        })();
+        #[cfg(test)]
+        observation.string_result(Operation::Reset, None, Some(self.last_transport), &result);
+        result
     }
 
     fn latency_samples(&self) -> u32 {
@@ -6119,6 +6496,8 @@ fn native_editor_state(state: vst3_host::IsolatedEditorState) -> NativeEditorSta
 #[cfg(feature = "vst3")]
 impl Drop for Vst3Backend {
     fn drop(&mut self) {
+        #[cfg(test)]
+        self.observation.lifecycle("Vst3Backend destructor entered");
         let _ = self
             .plugin
             .isolated_editor(vst3_host::IsolatedEditorCommand::Close);
@@ -6132,6 +6511,9 @@ impl Drop for Vst3Backend {
         if should_stop {
             let _ = self.plugin.stop_processing();
         }
+        #[cfg(test)]
+        self.observation
+            .lifecycle("Vst3Backend destructor body returned; fields still owned");
     }
 }
 
@@ -9860,3 +10242,47 @@ mod tests {
 #[cfg(all(test, unix, feature = "vst3"))]
 #[path = "plugin_reset_origin_tests.rs"]
 mod reset_origin_backend_tests;
+
+#[cfg(test)]
+mod genuine_bridge_observation_tests {
+    use super::*;
+
+    #[test]
+    fn popped_input_completion_counts_discard_without_output_delivery() {
+        let metrics = BridgeMetrics::default();
+        {
+            let _input = GenuineWorkerOperation::new(&metrics, true);
+            assert_eq!(metrics.genuine_input_consumed.load(Ordering::Acquire), 1);
+            assert_eq!(
+                metrics.genuine_operations_completed.load(Ordering::Acquire),
+                0
+            );
+            assert_eq!(metrics.genuine_worker_busy.load(Ordering::Acquire), 1);
+        }
+        assert_eq!(metrics.completed.load(Ordering::Acquire), 0);
+        assert_eq!(
+            metrics.genuine_operations_completed.load(Ordering::Acquire),
+            1
+        );
+        assert_eq!(metrics.genuine_worker_busy.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn reset_work_and_unwind_keep_input_accounting_distinct() {
+        let metrics = BridgeMetrics::default();
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            let _input = GenuineWorkerOperation::new(&metrics, true);
+            let _reset = GenuineWorkerOperation::new(&metrics, false);
+            assert_eq!(metrics.genuine_worker_busy.load(Ordering::Acquire), 2);
+            panic!("plugin-free observed unwind");
+        }));
+        assert!(result.is_err());
+        assert_eq!(metrics.genuine_input_consumed.load(Ordering::Acquire), 1);
+        assert_eq!(
+            metrics.genuine_operations_completed.load(Ordering::Acquire),
+            1
+        );
+        assert_eq!(metrics.genuine_worker_busy.load(Ordering::Acquire), 0);
+        assert_eq!(metrics.completed.load(Ordering::Acquire), 0);
+    }
+}

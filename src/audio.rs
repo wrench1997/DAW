@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "audio_genuine_observation.rs"]
+pub(crate) mod genuine_observation;
+
 use crate::plugin_timing::{
     PluginProcessingFault, PluginProcessingFaultReason, PluginProcessingHealth,
     PluginProcessingSnapshot, PluginProcessingTelemetry, PreparedPluginTimingPlan,
@@ -3132,10 +3136,25 @@ fn render_transport_chunk(
             transport.publish(status);
             continue;
         }
+        #[cfg(test)]
+        let genuine_segment =
+            dsp.genuine_segment_start(status, transport, segment_frames, rendered);
         let capture_device_frame = transport.device_frame;
         if dsp.plugin_fault.is_some() || dsp.plugin_processing_suspended() {
             dsp.master_block[..segment_frames].fill([0.0; 2]);
             consume(rendered, &dsp.master_block[..segment_frames]);
+            #[cfg(test)]
+            dsp.genuine_finish_segment(
+                status,
+                transport,
+                genuine_segment,
+                false,
+                if dsp.plugin_fault.is_some() {
+                    genuine_observation::GenuineSegmentDisposition::FaultSilence
+                } else {
+                    genuine_observation::GenuineSegmentDisposition::SuspendedSilence
+                },
+            );
             transport.device_frame = transport.device_frame.saturating_add(segment_frames as u64);
             if dsp.plugin_fault.is_some() {
                 transport.request.playing = false;
@@ -3153,6 +3172,11 @@ fn render_transport_chunk(
             segment_frames,
             transport.request.playing,
         );
+        #[cfg(test)]
+        let genuine_segment = genuine_segment.map(|mut record| {
+            record.timeline_render_active = dsp.timeline_plan_render_active;
+            record
+        });
         dsp.configure_plugin_transport(
             transport.timeline_frame,
             transport.beat_q32,
@@ -3220,6 +3244,18 @@ fn render_transport_chunk(
             segment_frames,
         );
         consume(rendered, &dsp.master_block[..segment_frames]);
+        #[cfg(test)]
+        dsp.genuine_finish_segment(
+            status,
+            transport,
+            genuine_segment,
+            timeline_ready,
+            if dsp.plugin_fault.is_some() {
+                genuine_observation::GenuineSegmentDisposition::FaultSilence
+            } else {
+                genuine_observation::GenuineSegmentDisposition::Rendered
+            },
+        );
         transport.advance(status, dsp, segment_frames);
         rendered += segment_frames;
     }
@@ -3581,6 +3617,7 @@ impl TestAudioCallback {
     pub(crate) fn pump(&mut self, engine: &AudioEngine, frames: usize) {
         assert_eq!(engine.engine_session, self.dsp.engine_session);
         assert!(frames > 0 && frames <= MAX_MIXER_BLOCK_FRAMES);
+        self.dsp.genuine_begin_pump();
         self.last_output_frames = frames;
         self.last_output[..frames].fill([0.0; 2]);
         let status = &engine.status;
@@ -3613,9 +3650,20 @@ impl TestAudioCallback {
             .apply_pending_timeline_activation(status, &mut self.dsp);
         self.transport
             .apply_latest_request(&engine.transport_mailbox, status, &mut self.dsp);
+        #[cfg(test)]
+        let genuine_admission = self
+            .dsp
+            .genuine_segment_start(status, &self.transport, frames, 0);
         if !self.dsp.admit_plugin_callback(frames) {
             self.transport.request.playing = false;
             self.transport.request.loop_enabled = false;
+            self.dsp.genuine_finish_segment(
+                status,
+                &self.transport,
+                genuine_admission,
+                false,
+                genuine_observation::GenuineSegmentDisposition::AdmissionRejected,
+            );
             self.transport.device_frame = self.transport.device_frame.saturating_add(frames as u64);
             self.transport.publish(status);
             self.dsp.publish_plugin_epoch_status(status);
@@ -6165,6 +6213,8 @@ impl MixerGraphEndpointIdentityTable {
 
 struct DspState {
     #[cfg(test)]
+    test_genuine_observation: Option<Box<genuine_observation::GenuineObservationBuffer>>,
+    #[cfg(test)]
     test_restoration_reset_arm: Option<TestRestorationResetArm>,
     #[cfg(test)]
     test_restoration_reset_observation: Option<TestRestorationResetObservation>,
@@ -6404,6 +6454,8 @@ impl DspState {
         }
 
         Ok(Self {
+            #[cfg(test)]
+            test_genuine_observation: None,
             #[cfg(test)]
             test_restoration_reset_arm: None,
             #[cfg(test)]

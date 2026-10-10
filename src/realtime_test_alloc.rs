@@ -48,3 +48,8 @@ pub fn assert_no_alloc_or_drop<T>(operation: impl FnOnce() -> T) -> T {
     assert_eq!(DROPS.with(Cell::get), 0, "callback deallocated");
     result
 }
+
+/// Read-only qualification audit; never enables, disables, or clears the guard.
+pub(crate) fn genuine_guard_inactive() -> bool {
+    ACTIVE.try_with(|active| !active.get()).unwrap_or(false)
+}

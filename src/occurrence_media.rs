@@ -376,6 +376,11 @@ static VERIFICATION_FIXTURE_CLEANUP_FAILURE: std::sync::atomic::AtomicU8 =
     std::sync::atomic::AtomicU8::new(0);
 
 #[cfg(test)]
+pub(crate) fn genuine_hooks_inactive() -> bool {
+    VERIFICATION_FIXTURE_CLEANUP_FAILURE.load(Ordering::Acquire) == 0
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FixtureDrainFailure {
     TimedOut,
@@ -592,6 +597,11 @@ impl VerificationAdmission {
         published: PublishedOccurrenceRender,
         policy: VerificationPolicy,
     ) -> Result<VerificationReceipt, VerificationStartFailure> {
+        #[cfg(test)]
+        crate::genuine_app_observer::record_hooks(
+            "actual occurrence verifier policy",
+            policy.fixture.genuine_inactive() && genuine_hooks_inactive(),
+        );
         #[cfg(test)]
         if VERIFICATION_FIXTURE_CLEANUP_FAILURE.load(Ordering::Acquire) != 0 {
             return Err(VerificationStartFailure::Refused {
@@ -929,6 +939,22 @@ struct VerificationFixture {
     panic_after_outcome: bool,
     fail_spawn: bool,
     pause_step: Option<(VerificationStep, std::sync::Arc<VerificationGate>)>,
+}
+
+#[cfg(test)]
+impl VerificationFixture {
+    fn genuine_inactive(&self) -> bool {
+        self.fail.is_none()
+            && self.panic_at.is_none()
+            && self.cancel_at.is_none()
+            && self.corrupt_read_sample.is_none()
+            && !self.replace_after_decode
+            && self.worker_gate.is_none()
+            && !self.panic_worker
+            && !self.panic_after_outcome
+            && !self.fail_spawn
+            && self.pause_step.is_none()
+    }
 }
 
 #[cfg(test)]

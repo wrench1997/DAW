@@ -489,6 +489,12 @@ pub struct CapturedInstrumentBounce {
 }
 
 impl CapturedInstrumentBounce {
+    /// Read-only identity of the existing completed receipt for the opt-in QA observer.
+    #[cfg(test)]
+    pub(crate) fn genuine_receipt_identity(&self) -> usize {
+        Arc::as_ptr(&self.receipt_token) as usize
+    }
+
     pub fn identity(&self) -> BounceSourceIdentity {
         self.identity
     }

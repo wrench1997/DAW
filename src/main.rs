@@ -13,6 +13,8 @@ mod export;
 mod export_job;
 mod export_options;
 pub mod fixed_quantum;
+#[cfg(test)]
+mod genuine_app_observer;
 mod icons;
 pub mod instrument_bounce;
 pub mod master_capture;

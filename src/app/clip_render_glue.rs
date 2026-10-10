@@ -616,6 +616,15 @@ impl CitrusApp {
             .as_mut()
             .ok_or("Restoration owner is already transferred")?;
         while let Some(event) = chain.control.try_next_event() {
+            // This restored source is still unpublished; its endpoint ID is
+            // allocated only after the readiness checks below succeed.
+            #[cfg(test)]
+            crate::genuine_app_observer::record_runtime_event(
+                0,
+                pending.project_session,
+                pending.instance_id,
+                &event,
+            );
             match &event {
                 RuntimeEvent::SlotReady { slot: 0, .. } => {
                     pending.ready = true;

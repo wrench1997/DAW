@@ -1503,6 +1503,21 @@ struct WavWriteFixture {
     cancel_before_commit: bool,
 }
 
+#[cfg(test)]
+impl WavWriteFixture {
+    fn genuine_inactive(&self) -> bool {
+        self.fail.is_none()
+            && self.panic_at.is_none()
+            && !self.fail_abort
+            && !self.fail_unlink
+            && !self.fail_parent_sync
+            && !self.cancel_after_cas
+            && !self.cancel_after_link
+            && !self.expire_before_commit
+            && !self.cancel_before_commit
+    }
+}
+
 fn write_stereo_wav_core(
     path: &Path,
     options: WavExportOptions,
@@ -1524,6 +1539,11 @@ fn write_stereo_wav_kernel(
     policy: WavWritePolicy,
     mut publication: Option<&mut CreateNewPublication>,
 ) -> Result<()> {
+    #[cfg(test)]
+    crate::genuine_app_observer::record_hooks(
+        "actual occurrence WAV writer policy",
+        policy.fixture.genuine_inactive(),
+    );
     control.checkpoint(7000)?;
     policy.check(control)?;
     options.validate()?;

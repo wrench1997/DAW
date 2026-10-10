@@ -442,7 +442,52 @@ pub struct FixedQuantumAdapter<E = AudioThreadEndpoint> {
     stats: FixedQuantumStats,
 }
 
+/// Read-only genuine qualification evidence. Constructed only by the serial test driver.
+/// Queued completed output and the fixed accumulation pre-roll are reported separately
+/// from input/submission quiescence; their continued ownership is not pending input work.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // Preserve complete bounded adapter evidence even when an oracle uses a subset.
+pub(crate) struct GenuineFixedQuantumSnapshot {
+    pub(crate) epoch: u64,
+    pub(crate) quantum_frames: usize,
+    pub(crate) expected_latency_revision: u64,
+    pub(crate) latency: FixedQuantumLatency,
+    pub(crate) input_phase_frames: usize,
+    pub(crate) pending_event_count: usize,
+    pub(crate) output_owned_frames: usize,
+    pub(crate) accumulation_preroll_frames_remaining: usize,
+    pub(crate) output_position: u64,
+    pub(crate) output_written: u64,
+    pub(crate) midi_output_owned: usize,
+    pub(crate) midi_fault_positions_owned: usize,
+    pub(crate) stats: FixedQuantumStats,
+    pub(crate) bridge: crate::plugins::plugin_runtime::GenuineBridgeSnapshot,
+}
+
 impl FixedQuantumAdapter<AudioThreadEndpoint> {
+    #[cfg(test)]
+    pub(crate) fn genuine_snapshot(&self) -> GenuineFixedQuantumSnapshot {
+        GenuineFixedQuantumSnapshot {
+            epoch: self.epoch,
+            quantum_frames: self.quantum_frames,
+            expected_latency_revision: self.expected_latency_revision,
+            latency: self.latency(),
+            input_phase_frames: self.scratch.input_fill,
+            pending_event_count: self.scratch.pending_event_count,
+            output_owned_frames: self.scratch.output_len,
+            accumulation_preroll_frames_remaining: (self.quantum_frames as u64)
+                .saturating_sub(self.scratch.output_position)
+                as usize,
+            output_position: self.scratch.output_position,
+            output_written: self.scratch.output_written,
+            midi_output_owned: self.scratch.midi_len,
+            midi_fault_positions_owned: self.scratch.midi_fault_count,
+            stats: self.stats,
+            bridge: self.endpoint.genuine_snapshot(),
+        }
+    }
+
     pub fn bridge_lookahead_quanta(&self) -> usize {
         self.endpoint.bridge_lookahead_quanta()
     }

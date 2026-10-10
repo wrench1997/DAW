@@ -917,7 +917,17 @@ fn render_and_dispose<B: RenderBackend>(
             Duration::from_millis(10)
         });
     }
-    if catch_unwind(AssertUnwindSafe(|| drop(backend))).is_err() {
+    #[cfg(test)]
+    crate::genuine_app_observer::record_lifecycle("renderer backend destruction attempt");
+    if catch_unwind(AssertUnwindSafe(|| {
+        drop(backend);
+        #[cfg(test)]
+        crate::genuine_app_observer::record_lifecycle("renderer backend destruction returned");
+    }))
+    .is_err()
+    {
+        #[cfg(test)]
+        crate::genuine_app_observer::record_lifecycle("renderer backend destruction panicked");
         let error = RenderFailure::new(FailureKind::Panic, "Disposed backend destructor panicked");
         if cleanup_primary.is_none() {
             cleanup_primary = Some(error);
@@ -1105,6 +1115,10 @@ pub(crate) struct OccurrenceRenderReceipt {
     progress: Arc<JobProgress>,
 }
 impl OccurrenceRenderReceipt {
+    #[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
+    pub(crate) fn genuine_hooks_inactive(&self) -> bool {
+        !self.progress.expire_cleanup_grace.load(Ordering::Acquire)
+    }
     pub(crate) fn cancel(&self) -> bool {
         self.control.export.cancel()
     }
@@ -1183,6 +1197,11 @@ fn run_occurrence_owned<B: RenderBackend>(
     progress: &JobProgress,
     factory: impl FnOnce() -> B,
 ) -> OccurrenceRenderOutcome {
+    #[cfg(test)]
+    crate::genuine_app_observer::record_hooks(
+        "occurrence renderer cleanup-grace override",
+        !progress.expire_cleanup_grace.load(Ordering::Acquire),
+    );
     let preflight = catch_unwind(AssertUnwindSafe(|| {
         let prepared = PreparedRender::from_occurrence(&capture, control)?;
         let provenance = capture
@@ -1220,6 +1239,8 @@ fn run_occurrence_owned<B: RenderBackend>(
     };
     // This producer owns its unwind boundary and typed post-link evidence. Do not
     // flatten a linked-path failure into the legacy string-only writer envelope.
+    #[cfg(test)]
+    crate::genuine_app_observer::record_lifecycle("occurrence writer publication attempt");
     let published = crate::occurrence_media::publish_occurrence_render(
         provenance,
         &path,
@@ -1228,6 +1249,12 @@ fn run_occurrence_owned<B: RenderBackend>(
         &control.export,
         control.deadline,
     );
+    #[cfg(test)]
+    crate::genuine_app_observer::record_lifecycle(if published.is_ok() {
+        "occurrence writer publication returned success"
+    } else {
+        "occurrence writer publication returned failure"
+    });
     drop(audio);
     drop(capture);
     match published {

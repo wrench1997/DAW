@@ -14,6 +14,10 @@ const MAX_RETAINED_PATH_BYTES: usize = 4096;
 thread_local! {
     static TEST_PCM_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_RETAINED_CLIP_PCM_BYTES) };
 }
+#[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
+pub(super) fn genuine_hooks_inactive() -> bool {
+    TEST_PCM_LIMIT.with(|limit| limit.get() == MAX_RETAINED_CLIP_PCM_BYTES)
+}
 #[cfg(test)]
 pub(in crate::app) struct TestPcmLimit(usize);
 #[cfg(test)]
