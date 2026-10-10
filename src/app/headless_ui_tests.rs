@@ -4468,7 +4468,11 @@ fn automation_point_blank_insert_and_drag_modifiers_and_cancel() {
     let mut ui = automation_point_ui();
     let middle = automation_point_position(&ui, 2);
     let left = automation_point_position(&ui, 1);
-    automation_secondary_click(&mut ui, Pos2::new((middle.x + left.x) / 2.0, middle.y));
+    // Keep the same time but click above the new midpoint tension handle.
+    automation_secondary_click(
+        &mut ui,
+        Pos2::new((middle.x + left.x) / 2.0, middle.y - 10.0),
+    );
     assert_eq!(ui.app.project.automation_lanes[0].lane.points().len(), 4);
     assert_eq!(ui.app.project.clips.len(), 1);
     assert_eq!(ui.app.undo_stack.len(), 1);
@@ -4611,7 +4615,10 @@ fn automation_point_source_offset_snaps_to_playlist_grid() {
     ui.settle();
     let left = automation_point_position(&ui, 1);
     let middle = automation_point_position(&ui, 2);
-    automation_secondary_click(&mut ui, Pos2::new((left.x + middle.x) / 2.0, middle.y));
+    automation_secondary_click(
+        &mut ui,
+        Pos2::new((left.x + middle.x) / 2.0, middle.y - 10.0),
+    );
     let point = ui.app.project.automation_lanes[0].lane.points()[1];
     assert!(
         (point.position - 1.125).abs() < 0.00001,
@@ -4625,7 +4632,7 @@ fn automation_point_double_click_is_retained_and_unselected_right_click_is_safe(
     let mut ui = automation_point_ui();
     let left = automation_point_position(&ui, 1);
     let middle = automation_point_position(&ui, 2);
-    let pos = Pos2::new((left.x + middle.x) / 2.0, middle.y);
+    let pos = Pos2::new((left.x + middle.x) / 2.0, middle.y - 10.0);
     for pressed in [true, false, true, false] {
         ui.run(vec![
             egui::Event::PointerMoved(pos),
