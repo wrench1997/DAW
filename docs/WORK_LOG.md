@@ -1721,3 +1721,33 @@ existing VST3/test callers remain unchanged. The original core Clippy failure is
 retained. This revision is unexecuted until source persistence/review; only core
 Clippy, affected pure topology tests and remaining compiler/package gates need
 fresh execution. Previously passing runs keep their original source attribution.
+
+### Dry-topology bounded source/mock results
+
+The final cfg revision c3aabe0f closes the core Clippy gate and passes its two
+pure topology policy tests, fresh68/68 client compiler contracts, Python239,
+formatting, package557 and current helper build. Vendor source stayed identical
+across all three revisions: its fresh3868c2fb execution passed596 available tests,
+27 docs and direct Clippy, including actual f32/f64 full-bus/zero-input fixtures.
+Patch replay reproduces58 vendor source/manifest files with zero fuzz.
+
+Caller evidence is explicitly mixed-revision: original bounce59 plus corrected
+fb86e1aa offline24/runtime77/export-control24/export60/options3 total247 unique
+selected all-feature App cases. Default and core selected109 each, helper25 and
+protocol13 also passed on fb86e1aa. This is not a whole-App execution claim.
+Feature/default Clippy passed there; final cfg attributes preserve their enabled
+bodies and keep core test helpers compiled. Fresh current helper SHA256 is
+bafce0dcf4c24411651d84df0877638b77b051019002a6cfbb06ce38ec96b76d.
+All738 source hashes were stable before/after each run, with exact diffs between
+runs retained. Current-worktree compiler commands, relative dep-info resolved
+against their recorded Cargo paths, four exact rlib bindings and15 copied executable
+hashes are preserved. The binder initially assumed absolute dep-info and then
+removed overly broad matching cfg text; both failures are retained, corrected
+without repository changes or rerunning tests.
+
+Original offline22/23 and core Clippy failures remain historical failures. The
+missing original SlotFault message/ledger is not fabricated; later corrected
+polling and intentional-unwind evidence is separate. No genuine plugin, native
+UI/device, genuine-plugin WAV, user-facing activation, realtime performance or whole-App
+qualification occurred. Independent final source/receipt review and durable
+archive close this checkpoint before any separately approved genuine plan.

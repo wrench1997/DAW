@@ -91,3 +91,52 @@ the previous Stop B unchanged-vendor reuse receipt cannot qualify these bytes.
 Genuine capture, MIDI/WAV audio and cancellation qualification remains separately
 frozen, archived and authorized. No realtime reset policy, COM thread ownership,
 strict fresh metadata or checked one-shot teardown contract is relaxed.
+
+## Executed source/mock checkpoint, 2026-10-10
+
+Bounded gates pass with the original failed runs retained. Source progression:
+3868c2fb (topology) → fb86e1aa (mock polling/unwind evidence only) → c3aabe0f
+(two convenience-method cfg guards only). No production algorithm was changed
+after the first source freeze; all 66 vendor entries stayed byte-identical.
+
+- 3868c2fb: 596 available vendor tests, 27 doc tests and direct vendor Clippy pass.
+  The single pre-existing absent SDK metadata fixture was explicitly excluded.
+  Nine actual topology COM tests, three pure binding tests, eight selected silent
+  codec/client tests and the pure used-Surge rejection also passed as focused gates.
+  The new doc compile-fail excludes arbitrary caller sample input from the client.
+- The all-feature App proof consists of 247 unique selected cases across runs:
+  59 bounce cases on 3868c2fb; corrected offline24, runtime77, export-control24,
+  ordinary export60 and export-options3 on fb86e1aa. This is not the whole App suite.
+  Default and core selected suites each passed109 on fb86e1aa. Helper25 plus13
+  protocol cases passed there too. Prior-source outcomes are not relabeled as
+  executions of the final cfg revision.
+- c3aabe0f: fresh core Clippy and two affected pure audio-policy tests pass. Fresh
+  public-client compiler contracts pass68/68 with stable inputs/fixtures and both
+  positive controls; no compiled Rust fixture or plugin was executed by that runner.
+  Python239, formatting and package557 checks pass; patch replay reconstructed all
+  58 vendor source/manifest inputs with zero fuzz. Feature/default Clippy passed on
+  fb86e1aa; the two cfg guards leave their enabled method bodies unchanged. Direct
+  vendor Clippy uses the recorded existing deprecated/drain_collect allowances.
+- Current-worktree forced vendor compilation, exact linked rlibs, caller commands,
+  copied test executables and helper are bound. The current default helper SHA256 is
+  bafce0dcf4c24411651d84df0877638b77b051019002a6cfbb06ce38ec96b76d.
+  Dep-info uses relative vendor paths; its source identity is resolved with the
+  recorded absolute Cargo manifest, source target and compiler working directory.
+
+The first offline run remains FAILED22/23: the mock lacked three normal native
+polling replies. Its original SlotFault text/ledger was not retained, and cleanup
+emitted FileNotFoundError. Source inspection established the missing first polling
+command; the corrected24-case run separately proves complete polling and successful
+admission. Its intentional Rust-unwind case preserves the original panic, records
+actual Joined, retains terminal Shutdown evidence, and inspects files before removal.
+Legacy Joined still does not establish the strict clone's full child-reap contract.
+The second run's core Clippy failure remains visible; the two cfg guards correct
+unused helpers only in the no-VST3/non-test binary. Two QA binder failures are also
+retained: assuming absolute dep-info paths and stripping every matching cfg attribute
+rather than the exact two. Only the receipt binder was corrected/rerun for those.
+
+These results qualify source/mock behavior and the bounded admission policy.
+There was no genuine plugin, editor, device, WAV qualification or user-facing action
+activation. Fresh real capture/state/base/MIDI/audio/reap acceptance remains a
+separately frozen plan and authorized run. Unseen plugin-internal changes, synchronous
+strict metadata cost and legacy source teardown limits are unchanged and explicit.
