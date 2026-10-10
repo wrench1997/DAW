@@ -1004,6 +1004,7 @@ impl OwnedTopologyLedger {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Keep current/previous owner and pump/poll domains explicit.
 pub(crate) fn claim_from_app(
     app: &CitrusApp,
     snapshot: &GenuineCallbackSnapshot,

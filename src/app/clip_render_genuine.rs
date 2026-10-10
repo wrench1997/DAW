@@ -43,7 +43,7 @@ mod support;
 pub(crate) mod topology;
 use health::{HealthClass, HealthStatus};
 use support::*;
-use topology::{OwnedTopologyKind, OwnedTopologyLedger, PumpPurpose, TopologyPumpRole};
+use topology::{OwnedTopologyLedger, PumpPurpose};
 const GLOBAL_VOLUME: u32 = 1_336_600_346;
 const SET_REQUEST: u64 = 0xA660_0002;
 const QUERY_REQUEST: u64 = 0xA660_0003;

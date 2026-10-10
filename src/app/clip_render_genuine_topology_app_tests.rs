@@ -24,6 +24,7 @@ const RUN: [u8; 32] = [0x64; 32];
 const MOCK_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy)]
+#[allow(clippy::large_enum_variant)] // Four bounded Copy slots retain exact in-place worker evidence.
 enum SourceSlot {
     Reserved,
     Owned { worker: usize, stats: BridgeStats },
@@ -406,47 +407,46 @@ impl TopologyFixture {
         {
             return Ok(());
         }
-        if self.ledger.clear()
+        if (self.ledger.clear()
             || self
                 .ledger
                 .open()
-                .is_some_and(|slot| slot.phase == OwnedTopologyPhase::Claimed)
+                .is_some_and(|slot| slot.phase == OwnedTopologyPhase::Claimed))
+            && let Some(kind) = kind
         {
-            if let Some(kind) = kind {
-                let worker = if matches!(
-                    kind,
-                    OwnedTopologyKind::InitialInstall | OwnedTopologyKind::ConversionRemove
-                ) {
-                    self.initial_worker
-                } else {
-                    latest_worker()
-                };
-                let (previous_endpoint, previous_worker) = if kind == OwnedTopologyKind::RedoRemove
-                {
-                    (
-                        self.fixture
-                            .app
-                            .running_generator_chains
-                            .values()
-                            .next()
-                            .map(|source| source.endpoint_id),
-                        Some(worker),
-                    )
-                } else {
-                    (Some(self.initial_endpoint), Some(self.initial_worker))
-                };
-                if let Some(claim) = topology::claim_from_app(
-                    self.fixture.app(),
-                    &before,
-                    kind,
-                    before.pump_ordinal + 1,
-                    self.poll + 1,
-                    worker,
-                    previous_endpoint,
-                    previous_worker,
-                )? {
-                    self.ledger.claim(claim)?;
-                }
+            let worker = if matches!(
+                kind,
+                OwnedTopologyKind::InitialInstall | OwnedTopologyKind::ConversionRemove
+            ) {
+                self.initial_worker
+            } else {
+                latest_worker()
+            };
+            let (previous_endpoint, previous_worker) = if kind == OwnedTopologyKind::RedoRemove
+            {
+                (
+                    self.fixture
+                        .app
+                        .running_generator_chains
+                        .values()
+                        .next()
+                        .map(|source| source.endpoint_id),
+                    Some(worker),
+                )
+            } else {
+                (Some(self.initial_endpoint), Some(self.initial_worker))
+            };
+            if let Some(claim) = topology::claim_from_app(
+                self.fixture.app(),
+                &before,
+                kind,
+                before.pump_ordinal + 1,
+                self.poll + 1,
+                worker,
+                previous_endpoint,
+                previous_worker,
+            )? {
+                self.ledger.claim(claim)?;
             }
         }
         self.fixture.pump_callback_only();
