@@ -909,3 +909,32 @@ exit protocol; the outer library cannot interrupt arbitrary caller blocking code
 The new concrete thread/COM fixtures and compile contracts must receive independent
 unsafe-callsite review and durable source archival before execution. This checkpoint
 has no native/genuine-plugin, timing, device, audible-isolation or release result.
+
+### Step1 source/mock validation
+
+The disabled feature has passed independent unsafe-callsite review and the
+source-bound Linux mock gates on Rust 1.99.0. The boxed-error revision passed
+41 focused tests (25 full-kernel/COM sessions and 16 closed-port tests), all 469
+available feature vendor tests, 34 external compiler contracts, 26 doctests,
+25 helper and 13 protocol tests, and all three strict root Clippy configurations.
+One known missing SDK metadata fixture remains excluded. The final test-only
+empty-arm correction then passed direct vendor test Clippy and all three affected
+shutdown fixtures, covering 18 accepted/in-flight/unread, success/error/panic
+combinations. The earlier compile and Clippy failures are retained.
+
+The 55 domain, 88 runtime and 52 borrowed-capability compiler outcomes, 428
+default vendor tests and 1,175 core tests are explicitly reused with their
+original flags, unchanged fixtures and excluding cfg boundaries recorded. Changed
+raw source files are not described as identical. The 1,192 App executions remain
+prior-source results; current all-feature App callers were freshly compiled and
+linked, and none invokes the new session. The current helper/protocol callers
+were executed. A fresh default helper build reproduces the pre-box helper hash
+exactly. Formatting, 239 Python checks, 552 package inputs and 53-file vendor
+patch replay pass. Source, compiler commands, linked rlibs and copied test/helper
+artifacts are hash-bound in the validation receipt.
+
+These results cover library ownership, full-kernel mock processing, closed ports,
+COM lifetime and failure behavior. The 350 ms mock attached-view hold establishes
+worker progress before main releases that hold; it is not a scheduling deadline.
+No genuine plug-in, native window, helper-worker activation, device, metadata
+lease or audible-isolation acceptance follows from this checkpoint.

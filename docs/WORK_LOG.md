@@ -1409,3 +1409,34 @@ that empty match-arm body with an empty block; runtime, public API, unsafe loan
 and assertions are unchanged. Preserve the failure. After source comparison,
 review and durable archival, rerun direct vendor Clippy and the affected exit
 matrix; the preceding executions remain explicitly attributed to their source.
+
+### Scoped worker Step1 validation completed
+
+The final bounded correction passes direct vendor test Clippy and the three
+shutdown fixtures' 18 combinations. Production and unsafe source are unchanged
+from the reviewed boxed revision. That revision freshly passed 41 focused,
+469 available vendor, 34 public compiler, 26 doctest, 25 helper and 13 protocol
+checks, plus all three strict root Clippy modes. The known absent SDK-generated
+metadata fixture stays excluded; direct vendor Clippy retains only the already
+documented upstream deprecated/drain_collect exceptions.
+
+The qualified receipt names the three cfg-excluded boxed modules and the later
+one-expression fixture change. It explicitly reuses 195 private compiler
+outcomes, 428 default vendor and 1,175 core tests with actual original flags and
+fixture hashes. The 1,192 App executions remain prior-source, with fresh current
+all-feature compilation/linkage; there are no App calls to with_scoped_worker.
+No reused result is described as a raw-source-identical fresh execution.
+
+The final default helper was forced to compile from this worktree and links the
+recorded exact vendor rlib. Its SHA256 is
+`d325d65df4267f8b4bff07701971596a042dc61a56671bd3cdf2af91e03fb64c`,
+identical before and after the cfg-excluded diagnostic corrections. Formatting,
+239 Python checks, 552 package inputs and 53 reconstructed vendor files pass.
+All original resolution/compile/Clippy failures and the QA-only source-path
+binding correction remain in the text receipts. Full source and recovery bundles
+are retained separately from private executables and official plug-in assets.
+
+The feature remains disabled by default. No helper/wire/App activation, strict
+metadata-policy change, native/genuine-plugin run, device/performance claim or
+publication is included. A fixed fresh-initialized-Surge test proposal requires
+separate approval after this source/mock checkpoint is reviewed and archived.
