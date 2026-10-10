@@ -1398,3 +1398,14 @@ the box. The original Clippy failure remains retained. This representation chang
 requires its own recovery archive, review and affected-feature rerun. Older
 cfg-excluded/default results may be reused only with explicit per-file/feature
 attribution; no raw-input identity is claimed for changed feature files.
+
+### Scoped worker fixture unit-expression correction (unvalidated)
+
+The boxed revision passed fresh 41 focused worker/port tests, 469 available vendor
+tests, 34 public compiler contracts, 26 doctests, 25 helper and 13 protocol tests,
+and all three strict root Clippy modes. Direct vendor test Clippy then exposed
+one redundant trailing unit expression in the exit-matrix assertion. Replace only
+that empty match-arm body with an empty block; runtime, public API, unsafe loan
+and assertions are unchanged. Preserve the failure. After source comparison,
+review and durable archival, rerun direct vendor Clippy and the affected exit
+matrix; the preceding executions remain explicitly attributed to their source.

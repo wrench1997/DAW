@@ -17142,7 +17142,7 @@
 +}
 --- /dev/null
 +++ b/src/internal/plugin_impl/domain_tests/scoped_worker_tests.rs
-@@ -0,0 +1,1733 @@
+@@ -0,0 +1,1731 @@
 +//! Disabled-feature full-kernel session evidence using allocating, locking COM mocks.
 +//! A held attached-view call establishes overlap, not a native-plugin or audio deadline.
 +//! All intentional Rust panics occur outside COM vtables. No native GUI is created.
@@ -18449,9 +18449,7 @@
 +    } else {
 +        let error = outcome.unwrap().unwrap_err();
 +        match (&error.primary, exit_kind, sdk_fails) {
-+            (ScopedWorkerFailure::Body(Error::ProcessFailed(-76_543)), ExitKind::BodyError, _) => {
-+                ()
-+            }
++            (ScopedWorkerFailure::Body(Error::ProcessFailed(-76_543)), ExitKind::BodyError, _) => {}
 +            (ScopedWorkerFailure::Worker(_), ExitKind::Normal, true) => (),
 +            (ScopedWorkerFailure::UnconsumedReply, ExitKind::Normal, false) => (),
 +            other => panic!("wrong precedence: {other:?}"),

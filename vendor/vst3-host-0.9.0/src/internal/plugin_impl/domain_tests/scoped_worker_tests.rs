@@ -1304,9 +1304,7 @@ fn exercise_shutdown(stage: &'static str, exit_kind: ExitKind, sdk_fails: bool) 
     } else {
         let error = outcome.unwrap().unwrap_err();
         match (&error.primary, exit_kind, sdk_fails) {
-            (ScopedWorkerFailure::Body(Error::ProcessFailed(-76_543)), ExitKind::BodyError, _) => {
-                ()
-            }
+            (ScopedWorkerFailure::Body(Error::ProcessFailed(-76_543)), ExitKind::BodyError, _) => {}
             (ScopedWorkerFailure::Worker(_), ExitKind::Normal, true) => (),
             (ScopedWorkerFailure::UnconsumedReply, ExitKind::Normal, false) => (),
             other => panic!("wrong precedence: {other:?}"),
