@@ -28,18 +28,17 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         0x1f83d9ab,
         0x5be0cd19,
     ];
-    let mut chunks = bytes.chunks_exact(64);
-    for block in &mut chunks {
+    let (chunks, remainder) = bytes.as_chunks::<64>();
+    for block in chunks {
         sha256_compress(&mut state, block);
     }
-    let remainder = chunks.remainder();
     let mut suffix = [0_u8; 128];
     suffix[..remainder.len()].copy_from_slice(remainder);
     suffix[remainder.len()] = 0x80;
     let suffix_len = if remainder.len() < 56 { 64 } else { 128 };
     let bit_length = (bytes.len() as u64).wrapping_mul(8);
     suffix[suffix_len - 8..suffix_len].copy_from_slice(&bit_length.to_be_bytes());
-    for block in suffix[..suffix_len].chunks_exact(64) {
+    for block in suffix[..suffix_len].as_chunks::<64>().0 {
         sha256_compress(&mut state, block);
     }
     let mut result = String::with_capacity(64);
@@ -67,7 +66,7 @@ fn sha256_compress(state: &mut [u32; 8], block: &[u8]) {
         0xc67178f2,
     ];
     let mut words = [0_u32; 64];
-    for (index, bytes) in block.chunks_exact(4).enumerate() {
+    for (index, bytes) in block.as_chunks::<4>().0.iter().enumerate() {
         words[index] = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     }
     for index in 16..64 {
@@ -158,7 +157,7 @@ pub fn trim_q128_stereo(
     tail_frames: usize,
     latency_frames: usize,
 ) -> Result<Vec<f32>, String> {
-    if generated.len() % CHANNELS != 0 {
+    if !generated.len().is_multiple_of(CHANNELS) {
         return Err(format!(
             "odd interleaved stereo sample count: {}",
             generated.len()
@@ -333,7 +332,7 @@ pub fn parse_float32_stereo_48k_wav(bytes: &[u8]) -> Result<RawFloat32Wav, Strin
                 if payload.is_some() {
                     return Err("duplicate data chunk".to_string());
                 }
-                if chunk.len() % 8 != 0 {
+                if !chunk.len().is_multiple_of(8) {
                     return Err(format!(
                         "data chunk contains {} bytes, not complete Float32 stereo frames",
                         chunk.len(),
@@ -367,15 +366,15 @@ pub fn parse_float32_stereo_48k_wav(bytes: &[u8]) -> Result<RawFloat32Wav, Strin
     }
     let payload = payload.ok_or_else(|| "missing data chunk".to_string())?;
     let frames = payload.len() / 8;
-    if let Some(declared) = fact_frames {
-        if u64::from(declared) != frames as u64 {
-            return Err(format!(
-                "fact frame mismatch: {declared} declared, {frames} in data"
-            ));
-        }
+    if let Some(declared) = fact_frames
+        && u64::from(declared) != frames as u64
+    {
+        return Err(format!(
+            "fact frame mismatch: {declared} declared, {frames} in data"
+        ));
     }
     let mut sample_bits = Vec::with_capacity(payload.len() / 4);
-    for (index, raw) in payload.chunks_exact(4).enumerate() {
+    for (index, raw) in payload.as_chunks::<4>().0.iter().enumerate() {
         let bits = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
         check_sample(f32::from_bits(bits), index, "WAV")?;
         sample_bits.push(bits);
@@ -762,7 +761,7 @@ mod tests {
         let fmt = (*b"fmt ", format_chunk());
         let data = (*b"data", vec![0; 8]);
         assert!(parse_float32_stereo_48k_wav(&riff(&[])).is_err());
-        assert!(parse_float32_stereo_48k_wav(&riff(&[fmt.clone()])).is_err());
+        assert!(parse_float32_stereo_48k_wav(&riff(std::slice::from_ref(&fmt))).is_err());
         assert!(parse_float32_stereo_48k_wav(&riff(&[data.clone(), fmt.clone()])).is_err());
         assert!(
             parse_float32_stereo_48k_wav(&riff(&[fmt.clone(), fmt.clone(), data.clone()])).is_err()

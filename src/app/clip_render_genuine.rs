@@ -1,8 +1,9 @@
 //! Ignored, explicit-run-only qualification of the actual selected-clip App path.
 //!
 //! SOURCE PREPARATION ONLY. Ordinary builds/discovery cannot run this test. The
-//! independent IEEE/WAV oracle retains every imported body and its22 tests; only
-//! the obsolete standalone Gate test-module registration is removed. Original
+//! independent IEEE/WAV oracle preserves the imported numerical operations and
+//! its 22 tests. Adaptations remove the obsolete standalone Gate test-module
+//! registration and apply mechanical Clippy style changes. Original
 //! import SHA256 1bff180934231ca40cf92c079038f45b4dddfdd2ad29a6df9216174b12a0d8b2.
 //! The UI boundary is a headlessly rendered real review plus direct invocation
 //! of the exact begin_clip_render_stop method used by its Render-and-convert
@@ -103,7 +104,7 @@ impl Journal {
         );
         let bytes = json_bytes(&row)?;
         require(
-            bytes.len() <= 256 * 1024 && self.bytes + bytes.len() + 1 <= 16 * 1024 * 1024,
+            bytes.len() <= 256 * 1024 && self.bytes + bytes.len() < 16 * 1024 * 1024,
             "bounded journal overflow",
         )?;
         self.file
@@ -402,31 +403,31 @@ impl GenuineFixture {
                     .unwrap_or("actual controller failure or unknown outcome"),
             )?;
         }
-        if let Some(job) = &app.clip_render_job {
-            if matches!(
+        if let Some(job) = &app.clip_render_job
+            && matches!(
                 job.phase,
                 ClipRenderPhase::Capturing
                     | ClipRenderPhase::RenderingDisposing
                     | ClipRenderPhase::VerifyingMedia
                     | ClipRenderPhase::RecapturingSource
-            ) {
-                let stamp = job.binding.ok_or("conversion live binding absent")?.stamp;
-                let source = app
-                    .running_generator_chains
-                    .get(&stamp.channel_id)
-                    .ok_or("conversion exact source owner missing")?;
-                let native = source
-                    .control
-                    .native_editor_snapshot(0)
-                    .ok_or("conversion native observation missing")?;
-                require(
-                    native.capture_serial == stamp.native_capture_serial
-                        && native.parameter_capture_serial == stamp.parameter_capture_serial
-                        && native.pending_request.is_none()
-                        && !native.capture_in_progress,
-                    "unexpected ordinary native capture/publication during conversion",
-                )?;
-            }
+            )
+        {
+            let stamp = job.binding.ok_or("conversion live binding absent")?.stamp;
+            let source = app
+                .running_generator_chains
+                .get(&stamp.channel_id)
+                .ok_or("conversion exact source owner missing")?;
+            let native = source
+                .control
+                .native_editor_snapshot(0)
+                .ok_or("conversion native observation missing")?;
+            require(
+                native.capture_serial == stamp.native_capture_serial
+                    && native.parameter_capture_serial == stamp.parameter_capture_serial
+                    && native.pending_request.is_none()
+                    && !native.capture_in_progress,
+                "unexpected ordinary native capture/publication during conversion",
+            )?;
         }
         let snapshot = self.snapshot();
         require(
@@ -464,7 +465,7 @@ impl GenuineFixture {
             let mut ordinary_states = 0usize;
             for r in &s.records { match &r.kind {
                 RecordKind::Call{boundary:Boundary::Returned,outcome:Some(CallOutcome::Error(_) | CallOutcome::StrictError(_)),..} => return Err("actual host operation failed".into()),
-                RecordKind::RuntimeEvent{event,..} if matches!(event,RuntimeEvent::SlotFault{..}|RuntimeEvent::StateRejected{..}|RuntimeEvent::ParameterCommandFailed{..}) => return Err("actual runtime event reports failure".into()),
+                RecordKind::RuntimeEvent{event:RuntimeEvent::SlotFault{..}|RuntimeEvent::StateRejected{..}|RuntimeEvent::ParameterCommandFailed{..},..} => return Err("actual runtime event reports failure".into()),
                 RecordKind::WorkerJoin{outcome:observe::WorkerJoinOutcome::WorkerPanicked,..}=>return Err("actual retained worker joined with panic".into()),
                 RecordKind::AppAudioAssetEvent(AudioAssetEvent::Registered{success:false,..})=>return Err("actual asset registration failed".into()),
                 RecordKind::AppGeneratorEndpointEvent(audio::GeneratorEndpointEvent::Installed{success:false,..}|audio::GeneratorEndpointEvent::StampedRemoved{result:Err(_),..})=>return Err("actual generator lifecycle receipt rejected".into()),
@@ -769,7 +770,7 @@ impl GenuineFixture {
         Ok(())
     }
     fn preflight(&mut self) -> Check {
-        self.journal.emit("declaration",json!({"stages":STAGES,"selector":SELECTOR,"binding_sha256":self.binding.binding_hash,"ui_boundary":"headless real review plus exact shared begin_clip_render_stop acceptance method; no pointer/native-window claim","control_ceilings":CONTROL_CEILINGS,"playing_segments":PLAY_SEGMENTS,"stopped_segments":[32,32,32],"cleanup_reserve":CLEANUP_PUMPS,"outer_seconds":120,"original_imported_oracle_sha256":"1bff180934231ca40cf92c079038f45b4dddfdd2ad29a6df9216174b12a0d8b2","adapted_oracle_source_sha256":"a02d3b59af625bdc68bc992753bbfd6683b4913b2f44bd8413240b7e722d4ca2","oracle_adaptation":"removed standalone test-only Gate module registration; all22 numerical/WAV/SHA test bodies unchanged"}))?;
+        self.journal.emit("declaration",json!({"stages":STAGES,"selector":SELECTOR,"binding_sha256":self.binding.binding_hash,"ui_boundary":"headless real review plus exact shared begin_clip_render_stop acceptance method; no pointer/native-window claim","control_ceilings":CONTROL_CEILINGS,"playing_segments":PLAY_SEGMENTS,"stopped_segments":[32,32,32],"cleanup_reserve":CLEANUP_PUMPS,"outer_seconds":120,"original_imported_oracle_sha256":"1bff180934231ca40cf92c079038f45b4dddfdd2ad29a6df9216174b12a0d8b2","adapted_oracle_source_sha256":"89ca0f7eb4defed60eac65b7c8d0330a9990a3a3deb4b1792339b030cea4550b","oracle_adaptation":"removed standalone test-only Gate module registration; mechanical Clippy style adaptations only; numerical constants, operation order, type, finite and padding checks unchanged"}))?;
         self.stage(0, Stage::Preflight)?;
         self.hooks()?;
         let descriptor_pin = self.binding.raw["harness_sources"]
@@ -1716,9 +1717,9 @@ impl GenuineFixture {
                                 && transport.time_sig_denominator == 4,
                             "strict clone first/absolute transport differs",
                         )?;
-                        for index in 0..128 {
-                            generated.push(channels[0][index]);
-                            generated.push(channels[1][index]);
+                        for (&left, &right) in channels[0].iter().zip(&channels[1]) {
+                            generated.push(left);
+                            generated.push(right);
                         }
                         block += 1;
                     }
@@ -2599,14 +2600,14 @@ impl GenuineFixture {
         Ok(())
     }
     fn summary(&mut self, result: &Check, cleanup: &Check) -> Check {
-        if let Err(reason) = result {
-            if let Some(index) = self.active_stage.take() {
-                self.stage_results[index] = "failed";
-                self.journal.emit(
-                    "stage_failed",
-                    json!({"stage":STAGES[index],"error":reason}),
-                )?;
-            }
+        if let Err(reason) = result
+            && let Some(index) = self.active_stage.take()
+        {
+            self.stage_results[index] = "failed";
+            self.journal.emit(
+                "stage_failed",
+                json!({"stage":STAGES[index],"error":reason}),
+            )?;
         }
         self.journal.emit("cleanup_result",json!({"terminal":cleanup.is_ok(),"error":cleanup.as_ref().err(),"quarantined":cleanup.is_err()}))?;
         self.journal.emit("summary",json!({"success":result.is_ok()&&cleanup.is_ok()&&self.stage_results.iter().all(|s|*s=="completed"),"stages":STAGES.iter().zip(self.stage_results).map(|(stage,status)|json!({"stage":stage,"status":status})).collect::<Vec<_>>(),"error":result.as_ref().err().or_else(||cleanup.as_ref().err()),"budgets":self.budget}))

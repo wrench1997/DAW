@@ -480,7 +480,7 @@ pub fn require_audible_windows(
     windows: &[(usize, usize)],
 ) -> Result<serde_json::Value, String> {
     must(
-        samples.len() % 2 == 0 && samples.iter().all(|x| x.is_finite() && x.abs() <= 1.0),
+        samples.len().is_multiple_of(2) && samples.iter().all(|x| x.is_finite() && x.abs() <= 1.0),
         "nonfinite or non-unit-range output",
     )?;
     let mut metrics = Vec::new();
@@ -535,8 +535,8 @@ mod tests {
         }
         assert!(b.charge(Charge::Control(0)).is_err());
         assert_eq!(b.controls[1], 0);
-        for p in 0..3 {
-            for _ in 0..PLAY_SEGMENTS[p] {
+        for (p, &segments) in PLAY_SEGMENTS.iter().enumerate() {
+            for _ in 0..segments {
                 b.charge(Charge::Playing(p)).unwrap();
             }
             assert!(b.charge(Charge::Playing(p)).is_err());

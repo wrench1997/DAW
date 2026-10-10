@@ -892,6 +892,79 @@ pub(crate) fn record_lifecycle(site: &'static str) {
     with_active(|state| state.push(None, 0, || RecordKind::Lifecycle(site)));
 }
 
+/// App consumption tap: preserve tagged replies without draining or replacing
+/// normal App handling. Ordinary state publication records length only.
+pub(crate) fn record_runtime_event(
+    endpoint_id: u64,
+    project_session: u64,
+    instance_id: u64,
+    event: &RuntimeEvent,
+) {
+    with_active(|state| {
+        let bytes = match event {
+            RuntimeEvent::SlotReady { name, .. } => {
+                if name.len() > MAX_TEXT {
+                    state.fail("observer runtime name cap exceeded");
+                    return;
+                }
+                name.len()
+            }
+            RuntimeEvent::SlotFault { message, .. }
+            | RuntimeEvent::ParameterCommandFailed { message, .. } => {
+                if message.len() > MAX_TEXT {
+                    state.fail("observer runtime error cap exceeded");
+                    return;
+                }
+                message.len()
+            }
+            RuntimeEvent::ParameterCatalogPage { items, .. } => {
+                if items.len() > crate::plugins::plugin_runtime::MAX_PLUGIN_PARAMETER_PAGE_ITEMS
+                    || items
+                        .iter()
+                        .any(|p| p.name.len() > MAX_TEXT || p.unit.len() > MAX_TEXT)
+                {
+                    state.fail("observer catalog page cap exceeded");
+                    return;
+                }
+                items
+                    .iter()
+                    .map(|p| {
+                        p.name.len()
+                            + p.unit.len()
+                            + std::mem::size_of::<
+                                crate::plugins::plugin_runtime::PluginParameterDescriptor,
+                            >()
+                    })
+                    .sum()
+            }
+            RuntimeEvent::State {
+                slot,
+                request_id,
+                epoch,
+                bytes,
+            } => {
+                state.push(None, 0, || RecordKind::OrdinaryState {
+                    endpoint_id,
+                    project_session,
+                    instance_id,
+                    slot: *slot,
+                    request_id: *request_id,
+                    epoch: *epoch,
+                    byte_len: bytes.len(),
+                });
+                return;
+            }
+            _ => 0,
+        };
+        state.push(None, bytes, || RecordKind::RuntimeEvent {
+            endpoint_id,
+            project_session,
+            instance_id,
+            event: event.clone(),
+        });
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -989,77 +1062,4 @@ mod tests {
         );
         assert!(state.records.iter().all(|r| r.stage == Stage::Conversion));
     }
-}
-
-/// App consumption tap: preserve tagged replies without draining or replacing
-/// normal App handling. Ordinary state publication records length only.
-pub(crate) fn record_runtime_event(
-    endpoint_id: u64,
-    project_session: u64,
-    instance_id: u64,
-    event: &RuntimeEvent,
-) {
-    with_active(|state| {
-        let bytes = match event {
-            RuntimeEvent::SlotReady { name, .. } => {
-                if name.len() > MAX_TEXT {
-                    state.fail("observer runtime name cap exceeded");
-                    return;
-                }
-                name.len()
-            }
-            RuntimeEvent::SlotFault { message, .. }
-            | RuntimeEvent::ParameterCommandFailed { message, .. } => {
-                if message.len() > MAX_TEXT {
-                    state.fail("observer runtime error cap exceeded");
-                    return;
-                }
-                message.len()
-            }
-            RuntimeEvent::ParameterCatalogPage { items, .. } => {
-                if items.len() > crate::plugins::plugin_runtime::MAX_PLUGIN_PARAMETER_PAGE_ITEMS
-                    || items
-                        .iter()
-                        .any(|p| p.name.len() > MAX_TEXT || p.unit.len() > MAX_TEXT)
-                {
-                    state.fail("observer catalog page cap exceeded");
-                    return;
-                }
-                items
-                    .iter()
-                    .map(|p| {
-                        p.name.len()
-                            + p.unit.len()
-                            + std::mem::size_of::<
-                                crate::plugins::plugin_runtime::PluginParameterDescriptor,
-                            >()
-                    })
-                    .sum()
-            }
-            RuntimeEvent::State {
-                slot,
-                request_id,
-                epoch,
-                bytes,
-            } => {
-                state.push(None, 0, || RecordKind::OrdinaryState {
-                    endpoint_id,
-                    project_session,
-                    instance_id,
-                    slot: *slot,
-                    request_id: *request_id,
-                    epoch: *epoch,
-                    byte_len: bytes.len(),
-                });
-                return;
-            }
-            _ => 0,
-        };
-        state.push(None, bytes, || RecordKind::RuntimeEvent {
-            endpoint_id,
-            project_session,
-            instance_id,
-            event: event.clone(),
-        });
-    });
 }
