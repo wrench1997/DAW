@@ -5,6 +5,8 @@
 //! Fixture's pending-generator handoff. It does not exercise the SDK picker/load
 //! method. All callback receipts, subsequent polls, compilation, conversion,
 //! history operations, restoration installation and joins are production paths.
+#[path = "clip_render_current_source_dispatch_tests.rs"]
+mod current_source_dispatch_tests;
 use super::*;
 use crate::app::clip_render_job::genuine::topology::{
     self, OwnedTopologyKind, OwnedTopologyLedger, OwnedTopologyPhase, TopologyPumpRole,

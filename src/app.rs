@@ -14619,6 +14619,29 @@ impl CitrusApp {
         }
     }
 
+    /// Admission for new source-bearing work. Cached compile identity alone is
+    /// insufficient during the normal fingerprint debounce after a Project edit.
+    /// This is read-only and intentionally does not depend on compiler liveness
+    /// or unrelated pending jobs; an exact retained current source remains usable.
+    fn timeline_audio_source_has_current_authority(&self) -> bool {
+        let Some(source) = self.timeline_audio_source.as_ref() else {
+            return false;
+        };
+        let sample_rate = self.timeline_sample_rate();
+        source.generation == self.timeline_desired_generation
+            && self.timeline_audio_sync.source_generation == Some(source.generation)
+            && timeline_source_identity_is_current(
+                source.generation,
+                source.fingerprint,
+                source.sample_rate,
+                self.timeline_compiled_generation,
+                self.timeline_compiled_fingerprint,
+                self.timeline_observed_fingerprint,
+                sample_rate,
+            )
+            && source.fingerprint == self.clip_timeline_fingerprint(sample_rate)
+    }
+
     fn recover_timeline_runtime_if_needed(&mut self) {
         if self.plugin_processing_blocks_playback() {
             return;
@@ -14641,6 +14664,9 @@ impl CitrusApp {
             );
             return;
         };
+        if !self.timeline_audio_source_has_current_authority() {
+            return;
+        }
         let frame = snapshot
             .timeline_frame
             .min(source.timeline.duration_frames());
@@ -14816,6 +14842,19 @@ impl CitrusApp {
             TimelineAudioSyncPhase::InstallReady
                 | TimelineAudioSyncPhase::LoopReady
                 | TimelineAudioSyncPhase::SeekReady
+                | TimelineAudioSyncPhase::AwaitingActivation {
+                    activation_request_id: 0,
+                    ..
+                }
+        ) && !self.timeline_audio_source_has_current_authority()
+        {
+            return;
+        }
+        if matches!(
+            self.timeline_audio_sync.phase,
+            TimelineAudioSyncPhase::InstallReady
+                | TimelineAudioSyncPhase::LoopReady
+                | TimelineAudioSyncPhase::SeekReady
         ) && !self.ensure_timeline_generator_routes_ready(&timeline)
         {
             return;
@@ -14895,6 +14934,9 @@ impl CitrusApp {
         };
         if source.generation != generation {
             self.timeline_audio_sync.confirmation_is_stale();
+            return;
+        }
+        if !self.timeline_audio_source_has_current_authority() {
             return;
         }
         let Some(loop_token) = self.timeline_audio_sync.loop_token else {
