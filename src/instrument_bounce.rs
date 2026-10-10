@@ -283,6 +283,7 @@ impl InstrumentBouncePlan {
         Self::prepare_internal(project, channel_id, sample_rate, tail_frames, None)
     }
 
+    #[allow(dead_code)] // Dormant Stop A entry; the App controller is separately gated.
     pub(crate) fn prepare_occurrence(
         project: &Project,
         request: Arc<crate::occurrence_request::OccurrenceRenderRequest>,

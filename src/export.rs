@@ -1174,8 +1174,11 @@ impl std::fmt::Display for PublicationError {
 pub(crate) struct PublicationEvidence {
     pub(crate) phase: PublicationPhase,
     /// Present if and only if this invocation successfully created the link.
+    #[allow(dead_code)] // Dormant Stop A: retained for the future App failure owner.
     pub(crate) retained_destination: Option<PathBuf>,
+    #[allow(dead_code)] // Dormant Stop A: retained for the future App failure owner.
     pub(crate) retained_stage: Option<PathBuf>,
+    #[allow(dead_code)] // Dormant Stop A: retained for the future App failure owner.
     pub(crate) identity: Option<PublishedFileIdentity>,
 }
 

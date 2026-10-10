@@ -866,10 +866,10 @@ impl VerificationGate {
 impl VerificationPolicy {
     #[cfg(test)]
     fn step(&self, step: VerificationStep, cancel: &AtomicBool) -> Result<(), MediaProblem> {
-        if let Some((at, gate)) = &self.fixture.pause_step {
-            if *at == step {
-                gate.wait();
-            }
+        if let Some((at, gate)) = &self.fixture.pause_step
+            && *at == step
+        {
+            gate.wait();
         }
         assert_ne!(
             self.fixture.panic_at,
