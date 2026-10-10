@@ -15,6 +15,10 @@ required-features = ["vst3"]
 default = ["vst2", "vst3"]
 vst2 = ["dep:vst"]
 vst3 = ["dep:vst3-host", "dep:xcb"]
+# Development-only library session. No helper caller or metadata-policy activation.
+experimental-scoped-worker = ["vst3", "vst3-host/experimental-scoped-worker"]
+# Dormant Linux strict offline clone; no App/UI or genuine acceptance implied.
+experimental-fresh-helper = ["vst3", "vst3-host/experimental-fresh-helper"]
 
 [dependencies]
 anyhow = "1.0"

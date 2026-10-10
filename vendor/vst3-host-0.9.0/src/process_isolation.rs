@@ -642,6 +642,10 @@ pub enum HostCommand {
     },
     /// Query per-bus channel counts and activation state.
     AudioBusLayout,
+    /// Check actual component audio buses against prepared shape without servicing I/O.
+    CheckedAudioBusLayout,
+    /// Enumerate current component event buses on the helper's owner thread.
+    EventBusLayout,
     /// Serialize the plugin's current state to an opaque byte blob.
     SaveState,
     /// Restore the plugin's state from a blob previously returned by `SaveState`.
@@ -910,6 +914,21 @@ pub enum HostResponse {
     AudioBusLayout {
         /// Complete input/output layout.
         layout: crate::audio::AudioBusLayout,
+    },
+    /// Actual audio shape checked against prepared buffers and pending topology flags.
+    CheckedAudioBusLayout {
+        /// Complete attested input/output layout.
+        layout: crate::plugin::CheckedAudioBusLayout,
+    },
+    /// Explicit harmless refusal of one of the new strict metadata queries.
+    MetadataQueryRejected {
+        /// Bounded reason; ordinary remote errors remain faults.
+        reason: crate::MetadataQueryRejection,
+    },
+    /// Current component event buses, with explicit unknown activation when necessary.
+    EventBusLayout {
+        /// Complete current input/output layout.
+        layout: crate::plugin::EventBusLayout,
     },
     /// A single parameter value (normalized).
     ParameterValue {

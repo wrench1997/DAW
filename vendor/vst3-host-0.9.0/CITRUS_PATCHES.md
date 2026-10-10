@@ -15,6 +15,38 @@
 
 ## Bounded upstream code changes
 
+### Dormant instrument-bounce event-bus query (unvalidated source checkpoint)
+
+Adds `Plugin::event_bus_layout`, its main-thread facade and an unsupported-default
+internal method, plus additive `EventBusLayout` command/response variants. The
+direct implementation enumerates current component event buses on the control
+thread, bounds counts/channels and checks every BusInfo result. Activation is
+reported only from a matching successful host activation record; unknown is
+explicit and `kDefaultActive` is never used as proof. The isolated query is
+fallible and never retries/recovers or substitutes cached PluginInfo MIDI bits.
+Production and vendored helper dispatch run the query on their existing owner.
+Existing wire commands, processing and state methods are unchanged. Plugin-free
+component/protocol tests are added, but no execution or vendor compatibility is
+claimed by this source checkpoint. The application keeps bounce dormant.
+
+### Strict audio-bus attestation (unvalidated source checkpoint)
+
+Additive `checked_audio_bus_layout`/`CheckedAudioBusLayout` compares actual component
+count/index/channels/main-or-aux descriptors with prepared buffers on the owner
+thread. Prepared bus types are retained from the same SDK reads that prepare
+channel counts, preserving legacy fallback behavior but refusing unknown proof.
+Existing `audio_bus_layout` behavior is unchanged. Host activation is attested
+only where known; default flags never prove live state. A non-draining restart
+flag read before/after enumeration rejects pending I/O/reload without servicing
+or reconfiguring the source. Both current event and checked audio queries use it.
+A bounded `MetadataQueryRejection` enum and additive typed helper response carry
+only Unsupported/PendingTopology/InconsistentTopology admission refusal. Untyped
+Error, wrong/malformed reply, SDK/IPC failures remain faults; no recovery/default
+layout is permitted. Added component/protocol fixtures cover Start/parameter/type
+changes, pending/reentrant flags and SDK/protocol errors; none has run at freeze.
+
+### Previously integrated extensions
+
 1. `src/plugin.rs`: additive `IsolatedEditorOwner`, `IsolatedEditorCommand`, and
    `IsolatedEditorState` types; `Plugin::isolated_editor` and an unsupported default internal
    implementation; checked `try_take_parameter_edits`/`try_take_host_notifications` drains so
@@ -356,3 +388,83 @@ The first source recovery archive was explicitly unvalidated. Focused tests cove
 zero/infinite tail, wrong/Error/malformed replies, helper death with recovery opt-in, partial
 latency/tail reads and old-chain retention. Executed validation is recorded separately.
 No wire addition, metadata cache, automatic reload, COM threading or SHM policy change.
+
+
+## Test-only borrowed processor capability (2026-10-10)
+
+Add a wholly cfg(test), private non-owning process capability and scoped-thread
+COM fixtures. The sole new unsafe Send applies only to that test token; no
+production owner, lease, runtime or host interface gains cross-thread authority.
+Owner/module lifetime, main-thread reference destruction, serial unsafe Process,
+atomic data-exchange interval and scoped join are audited independently before
+execution. The fixtures intentionally omit production runtime orchestration and
+do not enable an audio worker, metadata cache or user mode. Source recovery
+checkpoint is unvalidated until separate receipts record executed tests.
+
+## Scoped full-runtime process dependency (2026-10-10)
+
+Separate process-only SDK authority from lifecycle setProcessing notification.
+The existing kernel bodies, caller-side public envelopes and non-Send production
+session remain intact. A wholly cfg(test) disjoint runtime loan exercises that
+same complete kernel while loading-thread controller/UI access remains possible;
+only the test wrapper gains narrowly audited Send, without moving owning COM
+references, replacing prepared buffers or adding a helper worker. Retired host
+queue final Release after rebuild remains a disclosed processing-thread free
+possibility, not a no-free guarantee. Source checkpoint is unvalidated until the
+separate executed receipt, and unsafe fixture invocations require source review.
+
+## Disabled scoped worker library feature (2026-10-10, unvalidated)
+
+Add opt-in `experimental-scoped-worker`, absent from defaults, with a Linux-only
+scoped full-kernel worker and closed borrowed message/UI bridges. Main retains
+all owning COM/module/prepared references; only a private fixed dispatcher uses
+a narrow audited Send loan. Callback registration rejects entry, while existing
+public callback affinity and the worker's whole-success meter behavior are kept.
+Capacity-one transport and one outstanding credit provide bounded command count;
+caller audio/payload bytes and processing allocations are not claimed bounded or
+allocation-free. Accepted work joins before owner state/setup/reset/metadata or
+teardown. No helper/wire/App activation or metadata policy changes are included.
+Ordinary MIDI admission is mechanically shared with the owner, with the same
+public scalar validation before worker bookkeeping; mapped MIDI remains main-side.
+New source/COM/compiler fixtures require review and archival before execution.
+
+## Disabled strict fresh-helper foundation (source checkpoint; unvalidated)
+
+`experimental-fresh-helper` compiles a Linux-only crate-private `fresh_helper`
+module for low-level codec/pump/cleanup mock validation. It has no production
+caller. The legacy process-isolation implementation, wire variants, retries and
+serde behavior are unchanged. New files implement a closed eight-operation
+subset, strict bounded payload handling and exact audio shape, cooperative
+whole-exchange deadlines, owner-thread nonblocking I/O and cancellation, and
+retained Child ownership through a single reserved process-wide quarantine.
+No real plugin/COM authority is added. Full limits and the deliberate restrictions
+on nonempty event replies, legacy state arrays, SIGPIPE and concurrent strict
+sessions are documented in the repository's strict-foundation guide.
+
+## Closed strict offline client (Stop A source checkpoint; unvalidated)
+
+Extend the disabled Linux fresh-helper feature with a doc-hidden, typed, non-Send
+client and synchronous borrowed request view. Ten existing metadata/lifecycle/
+ordinary-note operations receive bounded closed codecs; full parameter fields,
+raw checked layouts and typed metadata refusals survive unchanged. No generic
+protocol/owner extraction or caller activation is exported. Split protocol/reap
+deadlines and a nonwaiting retained-owner cleanup continuation share the original
+teardown kernel, preserve first error evidence and cache proven exit status.
+The repository's STRICT_OFFLINE_CLIENT.md records limits and the separately
+gated future one-shot adapter; no real plugin or App integration is included.
+
+## Dry-generator acknowledgment and silent-input prerequisite (unvalidated)
+
+Owner activation records now distinguish successful false/true SDK acknowledgments
+from prepared participation, retaining a complete observed bus descriptor binding.
+Default inactive buses remain unknown; no default activation calls are added.
+Known state/topology changes and failures invalidate records; owner setup rechecks
+audio and event bindings. Pure rejected used-Surge restore leaves evidence intact.
+Checked getters expose the recorded known state, never infer false from prepared
+nonparticipation. No SDK processing kernel or owning COM thread authority changes.
+
+The disabled closed strict client adds count-only Q128 silent generator inputs
+(0..2); its fixed borrowed positive-zero view uses the existing bounded codec,
+without arbitrary external input authority or a per-call input Vec. New codec,
+client, activation and actual f32/f64 COM fixtures are unexecuted at this freeze.
+See docs/DRY_GENERATOR_TOPOLOGY.md for source/capture admission and remaining gates.

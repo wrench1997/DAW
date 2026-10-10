@@ -28074,29 +28074,7 @@ fn plugin_slot_config_candidate(
 }
 
 fn plugin_instance_runtime_spec(instance: &PluginInstance) -> PluginLoadSpec {
-    PluginLoadSpec {
-        descriptor: PluginDescriptor {
-            id: instance.uid.clone(),
-            name: instance.name.clone(),
-            vendor: instance.vendor.clone(),
-            path: instance.path.clone(),
-            format: match instance.format {
-                ProjectPluginFormat::Vst2 => ScannedPluginFormat::Vst2,
-                ProjectPluginFormat::Vst3 => ScannedPluginFormat::Vst3,
-            },
-            category: project_plugin_role_label(instance.role).to_owned(),
-            is_instrument: instance.role == PluginRole::Instrument,
-            verified: instance.path.exists(),
-            vst3_metadata: None,
-            scan_error: None,
-        },
-        class_uid: None,
-        vst3_helper_path: None,
-        initial_state: instance.opaque_state.clone(),
-        enabled: instance.enabled,
-        bypassed: instance.bypass,
-        wet: instance.wet,
-    }
+    plugins::plugin_load_spec_from_instance(instance)
 }
 
 fn channel_generator_runtime_spec(

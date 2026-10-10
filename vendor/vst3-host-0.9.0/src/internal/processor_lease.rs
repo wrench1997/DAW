@@ -20,10 +20,15 @@ use vst3::{
     },
 };
 
-/// Kept private to the crate, and intentionally narrower than IAudioProcessor itself.
-pub(super) trait ProcessorCalls {
+/// Only the SDK render call. Runtime kernels cannot start/stop processing through this trait.
+/// This capability alone does not grant cross-thread use.
+pub(super) trait ProcessorProcessCall {
     /// Caller must provide the SDK's valid, exclusively owned processing buffers/queues.
     unsafe fn process(&mut self, data: &mut ProcessData) -> tresult;
+}
+
+/// Lifecycle notification remains separate from the process-only kernel dependency.
+pub(super) trait ProcessorCalls {
     fn set_processing(&mut self, state: u8) -> tresult;
 }
 
@@ -46,13 +51,15 @@ impl<'owner> ProcessorLease<'owner> {
     }
 }
 
-impl ProcessorCalls for ProcessorLease<'_> {
+impl ProcessorProcessCall for ProcessorLease<'_> {
     unsafe fn process(&mut self, data: &mut ProcessData) -> tresult {
         // SAFETY: the caller provides live ProcessData buffers; the exclusive owner borrow
         // keeps its owning COM reference (and enclosing module) alive for this call.
         unsafe { self.processor.process(data) }
     }
+}
 
+impl ProcessorCalls for ProcessorLease<'_> {
     fn set_processing(&mut self, state: u8) -> tresult {
         // SAFETY: private lifecycle callers ensure the component is active and no process
         // call overlaps. The lease cannot be sent to another thread or outlive the owner.

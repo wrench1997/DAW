@@ -567,6 +567,22 @@ fn handle(
             Ok(layout) => HostResponse::AudioBusLayout { layout },
             Err(e) => err("AudioBusLayout", e),
         }),
+        HostCommand::CheckedAudioBusLayout => {
+            with(plugin, |p| match p.checked_audio_bus_layout() {
+                Ok(layout) => HostResponse::CheckedAudioBusLayout { layout },
+                Err(vst3_host::Error::MetadataQueryRejected(reason)) => {
+                    HostResponse::MetadataQueryRejected { reason }
+                }
+                Err(e) => err("CheckedAudioBusLayout", e),
+            })
+        }
+        HostCommand::EventBusLayout => with(plugin, |p| match p.event_bus_layout() {
+            Ok(layout) => HostResponse::EventBusLayout { layout },
+            Err(vst3_host::Error::MetadataQueryRejected(reason)) => {
+                HostResponse::MetadataQueryRejected { reason }
+            }
+            Err(e) => err("EventBusLayout", e),
+        }),
         HostCommand::SaveState => with(plugin, |p| match p.save_state() {
             Ok(data) => HostResponse::State { data },
             Err(e) => err("SaveState", e),

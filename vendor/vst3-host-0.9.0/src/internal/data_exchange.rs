@@ -175,6 +175,12 @@ pub(super) struct DataExchangeProcessGate<'owner> {
 }
 
 impl DataExchangeProcessGate<'_> {
+    /// Readiness only; the process flag itself is never exposed to production callers.
+    #[cfg(all(feature = "experimental-scoped-worker", target_os = "linux"))]
+    pub(super) fn is_entered(&self) -> bool {
+        self.in_process.load(Ordering::Acquire)
+    }
+
     /// Keep data-exchange block access enabled only for the returned guard's scope.
     /// Borrowing the gate exclusively prevents overlapping entries through this view.
     pub(super) fn enter(&mut self) -> DataExchangeProcessGuard<'_> {
@@ -183,6 +189,15 @@ impl DataExchangeProcessGate<'_> {
             in_process: self.in_process,
             _not_send_sync: PhantomData,
         }
+    }
+}
+
+// Test-only borrowing proof. The normal gate remains !Send/!Sync and no production
+// caller can extract its flag or turn it into cross-thread authority.
+#[cfg(test)]
+impl<'owner> DataExchangeProcessGate<'owner> {
+    pub(super) fn flag_for_scoped_worker_test(&self) -> &'owner AtomicBool {
+        self.in_process
     }
 }
 

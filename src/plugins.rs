@@ -16,6 +16,11 @@ use walkdir::{DirEntry, WalkDir};
 #[allow(dead_code)] // public control-plane surface is consumed incrementally by Mixer/UI code
 pub mod plugin_runtime;
 
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[path = "instrument_bounce_strict_backend.rs"]
+#[allow(dead_code)] // Explicit dormant renderer entry only; no App/UI activation.
+pub(crate) mod strict_backend;
+
 #[cfg(all(feature = "vst3", target_os = "windows"))]
 const VST3_HELPER_FILE_NAME: &str = "vst3-host-helper.exe";
 #[cfg(all(feature = "vst3", not(target_os = "windows")))]
@@ -429,6 +434,42 @@ fn vst3_helper_path_beside(executable: &Path) -> Result<PathBuf, String> {
 #[derive(Default)]
 pub struct NativePluginHost {
     _private: (),
+}
+
+/// Shared persistable load description. The saved UID remains the historical descriptor ID;
+/// it is not silently reinterpreted as a factory class UID by the bounce path.
+pub(crate) fn plugin_load_spec_from_instance(
+    instance: &crate::model::PluginInstance,
+) -> plugin_runtime::PluginLoadSpec {
+    use crate::model::{PluginFormat as StoredFormat, PluginRole};
+    plugin_runtime::PluginLoadSpec {
+        descriptor: PluginDescriptor {
+            id: instance.uid.clone(),
+            name: instance.name.clone(),
+            vendor: instance.vendor.clone(),
+            path: instance.path.clone(),
+            format: match instance.format {
+                StoredFormat::Vst2 => PluginFormat::Vst2,
+                StoredFormat::Vst3 => PluginFormat::Vst3,
+            },
+            category: match instance.role {
+                PluginRole::Instrument => "Instrument",
+                PluginRole::Effect => "Effect",
+                PluginRole::Unknown => "Unknown role",
+            }
+            .to_owned(),
+            is_instrument: instance.role == PluginRole::Instrument,
+            verified: instance.path.exists(),
+            vst3_metadata: None,
+            scan_error: None,
+        },
+        class_uid: None,
+        vst3_helper_path: None,
+        initial_state: instance.opaque_state.clone(),
+        enabled: instance.enabled,
+        bypassed: instance.bypass,
+        wet: instance.wet,
+    }
 }
 
 impl NativePluginHost {
