@@ -6,7 +6,13 @@
 
 本流程锁定 Cargo.lock、Rust 工具链、LLVM-MinGW 版本、feature 集与发布文件白名单。它使发布输入和步骤可追溯；除非已在独立干净环境中比较结果，否则不要宣称不同机器上的输出逐字节完全相同。最终发布身份以签名后的 SHA-256 为准。
 
-## 当前源码验证状态（2026-10-10）
+## 当前源码验证状态（2026-10-10 03:16 UTC）
+
+本轮为 Piano Note Properties 短音符 timing/精确 f32 文本往返修复，审查和实际测试的代码为 `707e0ea`，最后指南提交为 `97be40b`。700 文件清单逐字节对应；1,175 core、1,192 App +25 helper +13 protocol、22 expression checks、两套严格 Clippy、fmt/build/helper smoke 和 239 Python（零 skip）通过。没有 runtime 实验分支、真实插件或新 rendered/native/device 验收。`3adc585` 首次 fixture dirty-baseline 失败保留；测试基线修正不改变 runtime。新提交实际 Windows CI 和最终源包校验见交付包外部验证记录。
+
+历史 `3018b41` 的 [preview](https://github.com/wrench1997/DAW/actions/runs/38015281690) 完整通过且无上传；[quality](https://github.com/wrench1997/DAW/actions/runs/38015281682) 源码/control/state/lifecycle 通过，paint 前后失败、repaint 跳过。所有旧证据保持原始源码和 helper 归属。
+
+## 前一源码检查点（2026-10-10 01:58 UTC）
 
 本轮仅集成已审查的 checked latency/tail 与 AudioBusLayout 拒绝策略修复（`6fdfb8f`、`959958f`），源码与 700 文件测试清单一致。1,188 App、1,171 core、两套严格 root Clippy、fmt 和 239 Python 通过；未变的 vendor/helper/protocol 输入显式复用前一提交结果。集成目录再次检查真实 package 文档/QA/provenance 白名单及原始 archive+patch 重建。没有新真实插件/native/Windows runtime 或性能验收；源包的终态记录将列出新提交实际 CI，不能沿用旧结论。
 

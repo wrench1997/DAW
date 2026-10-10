@@ -11,7 +11,13 @@ Status terms:
 
 ## Current implementation and historical evidence
 
-Current source adds checked latency/tail and audio-bus layout admission. Failed
+Current Piano properties now use the canonical 1/64-beat timing minimum and exact
+f32 display round trips, preserving valid short-note starts and avoiding unintended
+changes on numeric focus/Enter or Apply. Source gates pass22 expression,1,175 core
+and1,192 App tests; direct production egui input covers dirty/Undo preservation.
+No new desktop/rendered-capture or FL parity claim follows. See [note expression](PIANO_NOTE_EXPRESSION.md).
+
+The previous source added checked latency/tail and audio-bus layout admission. Failed
 queries reject the candidate or preserve the existing fault boundary rather than
 inventing zero/stereo metadata. Source tests pass 1,188 App and 1,171 core cases;
 new genuine-plugin/native/Windows runtime acceptance remains pending. No new UI,

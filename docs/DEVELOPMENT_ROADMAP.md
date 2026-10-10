@@ -1,6 +1,6 @@
 # Development roadmap
 
-Updated: 2026-10-10 01:58 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
+Updated: 2026-10-10 03:16 UTC. Current priorities are detailed Piano composition and verified real-plugin usability/routing, while the full song outcome remains: **make a song, edit it without unintended changes, save it, recover its media, export the supported mix, and reopen it without losing work**. This document tracks concrete acceptance rather than promised dates or an undifferentiated feature list.
 
 ## Baseline and evidence rules
 
@@ -13,7 +13,20 @@ Updated: 2026-10-10 01:58 UTC. Current priorities are detailed Piano composition
 
 - Follow-on guarded state source **`60134a5`** is locally integrated from reviewed `c056dc5`. It rejects used/editor-opened exact Surge XT 1.3.4 before helper detachment or mutation, with fresh-instance/native rejection evidence. This guard later passed combined gates and exact Windows source/preview at244f622. The [state report](PLUGIN_STATE_RESTORE_LIMITS.md) retains previous failures, the legacy Admin caller limitation and absence of silent settlement. It now combines with reviewed timing source at **4fdfbc2**, whose fresh aggregate gates now pass1,170 app +22 helper +5 editor protocol +2 transport protocol,1,166 core,207 Python,276 available vendor tests (one named missing-fixture exclusion),26 doctests, both strict Clippy modes and both MSVC source profiles. Combined default2048 four-case delivery and fresh-state checks passed with helper9dd18d74; its exact244f622 Windows results are recorded above.
 
-## Current checked metadata/layout checkpoint
+## Current short-note properties checkpoint
+
+Reviewed runtime `707e0ea` and final guide `97be40b` preserve valid short-note
+timing and exact untouched f32 numeric round trips. Canonical 1/64-beat minimum,
+1/24-beat start-only edits, last legal start4095.984375 and precise end bounds
+have production-input and candidate regressions. Final execution passes22 focused,
+1,175 core and1,192 App +25 helper +13 protocol, both strict Clippy modes, fmt,
+build/helper smoke and239 Python cases with zero skips. The initial precision
+fixture failure remains recorded; its fix changes only saved-baseline setup.
+No experimental runtime branch, new renderer/device/plugin or performance result
+is included. Exact-commit Windows CI and source-bundle integrity close publication;
+the latest historical3018 preview passes while native paint remains failed.
+
+## Historical checked metadata/layout checkpoint
 
 Reviewed `6fdfb8f` and `959958f` are integrated byte-for-byte. Failed isolated
 latency/tail polls and unavailable AudioBusLayout now reject readiness instead of

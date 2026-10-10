@@ -1,8 +1,16 @@
 # 当前开发状态
 
-最后更新：2026-10-10 01:58 UTC。以当前源码、集成状态和实际执行结果为准。
+最后更新：2026-10-10 03:16 UTC。以当前源码、集成状态和实际执行结果为准。
 
-## 当前检查点：拒绝未知插件元数据
+## 当前检查点：短音符属性与无意舍入修复
+
+- 已按原提交快进集成审查通过的 `96223cc`、`3adc585`、`707e0ea` 和文档提交 `97be40b`。全部 700 文件的大小、SHA256 和 Git blob 与冻结清单一致；实际执行测试的代码是 `707e0ea`。仅 expression 实现、测试和既有指南发生功能提交变化，没有混入实验 runtime 分支。
+- Piano Note Properties 的新 timing 编辑与 Draw/resize 共用 1/64 beat 最小长度。1/24 beat 等合法短音符只改 start 不再被拒绝；最晚合法最小音符 start 为 4095.984375。以 f64 检查存储的 f32 start+length，避免浮点舍入掩盖越界。
+- Start/Length 显示使用可以精确往返 f32 的最短文本。只聚焦数值后 Enter 或直接 Apply，不再把短音符舍入，也不应制造 dirty 或 Undo。生产 egui 输入测试覆盖 1/64、1/24 和末端合法 start 的两字段、两种提交路径。
+- 最终源码执行通过：22 expression checks、1,175 core、1,192 App +25 helper +13 protocol、fmt、两套严格 all-target Clippy、all-bin build、普通 helper smoke 和 239 Python（零 skip）。集成目录再次检查 Python/package 文档/QA 清单；不重复或冒称新的 Rust执行。`3adc585` 的 21 pass/1 fixture dirty-baseline 失败保留，后续只初始化保存指纹修正测试，无 runtime 改动。
+- 没有新的 rendered capture、native desktop、physical input/audio、真实插件或性能验收；新 Windows CI 待发布后执行，终态另写源包验证记录。上一 `3018b41` 的 [preview](https://github.com/wrench1997/DAW/actions/runs/38015281690) 通过，[quality](https://github.com/wrench1997/DAW/actions/runs/38015281682) 仍保留两次 paint capture 失败和 repaint 跳过。既有证据与旧 helper 归属不变。
+
+## 历史检查点：拒绝未知插件元数据
 
 - 已按原提交快进集成 `6fdfb8f` 和 `959958f`，与独立审查、执行测试的 700 个源码文件逐字节一致。生产路径不再把 latency/tail 查询失败当作合法零值，也不再把 `AudioBusLayout` 查询失败猜成 stereo；合法零值、无限 tail 和合法 empty/mono/multibus 回答仍保留。
 - 当前源码测试通过：1,188 all-feature App、1,171 core、两套严格 root Clippy、fmt；集成目录重新执行 239 Python（含四项真实 Unix descriptor）及 vendor patch 重建。第二提交未变的 68 个 vendor/helper/protocol 输入明确复用第一提交的 400 available vendor、26 doctests、25 helper、13 protocol 结果，不冒称重新执行。
