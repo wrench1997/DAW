@@ -31,9 +31,11 @@ fn metadata(latency: u32, channels: usize) -> BouncePluginMetadata {
     }
 }
 fn fixture_project(song_frames: u64) -> Project {
-    let mut project = Project::default();
-    project.tempo = 120.0;
-    project.song_length_beats = song_frames as f32 / 4000.0;
+    let mut project = Project {
+        tempo: 120.0,
+        song_length_beats: song_frames as f32 / 4000.0,
+        ..Project::default()
+    };
     project.automation_lanes.clear();
     project.channels.truncate(1);
     project.channels[0].instrument_plugin_instance_id = Some(41);

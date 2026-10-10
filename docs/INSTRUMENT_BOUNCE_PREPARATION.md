@@ -354,3 +354,18 @@ after every poll, including a terminal one. Expiry stays a publication-blocking
 diagnostic; CleanupPending is shown only while termination remains unproven.
 A deterministic first-terminal-poll fixture and nonexpired control cover this
 boundary. Both unexecuted source checkpoints remain in Git/archive history.
+
+### First pure-slice plugin-free execution at `73b051e`
+
+Forced-source all-feature/all-target compilation passed. The copied App binary
+passed 33 bounce/mapper/coordinator tests, all 89 export-related tests, and 115
+runtime-module tests; helper 25 and protocol 13 passed. No-default/core compilation
+and its bounce 33 / export 89 groups also passed. These are focused gates, not
+full App/core aggregates or genuine VST qualification.
+
+Root Clippy stopped at one new test-only `field_reassign_with_default` lint in
+`fixture_project`. The next correction uses a Project struct initializer with
+exactly the same tempo/song length values; production Rust is unchanged. The
+failed Clippy receipt remains under `73b051e`. Core Clippy, Cargo fmt, Python and
+package checks were not reached in that attempt. The fixture correction is
+archived before rerunning; prior passing counts retain their original hash.
