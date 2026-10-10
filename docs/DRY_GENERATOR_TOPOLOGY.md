@@ -235,3 +235,23 @@ The earlier genuine001 remains FAILED and the one-source diagnostic remains only
 an observed refusal with qualification_success=false. A new fixed qualification
 must use the actual observed roles and newly observed known false acknowledgments,
 with separate frozen harness, review, archive and root authorization.
+
+## Fresh-only initial timing settlement, unvalidated source, 2026-10-10
+
+The actual complete Start diagnostic observed only tail88,200→96,000, with all
+ordered topology/activation/identity and latency fields equal. It did not admit a
+source or qualify rendering. Approved plan145ff381 now permits an initial tail
+change only across the first unpublished fresh-source Start. Both receipts still
+pass policy and every other field remains exact; all pre-Start acknowledgment
+comparisons remain full equality. The post-Start tail is the actual u32 value,
+never a fixture-specific conversion or cached fallback.
+
+A fresh-only scalar lifetime pin guards later live Ready/snapshot/poll/capture
+reads. A mismatch faults; no renewed settlement is available. Capture's full
+metadata equality and strict clone/renderer per-block checks are untouched.
+Ordinary loaders and working-source defaults retain their behavior. Ready's first
+reread must pass before its event; the second initial-snapshot reread can fault
+after Ready was queued and then publishes inactive state. This ordering is not
+changed or represented as atomic admission. No extra query or positive audio is
+introduced. Source/archive/review/mock gates remain pending, and a new genuine
+run is separately gated.

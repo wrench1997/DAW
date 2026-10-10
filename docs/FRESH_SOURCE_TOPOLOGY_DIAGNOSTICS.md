@@ -164,3 +164,47 @@ attempts remain failed, including the unobserved post-Start operand difference;
 no new genuine helper/plugin observation, capture, render or WAV qualification
 occurred. The later one-source diagnostic still requires its own frozen harness,
 build/artifact binding, durable archive, independent reviews and root authorization.
+
+## Observed initial tail settlement and unvalidated fresh-only policy, 2026-10-10
+
+The complete one-source diagnostic on69dd1608 completed observation only. Outer
+8ae2a19e4bcf4034a5d52b30a07b06936c7fa6d67ee8b4197907c0fa4b3d2355 and events
+ef16d1cdb6a1946b0fc69f9dceb6b3d046f960d3dafa8e2b57b2ab1e0aee7090 record exactly
+one changed field: tail_samples88,200 before Start becomes96,000 after Start. Both
+complete views pass the unchanged validator; all other nine fields equal. Actual
+stereo Aux input is known true; all three stereo Main outputs retain true/false/
+false. Both inactive acknowledgments are observed on both sides. No SDK cause is
+inferred. One source was refused, no Ready/capture/clone/audio/WAV was accepted,
+and legacy Joined/helper absence remains distinct from strict checked reap. This
+observation is durable in Libraryv111, archive53a83d8d. Both prior qualification
+failures remain failures.
+
+Root and both reviewers approved plan145ff381962a89c1a08093459b7321f9e215ac55923f9e814d1e52d7602f38d4.
+The current source is UNVALIDATED. It permits only the first unpublished fresh
+source's cross-Start tail settlement. Validation still precedes an exhaustive
+nine-field comparison. Any other changed field retains the same full-metadata
+refusal, including the true tail-difference flag when changes are combined.
+Pre-Start acknowledgment/final comparisons remain complete. No diagnostic schema,
+ordinary-source behavior, SDK call, default activation, helper or vendor changes.
+
+The actual validated post-Start latency/tail pair becomes a fresh-only lifetime
+pin. Tail remains an arbitrary u32, including zero and MAX; no88,200/96,000 special
+case, rescaling or clamp is used. Each later timing getter remains live and checks
+its returned value immediately. A mismatch fails rather than returning a cache or
+renewing the pin. The capture guard is inside each getter operation before the
+post-call cancellation checkpoint, so a returned mismatch remains BackendFailed.
+Capture's full before/after equality and all strict clone/renderer equality remain
+unchanged. A first-capture-read mismatch occurs before SaveState; a later mismatch
+still refuses the receipt and takes the existing worker fault path.
+
+Publication order is unchanged. A mismatching Ready timing reread prevents any
+SlotReady. The initial snapshot performs another read after Ready may have been
+queued; a failure there publishes a fault/inactive state, not a retrospective
+no-Ready result. Pin checks are at the existing observation fences and do not prove
+absence of unobserved transient drift or add a synchronous pre-block barrier.
+No positive Process, MIDI, reset or state capture is added before readiness.
+
+The old complete-view diagnostic harness requires refusal and remains historical;
+it must not be rerun expecting readiness. Any further genuine qualification needs
+a separately frozen/reviewed harness and explicit authorization. State/base,
+frames/latency/tail, audio/WAV, cancellation and strict disposal criteria remain.

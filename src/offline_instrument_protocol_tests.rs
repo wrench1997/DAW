@@ -213,7 +213,7 @@ impl FakeHelper {
         let plugin = dir.join("no-vendor-code.vst3");
         std::fs::write(&plugin, b"protocol fixture only").unwrap();
         let program = r#"#!/usr/bin/env python3
-import copy, json, sys, time
+import atexit, copy, json, sys, time
 from pathlib import Path
 mode = MODE
 log = LOG
@@ -228,6 +228,13 @@ parameter_applied = False
 acknowledged = set()
 activation_calls = 0
 post_start_fence_held = False
+timing = json.loads((fixture_dir / 'timing.json').read_text()) if (fixture_dir / 'timing.json').exists() else None
+timing_reads = dict(LatencySamples=0, TailSamples=0)
+metadata_reads = 0
+metadata_stage = None
+timing_held = False
+if timing is not None:
+    atexit.register(lambda: (fixture_dir / 'helper-exit.txt').write_text('normal interpreter exit\n'))
 dry_shape = mode.startswith('dry_') or mode.startswith('fresh_')
 attested = mode.startswith('dry_attested') or mode.startswith('dry_drift')
 observed_roles = 'observed_roles' in mode or mode == 'fresh_role_diagnostic'
@@ -239,6 +246,16 @@ for line in sys.stdin:
         stream.write(json.dumps(request) + '\n')
     name = request if isinstance(request, str) else next(iter(request))
     data = {} if isinstance(request, str) else request[name]
+    timing_stage = None
+    if timing is not None and processing:
+        if name == 'CheckedAudioBusLayout':
+            metadata_reads += 1
+            metadata_stage = ('post_start' if metadata_reads == 1 else
+                              'capture_first' if metadata_reads == 2 else 'capture_final')
+        if name in timing_reads:
+            timing_reads[name] += 1
+            timing_stage = metadata_stage or ('ready' if timing_reads[name] == 2 else
+                                              'snapshot' if timing_reads[name] == 3 else 'poll')
     result = copy.deepcopy(templates.get(name, templates['Unexpected']))
     if dry_shape and name == 'LoadPlugin' and mode == 'fresh_identity':
         result['PluginInfo']['category'] = 'Fx'
@@ -300,6 +317,8 @@ for line in sys.stdin:
     elif name == 'TailSamples':
         if mode in ('fresh_tail_on_start', 'fresh_combined_on_start') and processing:
             result['TailSamples']['samples'] = 4294967295
+        if mode == 'fresh_tail_during_ack' and activation_calls:
+            result['TailSamples']['samples'] = 96000
     elif name == 'SetBusActive':
         assert dry_shape and not processing and not saved, 'activation outside fresh unpublished setup'
         assert data['media_type'] == 'Audio' and data['active'] is False, data
@@ -355,6 +374,23 @@ for line in sys.stdin:
         while not (fixture_dir / 'release').exists() and time.monotonic() < wait_until:
             time.sleep(0.001)
         if not (fixture_dir / 'release').exists(): result = templates['CaptureError']
+    if timing is not None and name in timing_reads:
+        samples = 0 if name == 'LatencySamples' else timing['after_tail' if processing else 'before_tail']
+        if timing_stage is not None and timing_stage == timing.get('change_stage') and name == timing.get('field'):
+            samples = timing['observed']
+        result[name]['samples'] = samples
+        if timing_stage is not None and timing_stage == timing.get('error_stage') and name == timing.get('field'):
+            result = templates['CaptureError']
+        if timing_stage is not None and timing_stage == timing.get('hold_stage') and name == timing.get('field') and not timing_held:
+            timing_held = True
+            (fixture_dir / 'entered').write_text(timing_stage + ':' + name)
+            wait_until = time.monotonic() + 4
+            while not (fixture_dir / 'release').exists() and time.monotonic() < wait_until:
+                time.sleep(0.001)
+            if not (fixture_dir / 'release').exists(): result = templates['CaptureError']
+        with (fixture_dir / 'timing-replies.jsonl').open('a') as stream:
+            stream.write(json.dumps(dict(stage=timing_stage, name=name, result=result)) + '\n')
+        if name == 'TailSamples': metadata_stage = None
     print(json.dumps(result), flush=True)
     if name == 'Shutdown': break
 "#;
@@ -1159,6 +1195,209 @@ fn fresh_config() -> PluginPrepareConfig {
 }
 
 #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn fresh_timing_fixture(before: u32, after: u32, mut options: serde_json::Value) -> FakeHelper {
+    options["before_tail"] = before.into();
+    options["after_tail"] = after.into();
+    let fake = FakeHelper::new("fresh_timing");
+    std::fs::write(
+        fake.dir.join("timing.json"),
+        serde_json::to_vec(&options).unwrap(),
+    )
+    .unwrap();
+    fake
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+const FRESH_NATIVE_POLL: &[&str] = &[
+    "Editor",
+    "TakeParameterEdits",
+    "TakeHostNotifications",
+    "ServiceHostRequests",
+    "NativeDirtyRevision",
+    "LatencySamples",
+    "TailSamples",
+];
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+const FRESH_WORKER_TEARDOWN: &[&str] = &["Editor", "Editor", "StopProcessing", "Shutdown"];
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn fresh_timing_error(field: &str, expected: u32, observed: u32) -> String {
+    let field = match field {
+        "LatencySamples" => "latency_samples",
+        "TailSamples" => "tail_samples",
+        _ => panic!("not a timing field: {field}"),
+    };
+    format!(
+        "Fresh bounce source {field} changed after initial Start: expected {expected}, observed {observed}"
+    )
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn wait_fresh_timing_hold(fake: &FakeHelper, stage: &str, field: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !fake.dir.join("entered").exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(
+        std::fs::read_to_string(fake.dir.join("entered")).unwrap(),
+        format!("{stage}:{field}"),
+        "exact in-flight timing request: {:?}",
+        fake.names()
+    );
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn wait_fresh_timing_ready(control: &mut super::super::PluginChainControl, tail: u32) {
+    use super::super::RuntimeEvent;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut ready = 0;
+    while std::time::Instant::now() < deadline {
+        while let Some(event) = control.try_next_event() {
+            match event {
+                RuntimeEvent::SlotReady {
+                    slot,
+                    latency_samples,
+                    tail_samples,
+                    ..
+                } => {
+                    assert_eq!((slot, latency_samples, tail_samples), (0, 0, tail));
+                    ready += 1;
+                }
+                RuntimeEvent::SlotFault { message, .. } => panic!("unexpected fault: {message}"),
+                _ => panic!("unexpected admission event: {event:?}"),
+            }
+        }
+        if ready != 0
+            && control
+                .plugin_latency_snapshot()
+                .is_some_and(|snapshot| snapshot.active_mask == 1)
+            && control
+                .native_editor_snapshot(0)
+                .is_some_and(|snapshot| snapshot.state.generation == 2 && snapshot.error.is_none())
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(ready, 1);
+    let snapshot = control.plugin_latency_snapshot().unwrap();
+    assert_eq!(snapshot.active_mask, 1);
+    assert_eq!(snapshot.slot_latency_samples[0], 0);
+    assert_eq!(snapshot.total_plugin_latency_samples, 0);
+    assert_eq!(snapshot.tail_samples, tail);
+    assert_eq!(control.stats().latency_samples, 0);
+    assert_eq!(control.stats().tail_samples, tail);
+    assert_eq!(control.stats().submitted, 0);
+    assert_eq!(control.stats().completed, 0);
+    assert_eq!(control.stats().faults, 0);
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn wait_fresh_capture_reply(
+    receiver: &super::super::BounceStateReceiver,
+) -> Result<crate::instrument_bounce::BounceStateReceipt, BounceCaptureError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match receiver.try_recv() {
+            Ok(result) => {
+                assert!(receiver.termination_acknowledged());
+                return result;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(error) => panic!("capture reply disconnected: {error}"),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "capture reply deadline"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Accept complete existing native polls around exactly one dedicated capture, never an
+/// added metadata probe, capture retry, parameter/state mutation, or processing command.
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn assert_fresh_capture_worker_ledger(fake: &FakeHelper, capture: &[&str]) {
+    let names = fake.names();
+    let mut expected = fresh_setup_commands(true);
+    expected.extend([
+        "LatencySamples",
+        "TailSamples",
+        "LatencySamples",
+        "TailSamples",
+    ]);
+    assert!(names.len() >= expected.len() + FRESH_WORKER_TEARDOWN.len());
+    assert_eq!(names[..expected.len()], expected);
+    let polling_end = names.len() - FRESH_WORKER_TEARDOWN.len();
+    let mut index = expected.len();
+    let mut captures = 0;
+    let mut polls = 0;
+    while index < polling_end {
+        let remaining = &names[index..polling_end];
+        if !capture.is_empty()
+            && captures == 0
+            && remaining.len() >= capture.len()
+            && remaining[..capture.len()]
+                .iter()
+                .map(String::as_str)
+                .eq(capture.iter().copied())
+        {
+            expected.extend_from_slice(capture);
+            index += capture.len();
+            captures += 1;
+        } else {
+            assert!(
+                remaining.len() >= FRESH_NATIVE_POLL.len()
+                    && remaining[..FRESH_NATIVE_POLL.len()]
+                        .iter()
+                        .map(String::as_str)
+                        .eq(FRESH_NATIVE_POLL.iter().copied()),
+                "unexpected or partial native/capture sequence: {names:?}"
+            );
+            expected.extend_from_slice(FRESH_NATIVE_POLL);
+            index += FRESH_NATIVE_POLL.len();
+            polls += 1;
+        }
+    }
+    assert!(polls >= 1, "normal initial native poll remains required");
+    assert_eq!(captures, usize::from(!capture.is_empty()));
+    expected.extend_from_slice(FRESH_WORKER_TEARDOWN);
+    assert_eq!(names, expected);
+    for (index, request) in fake.requests().iter().enumerate() {
+        if let Some(editor) = request.get("Editor") {
+            assert_eq!(
+                editor["command"],
+                if index < polling_end {
+                    "Query"
+                } else {
+                    "Close"
+                }
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(fake.dir.join("helper-exit.txt")).unwrap(),
+        "normal interpreter exit\n",
+        "fixture child interpreter exit evidence, independent of legacy Joined"
+    );
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn assert_no_dedicated_capture_publication(control: &super::super::PluginChainControl) {
+    let native = control.native_editor_snapshot(0).unwrap();
+    assert_eq!(native.capture_serial, 0);
+    assert_eq!(native.parameter_capture_serial, 0);
+    assert_eq!(native.captured_generation, 0);
+    assert_eq!(native.captured_dirty_revision, 0);
+    assert!(native.captured_state.is_none());
+    assert!(native.captured_parameters.is_none());
+    assert!(!native.capture_in_progress);
+    assert!(native.pending_request.is_none());
+    assert_eq!(native.completed_request, 0);
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
 #[test]
 fn fresh_source_acknowledges_only_unknown_prepared_inactive_slots_once_before_start() {
     for (mode, mut expected) in [
@@ -1300,13 +1539,17 @@ fn fresh_source_partial_ack_failure_missing_ack_and_drift_never_start_or_retry()
         ("fresh_drift", 1),
         ("fresh_input_role_drift", 1),
         ("fresh_extra_role_drift", 1),
+        ("fresh_tail_during_ack", 1),
     ] {
         let fake = FakeHelper::new(mode);
         let mut source =
             Vst3Backend::load_fresh_bounce_source(fake.spec(vec![1, 2, 3]), fresh_config())
                 .unwrap();
         let error = source.prepare(fresh_config()).unwrap_err();
-        if matches!(mode, "fresh_input_role_drift" | "fresh_extra_role_drift") {
+        if matches!(
+            mode,
+            "fresh_input_role_drift" | "fresh_extra_role_drift" | "fresh_tail_during_ack"
+        ) {
             assert_eq!(
                 error, "Fresh bounce source topology changed during inactive-bus acknowledgment",
                 "{mode}"
@@ -1363,10 +1606,6 @@ fn fresh_metadata_mismatch_case(
         "fresh_latency_on_start" => {
             current.latency_samples = 127;
             &["latency_samples"]
-        }
-        "fresh_tail_on_start" => {
-            current.tail_samples = u32::MAX;
-            &["tail_samples"]
         }
         "fresh_combined_on_start" => {
             current.input_buses[0].is_main = false;
@@ -1673,7 +1912,6 @@ fn fresh_source_valid_start_metadata_drifts_report_exact_operands_without_admiss
         "fresh_extra_role_on_start",
         "fresh_event_channels_on_start",
         "fresh_latency_on_start",
-        "fresh_tail_on_start",
         "fresh_combined_on_start",
     ] {
         let fake = FakeHelper::new(mode);
@@ -1915,6 +2153,13 @@ fn fresh_source_worker_admits_ready_only_after_verified_setup_and_start() {
     for (mode, expected) in [
         ("fresh_normal", dry_metadata()),
         (
+            "fresh_tail_on_start",
+            BouncePluginMetadata {
+                tail_samples: u32::MAX,
+                ..dry_metadata()
+            },
+        ),
+        (
             "fresh_observed_roles_block_post_start",
             role_metadata(false, true, true),
         ),
@@ -1973,7 +2218,15 @@ fn fresh_source_worker_admits_ready_only_after_verified_setup_and_start() {
                         fake.requests()
                     );
                 }
-                if matches!(event, RuntimeEvent::SlotReady { slot: 0, .. }) {
+                if let RuntimeEvent::SlotReady {
+                    slot: 0,
+                    latency_samples,
+                    tail_samples,
+                    ..
+                } = event
+                {
+                    assert_eq!(latency_samples, expected.latency_samples);
+                    assert_eq!(tail_samples, expected.tail_samples);
                     assert_fresh_setup_fences(&fake, &expected);
                     assert!(!ready, "one candidate must publish Ready only once: {mode}");
                     ready = true;
@@ -2021,6 +2274,11 @@ fn fresh_source_worker_admits_ready_only_after_verified_setup_and_start() {
             "complete normal polling sequence missing: {names:?}"
         );
         assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 1);
+        assert_eq!(
+            control.plugin_latency_snapshot().unwrap().tail_samples,
+            expected.tail_samples
+        );
+        assert_eq!(control.stats().tail_samples, expected.tail_samples);
         assert!(!fake.names().iter().any(|name| matches!(
             name.as_str(),
             "Process" | "ProcessBuses" | "ProcessResetOrigin" | "ResetOrigin"
@@ -2045,6 +2303,565 @@ fn fresh_source_worker_admits_ready_only_after_verified_setup_and_start() {
                 "no later Ready or fault after successful admission: {event:?}"
             );
         }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_initial_tail_settlement_reaches_ready_snapshot_and_capture_unchanged() {
+    use super::super::{PluginChain, RuntimeEvent, ShutdownOutcome};
+    for (before, after) in [
+        (88_200, 96_000),
+        (0, 17),
+        (17, 0),
+        (0, u32::MAX),
+        (u32::MAX, 0),
+        (17, u32::MAX),
+        (u32::MAX, 17),
+    ] {
+        let fake = fresh_timing_fixture(before, after, serde_json::json!({}));
+        let PluginChain {
+            audio,
+            mut control,
+            guard,
+        } = PluginChain::spawn_fresh_bounce_source(41, fake.spec(vec![1, 2, 3]), fresh_config())
+            .unwrap();
+        let mut worker = FreshSourceWorkerGuard::new(&fake, guard);
+        wait_fresh_timing_ready(&mut control, after);
+        assert_eq!(audio.stats().tail_samples, after);
+        let receiver = control
+            .request_instrument_bounce_state(41, audio.epoch(), vec![17])
+            .unwrap();
+        let receipt = wait_fresh_capture_reply(&receiver).unwrap();
+        assert_eq!(receipt.epoch, audio.epoch());
+        let mut expected = capture_state();
+        expected.metadata = dry_metadata();
+        expected.metadata.tail_samples = after;
+        assert_eq!(
+            receipt.state, expected,
+            "exact opaque state and post-Start metadata: {before}->{after}"
+        );
+        assert_no_dedicated_capture_publication(&control);
+        assert_eq!(control.stats().faults, 0);
+        assert_eq!(control.stats().submitted, 0);
+        assert_eq!(control.stats().completed, 0);
+        assert_eq!(worker.join(), ShutdownOutcome::Joined);
+        while let Some(event) = control.try_next_event() {
+            assert!(
+                matches!(event, RuntimeEvent::ShutdownComplete),
+                "unexpected publication: {event:?}"
+            );
+        }
+        assert_fresh_capture_worker_ledger(&fake, CAPTURE_SEQUENCE);
+        let replies: Vec<serde_json::Value> =
+            std::fs::read_to_string(fake.dir.join("timing-replies.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+        let tails: Vec<_> = replies
+            .iter()
+            .filter(|reply| reply["name"] == "TailSamples")
+            .collect();
+        assert!(
+            tails.len() >= 10,
+            "setup, Ready, snapshot, native poll and both capture reads stay live"
+        );
+        for reply in tails {
+            assert_eq!(
+                reply["result"]["TailSamples"]["samples"],
+                if reply["stage"].is_null() {
+                    before
+                } else {
+                    after
+                }
+            );
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_tail_settlement_waits_for_post_start_and_ready_reply_fences() {
+    use super::super::{PluginChain, RuntimeEvent, ShutdownOutcome};
+    for stage in ["post_start", "ready"] {
+        let fake = fresh_timing_fixture(
+            88_200,
+            96_000,
+            serde_json::json!({
+                "hold_stage": stage, "field": "TailSamples",
+            }),
+        );
+        let PluginChain {
+            audio,
+            mut control,
+            guard,
+        } = PluginChain::spawn_fresh_bounce_source(41, fake.spec(vec![1, 2, 3]), fresh_config())
+            .unwrap();
+        let mut worker = FreshSourceWorkerGuard::new(&fake, guard);
+        wait_fresh_timing_hold(&fake, stage, "TailSamples");
+        assert!(
+            control.try_next_event().is_none(),
+            "no Ready before the held reply"
+        );
+        assert!(
+            control
+                .plugin_latency_snapshot()
+                .is_none_or(|snapshot| snapshot.active_mask == 0)
+        );
+        assert_eq!(control.stats().submitted, 0);
+        assert_eq!(control.stats().completed, 0);
+        let mut held = fresh_setup_commands(true);
+        if stage == "ready" {
+            held.extend(["LatencySamples", "TailSamples"]);
+        }
+        assert_eq!(
+            fake.names(),
+            held,
+            "no Process, MIDI, reset, capture, poll or replay before release"
+        );
+        std::fs::write(fake.dir.join("release"), b"release exact admission reply").unwrap();
+        wait_fresh_timing_ready(&mut control, 96_000);
+        assert_eq!(audio.stats().tail_samples, 96_000);
+        assert_eq!(worker.join(), ShutdownOutcome::Joined);
+        assert_fresh_capture_worker_ledger(&fake, &[]);
+        while let Some(event) = control.try_next_event() {
+            assert!(
+                matches!(event, RuntimeEvent::ShutdownComplete),
+                "unexpected later event: {event:?}"
+            );
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_timing_drift_faults_at_each_existing_worker_fence_without_rebaseline() {
+    use super::super::{PluginChain, RuntimeEvent, ShutdownOutcome};
+    use std::time::{Duration, Instant};
+    let old = FakeHelper::new("normal");
+    let old_source = old.source();
+    let old_requests = old.requests();
+    let old_state = (
+        old_source.prepared,
+        old_source.plugin.is_processing(),
+        old_source.input_channels,
+        old_source.output_channels,
+        old_source.native_revision_base,
+    );
+    for stage in ["ready", "snapshot", "poll"] {
+        for field in ["LatencySamples", "TailSamples"] {
+            for query_error in [false, true] {
+                let expected_value = if field == "LatencySamples" { 0 } else { 96_000 };
+                let observed = expected_value + 1;
+                let fake = fresh_timing_fixture(
+                    88_200,
+                    96_000,
+                    serde_json::json!({
+                        "field": field, "observed": observed, "hold_stage": stage,
+                        "change_stage": if query_error { "never" } else { stage },
+                        "error_stage": if query_error { stage } else { "never" },
+                    }),
+                );
+                let PluginChain {
+                    audio: _audio,
+                    mut control,
+                    guard,
+                } = PluginChain::spawn_fresh_bounce_source(
+                    41,
+                    fake.spec(vec![1, 2, 3]),
+                    fresh_config(),
+                )
+                .unwrap();
+                let mut worker = FreshSourceWorkerGuard::new(&fake, guard);
+                wait_fresh_timing_hold(&fake, stage, field);
+                let mut ready = 0;
+                while let Some(event) = control.try_next_event() {
+                    match event {
+                        RuntimeEvent::SlotReady {
+                            slot,
+                            latency_samples,
+                            tail_samples,
+                            ..
+                        } => {
+                            assert_eq!((slot, latency_samples, tail_samples), (0, 0, 96_000));
+                            ready += 1;
+                        }
+                        _ => panic!("unexpected event before reply: {event:?}"),
+                    }
+                }
+                assert_eq!(
+                    ready,
+                    usize::from(stage != "ready"),
+                    "initial-snapshot drift may follow an already queued Ready"
+                );
+                if stage == "poll" {
+                    assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 1);
+                    assert_eq!(control.stats().tail_samples, 96_000);
+                } else {
+                    assert!(
+                        control
+                            .plugin_latency_snapshot()
+                            .is_none_or(|snapshot| snapshot.active_mask == 0)
+                    );
+                }
+                std::fs::write(
+                    fake.dir.join("release"),
+                    b"return changed timing or helper error",
+                )
+                .unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut faults = Vec::new();
+                while Instant::now() < deadline {
+                    while let Some(event) = control.try_next_event() {
+                        match event {
+                            RuntimeEvent::SlotFault { slot, message } => {
+                                assert_eq!(slot, 0);
+                                faults.push(message);
+                            }
+                            _ => panic!("unexpected post-fence event: {event:?}"),
+                        }
+                    }
+                    if !faults.is_empty()
+                        && control
+                            .plugin_latency_snapshot()
+                            .is_some_and(|snapshot| snapshot.active_mask == 0)
+                    {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                assert_eq!(faults.len(), 1);
+                if query_error {
+                    assert_eq!(faults[0], format!("{field}: injected capture IPC failure"));
+                } else {
+                    assert_eq!(
+                        faults[0],
+                        fresh_timing_error(field, expected_value, observed)
+                    );
+                }
+                assert_eq!(control.stats().faults, 1);
+                assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 0);
+                assert_eq!(control.stats().tail_samples, 0);
+                assert_eq!(control.stats().submitted, 0);
+                assert_eq!(control.stats().completed, 0);
+                assert_eq!(worker.join(), ShutdownOutcome::Joined);
+                while let Some(event) = control.try_next_event() {
+                    assert!(
+                        matches!(event, RuntimeEvent::ShutdownComplete),
+                        "no retry/rebaseline after fault: {event:?}"
+                    );
+                }
+                let mut expected = fresh_setup_commands(true);
+                if stage != "ready" {
+                    expected.extend(["LatencySamples", "TailSamples"]);
+                }
+                if stage == "poll" {
+                    expected.extend(["LatencySamples", "TailSamples"]);
+                    expected.extend_from_slice(&FRESH_NATIVE_POLL[..5]);
+                }
+                expected.push("LatencySamples");
+                if field == "TailSamples" {
+                    expected.push("TailSamples");
+                }
+                expected.extend_from_slice(FRESH_WORKER_TEARDOWN);
+                assert_eq!(
+                    fake.names(),
+                    expected,
+                    "exact drift ledger: {stage}/{field}/{query_error}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(fake.dir.join("helper-exit.txt")).unwrap(),
+                    "normal interpreter exit\n"
+                );
+                assert_eq!(old.requests(), old_requests);
+                assert_eq!(
+                    (
+                        old_source.prepared,
+                        old_source.plugin.is_processing(),
+                        old_source.input_channels,
+                        old_source.output_channels,
+                        old_source.native_revision_base
+                    ),
+                    old_state
+                );
+            }
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_capture_pin_detects_first_and_final_drift_before_cancellation_checkpoint() {
+    use super::super::{PluginChain, RuntimeEvent, ShutdownOutcome};
+    for stage in ["capture_first", "capture_final"] {
+        for field in ["LatencySamples", "TailSamples"] {
+            for outcome in ["drift", "cancel_drift", "cancel_error", "cancel_match"] {
+                let expected_value = if field == "LatencySamples" { 0 } else { 96_000 };
+                let observed = expected_value + 1;
+                let fake = fresh_timing_fixture(
+                    88_200,
+                    96_000,
+                    serde_json::json!({
+                        "field": field, "observed": observed, "hold_stage": stage,
+                        "change_stage": if outcome.ends_with("drift") { stage } else { "never" },
+                        "error_stage": if outcome == "cancel_error" { stage } else { "never" },
+                    }),
+                );
+                let PluginChain {
+                    audio,
+                    mut control,
+                    guard,
+                } = PluginChain::spawn_fresh_bounce_source(
+                    41,
+                    fake.spec(vec![1, 2, 3]),
+                    fresh_config(),
+                )
+                .unwrap();
+                let mut worker = FreshSourceWorkerGuard::new(&fake, guard);
+                wait_fresh_timing_ready(&mut control, 96_000);
+                let receiver = control
+                    .request_instrument_bounce_state(41, audio.epoch(), vec![17])
+                    .unwrap();
+                wait_fresh_timing_hold(&fake, stage, field);
+                assert!(!receiver.termination_acknowledged());
+                assert!(matches!(
+                    receiver.try_recv(),
+                    Err(std::sync::mpsc::TryRecvError::Empty)
+                ));
+                assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 1);
+                if outcome.starts_with("cancel_") {
+                    receiver.cancel();
+                }
+                // Cancellation is published after dispatch, while the actual scalar/helper
+                // reply is still withheld. A returned mismatch must win inside capture_call.
+                std::fs::write(
+                    fake.dir.join("release"),
+                    b"return exact in-flight capture reply",
+                )
+                .unwrap();
+                let error = wait_fresh_capture_reply(&receiver).unwrap_err();
+                let faulted = outcome != "cancel_match";
+                let message = match error {
+                    BounceCaptureError::BackendFailed(message) => {
+                        assert!(faulted);
+                        if outcome == "cancel_error" {
+                            assert_eq!(message, format!("{field}: injected capture IPC failure"));
+                        } else {
+                            assert_eq!(
+                                message,
+                                fresh_timing_error(field, expected_value, observed)
+                            );
+                        }
+                        message
+                    }
+                    BounceCaptureError::Rejected(message) => {
+                        assert!(
+                            !faulted,
+                            "observed backend fault hidden by rejection: {message}"
+                        );
+                        assert_eq!(message, "Instrument bounce capture was cancelled");
+                        message
+                    }
+                };
+                assert_eq!(control.stats().faults, u64::from(faulted));
+                assert_eq!(
+                    control.plugin_latency_snapshot().unwrap().active_mask,
+                    u16::from(!faulted)
+                );
+                assert_eq!(
+                    control.stats().tail_samples,
+                    if faulted { 0 } else { 96_000 }
+                );
+                assert_no_dedicated_capture_publication(&control);
+                assert_eq!(control.stats().submitted, 0);
+                assert_eq!(control.stats().completed, 0);
+                assert_eq!(worker.join(), ShutdownOutcome::Joined);
+                let mut faults = 0;
+                while let Some(event) = control.try_next_event() {
+                    match event {
+                        RuntimeEvent::SlotFault {
+                            slot,
+                            message: event_message,
+                        } => {
+                            assert_eq!(slot, 0);
+                            assert_eq!(event_message, message);
+                            faults += 1;
+                        }
+                        RuntimeEvent::ShutdownComplete => {}
+                        _ => panic!(
+                            "dedicated capture published an ordinary/native event: {event:?}"
+                        ),
+                    }
+                }
+                assert_eq!(faults, usize::from(faulted));
+                let prefix = match (stage, field) {
+                    ("capture_first", "LatencySamples") => 5,
+                    ("capture_first", "TailSamples") => 6,
+                    ("capture_final", "LatencySamples") => 14,
+                    ("capture_final", "TailSamples") => 15,
+                    _ => unreachable!(),
+                };
+                assert_fresh_capture_worker_ledger(&fake, &CAPTURE_SEQUENCE[..prefix]);
+                assert_eq!(
+                    fake.names()
+                        .iter()
+                        .filter(|name| name.as_str() == "SaveState")
+                        .count(),
+                    usize::from(stage == "capture_final")
+                );
+            }
+        }
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_predispatch_capture_cancellation_sends_no_capture_request() {
+    use super::super::{PluginChain, RuntimeEvent, ShutdownOutcome};
+    let fake = fresh_timing_fixture(
+        88_200,
+        96_000,
+        serde_json::json!({
+            "hold_stage": "poll", "field": "TailSamples",
+        }),
+    );
+    let PluginChain {
+        audio,
+        mut control,
+        guard,
+    } = PluginChain::spawn_fresh_bounce_source(41, fake.spec(vec![1, 2, 3]), fresh_config())
+        .unwrap();
+    let mut worker = FreshSourceWorkerGuard::new(&fake, guard);
+    wait_fresh_timing_hold(&fake, "poll", "TailSamples");
+    wait_fresh_timing_ready(&mut control, 96_000);
+    let receiver = control
+        .request_instrument_bounce_state(41, audio.epoch(), vec![17])
+        .unwrap();
+    receiver.cancel();
+    assert!(!receiver.termination_acknowledged());
+    std::fs::write(
+        fake.dir.join("release"),
+        b"finish prior poll after queued capture cancellation",
+    )
+    .unwrap();
+    assert!(
+        matches!(wait_fresh_capture_reply(&receiver), Err(BounceCaptureError::Rejected(message)) if message == "Instrument bounce capture was cancelled")
+    );
+    assert_eq!(control.stats().faults, 0);
+    assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 1);
+    assert_no_dedicated_capture_publication(&control);
+    assert_eq!(worker.join(), ShutdownOutcome::Joined);
+    assert_fresh_capture_worker_ledger(&fake, &[]);
+    while let Some(event) = control.try_next_event() {
+        assert!(
+            matches!(event, RuntimeEvent::ShutdownComplete),
+            "unexpected publication: {event:?}"
+        );
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_success_pin_and_failed_consumption_both_forbid_reprepare() {
+    use super::super::FreshBounceSourceSetup;
+    for success in [false, true] {
+        let fake = if success {
+            fresh_timing_fixture(88_200, 96_000, serde_json::json!({}))
+        } else {
+            FakeHelper::new("fresh_latency_on_start")
+        };
+        let mut source =
+            Vst3Backend::load_fresh_bounce_source(fake.spec(vec![1, 2, 3]), fresh_config())
+                .unwrap();
+        assert!(matches!(
+            source.fresh_bounce_setup,
+            Some(FreshBounceSourceSetup::Pending)
+        ));
+        let result = source.prepare(fresh_config());
+        if success {
+            result.unwrap();
+            assert!(matches!(
+                source.fresh_bounce_setup,
+                Some(FreshBounceSourceSetup::Pinned {
+                    latency_samples: 0,
+                    tail_samples: 96_000
+                })
+            ));
+        } else {
+            assert_fresh_metadata_mismatch("fresh_latency_on_start", &result.unwrap_err());
+            assert!(matches!(
+                source.fresh_bounce_setup,
+                Some(FreshBounceSourceSetup::Consumed)
+            ));
+        }
+        let requests = fake.requests();
+        assert_eq!(
+            source.prepare(fresh_config()).unwrap_err(),
+            "Fresh bounce source preparation is one-shot; load a new candidate"
+        );
+        assert_eq!(
+            fake.requests(),
+            requests,
+            "reprepare emits no SDK/protocol command"
+        );
+        assert_eq!(source.prepared, success);
+        assert!(source.plugin.is_processing());
+        drop(source);
+        assert_fresh_post_start_refusal_ledger(&fake, true);
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn default_source_timing_remains_live_and_unpinned_after_start() {
+    for field in ["LatencySamples", "TailSamples"] {
+        let observed = if field == "LatencySamples" { 1 } else { 96_001 };
+        let fake = fresh_timing_fixture(
+            88_200,
+            96_000,
+            serde_json::json!({
+                "field": field, "change_stage": "ready", "observed": observed,
+            }),
+        );
+        let mut source = Vst3Backend::load(fake.spec(vec![1, 2, 3]), fresh_config()).unwrap();
+        source.prepare(fresh_config()).unwrap();
+        assert!(source.fresh_bounce_setup.is_none());
+        let setup = fake.names();
+        assert_eq!(
+            setup,
+            [
+                "LoadPlugin",
+                "AudioBusLayout",
+                "ResetOriginSupport",
+                "LoadState",
+                "StartProcessing",
+                "NativeDirtyRevision"
+            ]
+        );
+        assert_eq!(source.processing_metadata().unwrap(), (0, 96_000));
+        assert_eq!(
+            source.processing_metadata().unwrap(),
+            if field == "LatencySamples" {
+                (1, 96_000)
+            } else {
+                (0, 96_001)
+            }
+        );
+        assert_eq!(source.processing_metadata().unwrap(), (0, 96_000));
+        assert!(source.fresh_bounce_setup.is_none());
+        let mut expected = setup;
+        for _ in 0..3 {
+            expected.extend(["LatencySamples".into(), "TailSamples".into()]);
+        }
+        assert_eq!(
+            fake.names(),
+            expected,
+            "matching and changed ordinary reads use the unchanged live pair"
+        );
+        drop(source);
+        expected.extend(["Editor".into(), "StopProcessing".into(), "Shutdown".into()]);
+        assert_eq!(fake.names(), expected);
     }
 }
 

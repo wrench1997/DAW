@@ -5175,6 +5175,11 @@ fn validate_vst3_reset_maximum(max_block_frames: usize, reset_frames: usize) -> 
 enum FreshBounceSourceSetup {
     Pending,
     Consumed,
+    // Actual validated first post-Start timing, never a synthesized or renewed value.
+    Pinned {
+        latency_samples: u32,
+        tail_samples: u32,
+    },
 }
 
 #[cfg(feature = "vst3")]
@@ -5195,6 +5200,36 @@ struct Vst3Backend {
 
 #[cfg(feature = "vst3")]
 impl Vst3Backend {
+    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    fn validate_fresh_latency(&self, observed: u32) -> Result<(), String> {
+        if let Some(FreshBounceSourceSetup::Pinned {
+            latency_samples: expected,
+            ..
+        }) = self.fresh_bounce_setup
+            && observed != expected
+        {
+            return Err(format!(
+                "Fresh bounce source latency_samples changed after initial Start: expected {expected}, observed {observed}"
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    fn validate_fresh_tail(&self, observed: u32) -> Result<(), String> {
+        if let Some(FreshBounceSourceSetup::Pinned {
+            tail_samples: expected,
+            ..
+        }) = self.fresh_bounce_setup
+            && observed != expected
+        {
+            return Err(format!(
+                "Fresh bounce source tail_samples changed after initial Start: expected {expected}, observed {observed}"
+            ));
+        }
+        Ok(())
+    }
+
     #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
     fn load_fresh_bounce_source(
         spec: PluginLoadSpec,
@@ -5332,7 +5367,7 @@ impl PluginBackend for Vst3Backend {
                 self.fresh_bounce_setup = Some(FreshBounceSourceSetup::Consumed);
                 true
             }
-            Some(FreshBounceSourceSetup::Consumed) => {
+            Some(FreshBounceSourceSetup::Consumed | FreshBounceSourceSetup::Pinned { .. }) => {
                 return Err(
                     "Fresh bounce source preparation is one-shot; load a new candidate".into(),
                 );
@@ -5396,12 +5431,18 @@ impl PluginBackend for Vst3Backend {
                 .map_err(|error| {
                     Self::fresh_topology_post_start_error(error, &current, &before_start)
                 })?;
-            if current != before_start {
+            // Tail may settle only across this first unpublished Start. Every other
+            // field remains exact; preserve both original operands for diagnostics.
+            if !Self::fresh_start_metadata_compatible(&before_start, &current) {
                 return Err(Self::fresh_start_metadata_mismatch_error(
                     &before_start,
                     &current,
                 ));
             }
+            self.fresh_bounce_setup = Some(FreshBounceSourceSetup::Pinned {
+                latency_samples: current.latency_samples,
+                tail_samples: current.tail_samples,
+            });
         }
         self.max_block_frames = config.max_block_frames;
         self.prepared = true;
@@ -5813,10 +5854,14 @@ impl PluginBackend for Vst3Backend {
             .plugin
             .try_latency_samples()
             .map_err(|error| error.to_string())?;
+        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        self.validate_fresh_latency(latency)?;
         let tail = self
             .plugin
             .try_tail_samples()
             .map_err(|error| error.to_string())?;
+        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        self.validate_fresh_tail(tail)?;
         Ok((latency, tail))
     }
 }

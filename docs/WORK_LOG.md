@@ -1887,3 +1887,30 @@ archive precede that preparation.
   occurred. The failed c7a5d432 genuine source_setup and all unexecuted stages remain
   intact; this diagnostic cannot name the actual changed field until a separately
   authorized one-source observation records both operands.
+
+## 2026-10-10: initial fresh-source tail settlement, source only
+
+- The separately authorized one-source complete diagnostic observed exactly
+  tail_samples88,200→96,000 across Start; all nine other metadata fields were
+  equal, including actual inactive-extra acknowledgments. Both complete operands
+  passed the shared validator and all ten flags were independently reproduced.
+  Observation only: source refused, qualification=false, no capture/clone/audio.
+  Raw outer8ae2a19e/events ef16d1cd are durablev111 in archive53a83d8d; both earlier
+  failed qualifications retain their outcomes. No SDK-cause claim follows.
+- Root/both reviewers approved exact plan145ff381. Current UNVALIDATED production
+  lets only the first unpublished fresh-source tail settle across Start, keeps
+  the other nine fields exact, and stores the actual validated post-Start scalar
+  pair. Every later relevant getter stays live and must match that fresh-only pin.
+  Capture checks inside the getter closure preserve returned fault precedence
+  over cancellation. Ordinary/default paths, helper/vendor, strict clone and
+  capture/renderer full equality remain unchanged; no extra SDK/audio/reset work.
+- Ready event and initial active-snapshot publication remain separate: first
+  reread failure prevents Ready; second-read failure may follow queued Ready and
+  publishes a fault/inactive snapshot. Tests must not claim stronger ordering.
+  One-shot preparation and failed-candidate Drop retain their existing ownership.
+- Three new pure comparator tests cover all nine non-tail fields, tail0/finite/
+  MAX, original operands and outside-cap differences. Actual-worker fixtures
+  cover settlement, live reread/capture drift, cancellation precedence, held
+  replies and exact ledgers. All new compiler/mock execution awaits the exact
+  source archive, independent reviews and coordinated target lease. No new real
+  plugin retry is authorized by this source checkpoint.

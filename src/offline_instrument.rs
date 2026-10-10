@@ -358,6 +358,147 @@ mod fresh_topology_diagnostic {
     }
 }
 
+// The sole initialization exception is tail settlement at the first fresh Start.
+// Exhaustive destructuring requires an explicit decision for every future field.
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+mod fresh_start_admission {
+    use crate::instrument_bounce::{BounceAudioBus, BouncePluginMetadata};
+
+    #[derive(PartialEq, Eq)]
+    struct StableFields<'a> {
+        class_uid: &'a str,
+        version: &'a str,
+        name: &'a str,
+        category: &'a str,
+        event_input_buses: &'a [(u32, bool, Option<bool>)],
+        event_output_buses: &'a [(u32, bool, Option<bool>)],
+        input_buses: &'a [BounceAudioBus],
+        output_buses: &'a [BounceAudioBus],
+        latency_samples: u32,
+    }
+
+    impl<'a> From<&'a BouncePluginMetadata> for StableFields<'a> {
+        fn from(metadata: &'a BouncePluginMetadata) -> Self {
+            let BouncePluginMetadata {
+                class_uid,
+                version,
+                name,
+                category,
+                event_input_buses,
+                event_output_buses,
+                input_buses,
+                output_buses,
+                latency_samples,
+                tail_samples: _,
+            } = metadata;
+            Self {
+                class_uid,
+                version,
+                name,
+                category,
+                event_input_buses,
+                event_output_buses,
+                input_buses,
+                output_buses,
+                latency_samples: *latency_samples,
+            }
+        }
+    }
+
+    pub(super) fn compatible(
+        before_start: &BouncePluginMetadata,
+        current: &BouncePluginMetadata,
+    ) -> bool {
+        StableFields::from(before_start) == StableFields::from(current)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn metadata() -> BouncePluginMetadata {
+            BouncePluginMetadata {
+                class_uid: "ABCDEF019182FAEB566D624153675854".into(),
+                version: "1.3.4".into(),
+                name: "Surge XT".into(),
+                category: "Instrument|Synth".into(),
+                event_input_buses: vec![(16, true, Some(true))],
+                event_output_buses: vec![],
+                input_buses: vec![BounceAudioBus::new(2, false, Some(true))],
+                output_buses: vec![
+                    BounceAudioBus::new(2, true, Some(true)),
+                    BounceAudioBus::new(2, true, Some(false)),
+                    BounceAudioBus::new(2, true, Some(false)),
+                ],
+                latency_samples: 0,
+                tail_samples: 88_200,
+            }
+        }
+
+        #[test]
+        fn matching_and_only_tail_changes_keep_original_operands() {
+            for before_tail in [0, 88_200, 96_000, u32::MAX] {
+                for after_tail in [0, 88_200, 96_000, u32::MAX] {
+                    let mut before = metadata();
+                    before.tail_samples = before_tail;
+                    let mut current = before.clone();
+                    current.tail_samples = after_tail;
+                    let originals = (before.clone(), current.clone());
+                    assert!(compatible(&before, &current));
+                    assert_eq!((before, current), originals);
+                }
+            }
+        }
+
+        #[test]
+        fn all_other_nine_fields_refuse_alone_and_with_tail_change() {
+            for field in 0..9 {
+                for with_tail in [false, true] {
+                    let before = metadata();
+                    let mut current = before.clone();
+                    match field {
+                        0 => current.class_uid.replace_range(..1, "1"),
+                        1 => current.version.push('x'),
+                        2 => current.name.push('x'),
+                        3 => current.category.push_str("|Other"),
+                        4 => current.event_input_buses[0].0 = 8,
+                        5 => current.event_output_buses.push((1, true, Some(true))),
+                        6 => current.input_buses[0].is_main = true,
+                        7 => current.output_buses[1].is_main = false,
+                        8 => current.latency_samples = 1,
+                        _ => unreachable!(),
+                    }
+                    if with_tail {
+                        current.tail_samples = 96_000;
+                    }
+                    let originals = (before.clone(), current.clone());
+                    assert!(!compatible(&before, &current), "field {field}");
+                    assert_eq!((before, current), originals);
+                }
+            }
+        }
+
+        #[test]
+        fn full_values_beyond_diagnostic_caps_still_refuse() {
+            let mut before = metadata();
+            before.name = "x".repeat(8192);
+            let mut current = before.clone();
+            current.name.push('y');
+            assert!(!compatible(&before, &current));
+
+            before.output_buses.resize(17, before.output_buses[1]);
+            current = before.clone();
+            current.output_buses[16].active = None;
+            assert!(!compatible(&before, &current));
+
+            before.event_input_buses.resize(17, (16, true, Some(true)));
+            current = before.clone();
+            current.event_input_buses[16].2 = None;
+            assert!(!compatible(&before, &current));
+        }
+    }
+}
+
 // Equality-only diagnostics borrow the snapshots already read at the Start fence.
 // They neither query the owner nor participate in the admission decision.
 #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
@@ -1068,6 +1209,14 @@ impl Vst3Backend {
         fresh_metadata_mismatch_diagnostic::error(before_start, current)
     }
 
+    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    pub(super) fn fresh_start_metadata_compatible(
+        before_start: &BouncePluginMetadata,
+        current: &BouncePluginMetadata,
+    ) -> bool {
+        fresh_start_admission::compatible(before_start, current)
+    }
+
     pub(super) fn bounce_metadata(
         &self,
         fence: Option<&BounceCaptureFence>,
@@ -1084,14 +1233,26 @@ impl Vst3Backend {
         })?;
         let info = self.plugin.info();
         let latency_samples = capture_call(fence, || {
-            self.plugin
+            let value = self
+                .plugin
                 .try_latency_samples()
-                .map_err(classify_metadata_error)
+                .map_err(classify_metadata_error)?;
+            // A returned drift is an observed backend fault, even if cancellation
+            // arrives before capture_call's subsequent successful-call checkpoint.
+            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+            self.validate_fresh_latency(value)
+                .map_err(BounceCaptureError::BackendFailed)?;
+            Ok(value)
         })?;
         let tail_samples = capture_call(fence, || {
-            self.plugin
+            let value = self
+                .plugin
                 .try_tail_samples()
-                .map_err(classify_metadata_error)
+                .map_err(classify_metadata_error)?;
+            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+            self.validate_fresh_tail(value)
+                .map_err(BounceCaptureError::BackendFailed)?;
+            Ok(value)
         })?;
         Ok(BouncePluginMetadata {
             class_uid: info.uid.clone(),
