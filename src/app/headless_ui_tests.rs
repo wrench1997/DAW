@@ -4619,3 +4619,31 @@ fn automation_point_source_offset_snaps_to_playlist_grid() {
     );
     assert_eq!(ui.app.project.clips[0].start, 8.0);
 }
+
+#[test]
+fn automation_point_double_click_is_retained_and_unselected_right_click_is_safe() {
+    let mut ui = automation_point_ui();
+    let left = automation_point_position(&ui, 1);
+    let middle = automation_point_position(&ui, 2);
+    let pos = Pos2::new((left.x + middle.x) / 2.0, middle.y);
+    for pressed in [true, false, true, false] {
+        ui.run(vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+    }
+    ui.settle();
+    assert_eq!(ui.app.project.automation_lanes[0].lane.points().len(), 4);
+    assert_eq!(ui.app.undo_stack.len(), 1);
+    ui.app.clear_playlist_selection();
+    ui.settle();
+    let before = project_fingerprint(&ui.app.project);
+    automation_secondary_click(&mut ui, pos);
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert_eq!(ui.app.project.clips.len(), 1);
+}

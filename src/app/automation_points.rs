@@ -51,6 +51,17 @@ pub(super) fn candidate(project: &Project, action: PointAction) -> Option<Projec
             && clip.kind == ClipKind::Automation
             && clip.automation_id == Some(lane_id)
     })?;
+    if !clip.start.is_finite()
+        || clip.start < 0.0
+        || !clip.source_offset.is_finite()
+        || clip.source_offset < 0.0
+        || !clip.length.is_finite()
+        || clip.length <= 0.0
+        || !(clip.start + clip.length).is_finite()
+        || !(clip.source_offset + clip.length).is_finite()
+    {
+        return None;
+    }
     let mut result = project.clone();
     let lane = &mut result
         .automation_lanes
@@ -86,6 +97,7 @@ pub(super) fn candidate(project: &Project, action: PointAction) -> Option<Projec
         PointAction::Insert { point, .. } => {
             if !point.position.is_finite()
                 || !point.value.is_finite()
+                || !point.tension.is_finite()
                 || point.position < f64::from(clip.source_offset)
                 || point.position > f64::from(clip.source_offset + clip.length)
                 || lane.points().iter().any(|existing| {
@@ -118,7 +130,20 @@ pub(super) fn dragged_point(
     modifiers: egui::Modifiers,
 ) -> Option<AutomationPoint> {
     let current = *lane.points().get(index)?;
-    if !beat_width.is_finite()
+    if !origin.position.is_finite()
+        || !origin.value.is_finite()
+        || !origin.tension.is_finite()
+        || !delta.x.is_finite()
+        || !delta.y.is_finite()
+        || !source_start.is_finite()
+        || source_start < 0.0
+        || !clip_start.is_finite()
+        || clip_start < 0.0
+        || !length.is_finite()
+        || length <= 0.0
+        || !(source_start + length).is_finite()
+        || !(clip_start + length).is_finite()
+        || !beat_width.is_finite()
         || beat_width <= 0.0
         || !height.is_finite()
         || height <= 0.0
@@ -340,5 +365,66 @@ mod tests {
         let mut changed = project;
         changed.automation_lanes.clear();
         assert!(candidate(&changed, PointAction::Delete(reference)).is_none());
+    }
+    #[test]
+    fn point_edits_reject_nonfinite_and_invalid_spans_without_panicking() {
+        let (project, reference) = fixture();
+        for (start, source, length) in [
+            (f32::NAN, 2.0, 4.0),
+            (8.0, f32::NAN, 4.0),
+            (8.0, 2.0, f32::INFINITY),
+            (8.0, 2.0, -1.0),
+            (8.0, f32::MAX, f32::MAX),
+        ] {
+            let mut invalid = project.clone();
+            invalid.clips[0].start = start;
+            invalid.clips[0].source_offset = source;
+            invalid.clips[0].length = length;
+            assert!(
+                candidate(
+                    &invalid,
+                    PointAction::Insert {
+                        clip_id: 1,
+                        lane_id: 1,
+                        point: AutomationPoint::new(3.0, 0.5)
+                    }
+                )
+                .is_none()
+            );
+            assert!(
+                dragged_point(
+                    &project.automation_lanes[0].lane,
+                    1,
+                    reference.point,
+                    Vec2::ZERO,
+                    100.0,
+                    100.0,
+                    source,
+                    start,
+                    length,
+                    0.25,
+                    egui::Modifiers::NONE
+                )
+                .is_none()
+            );
+        }
+        for delta in [Vec2::new(f32::NAN, 0.0), Vec2::new(0.0, f32::INFINITY)] {
+            assert!(
+                dragged_point(
+                    &project.automation_lanes[0].lane,
+                    1,
+                    reference.point,
+                    delta,
+                    100.0,
+                    100.0,
+                    2.0,
+                    8.0,
+                    4.0,
+                    0.25,
+                    egui::Modifiers::NONE
+                )
+                .is_none()
+            );
+        }
     }
 }
