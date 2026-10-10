@@ -15,6 +15,38 @@
 
 ## Bounded upstream code changes
 
+### Dormant instrument-bounce event-bus query (unvalidated source checkpoint)
+
+Adds `Plugin::event_bus_layout`, its main-thread facade and an unsupported-default
+internal method, plus additive `EventBusLayout` command/response variants. The
+direct implementation enumerates current component event buses on the control
+thread, bounds counts/channels and checks every BusInfo result. Activation is
+reported only from a matching successful host activation record; unknown is
+explicit and `kDefaultActive` is never used as proof. The isolated query is
+fallible and never retries/recovers or substitutes cached PluginInfo MIDI bits.
+Production and vendored helper dispatch run the query on their existing owner.
+Existing wire commands, processing and state methods are unchanged. Plugin-free
+component/protocol tests are added, but no execution or vendor compatibility is
+claimed by this source checkpoint. The application keeps bounce dormant.
+
+### Strict audio-bus attestation (unvalidated source checkpoint)
+
+Additive `checked_audio_bus_layout`/`CheckedAudioBusLayout` compares actual component
+count/index/channels/main-or-aux descriptors with prepared buffers on the owner
+thread. Prepared bus types are retained from the same SDK reads that prepare
+channel counts, preserving legacy fallback behavior but refusing unknown proof.
+Existing `audio_bus_layout` behavior is unchanged. Host activation is attested
+only where known; default flags never prove live state. A non-draining restart
+flag read before/after enumeration rejects pending I/O/reload without servicing
+or reconfiguring the source. Both current event and checked audio queries use it.
+A bounded `MetadataQueryRejection` enum and additive typed helper response carry
+only Unsupported/PendingTopology/InconsistentTopology admission refusal. Untyped
+Error, wrong/malformed reply, SDK/IPC failures remain faults; no recovery/default
+layout is permitted. Added component/protocol fixtures cover Start/parameter/type
+changes, pending/reentrant flags and SDK/protocol errors; none has run at freeze.
+
+### Previously integrated extensions
+
 1. `src/plugin.rs`: additive `IsolatedEditorOwner`, `IsolatedEditorCommand`, and
    `IsolatedEditorState` types; `Plugin::isolated_editor` and an unsupported default internal
    implementation; checked `try_take_parameter_edits`/`try_take_host_notifications` drains so

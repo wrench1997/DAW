@@ -1899,6 +1899,11 @@ impl ComponentHandler {
         })
     }
 
+    /// Observe pending flags without consuming source lifecycle work.
+    pub(crate) fn pending_restart_flags(&self) -> crate::plugin::RestartFlags {
+        crate::plugin::RestartFlags::from_bits(self.restart_flags.load(Ordering::Acquire))
+    }
+
     /// Take the accumulated `restartComponent` flags, clearing them.
     pub fn take_restart_flags(&self) -> crate::plugin::RestartFlags {
         crate::plugin::RestartFlags::from_bits(self.restart_flags.swap(0, Ordering::AcqRel))

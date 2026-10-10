@@ -14,6 +14,7 @@ mod export_job;
 mod export_options;
 pub mod fixed_quantum;
 mod icons;
+pub mod instrument_bounce;
 pub mod master_capture;
 pub mod midi;
 pub mod midi_device;

@@ -2,6 +2,17 @@
 
 use thiserror::Error;
 
+/// Harmless refusal of a read-only strict metadata admission query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MetadataQueryRejection {
+    /// The implementation cannot attest the requested metadata.
+    Unsupported,
+    /// A component I/O change or reload is pending; the query does not service it.
+    PendingTopology,
+    /// Current component buses no longer match the prepared processing shape.
+    InconsistentTopology,
+}
+
 /// Main error type for vst3-host operations.
 ///
 /// Marked `#[non_exhaustive]`: match with a wildcard arm, as new variants may be added in
@@ -76,6 +87,10 @@ pub enum Error {
         "Output parameter storage failed; load a fresh plugin instance before processing or saving"
     )]
     ParameterOutputRejected,
+
+    /// Explicit bounded metadata admission refusal; no plugin health fault is implied.
+    #[error("Metadata query rejected: {0:?}")]
+    MetadataQueryRejected(MetadataQueryRejection),
 
     /// Other errors
     #[error("{0}")]

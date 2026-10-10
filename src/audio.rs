@@ -18886,6 +18886,297 @@ mod tests {
         drop(control);
     }
 
+    fn bounce_equivalence_note_on(frame: u64, note: ChasedNote) -> crate::timeline::TimelineEvent {
+        crate::timeline::TimelineEvent {
+            frame,
+            kind: TimelineEventKind::NoteOn {
+                note_id: note.note_id,
+                channel_id: note.channel_id,
+                note: note.note,
+                velocity: note.velocity,
+                gain: note.gain,
+                mixer_track: note.mixer_track,
+                source: note.source,
+            },
+        }
+    }
+
+    fn bounce_equivalence_note_off(frame: u64, note: ChasedNote) -> crate::timeline::TimelineEvent {
+        crate::timeline::TimelineEvent {
+            frame,
+            kind: TimelineEventKind::NoteOff {
+                note_id: note.note_id,
+                channel_id: note.channel_id,
+                note: note.note,
+                mixer_track: note.mixer_track,
+                source: note.source,
+            },
+        }
+    }
+
+    #[track_caller]
+    fn assert_bounce_midi_matches_callback(
+        events: &[crate::timeline::TimelineEvent],
+        song_frames: u64,
+        expected: &[FrameEvent],
+    ) {
+        let render_control = crate::instrument_bounce::render::RenderControl {
+            export: crate::export_job::ExportControl::default(),
+            deadline: Instant::now() + Duration::from_secs(30),
+        };
+        let bounce_midi = crate::instrument_bounce::render::map_selected_notes(
+            events,
+            7,
+            song_frames,
+            &render_control,
+        )
+        .expect("valid paired fixture closes every selected note identity");
+        let bounce_ledger: Vec<_> = bounce_midi
+            .iter()
+            .map(|event| FrameEvent::midi(u16::try_from(event.frame).unwrap(), None, event.data))
+            .collect();
+
+        let PluginChain {
+            audio,
+            control,
+            guard,
+        } = spawn_empty_chain(DEFAULT_PLUGIN_FIXED_QUANTUM_FRAMES);
+        let mut dsp = DspState::new(48_000.0);
+        dsp.generator_endpoints[0] = Some(GeneratorEndpointSlot {
+            channel_id: 7,
+            endpoint_id: 70,
+            plugin_instance_id: 700,
+            mixer_track: 1,
+            endpoint: fixed_adapter(audio),
+            pdc_delay: test_pdc_delay(),
+            pdc_initialized: false,
+            suppress_output_frames: 0,
+        });
+        let mut plan = TimelineRenderPlan::new();
+        // Adapt only the event representation. MIDI conversion, overlap accounting,
+        // and ordering below all go through the existing callback mapper unchanged.
+        for event in events {
+            let offset = u32::try_from(event.frame).unwrap();
+            match event.kind {
+                TimelineEventKind::NoteOn {
+                    note_id,
+                    channel_id,
+                    note,
+                    velocity,
+                    gain,
+                    mixer_track,
+                    source,
+                } => plan.note_on(
+                    ChasedNote {
+                        note_id,
+                        channel_id,
+                        note,
+                        velocity,
+                        gain,
+                        mixer_track,
+                        source,
+                    },
+                    offset,
+                ),
+                TimelineEventKind::NoteOff {
+                    note_id,
+                    channel_id,
+                    note,
+                    mixer_track,
+                    source,
+                } => plan.note_off(
+                    ChasedNote {
+                        note_id,
+                        channel_id,
+                        note,
+                        // NoteOff has no velocity/gain payload; the callback uses
+                        // the binding installed by its matching NoteOn.
+                        velocity: 0.0,
+                        gain: 0.0,
+                        mixer_track,
+                        source,
+                    },
+                    offset,
+                ),
+                _ => panic!("paired MIDI fixture must contain only note events"),
+            }
+        }
+        assert!(!plan.overflowed);
+        let routes = timeline_generator_route_table(1, 1, 7, 700);
+        assert!(DspState::stage_timeline_generator_plan(
+            &mut plan,
+            &mut dsp.generator_endpoints,
+            &mut dsp.timeline_generator_notes,
+            &routes,
+            1,
+            1,
+            &mut dsp.fixed_quantum_event_overflows,
+        ));
+        let endpoint = &dsp.generator_endpoints[0].as_ref().unwrap().endpoint;
+        let scratch = &endpoint.events.scratch;
+        let callback_ledger = &scratch.timeline.pending[..scratch.timeline.pending_len];
+        assert_eq!(callback_ledger, expected);
+        assert_eq!(bounce_ledger.as_slice(), callback_ledger);
+        assert_eq!(scratch.system.pending_len, 0);
+        assert_eq!(scratch.live.pending_len, 0);
+        assert_eq!(dsp.fixed_quantum_event_overflows, 0);
+        assert!(dsp.timeline_generator_notes.iter().all(Option::is_none));
+
+        drop(dsp);
+        guard.shutdown();
+        drop(control);
+    }
+
+    #[test]
+    fn instrument_bounce_midi_matches_callback_clip_gain_velocity_rounding_and_bounds() {
+        let cases = [
+            (60, 0.5, 0.5),   // Clip gain times velocity: 31.75 rounds to 32.
+            (61, 0.5, 1.0),   // Exact half: 63.5 rounds to 64.
+            (62, 0.49, 1.0),  // Below half: 62.23 rounds to 62.
+            (63, 0.0, 1.0),   // Zero velocity remains a NoteOn with minimum 1.
+            (64, 0.001, 0.5), // A positive product below half also becomes 1.
+            (65, 1.0, 0.0),   // Zero clip gain follows the same minimum rule.
+            (66, 0.75, 1.5),  // A valid clip gain above unity clamps the product to 127.
+        ];
+        let notes: Vec<_> = cases
+            .into_iter()
+            .enumerate()
+            .map(|(index, (pitch, velocity, gain))| ChasedNote {
+                velocity,
+                gain,
+                source: NoteSourceDescriptor::LegacyPiano {
+                    clip_id: 10,
+                    pattern_id: 20,
+                    persistent_note_id: index as u64 + 100,
+                    note_index: index as u32,
+                    repetition: 2,
+                },
+                ..chased_note(index as u64 + 1, 7, pitch)
+            })
+            .collect();
+        let events: Vec<_> = notes
+            .iter()
+            .copied()
+            .map(|note| bounce_equivalence_note_on(0, note))
+            .chain(
+                notes
+                    .iter()
+                    .copied()
+                    .map(|note| bounce_equivalence_note_off(1, note)),
+            )
+            .collect();
+        assert_bounce_midi_matches_callback(
+            &events,
+            1,
+            &[
+                FrameEvent::midi(0, None, [0x90, 60, 32]),
+                FrameEvent::midi(0, None, [0x90, 61, 64]),
+                FrameEvent::midi(0, None, [0x90, 62, 62]),
+                FrameEvent::midi(0, None, [0x90, 63, 1]),
+                FrameEvent::midi(0, None, [0x90, 64, 1]),
+                FrameEvent::midi(0, None, [0x90, 65, 1]),
+                FrameEvent::midi(0, None, [0x90, 66, 127]),
+                FrameEvent::midi(1, None, [0x80, 60, 0]),
+                FrameEvent::midi(1, None, [0x80, 61, 0]),
+                FrameEvent::midi(1, None, [0x80, 62, 0]),
+                FrameEvent::midi(1, None, [0x80, 63, 0]),
+                FrameEvent::midi(1, None, [0x80, 64, 0]),
+                FrameEvent::midi(1, None, [0x80, 65, 0]),
+                FrameEvent::midi(1, None, [0x80, 66, 0]),
+            ],
+        );
+    }
+
+    #[test]
+    fn instrument_bounce_midi_matches_callback_retriggers_and_last_pitch_reference() {
+        let first = chased_note(11, 7, 64);
+        let retrigger = ChasedNote {
+            velocity: 0.5,
+            source: NoteSourceDescriptor::LegacyPiano {
+                clip_id: 21,
+                pattern_id: 31,
+                persistent_note_id: 41,
+                note_index: 3,
+                repetition: 2,
+            },
+            ..chased_note(12, 7, 64)
+        };
+        let other_pitch = ChasedNote {
+            source: NoteSourceDescriptor::ChannelStep {
+                clip_id: 22,
+                pattern_id: 32,
+                step: 5,
+                repetition: 1,
+            },
+            ..chased_note(13, 7, 67)
+        };
+        let events = [
+            bounce_equivalence_note_on(0, first),
+            bounce_equivalence_note_on(1, retrigger),
+            bounce_equivalence_note_on(1, other_pitch),
+            bounce_equivalence_note_off(2, retrigger),
+            bounce_equivalence_note_off(3, other_pitch),
+            bounce_equivalence_note_off(127, first),
+        ];
+        assert_bounce_midi_matches_callback(
+            &events,
+            127,
+            &[
+                FrameEvent::midi(0, None, [0x90, 64, 127]),
+                FrameEvent::midi(1, None, [0x90, 64, 64]),
+                FrameEvent::midi(1, None, [0x90, 67, 127]),
+                FrameEvent::midi(3, None, [0x80, 67, 0]),
+                FrameEvent::midi(127, None, [0x80, 64, 0]),
+            ],
+        );
+    }
+
+    #[test]
+    fn instrument_bounce_midi_matches_callback_off_before_on_across_q128_boundary() {
+        let first = chased_note(21, 7, 64);
+        let second = ChasedNote {
+            source: NoteSourceDescriptor::ChannelStep {
+                clip_id: 2,
+                pattern_id: 3,
+                step: 4,
+                repetition: 1,
+            },
+            ..chased_note(22, 7, 64)
+        };
+        let third = ChasedNote {
+            source: NoteSourceDescriptor::LegacyPiano {
+                clip_id: 5,
+                pattern_id: 6,
+                persistent_note_id: 7,
+                note_index: 8,
+                repetition: 2,
+            },
+            ..chased_note(23, 7, 64)
+        };
+        // Keep the compiler's same-frame NoteOff-before-NoteOn order unchanged.
+        // The pending endpoint ledger spans both quanta without processing audio.
+        let events = [
+            bounce_equivalence_note_on(0, first),
+            bounce_equivalence_note_off(1, first),
+            bounce_equivalence_note_on(127, second),
+            bounce_equivalence_note_off(128, second),
+            bounce_equivalence_note_on(128, third),
+            bounce_equivalence_note_off(255, third),
+        ];
+        assert_bounce_midi_matches_callback(
+            &events,
+            255,
+            &[
+                FrameEvent::midi(0, None, [0x90, 64, 127]),
+                FrameEvent::midi(1, None, [0x80, 64, 0]),
+                FrameEvent::midi(127, None, [0x90, 64, 127]),
+                FrameEvent::midi(128, None, [0x80, 64, 0]),
+                FrameEvent::midi(128, None, [0x90, 64, 127]),
+                FrameEvent::midi(255, None, [0x80, 64, 0]),
+            ],
+        );
+    }
+
     #[test]
     fn generator_plugin_parameter_binding_is_exact_and_q128_batch_is_transactional() {
         let last_midi = Arc::new(AtomicU32::new(0));

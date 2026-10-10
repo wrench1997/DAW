@@ -1499,3 +1499,14 @@ The complete source/bundle/evidence archive will preserve the bounded working-se
 cooperative deadline, SIGPIPE embedding and one-slot quarantine limitations.
 No caller integration, plugin execution, metadata change or accepted publication
 is part of this checkpoint.
+
+## Strict offline caller: unvalidated combined baseline
+
+This local baseline combines accepted automation/piano ec47b63, reviewed strict
+foundation42b71bb and reviewed dormant bounce renderer e798949. The executable
+source merged mechanically without manual conflict resolution; additive WORK_LOG
+history is retained, and vendor patch/provenance pins are regenerated from the
+combined tree. This baseline is unvalidated pending independent semantic review,
+durable archive and combined gates. No new caller implementation, helper feature
+activation or real-plugin run is included. The approved next StopA plan remains
+external design evidence; StopB/genuine execution require separate clearance.

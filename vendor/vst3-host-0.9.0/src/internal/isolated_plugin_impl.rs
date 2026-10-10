@@ -647,6 +647,42 @@ impl PluginInternal for IsolatedPluginImpl {
         }
     }
 
+    fn checked_audio_bus_layout(&self) -> Result<crate::plugin::CheckedAudioBusLayout> {
+        match self.send_command_once(HostCommand::CheckedAudioBusLayout)? {
+            HostResponse::CheckedAudioBusLayout { layout } => {
+                layout.validate()?;
+                Ok(layout)
+            }
+            HostResponse::MetadataQueryRejected { reason } => {
+                Err(Error::MetadataQueryRejected(reason))
+            }
+            HostResponse::Error { message } => Err(Error::ProcessError(format!(
+                "CheckedAudioBusLayout: {message}"
+            ))),
+            _ => Err(Error::ProcessError(
+                "CheckedAudioBusLayout: unexpected response".into(),
+            )),
+        }
+    }
+
+    fn event_bus_layout(&self) -> Result<crate::plugin::EventBusLayout> {
+        match self.send_command_once(HostCommand::EventBusLayout)? {
+            HostResponse::EventBusLayout { layout } => {
+                layout.validate()?;
+                Ok(layout)
+            }
+            HostResponse::MetadataQueryRejected { reason } => {
+                Err(Error::MetadataQueryRejected(reason))
+            }
+            HostResponse::Error { message } => {
+                Err(Error::ProcessError(format!("EventBusLayout: {message}")))
+            }
+            _ => Err(Error::ProcessError(
+                "EventBusLayout: unexpected response".into(),
+            )),
+        }
+    }
+
     fn process_buses(&mut self, buffers: &mut BusAudioBuffers) -> Result<()> {
         let frames = buffers
             .outputs
@@ -2140,6 +2176,157 @@ mod tests {
             assert_eq!(fake.requests().len(), 4);
             assert_eq!(plugin.recovery_count(), 0);
         }
+    }
+
+    #[test]
+    fn checked_audio_layout_query_preserves_typed_refusal_and_never_recovers() {
+        use crate::{
+            plugin::{CheckedAudioBusConfig, CheckedAudioBusLayout},
+            MetadataQueryRejection,
+        };
+        let layout = CheckedAudioBusLayout {
+            inputs: vec![],
+            outputs: vec![CheckedAudioBusConfig {
+                channel_count: 2,
+                is_main: true,
+                active: Some(true),
+            }],
+        };
+        let mut invalid = layout.clone();
+        invalid.outputs[0].channel_count = 0;
+        for (index, reply) in [
+            HostResponse::CheckedAudioBusLayout {
+                layout: layout.clone(),
+            },
+            HostResponse::MetadataQueryRejected {
+                reason: MetadataQueryRejection::Unsupported,
+            },
+            HostResponse::MetadataQueryRejected {
+                reason: MetadataQueryRejection::PendingTopology,
+            },
+            HostResponse::MetadataQueryRejected {
+                reason: MetadataQueryRejection::InconsistentTopology,
+            },
+            HostResponse::Error {
+                message: "unsupported old helper".into(),
+            },
+            HostResponse::Success {
+                message: "wrong reply".into(),
+            },
+            HostResponse::CheckedAudioBusLayout { layout: invalid },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fake = FakeHelper::raw_metadata_reply(
+                &format!("checked_audio_{index}"),
+                "CheckedAudioBusLayout",
+                &serde_json::to_string(&reply).unwrap(),
+            );
+            let mut plugin = isolated(&fake);
+            plugin.auto_recover = true;
+            let result = plugin.checked_audio_bus_layout();
+            match index {
+                0 => assert_eq!(result.unwrap(), layout),
+                1..=3 => assert!(matches!(result, Err(Error::MetadataQueryRejected(_)))),
+                _ => assert!(matches!(result, Err(Error::ProcessError(_)))),
+            }
+            assert_eq!(plugin.recovery_count(), 0);
+            assert_eq!(fake.requests().len(), 1);
+        }
+        for (index, raw) in [
+            r#"{"CheckedAudioBusLayout":{"layout":{"inputs":[],"outputs":[{"channel_count":2,"is_main":true,"active":"yes"}]}}}"#,
+            r#"{"MetadataQueryRejected":{"reason":"SDKFailed"}}"#,
+        ].into_iter().enumerate() {
+            let fake = FakeHelper::raw_metadata_reply(&format!("checked_audio_malformed_{index}"), "CheckedAudioBusLayout", raw);
+            let mut plugin = isolated(&fake);
+            plugin.auto_recover = true;
+            // Establish readiness before the deliberately short malformed-response deadline.
+            plugin.send_command_once(HostCommand::GetAllParameters).unwrap();
+            plugin.response_timeout = Duration::from_secs(1);
+            plugin.process.lock().unwrap().set_timeout(Duration::from_secs(1));
+            let error = plugin.checked_audio_bus_layout().unwrap_err();
+            assert!(!matches!(error, Error::MetadataQueryRejected(_)));
+            assert_eq!(plugin.recovery_count(), 0);
+            assert_eq!(fake.requests().len(), 2);
+        }
+        let fake = FakeHelper::exit_on("checked_audio_dead", "CheckedAudioBusLayout");
+        let mut plugin = isolated(&fake);
+        plugin.auto_recover = true;
+        assert!(plugin.checked_audio_bus_layout().is_err());
+        assert_eq!(plugin.recovery_count(), 0);
+        assert_eq!(fake.requests().len(), 1);
+    }
+
+    #[test]
+    fn checked_event_bus_layout_returns_actual_reply_including_unknown_activation() {
+        let layout = crate::plugin::EventBusLayout {
+            inputs: vec![crate::plugin::EventBusConfig {
+                channel_count: 16,
+                is_main: true,
+                active: None,
+            }],
+            outputs: vec![crate::plugin::EventBusConfig {
+                channel_count: 1,
+                is_main: false,
+                active: Some(false),
+            }],
+        };
+        let fake = FakeHelper::raw_metadata_reply(
+            "event_bus_actual",
+            "EventBusLayout",
+            &serde_json::to_string(&HostResponse::EventBusLayout {
+                layout: layout.clone(),
+            })
+            .unwrap(),
+        );
+        let plugin = isolated(&fake);
+        assert_eq!(plugin.event_bus_layout().unwrap(), layout);
+        assert_eq!(plugin.recovery_count(), 0);
+        assert_eq!(fake.requests().len(), 1);
+    }
+
+    #[test]
+    fn checked_event_bus_layout_rejects_error_wrong_invalid_and_dead_helper_without_recovery() {
+        let invalid = HostResponse::EventBusLayout {
+            layout: crate::plugin::EventBusLayout {
+                inputs: vec![crate::plugin::EventBusConfig {
+                    channel_count: 0,
+                    is_main: true,
+                    active: Some(true),
+                }],
+                outputs: vec![],
+            },
+        };
+        for (index, reply) in [
+            HostResponse::Error {
+                message: "unsupported old helper".into(),
+            },
+            HostResponse::Success {
+                message: "wrong reply".into(),
+            },
+            invalid,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fake = FakeHelper::raw_metadata_reply(
+                &format!("event_bus_failure_{index}"),
+                "EventBusLayout",
+                &serde_json::to_string(&reply).unwrap(),
+            );
+            let mut plugin = isolated(&fake);
+            plugin.auto_recover = true;
+            assert!(plugin.event_bus_layout().is_err());
+            assert_eq!(plugin.recovery_count(), 0);
+            assert_eq!(fake.requests().len(), 1);
+        }
+        let fake = FakeHelper::exit_on("event_bus_dead", "EventBusLayout");
+        let mut plugin = isolated(&fake);
+        plugin.auto_recover = true;
+        assert!(plugin.event_bus_layout().is_err());
+        assert_eq!(plugin.recovery_count(), 0);
+        assert_eq!(fake.requests().len(), 1);
     }
 
     #[test]

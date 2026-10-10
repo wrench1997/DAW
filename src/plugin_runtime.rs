@@ -23,9 +23,19 @@ use std::{
 
 use rtrb::{Consumer, PopError, Producer, PushError, RingBuffer};
 
+use crate::instrument_bounce::{BounceCaptureError, BouncePluginState, BounceStateReceipt};
+
 #[cfg(feature = "vst3")]
 use super::installed_vst3_helper_path;
 use super::{PluginDescriptor, PluginFormat};
+
+#[path = "offline_instrument.rs"]
+mod offline_instrument;
+pub use offline_instrument::OfflineInstrument;
+
+#[cfg(test)]
+#[path = "instrument_bounce_tests.rs"]
+mod instrument_bounce_tests;
 
 /// Maximum block accepted by the plug-in bridge. This matches the Mixer's preallocated blocks.
 pub const MAX_PLUGIN_BLOCK_FRAMES: usize = 2_048;
@@ -400,6 +410,18 @@ pub trait PluginBackend: 'static {
         Ok(NativeEditorFeedback::default())
     }
     fn save_state(&mut self) -> Result<Vec<u8>, String>;
+    /// Dedicated read/capture surface. Defaults reject; this never closes an editor, resets
+    /// transport, restores state, or publishes the normal native/project-save snapshot.
+    fn capture_instrument_bounce_state(
+        &mut self,
+        _parameter_ids: &[u32],
+        fence: &BounceCaptureFence,
+    ) -> Result<BouncePluginState, BounceCaptureError> {
+        fence.checkpoint()?;
+        Err(BounceCaptureError::Rejected(
+            "This backend does not support instrument bounce capture".into(),
+        ))
+    }
     fn load_state(&mut self, state: &[u8]) -> Result<(), String>;
     /// Pure worker-side validation before any epoch-reset safety MIDI or lifecycle mutation.
     /// Default preserves custom/legacy backends; format adapters may require a reset contract.
@@ -1897,6 +1919,13 @@ pub enum RealtimeOutputSource {
 }
 
 enum AdminCommand {
+    CaptureInstrumentBounce {
+        expected_epoch: u64,
+        parameter_ids: Vec<u32>,
+        parameter_admission: Arc<AtomicU32>,
+        lease: BounceCaptureLease,
+        reply: SyncSender<Result<BounceStateReceipt, BounceCaptureError>>,
+    },
     NativeEditor {
         slot: usize,
         request_id: u64,
@@ -2016,7 +2045,179 @@ pub struct PluginChainControl {
     parameter_edit_admission: Arc<AtomicU32>,
 }
 
+/// Shared cooperative capture fence. One dispatched helper call retains its own timeout;
+/// backends must classify that call's real failure before checking cancellation afterward.
+/// The owner is acknowledged only after the worker has stopped all capture operations.
+pub struct BounceCaptureFence {
+    deadline: Instant,
+    cancelled: AtomicBool,
+    terminated: AtomicBool,
+    #[cfg(test)]
+    before_ack: Mutex<Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>>,
+}
+
+impl BounceCaptureFence {
+    fn new(deadline: Instant) -> Self {
+        Self {
+            deadline,
+            cancelled: AtomicBool::new(false),
+            terminated: AtomicBool::new(false),
+            #[cfg(test)]
+            before_ack: Mutex::new(None),
+        }
+    }
+
+    /// Check before and after every bounded IPC operation, never instead of its error result.
+    pub fn checkpoint(&self) -> Result<(), BounceCaptureError> {
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(BounceCaptureError::Rejected(
+                "Instrument bounce capture was cancelled".into(),
+            ));
+        }
+        if Instant::now() >= self.deadline {
+            return Err(BounceCaptureError::Rejected(
+                "Instrument bounce state capture timed out".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
+/// Worker/queued-command ownership, deliberately not retained by the reply receiver. Dropping
+/// a receiver requests cancellation; only this lease's final Drop releases source admission.
+struct BounceCaptureLease {
+    fence: Arc<BounceCaptureFence>,
+    metrics: Arc<BridgeMetrics>,
+}
+
+impl Drop for BounceCaptureLease {
+    fn drop(&mut self) {
+        // No capture operation may follow lease destruction. Reopen admission first, then
+        // acknowledge termination: an Acquire observer of acknowledgment can retry at once.
+        // Cancellation/drop/queue failure/panic all use this one path.
+        self.metrics
+            .bounce_capture_busy
+            .store(false, Ordering::Release);
+        #[cfg(test)]
+        if let Some((reached, resume)) = self.fence.before_ack.lock().unwrap().as_ref() {
+            // Per-fence test seam forces the inter-store boundary without a global hook.
+            reached.wait();
+            resume.wait();
+        }
+        self.fence.terminated.store(true, Ordering::Release);
+    }
+}
+
+/// Private bounded reply plus cancellation/termination observation. Drop never releases the
+/// worker's source lease or claims that an in-flight call has terminated.
+pub struct BounceStateReceiver {
+    receiver: Receiver<Result<BounceStateReceipt, BounceCaptureError>>,
+    fence: Arc<BounceCaptureFence>,
+}
+
+impl BounceStateReceiver {
+    pub(crate) fn cancel(&self) {
+        self.fence.cancel();
+    }
+
+    pub(crate) fn termination_acknowledged(&self) -> bool {
+        self.fence.terminated.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn try_recv(
+        &self,
+    ) -> Result<Result<BounceStateReceipt, BounceCaptureError>, TryRecvError> {
+        if !self.termination_acknowledged() {
+            return Err(TryRecvError::Empty);
+        }
+        self.receiver.try_recv()
+    }
+}
+
+impl Drop for BounceStateReceiver {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
 impl PluginChainControl {
+    /// One source generator, one private bounded receipt. No normal save/native publication.
+    pub fn request_instrument_bounce_state(
+        &self,
+        instance_id: u64,
+        expected_epoch: u64,
+        parameter_ids: Vec<u32>,
+    ) -> Result<BounceStateReceiver, String> {
+        let deadline = Instant::now()
+            .checked_add(crate::instrument_bounce::BOUNCE_CAPTURE_TIMEOUT)
+            .ok_or("Instrument bounce capture deadline overflow")?;
+        self.request_instrument_bounce_state_until(
+            instance_id,
+            expected_epoch,
+            parameter_ids,
+            deadline,
+        )
+    }
+
+    fn request_instrument_bounce_state_until(
+        &self,
+        instance_id: u64,
+        expected_epoch: u64,
+        parameter_ids: Vec<u32>,
+        deadline: Instant,
+    ) -> Result<BounceStateReceiver, String> {
+        if expected_epoch == 0
+            || self.manifest.slot_count != 1
+            || self.manifest.instance_ids[0] != Some(instance_id)
+            || parameter_ids.len() > MAX_PLUGIN_PARAMETER_CATALOG_ITEMS
+            || parameter_ids.windows(2).any(|pair| pair[0] >= pair[1])
+            || self.parameter_edit_admission.load(Ordering::Acquire) != 0
+        {
+            return Err("Instrument bounce requires one exact identified generator, a nonzero epoch and drained, unique generic parameter keys".into());
+        }
+        let snapshots = self
+            .metrics
+            .native_editors
+            .lock()
+            .map_err(|_| "Native snapshot lock poisoned")?;
+        let native = &snapshots[0];
+        if native.state.open
+            || native.pending_request.is_some()
+            || native.capture_in_progress
+            || native.error.is_some()
+        {
+            return Err("Instrument bounce source editor is open, pending or faulted".into());
+        }
+        if self
+            .metrics
+            .bounce_capture_busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err("An instrument bounce capture is already pending for this source".into());
+        }
+        let (reply, receiver) = mpsc::sync_channel(1);
+        let fence = Arc::new(BounceCaptureFence::new(deadline));
+        let lease = BounceCaptureLease {
+            fence: Arc::clone(&fence),
+            metrics: Arc::clone(&self.metrics),
+        };
+        if !self.try_admin(AdminCommand::CaptureInstrumentBounce {
+            expected_epoch,
+            parameter_ids,
+            parameter_admission: Arc::clone(&self.parameter_edit_admission),
+            lease,
+            reply,
+        }) {
+            // Rejected command ownership was dropped by try_admin, releasing exactly once.
+            return Err("Instrument bounce source command queue is full or disconnected".into());
+        }
+        Ok(BounceStateReceiver { receiver, fence })
+    }
     pub fn midi_capabilities(&self) -> (bool, bool) {
         let mask = self.metrics.midi_capabilities.load(Ordering::Acquire);
         (mask & 1 != 0, mask & (1 << 16) != 0)
@@ -2235,6 +2436,7 @@ fn manifest_accepts_slot(manifest: PluginEndpointManifest, slot: usize) -> bool 
 
 #[derive(Default)]
 struct BridgeMetrics {
+    bounce_capture_busy: AtomicBool,
     midi_capabilities: AtomicU32,
     midi_blocked: AtomicBool,
     native_editors: Mutex<[NativeEditorSnapshot; MAX_PLUGIN_CHAIN_SLOTS]>,
@@ -2819,6 +3021,30 @@ fn run_worker(
                     shutdown = true;
                     break;
                 }
+                Ok(AdminCommand::CaptureInstrumentBounce {
+                    expected_epoch,
+                    parameter_ids,
+                    parameter_admission,
+                    lease,
+                    reply,
+                }) => {
+                    let result = capture_instrument_bounce_on_worker(
+                        &lease.fence,
+                        expected_epoch,
+                        active_epoch,
+                        &requested_epoch,
+                        input.is_empty(),
+                        &parameter_ids,
+                        &parameter_admission,
+                        &mut slots,
+                        &mut events,
+                        &metrics,
+                    );
+                    // Abandoned/cancelled capture is harmless; never block the source worker.
+                    let _ = reply.try_send(result);
+                    // A reply alone is not completion. No capture calls remain after this ack.
+                    drop(lease);
+                }
                 Ok(AdminCommand::SaveState {
                     slot,
                     request_id,
@@ -3366,6 +3592,98 @@ fn handle_tagged_rt_parameter(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn capture_instrument_bounce_on_worker(
+    fence: &BounceCaptureFence,
+    expected_epoch: u64,
+    active_epoch: u64,
+    requested_epoch: &AtomicU64,
+    input_empty: bool,
+    parameter_ids: &[u32],
+    parameter_admission: &AtomicU32,
+    slots: &mut [WorkerSlot],
+    events: &mut Producer<RuntimeEvent>,
+    metrics: &BridgeMetrics,
+) -> Result<BounceStateReceipt, BounceCaptureError> {
+    let reject = |message: &str| BounceCaptureError::Rejected(message.into());
+    fence.checkpoint()?;
+    if expected_epoch == 0
+        || active_epoch != expected_epoch
+        || requested_epoch.load(Ordering::Acquire) != expected_epoch
+        || !input_empty
+        || parameter_admission.load(Ordering::Acquire) != 0
+    {
+        return Err(reject(
+            "Instrument bounce source is not quiescent at the exact requested epoch",
+        ));
+    }
+    let editor_closed = || {
+        metrics.native_editors.lock().is_ok_and(|snapshots| {
+            let native = &snapshots[0];
+            !native.state.open
+                && native.pending_request.is_none()
+                && !native.capture_in_progress
+                && native.error.is_none()
+        })
+    };
+    if !editor_closed() {
+        return Err(reject(
+            "Instrument bounce source editor is open, pending or faulted",
+        ));
+    }
+    if slots.len() != 1 {
+        return Err(reject(
+            "Instrument bounce source is not a one-slot generator",
+        ));
+    }
+    let slot = &mut slots[0];
+    if slot.fault.is_some()
+        || !slot.config.enabled
+        || slot.config.bypassed
+        || slot.config.wet != 1.0
+    {
+        return Err(reject(
+            "Instrument bounce source is faulted, bypassed or not fully wet",
+        ));
+    }
+    let backend = slot
+        .backend
+        .as_mut()
+        .ok_or_else(|| reject("Instrument bounce source backend is unavailable"))?;
+    fence.checkpoint()?;
+    let captured = panic::catch_unwind(AssertUnwindSafe(|| {
+        backend.capture_instrument_bounce_state(parameter_ids, fence)
+    }))
+    .unwrap_or_else(|payload| {
+        Err(BounceCaptureError::BackendFailed(format!(
+            "Instrument bounce capture panicked: {}",
+            panic_payload_message(payload.as_ref())
+        )))
+    });
+    if let Err(BounceCaptureError::BackendFailed(message)) = &captured {
+        // Do not hide a newly observed IPC/backend failure behind the nonmutating rejection path.
+        slot.fault = Some(message.clone());
+        register_fault(0, message.clone(), events, metrics);
+        // The best-effort SlotFault event may be dropped. Publish the reliable inactive
+        // identity before replying, not at the next periodic poll or later admin command.
+        update_latency_and_tail(slots, events, metrics);
+    }
+    let state = captured?;
+    fence.checkpoint()?;
+    if requested_epoch.load(Ordering::Acquire) != expected_epoch
+        || !editor_closed()
+        || parameter_admission.load(Ordering::Acquire) != 0
+    {
+        return Err(reject(
+            "Instrument bounce source changed while state was captured",
+        ));
+    }
+    Ok(BounceStateReceipt {
+        epoch: expected_epoch,
+        state,
+    })
+}
+
 fn capture_worker_state(
     slot: usize,
     request_id: u64,
@@ -3639,7 +3957,7 @@ fn handle_admin(
             }
             faulted || slots.get(slot).is_some_and(|slot| slot.fault.is_none())
         }
-        AdminCommand::Shutdown => false,
+        AdminCommand::Shutdown | AdminCommand::CaptureInstrumentBounce { .. } => false,
     }
 }
 
@@ -5325,6 +5643,14 @@ impl PluginBackend for Vst3Backend {
 
     fn save_state(&mut self) -> Result<Vec<u8>, String> {
         self.plugin.save_state().map_err(|error| error.to_string())
+    }
+
+    fn capture_instrument_bounce_state(
+        &mut self,
+        parameter_ids: &[u32],
+        fence: &BounceCaptureFence,
+    ) -> Result<BouncePluginState, BounceCaptureError> {
+        self.capture_bounce_state(parameter_ids, fence)
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), String> {

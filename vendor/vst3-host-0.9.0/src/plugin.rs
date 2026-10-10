@@ -108,6 +108,85 @@ pub struct PluginInfo {
     pub has_gui: bool,
 }
 
+/// One actual VST3 event bus, preserving its index within the input/output list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventBusConfig {
+    /// Number of MIDI channels reported by the current component bus.
+    pub channel_count: u32,
+    /// True for a main bus; false for an auxiliary bus.
+    pub is_main: bool,
+    /// Host-confirmed activation, never inferred from kDefaultActive. None means the
+    /// current component topology cannot be matched to the host's activation records.
+    pub active: Option<bool>,
+}
+
+/// Fresh component event-bus enumeration, not cached PluginInfo capability booleans.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventBusLayout {
+    /// Input buses in actual VST3 index order, including inactive buses.
+    pub inputs: Vec<EventBusConfig>,
+    /// Output buses in actual VST3 index order, including inactive buses.
+    pub outputs: Vec<EventBusConfig>,
+}
+
+impl EventBusLayout {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.inputs.len() > 32
+            || self.outputs.len() > 32
+            || self
+                .inputs
+                .iter()
+                .chain(&self.outputs)
+                .any(|bus| !(1..=16).contains(&bus.channel_count))
+        {
+            return Err(Error::Other("Invalid or oversized event-bus layout".into()));
+        }
+        Ok(())
+    }
+}
+
+/// Actual audio bus shape attested against the prepared processing buffers.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckedAudioBusConfig {
+    /// Channels in both the current component bus and prepared bus at this index.
+    pub channel_count: usize,
+    /// Main/aux type matches the prepared bus descriptor.
+    pub is_main: bool,
+    /// Host-confirmed activation; None never becomes a default-active guess.
+    pub active: Option<bool>,
+}
+
+/// Read-only component/prepared audio-layout consistency proof. No pending I/O is serviced.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckedAudioBusLayout {
+    /// Every actual input bus in index order.
+    pub inputs: Vec<CheckedAudioBusConfig>,
+    /// Every actual output bus in index order.
+    pub outputs: Vec<CheckedAudioBusConfig>,
+}
+
+impl CheckedAudioBusLayout {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.inputs.len() > 32
+            || self.outputs.len() > 32
+            || self
+                .inputs
+                .iter()
+                .chain(&self.outputs)
+                .any(|bus| !(1..=256).contains(&bus.channel_count))
+        {
+            return Err(Error::ProcessError(
+                "Invalid checked audio-bus layout".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// A saved plugin preset: the plugin's identity plus its opaque state blob.
 ///
 /// Written/read by [`Plugin::save_preset`] / [`Plugin::load_preset`]. The `uid` lets a
@@ -1264,6 +1343,14 @@ impl MainThreadPlugin {
     pub fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
         self.plugin.audio_bus_layout()
     }
+    /// Main-thread equivalent of [`Plugin::checked_audio_bus_layout`].
+    pub fn checked_audio_bus_layout(&self) -> Result<CheckedAudioBusLayout> {
+        self.plugin.checked_audio_bus_layout()
+    }
+    /// Main-thread equivalent of [`Plugin::event_bus_layout`].
+    pub fn event_bus_layout(&self) -> Result<EventBusLayout> {
+        self.plugin.event_bus_layout()
+    }
     /// Main-thread equivalent of [`Plugin::create_bus_audio_buffers`].
     pub fn create_bus_audio_buffers(&self, block_size: usize) -> Result<BusAudioBuffers> {
         self.plugin.create_bus_audio_buffers(block_size)
@@ -1505,6 +1592,18 @@ pub(crate) trait PluginInternal: Send {
     fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
         Err(Error::Other(
             "bus-aware audio processing is not supported for this plugin".to_string(),
+        ))
+    }
+    /// Strict read-only component/prepared consistency query. No fallback is safe.
+    fn checked_audio_bus_layout(&self) -> Result<CheckedAudioBusLayout> {
+        Err(Error::MetadataQueryRejected(
+            crate::MetadataQueryRejection::Unsupported,
+        ))
+    }
+    /// Fresh component enumeration. Older/custom implementations explicitly reject.
+    fn event_bus_layout(&self) -> Result<EventBusLayout> {
+        Err(Error::MetadataQueryRejected(
+            crate::MetadataQueryRejection::Unsupported,
         ))
     }
     /// Process buffers while preserving VST3 bus boundaries.
@@ -2754,6 +2853,31 @@ impl Plugin {
             .as_ref()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .audio_bus_layout()
+    }
+
+    /// Attest actual component audio buses against prepared buffers and host activation.
+    /// Rejects pending I/O/reload without draining flags, servicing, or reconfiguring.
+    pub fn checked_audio_bus_layout(&self) -> Result<CheckedAudioBusLayout> {
+        let layout = self
+            .internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .checked_audio_bus_layout()?;
+        layout.validate()?;
+        Ok(layout)
+    }
+
+    /// Enumerate current component event buses on the control/main thread. This is a
+    /// fallible query; unsupported helpers, invalid replies and disconnects never become
+    /// empty layouts or cached MIDI capabilities. No helper recovery is attempted.
+    pub fn event_bus_layout(&self) -> Result<EventBusLayout> {
+        let layout = self
+            .internal
+            .as_ref()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .event_bus_layout()?;
+        layout.validate()?;
+        Ok(layout)
     }
 
     /// Allocate a bus-aware silent buffer set matching the plug-in's current configuration.

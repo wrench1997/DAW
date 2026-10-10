@@ -100,7 +100,7 @@ pub use discovery::{
 };
 #[cfg(feature = "egui-widgets")]
 pub use embed::{EditorRect, EmbeddedEditor};
-pub use error::{Error, Result};
+pub use error::{Error, MetadataQueryRejection, Result};
 pub use host::{DiscoveryProgress, ProbeResult, Vst3Host, Vst3HostBuilder};
 pub use midi::{
     cc, MidiChannel, MidiEvent, NoteExpressionInfo, NoteExpressionType, NoteId, OutputEvent,

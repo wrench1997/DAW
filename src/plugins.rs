@@ -431,6 +431,42 @@ pub struct NativePluginHost {
     _private: (),
 }
 
+/// Shared persistable load description. The saved UID remains the historical descriptor ID;
+/// it is not silently reinterpreted as a factory class UID by the bounce path.
+pub(crate) fn plugin_load_spec_from_instance(
+    instance: &crate::model::PluginInstance,
+) -> plugin_runtime::PluginLoadSpec {
+    use crate::model::{PluginFormat as StoredFormat, PluginRole};
+    plugin_runtime::PluginLoadSpec {
+        descriptor: PluginDescriptor {
+            id: instance.uid.clone(),
+            name: instance.name.clone(),
+            vendor: instance.vendor.clone(),
+            path: instance.path.clone(),
+            format: match instance.format {
+                StoredFormat::Vst2 => PluginFormat::Vst2,
+                StoredFormat::Vst3 => PluginFormat::Vst3,
+            },
+            category: match instance.role {
+                PluginRole::Instrument => "Instrument",
+                PluginRole::Effect => "Effect",
+                PluginRole::Unknown => "Unknown role",
+            }
+            .to_owned(),
+            is_instrument: instance.role == PluginRole::Instrument,
+            verified: instance.path.exists(),
+            vst3_metadata: None,
+            scan_error: None,
+        },
+        class_uid: None,
+        vst3_helper_path: None,
+        initial_state: instance.opaque_state.clone(),
+        enabled: instance.enabled,
+        bypassed: instance.bypass,
+        wet: instance.wet,
+    }
+}
+
 impl NativePluginHost {
     /// Spawn one ordered Mixer insert chain. Starting the worker is synchronous; individual
     /// plug-in load success arrives asynchronously as `RuntimeEvent::SlotReady`/`SlotFault`.
