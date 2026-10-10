@@ -4884,7 +4884,21 @@ fn automation_tension_visibility_and_clipped_midpoint_alignment() {
     ]);
     ui.app.project.clips[0].source_offset = 2.0;
     ui.app.project.clips[0].length = 2.0;
+    let clipped_points = ui.app.project.automation_lanes[0].lane.points().to_vec();
+    let clipped_project = project_fingerprint(&ui.app.project);
+    ui.app.sync_history_observer();
+    ui.app.project_fingerprint = clipped_project;
+    ui.app.dirty = false;
+    ui.app.undo_stack.clear();
+    ui.app.redo_stack.clear();
     ui.settle();
+    assert_eq!(
+        ui.app.project.automation_lanes[0].lane.points(),
+        clipped_points
+    );
+    assert_eq!(project_fingerprint(&ui.app.project), clipped_project);
+    assert!(!ui.app.dirty);
+    assert!(ui.app.undo_stack.is_empty());
     assert!(!ui.nodes.iter().any(|node| {
         node.label()
             .is_some_and(|label| label.starts_with("Automation point "))

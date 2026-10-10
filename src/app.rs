@@ -17411,6 +17411,9 @@ impl CitrusApp {
                                     f64::from(source_offset)
                                         ..=f64::from(source_offset + clip_length),
                                 )
+                                // Split/slipped placements may expose only the middle
+                                // of a segment. Viewing must not relocate its endpoints.
+                                .clamp_existing_to_range(false)
                                 .speed(0.05)
                                 .prefix("B "),
                         )
