@@ -66,6 +66,9 @@ pub mod simple;
 pub mod transport;
 pub mod window;
 
+#[cfg(feature = "experimental-scoped-worker")]
+pub mod scoped_worker;
+
 pub mod discovery;
 
 #[cfg(feature = "egui-widgets")]
@@ -75,6 +78,10 @@ pub mod embed;
 pub mod backends;
 
 pub mod process_isolation;
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[allow(dead_code)] // Deliberately private foundation; caller integration is a later checkpoint.
+mod fresh_helper;
 
 #[cfg(feature = "midi-input")]
 pub mod midi_input;

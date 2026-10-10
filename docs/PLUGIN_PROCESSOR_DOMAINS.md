@@ -692,3 +692,249 @@ build reproduces the same helper SHA256
 The initial compile failure, absent upstream fixture, and prior checkpoint
 qualifications remain in the evidence. Genuine-plugin/native/Windows runtime
 acceptance and release are outside these source-only checkpoints.
+
+
+## 2026-10-10 — Borrowed processor thread proof (UNVALIDATED test-only checkpoint)
+
+The entire new capability and its constructor are `cfg(test)`. Production
+`ProcessorLease`, `ProcessorOps`, `MainThreadPlugin`, helper dispatch and strict
+metadata policy are unchanged. A private non-owning token exclusively borrows
+the aggregate owner and its module lifetime. It exposes only an unsafe mutable
+`process` call; one narrowly documented `Send` implementation moves that call
+capability into a scoped worker. It is neither Clone nor Sync and grants no
+controller, metadata, lifecycle, cast, AddRef or Release access. All owning COM
+references and final destruction remain on the loading thread.
+
+The mock uses worker-local f32 mono buffers and prepared ProcessData. Fixtures
+cover a 350 ms simulated main-thread hold, a same-thread negative baseline,
+checked readiness, SDK result errors, Rust-only worker/main panic, process-flag
+cleanup and a blocked worker that must join before owner/module release. No
+foreign COM unwind recovery is claimed. The mock intentionally allocates and
+locks. Its output proves only thread ownership/progress, not real-time safety.
+
+This is not a production audio fix: the raw fixture does not perform runtime
+native acknowledgments, process history, event/parameter orchestration, or
+output-fault handling. It cannot be selected by a user or helper. Production
+integration must preserve all of those semantics under a separately reviewed
+capability. Independent IPC, native polling, metadata freshness and device/PDC
+publication remain unresolved by this fixture. Existing strict mode still waits
+for fresh main-thread metadata. No experimental 500 ms mode is implemented.
+
+The new full-source compile-contract runner checks the actual test-only private
+types and a positive scoped use before asserting the borrow/visibility/auto-trait
+failures. At this recovery boundary compilation and execution remain pending;
+the exact unsafe call sites require independent review before execution.
+
+
+### Executed borrowed-capability proof (2026-10-10)
+
+Independent unsafe-boundary review preceded execution. All 8 new mock-thread
+fixtures and all 52 private compiler contracts pass. The latter include positive
+scoped transfer/rejoin and production-owner controls, then independent production
+exclusion, mutable/unsafe-call, authority, lifetime and borrow-failure checks. The
+350 ms fixture establishes completion before release of a main-thread hold lasting
+at least 350 ms, with a generous watchdog; it is not a 350 ms execution deadline.
+The same-thread case is a sequential-call structural control, not an execution of
+the actual helper dispatcher. Detached-thread exclusion is for a nonstatic owner
+loan; a deliberately leaked static owner is outside the tested teardown contract.
+
+Fresh source gates pass 408 available vendor tests (one known absent SDK fixture
+excluded), 26 doctests, 1,188 App tests, 25 helper tests, 13 protocol tests and 239
+Python tests. Root strict all-feature Clippy, formatting and the vendor test
+Clippy check pass; the latter retains only the already documented deprecated and
+drain_collect exceptions. Package closure checks 552 inputs and the upstream
+patch replays 48 files exactly. The separately archived lifecycle branch's two
+additional tests are not part of this branch or its 1,188 count.
+
+The first compiler-runner input was rejected before Cargo because it contained
+two binary targets. A separate QA library-only manifest removes only those two
+sections, preserving dependencies, features and the exact lock. The first ad hoc
+package-input check passed paths where bytes were required; its retained failure
+and corrected 552-input pass changed no source. All Rust bytes remain identical
+to the durably archived, independently reviewed pretest checkpoint.
+
+A forced current-worktree vendor compile and exact rlib link produced the copied
+helper SHA256 `ca1751af6d848d35a2b0054713d44bb1614d952eb4d280740123c52155dd6b7d`.
+These are source/mock/protocol results only. There is no genuine-plugin, native
+GUI, Windows runtime, device-audio or performance acceptance. The production
+helper has no new process capability, mode, worker or metadata policy.
+
+## Scoped full-runtime processing preparation (2026-10-10, unvalidated checkpoint)
+
+The production render kernel now depends on `ProcessorProcessCall`, which grants
+only the SDK `process` call. `setProcessing` remains in the separate lifecycle
+`ProcessorCalls` trait. The three runtime render functions use the same bodies,
+queue ordering, zero-sample bus hiding, positive-call history, native staging and
+per-SDK-call acknowledgment, transport advancement, error cleanup, output-loss
+and sticky parameter-output-fault precedence. The existing production
+`ProcessorOps` facade remains non-Send/non-Sync. Public `Plugin` flat/bus process
+wrappers are unchanged: only whole-call success updates levels and invokes the
+arbitrary caller-side audio callback while its existing meter mutex is held.
+
+A separate, entirely `cfg(test)` session loans the already prepared runtime by
+value while the loading thread retains the existing disjoint `ControlOps` view.
+`RuntimeLoan` has one private field and one narrowly audited unsafe Send. Its
+worker adapter exposes only a borrowed processor address with exclusive
+processor/module lifetime; it neither owns/clones a COM reference nor enters the
+process flag. The existing full kernel is the sole owner of the SDK-call gate.
+The owner physically retains all buffer allocations, parameter/event COM
+wrappers, controller, processor, factory and module. No loan operation can
+replace or rebuild those owners. State, setup, reset, lifecycle, metadata and
+destruction require the scoped worker to join and the owner borrow to end.
+
+The concurrent fixture is an ownership/orchestration proof, not helper worker
+activation. Its intended main-thread getter hold lasts at least 350 ms; a generous
+watchdog checks worker completion before release, without asserting a 350 ms
+processing deadline. It uses real host COM mock interfaces and the full runtime,
+but does not qualify arbitrary plug-ins or native windows. Same-thread callback
+metering and controller-mirroring entry points retain their original contracts;
+the runtime-only parameter method remains queue admission without mirroring.
+
+Host-issued queue lifetime is a distinct boundary. During one prepared lifetime,
+container-owned COM references remain live on the main owner. A plug-in can
+legally retain a queue, and after an owner-side rebuild its final later Release
+may free that retired host queue/arena on the processing thread. Join-before-
+rebuild prevents stale-owner access but does not move that final release back to
+the main thread. The fixture will preserve this negative evidence. No universal
+final-release affinity, whole-Process no-allocation/no-free, mutex removal,
+metadata freshness lease, independent IPC, or audible GUI-stall fix is claimed.
+
+This source checkpoint is unvalidated until the separate executed receipt is
+appended. Concurrent invocation requires independent review of both the narrow
+unsafe wrapper and its concrete COM fixture callsites before execution.
+
+### Executed scoped full-runtime proof (2026-10-10)
+
+The source/COM mock gate now passes. Twenty focused tests exercise the same
+production processing kernel through the test-only loan, including an actual
+main-thread controller getter held for at least 350 ms while the worker completes
+before release. They preserve per-SDK-call native acknowledgment across split
+blocks, zero-flush and positive-attempt history, checked input rollback, explicit
+transport, output loss/fault precedence, caller callback/meter behavior, scoped
+join on Rust panic, and module/reference destruction ordering. The retired-queue
+case intentionally observes final Release returning zero inside a later mocked
+SDK call after owner-side rebuild; that processing-thread free possibility is
+not hidden or treated as a passed no-free guarantee.
+
+- Available vendor suite: 428 passed; the one known absent SDK-generated
+  module-info fixture remains explicitly excluded. Vendor doctests: 26 passed.
+- App suite: 1,188 passed; helper: 25; protocol: 13; Python: 239, including the
+  copied helper's Unix descriptor checks. These use this branch's source, before
+  the separately published piano correction, which must be retained on integration.
+- Compiler contracts: 55 updated domain cases passed. The new runtime corpus has
+  88 unique verified outcomes across an interrupted 85-pass prefix and a six-case
+  rerun (three positive controls plus the corrected/unexecuted cases). Fixture,
+  production-source and lock hashes are compared in the union receipt. The
+  interrupted report remains incomplete; it is not rewritten into a full pass.
+- Strict root Clippy, formatting, vendor test Clippy with only the documented
+  pre-existing deprecated/drain-collect exceptions, 552 package inputs and exact
+  50-file official-crate patch replay passed.
+
+The first compile lacked the test's SDK ownership-trait import and stopped before
+execution. The first compiler-runner positive control failed on generated nested
+module paths; none of its negatives counted. A later detached-thread negative
+was correctly rejected with an unnumbered static-lifetime error rather than the
+runner's anticipated E0521; only that exact diagnostic expectation was corrected.
+All failed/interrupted records and the earlier unexecuted review corrections are
+retained. No production Rust changed during the runner corrections.
+
+The helper is bound to forced current-worktree vendor compilation, exact linked
+rlib/dep-info and a copied executable SHA-256:
+`d0c37d80e03f032004861081a4dd6d8c9a519775a586d9faf43ecaebfb3a42bb`.
+Full structured evidence is delivered with the separate tested source archive.
+No genuine plug-in, native GUI, Windows runtime, device, timing or audible
+isolation acceptance is claimed. No production worker, asynchronous mirror,
+independent IPC/native polling or metadata-policy change is activated. Existing
+strict metadata still blocks publication when its UI-thread queries are blocked.
+The next integration must preserve the accepted piano fix and obtain its own
+combined-source validation.
+
+## Disabled-feature scoped worker Step1 (unvalidated source)
+
+`experimental-scoped-worker` is absent from the root and vendor default feature
+sets. It exposes a Linux-only library implementation, not a helper command or App
+mode. Other backends/platforms reject the entry. Strict metadata queries, native
+polling, existing IPC, reset policy and all public processing callbacks retain
+their existing behavior. The accepted piano changes are present in this branch.
+
+`MainThreadPlugin::with_scoped_worker` checks loading-thread affinity, prepared
+processing state and that both user callback options are empty. The loading
+thread keeps the owner, module, owning COM references and prepared storage. Its
+callback borrows a main-only attached-UI bridge and an exclusive, Send message
+port; neither exposes a raw channel, processor, aggregate owner or thread handle.
+The library's private worker alone invokes the same full checked kernel. Its
+narrow Send loan cannot rebuild, replace or destroy buffers/COM owners, or call
+controller, metadata, lifecycle, reset or state methods. The kernel still enters
+exactly one SDK process gate. Retired host queues can still have their final
+Release/free during a later Process after main-side rebuild; no whole-Process
+no-allocation/no-free claim is made.
+
+One command may be outstanding at a time. Capacity-one channels bound command
+count, not the number of bytes in caller-owned audio buffers. Commands are flat
+or bus processing, ordinary NoteOn/NoteOff/PolyAftertouch admission, and explicit
+output-event drain. Ordinary scalar validation and transactional bookkeeping are
+shared with the existing owner path. Mapped CC, pitch bend, channel aftertouch,
+program selection and mirrored parameter setters remain owner operations. A
+failed process reply's returned buffers are partial diagnostic data, never a
+successful audio completion. Event drain remains explicit, as in the public API.
+
+Meter updates use the existing mutex once after whole-call success, including
+zero-frame success, and skip poison/failure exactly as before. Arbitrary audio
+or parameter callbacks are rejected at entry instead of being moved to a worker
+or replayed later. Existing public wrappers keep their callback affinity.
+
+The attached bridge services existing Linux run-loop work and an already
+attached view's size/resize/scale operations. It never creates a view as a query
+fallback; scale QI/use/Release stays on main. Native container focus/query remains
+in binary window code. Open/Close/native-close, SaveState, LoadState, setup, reset,
+all metadata (including future EventBusLayout/CheckedAudioBusLayout), and destruction require returning
+from the session before the existing owner handler runs. Fresh-helper eligibility
+belongs to future negotiation; positive-call history is preserved across re-entry.
+
+On callback return, error or Rust unwind, the library closes its unique sender,
+drains accepted work and joins before rejoining the owner. No stop packet competes
+with a full queue. Worker replies are nonblocking; failed publication is an
+explicit session fault. Kernel errors remain visible even after reply consumption;
+unread successful completion cannot be reported as delivered. Callback errors
+retain their original identity, and original Rust panic payloads resume only after
+join. Joined unread-reply diagnostics use one main-thread box after the body-panic
+path has been ruled out; ordinary successfully consumed replies are not boxed.
+A worker Rust panic marks terminal status before exit; if a preceding kernel
+error was already observed, the exact shared error remains bounded secondary
+evidence after join, including when a callback error is primary. Foreign COM unwind
+is unsupported. A hung foreign call pins the scope/module; no timeout detach or
+unload is permitted. A caller-created nested broker must itself use an interruptible
+exit protocol; the outer library cannot interrupt arbitrary caller blocking code.
+
+The new concrete thread/COM fixtures and compile contracts must receive independent
+unsafe-callsite review and durable source archival before execution. This checkpoint
+has no native/genuine-plugin, timing, device, audible-isolation or release result.
+
+### Step1 source/mock validation
+
+The disabled feature has passed independent unsafe-callsite review and the
+source-bound Linux mock gates on Rust 1.99.0. The boxed-error revision passed
+41 focused tests (25 full-kernel/COM sessions and 16 closed-port tests), all 469
+available feature vendor tests, 34 external compiler contracts, 26 doctests,
+25 helper and 13 protocol tests, and all three strict root Clippy configurations.
+One known missing SDK metadata fixture remains excluded. The final test-only
+empty-arm correction then passed direct vendor test Clippy and all three affected
+shutdown fixtures, covering 18 accepted/in-flight/unread, success/error/panic
+combinations. The earlier compile and Clippy failures are retained.
+
+The 55 domain, 88 runtime and 52 borrowed-capability compiler outcomes, 428
+default vendor tests and 1,175 core tests are explicitly reused with their
+original flags, unchanged fixtures and excluding cfg boundaries recorded. Changed
+raw source files are not described as identical. The 1,192 App executions remain
+prior-source results; current all-feature App callers were freshly compiled and
+linked, and none invokes the new session. The current helper/protocol callers
+were executed. A fresh default helper build reproduces the pre-box helper hash
+exactly. Formatting, 239 Python checks, 552 package inputs and 53-file vendor
+patch replay pass. Source, compiler commands, linked rlibs and copied test/helper
+artifacts are hash-bound in the validation receipt.
+
+These results cover library ownership, full-kernel mock processing, closed ports,
+COM lifetime and failure behavior. The 350 ms mock attached-view hold establishes
+worker progress before main releases that hold; it is not a scheduling deadline.
+No genuine plug-in, native window, helper-worker activation, device, metadata
+lease or audible-isolation acceptance follows from this checkpoint.

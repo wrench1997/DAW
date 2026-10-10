@@ -3,8 +3,10 @@
 use super::data_exchange::DataExchangeProcessGate;
 use super::native_edit_transport::NativeEditReceiver;
 
+#[cfg(test)]
+pub(crate) mod borrowed_processor_fixture;
 pub(crate) mod domain_session;
-use super::processor_lease::{ProcessorCalls, ProcessorLease};
+use super::processor_lease::{ProcessorCalls, ProcessorLease, ProcessorProcessCall};
 use crate::{
     audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
     error::{Error, Result},
@@ -2221,7 +2223,7 @@ impl ProcessorRuntime {
     #[allow(clippy::too_many_arguments)]
     fn process_chunk(
         &mut self,
-        processor: &mut ProcessorLease<'_>,
+        processor: &mut impl ProcessorProcessCall,
         gate: &mut DataExchangeProcessGate<'_>,
         buffers: &mut CallerAudioBuffers<'_>,
         frame_offset: usize,
@@ -2461,7 +2463,7 @@ impl ProcessorRuntime {
     /// parameter changes).
     fn process_chunks(
         &mut self,
-        processor: &mut ProcessorLease<'_>,
+        processor: &mut impl ProcessorProcessCall,
         gate: &mut DataExchangeProcessGate<'_>,
         buffers: &mut CallerAudioBuffers<'_>,
         total: usize,
@@ -2654,7 +2656,7 @@ impl ProcessorRuntime {
 
     fn process_buffer_view(
         &mut self,
-        processor: &mut ProcessorLease<'_>,
+        processor: &mut impl ProcessorProcessCall,
         gate: &mut DataExchangeProcessGate<'_>,
         is_active: bool,
         buffers: &mut CallerAudioBuffers<'_>,
@@ -2690,6 +2692,15 @@ impl PluginImpl {
 }
 
 impl PluginInternal for PluginImpl {
+    #[cfg(all(feature = "experimental-scoped-worker", target_os = "linux"))]
+    fn with_scoped_worker(
+        &mut self,
+        levels: &Mutex<crate::audio::AudioLevels>,
+        body: &mut crate::scoped_worker::ScopedWorkerCallback<'_>,
+    ) -> crate::scoped_worker::ScopedWorkerResult {
+        domain_session::scoped_worker::run(self, levels, body)
+    }
+
     fn with_domain_session(
         &mut self,
         callback: &mut domain_session::DomainSessionCallback<'_>,
@@ -3146,122 +3157,53 @@ impl PluginInternal for PluginImpl {
     }
 
     fn send_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {
-        // Floor to non-negative (the VST3 SDK treats a negative sampleOffset as undefined);
-        // `process()` additionally clamps queued offsets to the actual block length.
         let sample_offset = sample_offset.max(0);
-        let mut note_count_commit = None;
-        unsafe {
-            let mut vst_event: Event = std::mem::zeroed();
-            vst_event.busIndex = 0;
-            vst_event.sampleOffset = sample_offset;
-            vst_event.ppqPosition = 0.0;
-            vst_event.flags = Event_::EventFlags_::kIsLive as u16;
-
-            match event {
-                MidiEvent::NoteOn {
+        match event {
+            MidiEvent::NoteOn { .. }
+            | MidiEvent::NoteOff { .. }
+            | MidiEvent::PolyAftertouch { .. } => self
+                .runtime
+                .send_ordinary_midi_event_at(event, sample_offset),
+            MidiEvent::ControlChange {
+                channel,
+                controller,
+                value,
+            } => self.queue_mapped_midi_controller(
+                channel,
+                controller as u16,
+                value as f64 / 127.0,
+                sample_offset,
+            ),
+            MidiEvent::PitchBend { channel, value } => self.queue_mapped_midi_controller(
+                channel,
+                ControllerNumbers_::kPitchBend as u16,
+                value as f64 / 16_383.0,
+                sample_offset,
+            ),
+            MidiEvent::ChannelAftertouch { channel, pressure } => self
+                .queue_mapped_midi_controller(
                     channel,
-                    note,
-                    velocity,
-                } => {
-                    let index = channel.as_index() as usize * 128 + note as usize;
-                    let released = write_midi_note_on(&mut vst_event, channel, note, velocity);
-                    let next_count = if released {
-                        self.runtime.ordinary_note_counts[index].saturating_sub(1)
-                    } else {
-                        self.runtime.ordinary_note_counts[index]
-                            .checked_add(1)
-                            .ok_or(Error::EventInputRejected)?
-                    };
-                    note_count_commit = Some((index, next_count));
-                }
-                MidiEvent::NoteOff {
-                    channel,
-                    note,
-                    velocity,
-                } => {
-                    let index = channel.as_index() as usize * 128 + note as usize;
-                    note_count_commit = Some((
-                        index,
-                        self.runtime.ordinary_note_counts[index].saturating_sub(1),
-                    ));
-                    write_note_off_event(&mut vst_event, channel, note, velocity);
-                }
-                MidiEvent::ControlChange {
-                    channel,
-                    controller,
-                    value,
-                } => {
-                    return self.queue_mapped_midi_controller(
-                        channel,
-                        controller as u16,
-                        value as f64 / 127.0,
-                        sample_offset,
-                    );
-                }
-                MidiEvent::PitchBend { channel, value } => {
-                    return self.queue_mapped_midi_controller(
-                        channel,
-                        ControllerNumbers_::kPitchBend as u16,
-                        value as f64 / 16_383.0,
-                        sample_offset,
-                    );
-                }
-                MidiEvent::ChannelAftertouch { channel, pressure } => {
-                    return self.queue_mapped_midi_controller(
-                        channel,
-                        ControllerNumbers_::kAfterTouch as u16,
-                        pressure as f64 / 127.0,
-                        sample_offset,
-                    );
-                }
-                MidiEvent::PolyAftertouch {
-                    channel,
-                    note,
-                    pressure,
-                } => {
-                    // Per-note pressure maps to a first-class VST3 poly-pressure event.
-                    vst_event.r#type = kPolyPressureEvent as u16;
-                    vst_event.__field0.polyPressure.channel = channel.as_index() as i16;
-                    vst_event.__field0.polyPressure.pitch = note as i16;
-                    vst_event.__field0.polyPressure.pressure = pressure as f32 / 127.0;
-                    vst_event.__field0.polyPressure.noteId = -1;
-                }
-                MidiEvent::ProgramChange { program, .. } => {
-                    // VST3 has no MIDI program-change event; a program change is routed to the
-                    // root unit's (id 0) program-change parameter via IUnitInfo. The MIDI
-                    // channel does not map cleanly to a VST3 unit, so we target the root unit
-                    // regardless of channel. select_program drives the controller + processor
-                    // queue itself, so we return directly rather than falling through to the
-                    // event-list add below.
-                    self.service_control_thread_caches();
-                    if let Some(mapping) = self.cached_program_change(0) {
-                        let index = program as i32;
-                        if index < mapping.program_count {
-                            let value = if mapping.program_count > 1 {
-                                index as f64 / (mapping.program_count - 1) as f64
-                            } else {
-                                0.0
-                            };
-                            self.queue_processor_parameter_at(
-                                mapping.param_id,
-                                value,
-                                sample_offset,
-                            )?;
-                        }
+                    ControllerNumbers_::kAfterTouch as u16,
+                    pressure as f64 / 127.0,
+                    sample_offset,
+                ),
+            MidiEvent::ProgramChange { program, .. } => {
+                // Keep program mapping/cache/controller orchestration on the aggregate owner.
+                self.service_control_thread_caches();
+                if let Some(mapping) = self.cached_program_change(0) {
+                    let index = program as i32;
+                    if index < mapping.program_count {
+                        let value = if mapping.program_count > 1 {
+                            index as f64 / (mapping.program_count - 1) as f64
+                        } else {
+                            0.0
+                        };
+                        self.queue_processor_parameter_at(mapping.param_id, value, sample_offset)?;
                     }
-                    return Ok(());
                 }
+                Ok(())
             }
-
-            self.runtime
-                .input_events
-                .try_add_raw_event(&vst_event)
-                .map_err(|_| Error::EventInputRejected)?;
         }
-        if let Some((index, count)) = note_count_commit {
-            self.runtime.ordinary_note_counts[index] = count;
-        }
-        Ok(())
     }
 
     fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
@@ -5216,9 +5158,6 @@ mod process_buffer_tests {
     }
 
     impl ProcessorCalls for MockProcessorCalls {
-        unsafe fn process(&mut self, _data: &mut ProcessData) -> tresult {
-            panic!("notification transitions must not render audio")
-        }
         fn set_processing(&mut self, value: u8) -> tresult {
             self.trace.push((value, thread::current().id()));
             self.result
@@ -5980,6 +5919,67 @@ mod authoritative_transport_tests {
 mod domain_tests;
 
 impl ProcessorRuntime {
+    /// Mechanically shared ordinary MIDI admission. Both entry points validate scalar
+    /// values first; mapped MIDI remains an owner operation and cannot enter the worker.
+    fn send_ordinary_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {
+        let sample_offset = sample_offset.max(0);
+        let mut note_count_commit = None;
+        unsafe {
+            let mut vst_event: Event = std::mem::zeroed();
+            vst_event.busIndex = 0;
+            vst_event.sampleOffset = sample_offset;
+            vst_event.ppqPosition = 0.0;
+            vst_event.flags = Event_::EventFlags_::kIsLive as u16;
+            match event {
+                MidiEvent::NoteOn {
+                    channel,
+                    note,
+                    velocity,
+                } => {
+                    let index = channel.as_index() as usize * 128 + note as usize;
+                    let released = write_midi_note_on(&mut vst_event, channel, note, velocity);
+                    let next_count = if released {
+                        self.ordinary_note_counts[index].saturating_sub(1)
+                    } else {
+                        self.ordinary_note_counts[index]
+                            .checked_add(1)
+                            .ok_or(Error::EventInputRejected)?
+                    };
+                    note_count_commit = Some((index, next_count));
+                }
+                MidiEvent::NoteOff {
+                    channel,
+                    note,
+                    velocity,
+                } => {
+                    let index = channel.as_index() as usize * 128 + note as usize;
+                    note_count_commit =
+                        Some((index, self.ordinary_note_counts[index].saturating_sub(1)));
+                    write_note_off_event(&mut vst_event, channel, note, velocity);
+                }
+                MidiEvent::PolyAftertouch {
+                    channel,
+                    note,
+                    pressure,
+                } => {
+                    vst_event.r#type = kPolyPressureEvent as u16;
+                    vst_event.__field0.polyPressure.channel = channel.as_index() as i16;
+                    vst_event.__field0.polyPressure.pitch = note as i16;
+                    vst_event.__field0.polyPressure.pressure = pressure as f32 / 127.0;
+                    vst_event.__field0.polyPressure.noteId = -1;
+                }
+                _ => return Err(Error::MidiError("mapped MIDI requires the owner".into())),
+            }
+            self.input_events
+                .try_add_raw_event(&vst_event)
+                .map_err(|_| Error::EventInputRejected)?;
+        }
+        if let Some((index, count)) = note_count_commit {
+            self.ordinary_note_counts[index] = count;
+        }
+        Ok(())
+    }
+
     #[allow(clippy::unnecessary_cast)]
     fn update_tempo(&mut self, bpm: f64) {
         self.tempo = bpm;

@@ -1228,3 +1228,274 @@ acceptance and release are outside these source-only checkpoints.
 Added Channel Rack and Mixer volume/pan context-menu create/open, stable canonical targets, safe free-track placement, flat current-value envelopes and atomic creation history. Repeated actions reveal existing placements without editing them. Ambiguous/global-unplaced lanes and plug-in-backed Channel targets fail visibly; existing plug-in AUTOMATE is unchanged. See [workflow and limitations](NATIVE_CONTROL_AUTOMATION.md).
 
 Rust/app checkpoint `097ff1f`: 1,200 all-feature app, 1,183 core, 25 helper and 13 protocol tests; both strict Clippy profiles, fmt, all-bin build and helper smoke pass. Preceding `35620ff` had two stale accessibility-label fixtures; failures remain in external evidence and the full corrected suite passed. Packaging-only follow-up adds the guide allowlist; 553 actual package inputs and 239 Python tests pass. No new native/audio-device, rendered capture, real-plugin or Windows acceptance, publication or release claim.
+
+## 2026-10-10 — Borrowed processor thread proof (UNVALIDATED test-only checkpoint)
+
+The entire new capability and its constructor are `cfg(test)`. Production
+`ProcessorLease`, `ProcessorOps`, `MainThreadPlugin`, helper dispatch and strict
+metadata policy are unchanged. A private non-owning token exclusively borrows
+the aggregate owner and its module lifetime. It exposes only an unsafe mutable
+`process` call; one narrowly documented `Send` implementation moves that call
+capability into a scoped worker. It is neither Clone nor Sync and grants no
+controller, metadata, lifecycle, cast, AddRef or Release access. All owning COM
+references and final destruction remain on the loading thread.
+
+The mock uses worker-local f32 mono buffers and prepared ProcessData. Fixtures
+cover a 350 ms simulated main-thread hold, a same-thread negative baseline,
+checked readiness, SDK result errors, Rust-only worker/main panic, process-flag
+cleanup and a blocked worker that must join before owner/module release. No
+foreign COM unwind recovery is claimed. The mock intentionally allocates and
+locks. Its output proves only thread ownership/progress, not real-time safety.
+
+This is not a production audio fix: the raw fixture does not perform runtime
+native acknowledgments, process history, event/parameter orchestration, or
+output-fault handling. It cannot be selected by a user or helper. Production
+integration must preserve all of those semantics under a separately reviewed
+capability. Independent IPC, native polling, metadata freshness and device/PDC
+publication remain unresolved by this fixture. Existing strict mode still waits
+for fresh main-thread metadata. No experimental 500 ms mode is implemented.
+
+The new full-source compile-contract runner checks the actual test-only private
+types and a positive scoped use before asserting the borrow/visibility/auto-trait
+failures. At this recovery boundary compilation and execution remain pending;
+the exact unsafe call sites require independent review before execution.
+
+
+### Executed borrowed-capability proof (2026-10-10)
+
+Independent unsafe-boundary review preceded execution. All 8 new mock-thread
+fixtures and all 52 private compiler contracts pass. The latter include positive
+scoped transfer/rejoin and production-owner controls, then independent production
+exclusion, mutable/unsafe-call, authority, lifetime and borrow-failure checks. The
+350 ms fixture establishes completion before release of a main-thread hold lasting
+at least 350 ms, with a generous watchdog; it is not a 350 ms execution deadline.
+The same-thread case is a sequential-call structural control, not an execution of
+the actual helper dispatcher. Detached-thread exclusion is for a nonstatic owner
+loan; a deliberately leaked static owner is outside the tested teardown contract.
+
+Fresh source gates pass 408 available vendor tests (one known absent SDK fixture
+excluded), 26 doctests, 1,188 App tests, 25 helper tests, 13 protocol tests and 239
+Python tests. Root strict all-feature Clippy, formatting and the vendor test
+Clippy check pass; the latter retains only the already documented deprecated and
+drain_collect exceptions. Package closure checks 552 inputs and the upstream
+patch replays 48 files exactly. The separately archived lifecycle branch's two
+additional tests are not part of this branch or its 1,188 count.
+
+The first compiler-runner input was rejected before Cargo because it contained
+two binary targets. A separate QA library-only manifest removes only those two
+sections, preserving dependencies, features and the exact lock. The first ad hoc
+package-input check passed paths where bytes were required; its retained failure
+and corrected 552-input pass changed no source. All Rust bytes remain identical
+to the durably archived, independently reviewed pretest checkpoint.
+
+A forced current-worktree vendor compile and exact rlib link produced the copied
+helper SHA256 `ca1751af6d848d35a2b0054713d44bb1614d952eb4d280740123c52155dd6b7d`.
+These are source/mock/protocol results only. There is no genuine-plugin, native
+GUI, Windows runtime, device-audio or performance acceptance. The production
+helper has no new process capability, mode, worker or metadata policy.
+
+## 2026-10-10 — scoped full-runtime processing preparation (unvalidated)
+
+- Started a separate branch from reviewed test-only capability checkpoint
+  `45620f15868d2cfda3b0200645e743ad3355f586`. Accepted publication remains separate.
+- Split the SDK process-only dependency from lifecycle notification authority,
+  without changing the three existing runtime kernel bodies or public callback/
+  meter envelopes.
+- Added a cfg(test)-only exclusive runtime loan with disjoint loading-thread UI
+  control, one existing SDK gate and no owning COM/buffer movement or rebuild.
+  Full-kernel thread fixtures and compiler contracts require independent unsafe
+  source review and durable source/bundle archival before execution.
+- Retain the explicit retired-host-queue final-Release/free limitation after a
+  main-thread rebuild. No production helper worker, user mode, metadata-policy
+  change, genuine-plugin run or audible-isolation result is introduced here.
+
+### Scoped runtime preparation: executed source/mock results
+
+- Twenty full-kernel scoped COM/thread fixtures pass, including completion during
+  a main-thread getter hold of at least 350 ms and explicit retired-queue final-free
+  evidence. No helper worker or user mode is enabled.
+- 428 available vendor tests, 26 doctests,1,188 App, 25 helper, 13 protocol and 239
+  Python checks pass; one known unavailable SDK fixture is separately excluded.
+  Strict root Clippy/fmt, bounded vendor Clippy exceptions, 552 package inputs and
+  exact 50-file upstream patch replay pass.
+- Updated domain compiler contracts pass 55/55. The runtime 88-case corpus is a
+  hash-verified union: 85 passing outcomes from the preserved interrupted run,
+  plus a six-case rerun including three positive controls and all remaining cases.
+  It is not reported as an uninterrupted full 88 run. Production source and every
+  reused fixture/lock are verified unchanged.
+- Preserve initial missing-test-import compile failure, generated-module positive
+  control failure, diagnostic classification mismatch/interruption and unexecuted
+  source-review corrections. Runner corrections changed no production Rust.
+- Current-worktree compiler and copied-helper linkage are retained. Full source
+  and exact Git recovery bundle are archived before each significant gate, with
+  the separate lifecycle branch bundle preserved. This branch has not incorporated
+  the separately accepted piano fix; any integration must preserve that work.
+
+## 2026-10-10 — Local combined baseline for scoped worker Step1 (UNVALIDATED)
+
+Accepted piano checkpoint `dcdb2c1` and reviewed runtime preparation `7746d437`
+are combined only in a new experimental worktree. The sole conflict was additive
+WORK_LOG history; both sides are retained. All non-document files are exactly
+from their reviewed parents, including the piano tests and the full-runtime
+preparation. No production worker feature, helper dispatch, wire or metadata-mode
+change has been added at this checkpoint. Combined validation remains pending;
+archive the complete source and recovery bundle before running those gates.
+
+### Combined baseline validation before worker implementation
+
+The local `482a9b6` baseline passes fresh 1,192 App and 1,175 core tests,
+428 available vendor tests (one known absent SDK fixture excluded), 26 doctests,
+20 focused runtime fixtures, 25 helper and 13 protocol tests. Both strict root
+Clippy profiles, bounded vendor Clippy exceptions, formatting, 239 Python checks,
+552 package inputs and 50-file upstream patch replay pass. The 55 domain and
+88 runtime compiler outcomes are explicitly reused from `7746d437` after exact
+comparison of all 48 Rust/runner/manifest/lock inputs; the earlier interrupted
+runtime report and its verified union remain unchanged. Forced compilation binds
+the current worktree to its exact vendor rlib and copied helper. No feature worker,
+wire change, metadata mode or genuine-plugin execution is present in this baseline.
+
+## 2026-10-10 — Disabled scoped worker feature, Step1 source (UNVALIDATED)
+
+- Implement only the approved library session on the reviewed/tested combined
+  piano/runtime baseline. Root and vendor defaults exclude the feature; helper,
+  wire, App dispatch and metadata policy are unchanged.
+- Main owns COM/module/prepared storage while a scoped fixed-dispatch worker uses
+  the same full kernel. Closed borrowed UI/request ports, one outstanding credit,
+  callback-None eligibility and whole-success metering define the new boundary.
+- Ordinary MIDI bookkeeping is mechanically shared; mapped MIDI/control, state,
+  reset, metadata and teardown require owner rejoin. Accepted work drains before
+  join on error/unwind; no detached worker or hidden recovery is introduced.
+- Source tests, compiler contracts and exact unsafe callsites remain unexecuted
+  until independent review and a new durable source/Git-bundle checkpoint.
+
+### Scoped worker first compile correction (unvalidated)
+
+The initial QA manifest incorrectly retained upstream example-only development
+dependencies; offline resolution stopped before compilation. The established
+standalone library harness corrected that QA-only setup. The first actual feature
+compile then found a private entry visibility error and a reverse-drop-order
+lifetime error. The entry is now visible only within its owning plugin_impl module,
+and the UI dispatch anchor is declared before the branded port inside the same
+scope. No public authority or execution policy changes. All original logs are
+retained; no feature test has run yet. Corrected source requires its new recovery
+archive and review before rerun.
+
+### Existing compiler-runner module count (unvalidated runner correction)
+
+The feature-era source now declares18 top-level modules, including the cfg-gated
+scoped worker. The three existing source-linked compiler runners expected17.
+Only those three exact expected counts are corrected; fixture bytes, diagnostics,
+feature selection and source visibility are unchanged. Their prior results remain
+historical until fresh runs finish. The new external34-case runner has already
+passed on346de8b4, as have41 focused and469 available vendor tests. Current copied
+App/source gates continue against identical Rust bytes while this QA-only change
+is prepared for durable archival.
+
+### Scoped worker diagnostic representation correction (unvalidated)
+
+The feature41/469, default vendor428, App1192, core1175, doctests26, helper25,
+protocol13, all three root Clippy modes, formatting and compiler corpora34+55+88+52
+passed on the preceding source. Direct vendor Clippy rejected the136-byte session
+error because it embeds an unread owned reply. Only that optional diagnostic is
+now boxed, on main after join and after ruling out the original callback panic;
+normal consumed replies and their audio allocations are unchanged. The full exit
+matrix still verifies buffer pointer and shared-error identity after dereferencing
+the box. The original Clippy failure remains retained. This representation change
+requires its own recovery archive, review and affected-feature rerun. Older
+cfg-excluded/default results may be reused only with explicit per-file/feature
+attribution; no raw-input identity is claimed for changed feature files.
+
+### Scoped worker fixture unit-expression correction (unvalidated)
+
+The boxed revision passed fresh 41 focused worker/port tests, 469 available vendor
+tests, 34 public compiler contracts, 26 doctests, 25 helper and 13 protocol tests,
+and all three strict root Clippy modes. Direct vendor test Clippy then exposed
+one redundant trailing unit expression in the exit-matrix assertion. Replace only
+that empty match-arm body with an empty block; runtime, public API, unsafe loan
+and assertions are unchanged. Preserve the failure. After source comparison,
+review and durable archival, rerun direct vendor Clippy and the affected exit
+matrix; the preceding executions remain explicitly attributed to their source.
+
+### Scoped worker Step1 validation completed
+
+The final bounded correction passes direct vendor test Clippy and the three
+shutdown fixtures' 18 combinations. Production and unsafe source are unchanged
+from the reviewed boxed revision. That revision freshly passed 41 focused,
+469 available vendor, 34 public compiler, 26 doctest, 25 helper and 13 protocol
+checks, plus all three strict root Clippy modes. The known absent SDK-generated
+metadata fixture stays excluded; direct vendor Clippy retains only the already
+documented upstream deprecated/drain_collect exceptions.
+
+The qualified receipt names the three cfg-excluded boxed modules and the later
+one-expression fixture change. It explicitly reuses 195 private compiler
+outcomes, 428 default vendor and 1,175 core tests with actual original flags and
+fixture hashes. The 1,192 App executions remain prior-source, with fresh current
+all-feature compilation/linkage; there are no App calls to with_scoped_worker.
+No reused result is described as a raw-source-identical fresh execution.
+
+The final default helper was forced to compile from this worktree and links the
+recorded exact vendor rlib. Its SHA256 is
+`d325d65df4267f8b4bff07701971596a042dc61a56671bd3cdf2af91e03fb64c`,
+identical before and after the cfg-excluded diagnostic corrections. Formatting,
+239 Python checks, 552 package inputs and 53 reconstructed vendor files pass.
+All original resolution/compile/Clippy failures and the QA-only source-path
+binding correction remain in the text receipts. Full source and recovery bundles
+are retained separately from private executables and official plug-in assets.
+
+The feature remains disabled by default. No helper/wire/App activation, strict
+metadata-policy change, native/genuine-plugin run, device/performance claim or
+publication is included. A fixed fresh-initialized-Surge test proposal requires
+separate approval after this source/mock checkpoint is reviewed and archived.
+
+## Strict fresh-helper foundation: unvalidated first low-level source checkpoint
+
+A separate disabled Linux feature prepares a crate-private, one-request fresh-child
+transport with checkpointed bounded codecs, exact response shape and checked cleanup.
+The initial subset, single process-wide cleanup reservation and supported-host
+SIGPIPE precondition are described in `STRICT_HELPER_FOUNDATION.md`.
+
+This checkpoint has no production caller and has not been compiled or tested yet.
+The source will be archived before execution and receives independent syscall,
+codec, ownership and mock-callsite review. Existing worker genuine acceptance
+remains the separately retained initialized/headless library qualification;
+this transport source does not extend that acceptance. No App/helper/bounce
+wiring, tagged transport or metadata-policy activation is included.
+
+### First strict-foundation mock run (preserved failure)
+
+Exact source4085f8f7 compiled successfully. The first focused run completed63 tests:
+62 passed, and one negative scalar-spelling assertion expected MalformedReply for
+`"Infinity"` while the deliberate four-byte token cap returned Limit. Valid numeric
+round trips, exact large-payload limits, measured preflight rejection allocations
+and the complete pipe/cancellation/quarantine/cleanup tests passed. The failed
+run remains unchanged. Independent review approved splitting only this test
+expectation; no production parser behavior changed. The corrected revision is
+unvalidated pending the archived rerun and remaining source gates.
+
+### Strict-foundation Clippy correction (preserved failure)
+
+The corrected scalar test passed on121429af. Strict vendor Clippy then stopped
+on a manual-clamp style lint in reply-capacity growth, before the full suite ran.
+The reviewed replacement uses `clamp(4096, MAX_LINE)` with the same fixed bounds
+and arithmetic, preserving capacity and budget semantics. The original Clippy
+log is retained; this expression revision awaits its archived validation run.
+
+### Strict-foundation source/mock validation
+
+Archived927ef43b passes the current 532 available vendor tests, including all63
+foundation tests, with one explicit unavailable SDK fixture exclusion;26 doctests;
+77 runtime,25 helper and13 protocol tests; three root Clippy profiles and direct
+vendor Clippy; formatting;239 Python tests without skips; and553 package inputs.
+All six old compiler positive controls were rebuilt after the source-linked
+runtime-only manifest correction. Prior negative compiler and full App/core
+results are reused with their existing source/feature qualifications, not labeled
+fresh executions. Current all-feature callers compile/link successfully.
+
+Current-source forced linking reproduces the prior default helper exactly
+(SHA-256 d325d65df4267f8b4bff07701971596a042dc61a56671bd3cdf2af91e03fb64c).
+The new feature remains disabled and crate-private. Both source-test failures and
+the external QA invocation/skip are retained with their corrected outcomes.
+The complete source/bundle/evidence archive will preserve the bounded working-set,
+cooperative deadline, SIGPIPE embedding and one-slot quarantine limitations.
+No caller integration, plugin execution, metadata change or accepted publication
+is part of this checkpoint.
