@@ -1334,3 +1334,16 @@ from their reviewed parents, including the piano tests and the full-runtime
 preparation. No production worker feature, helper dispatch, wire or metadata-mode
 change has been added at this checkpoint. Combined validation remains pending;
 archive the complete source and recovery bundle before running those gates.
+
+### Combined baseline validation before worker implementation
+
+The local `482a9b6` baseline passes fresh 1,192 App and 1,175 core tests,
+428 available vendor tests (one known absent SDK fixture excluded), 26 doctests,
+20 focused runtime fixtures, 25 helper and 13 protocol tests. Both strict root
+Clippy profiles, bounded vendor Clippy exceptions, formatting, 239 Python checks,
+552 package inputs and 50-file upstream patch replay pass. The 55 domain and
+88 runtime compiler outcomes are explicitly reused from `7746d437` after exact
+comparison of all 48 Rust/runner/manifest/lock inputs; the earlier interrupted
+runtime report and its verified union remain unchanged. Forced compilation binds
+the current worktree to its exact vendor rlib and copied helper. No feature worker,
+wire change, metadata mode or genuine-plugin execution is present in this baseline.
