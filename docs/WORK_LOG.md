@@ -1510,3 +1510,31 @@ combined tree. This baseline is unvalidated pending independent semantic review,
 durable archive and combined gates. No new caller implementation, helper feature
 activation or real-plugin run is included. The approved next StopA plan remains
 external design evidence; StopB/genuine execution require separate clearance.
+
+### Strict offline caller combined-baseline validation
+
+Reviewed combined source6d7d038d passes the current focused App selections:
+33 bounce (including the three callback-MIDI equivalence tests),11 offline
+preparation/capture,89 export,77 runtime,9 native automation and22 piano
+expression tests. These selections cover240 distinct tests; one overlaps. The
+all-feature/all-target build succeeds, as do25 helper and13 protocol tests,
+541 available vendor feature tests (one external SDK fixture explicitly excluded),
+26 doctests, direct vendor and all three root Clippy profiles, formatting,
+six freshly executed private compiler positive cases across three runners,239 copied-helper-bound
+Python tests without skips, and554 package inputs. No full current App/core suite
+or reused negative compiler result is claimed for this focused merge checkpoint.
+
+All727 tracked source hashes remained unchanged through execution. Forced vendor
+recompilation, verbose caller link commands, copied rlibs/dep-info and copied tests
+bind the gates to this worktree. The default copied helper is SHA-256
+7865876366d2eb608fc2b685d79256b71ca4d9d27683a3e33ec7afa2469b3f69.
+Two external receipt-script assumptions (absolute versus relative dep-info paths,
+and the compiler report's command key) were corrected without source changes or
+repeating the completed gates; both rejected attempts remain in the evidence.
+
+This qualifies the local combined source/mock prerequisite only. No StopA client
+implementation, real-plugin run, device/native-UI acceptance, tagged transport or
+production activation is included. The reviewed next plan uses synchronous
+borrowed state/audio/text requests, retains one-shot checked cleanup ownership,
+and bounds both Stop and Shutdown protocol writes by the earlier job/cleanup
+deadline. StopB and genuine execution still need their separate approvals.
