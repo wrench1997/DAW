@@ -1557,3 +1557,13 @@ one-shot clone's reset-free checked Stop/Shutdown/reap oracle is documented
 explicitly; no RenderBackend, native plugin, UI/device or tagged-mode activation
 is part of this source checkpoint. See docs/STRICT_OFFLINE_CLIENT.md for exact
 bounds, cooperative timing, global reservation and deferred acceptance limits.
+
+### Stop A first mock run: retained negative-fixture failure
+
+Exact e77fc876 compiled and completed97 strict-foundation/client tests:96 passed.
+The only failure was an older negative expecting UnsupportedReply for a Parameters
+reply when State was expected. Catalog replies are now deliberately supported;
+WrongReply is the precise mismatch category. Independent review approved changing
+that expectation and adding a separate still-unsupported ParameterString probe.
+The production parser is unchanged. The original failed run and copied artifact
+remain retained; this test-only correction is unvalidated until archived rerun.

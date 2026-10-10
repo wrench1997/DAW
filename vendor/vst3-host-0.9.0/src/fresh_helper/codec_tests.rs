@@ -772,6 +772,11 @@ fn duplicate_missing_unknown_and_trailing_fields_fail_closed() {
     error(
         br#"{"Parameters":{"params":[]}}"#,
         &ReplyShape::State,
+        ErrorKind::WrongReply,
+    );
+    error(
+        br#"{"ParameterString":{"value":"still unsupported"}}"#,
+        &ReplyShape::State,
         ErrorKind::UnsupportedReply,
     );
     error(
