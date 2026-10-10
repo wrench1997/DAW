@@ -848,3 +848,62 @@ independent IPC/native polling or metadata-policy change is activated. Existing
 strict metadata still blocks publication when its UI-thread queries are blocked.
 The next integration must preserve the accepted piano fix and obtain its own
 combined-source validation.
+
+## Disabled-feature scoped worker Step1 (unvalidated source)
+
+`experimental-scoped-worker` is absent from the root and vendor default feature
+sets. It exposes a Linux-only library implementation, not a helper command or App
+mode. Other backends/platforms reject the entry. Strict metadata queries, native
+polling, existing IPC, reset policy and all public processing callbacks retain
+their existing behavior. The accepted piano changes are present in this branch.
+
+`MainThreadPlugin::with_scoped_worker` checks loading-thread affinity, prepared
+processing state and that both user callback options are empty. The loading
+thread keeps the owner, module, owning COM references and prepared storage. Its
+callback borrows a main-only attached-UI bridge and an exclusive, Send message
+port; neither exposes a raw channel, processor, aggregate owner or thread handle.
+The library's private worker alone invokes the same full checked kernel. Its
+narrow Send loan cannot rebuild, replace or destroy buffers/COM owners, or call
+controller, metadata, lifecycle, reset or state methods. The kernel still enters
+exactly one SDK process gate. Retired host queues can still have their final
+Release/free during a later Process after main-side rebuild; no whole-Process
+no-allocation/no-free claim is made.
+
+One command may be outstanding at a time. Capacity-one channels bound command
+count, not the number of bytes in caller-owned audio buffers. Commands are flat
+or bus processing, ordinary NoteOn/NoteOff/PolyAftertouch admission, and explicit
+output-event drain. Ordinary scalar validation and transactional bookkeeping are
+shared with the existing owner path. Mapped CC, pitch bend, channel aftertouch,
+program selection and mirrored parameter setters remain owner operations. A
+failed process reply's returned buffers are partial diagnostic data, never a
+successful audio completion. Event drain remains explicit, as in the public API.
+
+Meter updates use the existing mutex once after whole-call success, including
+zero-frame success, and skip poison/failure exactly as before. Arbitrary audio
+or parameter callbacks are rejected at entry instead of being moved to a worker
+or replayed later. Existing public wrappers keep their callback affinity.
+
+The attached bridge services existing Linux run-loop work and an already
+attached view's size/resize/scale operations. It never creates a view as a query
+fallback; scale QI/use/Release stays on main. Native container focus/query remains
+in binary window code. Open/Close/native-close, SaveState, LoadState, setup, reset,
+all metadata (including future EventBusLayout/CheckedAudioBusLayout), and destruction require returning
+from the session before the existing owner handler runs. Fresh-helper eligibility
+belongs to future negotiation; positive-call history is preserved across re-entry.
+
+On callback return, error or Rust unwind, the library closes its unique sender,
+drains accepted work and joins before rejoining the owner. No stop packet competes
+with a full queue. Worker replies are nonblocking; failed publication is an
+explicit session fault. Kernel errors remain visible even after reply consumption;
+unread successful completion cannot be reported as delivered. Callback errors
+retain their original identity, and original Rust panic payloads resume only after
+join. A worker Rust panic marks terminal status before exit; if a preceding kernel
+error was already observed, the exact shared error remains bounded secondary
+evidence after join, including when a callback error is primary. Foreign COM unwind
+is unsupported. A hung foreign call pins the scope/module; no timeout detach or
+unload is permitted. A caller-created nested broker must itself use an interruptible
+exit protocol; the outer library cannot interrupt arbitrary caller blocking code.
+
+The new concrete thread/COM fixtures and compile contracts must receive independent
+unsafe-callsite review and durable source archival before execution. This checkpoint
+has no native/genuine-plugin, timing, device, audible-isolation or release result.

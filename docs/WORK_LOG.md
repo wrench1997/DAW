@@ -1347,3 +1347,17 @@ comparison of all 48 Rust/runner/manifest/lock inputs; the earlier interrupted
 runtime report and its verified union remain unchanged. Forced compilation binds
 the current worktree to its exact vendor rlib and copied helper. No feature worker,
 wire change, metadata mode or genuine-plugin execution is present in this baseline.
+
+## 2026-10-10 — Disabled scoped worker feature, Step1 source (UNVALIDATED)
+
+- Implement only the approved library session on the reviewed/tested combined
+  piano/runtime baseline. Root and vendor defaults exclude the feature; helper,
+  wire, App dispatch and metadata policy are unchanged.
+- Main owns COM/module/prepared storage while a scoped fixed-dispatch worker uses
+  the same full kernel. Closed borrowed UI/request ports, one outstanding credit,
+  callback-None eligibility and whole-success metering define the new boundary.
+- Ordinary MIDI bookkeeping is mechanically shared; mapped MIDI/control, state,
+  reset, metadata and teardown require owner rejoin. Accepted work drains before
+  join on error/unwind; no detached worker or hidden recovery is introduced.
+- Source tests, compiler contracts and exact unsafe callsites remain unexecuted
+  until independent review and a new durable source/Git-bundle checkpoint.

@@ -6,6 +6,8 @@ use super::*;
 
 #[cfg(test)]
 mod runtime_loan_fixture;
+#[cfg(all(feature = "experimental-scoped-worker", target_os = "linux"))]
+pub(super) mod scoped_worker;
 #[cfg(test)]
 pub(crate) use runtime_loan_fixture::{with_runtime_loan_for_test, RuntimeLoan};
 use std::{marker::PhantomData, rc::Rc};

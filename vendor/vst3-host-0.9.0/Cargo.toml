@@ -67,6 +67,8 @@ egui-widgets = [
 ]
 midi-input = ["dep:midir"]
 process-isolation = []
+# Explicit opt-in; absent from defaults. Scoped worker API is Linux-only.
+experimental-scoped-worker = []
 
 [lib]
 name = "vst3_host"

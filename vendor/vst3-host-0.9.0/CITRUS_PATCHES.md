@@ -380,3 +380,18 @@ references, replacing prepared buffers or adding a helper worker. Retired host
 queue final Release after rebuild remains a disclosed processing-thread free
 possibility, not a no-free guarantee. Source checkpoint is unvalidated until the
 separate executed receipt, and unsafe fixture invocations require source review.
+
+## Disabled scoped worker library feature (2026-10-10, unvalidated)
+
+Add opt-in `experimental-scoped-worker`, absent from defaults, with a Linux-only
+scoped full-kernel worker and closed borrowed message/UI bridges. Main retains
+all owning COM/module/prepared references; only a private fixed dispatcher uses
+a narrow audited Send loan. Callback registration rejects entry, while existing
+public callback affinity and the worker's whole-success meter behavior are kept.
+Capacity-one transport and one outstanding credit provide bounded command count;
+caller audio/payload bytes and processing allocations are not claimed bounded or
+allocation-free. Accepted work joins before owner state/setup/reset/metadata or
+teardown. No helper/wire/App activation or metadata policy changes are included.
+Ordinary MIDI admission is mechanically shared with the owner, with the same
+public scalar validation before worker bookkeeping; mapped MIDI remains main-side.
+New source/COM/compiler fixtures require review and archival before execution.

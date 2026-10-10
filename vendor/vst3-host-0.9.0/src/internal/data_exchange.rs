@@ -175,6 +175,12 @@ pub(super) struct DataExchangeProcessGate<'owner> {
 }
 
 impl DataExchangeProcessGate<'_> {
+    /// Readiness only; the process flag itself is never exposed to production callers.
+    #[cfg(all(feature = "experimental-scoped-worker", target_os = "linux"))]
+    pub(super) fn is_entered(&self) -> bool {
+        self.in_process.load(Ordering::Acquire)
+    }
+
     /// Keep data-exchange block access enabled only for the returned guard's scope.
     /// Borrowing the gate exclusively prevents overlapping entries through this view.
     pub(super) fn enter(&mut self) -> DataExchangeProcessGuard<'_> {

@@ -626,6 +626,7 @@ impl<const S: bool, const C: bool> IEditControllerTrait for MockPlugin<S, C> {
         kResultOk
     }
     unsafe fn createView(&self, _name: FIDString) -> *mut IPlugView {
+        self.probe.record("createView");
         ptr::null_mut()
     }
 }
@@ -3248,3 +3249,6 @@ fn combined_reset_gate_is_sdk_scoped_on_success_sdk_error_and_staging_failure() 
 }
 
 mod runtime_loan_tests;
+
+#[cfg(all(feature = "experimental-scoped-worker", target_os = "linux"))]
+mod scoped_worker_tests;

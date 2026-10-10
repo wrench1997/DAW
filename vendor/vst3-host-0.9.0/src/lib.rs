@@ -66,6 +66,9 @@ pub mod simple;
 pub mod transport;
 pub mod window;
 
+#[cfg(feature = "experimental-scoped-worker")]
+pub mod scoped_worker;
+
 pub mod discovery;
 
 #[cfg(feature = "egui-widgets")]

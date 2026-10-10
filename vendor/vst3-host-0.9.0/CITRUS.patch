@@ -1,3 +1,25 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -67,6 +67,8 @@
+ ]
+ midi-input = ["dep:midir"]
+ process-isolation = []
++# Explicit opt-in; absent from defaults. Scoped worker API is Linux-only.
++experimental-scoped-worker = []
+ 
+ [lib]
+ name = "vst3_host"
+--- a/Cargo.toml.orig
++++ b/Cargo.toml.orig
+@@ -80,6 +80,8 @@
+ default = ["cpal-backend", "process-isolation"]
+ cpal-backend = ["cpal"]
+ process-isolation = []
++# Explicit opt-in; absent from defaults. Scoped worker API is Linux-only.
++experimental-scoped-worker = []
+ egui-widgets = ["egui", "raw-window-handle"]
+ # Bind a live MIDI input device (hardware/virtual port) and forward parsed events.
+ midi-input = ["dep:midir"]
 --- a/src/bin/vst3-host-helper.rs
 +++ b/src/bin/vst3-host-helper.rs
 @@ -443,18 +443,49 @@
@@ -4669,7 +4691,7 @@
  use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU8, AtomicUsize, Ordering};
  use std::sync::{Arc, Condvar, Mutex, OnceLock};
  use std::thread::{self, JoinHandle, Thread, ThreadId};
-@@ -160,6 +162,50 @@
+@@ -160,6 +162,56 @@
  struct SnapshotSink {
      blocks: VecDeque<OwnedDataExchangeBlock>,
      bytes: usize,
@@ -4686,6 +4708,12 @@
 +}
 +
 +impl DataExchangeProcessGate<'_> {
++    /// Readiness only; the process flag itself is never exposed to production callers.
++    #[cfg(all(feature = "experimental-scoped-worker", target_os = "linux"))]
++    pub(super) fn is_entered(&self) -> bool {
++        self.in_process.load(Ordering::Acquire)
++    }
++
 +    /// Keep data-exchange block access enabled only for the returned guard's scope.
 +    /// Borrowing the gate exclusively prevents overlapping entries through this view.
 +    pub(super) fn enter(&mut self) -> DataExchangeProcessGuard<'_> {
@@ -4720,7 +4748,7 @@
  }
  
  /// State shared by the host context, the audio callback, and one background dispatcher.
-@@ -237,12 +283,16 @@
+@@ -237,12 +289,16 @@
          self.active.store(active, Ordering::Release);
      }
  
@@ -4743,7 +4771,7 @@
      }
  
      fn queue(&self, id: u32) -> Option<&ExchangeQueue> {
-@@ -575,6 +625,87 @@
+@@ -575,6 +631,87 @@
  #[cfg(test)]
  mod tests {
      use super::*;
@@ -7502,9 +7530,9 @@
 +use super::data_exchange::DataExchangeProcessGate;
 +use super::native_edit_transport::NativeEditReceiver;
 +
-+pub(crate) mod domain_session;
 +#[cfg(test)]
 +pub(crate) mod borrowed_processor_fixture;
++pub(crate) mod domain_session;
 +use super::processor_lease::{ProcessorCalls, ProcessorLease, ProcessorProcessCall};
  use crate::{
      audio::{AudioBuffers, AudioBusBuffer, AudioBusConfig, AudioBusLayout, BusAudioBuffers},
@@ -8894,7 +8922,7 @@
          };
  
          self.chunk_events.clear();
-@@ -2382,13 +2685,27 @@
+@@ -2382,13 +2685,36 @@
      }
  }
  
@@ -8905,6 +8933,15 @@
 +}
 +
  impl PluginInternal for PluginImpl {
++    #[cfg(all(feature = "experimental-scoped-worker", target_os = "linux"))]
++    fn with_scoped_worker(
++        &mut self,
++        levels: &Mutex<crate::audio::AudioLevels>,
++        body: &mut crate::scoped_worker::ScopedWorkerCallback<'_>,
++    ) -> crate::scoped_worker::ScopedWorkerResult {
++        domain_session::scoped_worker::run(self, levels, body)
++    }
++
 +    fn with_domain_session(
 +        &mut self,
 +        callback: &mut domain_session::DomainSessionCallback<'_>,
@@ -8923,7 +8960,7 @@
              return Err(Error::InterfaceError("No controller available".to_string()));
          }
          // VST3 requires both halves: the controller (for GUI/display/formatting) and the
-@@ -2403,26 +2720,12 @@
+@@ -2403,26 +2729,12 @@
          value: f64,
          sample_offset: i32,
      ) -> Result<()> {
@@ -8955,7 +8992,7 @@
              id,
              value,
              sample_offset,
-@@ -2430,6 +2733,10 @@
+@@ -2430,6 +2742,10 @@
          Ok(())
      }
  
@@ -8966,7 +9003,7 @@
      fn set_tempo(&mut self, bpm: f64) -> Result<()> {
          self.update_tempo(bpm);
          Ok(())
-@@ -2447,7 +2754,7 @@
+@@ -2447,7 +2763,7 @@
  
      fn get_parameter(&self, id: u32) -> Result<f64> {
          self.drain_deferred_controller_sync();
@@ -8975,7 +9012,7 @@
              unsafe { Ok(controller.getParamNormalized(id)) }
          } else {
              Err(Error::InterfaceError("No controller available".to_string()))
-@@ -2458,7 +2765,7 @@
+@@ -2458,7 +2774,7 @@
          self.drain_deferred_controller_sync();
          let mut params = Vec::new();
  
@@ -8984,7 +9021,7 @@
              unsafe {
                  let count = controller.getParameterCount();
  
-@@ -2495,7 +2802,7 @@
+@@ -2495,7 +2811,7 @@
  
      fn format_parameter(&self, id: u32, normalized: f64) -> Result<String> {
          self.drain_deferred_controller_sync();
@@ -8993,7 +9030,7 @@
              unsafe {
                  let mut buf: String128 = std::mem::zeroed();
                  if controller.getParamStringByValue(id, normalized, &mut buf) == kResultOk {
-@@ -2514,39 +2821,95 @@
+@@ -2514,39 +2830,95 @@
          self.process_buffer_view(&mut CallerAudioBuffers::Flat(buffers))
      }
  
@@ -9105,7 +9142,7 @@
              return Err(e);
          }
  
-@@ -2558,20 +2921,20 @@
+@@ -2558,20 +2930,20 @@
                      result
                  )));
              }
@@ -9129,7 +9166,7 @@
                  Some(value)
                      if value == ePrefetchableSupport_::kIsNeverPrefetchable as u32
                          || value == ePrefetchableSupport_::kIsNotYetPrefetchable as u32 =>
-@@ -2587,19 +2950,18 @@
+@@ -2587,19 +2959,18 @@
              }
          }
          // VST3 requires the component inactive for setupProcessing; mirror reconfigure.
@@ -9154,7 +9191,7 @@
              return Err(e);
          }
  
-@@ -2611,7 +2973,7 @@
+@@ -2611,7 +2982,7 @@
                      result
                  )));
              }
@@ -9163,7 +9200,7 @@
          }
          Ok(())
      }
-@@ -2620,11 +2982,11 @@
+@@ -2620,11 +2991,11 @@
          use crate::audio::SpeakerArrangement;
          unsafe {
              let read = |dir: i32| -> Vec<SpeakerArrangement> {
@@ -9177,7 +9214,7 @@
                          SpeakerArrangement::from_raw(arr)
                      })
                      .collect()
-@@ -2641,7 +3003,7 @@
+@@ -2641,7 +3012,7 @@
          inputs: &[crate::audio::SpeakerArrangement],
          outputs: &[crate::audio::SpeakerArrangement],
      ) -> Result<()> {
@@ -9186,7 +9223,7 @@
              return Err(Error::Other(
                  "cannot set bus arrangements while processing".to_string(),
              ));
-@@ -2650,32 +3012,30 @@
+@@ -2650,32 +3021,30 @@
          let mut out_raw: Vec<u64> = outputs.iter().map(|a| a.raw()).collect();
          unsafe {
              // VST3 requires the component inactive for setBusArrangements + setupProcessing.
@@ -9228,7 +9265,7 @@
                  return Err(Error::InterfaceError(format!(
                      "setBusArrangements failed: {arrangement_result:#x}"
                  )));
-@@ -2691,7 +3051,7 @@
+@@ -2691,7 +3060,7 @@
                          result
                      )));
                  }
@@ -9237,7 +9274,7 @@
              }
          }
          Ok(())
-@@ -2705,7 +3065,7 @@
+@@ -2705,7 +3074,7 @@
          active: bool,
      ) -> Result<()> {
          use crate::audio::{BusDirection, MediaType};
@@ -9246,7 +9283,7 @@
              return Err(Error::Other(
                  "cannot activate a bus while processing".to_string(),
              ));
-@@ -2720,7 +3080,7 @@
+@@ -2720,7 +3089,7 @@
              BusDirection::Output => kOutput as i32,
          };
          unsafe {
@@ -9255,7 +9292,7 @@
              if bus_index < 0 || bus_index >= count {
                  return Err(Error::InvalidParameter(format!(
                      "bus index {bus_index} out of range for {media_type:?} {direction:?} \
-@@ -2728,35 +3088,35 @@
+@@ -2728,35 +3097,35 @@
                  )));
              }
  
@@ -9299,7 +9336,7 @@
                      self.create_process_data()
                  } else {
                      Ok(())
-@@ -2775,7 +3135,7 @@
+@@ -2775,7 +3144,7 @@
                          "Failed to reactivate after set_bus_active: {reactivate:#x}"
                      )));
                  }
@@ -9308,63 +9345,160 @@
              }
  
              update_result?;
-@@ -2791,6 +3151,7 @@
-         // Floor to non-negative (the VST3 SDK treats a negative sampleOffset as undefined);
-         // `process()` additionally clamps queued offsets to the actual block length.
-         let sample_offset = sample_offset.max(0);
-+        let mut note_count_commit = None;
-         unsafe {
-             let mut vst_event: Event = std::mem::zeroed();
-             vst_event.busIndex = 0;
-@@ -2806,11 +3167,14 @@
-                 } => {
-                     let index = channel.as_index() as usize * 128 + note as usize;
-                     let released = write_midi_note_on(&mut vst_event, channel, note, velocity);
--                    self.ordinary_note_counts[index] = if released {
--                        self.ordinary_note_counts[index].saturating_sub(1)
-+                    let next_count = if released {
-+                        self.runtime.ordinary_note_counts[index].saturating_sub(1)
-                     } else {
--                        self.ordinary_note_counts[index].saturating_add(1)
-+                        self.runtime.ordinary_note_counts[index]
-+                            .checked_add(1)
-+                            .ok_or(Error::EventInputRejected)?
-                     };
-+                    note_count_commit = Some((index, next_count));
-                 }
-                 MidiEvent::NoteOff {
-                     channel,
-@@ -2818,8 +3182,10 @@
-                     velocity,
-                 } => {
-                     let index = channel.as_index() as usize * 128 + note as usize;
--                    self.ordinary_note_counts[index] =
--                        self.ordinary_note_counts[index].saturating_sub(1);
-+                    note_count_commit = Some((
-+                        index,
-+                        self.runtime.ordinary_note_counts[index].saturating_sub(1),
-+                    ));
-                     write_note_off_event(&mut vst_event, channel, note, velocity);
-                 }
-                 MidiEvent::ControlChange {
-@@ -2889,70 +3255,41 @@
-                 }
-             }
- 
--            self.input_events.add_raw_event(&vst_event);
-+            self.runtime
-+                .input_events
-+                .try_add_raw_event(&vst_event)
-+                .map_err(|_| Error::EventInputRejected)?;
-+        }
-+        if let Some((index, count)) = note_count_commit {
-+            self.runtime.ordinary_note_counts[index] = count;
-         }
-         Ok(())
+@@ -2788,171 +3157,79 @@
      }
  
-     fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
--        self.input_events.add_event(event);
+     fn send_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {
+-        // Floor to non-negative (the VST3 SDK treats a negative sampleOffset as undefined);
+-        // `process()` additionally clamps queued offsets to the actual block length.
+         let sample_offset = sample_offset.max(0);
+-        unsafe {
+-            let mut vst_event: Event = std::mem::zeroed();
+-            vst_event.busIndex = 0;
+-            vst_event.sampleOffset = sample_offset;
+-            vst_event.ppqPosition = 0.0;
+-            vst_event.flags = Event_::EventFlags_::kIsLive as u16;
+-
+-            match event {
+-                MidiEvent::NoteOn {
++        match event {
++            MidiEvent::NoteOn { .. }
++            | MidiEvent::NoteOff { .. }
++            | MidiEvent::PolyAftertouch { .. } => self
++                .runtime
++                .send_ordinary_midi_event_at(event, sample_offset),
++            MidiEvent::ControlChange {
++                channel,
++                controller,
++                value,
++            } => self.queue_mapped_midi_controller(
++                channel,
++                controller as u16,
++                value as f64 / 127.0,
++                sample_offset,
++            ),
++            MidiEvent::PitchBend { channel, value } => self.queue_mapped_midi_controller(
++                channel,
++                ControllerNumbers_::kPitchBend as u16,
++                value as f64 / 16_383.0,
++                sample_offset,
++            ),
++            MidiEvent::ChannelAftertouch { channel, pressure } => self
++                .queue_mapped_midi_controller(
+                     channel,
+-                    note,
+-                    velocity,
+-                } => {
+-                    let index = channel.as_index() as usize * 128 + note as usize;
+-                    let released = write_midi_note_on(&mut vst_event, channel, note, velocity);
+-                    self.ordinary_note_counts[index] = if released {
+-                        self.ordinary_note_counts[index].saturating_sub(1)
+-                    } else {
+-                        self.ordinary_note_counts[index].saturating_add(1)
+-                    };
+-                }
+-                MidiEvent::NoteOff {
+-                    channel,
+-                    note,
+-                    velocity,
+-                } => {
+-                    let index = channel.as_index() as usize * 128 + note as usize;
+-                    self.ordinary_note_counts[index] =
+-                        self.ordinary_note_counts[index].saturating_sub(1);
+-                    write_note_off_event(&mut vst_event, channel, note, velocity);
+-                }
+-                MidiEvent::ControlChange {
+-                    channel,
+-                    controller,
+-                    value,
+-                } => {
+-                    return self.queue_mapped_midi_controller(
+-                        channel,
+-                        controller as u16,
+-                        value as f64 / 127.0,
+-                        sample_offset,
+-                    );
+-                }
+-                MidiEvent::PitchBend { channel, value } => {
+-                    return self.queue_mapped_midi_controller(
+-                        channel,
+-                        ControllerNumbers_::kPitchBend as u16,
+-                        value as f64 / 16_383.0,
+-                        sample_offset,
+-                    );
+-                }
+-                MidiEvent::ChannelAftertouch { channel, pressure } => {
+-                    return self.queue_mapped_midi_controller(
+-                        channel,
+-                        ControllerNumbers_::kAfterTouch as u16,
+-                        pressure as f64 / 127.0,
+-                        sample_offset,
+-                    );
+-                }
+-                MidiEvent::PolyAftertouch {
+-                    channel,
+-                    note,
+-                    pressure,
+-                } => {
+-                    // Per-note pressure maps to a first-class VST3 poly-pressure event.
+-                    vst_event.r#type = kPolyPressureEvent as u16;
+-                    vst_event.__field0.polyPressure.channel = channel.as_index() as i16;
+-                    vst_event.__field0.polyPressure.pitch = note as i16;
+-                    vst_event.__field0.polyPressure.pressure = pressure as f32 / 127.0;
+-                    vst_event.__field0.polyPressure.noteId = -1;
+-                }
+-                MidiEvent::ProgramChange { program, .. } => {
+-                    // VST3 has no MIDI program-change event; a program change is routed to the
+-                    // root unit's (id 0) program-change parameter via IUnitInfo. The MIDI
+-                    // channel does not map cleanly to a VST3 unit, so we target the root unit
+-                    // regardless of channel. select_program drives the controller + processor
+-                    // queue itself, so we return directly rather than falling through to the
+-                    // event-list add below.
+-                    self.service_control_thread_caches();
+-                    if let Some(mapping) = self.cached_program_change(0) {
+-                        let index = program as i32;
+-                        if index < mapping.program_count {
+-                            let value = if mapping.program_count > 1 {
+-                                index as f64 / (mapping.program_count - 1) as f64
+-                            } else {
+-                                0.0
+-                            };
+-                            self.queue_processor_parameter_at(
+-                                mapping.param_id,
+-                                value,
+-                                sample_offset,
+-                            )?;
+-                        }
++                    ControllerNumbers_::kAfterTouch as u16,
++                    pressure as f64 / 127.0,
++                    sample_offset,
++                ),
++            MidiEvent::ProgramChange { program, .. } => {
++                // Keep program mapping/cache/controller orchestration on the aggregate owner.
++                self.service_control_thread_caches();
++                if let Some(mapping) = self.cached_program_change(0) {
++                    let index = program as i32;
++                    if index < mapping.program_count {
++                        let value = if mapping.program_count > 1 {
++                            index as f64 / (mapping.program_count - 1) as f64
++                        } else {
++                            0.0
++                        };
++                        self.queue_processor_parameter_at(mapping.param_id, value, sample_offset)?;
+                     }
+-                    return Ok(());
+-                }
+-            }
+-
+-            self.input_events.add_raw_event(&vst_event);
+-        }
++                }
++                Ok(())
++            }
++        }
++    }
++
++    fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
 +        self.runtime.send_plugin_event(event)
 +    }
 +
@@ -9373,6 +9507,18 @@
 +        self.runtime
 +            .start_processor(&mut self.control.processor_lease())?;
 +        log::debug!("Plugin processing started successfully");
+         Ok(())
+     }
+ 
+-    fn send_plugin_event(&mut self, event: PluginEvent) -> Result<()> {
+-        self.input_events.add_event(event);
++    fn stop_processing(&mut self) -> Result<()> {
++        // Ending this exclusive lease is the current synchronous processor fence. Only then
++        // may the control domain deactivate the component or release owning COM references.
++        self.runtime
++            .stop_processor(&mut self.control.processor_lease())?;
++        self.deactivate_on_control_thread()?;
++        self.runtime.active_notes.clear();
          Ok(())
      }
  
@@ -9413,7 +9559,7 @@
 -        }
 -    }
 -
-     fn stop_processing(&mut self) -> Result<()> {
+-    fn stop_processing(&mut self) -> Result<()> {
 -        unsafe {
 -            if self.is_processing {
 -                self.processor.setProcessing(0);
@@ -9430,21 +9576,12 @@
 -
 -            Ok(())
 -        }
-+        // Ending this exclusive lease is the current synchronous processor fence. Only then
-+        // may the control domain deactivate the component or release owning COM references.
-+        self.runtime
-+            .stop_processor(&mut self.control.processor_lease())?;
-+        self.deactivate_on_control_thread()?;
-+        self.runtime.active_notes.clear();
-+        Ok(())
-+    }
-+
 +    fn processing_state(&self) -> Option<bool> {
 +        Some(self.runtime.is_processing)
      }
  
      fn has_editor(&self) -> bool {
-@@ -2963,12 +3300,12 @@
+@@ -2963,12 +3240,12 @@
  
          // An open editor is proof enough, and probing for a second view while one is attached
          // upsets plugins that assume a single live view.
@@ -9459,7 +9596,7 @@
              unsafe {
                  // Check if controller can create an editor view
                  let view_type = c"editor".as_ptr();
-@@ -2989,7 +3326,7 @@
+@@ -2989,7 +3266,7 @@
      }
  
      fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()> {
@@ -9468,7 +9605,7 @@
              return Err(Error::Other("Editor already open".to_string()));
          }
          if parent.is_null() {
-@@ -2998,7 +3335,22 @@
+@@ -2998,7 +3275,22 @@
              ));
          }
  
@@ -9492,7 +9629,7 @@
              unsafe {
                  // Create editor view
                  let view_type = c"editor".as_ptr();
-@@ -3025,9 +3377,13 @@
+@@ -3025,9 +3317,13 @@
  
                  // Hand the plugin an IPlugFrame (before attach, per the SDK) so it can
                  // request host-side resizes; requests land in `editor_resize`.
@@ -9509,7 +9646,7 @@
                  let frame_result = view.setFrame(frame.as_ptr());
                  if frame_result != kResultOk && frame_result != kResultTrue {
                      return Err(Error::Other(format!(
-@@ -3037,7 +3393,7 @@
+@@ -3037,7 +3333,7 @@
  
                  // Offer the current scale factor, but never let the answer decide whether the
                  // editor opens: a view that declines simply renders at its own scale.
@@ -9518,7 +9655,7 @@
  
                  // Platform-specific attachment
                  #[cfg(target_os = "macos")]
-@@ -3075,7 +3431,7 @@
+@@ -3075,7 +3371,7 @@
  
                  #[cfg(not(target_os = "android"))]
                  {
@@ -9527,7 +9664,7 @@
                      Ok(())
                  }
              }
-@@ -3086,7 +3442,7 @@
+@@ -3086,7 +3382,7 @@
  
      fn close_editor(&mut self) -> Result<()> {
          let mut close_error = None;
@@ -9536,7 +9673,7 @@
              unsafe {
                  let removed_result = view.removed();
                  // Break the view -> host-frame reference before releasing the view. The frame
-@@ -3109,63 +3465,29 @@
+@@ -3109,63 +3405,29 @@
          // `Plugin::service_run_loop` is public with no editor-open guard, a host driving it from
          // its frame loop would then dispatch straight into the removed view.
          #[cfg(target_os = "linux")]
@@ -9614,7 +9751,7 @@
              unsafe {
                  let mut view_rect = ViewRect {
                      left: 0,
-@@ -3180,7 +3502,7 @@
+@@ -3180,7 +3442,7 @@
              }
          }
  
@@ -9623,7 +9760,7 @@
              unsafe {
                  // Create a temporary view to get size
                  let view_type = c"editor".as_ptr();
-@@ -3220,11 +3542,11 @@
+@@ -3220,11 +3482,11 @@
  
      fn editor_can_resize(&self) -> bool {
          unsafe {
@@ -9637,7 +9774,7 @@
                  return false;
              };
              let view_ptr = controller.createView(c"editor".as_ptr());
-@@ -3236,76 +3558,7 @@
+@@ -3236,76 +3498,7 @@
      }
  
      fn resize_editor(&mut self, width: i32, height: i32) -> Result<(i32, i32)> {
@@ -9715,7 +9852,7 @@
      }
  
      fn set_editor_scale_factor(&mut self, factor: f32) -> Result<bool> {
-@@ -3314,11 +3567,11 @@
+@@ -3314,11 +3507,11 @@
                  "editor scale factor must be finite and greater than zero".to_string(),
              ));
          }
@@ -9729,7 +9866,7 @@
          Ok(supported)
      }
  
-@@ -3328,49 +3581,62 @@
+@@ -3328,49 +3521,62 @@
  
      fn take_parameter_edits(&mut self) -> Vec<crate::plugin::ParameterEdit> {
          self.service_control_thread_caches();
@@ -9798,7 +9935,7 @@
              .as_ref()
              .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?
              .dismiss_context_menu(menu_id)
-@@ -3378,6 +3644,7 @@
+@@ -3378,6 +3584,7 @@
  
      fn take_restart_flags(&mut self) -> crate::plugin::RestartFlags {
          let flags = self
@@ -9806,7 +9943,7 @@
              .component_handler
              .as_ref()
              .map(|h| h.take_restart_flags())
-@@ -3387,19 +3654,19 @@
+@@ -3387,19 +3594,19 @@
          // main-thread-domain controller calls (the MIDI map alone is buses × 16 × 130 of them).
          // So record what went stale and let the control thread rebuild.
          if bits & RestartFlags_::kMidiCCAssignmentChanged != 0 {
@@ -9830,7 +9967,7 @@
              return Err(Error::Other(
                  "restart requests must be serviced on the plugin control thread".to_string(),
              ));
-@@ -3411,37 +3678,39 @@
+@@ -3411,37 +3618,39 @@
          }
  
          unsafe {
@@ -9879,7 +10016,7 @@
                          self.negotiate_default_bus_arrangements()
                              .and_then(|()| self.setup_processing())
                      }
-@@ -3451,12 +3720,16 @@
+@@ -3451,12 +3660,16 @@
                  Ok(())
              };
  
@@ -9898,7 +10035,7 @@
                      Ok(())
                  } else {
                      Err(Error::Other(format!(
-@@ -3476,39 +3749,43 @@
+@@ -3476,39 +3689,43 @@
      }
  
      fn take_output_events(&self) -> Vec<PluginEvent> {
@@ -9953,7 +10090,7 @@
      }
  
      fn note_on(
-@@ -3518,58 +3795,11 @@
+@@ -3518,58 +3735,11 @@
          velocity: u8,
          sample_offset: i32,
      ) -> Result<crate::midi::NoteId> {
@@ -10014,7 +10151,7 @@
      }
  
      fn send_note_expression(
-@@ -3579,18 +3809,8 @@
+@@ -3579,18 +3749,8 @@
          value: f64,
          sample_offset: i32,
      ) -> Result<()> {
@@ -10035,7 +10172,7 @@
      }
  
      fn note_expressions(
-@@ -3600,6 +3820,7 @@
+@@ -3600,6 +3760,7 @@
      ) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
          use crate::midi::{NoteExpressionInfo, NoteExpressionType};
          let Some(ctrl) = self
@@ -10043,7 +10180,7 @@
              .controller
              .as_ref()
              .and_then(|c| c.cast::<INoteExpressionController>())
-@@ -3635,12 +3856,13 @@
+@@ -3635,12 +3796,13 @@
  
      fn get_units(&self) -> Result<Vec<crate::plugin::PluginUnit>> {
          use crate::plugin::PluginUnit;
@@ -10058,7 +10195,7 @@
              .unit_cache
              .lock()
              .unwrap_or_else(|poison| poison.into_inner())
-@@ -3649,7 +3871,7 @@
+@@ -3649,7 +3811,7 @@
          {
              return Ok(units);
          }
@@ -10067,7 +10204,7 @@
              return Ok(Vec::new());
          };
          // IUnitInfo is optional; plugins without it (no units/program lists) return empty.
-@@ -3696,6 +3918,7 @@
+@@ -3696,6 +3858,7 @@
                  });
              }
              *self
@@ -10075,7 +10212,7 @@
                  .unit_cache
                  .lock()
                  .unwrap_or_else(|poison| poison.into_inner()) = Some(units.clone());
-@@ -3706,7 +3929,7 @@
+@@ -3706,7 +3869,7 @@
      fn select_program(&mut self, unit_id: i32, program_index: i32) -> Result<()> {
          self.service_control_thread_caches();
          if self.cached_program_change(unit_id).is_none()
@@ -10084,7 +10221,7 @@
          {
              self.refresh_program_change_cache();
          }
-@@ -3736,12 +3959,13 @@
+@@ -3736,12 +3899,13 @@
      }
  
      fn selected_unit(&self) -> Result<Option<i32>> {
@@ -10099,7 +10236,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3753,12 +3977,13 @@
+@@ -3753,12 +3917,13 @@
      }
  
      fn select_unit(&mut self, unit_id: i32) -> Result<()> {
@@ -10114,7 +10251,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3783,12 +4008,13 @@
+@@ -3783,12 +3948,13 @@
                  "program index must be non-negative, got {program_index}"
              )));
          }
@@ -10129,7 +10266,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3831,6 +4057,7 @@
+@@ -3831,6 +3997,7 @@
          }
          self.ensure_control_thread("program data read")?;
          let Some(data_interface) = self
@@ -10137,7 +10274,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IProgramListData>())
-@@ -3871,6 +4098,7 @@
+@@ -3871,6 +4038,7 @@
          self.ensure_stream_size(data)?;
          self.ensure_control_thread("program data restore")?;
          let data_interface = self
@@ -10145,7 +10282,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IProgramListData>())
-@@ -3895,6 +4123,7 @@
+@@ -3895,6 +4063,7 @@
                  data_interface.setProgramData(program_list_id, program_index, stream_ptr.as_ptr());
              if result == kResultOk {
                  *self
@@ -10153,7 +10290,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -3911,6 +4140,7 @@
+@@ -3911,6 +4080,7 @@
      fn get_unit_data(&self, unit_id: i32) -> Result<Option<Vec<u8>>> {
          self.ensure_control_thread("unit data read")?;
          let Some(data_interface) = self
@@ -10161,7 +10298,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitData>())
-@@ -3940,6 +4170,7 @@
+@@ -3940,6 +4110,7 @@
          self.ensure_stream_size(data)?;
          self.ensure_control_thread("unit data restore")?;
          let data_interface = self
@@ -10169,7 +10306,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitData>())
-@@ -3961,6 +4192,7 @@
+@@ -3961,6 +4132,7 @@
              let result = data_interface.setUnitData(unit_id, stream_ptr.as_ptr());
              if result == kResultOk {
                  *self
@@ -10177,7 +10314,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -3977,6 +4209,7 @@
+@@ -3977,6 +4149,7 @@
      fn begin_host_edit(&mut self, parameter_id: u32) -> Result<()> {
          self.ensure_control_thread("host edit begin")?;
          let editing = self
@@ -10185,7 +10322,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
-@@ -3992,6 +4225,7 @@
+@@ -3992,6 +4165,7 @@
      fn end_host_edit(&mut self, parameter_id: u32) -> Result<()> {
          self.ensure_control_thread("host edit end")?;
          let editing = self
@@ -10193,7 +10330,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
-@@ -4012,6 +4246,7 @@
+@@ -4012,6 +4186,7 @@
          }
          self.ensure_control_thread("MIDI learn notification")?;
          let midi_learn = self
@@ -10201,7 +10338,7 @@
              .controller
              .as_ref()
              .and_then(|edit_controller| edit_controller.cast::<IMidiLearn>())
-@@ -4026,6 +4261,7 @@
+@@ -4026,6 +4201,7 @@
          use crate::plugin::AutomationState;
          self.ensure_control_thread("automation state update")?;
          let automation = self
@@ -10209,7 +10346,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IAutomationState>())
-@@ -4052,6 +4288,7 @@
+@@ -4052,6 +4228,7 @@
          })?;
          self.ensure_control_thread("parameter id remapping")?;
          let Some(remapper) = self
@@ -10217,7 +10354,7 @@
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IRemapParamID>())
-@@ -4075,8 +4312,11 @@
+@@ -4075,8 +4252,11 @@
      }
  
      fn midi_panic(&mut self) -> Result<()> {
@@ -10231,7 +10368,7 @@
              unsafe {
                  let mut event: Event = std::mem::zeroed();
                  event.busIndex = 0;
-@@ -4086,30 +4326,46 @@
+@@ -4086,30 +4266,46 @@
                  event.__field0.noteOff.noteId = note_id;
                  event.__field0.noteOff.channel = channel;
                  event.__field0.noteOff.pitch = pitch;
@@ -10302,7 +10439,7 @@
          }
  
          // Also route the standard panic controllers through IMidiMapping for plugins that
-@@ -4126,11 +4382,20 @@
+@@ -4126,11 +4322,20 @@
      }
  
      fn output_channel_count(&self) -> usize {
@@ -10324,7 +10461,7 @@
                      .bus_activation
                      .audio_outputs
                      .get(i as usize)
-@@ -4141,6 +4406,7 @@
+@@ -4141,6 +4346,7 @@
                  }
                  let mut info: BusInfo = std::mem::zeroed();
                  if self
@@ -10332,7 +10469,7 @@
                      .component
                      .getBusInfo(kAudio as i32, kOutput as i32, i, &mut info)
                      == kResultOk
-@@ -4149,6 +4415,7 @@
+@@ -4149,6 +4355,7 @@
                  } else {
                      let mut arrangement = 0u64;
                      if self
@@ -10340,7 +10477,7 @@
                          .processor
                          .getBusArrangement(kOutput as i32, i, &mut arrangement)
                          == kResultOk
-@@ -4162,14 +4429,23 @@
+@@ -4162,14 +4369,23 @@
      }
  
      fn save_state(&self) -> Result<Vec<u8>> {
@@ -10365,7 +10502,7 @@
              if result != kResultOk {
                  return Err(Error::Other(format!(
                      "Plugin does not provide state (getState: {result:#x})"
-@@ -4180,8 +4456,11 @@
+@@ -4180,8 +4396,11 @@
              // its state returns the blob above a second time: the envelope would carry the same
              // bytes twice, the combined size cap would effectively halve, and `load_state` would
              // apply `setState` twice. `load_state` has the matching guard.
@@ -10379,7 +10516,7 @@
              {
                  let stream = create_memory_stream_with_metadata(None, StreamStateType::Project);
                  let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
-@@ -4201,56 +4480,82 @@
+@@ -4201,56 +4420,82 @@
                  None
              };
  
@@ -10477,7 +10614,7 @@
                          let stream =
                              create_state_restore_stream(snapshot.component.clone(), context);
                          let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
-@@ -4268,9 +4573,13 @@
+@@ -4268,9 +4513,13 @@
                      }
                  }
  
@@ -10494,7 +10631,7 @@
                      let stream = create_state_restore_stream(controller_state.clone(), context);
                      let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                          Error::InterfaceError("Failed to create controller state stream".into())
-@@ -4283,11 +4592,27 @@
+@@ -4283,11 +4532,27 @@
                      }
                  }
  
@@ -10525,7 +10662,7 @@
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -4297,17 +4622,25 @@
+@@ -4297,17 +4562,25 @@
              })();
  
              let restore_result = (|| -> Result<()> {
@@ -10553,7 +10690,7 @@
                  }
                  Ok(())
              })();
-@@ -4405,43 +4738,72 @@
+@@ -4405,43 +4678,72 @@
          // Rebuild the table here if a restart invalidated it off-thread; a no-op on the audio
          // thread, which must never make controller calls.
          self.service_control_thread_caches();
@@ -10652,7 +10789,7 @@
          })
      }
  
-@@ -4576,7 +4938,7 @@
+@@ -4576,7 +4878,7 @@
  /// still fail — and by then the plugin may have spawned threads and registered callbacks.
  /// Releasing its interfaces and unloading the module without `terminate()` leaves that code
  /// running inside memory the unload is about to unmap. This guard runs the same sequence
@@ -10661,7 +10798,7 @@
  ///
  /// It holds its own references (COM refcounts), so `load` keeps using the originals as it
  /// builds; the extra references are released when the guard drops either way.
-@@ -4617,8 +4979,10 @@
+@@ -4617,8 +4919,10 @@
          self.connection.take()
      }
  
@@ -10674,7 +10811,7 @@
          self.armed = false;
      }
  }
-@@ -4681,21 +5045,23 @@
+@@ -4681,21 +4985,23 @@
          let _ = PluginInternal::close_editor(self);
  
          let _ = self.stop_processing();
@@ -10705,7 +10842,7 @@
      }
  }
  
-@@ -4776,18 +5142,53 @@
+@@ -4776,18 +5082,53 @@
          .unwrap_or_default()
  }
  
@@ -10762,7 +10899,7 @@
      if process_context_needs(requirements, R::kNeedContinousTimeSamples as u32) {
          ctx.continousTimeSamples = ctx.continousTimeSamples.wrapping_add(frames);
      }
-@@ -4798,17 +5199,79 @@
+@@ -4798,17 +5139,79 @@
          let nanos = (frames as f64 * 1_000_000_000.0 / ctx.sampleRate).round() as i64;
          ctx.systemTime = ctx.systemTime.saturating_add(nanos);
      }
@@ -10846,7 +10983,7 @@
  
      fn buses(channels: &[i32]) -> Vec<AudioBusBuffers> {
          channels
-@@ -5053,7 +5516,7 @@
+@@ -5053,7 +5456,7 @@
          // One second of audio at 48 kHz in 512-sample blocks.
          let blocks = 48_000 / 512;
          for _ in 0..blocks {
@@ -10855,7 +10992,7 @@
          }
          let advanced = (blocks * 512) as i64;
          assert_eq!(ctx.projectTimeSamples, advanced);
-@@ -5448,3 +5911,256 @@
+@@ -5448,3 +5851,317 @@
          assert_eq!(calls.load(Ordering::SeqCst), 0);
      }
  }
@@ -10927,6 +11064,67 @@
 +mod domain_tests;
 +
 +impl ProcessorRuntime {
++    /// Mechanically shared ordinary MIDI admission. Both entry points validate scalar
++    /// values first; mapped MIDI remains an owner operation and cannot enter the worker.
++    fn send_ordinary_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {
++        let sample_offset = sample_offset.max(0);
++        let mut note_count_commit = None;
++        unsafe {
++            let mut vst_event: Event = std::mem::zeroed();
++            vst_event.busIndex = 0;
++            vst_event.sampleOffset = sample_offset;
++            vst_event.ppqPosition = 0.0;
++            vst_event.flags = Event_::EventFlags_::kIsLive as u16;
++            match event {
++                MidiEvent::NoteOn {
++                    channel,
++                    note,
++                    velocity,
++                } => {
++                    let index = channel.as_index() as usize * 128 + note as usize;
++                    let released = write_midi_note_on(&mut vst_event, channel, note, velocity);
++                    let next_count = if released {
++                        self.ordinary_note_counts[index].saturating_sub(1)
++                    } else {
++                        self.ordinary_note_counts[index]
++                            .checked_add(1)
++                            .ok_or(Error::EventInputRejected)?
++                    };
++                    note_count_commit = Some((index, next_count));
++                }
++                MidiEvent::NoteOff {
++                    channel,
++                    note,
++                    velocity,
++                } => {
++                    let index = channel.as_index() as usize * 128 + note as usize;
++                    note_count_commit =
++                        Some((index, self.ordinary_note_counts[index].saturating_sub(1)));
++                    write_note_off_event(&mut vst_event, channel, note, velocity);
++                }
++                MidiEvent::PolyAftertouch {
++                    channel,
++                    note,
++                    pressure,
++                } => {
++                    vst_event.r#type = kPolyPressureEvent as u16;
++                    vst_event.__field0.polyPressure.channel = channel.as_index() as i16;
++                    vst_event.__field0.polyPressure.pitch = note as i16;
++                    vst_event.__field0.polyPressure.pressure = pressure as f32 / 127.0;
++                    vst_event.__field0.polyPressure.noteId = -1;
++                }
++                _ => return Err(Error::MidiError("mapped MIDI requires the owner".into())),
++            }
++            self.input_events
++                .try_add_raw_event(&vst_event)
++                .map_err(|_| Error::EventInputRejected)?;
++        }
++        if let Some((index, count)) = note_count_commit {
++            self.ordinary_note_counts[index] = count;
++        }
++        Ok(())
++    }
++
 +    #[allow(clippy::unnecessary_cast)]
 +    fn update_tempo(&mut self, bpm: f64) {
 +        self.tempo = bpm;
@@ -11248,7 +11446,7 @@
 +}
 --- /dev/null
 +++ b/src/internal/plugin_impl/domain_session.rs
-@@ -0,0 +1,380 @@
+@@ -0,0 +1,382 @@
 +//! Scoped, same-thread capabilities. The aggregate remains exclusively borrowed and owns
 +//! every COM reference, module and runtime field throughout the visit. No handback state,
 +//! movable owner, user callback or worker authority is introduced.
@@ -11257,6 +11455,8 @@
 +
 +#[cfg(test)]
 +mod runtime_loan_fixture;
++#[cfg(all(feature = "experimental-scoped-worker", target_os = "linux"))]
++pub(super) mod scoped_worker;
 +#[cfg(test)]
 +pub(crate) use runtime_loan_fixture::{with_runtime_loan_for_test, RuntimeLoan};
 +use std::{marker::PhantomData, rc::Rc};
@@ -11806,8 +12006,468 @@
 +    }
 +}
 --- /dev/null
++++ b/src/internal/plugin_impl/domain_session/scoped_worker.rs
+@@ -0,0 +1,457 @@
++//! Disabled-feature library session. Owning COM references and prepared storage remain
++//! in the loading-thread owner. Only the fixed processing dispatcher crosses threads.
++
++use super::*;
++use crate::scoped_worker::{
++    AttachedUiBridge, AttachedUiReply, AttachedUiRequest, ScopedWorkerCallback, ScopedWorkerError,
++    ScopedWorkerFailure, ScopedWorkerReport, ScopedWorkerResult, WorkerCommand, WorkerIo,
++    WorkerOutcome, WorkerReply, WorkerStatus,
++};
++use std::{
++    panic::{catch_unwind, resume_unwind, AssertUnwindSafe},
++    ptr::NonNull,
++    sync::mpsc,
++};
++use vst3::ComRef;
++
++struct ProcessAddress<'owner> {
++    pointer: NonNull<IAudioProcessor>,
++    _owners: PhantomData<(&'owner mut ComPtr<IAudioProcessor>, &'owner dyn VstModule)>,
++}
++
++impl<'owner> ProcessAddress<'owner> {
++    fn new(processor: &'owner mut ComPtr<IAudioProcessor>, _module: &'owner dyn VstModule) -> Self {
++        Self {
++            pointer: NonNull::new(processor.as_ptr()).expect("owning processor is non-null"),
++            _owners: PhantomData,
++        }
++    }
++}
++
++impl ProcessorProcessCall for ProcessAddress<'_> {
++    unsafe fn process(&mut self, data: &mut ProcessData) -> tresult {
++        // SAFETY: the sole caller is the unchanged full kernel, which prepares and keeps
++        // every nested buffer/queue pointer live and exclusive for this synchronous call.
++        // The owner/module loan pins this vtable. ComRef never AddRefs or Releases it.
++        unsafe {
++            ComRef::from_raw(self.pointer.as_ptr())
++                .expect("borrowed processor")
++                .process(data)
++        }
++    }
++}
++
++struct RuntimeLoan<'owner> {
++    core: PreparedRuntimeOps<'owner, ProcessAddress<'owner>>,
++    levels: &'owner Mutex<crate::audio::AudioLevels>,
++}
++
++// SAFETY: this private loan is constructed exactly once from disjoint fields of the
++// exclusively borrowed loading-thread owner. All owning processor/controller/factory/module
++// references and current prepared COM queue owners stay in that owner until scoped join.
++// The fixed dispatcher can only call the existing checked processing kernel, validated
++// ordinary MIDI admission, and owned output drain. It cannot rebuild/drop/replace runtime
++// storage, invoke controller/state/metadata/lifecycle, or expose a COM address. The borrowed
++// processor grants only SDK process, a processing-thread method; the kernel owns the ONE
++// existing data-exchange gate. RuntimeLoan is not Sync/Clone and dispatch requires &mut.
++// Main simultaneously receives only disjoint ControlOps and its view scale scalar. Shared
++// native/COM queues retain their existing synchronization. Meter access uses its existing
++// Mutex; user callbacks are rejected before entry and never run here. A hung foreign call
++// pins the scoped join, never permits detached unload. A plugin-retained retired host queue
++// may still receive final Release/free in a later Process after owner-side rebuild: this is
++// NOT a whole-Process no-allocation/no-free or universal host-container drop-affinity claim.
++unsafe impl Send for RuntimeLoan<'_> {}
++
++impl RuntimeLoan<'_> {
++    fn dispatch(&mut self, command: WorkerCommand) -> (WorkerReply, Option<Arc<Error>>) {
++        match command {
++            WorkerCommand::Process {
++                mut buffers,
++                transport,
++            } => {
++                let result = transport
++                    .map(|t| self.core.set_process_transport(t))
++                    .transpose()
++                    .and_then(|_| self.core.process(&mut buffers))
++                    .map_err(Arc::new);
++                if result.is_ok() {
++                    if let Ok(mut levels) = self.levels.lock() {
++                        levels.update_from_buffers(&buffers.outputs);
++                    }
++                }
++                let failure = result.as_ref().err().cloned();
++                (WorkerReply::Processed { buffers, result }, failure)
++            }
++            WorkerCommand::ProcessBuses {
++                mut buffers,
++                transport,
++            } => {
++                let result = transport
++                    .map(|t| self.core.set_process_transport(t))
++                    .transpose()
++                    .and_then(|_| self.core.process_buses(&mut buffers))
++                    .map_err(Arc::new);
++                if result.is_ok() {
++                    if let Ok(mut levels) = self.levels.lock() {
++                        levels.update_from_bus_buffers(&buffers.outputs);
++                    }
++                }
++                let failure = result.as_ref().err().cloned();
++                (WorkerReply::ProcessedBuses { buffers, result }, failure)
++            }
++            WorkerCommand::SendMidi {
++                event,
++                sample_offset,
++            } => {
++                let event = event.into_midi_event();
++                let result = crate::plugin::validate_midi_event(&event)
++                    .and_then(|_| {
++                        self.core
++                            .runtime
++                            .send_ordinary_midi_event_at(event, sample_offset)
++                    })
++                    .map_err(Arc::new);
++                let failure = result.as_ref().err().cloned();
++                (WorkerReply::MidiAdmission { result }, failure)
++            }
++            WorkerCommand::TakeOutputEvents => {
++                let (events, lost) = self.core.take_output_events_with_loss();
++                (WorkerReply::OutputEvents { events, lost }, None)
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(in crate::internal::plugin_impl) enum WorkerTestPoint {
++    BeforeDispatch,
++    AfterDispatchBeforeReply,
++    AfterReply,
++}
++
++#[derive(Default)]
++struct DriverHooks {
++    #[cfg(test)]
++    hook: Option<Box<dyn FnMut(WorkerTestPoint) + Send>>,
++    #[cfg(test)]
++    fail_spawn: bool,
++}
++
++impl DriverHooks {
++    fn before_dispatch(&mut self) {
++        #[cfg(test)]
++        if let Some(hook) = self.hook.as_mut() {
++            hook(WorkerTestPoint::BeforeDispatch);
++        }
++    }
++    fn after_dispatch(&mut self) {
++        #[cfg(test)]
++        if let Some(hook) = self.hook.as_mut() {
++            // Deliberate test panic is Rust-only, after SDK/gate return, never in COM.
++            hook(WorkerTestPoint::AfterDispatchBeforeReply);
++        }
++    }
++    fn after_reply(&mut self) {
++        #[cfg(test)]
++        if let Some(hook) = self.hook.as_mut() {
++            hook(WorkerTestPoint::AfterReply);
++        }
++    }
++}
++
++struct PanicStatusGuard(Arc<WorkerStatus>);
++impl Drop for PanicStatusGuard {
++    fn drop(&mut self) {
++        if thread::panicking() {
++            // Observable before join, even if the caller only polls session status.
++            self.0.mark_terminal();
++        }
++    }
++}
++
++struct WorkerExit {
++    completed: usize,
++    failure: Option<WorkerOutcome>,
++}
++
++fn worker_loop(
++    mut runtime: RuntimeLoan<'_>,
++    commands: mpsc::Receiver<WorkerCommand>,
++    replies: mpsc::SyncSender<WorkerReply>,
++    status: Arc<WorkerStatus>,
++    mut hooks: DriverHooks,
++    first_error: Arc<Mutex<Option<Arc<Error>>>>,
++) -> WorkerExit {
++    let mut exit = WorkerExit {
++        completed: 0,
++        failure: None,
++    };
++    // Closing the unique sender wakes recv. An already accepted command is still drained;
++    // a CLOSED flag is not permission to silently discard accepted work.
++    while let Ok(command) = commands.recv() {
++        hooks.before_dispatch();
++        let (reply, failure) = runtime.dispatch(command);
++        exit.completed = exit.completed.saturating_add(1);
++        if let Some(error) = failure {
++            // Only failures take this latch. Release it before hooks, publication or join.
++            // Retain the exact Arc even if a later Rust panic prevents returning WorkerExit.
++            *first_error
++                .lock()
++                .unwrap_or_else(|poison| poison.into_inner()) = Some(Arc::clone(&error));
++            status.mark_terminal();
++            exit.failure = Some(WorkerOutcome::Failed(error));
++        }
++        hooks.after_dispatch();
++        if replies.try_send(reply).is_err() {
++            status.mark_terminal();
++            if exit.failure.is_none() {
++                exit.failure = Some(WorkerOutcome::ReplyUndelivered);
++            }
++            break;
++        }
++        hooks.after_reply();
++        if exit.failure.is_some() {
++            break;
++        }
++    }
++    exit
++}
++
++fn ui_request(
++    control: &mut ControlOps<'_>,
++    scale: &mut f32,
++    request: AttachedUiRequest,
++) -> Result<AttachedUiReply> {
++    if thread::current().id() != control.control_thread {
++        return Err(Error::Other(
++            "attached UI request must run on loading thread".into(),
++        ));
++    }
++    // Run-loop registrations can predate/outlive a view. This is existing UI host delivery,
++    // not ServiceHostRequests, processor metadata, or a component lifecycle capability.
++    if request == AttachedUiRequest::ServiceRunLoop {
++        control.service_run_loop();
++        return Ok(AttachedUiReply::RunLoopServiced);
++    }
++    let view = control
++        .view
++        .as_ref()
++        .ok_or_else(|| Error::Other("Plugin editor is not attached".into()))?;
++    match request {
++        AttachedUiRequest::AttachedSize => {
++            let mut rect = ViewRect {
++                left: 0,
++                top: 0,
++                right: 0,
++                bottom: 0,
++            };
++            if unsafe { view.getSize(&mut rect) } != kResultOk {
++                return Err(Error::Other("attached editor size query failed".into()));
++            }
++            Ok(AttachedUiReply::AttachedSize(view_rect_size(&rect)?))
++        }
++        AttachedUiRequest::CanResize => Ok(AttachedUiReply::CanResize(
++            unsafe { view.canResize() } == kResultTrue,
++        )),
++        AttachedUiRequest::Resize { width, height } => control
++            .resize_editor(width, height)
++            .map(AttachedUiReply::Resized),
++        AttachedUiRequest::SetScale { factor } => {
++            // Temporary QI owning reference is created, used and released on main only.
++            let accepted = unsafe { set_view_scale_factor(view, factor)? };
++            *scale = factor;
++            Ok(AttachedUiReply::ScaleAccepted(accepted))
++        }
++        AttachedUiRequest::TakeResizeRequest => Ok(AttachedUiReply::ResizeRequest(
++            control.take_editor_resize_request(),
++        )),
++        AttachedUiRequest::ServiceRunLoop => unreachable!("handled before attached-view lookup"),
++    }
++}
++
++fn rejected(error: Error) -> ScopedWorkerError {
++    ScopedWorkerError {
++        primary: ScopedWorkerFailure::Rejected(error),
++        secondary_worker: None,
++        unconsumed_reply: None,
++    }
++}
++
++pub(super) fn run(
++    owner: &mut PluginImpl,
++    levels: &Mutex<crate::audio::AudioLevels>,
++    body: &mut ScopedWorkerCallback<'_>,
++) -> ScopedWorkerResult {
++    run_inner(owner, levels, body, DriverHooks::default())
++}
++
++/// Test hooks are absent from production and execute only in Rust outside the SDK call.
++#[cfg(test)]
++pub(in crate::internal::plugin_impl) fn run_for_test(
++    owner: &mut PluginImpl,
++    levels: &Mutex<crate::audio::AudioLevels>,
++    body: &mut ScopedWorkerCallback<'_>,
++    hook: Option<Box<dyn FnMut(WorkerTestPoint) + Send>>,
++    fail_spawn: bool,
++) -> ScopedWorkerResult {
++    run_inner(owner, levels, body, DriverHooks { hook, fail_spawn })
++}
++
++fn run_inner(
++    owner: &mut PluginImpl,
++    levels: &Mutex<crate::audio::AudioLevels>,
++    body: &mut ScopedWorkerCallback<'_>,
++    hooks: DriverHooks,
++) -> ScopedWorkerResult {
++    owner
++        .ensure_control_thread("scoped worker")
++        .map_err(rejected)?;
++    if !owner.control.is_active
++        || !owner.runtime.is_processing
++        || owner.control.applied_setup.is_none()
++        || owner.runtime.process_data.is_none()
++        || owner.runtime.observe_parameter_output_fault()
++        || owner
++            .control
++            ._host_app
++            .data_exchange_process_gate()
++            .is_entered()
++    {
++        return Err(rejected(Error::Other(
++            "scoped worker owner is not prepared/active".into(),
++        )));
++    }
++    // Positive processing history is intentionally preserved across re-entry. Fresh-helper
++    // policy belongs to later negotiation, not an artificial has_processed_audio reset.
++    let ControlDomain {
++        processor,
++        controller,
++        plugin_view,
++        editor_resize,
++        deferred_controller_sync,
++        control_thread,
++        _host_app,
++        _module,
++        is_active,
++        run_loop,
++        editor_scale_factor,
++        ..
++    } = &mut owner.control;
++    let mut control = ControlOps {
++        controller,
++        view: plugin_view,
++        resize: editor_resize,
++        deferred_controller_sync,
++        control_thread: *control_thread,
++        host_ui: _host_app,
++        run_loop,
++        _same_thread: PhantomData,
++    };
++    let runtime = RuntimeLoan {
++        core: PreparedRuntimeOps {
++            runtime: &mut owner.runtime,
++            processor: ProcessAddress::new(processor, _module.as_ref()),
++            gate: _host_app.data_exchange_process_gate(),
++            is_active: *is_active,
++            _same_thread: PhantomData,
++        },
++        levels,
++    };
++    let status = Arc::new(WorkerStatus::new());
++    let first_error = Arc::new(Mutex::new(None));
++    thread::scope(|scope| {
++        // Declared INSIDE scope: Drop closes the unique sender before scope's implicit join
++        // on every unwind path. No owned sender or join handle reaches caller code.
++        let (mut io, commands, replies) = WorkerIo::channel(Arc::clone(&status));
++        let worker_status = Arc::clone(&status);
++        let worker_error = Arc::clone(&first_error);
++        #[cfg(test)]
++        if hooks.fail_spawn {
++            return Err(ScopedWorkerError {
++                primary: ScopedWorkerFailure::Spawn(Error::IoError(std::io::Error::other(
++                    "injected spawn refusal",
++                ))),
++                secondary_worker: None,
++                unconsumed_reply: None,
++            });
++        }
++        let worker = thread::Builder::new()
++            .name("vst3-scoped-process".into())
++            .spawn_scoped(scope, move || {
++                let _panic_status = PanicStatusGuard(Arc::clone(&worker_status));
++                worker_loop(
++                    runtime,
++                    commands,
++                    replies,
++                    worker_status,
++                    hooks,
++                    worker_error,
++                )
++            })
++            .map_err(|error| ScopedWorkerError {
++                primary: ScopedWorkerFailure::Spawn(Error::IoError(error)),
++                secondary_worker: None,
++                unconsumed_reply: None,
++            })?;
++        let mut dispatch = |request| ui_request(&mut control, editor_scale_factor, request);
++        let mut ui = AttachedUiBridge::new(&mut dispatch, Arc::clone(&status));
++        let body_result = catch_unwind(AssertUnwindSafe(|| body(&mut ui, &mut io)));
++        io.close();
++        let joined = worker.join();
++        let pending = io.has_pending();
++        let unread = io.take_unconsumed_reply();
++        let exit = match joined {
++            Ok(exit) => exit,
++            Err(_) => WorkerExit {
++                completed: 0,
++                failure: Some(WorkerOutcome::Panicked {
++                    prior_error: first_error
++                        .lock()
++                        .unwrap_or_else(|poison| poison.into_inner())
++                        .clone(),
++                }),
++            },
++        };
++        let body_result = match body_result {
++            Ok(result) => result,
++            Err(payload) => resume_unwind(payload), // exact Rust payload, AFTER join
++        };
++        if let Err(error) = body_result {
++            return Err(ScopedWorkerError {
++                primary: ScopedWorkerFailure::Body(error),
++                secondary_worker: exit.failure,
++                unconsumed_reply: unread,
++            });
++        }
++        if let Some(outcome) = exit.failure {
++            let primary = match outcome {
++                WorkerOutcome::Failed(ref error) => ScopedWorkerFailure::Worker(Arc::clone(error)),
++                WorkerOutcome::Panicked { .. } => ScopedWorkerFailure::WorkerPanicked,
++                WorkerOutcome::ReplyUndelivered => ScopedWorkerFailure::BridgeFailed,
++            };
++            return Err(ScopedWorkerError {
++                primary,
++                secondary_worker: Some(outcome),
++                unconsumed_reply: unread,
++            });
++        }
++        if status.is_terminal() {
++            return Err(ScopedWorkerError {
++                primary: ScopedWorkerFailure::BridgeFailed,
++                secondary_worker: None,
++                unconsumed_reply: unread,
++            });
++        }
++        if pending {
++            return Err(ScopedWorkerError {
++                primary: ScopedWorkerFailure::UnconsumedReply,
++                secondary_worker: None,
++                unconsumed_reply: unread,
++            });
++        }
++        Ok(ScopedWorkerReport {
++            completed_commands: exit.completed,
++        })
++    })
++}
+--- /dev/null
 +++ b/src/internal/plugin_impl/domain_tests.rs
-@@ -0,0 +1,3250 @@
+@@ -0,0 +1,3254 @@
 +//! Synchronous ownership/lifecycle regression tests using real VST3 COM interfaces.
 +//! These mocks intentionally allocate and lock; these are not real-time-safety tests.
 +
@@ -12436,6 +13096,7 @@
 +        kResultOk
 +    }
 +    unsafe fn createView(&self, _name: FIDString) -> *mut IPlugView {
++        self.probe.record("createView");
 +        ptr::null_mut()
 +    }
 +}
@@ -15058,6 +15719,9 @@
 +}
 +
 +mod runtime_loan_tests;
++
++#[cfg(all(feature = "experimental-scoped-worker", target_os = "linux"))]
++mod scoped_worker_tests;
 --- /dev/null
 +++ b/src/internal/plugin_impl/domain_tests/borrowed_processor_tests.rs
 @@ -0,0 +1,335 @@
@@ -16472,6 +17136,1740 @@
 +    );
 +}
 --- /dev/null
++++ b/src/internal/plugin_impl/domain_tests/scoped_worker_tests.rs
+@@ -0,0 +1,1731 @@
++//! Disabled-feature full-kernel session evidence using allocating, locking COM mocks.
++//! A held attached-view call establishes overlap, not a native-plugin or audio deadline.
++//! All intentional Rust panics occur outside COM vtables. No native GUI is created.
++
++use super::*;
++use crate::scoped_worker::{
++    AttachedUiReply, AttachedUiRequest, CommandRejectionReason, OrdinaryMidiEvent,
++    ScopedWorkerFailure, WorkerCommand, WorkerIo, WorkerOutcome, WorkerReply,
++};
++use std::{
++    panic::{catch_unwind, AssertUnwindSafe},
++    sync::mpsc,
++    time::{Duration, Instant},
++};
++use vst3::Steinberg::{char16, int16};
++
++const WATCHDOG: Duration = Duration::from_secs(8);
++
++fn public_plugin(internal: PluginImpl) -> crate::plugin::Plugin {
++    crate::plugin::Plugin {
++        info: internal.info.clone(),
++        compatibility: Vec::new(),
++        is_processing: internal.runtime.is_processing,
++        sample_rate: internal.runtime.sample_rate,
++        block_size: internal.runtime.block_size,
++        audio_levels: Arc::new(Mutex::new(crate::audio::AudioLevels::new(1))),
++        parameter_change_callback: None,
++        audio_callback: None,
++        internal: Some(Box::new(internal)),
++    }
++}
++
++fn process_command(frames: usize) -> WorkerCommand {
++    WorkerCommand::Process {
++        buffers: AudioBuffers::new(0, 1, frames, 48_000.0),
++        transport: None,
++    }
++}
++
++fn exchange(io: &mut WorkerIo<'_>, command: WorkerCommand) -> WorkerReply {
++    io.try_submit(command).unwrap();
++    io.recv_reply().unwrap()
++}
++
++fn assert_process_ok(reply: WorkerReply, frames: usize) {
++    match reply {
++        WorkerReply::Processed { buffers, result } => {
++            result.unwrap();
++            assert_eq!(buffers.outputs[0], vec![1.0; frames]);
++        }
++        _ => panic!("expected flat process reply"),
++    }
++}
++
++fn note(velocity: u8) -> OrdinaryMidiEvent {
++    OrdinaryMidiEvent::NoteOn {
++        channel: MidiChannel::Ch1,
++        note: 60,
++        velocity,
++    }
++}
++
++fn midi(event: OrdinaryMidiEvent) -> WorkerCommand {
++    WorkerCommand::SendMidi {
++        event,
++        sample_offset: 0,
++    }
++}
++
++fn assert_midi_ok(reply: WorkerReply) {
++    match reply {
++        WorkerReply::MidiAdmission { result } => result.unwrap(),
++        _ => panic!("expected MIDI admission"),
++    }
++}
++
++fn internal_exchange(
++    owner: &mut PluginImpl,
++    command: WorkerCommand,
++) -> (crate::scoped_worker::ScopedWorkerResult, WorkerReply) {
++    let levels = Mutex::new(crate::audio::AudioLevels::new(1));
++    let mut command = Some(command);
++    let mut reply = None;
++    let result = owner.with_scoped_worker(&levels, &mut |_, io| {
++        reply = Some(exchange(io, command.take().unwrap()));
++        Ok(())
++    });
++    (result, reply.expect("entered prepared session"))
++}
++
++fn assert_owner_ledger(trace: &Trace, main: ThreadId, workers: &[ThreadId]) {
++    for call in trace.calls() {
++        if call.method == "process" {
++            assert!(workers.contains(&call.thread), "{call:?}");
++            assert_ne!(call.thread, main);
++        } else {
++            assert_eq!(call.thread, main, "owning/control/lifecycle call: {call:?}");
++        }
++    }
++}
++
++fn assert_teardown_before_module(trace: &Trace) {
++    let calls = trace.methods();
++    let module = calls
++        .iter()
++        .position(|call| *call == ("module", "drop"))
++        .unwrap();
++    for target in [
++        ("component", "terminate"),
++        ("component", "drop"),
++        ("factory", "drop"),
++    ] {
++        assert_eq!(calls.iter().filter(|call| **call == target).count(), 1);
++        assert!(calls.iter().position(|call| *call == target).unwrap() < module);
++    }
++}
++
++#[derive(Default)]
++struct ViewState {
++    size: Mutex<(i32, i32)>,
++    get_size: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
++    on_size: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
++    scale_result: AtomicI32,
++}
++
++struct AttachedView {
++    probe: Probe,
++    state: Arc<ViewState>,
++}
++impl Class for AttachedView {
++    type Interfaces = (IPlugView, IPlugViewContentScaleSupport);
++}
++impl Recorded for AttachedView {
++    fn probe(&self) -> &Probe {
++        &self.probe
++    }
++}
++impl Drop for AttachedView {
++    fn drop(&mut self) {
++        self.probe.record("drop");
++    }
++}
++impl IPlugViewTrait for AttachedView {
++    unsafe fn isPlatformTypeSupported(&self, _kind: FIDString) -> tresult {
++        kResultOk
++    }
++    unsafe fn attached(&self, _parent: *mut c_void, _kind: FIDString) -> tresult {
++        self.probe.record("attached");
++        kResultOk
++    }
++    unsafe fn removed(&self) -> tresult {
++        self.probe.record("removed");
++        kResultOk
++    }
++    unsafe fn onWheel(&self, _distance: f32) -> tresult {
++        kResultOk
++    }
++    unsafe fn onKeyDown(&self, _key: char16, _code: int16, _modifiers: int16) -> tresult {
++        kResultOk
++    }
++    unsafe fn onKeyUp(&self, _key: char16, _code: int16, _modifiers: int16) -> tresult {
++        kResultOk
++    }
++    unsafe fn getSize(&self, size: *mut ViewRect) -> tresult {
++        self.probe.record("getSize");
++        if let Ok(hook) = self.state.get_size.lock() {
++            if let Some(hook) = hook.as_ref() {
++                hook();
++            }
++        }
++        let Ok(current) = self.state.size.lock() else {
++            return kResultFalse;
++        };
++        if size.is_null() {
++            return kInvalidArgument;
++        }
++        *size = ViewRect {
++            left: 0,
++            top: 0,
++            right: current.0,
++            bottom: current.1,
++        };
++        kResultOk
++    }
++    unsafe fn onSize(&self, rect: *mut ViewRect) -> tresult {
++        self.probe.record("onSize");
++        if let Ok(hook) = self.state.on_size.lock() {
++            if let Some(hook) = hook.as_ref() {
++                hook();
++            }
++        }
++        if rect.is_null() {
++            return kInvalidArgument;
++        }
++        let Ok(mut current) = self.state.size.lock() else {
++            return kResultFalse;
++        };
++        *current = ((*rect).right - (*rect).left, (*rect).bottom - (*rect).top);
++        kResultOk
++    }
++    unsafe fn onFocus(&self, _state: TBool) -> tresult {
++        kResultOk
++    }
++    unsafe fn setFrame(&self, _frame: *mut IPlugFrame) -> tresult {
++        self.probe.record("setFrame");
++        kResultOk
++    }
++    unsafe fn canResize(&self) -> tresult {
++        self.probe.record("canResize");
++        kResultTrue
++    }
++    unsafe fn checkSizeConstraint(&self, _rect: *mut ViewRect) -> tresult {
++        self.probe.record("checkSizeConstraint");
++        kResultOk
++    }
++}
++impl IPlugViewContentScaleSupportTrait for AttachedView {
++    unsafe fn setContentScaleFactor(&self, _factor: f32) -> tresult {
++        self.probe.record("setContentScaleFactor");
++        self.state.scale_result.load(Ordering::Acquire)
++    }
++}
++
++fn attach_mock_view(owner: &mut PluginImpl, trace: &Trace) -> Arc<ViewState> {
++    let state = Arc::new(ViewState::default());
++    *state.size.lock().unwrap() = (640, 480);
++    state.scale_result.store(kResultOk, Ordering::Release);
++    owner.control.plugin_view = Some(tracked(AttachedView {
++        probe: Probe {
++            name: "view",
++            trace: trace.clone(),
++        },
++        state: state.clone(),
++    }));
++    state
++}
++
++#[test]
++fn scoped_worker_public_session_reuses_one_worker_and_returns_original_audio_allocations() {
++    let main = thread::current().id();
++    let trace = Trace::default();
++    let state = Arc::new(MockState::default());
++    let mut internal = plugin_fixture(&trace, &state);
++    internal.start_processing().unwrap();
++    let mut owner = crate::plugin::MainThreadPlugin::from_in_process(public_plugin(internal));
++    let before = trace.calls().len();
++    let report = owner
++        .with_scoped_worker(&mut |_, io| {
++            for frames in [16, 40, 0, 7] {
++                let buffers = AudioBuffers::new(0, 1, frames, 48_000.0);
++                let address = buffers.outputs[0].as_ptr();
++                io.try_submit(WorkerCommand::Process {
++                    buffers,
++                    transport: None,
++                })
++                .unwrap();
++                let denied = io.try_submit(WorkerCommand::TakeOutputEvents).unwrap_err();
++                assert_eq!(denied.reason, CommandRejectionReason::Pending);
++                assert!(matches!(denied.command, WorkerCommand::TakeOutputEvents));
++                match io.recv_reply().unwrap() {
++                    WorkerReply::Processed { buffers, result } => {
++                        result.unwrap();
++                        assert_eq!(buffers.outputs[0].as_ptr(), address);
++                        assert_eq!(buffers.outputs[0], vec![1.0; frames]);
++                    }
++                    _ => panic!("wrong reply"),
++                }
++            }
++            assert!(matches!(
++                exchange(io, WorkerCommand::TakeOutputEvents),
++                WorkerReply::OutputEvents { lost: false, .. }
++            ));
++            Ok(())
++        })
++        .unwrap();
++    assert_eq!(report.completed_commands, 5);
++    let calls = trace.calls();
++    let workers: Vec<_> = calls[before..]
++        .iter()
++        .filter(|c| c.method == "process")
++        .map(|c| c.thread)
++        .collect();
++    assert_eq!(workers.len(), 6);
++    assert!(workers.iter().all(|id| *id == workers[0]));
++    assert!(trace.methods()[before..]
++        .iter()
++        .all(|(_, method)| *method == "process"));
++    assert!(owner.is_processing());
++    drop(owner);
++    assert_owner_ledger(&trace, main, &[workers[0]]);
++    assert_teardown_before_module(&trace);
++}
++
++#[test]
++fn scoped_worker_completes_while_actual_attached_get_size_or_resize_holds_350ms() {
++    for resize in [false, true] {
++        let main = thread::current().id();
++        let trace = Trace::default();
++        let state = Arc::new(MockState::default());
++        let mut internal = plugin_fixture(&trace, &state);
++        internal.start_processing().unwrap();
++        let view = attach_mock_view(&mut internal, &trace);
++        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
++        let mut entered_rx = Some(entered_rx);
++        let (done_tx, done_rx) = mpsc::sync_channel(1);
++        let done_rx = Mutex::new(done_rx);
++        let held = Arc::new(AtomicBool::new(false));
++        let held_in_ui = held.clone();
++        let held_in_producer = held.clone();
++        let observed = Arc::new(AtomicBool::new(false));
++        let observed_in_ui = observed.clone();
++        let hook: Box<dyn Fn() + Send + Sync> = Box::new(move || {
++            // Never assert or panic through COM, including watchdog/latch failure.
++            held_in_ui.store(true, Ordering::Release);
++            let started = Instant::now();
++            let sent = entered_tx.send(()).is_ok();
++            thread::sleep(Duration::from_millis(350));
++            let completed = done_rx
++                .lock()
++                .ok()
++                .and_then(|rx| rx.recv_timeout(WATCHDOG).ok());
++            observed_in_ui.store(
++                sent && completed == Some(true) && started.elapsed() >= Duration::from_millis(350),
++                Ordering::Release,
++            );
++            held_in_ui.store(false, Ordering::Release);
++        });
++        if resize {
++            *view.on_size.lock().unwrap() = Some(hook);
++        } else {
++            *view.get_size.lock().unwrap() = Some(hook);
++        }
++        let mut owner = crate::plugin::MainThreadPlugin::from_in_process(public_plugin(internal));
++        let mut producer_id = None;
++        owner
++            .with_scoped_worker(&mut |ui, io| {
++                let entered_rx = entered_rx.take().unwrap();
++                let done_tx = done_tx.clone();
++                let held_in_producer = held_in_producer.clone();
++                thread::scope(|scope| {
++                    let producer = scope.spawn(move || {
++                        entered_rx.recv_timeout(WATCHDOG).unwrap();
++                        assert_process_ok(exchange(io, process_command(40)), 40);
++                        done_tx
++                            .send(held_in_producer.load(Ordering::Acquire))
++                            .unwrap();
++                        thread::current().id()
++                    });
++                    let request = if resize {
++                        AttachedUiRequest::Resize {
++                            width: 800,
++                            height: 600,
++                        }
++                    } else {
++                        AttachedUiRequest::AttachedSize
++                    };
++                    let reply = ui.request(request)?;
++                    assert_eq!(
++                        reply,
++                        if resize {
++                            AttachedUiReply::Resized((800, 600))
++                        } else {
++                            AttachedUiReply::AttachedSize((640, 480))
++                        }
++                    );
++                    producer_id = Some(producer.join().unwrap());
++                    Ok(())
++                })
++            })
++            .unwrap();
++        assert!(observed.load(Ordering::Acquire));
++        assert!(!held.load(Ordering::Acquire));
++        *view.get_size.lock().unwrap() = None;
++        *view.on_size.lock().unwrap() = None;
++        let workers: Vec<_> = trace
++            .calls()
++            .iter()
++            .filter(|c| c.method == "process")
++            .map(|c| c.thread)
++            .collect();
++        assert_eq!(workers.len(), 3);
++        assert!(workers.iter().all(|id| *id == workers[0]));
++        assert_ne!(workers[0], producer_id.unwrap());
++        drop(owner);
++        assert_owner_ledger(&trace, main, &[workers[0]]);
++        assert_teardown_before_module(&trace);
++    }
++}
++
++#[test]
++fn scoped_worker_absent_attached_ui_never_attempts_create_view() {
++    let trace = Trace::default();
++    let mut internal = plugin_fixture(&trace, &Arc::new(MockState::default()));
++    internal.start_processing().unwrap();
++    let mut owner = crate::plugin::MainThreadPlugin::from_in_process(public_plugin(internal));
++    trace.clear();
++    owner
++        .with_scoped_worker(&mut |ui, _| {
++            for request in [
++                AttachedUiRequest::AttachedSize,
++                AttachedUiRequest::CanResize,
++                AttachedUiRequest::Resize {
++                    width: 800,
++                    height: 600,
++                },
++                AttachedUiRequest::SetScale { factor: 2.0 },
++                AttachedUiRequest::TakeResizeRequest,
++            ] {
++                assert!(ui.request(request).is_err());
++            }
++            assert_eq!(
++                ui.request(AttachedUiRequest::ServiceRunLoop)?,
++                AttachedUiReply::RunLoopServiced
++            );
++            Ok(())
++        })
++        .unwrap();
++    assert!(trace.calls().is_empty());
++}
++
++#[test]
++fn scoped_worker_scale_query_use_release_and_resize_delivery_stay_on_main() {
++    let main = thread::current().id();
++    let trace = Trace::default();
++    let mut internal = plugin_fixture(&trace, &Arc::new(MockState::default()));
++    internal.start_processing().unwrap();
++    let view = attach_mock_view(&mut internal, &trace);
++    *internal.control.editor_resize.lock().unwrap() = Some((700, 500));
++    let mut owner = crate::plugin::MainThreadPlugin::from_in_process(public_plugin(internal));
++    trace.clear();
++    owner
++        .with_scoped_worker(&mut |ui, _| {
++            assert_eq!(
++                ui.request(AttachedUiRequest::SetScale { factor: 2.0 })?,
++                AttachedUiReply::ScaleAccepted(true)
++            );
++            view.scale_result.store(kResultFalse, Ordering::Release);
++            assert_eq!(
++                ui.request(AttachedUiRequest::SetScale { factor: 1.5 })?,
++                AttachedUiReply::ScaleAccepted(false)
++            );
++            let before_invalid = trace.calls().len();
++            assert!(ui
++                .request(AttachedUiRequest::SetScale { factor: f32::NAN })
++                .is_err());
++            assert_eq!(trace.calls().len(), before_invalid);
++            assert_eq!(
++                ui.request(AttachedUiRequest::TakeResizeRequest)?,
++                AttachedUiReply::ResizeRequest(Some((700, 500)))
++            );
++            assert_eq!(
++                ui.request(AttachedUiRequest::TakeResizeRequest)?,
++                AttachedUiReply::ResizeRequest(None)
++            );
++            Ok(())
++        })
++        .unwrap();
++    assert_eq!(
++        trace.methods(),
++        [
++            ("view", "addRef"),
++            ("view", "setContentScaleFactor"),
++            ("view", "release"),
++            ("view", "addRef"),
++            ("view", "setContentScaleFactor"),
++            ("view", "release")
++        ]
++    );
++    trace.assert_thread(main);
++    assert!(!trace
++        .methods()
++        .iter()
++        .any(|(_, method)| *method == "createView"));
++}
++
++#[test]
++fn scoped_worker_ordinary_midi_validation_preserves_existing_obligations() {
++    for event in [
++        OrdinaryMidiEvent::NoteOn {
++            channel: MidiChannel::Ch1,
++            note: 128,
++            velocity: 1,
++        },
++        OrdinaryMidiEvent::NoteOn {
++            channel: MidiChannel::Ch1,
++            note: 60,
++            velocity: 128,
++        },
++        OrdinaryMidiEvent::NoteOff {
++            channel: MidiChannel::Ch1,
++            note: 128,
++            velocity: 0,
++        },
++        OrdinaryMidiEvent::NoteOff {
++            channel: MidiChannel::Ch1,
++            note: 60,
++            velocity: 128,
++        },
++        OrdinaryMidiEvent::PolyAftertouch {
++            channel: MidiChannel::Ch1,
++            note: 128,
++            pressure: 1,
++        },
++        OrdinaryMidiEvent::PolyAftertouch {
++            channel: MidiChannel::Ch1,
++            note: 60,
++            pressure: 128,
++        },
++    ] {
++        let trace = Trace::default();
++        let mut owner = plugin_fixture(&trace, &Arc::new(MockState::default()));
++        owner.start_processing().unwrap();
++        owner.runtime.ordinary_note_counts[60] = 3;
++        owner.runtime.active_notes.push((9, 0, 62));
++        owner.runtime.next_note_id = 10;
++        owner.set_process_transport(reset_transport()).unwrap();
++        owner.queue_processor_parameter_at(7, 0.5, 17).unwrap();
++        let handler = owner.control.component_handler.as_ref().unwrap().clone();
++        assert_eq!(unsafe { handler.performEdit(8, 0.25) }, kResultOk);
++        let native = handler.native_edits.snapshot();
++        let before = trace.calls().len();
++        let (result, reply) = internal_exchange(&mut owner, midi(event));
++        assert!(matches!(
++            reply,
++            WorkerReply::MidiAdmission { result: Err(_) }
++        ));
++        assert!(matches!(
++            result.unwrap_err().primary,
++            ScopedWorkerFailure::Worker(_)
++        ));
++        assert_eq!(owner.runtime.ordinary_note_counts[60], 3);
++        assert_eq!(owner.runtime.active_notes, [(9, 0, 62)]);
++        assert_eq!(owner.runtime.next_note_id, 10);
++        assert!(owner.runtime.input_events.is_empty());
++        assert_eq!(owner.runtime.pending_param_changes.len(), 1);
++        assert_eq!(owner.runtime.process_transport, Some(reset_transport()));
++        assert_eq!(handler.native_edits.snapshot(), native);
++        assert_eq!(trace.calls().len(), before);
++    }
++}
++
++#[test]
++fn scoped_worker_counter_overflow_is_retryable_after_velocity_zero_release() {
++    let mut owner = plugin_fixture(&Trace::default(), &Arc::new(MockState::default()));
++    owner.start_processing().unwrap();
++    owner.runtime.ordinary_note_counts[60] = u16::MAX;
++    let (failed, reply) = internal_exchange(&mut owner, midi(note(100)));
++    assert!(
++        matches!(reply, WorkerReply::MidiAdmission { result: Err(ref error) } if matches!(error.as_ref(), Error::EventInputRejected))
++    );
++    assert!(failed.is_err());
++    assert!(owner.runtime.input_events.is_empty());
++    assert_eq!(owner.runtime.ordinary_note_counts[60], u16::MAX);
++    let levels = Mutex::new(crate::audio::AudioLevels::new(1));
++    owner
++        .with_scoped_worker(&levels, &mut |_, io| {
++            assert_midi_ok(exchange(io, midi(note(0))));
++            assert_midi_ok(exchange(io, midi(note(100))));
++            assert_midi_ok(exchange(
++                io,
++                WorkerCommand::SendMidi {
++                    event: OrdinaryMidiEvent::NoteOff {
++                        channel: MidiChannel::Ch1,
++                        note: 60,
++                        velocity: 64,
++                    },
++                    sample_offset: -12,
++                },
++            ));
++            assert_midi_ok(exchange(
++                io,
++                midi(OrdinaryMidiEvent::PolyAftertouch {
++                    channel: MidiChannel::Ch1,
++                    note: 60,
++                    pressure: 127,
++                }),
++            ));
++            Ok(())
++        })
++        .unwrap();
++    assert_eq!(owner.runtime.ordinary_note_counts[60], u16::MAX - 1);
++    assert_eq!(queued_note_releases(&owner), [(-1, 0, 60), (-1, 0, 60)]);
++    let events = owner.runtime.input_events.events.lock().unwrap();
++    assert_eq!(events.len(), 4);
++    assert!(matches!(
++        events[0].data,
++        crate::midi::PluginEventData::NoteOff { .. }
++    ));
++    assert_eq!(events[2].sample_offset, 0);
++    assert!(owner.runtime.active_notes.is_empty());
++    assert_eq!(owner.runtime.next_note_id, 1);
++}
++
++#[test]
++fn scoped_worker_full_input_queue_never_commits_failed_note_bookkeeping() {
++    for event in [
++        note(100),
++        note(0),
++        OrdinaryMidiEvent::NoteOff {
++            channel: MidiChannel::Ch1,
++            note: 60,
++            velocity: 0,
++        },
++        OrdinaryMidiEvent::PolyAftertouch {
++            channel: MidiChannel::Ch1,
++            note: 60,
++            pressure: 60,
++        },
++    ] {
++        let mut owner = plugin_fixture(&Trace::default(), &Arc::new(MockState::default()));
++        owner.start_processing().unwrap();
++        owner.runtime.ordinary_note_counts[60] = 3;
++        owner.runtime.active_notes.push((4, 0, 61));
++        owner.runtime.next_note_id = 5;
++        fill_admission_queue(&mut owner, MAX_QUEUED_EVENTS);
++        let (failed, reply) = internal_exchange(&mut owner, midi(event));
++        assert!(failed.is_err());
++        assert!(
++            matches!(reply, WorkerReply::MidiAdmission { result: Err(ref error) } if matches!(error.as_ref(), Error::EventInputRejected))
++        );
++        assert_eq!(owner.runtime.ordinary_note_counts[60], 3);
++        assert_eq!(owner.runtime.active_notes, [(4, 0, 61)]);
++        assert_eq!(owner.runtime.next_note_id, 5);
++        assert_eq!(
++            owner.runtime.input_events.events.lock().unwrap().len(),
++            MAX_QUEUED_EVENTS
++        );
++    }
++}
++
++#[test]
++fn scoped_worker_native_ack_tracks_sdk_result_and_sticky_parameter_fault_separately() {
++    for (sdk_fails, output_fault) in [(false, false), (true, false), (false, true), (true, true)] {
++        let state = Arc::new(MockState::default());
++        state.no_alloc_process.store(true, Ordering::Release);
++        state.fail_process.store(sdk_fails, Ordering::Release);
++        state
++            .output_points
++            .store(if output_fault { 4097 } else { 0 }, Ordering::Release);
++        let mut owner = plugin_fixture(&Trace::default(), &state);
++        owner.start_processing().unwrap();
++        let handler = owner.control.component_handler.as_ref().unwrap().clone();
++        assert_eq!(unsafe { handler.performEdit(7, 0.5) }, kResultOk);
++        let (session, reply) = internal_exchange(&mut owner, process_command(0));
++        let WorkerReply::Processed { result, .. } = reply else {
++            panic!("wrong reply");
++        };
++        assert_eq!(result.is_err(), sdk_fails || output_fault);
++        if let Err(reply_error) = result {
++            let session = session.unwrap_err();
++            let ScopedWorkerFailure::Worker(primary) = session.primary else {
++                panic!("worker must stay primary");
++            };
++            let Some(WorkerOutcome::Failed(secondary)) = session.secondary_worker else {
++                panic!("missing independently retained worker failure");
++            };
++            assert!(Arc::ptr_eq(&reply_error, &primary));
++            assert!(Arc::ptr_eq(&reply_error, &secondary));
++            assert!(session.unconsumed_reply.is_none());
++            if output_fault {
++                assert!(matches!(primary.as_ref(), Error::ParameterOutputRejected));
++            } else {
++                assert!(
++                    matches!(primary.as_ref(), Error::ProcessFailed(code) if *code == kResultFalse)
++                );
++            }
++        } else {
++            assert_eq!(session.unwrap().completed_commands, 1);
++        }
++        let native = handler.native_edits.snapshot();
++        assert_eq!(native.applied, u64::from(!sdk_fails));
++        assert_eq!(native.lost, sdk_fails);
++        assert_eq!(owner.runtime.observe_parameter_output_fault(), output_fault);
++        state.fail_process.store(false, Ordering::Release);
++        state.output_points.store(0, Ordering::Release);
++        owner.stop_processing().unwrap();
++        owner.start_processing().unwrap();
++        let levels = Mutex::new(crate::audio::AudioLevels::new(1));
++        let reentry = owner.with_scoped_worker(&levels, &mut |_, _| Ok(()));
++        assert_eq!(reentry.is_err(), output_fault);
++        assert_eq!(handler.native_edits.snapshot(), native);
++    }
++}
++
++#[test]
++fn scoped_worker_output_event_loss_drains_without_changing_native_ack_or_session_success() {
++    let state = Arc::new(MockState::default());
++    state.no_alloc_process.store(true, Ordering::Release);
++    state.output_event_attempts.store(4097, Ordering::Release);
++    let mut internal = plugin_fixture(&Trace::default(), &state);
++    internal.runtime.output_events_owned = Arc::new(ArrayQueue::new(4096));
++    internal.start_processing().unwrap();
++    let handler = internal.control.component_handler.as_ref().unwrap().clone();
++    assert_eq!(unsafe { handler.performEdit(42, 0.25) }, kResultOk);
++    let mut owner = crate::plugin::MainThreadPlugin::from_in_process(public_plugin(internal));
++    let report = owner.with_scoped_worker(&mut |_, io| {
++        match exchange(io, process_command(1)) {
++            WorkerReply::Processed { result, .. } => result.unwrap(),
++            _ => panic!("wrong process reply"),
++        }
++        match exchange(io, WorkerCommand::TakeOutputEvents) {
++            WorkerReply::OutputEvents { events, lost } => {
++                assert!(lost);
++                assert_eq!(events.len(), 4096);
++                for (index, event) in events.iter().enumerate() {
++                    assert!(matches!(event.data, crate::midi::PluginEventData::NoteOff { note_id, .. } if note_id == index as i32));
++                }
++            }
++            _ => panic!("wrong drain reply"),
++        }
++        assert!(matches!(exchange(io, WorkerCommand::TakeOutputEvents), WorkerReply::OutputEvents { events, lost: false } if events.is_empty()));
++        assert!(!io.is_terminal());
++        Ok(())
++    }).unwrap();
++    assert_eq!(report.completed_commands, 3);
++    assert_eq!(state.rejected_output_events.load(Ordering::Acquire), 1);
++    assert_eq!(handler.native_edits.snapshot().applied, 1);
++    assert!(!handler.native_edits.snapshot().lost);
++    assert!(owner.save_state().is_ok());
++}
++
++#[test]
++fn scoped_worker_metering_updates_whole_successful_flat_and_bus_calls_including_zero() {
++    for bus in [false, true] {
++        let state = Arc::new(MockState::default());
++        let mut internal = plugin_fixture(&Trace::default(), &state);
++        internal.start_processing().unwrap();
++        let layout = internal.audio_bus_layout().unwrap();
++        let plugin = public_plugin(internal);
++        let levels = plugin.audio_levels.clone();
++        let mut owner = crate::plugin::MainThreadPlugin::from_in_process(plugin);
++        owner
++            .with_scoped_worker(&mut |_, io| {
++                for frames in [40, 0] {
++                    let command = if bus {
++                        WorkerCommand::ProcessBuses {
++                            buffers: BusAudioBuffers::new(&layout, frames, 48_000.0),
++                            transport: None,
++                        }
++                    } else {
++                        process_command(frames)
++                    };
++                    match exchange(io, command) {
++                        WorkerReply::Processed { result, .. }
++                        | WorkerReply::ProcessedBuses { result, .. } => result.unwrap(),
++                        _ => panic!("wrong process reply"),
++                    }
++                    let levels = levels.lock().unwrap();
++                    let expected = if frames == 0 { 0.0 } else { 1.0 };
++                    assert_eq!(levels.channels[0].peak, expected);
++                    assert_eq!(levels.channels[0].rms, expected);
++                }
++                Ok(())
++            })
++            .unwrap();
++        assert_eq!(state.processed_layouts.lock().unwrap().len(), 4);
++    }
++}
++
++#[test]
++fn scoped_worker_failed_or_partial_calls_return_allocations_without_updating_whole_call_meters() {
++    for bus in [false, true] {
++        for failure in ["sdk", "partial", "output"] {
++            let state = Arc::new(MockState::default());
++            let mut internal = plugin_fixture(&Trace::default(), &state);
++            internal.start_processing().unwrap();
++            let layout = internal.audio_bus_layout().unwrap();
++            if failure == "sdk" {
++                state.fail_process.store(true, Ordering::Release);
++            }
++            if failure == "output" {
++                state.no_alloc_process.store(true, Ordering::Release);
++                state.output_points.store(4097, Ordering::Release);
++            }
++            if failure == "partial" {
++                let weak = Arc::downgrade(&state);
++                *state.process_callback.lock().unwrap() = Some(Box::new(move || {
++                    if let Some(state) = weak.upgrade() {
++                        state.fail_process.store(true, Ordering::Release);
++                    }
++                }));
++            }
++            let plugin = public_plugin(internal);
++            plugin.audio_levels.lock().unwrap().channels[0].peak = 0.375;
++            let mut owner = crate::plugin::MainThreadPlugin::from_in_process(plugin);
++            let mut returned = false;
++            let result = owner.with_scoped_worker(&mut |_, io| {
++                let (command, address) = if bus {
++                    let mut buffers = BusAudioBuffers::new(&layout, 32, 48_000.0);
++                    buffers.outputs[0].channels[0].fill(-0.25);
++                    let address = buffers.outputs[0].channels[0].as_ptr();
++                    (
++                        WorkerCommand::ProcessBuses {
++                            buffers,
++                            transport: None,
++                        },
++                        address,
++                    )
++                } else {
++                    let mut buffers = AudioBuffers::new(0, 1, 32, 48_000.0);
++                    buffers.outputs[0].fill(-0.25);
++                    let address = buffers.outputs[0].as_ptr();
++                    (
++                        WorkerCommand::Process {
++                            buffers,
++                            transport: None,
++                        },
++                        address,
++                    )
++                };
++                let samples = match exchange(io, command) {
++                    WorkerReply::Processed {
++                        mut buffers,
++                        result,
++                    } => {
++                        assert!(result.is_err());
++                        buffers.outputs.remove(0)
++                    }
++                    WorkerReply::ProcessedBuses {
++                        mut buffers,
++                        result,
++                    } => {
++                        assert!(result.is_err());
++                        buffers.outputs[0].channels.remove(0)
++                    }
++                    _ => panic!("wrong process reply"),
++                };
++                assert_eq!(samples.as_ptr(), address);
++                if failure == "partial" {
++                    assert_eq!(samples[..16], [1.0; 16]);
++                    assert_eq!(samples[16..], [-0.25; 16]);
++                }
++                returned = true;
++                Ok(())
++            });
++            assert!(returned);
++            assert!(matches!(
++                result.unwrap_err().primary,
++                ScopedWorkerFailure::Worker(_)
++            ));
++            assert_eq!(owner.get_output_levels().channels[0].peak, 0.375);
++        }
++    }
++}
++
++#[test]
++fn scoped_worker_poisoned_meter_mutex_skips_update_without_failing_processing() {
++    for bus in [false, true] {
++        let state = Arc::new(MockState::default());
++        let mut internal = plugin_fixture(&Trace::default(), &state);
++        internal.start_processing().unwrap();
++        let layout = internal.audio_bus_layout().unwrap();
++        let plugin = public_plugin(internal);
++        let levels = plugin.audio_levels.clone();
++        assert!(catch_unwind(AssertUnwindSafe(|| {
++            let mut levels = levels.lock().unwrap();
++            levels.channels[0].peak = 0.625;
++            panic!("intentional Rust mutex poison outside COM");
++        }))
++        .is_err());
++        let mut owner = crate::plugin::MainThreadPlugin::from_in_process(plugin);
++        owner
++            .with_scoped_worker(&mut |_, io| {
++                let command = if bus {
++                    WorkerCommand::ProcessBuses {
++                        buffers: BusAudioBuffers::new(&layout, 16, 48_000.0),
++                        transport: None,
++                    }
++                } else {
++                    process_command(16)
++                };
++                match exchange(io, command) {
++                    WorkerReply::Processed { result, .. }
++                    | WorkerReply::ProcessedBuses { result, .. } => result.unwrap(),
++                    _ => panic!("wrong process reply"),
++                }
++                Ok(())
++            })
++            .unwrap();
++        assert_eq!(state.processed_layouts.lock().unwrap().len(), 1);
++        assert_eq!(owner.get_output_levels().channels[0].peak, 0.625);
++        assert!(levels.is_poisoned());
++    }
++}
++
++#[test]
++fn scoped_worker_either_registered_callback_rejects_before_com_queues_or_transport_change() {
++    for callbacks in [1, 2, 3] {
++        let trace = Trace::default();
++        let state = Arc::new(MockState::default());
++        state.capture_origin.store(true, Ordering::Release);
++        let mut internal = plugin_fixture(&trace, &state);
++        internal.start_processing().unwrap();
++        internal.set_process_transport(reset_transport()).unwrap();
++        internal.queue_processor_parameter_at(1, 0.25, 0).unwrap();
++        internal
++            .send_midi_event(MidiEvent::NoteOn {
++                channel: MidiChannel::Ch1,
++                note: 60,
++                velocity: 100,
++            })
++            .unwrap();
++        let events = internal.runtime.input_events.clone();
++        let handler = internal.control.component_handler.as_ref().unwrap().clone();
++        assert_eq!(unsafe { handler.performEdit(3, 0.75) }, kResultOk);
++        let native = handler.native_edits.snapshot();
++        let mut plugin = public_plugin(internal);
++        let called = Arc::new(AtomicUsize::new(0));
++        if callbacks & 1 != 0 {
++            let called = called.clone();
++            plugin.on_audio_process(move |_| {
++                called.fetch_add(1, Ordering::Relaxed);
++            });
++        }
++        if callbacks & 2 != 0 {
++            let called = called.clone();
++            plugin.on_parameter_change(move |_, _| {
++                called.fetch_add(1, Ordering::Relaxed);
++            });
++        }
++        let mut owner = crate::plugin::MainThreadPlugin::from_in_process(plugin);
++        let before = trace.calls().len();
++        let mut entered = false;
++        let result = owner.with_scoped_worker(&mut |_, _| {
++            entered = true;
++            Ok(())
++        });
++        assert!(matches!(
++            result.unwrap_err().primary,
++            ScopedWorkerFailure::Rejected(_)
++        ));
++        assert!(!entered);
++        assert_eq!(trace.calls().len(), before);
++        assert_eq!(called.load(Ordering::Acquire), 0);
++        assert_eq!(events.events.lock().unwrap().len(), 1);
++        assert_eq!(handler.native_edits.snapshot(), native);
++        owner
++            .process_audio(&mut AudioBuffers::new(0, 1, 16, 48_000.0))
++            .unwrap();
++        assert_eq!(
++            state.origin_calls.lock().unwrap()[0].transport.unwrap().1,
++            reset_transport().sample_position
++        );
++        assert_eq!(
++            state.processed_parameters.lock().unwrap()[0],
++            [(1, 0, 0.25), (3, 0, 0.75)]
++        );
++        assert_eq!(state.processed_event_count.load(Ordering::Acquire), 1);
++    }
++}
++
++#[test]
++fn scoped_worker_readiness_rejections_preserve_queues_transport_and_owner_references() {
++    for mode in [
++        "inactive",
++        "not_processing",
++        "output_fault",
++        "wrong_thread",
++        "missing_setup",
++        "missing_data",
++        "active_call",
++    ] {
++        let trace = Trace::default();
++        let mut owner = plugin_fixture(&trace, &Arc::new(MockState::default()));
++        owner.start_processing().unwrap();
++        owner.set_process_transport(reset_transport()).unwrap();
++        owner.queue_processor_parameter_at(7, 0.5, 8).unwrap();
++        owner
++            .send_midi_event(MidiEvent::NoteOn {
++                channel: MidiChannel::Ch1,
++                note: 60,
++                velocity: 100,
++            })
++            .unwrap();
++        let main = owner.control.control_thread;
++        match mode {
++            "inactive" => owner.control.is_active = false,
++            "not_processing" => owner.runtime.is_processing = false,
++            "output_fault" => owner
++                .runtime
++                .parameter_output_fault
++                .store(true, Ordering::Release),
++            "wrong_thread" => {
++                owner.control.control_thread =
++                    thread::spawn(|| thread::current().id()).join().unwrap()
++            }
++            "missing_setup" => owner.control.applied_setup = None,
++            "missing_data" => owner.runtime.process_data = None,
++            _ => (),
++        }
++        let host = owner.control._host_app.clone();
++        let mut gate = host.data_exchange_process_gate();
++        let active = if mode == "active_call" {
++            Some(gate.enter())
++        } else {
++            None
++        };
++        let levels = Mutex::new(crate::audio::AudioLevels::new(1));
++        let before = trace.calls().len();
++        let mut entered = false;
++        let result = owner.with_scoped_worker(&levels, &mut |_, _| {
++            entered = true;
++            Ok(())
++        });
++        assert!(
++            matches!(
++                result.unwrap_err().primary,
++                ScopedWorkerFailure::Rejected(_)
++            ),
++            "{mode}"
++        );
++        assert!(!entered, "{mode}");
++        assert_eq!(trace.calls().len(), before, "{mode}");
++        assert_eq!(
++            owner.runtime.input_events.events.lock().unwrap().len(),
++            1,
++            "{mode}"
++        );
++        assert_eq!(owner.runtime.pending_param_changes.len(), 1, "{mode}");
++        assert_eq!(owner.runtime.ordinary_note_counts[60], 1, "{mode}");
++        assert_eq!(
++            owner.runtime.process_transport,
++            Some(reset_transport()),
++            "{mode}"
++        );
++        drop(active);
++        owner.control.control_thread = main;
++        // Restore fixture-only readiness mutations so Drop follows the real active lifecycle.
++        if mode == "inactive" {
++            owner.control.is_active = true;
++        }
++        if mode == "not_processing" {
++            owner.runtime.is_processing = true;
++        }
++    }
++}
++
++#[test]
++fn scoped_worker_rejection_leaves_strict_main_thread_wrapper_callback_affinity_unchanged() {
++    let main = thread::current().id();
++    let trace = Trace::default();
++    let mut internal = plugin_fixture(&trace, &Arc::new(MockState::default()));
++    internal.start_processing().unwrap();
++    let layout = internal.audio_bus_layout().unwrap();
++    let mut plugin = public_plugin(internal);
++    let levels = plugin.audio_levels.clone();
++    let audio_calls = Arc::new(Mutex::new(Vec::new()));
++    let observed = audio_calls.clone();
++    plugin.on_audio_process(move |audio| {
++        observed.lock().unwrap().push((
++            thread::current().id(),
++            audio.channels[0].peak,
++            matches!(levels.try_lock(), Err(std::sync::TryLockError::WouldBlock)),
++        ));
++    });
++    let parameter_calls = Arc::new(Mutex::new(Vec::new()));
++    let observed = parameter_calls.clone();
++    plugin.on_parameter_change(move |id, value| {
++        observed
++            .lock()
++            .unwrap()
++            .push((thread::current().id(), id, value));
++    });
++    let mut owner = crate::plugin::MainThreadPlugin::from_in_process(plugin);
++    assert!(owner
++        .with_scoped_worker(&mut |_, _| panic!("ineligible callback body"))
++        .is_err());
++    owner
++        .process_audio(&mut AudioBuffers::new(0, 1, 40, 48_000.0))
++        .unwrap();
++    owner
++        .process_audio(&mut AudioBuffers::new(0, 1, 0, 48_000.0))
++        .unwrap();
++    owner
++        .process_bus_audio(&mut BusAudioBuffers::new(&layout, 16, 48_000.0))
++        .unwrap();
++    owner.set_parameter(7, 0.625).unwrap();
++    assert_eq!(
++        *audio_calls.lock().unwrap(),
++        [(main, 1.0, true), (main, 0.0, true), (main, 1.0, true)]
++    );
++    assert_eq!(*parameter_calls.lock().unwrap(), [(main, 7, 0.625)]);
++    trace.assert_thread(main);
++}
++
++#[test]
++fn scoped_worker_reentry_preserves_zero_flush_and_positive_attempt_surge_restore_history() {
++    for fail_positive in [false, true] {
++        let state = Arc::new(MockState::default());
++        let mut owner = plugin_fixture(&Trace::default(), &state);
++        identify_surge_fixture(&mut owner);
++        owner.start_processing().unwrap();
++        for _ in 0..2 {
++            let (result, reply) = internal_exchange(&mut owner, process_command(0));
++            result.unwrap();
++            assert_process_ok(reply, 0);
++            assert!(!owner.runtime.has_processed_audio);
++            assert!(owner.preflight_state_restore().is_ok());
++        }
++        let saved = owner.save_state().unwrap();
++        owner.load_state(&saved).unwrap();
++        state.fail_process.store(fail_positive, Ordering::Release);
++        let (result, _) = internal_exchange(&mut owner, process_command(1));
++        assert_eq!(result.is_err(), fail_positive);
++        assert!(owner.runtime.has_processed_audio);
++        assert!(owner.preflight_state_restore().is_err());
++        state.fail_process.store(false, Ordering::Release);
++        let (result, reply) = internal_exchange(&mut owner, process_command(0));
++        result.unwrap();
++        assert_process_ok(reply, 0);
++        assert!(owner.runtime.has_processed_audio);
++        assert!(owner.load_state(&saved).is_err());
++    }
++}
++
++#[test]
++fn scoped_worker_exit_never_stops_processing_and_owner_reset_state_work_after_rejoin() {
++    let trace = Trace::default();
++    let state = Arc::new(MockState::default());
++    let mut internal = plugin_fixture(&trace, &state);
++    internal.start_processing().unwrap();
++    let mut owner = crate::plugin::MainThreadPlugin::from_in_process(public_plugin(internal));
++    let before = trace.calls().len();
++    for _ in 0..2 {
++        owner
++            .with_scoped_worker(&mut |_, io| {
++                assert_process_ok(exchange(io, process_command(16)), 16);
++                Ok(())
++            })
++            .unwrap();
++    }
++    assert!(owner.is_processing());
++    assert!(trace.methods()[before..]
++        .iter()
++        .all(|(_, method)| *method == "process"));
++    let reset = owner.process_reset_origin(16, reset_transport()).unwrap();
++    reset.ensure_success().unwrap();
++    let saved = owner.save_state().unwrap();
++    owner.load_state(&saved).unwrap();
++    assert!(owner.is_processing());
++    owner
++        .with_scoped_worker(&mut |_, io| {
++            assert_process_ok(exchange(io, process_command(16)), 16);
++            Ok(())
++        })
++        .unwrap();
++}
++
++#[test]
++fn scoped_worker_invalid_bus_command_rejects_before_sdk_and_native_ack() {
++    let trace = Trace::default();
++    let mut owner = plugin_fixture(&trace, &Arc::new(MockState::default()));
++    owner.start_processing().unwrap();
++    let handler = owner.control.component_handler.as_ref().unwrap().clone();
++    assert_eq!(unsafe { handler.performEdit(5, 0.5) }, kResultOk);
++    let native = handler.native_edits.snapshot();
++    let layout = owner.audio_bus_layout().unwrap();
++    let mut buffers = BusAudioBuffers::new(&layout, 16, 48_000.0);
++    buffers.outputs[0].channels.clear();
++    let before = trace.calls().len();
++    let (result, reply) = internal_exchange(
++        &mut owner,
++        WorkerCommand::ProcessBuses {
++            buffers,
++            transport: None,
++        },
++    );
++    assert!(result.is_err());
++    assert!(matches!(
++        reply,
++        WorkerReply::ProcessedBuses { result: Err(_), .. }
++    ));
++    assert_eq!(trace.calls().len(), before);
++    assert_eq!(handler.native_edits.snapshot(), native);
++}
++
++#[derive(Clone, Copy, Debug)]
++enum ExitKind {
++    Normal,
++    BodyError,
++    MainPanic,
++}
++
++fn exercise_shutdown(stage: &'static str, exit_kind: ExitKind, sdk_fails: bool) {
++    use super::super::domain_session::scoped_worker::{run_for_test, WorkerTestPoint};
++    let main = thread::current().id();
++    let trace = Trace::default();
++    let state = Arc::new(MockState::default());
++    state.fail_process.store(sdk_fails, Ordering::Release);
++    let mut owner = plugin_fixture(&trace, &state);
++    owner.start_processing().unwrap();
++    let host = owner.control._host_app.clone();
++    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
++    let (release_tx, release_rx) = mpsc::sync_channel(1);
++    let release_rx = Arc::new(Mutex::new(release_rx));
++    let latch_ok = Arc::new(AtomicBool::new(true));
++    let completed = Arc::new(AtomicBool::new(false));
++    if stage == "inflight" {
++        let entered_tx = entered_tx.clone();
++        let release_rx = release_rx.clone();
++        let latch_ok = latch_ok.clone();
++        *state.process_entry_callback.lock().unwrap() = Some(Box::new(move || {
++            let sent = entered_tx.send(()).is_ok();
++            let released = release_rx
++                .lock()
++                .ok()
++                .and_then(|rx| rx.recv_timeout(WATCHDOG).ok())
++                .is_some();
++            latch_ok.store(sent && released, Ordering::Release);
++        }));
++    }
++    let finished_in_hook = completed.clone();
++    let hook_ok = latch_ok.clone();
++    let hook = Box::new(move |point| {
++        if stage == "accepted_before_dispatch" && point == WorkerTestPoint::BeforeDispatch {
++            let sent = entered_tx.send(()).is_ok();
++            let released = release_rx
++                .lock()
++                .ok()
++                .and_then(|rx| rx.recv_timeout(WATCHDOG).ok())
++                .is_some();
++            hook_ok.store(sent && released, Ordering::Release);
++        }
++        if point == WorkerTestPoint::AfterDispatchBeforeReply {
++            finished_in_hook.store(true, Ordering::Release);
++        }
++        if stage == "unread" && point == WorkerTestPoint::AfterReply {
++            let _ = entered_tx.send(());
++        }
++    });
++    let body_leaving = Arc::new(AtomicBool::new(false));
++    let pinned = Arc::new(AtomicBool::new(false));
++    let levels = Mutex::new(crate::audio::AudioLevels::new(1));
++    let before = trace.calls().len();
++    let mut submitted_address = ptr::null();
++    let outcome = thread::scope(|scope| {
++        let body_leaving = body_leaving.clone();
++        let pinned = pinned.clone();
++        let trace = trace.clone();
++        let body_leaving_in_releaser = body_leaving.clone();
++        let releaser = scope.spawn(move || {
++            let start = Instant::now();
++            while !body_leaving_in_releaser.load(Ordering::Acquire) && start.elapsed() < WATCHDOG {
++                thread::sleep(Duration::from_millis(1));
++            }
++            if stage != "unread" {
++                thread::sleep(Duration::from_millis(30));
++            }
++            pinned.store(
++                !trace.methods().iter().any(|(_, method)| {
++                    matches!(*method, "terminate" | "drop" | "setProcessing(false)")
++                }),
++                Ordering::Release,
++            );
++            let _ = release_tx.send(());
++        });
++        let result = catch_unwind(AssertUnwindSafe(|| {
++            run_for_test(
++                &mut owner,
++                &levels,
++                &mut |_, io| {
++                    let buffers = AudioBuffers::new(0, 1, 16, 48_000.0);
++                    submitted_address = buffers.outputs[0].as_ptr();
++                    io.try_submit(WorkerCommand::Process {
++                        buffers,
++                        transport: None,
++                    })
++                    .unwrap();
++                    entered_rx.recv_timeout(WATCHDOG).unwrap();
++                    assert!(io.has_pending());
++                    body_leaving.store(true, Ordering::Release);
++                    match exit_kind {
++                        ExitKind::Normal => Ok(()),
++                        ExitKind::BodyError => Err(Error::ProcessFailed(-76_543)),
++                        ExitKind::MainPanic => {
++                            std::panic::panic_any("exact scoped-main panic payload")
++                        }
++                    }
++                },
++                Some(hook),
++                false,
++            )
++        }));
++        releaser.join().unwrap();
++        result
++    });
++    assert!(latch_ok.load(Ordering::Acquire), "{stage} {exit_kind:?}");
++    assert!(
++        completed.load(Ordering::Acquire),
++        "accepted work must finish before return/unwind"
++    );
++    assert!(
++        pinned.load(Ordering::Acquire),
++        "owner/module must outlive scoped join"
++    );
++    assert!(!host.is_data_exchange_in_process_for_test());
++    assert!(owner.runtime.is_processing);
++    assert!(owner.runtime.has_processed_audio);
++    if matches!(exit_kind, ExitKind::MainPanic) {
++        assert_eq!(
++            outcome.unwrap_err().downcast_ref::<&'static str>(),
++            Some(&"exact scoped-main panic payload")
++        );
++    } else {
++        let error = outcome.unwrap().unwrap_err();
++        match (&error.primary, exit_kind, sdk_fails) {
++            (ScopedWorkerFailure::Body(Error::ProcessFailed(-76_543)), ExitKind::BodyError, _) => {
++                ()
++            }
++            (ScopedWorkerFailure::Worker(_), ExitKind::Normal, true) => (),
++            (ScopedWorkerFailure::UnconsumedReply, ExitKind::Normal, false) => (),
++            other => panic!("wrong precedence: {other:?}"),
++        }
++        let Some(WorkerReply::Processed { buffers, result }) = error.unconsumed_reply else {
++            panic!("missing original unread audio");
++        };
++        assert_eq!(buffers.outputs[0].as_ptr(), submitted_address);
++        assert_eq!(result.is_err(), sdk_fails);
++        if sdk_fails {
++            let Some(WorkerOutcome::Failed(secondary)) = error.secondary_worker else {
++                panic!("lost worker failure");
++            };
++            let reply_error = result.unwrap_err();
++            assert!(Arc::ptr_eq(&secondary, &reply_error));
++            if let ScopedWorkerFailure::Worker(primary) = error.primary {
++                assert!(Arc::ptr_eq(&primary, &reply_error));
++            }
++        } else {
++            assert!(error.secondary_worker.is_none());
++            assert_eq!(buffers.outputs[0], [1.0; 16]);
++        }
++    }
++    assert!(trace.methods()[before..]
++        .iter()
++        .all(|(_, method)| *method == "process"));
++    let workers: Vec<_> = trace.calls()[before..]
++        .iter()
++        .filter(|c| c.method == "process")
++        .map(|c| c.thread)
++        .collect();
++    assert_eq!(workers.len(), 1);
++    *state.process_entry_callback.lock().unwrap() = None;
++    drop(host);
++    drop(owner);
++    assert_owner_ledger(&trace, main, &workers);
++    assert_teardown_before_module(&trace);
++}
++
++#[test]
++fn scoped_worker_normal_exit_drains_accepted_inflight_and_unread_success_or_failure() {
++    for stage in ["accepted_before_dispatch", "inflight", "unread"] {
++        for sdk_fails in [false, true] {
++            exercise_shutdown(stage, ExitKind::Normal, sdk_fails);
++        }
++    }
++}
++
++#[test]
++fn scoped_worker_body_error_stays_primary_after_draining_accepted_inflight_and_unread_work() {
++    for stage in ["accepted_before_dispatch", "inflight", "unread"] {
++        for sdk_fails in [false, true] {
++            exercise_shutdown(stage, ExitKind::BodyError, sdk_fails);
++        }
++    }
++}
++
++#[test]
++fn scoped_worker_main_rust_panic_resumes_exact_payload_only_after_all_accepted_work_joins() {
++    for stage in ["accepted_before_dispatch", "inflight", "unread"] {
++        for sdk_fails in [false, true] {
++            exercise_shutdown(stage, ExitKind::MainPanic, sdk_fails);
++        }
++    }
++}
++
++#[test]
++fn scoped_worker_rust_panic_is_terminal_before_join_and_preserves_prior_sdk_error() {
++    use super::super::domain_session::scoped_worker::{run_for_test, WorkerTestPoint};
++    for point in [
++        WorkerTestPoint::BeforeDispatch,
++        WorkerTestPoint::AfterDispatchBeforeReply,
++    ] {
++        for body_error in [false, true] {
++            for sdk_fails in [false, true] {
++                if point == WorkerTestPoint::BeforeDispatch && sdk_fails {
++                    continue;
++                }
++                let main = thread::current().id();
++                let trace = Trace::default();
++                let state = Arc::new(MockState::default());
++                state.fail_process.store(sdk_fails, Ordering::Release);
++                let mut owner = plugin_fixture(&trace, &state);
++                owner.start_processing().unwrap();
++                attach_mock_view(&mut owner, &trace);
++                let handler = owner.control.component_handler.as_ref().unwrap().clone();
++                assert_eq!(unsafe { handler.performEdit(7, 0.5) }, kResultOk);
++                let levels = Mutex::new(crate::audio::AudioLevels::new(1));
++                let before = trace.calls().len();
++                let hook = Box::new(move |at| {
++                    if at == point {
++                        panic!("intentional private worker Rust panic outside COM");
++                    }
++                });
++                let result = run_for_test(
++                    &mut owner,
++                    &levels,
++                    &mut |ui, io| {
++                        io.try_submit(process_command(16)).unwrap();
++                        // Exercise status-only observation, without recv/try_reply manufacturing it.
++                        let start = Instant::now();
++                        while !io.is_terminal() && start.elapsed() < WATCHDOG {
++                            thread::sleep(Duration::from_millis(1));
++                        }
++                        assert!(io.is_terminal(), "worker unwind must close UI before join");
++                        assert!(io.is_closed());
++                        let before_ui = trace.calls().len();
++                        assert!(ui.request(AttachedUiRequest::AttachedSize).is_err());
++                        assert_eq!(trace.calls().len(), before_ui);
++                        if body_error {
++                            Err(Error::ProcessFailed(-76_543))
++                        } else {
++                            Ok(())
++                        }
++                    },
++                    Some(hook),
++                    false,
++                )
++                .unwrap_err();
++                if body_error {
++                    assert!(matches!(
++                        result.primary,
++                        ScopedWorkerFailure::Body(Error::ProcessFailed(-76_543))
++                    ));
++                } else {
++                    assert!(matches!(
++                        result.primary,
++                        ScopedWorkerFailure::WorkerPanicked
++                    ));
++                }
++                let Some(WorkerOutcome::Panicked { prior_error }) = result.secondary_worker else {
++                    panic!("missing worker panic evidence");
++                };
++                assert_eq!(prior_error.is_some(), sdk_fails);
++                if let Some(error) = prior_error {
++                    assert!(
++                        matches!(error.as_ref(), Error::ProcessFailed(code) if *code == kResultFalse)
++                    );
++                }
++                assert!(result.unconsumed_reply.is_none());
++                let dispatched = point == WorkerTestPoint::AfterDispatchBeforeReply;
++                assert_eq!(
++                    handler.native_edits.snapshot().applied,
++                    u64::from(dispatched && !sdk_fails)
++                );
++                assert_eq!(
++                    handler.native_edits.snapshot().lost,
++                    dispatched && sdk_fails
++                );
++                assert_eq!(owner.runtime.has_processed_audio, dispatched);
++                assert!(!owner
++                    .control
++                    ._host_app
++                    .is_data_exchange_in_process_for_test());
++                let workers: Vec<_> = trace.calls()[before..]
++                    .iter()
++                    .filter(|c| c.method == "process")
++                    .map(|c| c.thread)
++                    .collect();
++                assert_eq!(workers.len(), usize::from(dispatched));
++                drop(handler);
++                drop(owner);
++                assert_owner_ledger(&trace, main, &workers);
++                assert_teardown_before_module(&trace);
++            }
++        }
++    }
++}
++
++#[test]
++fn scoped_worker_spawn_failure_does_not_enter_body_or_touch_prepared_owner() {
++    use super::super::domain_session::scoped_worker::run_for_test;
++    let trace = Trace::default();
++    let mut owner = plugin_fixture(&trace, &Arc::new(MockState::default()));
++    owner.start_processing().unwrap();
++    owner.set_process_transport(reset_transport()).unwrap();
++    owner.queue_processor_parameter_at(7, 0.5, 0).unwrap();
++    let prepared = &**owner.runtime.process_data.as_ref().unwrap() as *const HostProcessData;
++    let levels = Mutex::new(crate::audio::AudioLevels::new(1));
++    let before = trace.calls().len();
++    let mut entered = false;
++    let result = run_for_test(
++        &mut owner,
++        &levels,
++        &mut |_, _| {
++            entered = true;
++            Ok(())
++        },
++        None,
++        true,
++    )
++    .unwrap_err();
++    assert!(matches!(
++        result.primary,
++        ScopedWorkerFailure::Spawn(Error::IoError(_))
++    ));
++    assert!(result.secondary_worker.is_none());
++    assert!(result.unconsumed_reply.is_none());
++    assert!(!entered);
++    assert_eq!(trace.calls().len(), before);
++    assert_eq!(
++        &**owner.runtime.process_data.as_ref().unwrap() as *const HostProcessData,
++        prepared
++    );
++    assert_eq!(owner.runtime.pending_param_changes.len(), 1);
++    assert_eq!(owner.runtime.process_transport, Some(reset_transport()));
++    let (result, reply) = internal_exchange(&mut owner, process_command(16));
++    result.unwrap();
++    assert_process_ok(reply, 16);
++}
++
++#[test]
++fn scoped_worker_public_commands_keep_full_split_transport_parameter_midi_and_gate_pipeline() {
++    let trace = Trace::default();
++    let state = Arc::new(MockState::default());
++    state.capture_origin.store(true, Ordering::Release);
++    let mut internal = plugin_fixture(&trace, &state);
++    internal.start_processing().unwrap();
++    internal.queue_processor_parameter_at(2, 0.5, 17).unwrap();
++    let handler = internal.control.component_handler.as_ref().unwrap().clone();
++    assert_eq!(unsafe { handler.performEdit(3, 0.75) }, kResultOk);
++    let host = internal.control._host_app.clone();
++    let observed_gate = Arc::new(AtomicBool::new(true));
++    let gate_in_sdk = observed_gate.clone();
++    let host_in_sdk = host.clone();
++    *state.process_entry_callback.lock().unwrap() = Some(Box::new(move || {
++        if !host_in_sdk.is_data_exchange_in_process_for_test() {
++            gate_in_sdk.store(false, Ordering::Release);
++        }
++    }));
++    let layout = internal.audio_bus_layout().unwrap();
++    let mut owner = crate::plugin::MainThreadPlugin::from_in_process(public_plugin(internal));
++    let transport = crate::plugin::ProcessTransport {
++        sample_position: 1024,
++        quarter_note_position: 4.0,
++        tempo: 120.0,
++        playing: true,
++        time_sig_numerator: 4,
++        time_sig_denominator: 4,
++    };
++    let report = owner
++        .with_scoped_worker(&mut |_, io| {
++            assert_midi_ok(exchange(
++                io,
++                WorkerCommand::SendMidi {
++                    event: note(100),
++                    sample_offset: 1,
++                },
++            ));
++            assert_midi_ok(exchange(
++                io,
++                WorkerCommand::SendMidi {
++                    event: OrdinaryMidiEvent::NoteOff {
++                        channel: MidiChannel::Ch1,
++                        note: 60,
++                        velocity: 0,
++                    },
++                    sample_offset: 33,
++                },
++            ));
++            assert_process_ok(
++                exchange(
++                    io,
++                    WorkerCommand::Process {
++                        buffers: AudioBuffers::new(0, 1, 40, 48_000.0),
++                        transport: Some(transport),
++                    },
++                ),
++                40,
++            );
++            match exchange(
++                io,
++                WorkerCommand::ProcessBuses {
++                    buffers: BusAudioBuffers::new(&layout, 16, 48_000.0),
++                    transport: None,
++                },
++            ) {
++                WorkerReply::ProcessedBuses { buffers, result } => {
++                    result.unwrap();
++                    assert_eq!(buffers.outputs[0].channels[0], [1.0; 16]);
++                }
++                _ => panic!("wrong bus reply"),
++            }
++            Ok(())
++        })
++        .unwrap();
++    assert_eq!(report.completed_commands, 4);
++    assert!(observed_gate.load(Ordering::Acquire));
++    assert!(!host.is_data_exchange_in_process_for_test());
++    assert_eq!(
++        *state.processed_parameters.lock().unwrap(),
++        [vec![(3, 0, 0.75)], vec![(2, 1, 0.5)], vec![], vec![]]
++    );
++    let calls = state.origin_calls.lock().unwrap();
++    assert_eq!(
++        calls.iter().map(|call| call.frames).collect::<Vec<_>>(),
++        [16, 16, 8, 16]
++    );
++    assert_eq!(
++        calls
++            .iter()
++            .map(|call| call.transport.unwrap().1)
++            .collect::<Vec<_>>(),
++        [1024, 1040, 1056, 1064]
++    );
++    assert_eq!(
++        calls
++            .iter()
++            .map(|call| call.events.len())
++            .collect::<Vec<_>>(),
++        [1, 0, 1, 0]
++    );
++    assert_eq!(calls[0].events[0], (kNoteOnEvent as u16, 1, 60));
++    assert_eq!(calls[2].events[0], (kNoteOffEvent as u16, 1, 60));
++    assert_eq!(handler.native_edits.snapshot().applied, 1);
++    assert!(!handler.native_edits.snapshot().lost);
++    drop(calls);
++    *state.process_entry_callback.lock().unwrap() = None;
++}
++
++#[test]
++fn scoped_worker_current_and_retired_host_queue_release_counts_remain_distinct() {
++    use vst3::com_scrape_types::Unknown;
++    // The feature worker borrows its processor; it never owns or releases that interface.
++    // A plugin-retained host queue is a separate SDK reference. A queue retired by an
++    // owner-side rebuild can legitimately receive final Release/free inside later Process.
++    // This bounds the affinity claim: it is not a whole-Process no-allocation/no-free claim.
++    for retire_before_release in [false, true] {
++        let main = thread::current().id();
++        let trace = Trace::default();
++        let state = Arc::new(MockState::default());
++        let mut internal = plugin_fixture(&trace, &state);
++        internal.start_processing().unwrap();
++        let input = &internal
++            .runtime
++            .process_data
++            .as_ref()
++            .unwrap()
++            .input_param_changes;
++        let retained = unsafe {
++            let raw = input.addParameterData(&7, ptr::null_mut());
++            assert!(!raw.is_null());
++            assert_eq!(IParamValueQueue::add_ref(raw), 2);
++            ComPtr::from_raw(raw).unwrap()
++        };
++        if retire_before_release {
++            internal.stop_processing().unwrap();
++            internal.reconfigure(44_100.0, 32).unwrap();
++            internal.start_processing().unwrap();
++        }
++        let retained = Mutex::new(Some(retained));
++        let releases = Arc::new(Mutex::new(Vec::new()));
++        let ledger = releases.clone();
++        let release_recorded = Arc::new(AtomicBool::new(false));
++        let recorded_in_sdk = release_recorded.clone();
++        *state.process_callback.lock().unwrap() = Some(Box::new(move || {
++            // Do not panic through COM if the test's latch/ledger unexpectedly fails.
++            let retained = retained
++                .lock()
++                .ok()
++                .and_then(|mut retained| retained.take());
++            if let Some(retained) = retained {
++                // SAFETY: exactly the owned SDK reference acquired by AddRef above.
++                // into_raw transfers it without Release; release consumes it exactly once.
++                // No dereference follows a possible final release. The SDK already grants
++                // IParamValueQueue Send + Sync; no new unsafe auto-trait or owner is added.
++                let remaining = unsafe { IParamValueQueue::release(retained.into_raw()) };
++                if let Ok(mut ledger) = ledger.lock() {
++                    ledger.push((thread::current().id(), remaining));
++                    recorded_in_sdk.store(true, Ordering::Release);
++                }
++            }
++        }));
++        let mut owner = crate::plugin::MainThreadPlugin::from_in_process(public_plugin(internal));
++        let before = trace.calls().len();
++        let report = owner
++            .with_scoped_worker(&mut |_, io| {
++                assert_process_ok(
++                    exchange(
++                        io,
++                        WorkerCommand::Process {
++                            buffers: AudioBuffers::new(
++                                0,
++                                1,
++                                0,
++                                if retire_before_release {
++                                    44_100.0
++                                } else {
++                                    48_000.0
++                                },
++                            ),
++                            transport: None,
++                        },
++                    ),
++                    0,
++                );
++                Ok(())
++            })
++            .unwrap();
++        assert_eq!(report.completed_commands, 1);
++        assert!(release_recorded.load(Ordering::Acquire));
++        let calls = trace.calls();
++        let workers: Vec<_> = calls[before..]
++            .iter()
++            .filter(|call| call.method == "process")
++            .map(|call| call.thread)
++            .collect();
++        assert_eq!(workers.len(), 1);
++        let worker = workers[0];
++        assert_ne!(worker, main);
++        assert_eq!(
++            *releases.lock().unwrap(),
++            [(worker, if retire_before_release { 0 } else { 1 })]
++        );
++        assert_eq!(&trace.methods()[before..], &[("component", "process")]);
++        *state.process_callback.lock().unwrap() = None;
++        owner.stop_processing().unwrap();
++        drop(owner);
++        assert_owner_ledger(&trace, main, &[worker]);
++        assert_teardown_before_module(&trace);
++    }
++}
+--- /dev/null
 +++ b/src/internal/plugin_impl/domain_tests/session_tests.rs
 @@ -0,0 +1,377 @@
 +//! Real same-thread capability tests. Rust callback unwind is not foreign COM unwind recovery.
@@ -16924,7 +19322,17 @@
 +}
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -111,9 +111,11 @@
+@@ -66,6 +66,9 @@
+ pub mod transport;
+ pub mod window;
+ 
++#[cfg(feature = "experimental-scoped-worker")]
++pub mod scoped_worker;
++
+ pub mod discovery;
+ 
+ #[cfg(feature = "egui-widgets")]
+@@ -111,9 +114,11 @@
      RtAudioHandle,
  };
  pub use plugin::{
@@ -16939,7 +19347,7 @@
  };
  pub use realtime::{RealtimePluginRunner, RtControl};
  pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
-@@ -142,8 +144,8 @@
+@@ -142,8 +147,8 @@
          plugin::{
              AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification,
              OutputEventConsumer, OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin,
@@ -17079,7 +19487,7 @@
  /// VST3 plugin instance
  #[allow(clippy::type_complexity)] // callback fields are Box<dyn Fn...>; intrinsic to the API
  pub struct Plugin {
-@@ -723,8 +843,570 @@
+@@ -723,8 +843,625 @@
      pub(crate) internal: Option<Box<dyn PluginInternal>>,
  }
  
@@ -17151,6 +19559,45 @@
 +            .as_mut()
 +            .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
 +            .with_domain_session(callback)
++    }
++
++    /// Run a development-only scoped processing worker while this loading thread serves
++    /// a restricted attached-editor bridge. No helper dispatch or metadata mode is enabled.
++    ///
++    /// Both registered callback options must be empty: arbitrary user callbacks retain their
++    /// existing public-wrapper caller affinity and are never moved into this session.
++    /// All accepted work joins before this method returns or resumes a Rust callback panic.
++    /// A hung foreign process call pins this scope; it is never detached or unloaded.
++    #[cfg(feature = "experimental-scoped-worker")]
++    pub fn with_scoped_worker(
++        &mut self,
++        body: &mut crate::scoped_worker::ScopedWorkerCallback<'_>,
++    ) -> crate::scoped_worker::ScopedWorkerResult {
++        use crate::scoped_worker::{ScopedWorkerError, ScopedWorkerFailure};
++        let reject = |error| ScopedWorkerError {
++            primary: ScopedWorkerFailure::Rejected(error),
++            secondary_worker: None,
++            unconsumed_reply: None,
++        };
++        if std::thread::current().id() != self.loading_thread {
++            return Err(reject(Error::Other(
++                "scoped worker must start on the plugin loading thread".into(),
++            )));
++        }
++        if self.plugin.audio_callback.is_some() || self.plugin.parameter_change_callback.is_some() {
++            return Err(reject(Error::Other(
++                "scoped worker does not accept registered user callbacks".into(),
++            )));
++        }
++        if !self.plugin.is_processing {
++            return Err(reject(Error::NotProcessing));
++        }
++        let internal = self
++            .plugin
++            .internal
++            .as_mut()
++            .ok_or_else(|| reject(Error::Other("Plugin not initialized".into())))?;
++        internal.with_scoped_worker(self.plugin.audio_levels.as_ref(), body)
 +    }
 +
 +    // Only the in-process host loader calls this; there is no public conversion from a
@@ -17647,10 +20094,26 @@
 +        ))
 +    }
 +
++    /// Feature-only local worker; isolated/unsupported backends expose no raw capability.
++    #[cfg(feature = "experimental-scoped-worker")]
++    fn with_scoped_worker(
++        &mut self,
++        _levels: &Mutex<AudioLevels>,
++        _body: &mut crate::scoped_worker::ScopedWorkerCallback<'_>,
++    ) -> crate::scoped_worker::ScopedWorkerResult {
++        Err(crate::scoped_worker::ScopedWorkerError {
++            primary: crate::scoped_worker::ScopedWorkerFailure::Rejected(Error::Other(
++                "scoped worker is unsupported by this backend/platform".into(),
++            )),
++            secondary_worker: None,
++            unconsumed_reply: None,
++        })
++    }
++
      fn set_parameter(&mut self, id: u32, value: f64) -> Result<()>;
      /// Schedule a parameter change at a sample offset within the next process block.
      /// Defaults to a block-start change (ignores the offset) for implementations that don't
-@@ -749,6 +1431,21 @@
+@@ -749,6 +1486,21 @@
      fn get_all_parameters(&self) -> Result<Vec<Parameter>>;
      fn format_parameter(&self, id: u32, normalized: f64) -> Result<String>;
      fn process(&mut self, buffers: &mut AudioBuffers) -> Result<()>;
@@ -17672,7 +20135,7 @@
      /// Query the current per-bus channel counts and activation state.
      fn audio_bus_layout(&self) -> Result<AudioBusLayout> {
          Err(Error::Other(
-@@ -805,9 +1502,13 @@
+@@ -805,9 +1557,13 @@
              "bus activation is not supported for this plugin".to_string(),
          ))
      }
@@ -17689,7 +20152,7 @@
      fn set_tempo(&mut self, _bpm: f64) -> Result<()> {
          Err(Error::Other(
              "runtime transport mutation is not supported for this plugin".to_string(),
-@@ -898,10 +1599,21 @@
+@@ -898,10 +1654,21 @@
      }
      fn start_processing(&mut self) -> Result<()>;
      fn stop_processing(&mut self) -> Result<()>;
@@ -17711,7 +20174,7 @@
      /// Whether the editor accepts host-driven size changes.
      fn editor_can_resize(&self) -> bool {
          false
-@@ -931,6 +1643,19 @@
+@@ -931,6 +1698,19 @@
      fn take_host_notifications(&mut self) -> Vec<HostNotification> {
          Vec::new()
      }
@@ -17731,7 +20194,7 @@
      /// Dispatch any main-thread data-exchange blocks to the controller and drain owned host
      /// snapshots. Background-dispatched queues are copied into the same bounded snapshot sink.
      fn take_data_exchange_blocks(&mut self) -> Vec<DataExchangeBlock> {
-@@ -962,8 +1687,11 @@
+@@ -962,8 +1742,11 @@
      fn take_output_events(&self) -> Vec<PluginEvent> {
          Vec::new()
      }
@@ -17745,7 +20208,7 @@
      fn output_midi_handle(&self) -> Option<OutputMidiConsumer> {
          None
      }
-@@ -1051,9 +1779,18 @@
+@@ -1051,9 +1834,18 @@
      fn latency_samples(&self) -> u32 {
          0
      }
@@ -17764,7 +20227,7 @@
      }
      /// Resolve a MIDI controller `(bus, channel, cc)` to a parameter id via `IMidiMapping`.
      /// Defaults to `None` (plugin doesn't implement the interface, or no mapping).
-@@ -1066,6 +1803,11 @@
+@@ -1066,6 +1858,11 @@
              "state save/restore is not supported".to_string(),
          ))
      }
@@ -17776,7 +20239,7 @@
      /// Restore the plugin's state from a blob previously returned by [`Self::save_state`],
      /// telling the plugin what kind of restore this is via the stream's attributes.
      ///
-@@ -1341,6 +2083,19 @@
+@@ -1341,6 +2138,19 @@
              .queue_processor_parameter_at(id, value, sample_offset)
      }
  
@@ -17796,7 +20259,7 @@
      /// Change the transport tempo (beats per minute) advertised to the plugin in the host
      /// `ProcessContext`, taking effect on the **next** processed block — even while the plugin
      /// is actively processing. Drives tempo-synced DSP (LFOs, synced delays, arpeggiators).
-@@ -1387,10 +2142,8 @@
+@@ -1387,10 +2197,8 @@
      /// `ProcessContext` (the `kPlaying` flag), taking effect on the **next** processed block —
      /// even while the plugin is actively processing.
      ///
@@ -17809,7 +20272,7 @@
      pub fn set_playing(&mut self, playing: bool) -> Result<()> {
          self.internal
              .as_mut()
-@@ -1563,6 +2316,16 @@
+@@ -1563,6 +2371,16 @@
              .unwrap_or(0)
      }
  
@@ -17826,7 +20289,7 @@
      /// The plugin's reported tail length in samples (how long it keeps producing output
      /// after input stops — e.g. reverb/delay), via `IAudioProcessor::getTailSamples`. `0`
      /// means no tail; `u32::MAX` means an infinite tail. Works both in-process and across
-@@ -1572,6 +2335,16 @@
+@@ -1572,6 +2390,16 @@
              .as_ref()
              .map(|i| i.tail_samples())
              .unwrap_or(0)
@@ -17843,7 +20306,7 @@
      }
  
      /// Resolve a MIDI controller to the parameter it's mapped to, via the plugin's
-@@ -1846,10 +2619,15 @@
+@@ -1846,10 +2674,15 @@
              return Ok(());
          }
  
@@ -17863,7 +20326,7 @@
  
          self.is_processing = false;
          Ok(())
-@@ -1882,6 +2660,37 @@
+@@ -1882,6 +2715,37 @@
          }
  
          Ok(())
@@ -17901,7 +20364,7 @@
      }
  
      /// Return every audio bus's current channel count and activation state.
-@@ -1986,6 +2795,29 @@
+@@ -1986,6 +2850,29 @@
              .as_ref()
              .map(|i| i.has_editor())
              .unwrap_or(false)
@@ -17931,7 +20394,7 @@
      }
  
      /// Open the plugin editor window
-@@ -2115,6 +2947,39 @@
+@@ -2115,6 +3002,39 @@
              .unwrap_or_default()
      }
  
@@ -17971,7 +20434,7 @@
      /// Drain ordered requests the plugin reported through `IComponentHandler2`.
      pub fn take_host_notifications(&mut self) -> Vec<HostNotification> {
          self.internal
-@@ -2176,10 +3041,17 @@
+@@ -2176,10 +3096,17 @@
      /// lifecycle. The returned flags still describe every request; in particular,
      /// [`RestartFlags::reload_component`] means the caller must replace this plugin instance.
      pub fn service_host_requests(&mut self) -> Result<RestartFlags> {
@@ -17993,7 +20456,7 @@
      }
  
      /// Take the MIDI events the plugin has emitted (e.g. from an arpeggiator or MPE
-@@ -2191,7 +3063,8 @@
+@@ -2191,7 +3118,8 @@
      /// marshalled back alongside each processed block.
      ///
      /// The buffer is capped at 4096 events: if you never poll while a chatty plugin keeps
@@ -18003,7 +20466,7 @@
      pub fn take_output_midi(&self) -> Vec<MidiEvent> {
          self.internal
              .as_ref()
-@@ -2209,6 +3082,19 @@
+@@ -2209,6 +3137,19 @@
          self.internal
              .as_ref()
              .map(|i| i.take_output_events())
@@ -18023,7 +20486,7 @@
              .unwrap_or_default()
      }
  
-@@ -2248,6 +3134,15 @@
+@@ -2248,6 +3189,15 @@
              .save_state()
      }
  
@@ -18039,7 +20502,7 @@
      /// Restore plugin state from a blob produced by [`Self::save_state`] on the *same*
      /// plugin. Applies to both the processor and the controller, so parameter values and
      /// the editor reflect the restored state.
-@@ -2258,10 +3153,17 @@
+@@ -2258,10 +3208,17 @@
      /// The plugin is told this is a project/session restore ([`StateContext::Project`]). Use
      /// [`Self::load_state_with_context`] when the bytes came from a preset file instead.
      pub fn load_state(&mut self, data: &[u8]) -> Result<()> {
@@ -18061,7 +20524,7 @@
      }
  
      /// Restore plugin state as [`Self::load_state`] does, and tell the plugin where the bytes
-@@ -2276,10 +3178,17 @@
+@@ -2276,10 +3233,17 @@
      /// Works both in-process and across process isolation — an isolated plugin's `setState`
      /// sees the same attributes.
      pub fn load_state_with_context(&mut self, data: &[u8], context: &StateContext) -> Result<()> {
@@ -18083,7 +20546,7 @@
      }
  
      /// Save this plugin's state to a file as a [`PluginPreset`] (JSON: the plugin's `uid`
-@@ -2454,14 +3363,14 @@
+@@ -2454,14 +3418,14 @@
  /// Highest value a 14-bit MIDI pitch-bend can carry.
  const MIDI_PITCH_BEND_MAX: u16 = 16383;
  
@@ -18100,7 +20563,16 @@
      if velocity > MIDI_DATA_MAX {
          return Err(Error::MidiError(format!("Invalid velocity: {}", velocity)));
      }
-@@ -2543,7 +3452,7 @@
+@@ -2505,7 +3469,7 @@
+ ///
+ /// The match below has no wildcard arm on purpose: `MidiEvent` is `#[non_exhaustive]` only to
+ /// downstream crates, so a variant added here fails to compile until it states its own ranges.
+-fn validate_midi_event(event: &MidiEvent) -> Result<()> {
++pub(crate) fn validate_midi_event(event: &MidiEvent) -> Result<()> {
+     match *event {
+         MidiEvent::NoteOn { note, velocity, .. } | MidiEvent::NoteOff { note, velocity, .. } => {
+             validate_note(note)?;
+@@ -2543,7 +3507,7 @@
      }
  }
  
@@ -18109,7 +20581,7 @@
      if event.bus_index < 0 {
          return Err(Error::MidiError(format!(
              "Invalid event bus index: {}",
-@@ -2669,6 +3578,59 @@
+@@ -2669,6 +3633,59 @@
              "Legacy MIDI CC events are plugin output only".to_string(),
          )),
      }
@@ -18169,7 +20641,7 @@
  }
  
  /// Platform-specific window handle
-@@ -2950,6 +3912,29 @@
+@@ -2950,6 +3967,29 @@
  #[cfg(test)]
  mod public_surface_tests {
      use super::*;
@@ -18199,7 +20671,7 @@
  
      /// A `Plugin` with no backing implementation. Enough to exercise the checks the public
      /// surface performs *before* it reaches into `internal`.
-@@ -3327,3 +4312,68 @@
+@@ -3327,3 +4367,68 @@
          assert!(decode_state_snapshot(&bytes).is_err());
      }
  }
@@ -18972,5 +21444,954 @@
 +        assert_eq!(result.status.code(), Some(1));
 +        assert!(String::from_utf8_lossy(&result.stderr)
 +            .contains("could not isolate helper protocol output"));
++    }
++}
+--- /dev/null
++++ b/src/scoped_worker.rs
+@@ -0,0 +1,946 @@
++//! Owned messages and borrowed ports for an opt-in, library-owned scoped worker.
++//!
++//! A session keeps the plug-in owner on its control thread. Its callback receives only an
++//! attached-editor bridge and a single-credit worker port. Neither port exposes an owner,
++//! processor, raw SDK interface, channel endpoint, thread scope, or join handle. Audio replies
++//! return the submitted allocations even on failure; failed output is diagnostic data, not a
++//! successfully processed block. This bounded transport is not a real-time scheduling claim.
++
++use crate::midi::PluginEvent;
++use crate::{AudioBuffers, BusAudioBuffers, Error, MidiChannel, ProcessTransport};
++use std::{
++    cell::Cell,
++    fmt,
++    marker::PhantomData,
++    rc::Rc,
++    sync::{
++        atomic::{AtomicU8, Ordering},
++        mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
++        Arc,
++    },
++};
++
++/// The ordinary MIDI messages admitted by a scoped worker.
++///
++/// Mapped MIDI, parameter changes, batches, and lifecycle operations are deliberately absent.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum OrdinaryMidiEvent {
++    /// Start a note.
++    NoteOn {
++        /// MIDI channel.
++        channel: MidiChannel,
++        /// MIDI note number, validated as 0 through 127 by the worker.
++        note: u8,
++        /// Velocity, validated as 0 through 127 by the worker.
++        velocity: u8,
++    },
++    /// Release a note.
++    NoteOff {
++        /// MIDI channel.
++        channel: MidiChannel,
++        /// MIDI note number, validated as 0 through 127 by the worker.
++        note: u8,
++        /// Release velocity, validated as 0 through 127 by the worker.
++        velocity: u8,
++    },
++    /// Apply pressure to one note.
++    PolyAftertouch {
++        /// MIDI channel.
++        channel: MidiChannel,
++        /// MIDI note number, validated as 0 through 127 by the worker.
++        note: u8,
++        /// Pressure, validated as 0 through 127 by the worker.
++        pressure: u8,
++    },
++}
++
++impl OrdinaryMidiEvent {
++    pub(crate) fn into_midi_event(self) -> crate::MidiEvent {
++        match self {
++            Self::NoteOn {
++                channel,
++                note,
++                velocity,
++            } => crate::MidiEvent::NoteOn {
++                channel,
++                note,
++                velocity,
++            },
++            Self::NoteOff {
++                channel,
++                note,
++                velocity,
++            } => crate::MidiEvent::NoteOff {
++                channel,
++                note,
++                velocity,
++            },
++            Self::PolyAftertouch {
++                channel,
++                note,
++                pressure,
++            } => crate::MidiEvent::PolyAftertouch {
++                channel,
++                note,
++                pressure,
++            },
++        }
++    }
++}
++
++/// One owned operation submitted to the scoped worker.
++#[derive(Debug)]
++pub enum WorkerCommand {
++    /// Process flat audio buffers, optionally setting transport immediately before processing.
++    Process {
++        /// Owned input and output allocations returned in the reply, including on failure.
++        buffers: AudioBuffers,
++        /// Optional authoritative transport for this block.
++        transport: Option<ProcessTransport>,
++    },
++    /// Process bus-aware audio buffers, optionally setting transport immediately beforehand.
++    ProcessBuses {
++        /// Owned input and output buses returned in the reply, including on failure.
++        buffers: BusAudioBuffers,
++        /// Optional authoritative transport for this block.
++        transport: Option<ProcessTransport>,
++    },
++    /// Admit one ordinary MIDI event to the pending input queue.
++    SendMidi {
++        /// The note or pressure message to admit.
++        event: OrdinaryMidiEvent,
++        /// Sample offset within the next block.
++        sample_offset: i32,
++    },
++    /// Drain owned output events and their native event-loss indication.
++    TakeOutputEvents,
++}
++
++/// The owned reply corresponding to the single outstanding worker command.
++///
++/// A worker failure is also retained independently until the private worker has joined.
++/// Receiving or ignoring a failure reply cannot turn the session into a success.
++#[derive(Debug)]
++pub enum WorkerReply {
++    /// A flat process attempt, with the original owned allocations.
++    Processed {
++        /// Original buffers. On failure their contents are partial diagnostic data only.
++        buffers: AudioBuffers,
++        /// Processing outcome, preserving the worker's original shared error.
++        result: std::result::Result<(), Arc<Error>>,
++    },
++    /// A bus-aware process attempt, with the original owned allocations.
++    ProcessedBuses {
++        /// Original buffers. On failure their contents are partial diagnostic data only.
++        buffers: BusAudioBuffers,
++        /// Processing outcome, preserving the worker's original shared error.
++        result: std::result::Result<(), Arc<Error>>,
++    },
++    /// Queue admission outcome for one ordinary MIDI message.
++    MidiAdmission {
++        /// Admission outcome; success does not mean that an audio block has processed it.
++        result: std::result::Result<(), Arc<Error>>,
++    },
++    /// Drained output events and the runtime's actual event-loss indication.
++    OutputEvents {
++        /// Events owned by the caller after this reply is received.
++        events: Vec<PluginEvent>,
++        /// Native event loss. Transport failures are never converted into this flag.
++        lost: bool,
++    },
++}
++
++impl WorkerReply {
++    fn failed(&self) -> bool {
++        match self {
++            Self::Processed { result, .. }
++            | Self::ProcessedBuses { result, .. }
++            | Self::MidiAdmission { result } => result.is_err(),
++            Self::OutputEvents { .. } => false,
++        }
++    }
++}
++
++/// The closed set of requests supported for an already attached editor.
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub enum AttachedUiRequest {
++    /// Read the size of the attached view without creating a new view.
++    AttachedSize,
++    /// Query whether the attached view supports host-driven resizing.
++    CanResize,
++    /// Resize the attached view, subject to its constraints.
++    Resize {
++        /// Requested width in the view's coordinate system.
++        width: i32,
++        /// Requested height in the view's coordinate system.
++        height: i32,
++    },
++    /// Set the attached view's content scale.
++    SetScale {
++        /// Logical-to-physical scale factor.
++        factor: f32,
++    },
++    /// Take the latest resize request made by the attached view.
++    TakeResizeRequest,
++    /// Service platform editor run-loop work on the control thread.
++    ServiceRunLoop,
++}
++
++/// An owned response from the attached-editor dispatcher.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum AttachedUiReply {
++    /// Current attached-view width and height.
++    AttachedSize((i32, i32)),
++    /// Whether host-driven resizing is supported.
++    CanResize(bool),
++    /// Width and height accepted by the view after resizing.
++    Resized((i32, i32)),
++    /// Whether the view accepted the content-scale request.
++    ScaleAccepted(bool),
++    /// The latest requested width and height, if a request was pending.
++    ResizeRequest(Option<(i32, i32)>),
++    /// Platform run-loop servicing completed.
++    RunLoopServiced,
++}
++
++const CLOSED: u8 = 1;
++const TERMINAL: u8 = 2;
++
++/// Readiness only: this contains no plug-in or editor metadata.
++pub(crate) struct WorkerStatus {
++    flags: AtomicU8,
++}
++
++impl WorkerStatus {
++    pub(crate) fn new() -> Self {
++        Self {
++            flags: AtomicU8::new(0),
++        }
++    }
++
++    pub(crate) fn mark_closed(&self) {
++        self.flags.fetch_or(CLOSED, Ordering::Release);
++    }
++
++    pub(crate) fn mark_terminal(&self) {
++        self.flags.fetch_or(CLOSED | TERMINAL, Ordering::Release);
++    }
++
++    pub(crate) fn is_closed(&self) -> bool {
++        self.flags.load(Ordering::Acquire) & CLOSED != 0
++    }
++
++    pub(crate) fn is_terminal(&self) -> bool {
++        self.flags.load(Ordering::Acquire) & TERMINAL != 0
++    }
++}
++
++/// A main-thread-only, borrowed bridge to the already attached editor.
++///
++/// The bridge cannot be cloned, sent to another thread, or extracted from its session. It
++/// contains no plug-in owner or native interface. Every request requires exclusive access.
++pub struct AttachedUiBridge<'session> {
++    dispatch:
++        &'session mut (dyn FnMut(AttachedUiRequest) -> crate::Result<AttachedUiReply> + 'session),
++    status: Arc<WorkerStatus>,
++    _session: PhantomData<fn(&'session mut ()) -> &'session mut ()>,
++    _main_thread_only: PhantomData<Rc<()>>,
++}
++
++impl<'session> AttachedUiBridge<'session> {
++    pub(crate) fn new(
++        dispatch: &'session mut (dyn FnMut(AttachedUiRequest) -> crate::Result<AttachedUiReply>
++                           + 'session),
++        status: Arc<WorkerStatus>,
++    ) -> Self {
++        Self {
++            dispatch,
++            status,
++            _session: PhantomData,
++            _main_thread_only: PhantomData,
++        }
++    }
++
++    /// Perform one attached-editor request on the session's control thread.
++    ///
++    /// A closed or terminal worker session rejects requests before calling the dispatcher.
++    /// Dispatcher errors are returned unchanged, allowing the callback to handle them.
++    pub fn request(&mut self, request: AttachedUiRequest) -> crate::Result<AttachedUiReply> {
++        if self.status.is_closed() || self.status.is_terminal() {
++            return Err(Error::Other("attached UI bridge is closed".into()));
++        }
++        (self.dispatch)(request)
++    }
++}
++
++/// Why a command was not admitted to the worker transport.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum CommandRejectionReason {
++    /// The previous command's reply has not yet been consumed.
++    Pending,
++    /// The session has been explicitly sealed.
++    Closed,
++    /// A sticky terminal worker failure has been observed.
++    Terminal,
++    /// The bounded command slot is unexpectedly occupied.
++    Full,
++    /// The private worker no longer owns the command receiver.
++    Disconnected,
++}
++
++/// A transport rejection that returns the exact original, unsubmitted command.
++#[derive(Debug)]
++pub struct CommandRejection {
++    /// Why this submission did not occur.
++    pub reason: CommandRejectionReason,
++    /// The original owned command, including any audio allocations.
++    pub command: WorkerCommand,
++}
++
++impl fmt::Display for CommandRejection {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        write!(f, "scoped worker command rejected: {:?}", self.reason)
++    }
++}
++
++impl std::error::Error for CommandRejection {}
++
++/// A failure to receive the outstanding command's reply.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum ReplyError {
++    /// No command currently owns the port's single outstanding credit.
++    NoPending,
++    /// The worker's reply endpoint disconnected before a reply could be obtained.
++    Disconnected,
++}
++
++impl fmt::Display for ReplyError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::NoPending => f.write_str("no scoped worker reply is pending"),
++            Self::Disconnected => f.write_str("scoped worker reply channel disconnected"),
++        }
++    }
++}
++
++impl std::error::Error for ReplyError {}
++
++/// A session-branded, single-credit client port for the library-owned worker.
++///
++/// This port is `Send`, but is neither `Sync` nor `Clone`. Both channels have capacity one.
++/// One submitted command owns the credit until its reply is consumed; the worker taking a
++/// command from its queue does not release that credit. There is no channel extraction API.
++/// Dropping the port closes its unique command sender.
++pub struct WorkerIo<'session> {
++    command: Option<SyncSender<WorkerCommand>>,
++    reply: Receiver<WorkerReply>,
++    pending: bool,
++    status: Arc<WorkerStatus>,
++    _session: PhantomData<fn(&'session mut ()) -> &'session mut ()>,
++    _exclusive: PhantomData<Cell<()>>,
++}
++
++impl<'session> WorkerIo<'session> {
++    pub(crate) fn channel(
++        status: Arc<WorkerStatus>,
++    ) -> (Self, Receiver<WorkerCommand>, SyncSender<WorkerReply>) {
++        let (command, commands) = mpsc::sync_channel(1);
++        let (replies, reply) = mpsc::sync_channel(1);
++        (
++            Self {
++                command: Some(command),
++                reply,
++                pending: false,
++                status,
++                _session: PhantomData,
++                _exclusive: PhantomData,
++            },
++            commands,
++            replies,
++        )
++    }
++
++    /// Attempt to submit one command without blocking.
++    ///
++    /// Every rejection returns the original command. A pending reply, a sealed session, or a
++    /// sticky terminal failure prevents submission before the command channel is accessed.
++    pub fn try_submit(
++        &mut self,
++        command: WorkerCommand,
++    ) -> std::result::Result<(), CommandRejection> {
++        let reason = if self.pending {
++            Some(CommandRejectionReason::Pending)
++        } else if self.status.is_terminal() {
++            Some(CommandRejectionReason::Terminal)
++        } else if self.status.is_closed() || self.command.is_none() {
++            Some(CommandRejectionReason::Closed)
++        } else {
++            None
++        };
++        if let Some(reason) = reason {
++            return Err(CommandRejection { reason, command });
++        }
++        let Some(sender) = self.command.as_ref() else {
++            return Err(CommandRejection {
++                reason: CommandRejectionReason::Closed,
++                command,
++            });
++        };
++        match sender.try_send(command) {
++            Ok(()) => {
++                self.pending = true;
++                Ok(())
++            }
++            Err(TrySendError::Full(command)) => {
++                self.status.mark_terminal();
++                Err(CommandRejection {
++                    reason: CommandRejectionReason::Full,
++                    command,
++                })
++            }
++            Err(TrySendError::Disconnected(command)) => {
++                self.status.mark_terminal();
++                Err(CommandRejection {
++                    reason: CommandRejectionReason::Disconnected,
++                    command,
++                })
++            }
++        }
++    }
++
++    /// Try to receive the outstanding reply without blocking.
++    ///
++    /// `Ok(None)` means the command is still outstanding. Only consuming a reply releases the
++    /// credit. A terminal status does not hide a failure reply already queued by the worker.
++    pub fn try_reply(&mut self) -> std::result::Result<Option<WorkerReply>, ReplyError> {
++        if !self.pending {
++            return Err(ReplyError::NoPending);
++        }
++        match self.reply.try_recv() {
++            Ok(reply) => Ok(Some(self.consume_reply(reply))),
++            Err(TryRecvError::Empty) => Ok(None),
++            Err(TryRecvError::Disconnected) => {
++                self.status.mark_terminal();
++                Err(ReplyError::Disconnected)
++            }
++        }
++    }
++
++    /// Wait for the outstanding reply, releasing the credit only when a reply is received.
++    ///
++    /// This may block the calling thread. Hosts that must continue servicing their editor
++    /// should poll [`Self::try_reply`] and service their attached UI between polls instead.
++    pub fn recv_reply(&mut self) -> std::result::Result<WorkerReply, ReplyError> {
++        if !self.pending {
++            return Err(ReplyError::NoPending);
++        }
++        match self.reply.recv() {
++            Ok(reply) => Ok(self.consume_reply(reply)),
++            Err(_) => {
++                self.status.mark_terminal();
++                Err(ReplyError::Disconnected)
++            }
++        }
++    }
++
++    fn consume_reply(&mut self, reply: WorkerReply) -> WorkerReply {
++        self.pending = false;
++        if reply.failed() {
++            self.status.mark_terminal();
++        }
++        reply
++    }
++
++    /// Report whether a submitted command still owns the port's credit.
++    pub fn has_pending(&mut self) -> bool {
++        self.pending
++    }
++
++    /// Report whether the session has been sealed or a terminal failure was observed.
++    pub fn is_closed(&mut self) -> bool {
++        self.status.is_closed()
++    }
++
++    /// Report whether a terminal worker or transport failure has been observed.
++    pub fn is_terminal(&mut self) -> bool {
++        self.status.is_terminal()
++    }
++
++    pub(crate) fn close(&mut self) {
++        self.status.mark_closed();
++        self.command.take();
++    }
++
++    // Called only after the private worker has joined. A missing reply does not release a
++    // pending credit, so the driver can distinguish an abandoned operation from consumption.
++    pub(crate) fn take_unconsumed_reply(&mut self) -> Option<WorkerReply> {
++        self.reply
++            .try_recv()
++            .ok()
++            .map(|reply| self.consume_reply(reply))
++    }
++}
++
++impl Drop for WorkerIo<'_> {
++    fn drop(&mut self) {
++        self.close();
++    }
++}
++
++/// A callback that can borrow both ports only within the library-owned session.
++///
++/// The higher-ranked session lifetime prevents returning or retaining either branded port.
++/// The library retains responsibility for sealing submission and joining the private worker.
++pub type ScopedWorkerCallback<'callback> = dyn for<'session> FnMut(
++        &mut AttachedUiBridge<'session>,
++        &mut WorkerIo<'session>,
++    ) -> crate::Result<()>
++    + 'callback;
++
++/// Successful completion of a joined scoped worker session.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ScopedWorkerReport {
++    /// Number of commands completed by the worker before it joined.
++    pub completed_commands: usize,
++}
++
++/// An independently retained worker failure, bounded to one outcome per session.
++#[derive(Debug)]
++pub enum WorkerOutcome {
++    /// The original SDK or processing-kernel error, shared with any failure reply.
++    Failed(Arc<Error>),
++    /// The private worker panicked; no panic payload or thread authority is exposed.
++    Panicked {
++        /// An exact kernel error recorded before that Rust panic, if any.
++        prior_error: Option<Arc<Error>>,
++    },
++    /// The worker could not publish its owned reply to the client port.
++    ReplyUndelivered,
++}
++
++/// The primary cause of unsuccessful scoped-session completion.
++#[derive(Debug)]
++pub enum ScopedWorkerFailure {
++    /// Session validation rejected entry; retains the original error.
++    Rejected(Error),
++    /// Worker creation failed; retains the original error.
++    Spawn(Error),
++    /// The client callback returned an error; always primary after the worker joins.
++    Body(Error),
++    /// An SDK or processing-kernel operation failed; retains the original shared error.
++    Worker(Arc<Error>),
++    /// The private worker panicked.
++    WorkerPanicked,
++    /// The bounded worker transport failed.
++    BridgeFailed,
++    /// The callback returned without consuming an outstanding worker reply.
++    UnconsumedReply,
++}
++
++impl fmt::Display for ScopedWorkerFailure {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Rejected(error) => write!(f, "scoped worker session rejected: {error}"),
++            Self::Spawn(error) => write!(f, "scoped worker spawn failed: {error}"),
++            Self::Body(error) => write!(f, "scoped worker callback failed: {error}"),
++            Self::Worker(error) => write!(f, "scoped worker operation failed: {error}"),
++            Self::WorkerPanicked => f.write_str("scoped worker panicked"),
++            Self::BridgeFailed => f.write_str("scoped worker bridge failed"),
++            Self::UnconsumedReply => f.write_str("scoped worker reply was not consumed"),
++        }
++    }
++}
++
++impl std::error::Error for ScopedWorkerFailure {
++    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
++        match self {
++            Self::Rejected(error) | Self::Spawn(error) | Self::Body(error) => Some(error),
++            Self::Worker(error) => Some(error.as_ref()),
++            Self::WorkerPanicked | Self::BridgeFailed | Self::UnconsumedReply => None,
++        }
++    }
++}
++
++/// Joined-session failure with a preserved primary cause and bounded secondary evidence.
++///
++/// A callback error stays primary even if the worker also fails. Its original error is never
++/// converted into a string or replaced by the worker outcome. An original callback panic is
++/// resumed by the driver after join instead of being represented here.
++#[derive(Debug)]
++pub struct ScopedWorkerError {
++    /// The primary failure, with the callback's original error taking precedence after join.
++    pub primary: ScopedWorkerFailure,
++    /// At most one independently retained worker failure from the joined worker ledger.
++    pub secondary_worker: Option<WorkerOutcome>,
++    /// An unconsumed owned reply, retaining original audio allocations when one is available.
++    /// Recovered audio is diagnostic only, even if the individual command reported success.
++    pub unconsumed_reply: Option<WorkerReply>,
++}
++
++impl fmt::Display for ScopedWorkerError {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        fmt::Display::fmt(&self.primary, f)
++    }
++}
++
++impl std::error::Error for ScopedWorkerError {
++    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
++        Some(&self.primary)
++    }
++}
++
++/// Result of completing and joining a scoped worker session.
++pub type ScopedWorkerResult = std::result::Result<ScopedWorkerReport, ScopedWorkerError>;
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn ports() -> (
++        WorkerIo<'static>,
++        Receiver<WorkerCommand>,
++        SyncSender<WorkerReply>,
++    ) {
++        WorkerIo::channel(Arc::new(WorkerStatus::new()))
++    }
++
++    fn output_reply() -> WorkerReply {
++        WorkerReply::OutputEvents {
++            events: Vec::new(),
++            lost: false,
++        }
++    }
++
++    fn audio_command() -> (WorkerCommand, *const f32) {
++        let mut buffers = AudioBuffers::new(1, 1, 8, 48_000.0);
++        buffers.inputs[0][0] = 0.25;
++        let allocation = buffers.inputs[0].as_ptr();
++        (
++            WorkerCommand::Process {
++                buffers,
++                transport: None,
++            },
++            allocation,
++        )
++    }
++
++    fn assert_original_audio(command: WorkerCommand, allocation: *const f32) {
++        let WorkerCommand::Process { buffers, transport } = command else {
++            panic!("expected original process command");
++        };
++        assert_eq!(buffers.inputs[0].as_ptr(), allocation);
++        assert_eq!(buffers.inputs[0][0], 0.25);
++        assert!(transport.is_none());
++    }
++
++    #[test]
++    fn worker_port_and_owned_messages_are_send() {
++        fn assert_send<T: Send>() {}
++        assert_send::<WorkerIo<'static>>();
++        assert_send::<WorkerCommand>();
++        assert_send::<WorkerReply>();
++    }
++
++    #[test]
++    fn receiving_a_command_does_not_release_the_client_credit() {
++        let (mut io, commands, replies) = ports();
++        assert_eq!(io.try_reply().unwrap_err(), ReplyError::NoPending);
++        io.try_submit(WorkerCommand::TakeOutputEvents).unwrap();
++        assert!(matches!(
++            commands.try_recv(),
++            Ok(WorkerCommand::TakeOutputEvents)
++        ));
++        assert!(io.has_pending());
++        assert!(io.try_reply().unwrap().is_none());
++        let (command, allocation) = audio_command();
++        let rejected = io.try_submit(command).unwrap_err();
++        assert_eq!(rejected.reason, CommandRejectionReason::Pending);
++        assert_original_audio(rejected.command, allocation);
++        replies.try_send(output_reply()).unwrap();
++        assert!(io.has_pending());
++        assert!(matches!(
++            io.try_reply().unwrap(),
++            Some(WorkerReply::OutputEvents { lost: false, .. })
++        ));
++        assert!(!io.has_pending());
++        io.try_submit(WorkerCommand::TakeOutputEvents).unwrap();
++        assert!(matches!(
++            commands.try_recv(),
++            Ok(WorkerCommand::TakeOutputEvents)
++        ));
++    }
++
++    #[test]
++    fn command_and_reply_channels_each_have_capacity_one() {
++        let (mut io, commands, replies) = ports();
++        // Deliberately bypass credit from inside this module to check the actual capacity and
++        // defensive Full path. No public API exposes this sender or permits this bypass.
++        io.command
++            .as_ref()
++            .unwrap()
++            .try_send(WorkerCommand::TakeOutputEvents)
++            .unwrap();
++        let (command, allocation) = audio_command();
++        let rejected = io.try_submit(command).unwrap_err();
++        assert_eq!(rejected.reason, CommandRejectionReason::Full);
++        assert_original_audio(rejected.command, allocation);
++        assert!(io.is_terminal());
++        assert!(matches!(
++            commands.try_recv(),
++            Ok(WorkerCommand::TakeOutputEvents)
++        ));
++        replies.try_send(output_reply()).unwrap();
++        assert!(matches!(
++            replies.try_send(output_reply()),
++            Err(TrySendError::Full(_))
++        ));
++    }
++
++    #[test]
++    fn close_returns_unsubmitted_audio_and_disconnects_the_unique_sender() {
++        let (mut io, commands, _replies) = ports();
++        io.close();
++        let (command, allocation) = audio_command();
++        let rejected = io.try_submit(command).unwrap_err();
++        assert_eq!(rejected.reason, CommandRejectionReason::Closed);
++        assert_original_audio(rejected.command, allocation);
++        assert!(matches!(
++            commands.try_recv(),
++            Err(TryRecvError::Disconnected)
++        ));
++        assert!(!io.is_terminal());
++    }
++
++    #[test]
++    fn dropping_the_port_closes_submission_and_marks_shared_readiness() {
++        let status = Arc::new(WorkerStatus::new());
++        let (io, commands, _replies) = WorkerIo::channel(status.clone());
++        drop(io);
++        assert!(status.is_closed());
++        assert!(matches!(
++            commands.try_recv(),
++            Err(TryRecvError::Disconnected)
++        ));
++    }
++
++    #[test]
++    fn disconnected_submission_returns_original_audio_and_becomes_terminal() {
++        let (mut io, commands, _replies) = ports();
++        drop(commands);
++        let (command, allocation) = audio_command();
++        let rejected = io.try_submit(command).unwrap_err();
++        assert_eq!(rejected.reason, CommandRejectionReason::Disconnected);
++        assert_original_audio(rejected.command, allocation);
++        assert!(io.is_terminal());
++        assert!(!io.has_pending());
++        assert_eq!(
++            io.try_submit(WorkerCommand::TakeOutputEvents)
++                .unwrap_err()
++                .reason,
++            CommandRejectionReason::Terminal,
++        );
++    }
++
++    #[test]
++    fn disconnected_reply_does_not_release_an_unfulfilled_credit() {
++        let (mut io, _commands, replies) = ports();
++        io.try_submit(WorkerCommand::TakeOutputEvents).unwrap();
++        drop(replies);
++        assert_eq!(io.try_reply().unwrap_err(), ReplyError::Disconnected);
++        assert!(io.has_pending());
++        assert!(io.is_terminal());
++    }
++
++    #[test]
++    fn a_failure_reply_keeps_its_buffers_and_the_independent_error_identity() {
++        let (mut io, commands, replies) = ports();
++        let (command, allocation) = audio_command();
++        io.try_submit(command).unwrap();
++        let WorkerCommand::Process { mut buffers, .. } = commands.try_recv().unwrap() else {
++            panic!("expected process command");
++        };
++        buffers.outputs[0][0] = 0.75;
++        let ledger_error = Arc::new(Error::ProcessFailed(-17));
++        replies
++            .try_send(WorkerReply::Processed {
++                buffers,
++                result: Err(ledger_error.clone()),
++            })
++            .unwrap();
++        let WorkerReply::Processed { buffers, result } = io.recv_reply().unwrap() else {
++            panic!("expected process reply");
++        };
++        assert_eq!(buffers.inputs[0].as_ptr(), allocation);
++        assert_eq!(buffers.outputs[0][0], 0.75);
++        assert!(Arc::ptr_eq(&ledger_error, &result.unwrap_err()));
++        assert!(!io.has_pending());
++        assert!(io.is_terminal());
++        assert_eq!(
++            io.try_submit(WorkerCommand::TakeOutputEvents)
++                .unwrap_err()
++                .reason,
++            CommandRejectionReason::Terminal,
++        );
++        assert!(matches!(ledger_error.as_ref(), Error::ProcessFailed(-17)));
++    }
++
++    #[test]
++    fn a_terminal_status_does_not_hide_the_already_published_failure_reply() {
++        let status = Arc::new(WorkerStatus::new());
++        let (mut io, commands, replies) = WorkerIo::channel(status.clone());
++        io.try_submit(WorkerCommand::TakeOutputEvents).unwrap();
++        commands.try_recv().unwrap();
++        status.mark_terminal();
++        replies.try_send(output_reply()).unwrap();
++        assert!(io.try_reply().unwrap().is_some());
++        assert!(io.is_terminal());
++        assert!(!io.has_pending());
++    }
++
++    #[test]
++    fn an_unread_reply_can_be_recovered_after_sealing() {
++        let (mut io, commands, replies) = ports();
++        let (command, allocation) = audio_command();
++        io.try_submit(command).unwrap();
++        let WorkerCommand::Process { buffers, .. } = commands.try_recv().unwrap() else {
++            panic!("expected process command");
++        };
++        replies
++            .try_send(WorkerReply::Processed {
++                buffers,
++                result: Ok(()),
++            })
++            .unwrap();
++        drop(replies);
++        io.close();
++        assert!(io.has_pending());
++        let WorkerReply::Processed { buffers, result } = io.take_unconsumed_reply().unwrap() else {
++            panic!("expected unconsumed process reply");
++        };
++        assert_eq!(buffers.inputs[0].as_ptr(), allocation);
++        assert!(result.is_ok());
++        assert!(!io.has_pending());
++        assert!(io.take_unconsumed_reply().is_none());
++    }
++
++    #[test]
++    fn missing_unread_reply_preserves_pending_evidence() {
++        let (mut io, _commands, replies) = ports();
++        io.try_submit(WorkerCommand::TakeOutputEvents).unwrap();
++        drop(replies);
++        io.close();
++        assert!(io.take_unconsumed_reply().is_none());
++        assert!(io.has_pending());
++    }
++
++    #[test]
++    fn output_event_loss_is_not_invented_by_transport_readiness() {
++        let status = Arc::new(WorkerStatus::new());
++        let (mut io, commands, replies) = WorkerIo::channel(status.clone());
++        io.try_submit(WorkerCommand::TakeOutputEvents).unwrap();
++        commands.try_recv().unwrap();
++        replies.try_send(output_reply()).unwrap();
++        status.mark_terminal();
++        let WorkerReply::OutputEvents { lost, events } = io.recv_reply().unwrap() else {
++            panic!("expected output events");
++        };
++        assert!(!lost);
++        assert!(events.is_empty());
++    }
++
++    #[test]
++    fn ui_dispatch_errors_are_returned_unchanged_and_may_be_handled() {
++        let mut calls = 0;
++        let mut dispatch = |_request| {
++            calls += 1;
++            if calls == 1 {
++                Err(Error::ProcessFailed(-31))
++            } else {
++                Ok(AttachedUiReply::CanResize(true))
++            }
++        };
++        let mut bridge = AttachedUiBridge::new(&mut dispatch, Arc::new(WorkerStatus::new()));
++        assert!(matches!(
++            bridge.request(AttachedUiRequest::CanResize),
++            Err(Error::ProcessFailed(-31))
++        ));
++        assert_eq!(
++            bridge.request(AttachedUiRequest::CanResize).unwrap(),
++            AttachedUiReply::CanResize(true)
++        );
++    }
++
++    #[test]
++    fn closed_status_prevents_ui_dispatch() {
++        let status = Arc::new(WorkerStatus::new());
++        let mut dispatch = |_request| -> crate::Result<AttachedUiReply> {
++            panic!("closed bridge must not dispatch");
++        };
++        let mut bridge = AttachedUiBridge::new(&mut dispatch, status.clone());
++        status.mark_closed();
++        assert!(bridge.request(AttachedUiRequest::ServiceRunLoop).is_err());
++    }
++
++    #[test]
++    fn ordinary_midi_conversion_preserves_values_before_validation() {
++        let messages = [
++            (
++                OrdinaryMidiEvent::NoteOn {
++                    channel: MidiChannel::Ch16,
++                    note: 255,
++                    velocity: 254,
++                },
++                crate::MidiEvent::NoteOn {
++                    channel: MidiChannel::Ch16,
++                    note: 255,
++                    velocity: 254,
++                },
++            ),
++            (
++                OrdinaryMidiEvent::NoteOff {
++                    channel: MidiChannel::Ch2,
++                    note: 17,
++                    velocity: 93,
++                },
++                crate::MidiEvent::NoteOff {
++                    channel: MidiChannel::Ch2,
++                    note: 17,
++                    velocity: 93,
++                },
++            ),
++            (
++                OrdinaryMidiEvent::PolyAftertouch {
++                    channel: MidiChannel::Ch9,
++                    note: 3,
++                    pressure: 200,
++                },
++                crate::MidiEvent::PolyAftertouch {
++                    channel: MidiChannel::Ch9,
++                    note: 3,
++                    pressure: 200,
++                },
++            ),
++        ];
++        for (ordinary, expected) in messages {
++            assert_eq!(ordinary.into_midi_event(), expected);
++        }
++    }
++
++    #[test]
++    fn callback_error_and_worker_error_remain_separate_owned_causes() {
++        let worker_error = Arc::new(Error::ProcessFailed(-41));
++        let error = ScopedWorkerError {
++            primary: ScopedWorkerFailure::Body(Error::ProcessFailed(-53)),
++            secondary_worker: Some(WorkerOutcome::Failed(worker_error.clone())),
++            unconsumed_reply: None,
++        };
++        assert!(matches!(
++            error.primary,
++            ScopedWorkerFailure::Body(Error::ProcessFailed(-53))
++        ));
++        let Some(WorkerOutcome::Failed(secondary)) = error.secondary_worker else {
++            panic!("expected independent worker failure");
++        };
++        assert!(Arc::ptr_eq(&worker_error, &secondary));
 +    }
 +}

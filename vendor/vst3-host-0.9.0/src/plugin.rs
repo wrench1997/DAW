@@ -913,6 +913,45 @@ impl MainThreadPlugin {
             .with_domain_session(callback)
     }
 
+    /// Run a development-only scoped processing worker while this loading thread serves
+    /// a restricted attached-editor bridge. No helper dispatch or metadata mode is enabled.
+    ///
+    /// Both registered callback options must be empty: arbitrary user callbacks retain their
+    /// existing public-wrapper caller affinity and are never moved into this session.
+    /// All accepted work joins before this method returns or resumes a Rust callback panic.
+    /// A hung foreign process call pins this scope; it is never detached or unloaded.
+    #[cfg(feature = "experimental-scoped-worker")]
+    pub fn with_scoped_worker(
+        &mut self,
+        body: &mut crate::scoped_worker::ScopedWorkerCallback<'_>,
+    ) -> crate::scoped_worker::ScopedWorkerResult {
+        use crate::scoped_worker::{ScopedWorkerError, ScopedWorkerFailure};
+        let reject = |error| ScopedWorkerError {
+            primary: ScopedWorkerFailure::Rejected(error),
+            secondary_worker: None,
+            unconsumed_reply: None,
+        };
+        if std::thread::current().id() != self.loading_thread {
+            return Err(reject(Error::Other(
+                "scoped worker must start on the plugin loading thread".into(),
+            )));
+        }
+        if self.plugin.audio_callback.is_some() || self.plugin.parameter_change_callback.is_some() {
+            return Err(reject(Error::Other(
+                "scoped worker does not accept registered user callbacks".into(),
+            )));
+        }
+        if !self.plugin.is_processing {
+            return Err(reject(Error::NotProcessing));
+        }
+        let internal = self
+            .plugin
+            .internal
+            .as_mut()
+            .ok_or_else(|| reject(Error::Other("Plugin not initialized".into())))?;
+        internal.with_scoped_worker(self.plugin.audio_levels.as_ref(), body)
+    }
+
     // Only the in-process host loader calls this; there is no public conversion from a
     // legacy movable Plugin that may have initialized its controller on another thread.
     pub(crate) fn from_in_process(plugin: Plugin) -> Self {
@@ -1405,6 +1444,22 @@ pub(crate) trait PluginInternal: Send {
         Err(Error::Other(
             "scoped local plugin domains are unsupported by this backend".to_string(),
         ))
+    }
+
+    /// Feature-only local worker; isolated/unsupported backends expose no raw capability.
+    #[cfg(feature = "experimental-scoped-worker")]
+    fn with_scoped_worker(
+        &mut self,
+        _levels: &Mutex<AudioLevels>,
+        _body: &mut crate::scoped_worker::ScopedWorkerCallback<'_>,
+    ) -> crate::scoped_worker::ScopedWorkerResult {
+        Err(crate::scoped_worker::ScopedWorkerError {
+            primary: crate::scoped_worker::ScopedWorkerFailure::Rejected(Error::Other(
+                "scoped worker is unsupported by this backend/platform".into(),
+            )),
+            secondary_worker: None,
+            unconsumed_reply: None,
+        })
     }
 
     fn set_parameter(&mut self, id: u32, value: f64) -> Result<()>;
@@ -3414,7 +3469,7 @@ fn validate_pressure(pressure: u8) -> Result<()> {
 ///
 /// The match below has no wildcard arm on purpose: `MidiEvent` is `#[non_exhaustive]` only to
 /// downstream crates, so a variant added here fails to compile until it states its own ranges.
-fn validate_midi_event(event: &MidiEvent) -> Result<()> {
+pub(crate) fn validate_midi_event(event: &MidiEvent) -> Result<()> {
     match *event {
         MidiEvent::NoteOn { note, velocity, .. } | MidiEvent::NoteOff { note, velocity, .. } => {
             validate_note(note)?;
