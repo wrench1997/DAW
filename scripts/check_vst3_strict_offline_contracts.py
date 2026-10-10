@@ -365,7 +365,7 @@ def build_cases():
          'Clonable cancellation authority cannot be converted into the owner.')
     case('cancel_no_abandoned_cleanup', '''fn contract(deadline: Instant) {
     let _ = CancelHandle::cleanup_abandoned(deadline); // CONTRACT
-}''', 'E0599', ['`cleanup_abandoned`', 'CancelHandle', 'no function or associated item'],
+}''', 'E0599', ['`cleanup_abandoned`', 'CancelHandle', 'no associated function or constant named'],
          'Cancellation-only authority has no abandoned-owner cleanup entry point.')
 
     case('spawn_failure_cleanup_is_client', '''fn contract(failure: SpawnFailure) {

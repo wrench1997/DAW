@@ -1567,3 +1567,16 @@ WrongReply is the precise mismatch category. Independent review approved changin
 that expectation and adding a separate still-unsupported ParameterString probe.
 The production parser is unchanged. The original failed run and copied artifact
 remain retained; this test-only correction is unvalidated until archived rerun.
+
+### Stop A compiler diagnostic correction: preserved 67/68 report
+
+Exact51aa05a4 passes575 available vendor tests, including all97 foundation/client
+cases, strict vendor Clippy and26 doctests. The new external API compiler corpus
+completed68 cases with67 matches. Its CancelHandle::cleanup_abandoned negative
+correctly failed with E0599 on the marked expression, but Rust1.99 calls this
+"no associated function or constant named" rather than the expected older phrase.
+Independent review approved only that exact diagnostic-fragment correction;
+the error code, type/method fragments and primary-span requirement remain.
+No Rust, manifest, lock or fixture bytes change. The original67/68 report is kept;
+two fresh positive controls plus the corrected negative will support an explicitly
+attributed68-case union, followed by the still-unexecuted root/package gates.
