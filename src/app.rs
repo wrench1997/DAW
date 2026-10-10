@@ -1,5 +1,7 @@
 mod audio_import;
 mod automation_points;
+#[allow(dead_code)]
+mod clip_render;
 #[cfg(test)]
 mod headless_ui_capture;
 #[cfg(test)]
