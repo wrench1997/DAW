@@ -15,6 +15,41 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+// Failure-only diagnostics for the private, device-free topology qualification.
+// Copy retained fields only; never query a worker, service an owner, or reset time.
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+impl PendingClipRestoration {
+    pub(in crate::app) fn genuine_diagnostic_ready(&self) -> bool {
+        self.ready
+    }
+
+    pub(in crate::app) fn genuine_diagnostic_started_at(&self) -> Instant {
+        self.started_at
+    }
+
+    pub(in crate::app) fn genuine_diagnostic_chain_workers(&self) -> Option<(usize, usize)> {
+        self.chain.as_ref().map(|chain| {
+            (
+                chain.control.genuine_worker_id(),
+                chain.guard.genuine_worker_id(),
+            )
+        })
+    }
+
+    pub(in crate::app) fn genuine_diagnostic_transferred_workers(
+        &self,
+    ) -> (Option<usize>, Option<usize>) {
+        (
+            self.transferred_control
+                .as_ref()
+                .map(PluginChainControl::genuine_worker_id),
+            self.transferred_guard
+                .as_ref()
+                .map(PluginWorkerGuard::genuine_worker_id),
+        )
+    }
+}
+
 impl PendingClipRestoration {
     pub(in crate::app) fn poll_test_shutdown_retained(&mut self) -> bool {
         let mut complete = true;

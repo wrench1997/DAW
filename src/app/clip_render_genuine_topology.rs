@@ -1656,10 +1656,84 @@ impl PumpPurpose {
 }
 pub(crate) fn ordinary_health_clear_from_app(app: &CitrusApp) -> Check<bool> {
     let observed = health::observe(app);
-    require(
-        observed.status.class != HealthClass::Failed,
-        "ordinary App health failed during owned topology",
-    )?;
+    if observed.status.class == HealthClass::Failed {
+        // Preserve this exact already-sampled classification and operand set.
+        // Raw build016 discarded it and retained only the generic prefix, so
+        // its specific failed operand and restoration cause remain unknown.
+        // Everything below is lazy driver-only evidence, never new authority.
+        const TOAST_BYTES: usize = 4 * 1024;
+        fn inventory<I: ExactSizeIterator>(items: I, item: impl Fn(I::Item) -> Value) -> Value {
+            let count = items.len();
+            let entries = items
+                .take(observe::MAX_RECORD_BATCH)
+                .map(item)
+                .collect::<Vec<_>>();
+            json!({"count":count,"truncated":count > observe::MAX_RECORD_BATCH,"entries":entries})
+        }
+        let observed_at = Instant::now();
+        let pending_restorations = inventory(
+            app.pending_clip_restorations.iter(),
+            |(channel, pending)| {
+                let started_at = pending.genuine_diagnostic_started_at();
+                let deadline = started_at.checked_add(Duration::from_secs(35));
+                let chain_workers = pending.genuine_diagnostic_chain_workers();
+                let (transferred_control, transferred_guard) =
+                    pending.genuine_diagnostic_transferred_workers();
+                json!({"channel":channel,"ready":pending.genuine_diagnostic_ready(),
+                "chain_present":chain_workers.is_some(),
+                "chain_control_worker":chain_workers.map(|workers|workers.0),
+                "chain_guard_worker":chain_workers.map(|workers|workers.1),
+                "transferred_control_worker":transferred_control,"transferred_guard_worker":transferred_guard,
+                "started_at":format!("{started_at:?}"),"deadline":deadline.map(|value|format!("{value:?}")),
+                "elapsed_ms_at_observation":observed_at.saturating_duration_since(started_at).as_millis(),
+                "deadline_elapsed_at_observation":deadline.map(|value|observed_at > value)})
+            },
+        );
+        let pending_generators = inventory(
+            app.pending_generator_chains.iter(),
+            |(channel, source)| {
+                json!({"channel":channel,"project_session":source.project_session,
+                "endpoint":source.endpoint_id,"instance":source.instance_id,"mixer_track":source.mixer_track,
+                "control_worker":source.control.genuine_worker_id(),"guard_worker":source.guard.genuine_worker_id()})
+            },
+        );
+        let running_generators = inventory(
+            app.running_generator_chains.iter(),
+            |(channel, source)| {
+                json!({"channel":channel,"project_session":source.project_session,
+                "endpoint":source.endpoint_id,"instance":source.instance_id,"mixer_track":source.mixer_track,
+                "control_worker":source.control.genuine_worker_id(),"guard_worker":source.guard.genuine_worker_id()})
+            },
+        );
+        let retired_restorations = inventory(
+            app.retired_clip_restorations.iter(),
+            |guard| json!({"guard_worker":guard.genuine_worker_id()}),
+        );
+        let install_acknowledgments = inventory(
+            app.clip_restoration_installs.iter(),
+            |(instance, (endpoint, ready))| json!({"instance":instance,"endpoint":endpoint,"ready":ready}),
+        );
+        let current_toast_observation = app.toast.as_ref().map(|(message, _)| {
+            let mut end = message.len().min(TOAST_BYTES);
+            while !message.is_char_boundary(end) { end -= 1; }
+            json!({"label":"current_toast_observation","text":&message[..end],
+                "original_bytes":message.len(),"retained_bytes":end,"truncated":end != message.len()})
+        });
+        let restoration_observation = json!({
+            "clip_restoration_failed":app.clip_restoration_failed,
+            "clip_restoration_playback_pending":app.clip_restoration_playback_pending,
+            "app_playing":app.playing,"clip_restoration_timeline":app.clip_restoration_timeline,
+            "pending_restorations":pending_restorations,"pending_generators":pending_generators,
+            "running_generators":running_generators,"retired_restorations":retired_restorations,
+            "install_acknowledgments":install_acknowledgments,
+            "current_toast_observation":current_toast_observation,
+            "bounds":{"inventory_items":observe::MAX_RECORD_BATCH,"toast_bytes":TOAST_BYTES}
+        });
+        return Err(format!(
+            "ordinary App health failed during owned topology: {}",
+            json!({"health":observed.evidence,"restoration_observation":restoration_observation})
+        ));
+    }
     Ok(observed.status.class == HealthClass::Clear)
 }
 impl GenuineFixture {
