@@ -1751,3 +1751,19 @@ polling and intentional-unwind evidence is separate. No genuine plugin, native
 UI/device, genuine-plugin WAV, user-facing activation, realtime performance or whole-App
 qualification occurred. Independent final source/receipt review and durable
 archive close this checkpoint before any separately approved genuine plan.
+
+## 2026-10-10: fresh-source refusal diagnostics (UNVALIDATED)
+
+The one authorized genuine strict Surge attempt failed before SlotReady on the
+structural topology policy, with one source helper and nine unexecuted stages.
+The failed trace and unchanged source are durable in experimental Library v90;
+there is no capture/clone/WAV qualification. Raw rejected descriptors were absent,
+so no particular runtime field can be inferred from the generic message.
+
+Under reviewed scope60865b02, a separate diagnostic-only source slice adds bounded
+internal typed records to three existing fresh-source validation failures. Raw,
+proposed, prepared and prior observations are separately labeled; original error
+prefix/admission and all SDK call ordering are preserved. Five pure and three
+actual worker/backend fixtures cover bounds, attribution and exact ledgers. This
+source is unvalidated until archived/reviewed mock gates execute. No new genuine
+attempt or topology-policy relaxation is authorized by this entry.

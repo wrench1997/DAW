@@ -20,6 +20,329 @@ use {
     std::collections::BTreeMap,
 };
 
+// Refusal-only, scalar diagnostics for unpublished experimental fresh candidates.
+// These records never query or change the plugin and never alter admission.
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+mod fresh_topology_diagnostic {
+    use crate::instrument_bounce::BouncePluginMetadata;
+    use serde::Serialize;
+    use vst3_host::audio::AudioBusLayout;
+
+    const MAX_BUSES: usize = 16;
+    const MAX_ERROR_CHARS: usize = 256;
+    const MARKER: &str = "\nFreshBounceTopologyRefusalV1=";
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "snake_case")]
+    pub(super) enum Phase {
+        ProposedPreflight,
+        FinalPreStart,
+        PostStart,
+    }
+
+    #[derive(Serialize)]
+    struct BoundedList<T> {
+        total_count: usize,
+        truncated: bool,
+        entries: Vec<T>,
+    }
+
+    impl<T> BoundedList<T> {
+        fn from_slice<S>(items: &[S], project: impl Fn(&S) -> T) -> Self {
+            Self {
+                total_count: items.len(),
+                truncated: items.len() > MAX_BUSES,
+                // Apply the cap before materializing or cloning any descriptor.
+                entries: items.iter().take(MAX_BUSES).map(project).collect(),
+            }
+        }
+    }
+
+    #[derive(Serialize)]
+    struct CheckedBus {
+        channel_count: usize,
+        is_main: bool,
+        active: Option<bool>,
+    }
+
+    #[derive(Serialize)]
+    struct PreparedBus {
+        channel_count: usize,
+        active: bool,
+    }
+
+    #[derive(Serialize)]
+    struct Buses<T> {
+        inputs: BoundedList<T>,
+        outputs: BoundedList<T>,
+    }
+
+    impl Buses<CheckedBus> {
+        fn checked(metadata: &BouncePluginMetadata) -> Self {
+            let project = |bus: &crate::instrument_bounce::BounceAudioBus| CheckedBus {
+                channel_count: bus.channel_count,
+                is_main: bus.is_main,
+                active: bus.active,
+            };
+            Self {
+                inputs: BoundedList::from_slice(&metadata.input_buses, project),
+                outputs: BoundedList::from_slice(&metadata.output_buses, project),
+            }
+        }
+    }
+
+    impl Buses<PreparedBus> {
+        fn prepared(layout: &AudioBusLayout) -> Self {
+            let project = |bus: &vst3_host::audio::AudioBusConfig| PreparedBus {
+                channel_count: bus.channel_count,
+                active: bus.active,
+            };
+            Self {
+                inputs: BoundedList::from_slice(&layout.inputs, project),
+                outputs: BoundedList::from_slice(&layout.outputs, project),
+            }
+        }
+    }
+
+    #[derive(Serialize)]
+    struct Refusal {
+        schema: u32,
+        kind: &'static str,
+        validation_phase: Phase,
+        validator_error_excerpt: String,
+        validator_error_truncated: bool,
+        raw_checked: Buses<CheckedBus>,
+        prepared_observation_phase: Option<&'static str>,
+        prepared: Option<Buses<PreparedBus>>,
+        proposal: Option<Buses<CheckedBus>>,
+        expected_before_start: Option<Buses<CheckedBus>>,
+    }
+
+    pub(super) fn error(
+        original: String,
+        phase: Phase,
+        actual: &BouncePluginMetadata,
+        prepared: Option<&AudioBusLayout>,
+        proposal: Option<&BouncePluginMetadata>,
+        prior: Option<&BouncePluginMetadata>,
+    ) -> String {
+        let record = Refusal {
+            schema: 1,
+            kind: "fresh_bounce_topology_refusal",
+            validation_phase: phase,
+            validator_error_excerpt: original.chars().take(MAX_ERROR_CHARS).collect(),
+            validator_error_truncated: original.chars().nth(MAX_ERROR_CHARS).is_some(),
+            raw_checked: Buses::checked(actual),
+            prepared_observation_phase: prepared.map(|_| "initial_preflight_read"),
+            prepared: prepared.map(Buses::prepared),
+            proposal: proposal.map(Buses::checked),
+            expected_before_start: prior.map(Buses::checked),
+        };
+        // Preserve the original rejection even if diagnostic formatting fails.
+        match serde_json::to_string(&record) {
+            Ok(json) => format!("{original}{MARKER}{json}"),
+            Err(_) => original,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::instrument_bounce::BounceAudioBus;
+        use serde_json::Value;
+        use vst3_host::audio::AudioBusConfig;
+
+        fn metadata() -> BouncePluginMetadata {
+            BouncePluginMetadata {
+                class_uid: "ABCDEF019182FAEB566D624153675854".into(),
+                name: "not emitted".into(),
+                version: "not emitted".into(),
+                category: "Instrument".into(),
+                event_input_buses: vec![(16, true, Some(true))],
+                event_output_buses: vec![],
+                input_buses: vec![BounceAudioBus::new(2, false, Some(true))],
+                output_buses: vec![
+                    BounceAudioBus::new(2, true, Some(true)),
+                    BounceAudioBus::new(2, true, None),
+                    BounceAudioBus::new(2, true, None),
+                ],
+                latency_samples: 0,
+                tail_samples: 96_000,
+            }
+        }
+
+        fn parse(message: &str, prefix: &str) -> Value {
+            let (actual_prefix, json) = message.split_once(MARKER).unwrap();
+            assert_eq!(actual_prefix, prefix);
+            assert!(!json.contains("not emitted"));
+            serde_json::from_str(json).unwrap()
+        }
+
+        #[test]
+        fn refusal_preserves_raw_roles_unknowns_and_separate_proposal() {
+            let actual = metadata();
+            let mut proposal = actual.clone();
+            for bus in &mut proposal.output_buses[1..] {
+                bus.active = Some(false);
+            }
+            let original = proposal.validate(48_000).unwrap_err();
+            let prepared = AudioBusLayout {
+                inputs: vec![AudioBusConfig {
+                    channel_count: 2,
+                    active: true,
+                }],
+                outputs: vec![
+                    AudioBusConfig {
+                        channel_count: 2,
+                        active: true,
+                    },
+                    AudioBusConfig {
+                        channel_count: 2,
+                        active: false,
+                    },
+                    AudioBusConfig {
+                        channel_count: 2,
+                        active: false,
+                    },
+                ],
+            };
+            let encoded = error(
+                original.clone(),
+                Phase::ProposedPreflight,
+                &actual,
+                Some(&prepared),
+                Some(&proposal),
+                None,
+            );
+            let json = parse(&encoded, &original);
+            assert_eq!(json["validation_phase"], "proposed_preflight");
+            assert_eq!(
+                json["raw_checked"]["inputs"]["entries"][0]["is_main"],
+                false
+            );
+            for index in [1, 2] {
+                assert_eq!(
+                    json["raw_checked"]["outputs"]["entries"][index]["is_main"],
+                    true
+                );
+                assert!(json["raw_checked"]["outputs"]["entries"][index]["active"].is_null());
+                assert_eq!(
+                    json["proposal"]["outputs"]["entries"][index]["active"],
+                    false
+                );
+                assert_eq!(
+                    json["prepared"]["outputs"]["entries"][index]["active"],
+                    false
+                );
+            }
+            assert_eq!(json["prepared_observation_phase"], "initial_preflight_read");
+            assert!(json["expected_before_start"].is_null());
+            assert_eq!(actual.output_buses[1].active, None);
+            assert_eq!(proposal.validate(48_000).unwrap_err(), original);
+        }
+
+        #[test]
+        fn post_start_refusal_has_current_and_prior_but_no_invented_prepared_read() {
+            let prior = metadata();
+            let mut current = prior.clone();
+            current.output_buses[0].channel_count = 4;
+            let json = parse(
+                &error(
+                    "original".into(),
+                    Phase::PostStart,
+                    &current,
+                    None,
+                    None,
+                    Some(&prior),
+                ),
+                "original",
+            );
+            assert_eq!(json["validation_phase"], "post_start");
+            assert_eq!(
+                json["raw_checked"]["outputs"]["entries"][0]["channel_count"],
+                4
+            );
+            assert_eq!(
+                json["expected_before_start"]["outputs"]["entries"][0]["channel_count"],
+                2
+            );
+            assert!(json["prepared"].is_null());
+            assert!(json["prepared_observation_phase"].is_null());
+            assert!(json["proposal"].is_null());
+        }
+
+        #[test]
+        fn final_pre_start_phase_is_distinct() {
+            let actual = metadata();
+            let json = parse(
+                &error(
+                    "rejected".into(),
+                    Phase::FinalPreStart,
+                    &actual,
+                    None,
+                    Some(&actual),
+                    None,
+                ),
+                "rejected",
+            );
+            assert_eq!(json["validation_phase"], "final_pre_start");
+            assert!(json["expected_before_start"].is_null());
+        }
+
+        #[test]
+        fn projection_visits_only_the_bounded_prefix() {
+            let values = vec![0_u8; 10_000];
+            let visits = std::cell::Cell::new(0);
+            let record = BoundedList::from_slice(&values, |_| {
+                visits.set(visits.get() + 1);
+                7_u8
+            });
+            assert_eq!(visits.get(), 16);
+            assert_eq!(record.entries, vec![7; 16]);
+            assert_eq!(record.total_count, 10_000);
+            assert!(record.truncated);
+        }
+
+        #[test]
+        fn construction_caps_lists_before_materialization_without_hiding_counts() {
+            let mut actual = metadata();
+            actual.output_buses = (0..1_000)
+                .map(|index| BounceAudioBus::new(index, index % 2 == 0, None))
+                .collect();
+            let original = "é".repeat(300);
+            let encoded = error(
+                original.clone(),
+                Phase::ProposedPreflight,
+                &actual,
+                None,
+                Some(&actual),
+                Some(&actual),
+            );
+            let json = parse(&encoded, &original);
+            for view in ["raw_checked", "proposal", "expected_before_start"] {
+                let outputs = &json[view]["outputs"];
+                assert_eq!(outputs["total_count"], 1_000);
+                assert_eq!(outputs["truncated"], true);
+                assert_eq!(outputs["entries"].as_array().unwrap().len(), 16);
+                for index in 0..16 {
+                    assert_eq!(outputs["entries"][index]["channel_count"], index);
+                    assert!(outputs["entries"][index]["active"].is_null());
+                }
+            }
+            assert_eq!(
+                json["validator_error_excerpt"]
+                    .as_str()
+                    .unwrap()
+                    .chars()
+                    .count(),
+                256
+            );
+            assert_eq!(json["validator_error_truncated"], true);
+            assert!(encoded.len() < 16_384);
+        }
+    }
+}
+
 /// Construct and use on the same background owner thread. The backend is deliberately !Send.
 pub struct OfflineInstrument {
     #[cfg(feature = "vst3")]
@@ -186,7 +509,16 @@ impl Vst3Backend {
         }
         // Includes actual factory Instrument identity, ALL later buses, event policy and
         // latency. In particular an active aux is rejected rather than disabled to fit.
-        proposed.validate(sample_rate)?;
+        proposed.validate(sample_rate).map_err(|error| {
+            fresh_topology_diagnostic::error(
+                error,
+                fresh_topology_diagnostic::Phase::ProposedPreflight,
+                &actual,
+                Some(&prepared),
+                Some(&proposed),
+                None,
+            )
+        })?;
         for (direction, index) in acknowledge {
             self.plugin
                 .set_bus_active(MediaType::Audio, direction, index as i32, false)
@@ -212,13 +544,38 @@ impl Vst3Backend {
         let checked = self
             .bounce_metadata(None)
             .map_err(|error| error.to_string())?;
-        checked.validate(sample_rate)?;
+        checked.validate(sample_rate).map_err(|error| {
+            fresh_topology_diagnostic::error(
+                error,
+                fresh_topology_diagnostic::Phase::FinalPreStart,
+                &checked,
+                Some(&prepared),
+                Some(&proposed),
+                None,
+            )
+        })?;
         if checked != proposed {
             return Err("Fresh bounce source topology changed before admission".into());
         }
         self.input_channels = checked.participating_input_channels();
         self.output_channels = checked.output_buses[0].channel_count;
         Ok(checked)
+    }
+
+    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    pub(super) fn fresh_topology_post_start_error(
+        error: String,
+        current: &BouncePluginMetadata,
+        before_start: &BouncePluginMetadata,
+    ) -> String {
+        fresh_topology_diagnostic::error(
+            error,
+            fresh_topology_diagnostic::Phase::PostStart,
+            current,
+            None, // No extra prepared-layout query is made after Start.
+            None,
+            Some(before_start),
+        )
     }
 
     pub(super) fn bounce_metadata(

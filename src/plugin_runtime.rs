@@ -5391,7 +5391,11 @@ impl PluginBackend for Vst3Backend {
             let current = self
                 .bounce_metadata(None)
                 .map_err(|error| error.to_string())?;
-            current.validate(config.sample_rate as u32)?;
+            current
+                .validate(config.sample_rate as u32)
+                .map_err(|error| {
+                    Self::fresh_topology_post_start_error(error, &current, &before_start)
+                })?;
             if current != before_start {
                 return Err(
                     "Fresh bounce source topology changed at Start before admission".into(),

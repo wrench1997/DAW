@@ -248,6 +248,12 @@ for line in sys.stdin:
         inputs = [bus(2, mode != 'fresh_input_aux', mode != 'fresh_input_inactive', 0, 'Input')]
         outputs = [bus(2, True, True, 0, 'Output'), bus(1, False, False, 1, 'Output'),
                    bus(3 if mode == 'fresh_unsupported_last' else 2, False, mode == 'fresh_aux_active_last', 2, 'Output')]
+        if mode == 'fresh_role_diagnostic':
+            if checked:
+                inputs[0]['is_main'] = False
+                for output in outputs: output['is_main'] = True
+        if mode == 'fresh_raw_invalid_after_start' and checked and processing:
+            outputs[0]['channel_count'] = 4
         if mode == 'fresh_extra_output': outputs.append(bus(2, False, False, 3, 'Output'))
         if mode == 'fresh_prepared_mismatch' and not checked: outputs[-1]['channel_count'] = 1
         if mode == 'fresh_prepared_count' and not checked: outputs.pop()
@@ -1564,4 +1570,179 @@ fn fresh_source_fixture_unwind_joins_worker_and_retains_terminal_evidence() {
     // claim the legacy shutdown mechanism has gained strict helper-reap guarantees.
     std::fs::remove_dir_all(&directory).unwrap();
     assert!(!directory.exists());
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn parse_fresh_topology_refusal(error: &str) -> serde_json::Value {
+    let (prefix, data) = error.split_once("\nFreshBounceTopologyRefusalV1=").unwrap();
+    assert_eq!(
+        prefix,
+        "Instrument bounce requires at most one known main mono/stereo input, one known-active main mono/stereo output, and at most two known-inactive auxiliary mono/stereo outputs"
+    );
+    serde_json::from_str(data).unwrap()
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_diagnostic_worker_keeps_exact_refusal_ledger_and_raw_roles() {
+    use super::super::{PluginChain, RuntimeEvent, ShutdownOutcome};
+    use std::time::{Duration, Instant};
+    let fake = FakeHelper::new("fresh_role_diagnostic");
+    let PluginChain {
+        audio: _audio,
+        mut control,
+        guard,
+    } = PluginChain::spawn_fresh_bounce_source(41, fake.spec(vec![]), fresh_config()).unwrap();
+    let mut worker = FreshSourceWorkerGuard::new(&fake, guard);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut fault = None;
+    while Instant::now() < deadline && fault.is_none() {
+        while let Some(event) = control.try_next_event() {
+            match event {
+                RuntimeEvent::SlotReady { .. } => panic!("refused source published Ready"),
+                RuntimeEvent::SlotFault { slot: 0, message } => fault = Some(message),
+                _ => {}
+            }
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let fault = fault.expect("actual worker refusal required");
+    let json = parse_fresh_topology_refusal(&fault);
+    assert_eq!(json["validation_phase"], "proposed_preflight");
+    assert_eq!(json["raw_checked"]["inputs"]["total_count"], 1);
+    assert_eq!(
+        json["raw_checked"]["inputs"]["entries"][0]["is_main"],
+        false
+    );
+    assert_eq!(json["raw_checked"]["outputs"]["total_count"], 3);
+    for index in 0..3 {
+        assert_eq!(
+            json["raw_checked"]["outputs"]["entries"][index]["is_main"],
+            true
+        );
+    }
+    for index in [1, 2] {
+        assert!(json["raw_checked"]["outputs"]["entries"][index]["active"].is_null());
+        assert_eq!(
+            json["prepared"]["outputs"]["entries"][index]["active"],
+            false
+        );
+        assert_eq!(
+            json["proposal"]["outputs"]["entries"][index]["active"],
+            false
+        );
+    }
+    assert_eq!(worker.join(), ShutdownOutcome::Joined);
+    assert_eq!(control.plugin_latency_snapshot().unwrap().active_mask, 0);
+    assert_eq!(
+        fake.names(),
+        [
+            "LoadPlugin",
+            "AudioBusLayout",
+            "ResetOriginSupport",
+            "CheckedAudioBusLayout",
+            "EventBusLayout",
+            "LatencySamples",
+            "TailSamples",
+            "AudioBusLayout",
+            "Editor",
+            "Shutdown",
+        ]
+    );
+    while let Some(event) = control.try_next_event() {
+        assert!(!matches!(event, RuntimeEvent::SlotReady { .. }));
+    }
+    let requests = fake.requests();
+    assert_eq!(requests[8]["Editor"]["command"], "Close");
+    assert_eq!(control.stats().submitted, 0);
+    assert_eq!(control.stats().completed, 0);
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_diagnostic_success_path_adds_no_owner_calls() {
+    let fake = FakeHelper::new("normal");
+    let mut source =
+        Vst3Backend::load_fresh_bounce_source(fake.spec(vec![]), fresh_config()).unwrap();
+    source.prepare(fresh_config()).unwrap();
+    assert_eq!(
+        fake.names(),
+        [
+            "LoadPlugin",
+            "AudioBusLayout",
+            "ResetOriginSupport",
+            "CheckedAudioBusLayout",
+            "EventBusLayout",
+            "LatencySamples",
+            "TailSamples",
+            "AudioBusLayout",
+            "CheckedAudioBusLayout",
+            "EventBusLayout",
+            "LatencySamples",
+            "TailSamples",
+            "StartProcessing",
+            "NativeDirtyRevision",
+            "CheckedAudioBusLayout",
+            "EventBusLayout",
+            "LatencySamples",
+            "TailSamples",
+        ]
+    );
+    assert!(source.prepared);
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn fresh_source_diagnostic_post_start_failure_does_not_query_prepared_again() {
+    let fake = FakeHelper::new("fresh_raw_invalid_after_start");
+    let mut source =
+        Vst3Backend::load_fresh_bounce_source(fake.spec(vec![]), fresh_config()).unwrap();
+    let error = source.prepare(fresh_config()).unwrap_err();
+    let json = parse_fresh_topology_refusal(&error);
+    assert_eq!(json["validation_phase"], "post_start");
+    assert!(json["prepared"].is_null());
+    assert!(json["prepared_observation_phase"].is_null());
+    assert_eq!(
+        json["raw_checked"]["outputs"]["entries"][0]["channel_count"],
+        4
+    );
+    assert_eq!(
+        json["expected_before_start"]["outputs"]["entries"][0]["channel_count"],
+        2
+    );
+    let names = fake.names();
+    let mut expected = vec![
+        "LoadPlugin",
+        "AudioBusLayout",
+        "ResetOriginSupport",
+        "CheckedAudioBusLayout",
+        "EventBusLayout",
+        "LatencySamples",
+        "TailSamples",
+        "AudioBusLayout",
+    ];
+    for _ in 0..2 {
+        expected.extend([
+            "SetBusActive",
+            "CheckedAudioBusLayout",
+            "EventBusLayout",
+            "LatencySamples",
+            "TailSamples",
+            "AudioBusLayout",
+        ]);
+    }
+    expected.extend([
+        "CheckedAudioBusLayout",
+        "EventBusLayout",
+        "LatencySamples",
+        "TailSamples",
+        "StartProcessing",
+        "NativeDirtyRevision",
+        "CheckedAudioBusLayout",
+        "EventBusLayout",
+        "LatencySamples",
+        "TailSamples",
+    ]);
+    assert_eq!(names, expected);
+    assert!(!source.prepared && source.plugin.is_processing());
 }
