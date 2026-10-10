@@ -1819,3 +1819,33 @@ Rust correction iterates the actual output array after asserting exactly 3 outpu
 keeping every role/channel assertion. Production and all other fixture bodies are
 unchanged. The affected capture fixture and remaining Clippy/fmt/Python/package
 gates await archive and review; prior executed gates retain their original bytes.
+
+
+### Reviewed role-policy gate results, 2026-10-10
+
+All bounded gates have completed. The production role predicates/error/comment
+remain 57aedcfb; 843653da changes only one test assertion and its log. Prior-source
+57aedcfb passed vendor 21 selected cases, feature offline 32/bounce 60/runtime 77,
+helper 25, default offline 15/bounce 43/runtime 77 and core bounce 43/runtime 76. The
+feature bounce suite includes 378 success and 360 fault cases within two functions.
+Current 843653da freshly passed the affected capture 1, current all-feature compile,
+three strict root Clippy profiles, fmt, Python 239 and package 557. Ordinary helper
+bafce0dc reproduced from current-worktree vendor linkage. Full suites were not
+rerun on the test-only correction and are not reported as such.
+
+Run001's test/ordinary artifact collision and mistaken startup-only helper --list
+remain preserved. Executed App identity b992d736 matches its actual test record;
+the overwritten helper-test/ordinary-App and dep-info were recovered only against
+their original hashes, with original records unchanged. Corrected unique paths,
+duplicate rejection and pre-list/pre-run test-hash checks prevent recurrence.
+Run002's needless_range_loop failure is retained; the exact count/iterator fix was
+archived and independently reviewed before the bounded run003 continuation.
+Artifact binding 4b4cfbaf25c6b1173d65593346031a558e0d1ee4b57e3e96af9b85892d99f774
+records all source revisions, stable run maps and current compiler/link provenance.
+
+No production source changed after 57aedcfb, and no genuine plugin/native/editor
+qualification occurred in these gates. The actual one-source refusal remains
+qualification_success=false; original genuine001 stays FAILED. Successful actual
+capture, strict clone state/base/MIDI/audio/WAV and cancellation require a separately
+frozen and authorized qualification. Final source/evidence review and durable
+archive precede that preparation.

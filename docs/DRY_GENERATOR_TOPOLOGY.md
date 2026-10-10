@@ -181,3 +181,57 @@ Existing full-slot f32/f64 SDK zero-input evidence is unchanged and will be chec
 again. A later actual source capture/strict-clone/WAV qualification needs its own
 updated harness and separate execution authorization; this source change does not
 establish that state restore or DSP will succeed on the initialized fixture.
+
+
+## Role-policy source/mock closure, 2026-10-10
+
+The UNVALIDATED role-policy notes above preserve the source-freeze stage. Bounded
+source/mock gates are now complete, with both intervening failures retained.
+Production behavior has not changed since 57aedcfb. Final tested 843653da changes only
+a capture fixture's iterator/exact-count assertion and its WORK_LOG explanation.
+No genuine instrument qualification or user-facing activation is included.
+
+Executed on 57aedcfb, with source maps unchanged within each run:
+
+- Vendor topology 9, binding 3, silent-input codec/client 8 and used-restore guard 1.
+  These include the actual f32/f64 repeated zero-input/full-declared-slot checks.
+- All-feature App: offline 32, bounce 60 and runtime 77. The bounce suite includes
+  the 378 successful topology cases and 360 exact fault cases inside two test
+  functions; those case counts are not additional test-function counts.
+- Helper 25, default offline 15/bounce 43/runtime 77, core bounce 43/runtime 76.
+- All-feature/default/core test executables were source-linked and copied.
+
+Run001 stopped at a QA artifact-copy collision after its passing App suites:
+test/ordinary helper names shared a destination, and the ordinary helper reached
+--list, emitted its startup line, received no protocol request and listed zero
+tests. The selector rejected it. The App's earlier ordinary copy also shared its
+later test destination, but the executed App copy matches the real test hash
+b992d736. Both raw overwritten records remain. Exact original-hash artifacts and
+dep-info were recovered separately; the correction uses unique profile names,
+duplicate refusal and selected test-hash checks before list/run. No helper-test
+pass or plugin load is inferred from the erroneous startup/EOF invocation.
+
+Run002 completed the remaining mock suites, then root Clippy rejected a test-only
+needless_range_loop. The corrected 843653da fixture binds the output array, asserts
+exactly 3 elements and checks every unchanged role/channel assertion. Run003 freshly
+compiled current all-feature callers and passed that affected capture test 1,
+strict root Clippy in all-feature/default/core profiles, fmt, Python 239 and package
+input validation 557. It also rebuilt the ordinary helper from this worktree and
+reproduced bafce0dcf4c24411651d84df0877638b77b051019002a6cfbb06ce38ec96b76d.
+The earlier full selected mocks are not relabeled as executions of the correction.
+
+Artifact binding 4b4cfbaf25c6b1173d65593346031a558e0d1ee4b57e3e96af9b85892d99f774
+binds 23 root artifact records, 4 copied vendor rlibs, the vendor test executable and
+the continued exact helper test, with current package paths, exact compiler externs
+and per-run before/after source hashes. The original collision and Clippy failures
+remain terminal historical results. No full-App, whole-vendor, doc-test or compiler-
+negative rerun is claimed for this small role-policy slice.
+
+These mocks establish bounded role admission and complete descriptor fidelity,
+explicit silent input, actual mock acknowledgment ordering, post-Start publication
+fencing and unchanged strict output/cleanup checks. They do not establish genuine
+Surge state restore, capture/base fidelity, MIDI/audio, WAV or cancellation behavior.
+The earlier genuine001 remains FAILED and the one-source diagnostic remains only
+an observed refusal with qualification_success=false. A new fixed qualification
+must use the actual observed roles and newly observed known false acknowledgments,
+with separate frozen harness, review, archive and root authorization.
