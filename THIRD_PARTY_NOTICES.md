@@ -11,6 +11,16 @@ Citrus Studio 自有代码按仓库根目录 [LICENSE](LICENSE) 中的 MIT Licen
 
 VST2/VST3 插件由用户自行安装和加载。发布包不应包含任何第三方插件、插件预设、厂商 SDK、用户项目、录音或插件扫描缓存。
 
+## External plug-in used for selected-clip qualification
+
+The [Linux selected-clip qualification](docs/SELECTED_CLIP_QUALIFICATION.md) used
+an externally obtained official Surge XT 1.3.4 instrument. Its
+[release, archive/module hashes and GPL v3 license provenance](qa/real_vst3/receipts/README.md#surge-xt--surge-xt-effects-134)
+are recorded separately. No Surge binary, factory asset, captured state or
+rendered audio is added to the source or Windows preview package by this
+qualification documentation. This does not change the licenses of Citrus Studio
+or its existing vendored dependencies.
+
 ## 发布包内的直接组件
 
 | 随附文件 | 来源 | 版本或基线 | 许可证 |

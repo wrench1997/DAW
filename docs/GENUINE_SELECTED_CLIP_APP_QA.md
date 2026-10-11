@@ -1,4 +1,8 @@
-# Genuine selected-clip App qualification preparation
+# Genuine selected-clip App qualification: historical preparation
+
+The current [Linux qualification result and reproduction boundaries](SELECTED_CLIP_QUALIFICATION.md) supersede the preparation-only status below. One full real-App run passed at `a9700799`; this page preserves earlier checkpoints and their original limits.
+
+## Historical preparation and corrections
 
 This checkpoint adds an ignored, separately opted-in genuine App-method/callback fixture and inactive test-profile observation seams. It carries no genuine execution result. The tested base is `4a56f3755cc8216da7da69ed07e4b7c1d20d6aae`; approved plan SHA-256 is `bb3fbc835dfad5d4275f4b21772e3c452e0d42cee9c7b69ae0f79ea28978a68d`.
 

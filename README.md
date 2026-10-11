@@ -71,6 +71,14 @@ GUI and DSP on one thread; the transport-only 350 ms fixture does not establish
 native resize or whole-process realtime performance. Prior optimized timing
 measurements remain attributed to their older helper, not this new one.
 
+[Selected-instrument clip conversion](docs/SELECTED_CLIP_QUALIFICATION.md) passed
+one complete headless real-App conversion/playback/Undo/Redo/cleanup run on Linux
+with Surge XT 1.3.4 at `a9700799`. It remains opt-in through
+`experimental-fresh-helper`; native GUI interaction and Windows plug-in runtime
+are not established by that result. The Linux qualification is bound to
+`a9700799`/`build031`; Windows CI is separately required for the exact accepted
+integration revision.
+
 ## Architecture
 
 - `eframe`, `egui`, and `wgpu`: native GPU-rendered desktop UI

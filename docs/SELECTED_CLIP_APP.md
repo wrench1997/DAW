@@ -1,4 +1,8 @@
-# Stop B App integration: source preparation only
+# Selected-clip App integration and historical checkpoints
+
+Current status: one complete Linux experimental headless real-App conversion/playback/Undo/Redo/cleanup run passed at `a9700799`. See the [qualification result, user opt-in and reproduction boundaries](SELECTED_CLIP_QUALIFICATION.md). The Linux qualification is bound to `a9700799`/`build031`; Windows CI is separately required for the exact accepted integration revision. The source-preparation and unexecuted statements below describe their original checkpoints.
+
+## Historical Stop B source preparation
 
 Base: accepted Stop A e67b6988ee084585cf0782f19fd0be1012dc8ce1, isolated in DAW-selected-clip-app. The accepted App, Stop 0, Stop A and strict qualification checkouts remain untouched. First frozen d5eefc31 compiled successfully, then the App96 mock suite passed66/failed30 at shared final Timeline admission. The exact original run is retained; no correction build/test has yet run, and no genuine plug-in/native UI/device invocation occurred.
 
