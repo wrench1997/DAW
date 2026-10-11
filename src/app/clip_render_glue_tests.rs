@@ -646,6 +646,7 @@ struct RestorationFixture {
     callback: Option<audio::TestAudioCallback>,
     source: Option<TestCaptureSource>,
     untransferred: Option<PluginChain>,
+    removed_restoration: Option<PendingClipRestoration>,
     admission: Option<std::sync::MutexGuard<'static, ()>>,
 }
 
@@ -654,6 +655,7 @@ struct RetainedRestorationFailure {
     _callback: Option<audio::TestAudioCallback>,
     _source: Option<TestCaptureSource>,
     _untransferred: Option<PluginChain>,
+    _removed_restoration: Option<PendingClipRestoration>,
     _admission: Option<std::sync::MutexGuard<'static, ()>>,
     _cleanup_result: Result<Result<(), &'static str>, Box<dyn std::any::Any + Send>>,
 }
@@ -671,6 +673,10 @@ impl RestorationFixture {
     }
 
     fn with_max_block_frames(max_block_frames: usize) -> Self {
+        Self::with_preparation(max_block_frames, false, 41)
+    }
+
+    fn with_preparation(max_block_frames: usize, held: bool, instance_id: u64) -> Self {
         let deadline = Instant::now() + Duration::from_secs(10);
         let admission = loop {
             assert!(
@@ -707,17 +713,25 @@ impl RestorationFixture {
             callback: Some(callback),
             source: None,
             untransferred: None,
+            removed_restoration: None,
             admission: Some(admission),
         };
-        let (chain, source) = TestCaptureSource::new(
-            41,
-            source_state(),
-            PluginPrepareConfig {
-                sample_rate: 48_000.0,
-                max_block_frames,
-            },
-        )
-        .unwrap();
+        let config = PluginPrepareConfig {
+            sample_rate: 48_000.0,
+            max_block_frames,
+        };
+        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        let created = if held {
+            TestCaptureSource::new_with_held_prepare(instance_id, source_state(), config)
+        } else {
+            TestCaptureSource::new(instance_id, source_state(), config)
+        };
+        #[cfg(not(all(target_os = "linux", feature = "experimental-fresh-helper")))]
+        let created = {
+            assert!(!held, "held preparation requires the existing test profile");
+            TestCaptureSource::new(instance_id, source_state(), config)
+        };
+        let (chain, source) = created.unwrap();
         // No assertion, callback, or readiness poll exists between spawn and
         // assigning the exact worker to this already-active cleanup owner.
         fixture.untransferred = Some(chain);
@@ -787,6 +801,14 @@ impl RestorationFixture {
             if let Some(chain) = &mut self.untransferred {
                 poll(&mut chain.guard);
             }
+            if let Some(restoration) = &mut self.removed_restoration {
+                if let Some(chain) = &mut restoration.chain {
+                    poll(&mut chain.guard);
+                }
+                if let Some(guard) = &mut restoration.transferred_guard {
+                    poll(guard);
+                }
+            }
             let app = self.app_mut();
             for restoration in app.pending_clip_restorations.values_mut() {
                 if let Some(chain) = &mut restoration.chain {
@@ -836,6 +858,7 @@ impl Drop for RestorationFixture {
                 _callback: self.callback.take(),
                 _source: self.source.take(),
                 _untransferred: self.untransferred.take(),
+                _removed_restoration: self.removed_restoration.take(),
                 _admission: self.admission.take(),
                 _cleanup_result: result,
             };
@@ -2561,4 +2584,836 @@ fn actual_open_and_new_refusals_do_not_report_success_or_replace_the_session() {
     assert_refused(&fixture, &before, session, &saved_path);
     assert!(fixture.app().clip_render_fence_active());
     assert!(!fixture.app().clip_session_retirement_pending());
+}
+
+// Route-predicate matrices use one retained mock owner at a time. They compile
+// immutable model inputs for the real App classifier; none is a dispatched or
+// injected compiler result, callback receipt, successful install, or Ready event.
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn pending_route_fixture(held: bool, worker_instance: u64) -> RestorationFixture {
+    let mut fixture =
+        RestorationFixture::with_preparation(MAX_MIXER_BLOCK_FRAMES, held, worker_instance);
+    let binding = fixture
+        .app_mut()
+        .prepare_clip_render_restoration(41, &source_state().metadata)
+        .unwrap();
+    fixture.app_mut().install_clip_render_restoration(binding);
+    fixture
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn route_test_timeline(project: &Project) -> CompiledTimeline {
+    let map = TempoMap::from_project(project, 48_000).unwrap();
+    CompiledTimeline::from_project(project, &map, TimelineCompileOptions::default()).unwrap()
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn exact_route(timeline: &CompiledTimeline) -> GeneratorRouteRequirement {
+    let requirements = timeline_generator_route_requirements(timeline).unwrap();
+    assert_eq!(requirements.len(), 1);
+    requirements[0]
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn assert_pending_route(fixture: &RestorationFixture, timeline: &CompiledTimeline, eligible: bool) {
+    let app = fixture.app();
+    let requirement = exact_route(timeline);
+    assert!(app.pending_generator_chains.is_empty());
+    assert!(app.pending_generator_removals.is_empty());
+    assert!(app.pending_generator_routes.is_empty());
+    assert!(app.running_generator_chains.is_empty());
+    assert_eq!(
+        app.clip_restoration_pending_for_timeline_route(&requirement),
+        eligible
+    );
+    let actual = app.timeline_generator_routes_state(timeline);
+    if eligible {
+        assert_eq!(
+            actual,
+            RequiredGeneratorRouteState::Pending {
+                channel_id: requirement.channel_id,
+                plugin_instance_id: requirement.plugin_instance_id,
+            }
+        );
+    } else {
+        assert!(
+            matches!(actual, RequiredGeneratorRouteState::Failed(_)),
+            "{actual:?}"
+        );
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+fn refresh_pending_route_snapshot(fixture: &mut RestorationFixture) {
+    let snapshot = clip_render::project_snapshot(&fixture.app().project).unwrap();
+    let channel = fixture.app().project.channels[0].id;
+    fixture
+        .app_mut()
+        .pending_clip_restorations
+        .get_mut(&channel)
+        .unwrap()
+        .live_snapshot = snapshot;
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn restoration_pending_route_accepts_exact_unready_owner_without_mutation() {
+    let mut fixture = pending_route_fixture(true, 41);
+    // Stable mixer identity is deliberately unrelated to its actual runtime slot.
+    let channel = fixture.app().project.channels[0].id;
+    let old_id = fixture.app().project.channels[0].mixer_track;
+    let remap = |project: &mut Project| {
+        let index = project.mixer_track_index(old_id).unwrap();
+        project.mixer_tracks[index].id = 8_123;
+        project.channels[0].mixer_track = 8_123;
+        for route in &mut project.mixer_routes {
+            if route.source_mixer_track_id == old_id {
+                route.source_mixer_track_id = 8_123;
+            }
+            let (MixerRouteDestination::MainInput { mixer_track_id }
+            | MixerRouteDestination::PluginSidechain { mixer_track_id, .. }) =
+                &mut route.destination;
+            if *mixer_track_id == old_id {
+                *mixer_track_id = 8_123;
+            }
+        }
+    };
+    remap(&mut fixture.app_mut().project);
+    remap(
+        fixture
+            .app_mut()
+            .pending_clip_restorations
+            .get_mut(&channel)
+            .unwrap()
+            .candidate
+            .as_mut()
+            .unwrap(),
+    );
+    refresh_pending_route_snapshot(&mut fixture);
+    let timeline = route_test_timeline(&fixture.app().project);
+    assert_ne!(exact_route(&timeline).mixer_track as u64, 8_123);
+    let pending = &fixture.app().pending_clip_restorations[&channel];
+    assert!(!pending.ready);
+    assert!(
+        pending
+            .chain
+            .as_ref()
+            .unwrap()
+            .control
+            .plugin_endpoint_snapshot()
+            .is_none()
+    );
+    let owner = restoration_owner_ids(pending);
+    let started_at = pending.started_at;
+    let candidate_bytes =
+        clip_render::project_snapshot(pending.candidate.as_ref().unwrap()).unwrap();
+    let history = project_and_history(fixture.app());
+    let state = fixture.app().genuine_timeline_app_state();
+    let next_endpoint = fixture.app().next_generator_endpoint_id;
+    let callback_before = fixture.callback.as_ref().unwrap().genuine_snapshot();
+    let captures = fixture.source.as_ref().unwrap().capture_count();
+    for _ in 0..8 {
+        assert_pending_route(&fixture, &timeline, true);
+        let pending = &fixture.app().pending_clip_restorations[&channel];
+        assert!(!pending.ready);
+        assert_eq!(restoration_owner_ids(pending), owner);
+        assert_eq!(pending.started_at, started_at);
+        assert!(
+            clip_render::project_matches_snapshot(
+                pending.candidate.as_ref().unwrap(),
+                &candidate_bytes
+            )
+            .unwrap()
+        );
+        assert_eq!(project_and_history(fixture.app()), history);
+        assert_eq!(fixture.app().genuine_timeline_app_state(), state);
+        assert_eq!(fixture.app().next_generator_endpoint_id, next_endpoint);
+    }
+    assert_eq!(fixture.source.as_ref().unwrap().capture_count(), captures);
+    let callback_after = fixture.callback.as_ref().unwrap().genuine_snapshot();
+    assert_eq!(
+        callback_after.pending_audio_commands,
+        callback_before.pending_audio_commands
+    );
+    assert_eq!(callback_after.device_frame, callback_before.device_frame);
+    assert!(callback_after.endpoints.is_empty());
+    // Published metadata before App consumption of the actual Ready is still Pending.
+    fixture.source.as_ref().unwrap().release_prepare();
+    fixture.wait_for_actual_worker_snapshot();
+    assert_pending_route(&fixture, &timeline, true);
+    assert!(!fixture.app().pending_clip_restorations[&channel].ready);
+    fill_ordinary_ring_and_prove_stop_all_rejected(fixture.app_mut());
+    fixture.app_mut().poll_clip_restorations();
+    let pending = &fixture.app().pending_clip_restorations[&channel];
+    assert!(
+        pending.ready,
+        "read-only classification must leave the actual Ready queued"
+    );
+    assert_eq!(restoration_owner_ids(pending), owner);
+    assert_eq!(pending.started_at, started_at);
+    assert_pending_route(&fixture, &timeline, true);
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn restoration_pending_route_rejects_channel_instance_mixer_and_session_mismatch() {
+    let mut fixture = pending_route_fixture(false, 41);
+    let timeline = route_test_timeline(&fixture.app().project);
+    let requirement = exact_route(&timeline);
+    let channel = requirement.channel_id;
+    for mismatch in 0..3 {
+        let mut model = fixture.app().project.clone();
+        match mismatch {
+            0 => model.channels[0].id += 100,
+            1 => {
+                model.channels[0].instrument_plugin_instance_id = Some(42);
+                model.plugin_instances[0].id = 42;
+            }
+            _ => {
+                model.channels[0].mixer_track = model
+                    .mixer_tracks
+                    .iter()
+                    .find(|track| usize::from(track.runtime_slot) != requirement.mixer_track)
+                    .unwrap()
+                    .id
+            }
+        }
+        assert_pending_route(&fixture, &route_test_timeline(&model), false);
+    }
+    let owner = fixture
+        .app_mut()
+        .pending_clip_restorations
+        .remove(&channel)
+        .unwrap();
+    fixture
+        .app_mut()
+        .pending_clip_restorations
+        .insert(channel + 100, owner);
+    assert_pending_route(&fixture, &timeline, false);
+    let owner = fixture
+        .app_mut()
+        .pending_clip_restorations
+        .remove(&(channel + 100))
+        .unwrap();
+    fixture
+        .app_mut()
+        .pending_clip_restorations
+        .insert(channel, owner);
+    let original = fixture.app().pending_clip_restorations[&channel]
+        .candidate
+        .as_ref()
+        .unwrap()
+        .clone();
+    for mismatch in 0..4 {
+        let candidate = fixture
+            .app_mut()
+            .pending_clip_restorations
+            .get_mut(&channel)
+            .unwrap()
+            .candidate
+            .as_mut()
+            .unwrap();
+        match mismatch {
+            0 => candidate.channels[0].id += 100,
+            1 => candidate.channels[0].instrument_plugin_instance_id = Some(42),
+            2 => candidate.plugin_instances[0].id = 42,
+            _ => {
+                candidate.channels[0].mixer_track = candidate
+                    .mixer_tracks
+                    .iter()
+                    .find(|track| usize::from(track.runtime_slot) != requirement.mixer_track)
+                    .unwrap()
+                    .id
+            }
+        }
+        assert_pending_route(&fixture, &timeline, false);
+        fixture
+            .app_mut()
+            .pending_clip_restorations
+            .get_mut(&channel)
+            .unwrap()
+            .candidate = Some(original.clone());
+    }
+    let session = fixture.app().project_session;
+    fixture.app_mut().project_session += 1;
+    assert_pending_route(&fixture, &timeline, false);
+    fixture.app_mut().project_session = session;
+    fixture
+        .app_mut()
+        .pending_clip_restorations
+        .get_mut(&channel)
+        .unwrap()
+        .project_session += 1;
+    assert_pending_route(&fixture, &timeline, false);
+    fixture
+        .app_mut()
+        .pending_clip_restorations
+        .get_mut(&channel)
+        .unwrap()
+        .project_session = session;
+    assert!(
+        fixture
+            .app_mut()
+            .audio
+            .as_mut()
+            .unwrap()
+            .set_project_session(session + 1)
+    );
+    assert_pending_route(&fixture, &timeline, false);
+    assert!(
+        fixture
+            .app_mut()
+            .audio
+            .as_mut()
+            .unwrap()
+            .set_project_session(session)
+    );
+    let audio = fixture.app_mut().audio.take();
+    assert_pending_route(&fixture, &timeline, false);
+    fixture.app_mut().audio = audio;
+    let (mut replacement, callback) = AudioEngine::test_engine_with_callback();
+    assert!(replacement.set_project_session(session));
+    assert_ne!(
+        replacement.engine_session(),
+        fixture.app().audio.as_ref().unwrap().engine_session()
+    );
+    fixture.callback = Some(callback);
+    fixture.app_mut().audio = Some(replacement);
+    assert_pending_route(&fixture, &timeline, false);
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn restoration_pending_route_rejects_stale_live_revision_snapshot_and_candidate_binding() {
+    let mut fixture = pending_route_fixture(false, 41);
+    let timeline = route_test_timeline(&fixture.app().project);
+    let channel = exact_route(&timeline).channel_id;
+    let original = fixture.app().project.clone();
+    fixture.app_mut().clip_render_model_revision += 1;
+    assert_pending_route(&fixture, &timeline, false);
+    fixture.app_mut().clip_render_model_revision -= 1;
+    fixture
+        .app_mut()
+        .project
+        .name
+        .push_str(" live changed with same revision");
+    assert_pending_route(&fixture, &timeline, false);
+    fixture.app_mut().project = original;
+    let snapshot = fixture.app().pending_clip_restorations[&channel]
+        .live_snapshot
+        .clone();
+    fixture
+        .app_mut()
+        .pending_clip_restorations
+        .get_mut(&channel)
+        .unwrap()
+        .live_snapshot = Arc::from([0_u8]);
+    assert_pending_route(&fixture, &timeline, false);
+    fixture
+        .app_mut()
+        .pending_clip_restorations
+        .get_mut(&channel)
+        .unwrap()
+        .live_snapshot = snapshot;
+    let candidate = fixture
+        .app_mut()
+        .pending_clip_restorations
+        .get_mut(&channel)
+        .unwrap()
+        .candidate
+        .take();
+    assert_pending_route(&fixture, &timeline, false);
+    fixture
+        .app_mut()
+        .pending_clip_restorations
+        .get_mut(&channel)
+        .unwrap()
+        .candidate = candidate;
+    fixture
+        .app_mut()
+        .pending_clip_restorations
+        .get_mut(&channel)
+        .unwrap()
+        .candidate
+        .as_mut()
+        .unwrap()
+        .plugin_instances
+        .clear();
+    assert_pending_route(&fixture, &timeline, false);
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn restoration_pending_route_rejects_missing_or_changed_binding_and_dry_configuration() {
+    let mut fixture = pending_route_fixture(false, 41);
+    let timeline = route_test_timeline(&fixture.app().project);
+    let channel = exact_route(&timeline).channel_id;
+    let binding = fixture
+        .app_mut()
+        .clip_render_restorations
+        .remove(&41)
+        .unwrap();
+    assert_pending_route(&fixture, &timeline, false);
+    fixture
+        .app_mut()
+        .clip_render_restorations
+        .insert(41, binding.clone());
+    for mismatch in 0..6 {
+        let changed = fixture
+            .app_mut()
+            .clip_render_restorations
+            .get_mut(&41)
+            .unwrap();
+        match mismatch {
+            0 => changed.project_session += 1,
+            1 => changed.instance_id += 1,
+            2 => changed.descriptor_id.push_str(" changed"),
+            3 => changed.module_path = PathBuf::from("/changed-binding.vst3"),
+            4 => changed.metadata.latency_samples += 1,
+            _ => changed.metadata.tail_samples += 1,
+        }
+        assert_pending_route(&fixture, &timeline, false);
+        fixture
+            .app_mut()
+            .clip_render_restorations
+            .insert(41, binding.clone());
+    }
+    let live = fixture.app().project.clone();
+    let candidate = fixture.app().pending_clip_restorations[&channel]
+        .candidate
+        .as_ref()
+        .unwrap()
+        .clone();
+    for change_live in [false, true] {
+        for mismatch in 0..8 {
+            let project = if change_live {
+                &mut fixture.app_mut().project
+            } else {
+                fixture
+                    .app_mut()
+                    .pending_clip_restorations
+                    .get_mut(&channel)
+                    .unwrap()
+                    .candidate
+                    .as_mut()
+                    .unwrap()
+            };
+            let instance = &mut project.plugin_instances[0];
+            match mismatch {
+                0 => instance.uid.push_str(" changed"),
+                1 => instance.path = PathBuf::from("/changed-instance.vst3"),
+                2 => instance.format = ProjectPluginFormat::Vst2,
+                3 => instance.role = PluginRole::Effect,
+                4 => instance.enabled = false,
+                5 => instance.bypass = true,
+                6 => instance.wet = 0.0,
+                _ => instance.wet = 0.5,
+            }
+            // For live cases keep currentness exact, isolating the live binding/config guard.
+            if change_live {
+                refresh_pending_route_snapshot(&mut fixture);
+            }
+            assert_pending_route(&fixture, &timeline, false);
+            fixture.app_mut().project = live.clone();
+            fixture
+                .app_mut()
+                .pending_clip_restorations
+                .get_mut(&channel)
+                .unwrap()
+                .candidate = Some(candidate.clone());
+            refresh_pending_route_snapshot(&mut fixture);
+        }
+    }
+    assert_pending_route(&fixture, &timeline, true);
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn restoration_pending_route_rejects_expiry_terminal_failure_cancelled_and_missing_owner() {
+    {
+        let mut fixture = pending_route_fixture(false, 41);
+        let timeline = route_test_timeline(&fixture.app().project);
+        let channel = exact_route(&timeline).channel_id;
+        let started_at = fixture.app().pending_clip_restorations[&channel].started_at;
+        fixture
+            .app_mut()
+            .pending_clip_restorations
+            .get_mut(&channel)
+            .unwrap()
+            .started_at = Instant::now() - Duration::from_secs(36);
+        assert_pending_route(&fixture, &timeline, false);
+        fixture
+            .app_mut()
+            .pending_clip_restorations
+            .get_mut(&channel)
+            .unwrap()
+            .started_at = started_at;
+        fixture.app_mut().clip_restoration_failed = true;
+        assert_pending_route(&fixture, &timeline, false);
+        fixture.app_mut().clip_restoration_failed = false;
+        fixture.app_mut().clip_restoration_playback_pending = false;
+        assert_pending_route(&fixture, &timeline, false);
+        fixture.app_mut().clip_restoration_playback_pending = true;
+        fixture.removed_restoration = fixture.app_mut().pending_clip_restorations.remove(&channel);
+        assert_pending_route(&fixture, &timeline, false);
+        let pending = fixture.removed_restoration.take().unwrap();
+        fixture
+            .app_mut()
+            .pending_clip_restorations
+            .insert(channel, pending);
+        fixture.untransferred = fixture
+            .app_mut()
+            .pending_clip_restorations
+            .get_mut(&channel)
+            .unwrap()
+            .chain
+            .take();
+        assert_pending_route(&fixture, &timeline, false);
+        let chain = fixture.untransferred.take().unwrap();
+        fixture
+            .app_mut()
+            .pending_clip_restorations
+            .get_mut(&channel)
+            .unwrap()
+            .chain = Some(chain);
+        assert_pending_route(&fixture, &timeline, true);
+        // A split/transferred owner is retained for cleanup, never a route certificate.
+        let pending = fixture
+            .app_mut()
+            .pending_clip_restorations
+            .get_mut(&channel)
+            .unwrap();
+        let PluginChain {
+            audio,
+            control,
+            guard,
+        } = pending.chain.take().unwrap();
+        pending.transferred_control = Some(control);
+        pending.transferred_guard = Some(guard);
+        drop(audio);
+        assert_pending_route(&fixture, &timeline, false);
+        let guard = fixture
+            .app_mut()
+            .pending_clip_restorations
+            .get_mut(&channel)
+            .unwrap()
+            .transferred_guard
+            .take()
+            .unwrap();
+        fixture.app_mut().retired_clip_restorations.push(guard);
+        fixture
+            .app_mut()
+            .pending_clip_restorations
+            .get_mut(&channel)
+            .unwrap()
+            .transferred_control = None;
+        assert_pending_route(&fixture, &timeline, false);
+    }
+    // Obtain an actual refused session intent with no moved source owners. Its
+    // original real callback-confirmed worker is drained by Fixture before reuse.
+    let retirement = {
+        let mut fixture = Fixture::new();
+        let binding = fixture
+            .app_mut()
+            .prepare_clip_render_restoration(41, &source_state().metadata)
+            .unwrap();
+        fixture.app_mut().install_clip_render_restoration(binding);
+        fixture.app_mut().clip_restoration_playback_pending = true;
+        assert!(
+            fixture
+                .app_mut()
+                .defer_clip_session_intent(ProjectIntent::Quit)
+                .is_none()
+        );
+        fixture.app_mut().clip_session_retirement.take().unwrap()
+    };
+    let mut fixture = pending_route_fixture(false, 41);
+    let timeline = route_test_timeline(&fixture.app().project);
+    assert_pending_route(&fixture, &timeline, true);
+    fixture.app_mut().clip_session_retirement = Some(retirement);
+    assert_pending_route(&fixture, &timeline, false);
+    assert!(fixture.app_mut().cancel_clip_session_retirement());
+    assert_pending_route(&fixture, &timeline, true);
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn restoration_pending_route_rejects_observed_worker_fault_stop_and_published_identity_timing_drift()
+ {
+    {
+        let mut fixture = pending_route_fixture(true, 41);
+        let timeline = route_test_timeline(&fixture.app().project);
+        let channel = exact_route(&timeline).channel_id;
+        assert!(
+            fixture.app().pending_clip_restorations[&channel]
+                .chain
+                .as_ref()
+                .unwrap()
+                .control
+                .plugin_endpoint_snapshot()
+                .is_none()
+        );
+        assert_pending_route(&fixture, &timeline, true);
+        // Synthetic missing-read input only: None can also be a coherent-read
+        // collision after a real Ready. It grants only Pending, never Ready or
+        // admission. No successful worker or callback receipt is fabricated.
+        fixture
+            .app_mut()
+            .pending_clip_restorations
+            .get_mut(&channel)
+            .unwrap()
+            .ready = true;
+        assert_pending_route(&fixture, &timeline, true);
+        fixture
+            .app_mut()
+            .pending_clip_restorations
+            .get_mut(&channel)
+            .unwrap()
+            .ready = false;
+        assert_pending_route(&fixture, &timeline, true);
+    }
+    {
+        let fixture = pending_route_fixture(false, 42);
+        let timeline = route_test_timeline(&fixture.app().project);
+        let channel = exact_route(&timeline).channel_id;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fixture.app().pending_clip_restorations[&channel]
+            .chain
+            .as_ref()
+            .unwrap()
+            .control
+            .plugin_endpoint_snapshot()
+            .is_none()
+        {
+            assert!(
+                Instant::now() < deadline,
+                "real mismatched manifest did not publish"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_pending_route(&fixture, &timeline, false);
+        assert!(!fixture.app().pending_clip_restorations[&channel].ready);
+    }
+    {
+        let mut fixture = pending_route_fixture(false, 41);
+        fixture.wait_for_actual_worker_snapshot();
+        let timeline = route_test_timeline(&fixture.app().project);
+        let channel = exact_route(&timeline).channel_id;
+        assert_pending_route(&fixture, &timeline, true);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // Explicit retained shutdown observes the real stopped flag; no stats are overwritten.
+        loop {
+            let result = fixture
+                .app_mut()
+                .pending_clip_restorations
+                .get_mut(&channel)
+                .unwrap()
+                .chain
+                .as_mut()
+                .unwrap()
+                .guard
+                .poll_shutdown_retained();
+            if result == RetainedShutdownPoll::Joined {
+                break;
+            }
+            assert_eq!(result, RetainedShutdownPoll::Pending);
+            assert!(
+                Instant::now() < deadline,
+                "exact mock shutdown did not join"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            fixture.app().pending_clip_restorations[&channel]
+                .chain
+                .as_ref()
+                .unwrap()
+                .control
+                .stats()
+                .stopped
+        );
+        assert_pending_route(&fixture, &timeline, false);
+    }
+    {
+        let mut fixture = pending_route_fixture(false, 41);
+        fixture.wait_for_actual_worker_snapshot();
+        let timeline = route_test_timeline(&fixture.app().project);
+        let channel = exact_route(&timeline).channel_id;
+        let mut changed = source_state();
+        changed.metadata.latency_samples = 1;
+        fixture.source.as_ref().unwrap().set_capture_state(changed);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !fixture.app().pending_clip_restorations[&channel]
+            .chain
+            .as_ref()
+            .unwrap()
+            .control
+            .plugin_endpoint_snapshot()
+            .is_some_and(|snapshot| snapshot.total_plugin_latency_samples() == 1)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "real changed timing did not publish"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!fixture.app().pending_clip_restorations[&channel].ready);
+        assert_pending_route(&fixture, &timeline, true);
+        // The actual driver consumes Ready and rejects the published mismatch.
+        fixture.removed_restoration = fixture.app_mut().pending_clip_restorations.remove(&channel);
+        // Keep the sole worker inside the active cleanup fixture throughout the call.
+        let RestorationFixture {
+            app,
+            removed_restoration,
+            ..
+        } = &mut fixture;
+        let result = app
+            .as_deref_mut()
+            .unwrap()
+            .drive_clip_restoration(channel, removed_restoration.as_mut().unwrap());
+        assert!(result.unwrap_err().contains("identity/timing"));
+        let pending = fixture.removed_restoration.take().unwrap();
+        fixture
+            .app_mut()
+            .pending_clip_restorations
+            .insert(channel, pending);
+        assert!(fixture.app().pending_clip_restorations[&channel].ready);
+        assert_pending_route(&fixture, &timeline, false);
+    }
+    {
+        let fixture = pending_route_fixture(false, 41);
+        fixture.wait_for_actual_worker_snapshot();
+        let timeline = route_test_timeline(&fixture.app().project);
+        let channel = exact_route(&timeline).channel_id;
+        fixture
+            .source
+            .as_ref()
+            .unwrap()
+            .fail_capture_after_gate("actual predicate-matrix backend failure".into());
+        let control = &fixture.app().pending_clip_restorations[&channel]
+            .chain
+            .as_ref()
+            .unwrap()
+            .control;
+        let receiver = control
+            .request_instrument_bounce_state(41, control.stats().current_epoch, vec![17])
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let outcome = loop {
+            match receiver.try_recv() {
+                Ok(outcome) => break outcome,
+                Err(std::sync::mpsc::TryRecvError::Empty) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1))
+                }
+                other => panic!("actual failure capture did not terminate: {other:?}"),
+            }
+        };
+        assert!(matches!(
+            outcome,
+            Err(crate::instrument_bounce::BounceCaptureError::BackendFailed(
+                _
+            ))
+        ));
+        assert!(receiver.termination_acknowledged());
+        assert!(control.stats().faults > 0);
+        assert_pending_route(&fixture, &timeline, false);
+    }
+}
+
+#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[test]
+fn restoration_pending_route_preserves_ordinary_pending_and_confirmed_route_results() {
+    let mut fixture = pending_route_fixture(false, 41);
+    fixture.wait_for_actual_worker_snapshot();
+    let timeline = route_test_timeline(&fixture.app().project);
+    let requirement = exact_route(&timeline);
+    let channel = requirement.channel_id;
+    let empty = route_test_timeline(&Project::blank());
+    assert_eq!(
+        fixture.app().timeline_generator_routes_state(&empty),
+        RequiredGeneratorRouteState::Ready
+    );
+    fixture.app_mut().clip_restoration_playback_pending = false;
+    assert_pending_route(&fixture, &timeline, false);
+    let project_session = fixture.app().project_session;
+    for ordinary in 0..2 {
+        match ordinary {
+            0 => {
+                fixture
+                    .app_mut()
+                    .pending_generator_routes
+                    .insert(channel, requirement.mixer_track);
+            }
+            _ => {
+                fixture.app_mut().pending_generator_removals.insert(
+                    channel,
+                    PendingGeneratorRemoval {
+                        project_session,
+                        endpoint_id: None,
+                        plugin_instance_id: Some(41),
+                    },
+                );
+            }
+        }
+        assert_eq!(
+            fixture.app().timeline_generator_routes_state(&timeline),
+            RequiredGeneratorRouteState::Pending {
+                channel_id: channel,
+                plugin_instance_id: 41,
+            }
+        );
+        fixture.app_mut().pending_generator_routes.clear();
+        fixture.app_mut().pending_generator_removals.clear();
+    }
+    fixture.app_mut().clip_restoration_playback_pending = true;
+    let owner = restoration_owner_ids(&fixture.app().pending_clip_restorations[&channel]);
+    fixture.app_mut().poll_clip_restorations();
+    assert!(fixture.app().pending_clip_restorations.is_empty());
+    assert!(fixture.app().running_generator_chains.is_empty());
+    let pending = &fixture.app().pending_generator_chains[&channel];
+    assert_eq!(
+        (
+            pending.control.genuine_worker_id(),
+            pending.guard.genuine_worker_id()
+        ),
+        (owner.0, owner.0)
+    );
+    assert_eq!(
+        fixture.app().timeline_generator_routes_state(&timeline),
+        RequiredGeneratorRouteState::Pending {
+            channel_id: channel,
+            plugin_instance_id: 41,
+        }
+    );
+    // Only the actual callback Installed receipt may create the confirmed route.
+    fixture
+        .callback
+        .as_mut()
+        .unwrap()
+        .pump(fixture.app.as_ref().unwrap().audio.as_ref().unwrap(), 128);
+    fixture.app_mut().poll_generator_endpoint_events();
+    assert!(fixture.app().pending_generator_chains.is_empty());
+    let running = &fixture.app().running_generator_chains[&channel];
+    assert_eq!(
+        (
+            running.control.genuine_worker_id(),
+            running.guard.genuine_worker_id()
+        ),
+        (owner.0, owner.0)
+    );
+    assert_eq!(
+        fixture.app().timeline_generator_routes_state(&timeline),
+        RequiredGeneratorRouteState::Ready
+    );
+    fixture
+        .app_mut()
+        .pending_generator_routes
+        .insert(channel, requirement.mixer_track);
+    assert_eq!(
+        fixture.app().timeline_generator_routes_state(&timeline),
+        RequiredGeneratorRouteState::Pending {
+            channel_id: channel,
+            plugin_instance_id: 41,
+        }
+    );
 }

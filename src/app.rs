@@ -14145,13 +14145,18 @@ impl CitrusApp {
             })
             .collect::<Vec<_>>();
         confirmed.sort_unstable_by_key(|route| route.channel_id);
-        let pending_channels = self
+        let mut pending_channels = self
             .pending_generator_chains
             .keys()
             .chain(self.pending_generator_removals.keys())
             .chain(self.pending_generator_routes.keys())
             .copied()
             .collect::<HashSet<_>>();
+        for requirement in &requirements {
+            if self.clip_restoration_pending_for_timeline_route(requirement) {
+                pending_channels.insert(requirement.channel_id);
+            }
+        }
         required_generator_route_state(&requirements, &confirmed, &pending_channels)
     }
 

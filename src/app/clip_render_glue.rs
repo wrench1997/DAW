@@ -306,6 +306,105 @@ impl CitrusApp {
         self.clip_restoration_resources_pending()
             || self.clip_restoration_playback_pending && !self.clip_restoration_failed
     }
+    /// An exact retained preparation can delay dispatch, but cannot certify Ready.
+    /// Keep event consumption, endpoint transfer and final admission in the driver.
+    pub(super) fn clip_restoration_pending_for_timeline_route(
+        &self,
+        requirement: &GeneratorRouteRequirement,
+    ) -> bool {
+        if !self.clip_restoration_playback_pending
+            || self.clip_restoration_failed
+            || self.clip_session_retirement_pending()
+        {
+            return false;
+        }
+        let Some(pending) = self.pending_clip_restorations.get(&requirement.channel_id) else {
+            return false;
+        };
+        if pending.instance_id != requirement.plugin_instance_id
+            || pending.project_session != self.project_session
+            || self.audio.as_ref().is_none_or(|audio| {
+                audio.engine_session() != pending.engine_session
+                    || audio.project_session() != pending.project_session
+            })
+            || pending.started_at.elapsed() > Duration::from_secs(35)
+            || pending.transferred_control.is_some()
+            || pending.transferred_guard.is_some()
+        {
+            return false;
+        }
+        let (Some(candidate), Some(chain)) = (&pending.candidate, &pending.chain) else {
+            return false;
+        };
+        let stats = chain.control.stats();
+        if stats.faults != 0
+            || stats.stopped
+            || pending.live_revision != self.clip_render_model_revision
+            || !matches!(
+                clip_render::project_matches_snapshot(&self.project, &pending.live_snapshot),
+                Ok(true)
+            )
+        {
+            return false;
+        }
+        let Some(binding) = self.clip_render_restorations.get(&pending.instance_id) else {
+            return false;
+        };
+        if pending.expected_timing
+            != (
+                binding.metadata.latency_samples,
+                binding.metadata.tail_samples,
+            )
+        {
+            return false;
+        }
+        // Borrow model identities directly: runtime-spec construction clones
+        // opaque state and is unnecessary for this read-only route decision.
+        for project in [&self.project, candidate] {
+            let Some(channel) = project
+                .channels
+                .iter()
+                .find(|channel| channel.id == requirement.channel_id)
+            else {
+                return false;
+            };
+            if channel.instrument_plugin_instance_id != Some(pending.instance_id)
+                || project.mixer_runtime_slot(channel.mixer_track) != Some(requirement.mixer_track)
+            {
+                return false;
+            }
+            let Some(instance) = project
+                .plugin_instances
+                .iter()
+                .find(|instance| instance.id == pending.instance_id)
+            else {
+                return false;
+            };
+            if !binding.matches_playback_instance(self.project_session, instance)
+                || !instance.enabled
+                || instance.bypass
+                || instance.wet.to_bits() != 1.0f32.to_bits()
+            {
+                return false;
+            }
+        }
+        // None may be a bounded coherent-read collision, including after Ready.
+        // It remains a wait, exactly as in drive_clip_restoration; only a
+        // published Ready snapshot is checked for active/timing coherence here.
+        if let Some(snapshot) = chain.control.plugin_endpoint_snapshot()
+            && (snapshot.slot_count() != 1
+                || snapshot.manifest().instance_ids[0] != Some(pending.instance_id)
+                || pending.ready
+                    && (snapshot.active_mask() != 1
+                        || (
+                            snapshot.total_plugin_latency_samples(),
+                            snapshot.tail_samples(),
+                        ) != pending.expected_timing))
+        {
+            return false;
+        }
+        true
+    }
     pub(super) fn source_restoration_expectation(
         &self,
         candidate: &Project,
