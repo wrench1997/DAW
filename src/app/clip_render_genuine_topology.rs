@@ -149,6 +149,7 @@ pub(crate) struct OwnedTopologyLedger {
     failed: std::cell::Cell<bool>,
     // Fixed, observation-only provenance. Neither retention nor emission can
     // grant authority or replace the original sticky ledger failure.
+    first_rejected_claim: Option<OwnedTopologyClaim>,
     first_rejected_issued_state: Option<TimelineAppState>,
     issued_failure_observation_attempted: bool,
     issued_failure_diagnostic_error: Option<String>,
@@ -197,6 +198,7 @@ impl OwnedTopologyLedger {
         Self {
             run,
             failed: std::cell::Cell::new(false),
+            first_rejected_claim: None,
             first_rejected_issued_state: None,
             issued_failure_observation_attempted: false,
             issued_failure_diagnostic_error: None,
@@ -1052,7 +1054,7 @@ impl OwnedTopologyLedger {
         Ok(true)
     }
     pub(crate) fn evidence(&self) -> Value {
-        json!({"terminal_failure":self.failed.get(),"settled_count":self.settled,"settled_baseline":self.baseline,"lifecycle_receipts":self.observed_receipts,"slots":self.slots.iter().map(|s| json!({"phase":s.phase,"kind":s.claim.map(|c|c.kind),"callback_receipt_ordinal":s.receipt.map(|r|r.record_ordinal),"callback_pump":s.receipt.map(|r|r.pump_ordinal),"expected_next_poll":s.claim.map(|c|c.next_poll),"consumed_poll":s.consumed_poll,"owner_issued_timeline":s.timeline,"issued_and_consumed":s.requests})).collect::<Vec<_>>()})
+        json!({"terminal_failure":self.failed.get(),"first_rejected_claim":self.first_rejected_claim.map(claim_evidence),"settled_count":self.settled,"settled_baseline":self.baseline,"lifecycle_receipts":self.observed_receipts,"slots":self.slots.iter().map(|s| json!({"phase":s.phase,"kind":s.claim.map(|c|c.kind),"callback_receipt_ordinal":s.receipt.map(|r|r.record_ordinal),"callback_pump":s.receipt.map(|r|r.pump_ordinal),"expected_next_poll":s.claim.map(|c|c.next_poll),"consumed_poll":s.consumed_poll,"owner_issued_timeline":s.timeline,"issued_and_consumed":s.requests})).collect::<Vec<_>>()})
     }
 }
 
@@ -2046,8 +2048,10 @@ impl GenuineFixture {
 impl OwnedTopologyLedger {
     pub(crate) fn claim(&mut self, c: OwnedTopologyClaim) -> Check {
         require(!self.failed.get(), "owned topology ledger already terminal")?;
+        let supplied_claim = c;
         let result = self.claim_inner(c);
         if result.is_err() {
+            self.first_rejected_claim.get_or_insert(supplied_claim);
             self.failed.set(true);
         }
         result

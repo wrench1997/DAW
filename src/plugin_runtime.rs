@@ -55,6 +55,10 @@ mod capture_settlement_tests;
 mod retained_shutdown_tests;
 
 #[cfg(test)]
+#[path = "plugin_worker_identity_tests.rs"]
+mod worker_identity_tests;
+
+#[cfg(test)]
 #[path = "plugin_test_capture_source.rs"]
 pub(crate) mod test_capture_source;
 
@@ -3001,6 +3005,17 @@ struct BridgeMetrics {
     stopped: AtomicBool,
 }
 
+/// Pins only the observed allocation address, never its metrics or worker lifetime.
+#[cfg(test)]
+pub(crate) struct WorkerIdentityWitness(std::sync::Weak<BridgeMetrics>);
+
+#[cfg(test)]
+impl WorkerIdentityWitness {
+    fn new(metrics: &Arc<BridgeMetrics>) -> Self {
+        Self(Arc::downgrade(metrics))
+    }
+}
+
 impl BridgeMetrics {
     fn snapshot(&self) -> BridgeStats {
         let bridge_frames = u64::from(self.current_bridge_frames.load(Ordering::Relaxed));
@@ -3530,6 +3545,9 @@ impl PluginChain {
         let requested_epoch = Arc::clone(&metrics.requested_epoch);
         requested_epoch.store(INITIAL_TRANSPORT_EPOCH, Ordering::Relaxed);
         let parameter_edit_admission = Arc::new(AtomicU32::new(0));
+
+        #[cfg(test)]
+        genuine_observer::retain_worker_identity(|| WorkerIdentityWitness::new(&metrics));
 
         let worker_metrics = Arc::clone(&metrics);
         let worker_requested_epoch = Arc::clone(&requested_epoch);

@@ -1206,3 +1206,143 @@ fn issued_failure_evidence_nested_calls_and_serialization_preserve_primary_error
         }
     }
 }
+
+#[test]
+fn rejected_claim_evidence_preserves_exact_first_owner_pair() {
+    fn assert_preserved(
+        l: &OwnedTopologyLedger,
+        supplied: OwnedTopologyClaim,
+        pre_claim_payload: &Value,
+        before: &Value,
+        before_slots: &str,
+    ) {
+        assert_eq!(l.first_rejected_claim, Some(supplied));
+        assert!(l.failed.get());
+        assert!(!l.clear());
+        assert_eq!(format!("{:?}", l.slots), before_slots);
+        let mut expected = before.clone();
+        expected["terminal_failure"] = json!(true);
+        expected["first_rejected_claim"] = pre_claim_payload.clone();
+        assert_eq!(l.evidence(), expected);
+        // Genuine emits claim_evidence(c) before the one claim call. Mock
+        // failures include ledger.evidence(); neither representation resamples
+        // an owner, retries the claim, or emits an additional observer event.
+        let mock_failure_envelope = json!({"ledger":l.evidence()});
+        let retained = &mock_failure_envelope["ledger"]["first_rejected_claim"];
+        assert_eq!(retained, pre_claim_payload);
+        assert_eq!(retained, &claim_evidence(supplied));
+        assert_eq!(retained["endpoint"], supplied.endpoint);
+        assert_eq!(retained["worker"], supplied.worker);
+        assert_eq!(retained["previous_endpoint"], json!(supplied.previous_endpoint));
+        assert_eq!(retained["previous_worker"], json!(supplied.previous_worker));
+    }
+
+    let c = claim(OwnedTopologyKind::UndoInstall);
+    for (endpoint_alias, worker_alias) in [(true, false), (false, true), (true, true)] {
+        let supplied = OwnedTopologyClaim {
+            previous_endpoint: if endpoint_alias {
+                Some(c.endpoint)
+            } else {
+                c.previous_endpoint
+            },
+            previous_worker: if worker_alias {
+                Some(c.worker)
+            } else {
+                c.previous_worker
+            },
+            ..c
+        };
+        let mut l = ledger(c.kind);
+        let before = l.evidence();
+        let before_slots = format!("{:?}", l.slots);
+        let pre_claim_payload = claim_evidence(supplied);
+        assert_eq!(l.first_rejected_claim, None);
+        assert_eq!(l.claim(supplied), Err("Undo owner is not fresh".into()));
+        assert_preserved(&l, supplied, &pre_claim_payload, &before, &before_slots);
+        for later in [c, claim(OwnedTopologyKind::RedoRemove)] {
+            assert_ne!(later, supplied);
+            assert_eq!(
+                l.claim(later),
+                Err("owned topology ledger already terminal".into())
+            );
+            assert_eq!(
+                l.callback_receipts(&[], later.pump, later.next_poll),
+                Err("owned topology ledger already terminal".into())
+            );
+            assert_eq!(
+                l.observe_issued(app_state(later, TimelinePhase::InstallReady)),
+                Err("owned topology ledger already terminal".into())
+            );
+            assert_preserved(&l, supplied, &pre_claim_payload, &before, &before_slots);
+        }
+    }
+
+    for kind in KINDS {
+        for changed_owner in [false, true] {
+            let c = claim(kind);
+            let mut l = ledger(kind);
+            assert_eq!(l.claim(c), Ok(()));
+            assert_eq!(l.first_rejected_claim, None);
+            assert_eq!(l.evidence()["first_rejected_claim"], Value::Null);
+            assert!(!l.failed.get());
+            let deferred = OwnedTopologyClaim {
+                pump: c.pump + 1,
+                next_poll: c.next_poll + 1,
+                ..c
+            };
+            assert_eq!(l.claim(deferred), Ok(()));
+            assert_eq!(l.open().unwrap().claim, Some(deferred));
+            assert_eq!(l.first_rejected_claim, None);
+            assert_eq!(l.evidence()["first_rejected_claim"], Value::Null);
+            assert!(!l.failed.get());
+            let supplied = if changed_owner {
+                OwnedTopologyClaim {
+                    pump: deferred.pump + 1,
+                    next_poll: deferred.next_poll + 1,
+                    worker: deferred.worker + 1,
+                    ..deferred
+                }
+            } else {
+                deferred
+            };
+            let before = l.evidence();
+            let before_slots = format!("{:?}", l.slots);
+            let pre_claim_payload = claim_evidence(supplied);
+            let primary = if changed_owner {
+                "deferred command owner, exact old callback or desired obligation changed"
+            } else {
+                "deferred claim did not advance existing pump/poll"
+            };
+            assert_eq!(l.claim(supplied), Err(primary.into()));
+            assert_preserved(&l, supplied, &pre_claim_payload, &before, &before_slots);
+            assert_eq!(
+                l.claim(c),
+                Err("owned topology ledger already terminal".into())
+            );
+            assert_preserved(&l, supplied, &pre_claim_payload, &before, &before_slots);
+        }
+    }
+
+    let c = claim(OwnedTopologyKind::InitialInstall);
+    let mut l = ledger(c.kind);
+    let before_slots = format!("{:?}", l.slots);
+    let mut expected = l.evidence();
+    assert_eq!(
+        l.callback_receipts(&[receipt(c)], c.pump, c.next_poll),
+        Err("unsolicited lifecycle receipt".into())
+    );
+    expected["terminal_failure"] = json!(true);
+    assert!(l.failed.get());
+    assert!(!l.clear());
+    assert_eq!(l.evidence(), expected);
+    for later in [c, claim(OwnedTopologyKind::UndoInstall)] {
+        assert_eq!(
+            l.claim(later),
+            Err("owned topology ledger already terminal".into())
+        );
+        assert_eq!(l.first_rejected_claim, None);
+        assert_eq!(l.evidence()["first_rejected_claim"], Value::Null);
+        assert_eq!(l.evidence(), expected);
+        assert_eq!(format!("{:?}", l.slots), before_slots);
+    }
+}

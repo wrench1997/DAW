@@ -13,7 +13,9 @@ use crate::{
         BouncePluginMetadata, BouncePluginState, BounceSourceIdentity, CapturedInstrumentBounce,
         render::{BackendFailure, RenderReport},
     },
-    plugins::plugin_runtime::{BridgeStats, PluginEndpointManifest, PluginTransport, RuntimeEvent},
+    plugins::plugin_runtime::{
+        BridgeStats, PluginEndpointManifest, PluginTransport, RuntimeEvent, WorkerIdentityWitness,
+    },
 };
 use std::{
     cell::{Cell, RefCell},
@@ -22,6 +24,7 @@ use std::{
 
 pub(crate) const MAX_RECORDS: usize = 32_768;
 pub(crate) const MAX_RECORD_BATCH: usize = 64;
+pub(crate) const MAX_WORKER_IDENTITIES: usize = 4;
 pub(crate) const MAX_TIMELINE_EVENTS: usize = 256;
 // Cumulative copied payload accounting; this is not an allocator/RSS limit.
 pub(crate) const MAX_PRIVATE_BYTES: usize = 256 * 1024 * 1024;
@@ -354,6 +357,7 @@ pub(crate) struct ObservationSnapshot {
     phases: [bool; 3],
     record_cap: usize,
     byte_cap: usize,
+    worker_identities: [Option<WorkerIdentityWitness>; MAX_WORKER_IDENTITIES],
 }
 impl ObservationSnapshot {
     fn new(record_cap: usize, byte_cap: usize) -> Result<Self, &'static str> {
@@ -373,6 +377,7 @@ impl ObservationSnapshot {
             phases: [false; 3],
             record_cap,
             byte_cap,
+            worker_identities: std::array::from_fn(|_| None),
         })
     }
     fn fail(&mut self, failure: &'static str) {
@@ -479,6 +484,22 @@ fn with_run(run: &Arc<Mutex<ObservationSnapshot>>, f: impl FnOnce(&mut Observati
             f(&mut state);
         }
     }
+}
+
+/// Synchronous worker/control-side registration before spawn. The builder is
+/// never called without an active run and a free, lifetime-owned witness slot.
+pub(crate) fn retain_worker_identity(build: impl FnOnce() -> WorkerIdentityWitness) {
+    with_active(|state| {
+        let Some(slot) = state
+            .worker_identities
+            .iter_mut()
+            .find(|slot| slot.is_none())
+        else {
+            state.fail("observer worker identity cap exceeded");
+            return;
+        };
+        *slot = Some(build());
+    });
 }
 
 #[cfg_attr(
