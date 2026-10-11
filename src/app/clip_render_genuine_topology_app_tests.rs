@@ -422,8 +422,7 @@ impl TopologyFixture {
             } else {
                 latest_worker()
             };
-            let (previous_endpoint, previous_worker) = if kind == OwnedTopologyKind::RedoRemove
-            {
+            let (previous_endpoint, previous_worker) = if kind == OwnedTopologyKind::RedoRemove {
                 (
                     self.fixture
                         .app
