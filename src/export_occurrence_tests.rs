@@ -51,7 +51,10 @@ fn owned_float32_unsupported_platform_refuses_before_any_file_side_effect() {
         .unwrap_err();
         assert_eq!(failure.primary.kind, PublicationErrorKind::Unsupported);
         assert_eq!(failure.primary.operation, PublicationOperation::Write);
-        assert_eq!(failure.primary.io_kind, Some(std::io::ErrorKind::Unsupported));
+        assert_eq!(
+            failure.primary.io_kind,
+            Some(std::io::ErrorKind::Unsupported)
+        );
         assert_eq!(failure.evidence.phase, PublicationPhase::PreLink);
         assert!(failure.evidence.retained_destination.is_none());
         assert!(failure.evidence.retained_stage.is_none());
