@@ -10,9 +10,10 @@
 //! processing methods allocate nothing, lock nothing and perform no I/O.
 
 use crate::plugins::plugin_runtime::{
-    AudioThreadEndpoint, BridgeStats, MAX_PLUGIN_BLOCK_FRAMES, MidiMessage, ParameterEditId,
-    PluginEndpointManifest, PluginEndpointSnapshot, PluginLatencySnapshot, PluginMidiBatch,
-    PluginMidiOutput, PluginTransport, RealtimeOutputSource, RealtimeProcessStatus, SubmitStatus,
+    AudioThreadEndpoint, BounceSourceCallbackIdentity, BridgeStats, MAX_PLUGIN_BLOCK_FRAMES,
+    MidiMessage, ParameterEditId, PluginEndpointManifest, PluginEndpointSnapshot,
+    PluginLatencySnapshot, PluginMidiBatch, PluginMidiOutput, PluginTransport,
+    RealtimeOutputSource, RealtimeProcessStatus, SubmitStatus,
 };
 use crate::timeline::{
     TIMELINE_ENDPOINT_MAX_EVENTS_PER_CALLBACK, TIMELINE_ENDPOINT_MAX_EVENTS_PER_QUANTUM,
@@ -466,6 +467,24 @@ pub(crate) struct GenuineFixedQuantumSnapshot {
 }
 
 impl FixedQuantumAdapter<AudioThreadEndpoint> {
+    pub(crate) fn invalidate_bounce_source_settlement(&self) {
+        self.endpoint.invalidate_bounce_source_settlement();
+    }
+
+    pub(crate) fn publish_bounce_source_settlement(
+        &self,
+        identity: BounceSourceCallbackIdentity,
+        callback_ready: bool,
+    ) {
+        self.endpoint.publish_bounce_source_settlement(
+            identity,
+            callback_ready
+                && self.epoch == identity.epoch
+                && self.scratch.input_fill == 0
+                && self.scratch.pending_event_count == 0,
+        );
+    }
+
     #[cfg(test)]
     pub(crate) fn genuine_snapshot(&self) -> GenuineFixedQuantumSnapshot {
         GenuineFixedQuantumSnapshot {

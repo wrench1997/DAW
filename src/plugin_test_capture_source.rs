@@ -20,6 +20,43 @@ struct Shared {
     panic_on_backend_drop: AtomicBool,
     prepare_paused: Mutex<bool>,
     prepare_resume: Condvar,
+    reset: ProcessingGate,
+    process: ProcessingGate,
+    fail_process_after_gate: AtomicBool,
+}
+
+/// Mock-only backend blocking; production publications still come from the
+/// real worker scopes. Default inactive, bounded, and released by the retained
+/// Fixture before any unwind cleanup poll or exact JoinHandle shutdown.
+#[derive(Default)]
+struct ProcessingGate {
+    entries: AtomicU64,
+    paused: Mutex<bool>,
+    resume: Condvar,
+}
+impl ProcessingGate {
+    fn enter(&self) -> Result<(), String> {
+        self.entries.fetch_add(1, Ordering::AcqRel);
+        let paused = self.paused.lock().unwrap();
+        let (paused, timeout) = self
+            .resume
+            .wait_timeout_while(paused, CAPTURE_GATE_BUDGET, |paused| *paused)
+            .unwrap();
+        if timeout.timed_out() && *paused {
+            return Err("Capture fixture processing gate exceeded its bounded test budget".into());
+        }
+        Ok(())
+    }
+    fn pause(&self) {
+        *self.paused.lock().unwrap() = true;
+    }
+    fn release(&self) {
+        *self
+            .paused
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+        self.resume.notify_all();
+    }
 }
 
 /// Control handle for a deterministic backend used by the actual worker/capture machinery.
@@ -73,6 +110,9 @@ impl TestCaptureSource {
             panic_on_backend_drop: AtomicBool::new(false),
             prepare_paused: Mutex::new(prepare_paused),
             prepare_resume: Condvar::new(),
+            reset: ProcessingGate::default(),
+            process: ProcessingGate::default(),
+            fail_process_after_gate: AtomicBool::new(false),
         });
         let worker_shared = Arc::clone(&shared);
         let chain = PluginChain::spawn_identified_with_backend_factory(
@@ -119,7 +159,33 @@ impl TestCaptureSource {
             .store(true, Ordering::Release);
     }
 
+    pub(crate) fn pause_reset(&self) {
+        self.shared.reset.pause();
+    }
+    pub(crate) fn release_reset(&self) {
+        self.shared.reset.release();
+    }
+    pub(crate) fn reset_count(&self) -> u64 {
+        self.shared.reset.entries.load(Ordering::Acquire)
+    }
+    pub(crate) fn pause_process(&self) {
+        self.shared.process.pause();
+    }
+    pub(crate) fn release_process(&self) {
+        self.shared.process.release();
+    }
+    pub(crate) fn process_count(&self) -> u64 {
+        self.shared.process.entries.load(Ordering::Acquire)
+    }
+    pub(crate) fn fail_process_after_gate(&self) {
+        self.shared
+            .fail_process_after_gate
+            .store(true, Ordering::Release);
+    }
+
     pub(crate) fn release_gates(&self) {
+        self.release_reset();
+        self.release_process();
         self.release_prepare();
         *self
             .shared
@@ -187,9 +253,21 @@ impl PluginBackend for CaptureBackend {
         right: &mut [f32],
         frames: usize,
     ) -> Result<(), String> {
+        self.shared.process.enter()?;
+        if self
+            .shared
+            .fail_process_after_gate
+            .swap(false, Ordering::AcqRel)
+        {
+            return Err("Capture fixture actual Process failure".into());
+        }
         left[..frames].fill(0.0);
         right[..frames].fill(0.0);
         Ok(())
+    }
+
+    fn reset_processing(&mut self) -> Result<(), String> {
+        self.shared.reset.enter()
     }
 
     fn send_midi(&mut self, _: MidiMessage) -> Result<(), String> {

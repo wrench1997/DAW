@@ -14416,6 +14416,9 @@ impl CitrusApp {
                     .timeline_audio_sync
                     .confirm_activation_receipt(request_id, revision, epoch, frame)
                 {
+                    if let Some(job) = &mut self.clip_render_job {
+                        job.observe_stop_activation_confirmed(request_id, revision, epoch, frame);
+                    }
                     // The callback now owns native Channel automation. Force
                     // every still-legacy target to publish a fresh full value
                     // in this same UI tick while callback-owned native targets
@@ -14975,13 +14978,22 @@ impl CitrusApp {
         };
         match audio.activate_timeline_transport(spec) {
             Ok(request_id) => {
-                let _ = self.timeline_audio_sync.queue_activation(
+                if self.timeline_audio_sync.queue_activation(
                     request_id,
                     generation,
                     seek_serial,
                     minimum_epoch,
                     frame,
-                );
+                ) && let Some(job) = &mut self.clip_render_job
+                {
+                    job.observe_stop_activation_queued(
+                        request_id,
+                        generation,
+                        seek_serial,
+                        minimum_epoch,
+                        frame,
+                    );
+                }
             }
             Err(TimelineControlError::CommandQueueFull) => {
                 self.timeline_audio_sync.queue_full();

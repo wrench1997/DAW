@@ -285,6 +285,7 @@ struct GenuineFixture {
     topology: OwnedTopologyLedger,
     topology_records: usize,
     last_topology_health_evidence: Option<Value>,
+    last_stop_settlement_evidence: Option<Value>,
 }
 impl GenuineFixture {
     fn new(binding: RunBinding, token: [u8; 32], entered: Instant) -> Check<Self> {
@@ -329,6 +330,7 @@ impl GenuineFixture {
             topology: OwnedTopologyLedger::new(token),
             topology_records: 0,
             last_topology_health_evidence: None,
+            last_stop_settlement_evidence: None,
         };
         let (engine, callback) = AudioEngine::test_engine_with_callback();
         f.callback = Some(callback);
@@ -525,6 +527,66 @@ impl GenuineFixture {
         }
         self.pacer.wait(cadence, deadline.min(self.outer))
     }
+    /// Read only the exact production sample that the App already used. This
+    /// adds bounded evidence, never a new settlement query or pump decision.
+    fn record_stop_settlement(&mut self) -> Check {
+        let Some(job) = self.app().clip_render_job.as_ref() else {
+            return Ok(());
+        };
+        let Some(stop) = job.stop_preparation else {
+            return Ok(());
+        };
+        let identity = |target: BounceSourceCallbackIdentity| {
+            json!({
+                "engine": target.engine_session, "project": target.project_session,
+                "generation": target.timeline_generation, "epoch": target.epoch,
+                "legacy_request": target.transport_request, "channel": target.channel_id,
+                "endpoint": target.endpoint_id, "instance": target.instance_id,
+            })
+        };
+        let observed = job.stop_settlement.map(|sample| {
+            json!({
+                "result": format!("{:?}", sample.settlement),
+                "coherent": sample.coherent, "requested_epoch": sample.requested_epoch,
+                "callback": {
+                    "identity": sample.callback_identity.map(identity),
+                    "ready": sample.callback_ready, "submitted": sample.submitted,
+                },
+                "worker": {
+                    "reset_completed_epoch": sample.reset_completed_epoch,
+                    "consumed": sample.consumed, "terminal": sample.terminal,
+                    "busy": sample.busy, "valid": sample.worker_valid,
+                },
+                "exhausted": sample.exhausted,
+                "parameter_admission": sample.parameter_admission,
+                "capture_busy": sample.capture_busy,
+            })
+        });
+        let evidence = json!({
+            "operation": job.operation_id,
+            "phase": format!("{:?}", job.phase),
+            "intent": {
+                "generation": stop.generation, "seek_serial": stop.seek_serial,
+                "frame": stop.frame, "legacy_request": stop.transport_request,
+                "superseded": stop.superseded,
+                "activation": stop.activation.map(|activation| json!({
+                    "timeline_request": activation.request_id,
+                    "minimum_epoch": activation.minimum_epoch,
+                    "committed_epoch": activation.committed_epoch,
+                })),
+            },
+            "target": job.settlement_target.map(identity),
+            "last_admission_sample": observed,
+            "failure": job.failure.as_deref().map(bounded_clip_timeline_text),
+        });
+        if self.last_stop_settlement_evidence.as_ref() != Some(&evidence) {
+            self.journal
+                .emit("capture_stop_settlement", evidence.clone())?;
+            self.last_stop_settlement_evidence = Some(evidence);
+        }
+        Ok(())
+    }
+
     fn poll(&mut self, reason: &str) -> Check<HealthStatus> {
         self.pace(Cadence::Poll, self.outer)?;
         self.budget.poll()?;
@@ -541,6 +603,7 @@ impl GenuineFixture {
         app.poll_timeline_audio_runtime(&ctx);
         app.drive_clip_render_job();
         self.journal.emit("controller_poll",json!({"ordinal":self.budget.polls,"reason":reason,"stage":self.active_stage,"phase":format!("{:?}",self.app().clip_render_job.as_ref().map(|j|j.phase)),"desired_generation":self.app().timeline_desired_generation,"confirmed":self.app().audio.as_ref().and_then(AudioEngine::confirmed_timeline_identity)}))?;
+        self.record_stop_settlement()?;
         self.persist_new_observations()?;
         self.consume_owned_topology_poll()?;
         self.healthy()
@@ -808,6 +871,20 @@ impl GenuineFixture {
                     stats,
                 } => {
                     json!({"type":"worker","site":site,"worker":worker_id,"manifest":format!("{manifest:?}"),"epoch":epoch,"sequence":sequence,"stats":format!("{stats:?}")})
+                }
+                RecordKind::WorkerCaptureGuard {
+                    worker_id,
+                    operands,
+                } => {
+                    json!({
+                        "type": "worker_capture_guard", "worker": worker_id,
+                        "expected_epoch": operands.expected_epoch,
+                        "active_epoch": operands.active_epoch,
+                        "requested_epoch": operands.requested_epoch,
+                        "input_empty": operands.input_empty,
+                        "parameter_admission": operands.parameter_admission,
+                        "accepted": operands.accepted,
+                    })
                 }
                 RecordKind::HookInventory { site, inactive } => {
                     json!({"type":"test_hooks","site":site,"inactive":inactive})

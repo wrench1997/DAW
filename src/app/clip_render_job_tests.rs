@@ -5,6 +5,8 @@
 #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
 #[path = "clip_render_genuine_topology_app_tests.rs"]
 mod genuine_topology_app_tests;
+#[path = "clip_render_stop_settlement_tests.rs"]
+mod stop_settlement_tests;
 use super::*;
 use crate::instrument_bounce::render::{
     BackendFailure, BlockReply, DisposalObservation, RenderBackend,

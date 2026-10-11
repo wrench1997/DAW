@@ -16,7 +16,7 @@ use crate::{
     plugins::plugin_runtime::{BridgeStats, PluginEndpointManifest, PluginTransport, RuntimeEvent},
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     sync::{Arc, Mutex, Weak},
 };
 
@@ -205,6 +205,17 @@ pub(crate) struct TimelineAppState {
     pub retry_pending: Option<(u64, u64)>,
 }
 
+/// Exactly the once-sampled operands and result of the canonical worker guard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WorkerCaptureGuard {
+    pub expected_epoch: u64,
+    pub active_epoch: u64,
+    pub requested_epoch: u64,
+    pub input_empty: bool,
+    pub parameter_admission: u32,
+    pub accepted: bool,
+}
+
 // Intentionally no Debug on payload-bearing records: opaque/PCM must never
 // accidentally enter the public evidence archive through a formatted snapshot.
 #[allow(dead_code)] // Raw evidence fields are retained even when the fixed oracle reads a subset.
@@ -262,6 +273,10 @@ pub(crate) enum RecordKind {
         event: crate::timeline_runtime::TimelineRuntimeEvent,
         before: TimelineAppState,
         after: TimelineAppState,
+    },
+    WorkerCaptureGuard {
+        worker_id: Option<usize>,
+        operands: WorkerCaptureGuard,
     },
     WorkerJoin {
         worker_id: usize,
@@ -974,6 +989,69 @@ pub(crate) fn record_app_timeline_event(
 ) {
     with_active(|state| state.timeline_event(event, before, after));
 }
+// Unit-test isolation affects only collection. The genuine guard's hook inventory
+// must find this absent. No production code, backend decision or retry reads it.
+thread_local! {
+    static CAPTURE_GUARD_TEST_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static CAPTURE_GUARD_TEST_STATE: RefCell<Option<ObservationSnapshot>> = const { RefCell::new(None) };
+}
+pub(crate) fn capture_guard_test_observer_inactive() -> bool {
+    !CAPTURE_GUARD_TEST_ACTIVE.with(Cell::get)
+}
+
+pub(crate) fn with_capture_guard_test_observer<T>(
+    capacity: Option<usize>,
+    operation: impl FnOnce() -> T,
+) -> (T, Option<ObservationSnapshot>) {
+    struct Restore {
+        active: bool,
+        state: Option<ObservationSnapshot>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            CAPTURE_GUARD_TEST_ACTIVE.with(|active| active.set(self.active));
+            CAPTURE_GUARD_TEST_STATE.with(|state| {
+                *state.borrow_mut() = self.state.take();
+            });
+        }
+    }
+    let state = capacity.map(|cap| {
+        assert!(cap <= MAX_RECORDS);
+        ObservationSnapshot::new(cap, 0).expect("bounded capture observer")
+    });
+    let restore = Restore {
+        active: CAPTURE_GUARD_TEST_ACTIVE.with(|active| active.replace(true)),
+        state: CAPTURE_GUARD_TEST_STATE.with(|slot| slot.replace(state)),
+    };
+    let result = operation();
+    let observation = CAPTURE_GUARD_TEST_STATE.with(|state| state.borrow_mut().take());
+    drop(restore);
+    (result, observation)
+}
+
+pub(crate) fn record_worker_capture_guard(operands: WorkerCaptureGuard) {
+    let worker_id = WORKER.with(Cell::get).map(|worker| worker.id);
+    if !capture_guard_test_observer_inactive() {
+        CAPTURE_GUARD_TEST_STATE.with(|state| {
+            if let Some(state) = state.borrow_mut().as_mut() {
+                record_capture_guard_into(state, worker_id, operands);
+            }
+        });
+        return;
+    }
+    with_active(|state| record_capture_guard_into(state, worker_id, operands));
+}
+fn record_capture_guard_into(
+    state: &mut ObservationSnapshot,
+    worker_id: Option<usize>,
+    operands: WorkerCaptureGuard,
+) {
+    state.push(None, 0, || RecordKind::WorkerCaptureGuard {
+        worker_id,
+        operands,
+    });
+}
+
 pub(crate) fn record_worker_join(worker_id: usize, outcome: WorkerJoinOutcome) {
     with_active(|state| state.push(None, 0, || RecordKind::WorkerJoin { worker_id, outcome }));
 }

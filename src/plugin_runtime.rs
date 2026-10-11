@@ -47,6 +47,10 @@ pub(crate) use source_restoration::SourceRestorationExpectation;
 mod instrument_bounce_tests;
 
 #[cfg(test)]
+#[path = "plugin_capture_settlement_tests.rs"]
+mod capture_settlement_tests;
+
+#[cfg(test)]
 #[path = "plugin_retained_shutdown_tests.rs"]
 mod retained_shutdown_tests;
 
@@ -1088,6 +1092,218 @@ pub enum ReceiveStatus {
     },
 }
 
+/// Exact owner-bound callback identity. The legacy mailbox request is a separate
+/// ID domain from the Timeline activation request retained by the App.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BounceSourceCallbackIdentity {
+    pub engine_session: u64,
+    pub project_session: u64,
+    pub timeline_generation: u64,
+    pub epoch: u64,
+    pub transport_request: u64,
+    pub channel_id: u32,
+    pub endpoint_id: u64,
+    pub instance_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BounceSourceSettlement {
+    Waiting,
+    Ready,
+    Invalid,
+}
+
+/// One bounded production observation, including the operands of its decision.
+/// This is a pre-admission check, never a lease against later source mutation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BounceSourceSettlementObservation {
+    pub settlement: BounceSourceSettlement,
+    pub callback_identity: Option<BounceSourceCallbackIdentity>,
+    pub callback_ready: bool,
+    pub submitted: u64,
+    pub reset_completed_epoch: u64,
+    pub consumed: u64,
+    pub terminal: u64,
+    pub busy: u32,
+    pub worker_valid: bool,
+    pub exhausted: bool,
+    pub coherent: bool,
+    pub requested_epoch: u64,
+    pub parameter_admission: u32,
+    pub capture_busy: bool,
+}
+
+#[derive(Default)]
+struct SettlementPublication {
+    sequence: AtomicU64,
+    exhausted: AtomicBool,
+}
+impl SettlementPublication {
+    /// Single-writer, bounded publication. Reserve both versions before mutation;
+    /// exhaustion is sticky and the last readable tuple can never become authority.
+    fn write(&self, update: impl FnOnce()) {
+        if self.exhausted.load(Ordering::Acquire) {
+            return;
+        }
+        let version = self.sequence.load(Ordering::Relaxed);
+        let Some(next) = version.checked_add(2).filter(|_| version & 1 == 0) else {
+            self.exhausted.store(true, Ordering::Release);
+            return;
+        };
+        self.sequence.swap(version + 1, Ordering::AcqRel);
+        // If a reader observes any new Relaxed payload, this Release fence and
+        // its trailing Acquire fence order the odd version before its recheck.
+        atomic::fence(Ordering::Release);
+        update();
+        self.sequence.store(next, Ordering::Release);
+    }
+}
+
+#[derive(Default)]
+struct CallbackSettlement {
+    publication: SettlementPublication,
+    published: AtomicBool,
+    ready: AtomicBool,
+    retired: AtomicBool,
+    engine_session: AtomicU64,
+    project_session: AtomicU64,
+    timeline_generation: AtomicU64,
+    epoch: AtomicU64,
+    transport_request: AtomicU64,
+    channel_id: AtomicU32,
+    endpoint_id: AtomicU64,
+    instance_id: AtomicU64,
+    submitted: AtomicU64,
+}
+impl CallbackSettlement {
+    fn invalidate(&self) {
+        self.publication.write(|| {
+            self.published.store(false, Ordering::Relaxed);
+            self.ready.store(false, Ordering::Relaxed);
+        });
+    }
+    fn publish(&self, identity: BounceSourceCallbackIdentity, ready: bool, submitted: u64) {
+        self.publication.write(|| {
+            self.engine_session
+                .store(identity.engine_session, Ordering::Relaxed);
+            self.project_session
+                .store(identity.project_session, Ordering::Relaxed);
+            self.timeline_generation
+                .store(identity.timeline_generation, Ordering::Relaxed);
+            self.epoch.store(identity.epoch, Ordering::Relaxed);
+            self.transport_request
+                .store(identity.transport_request, Ordering::Relaxed);
+            self.channel_id
+                .store(identity.channel_id, Ordering::Relaxed);
+            self.endpoint_id
+                .store(identity.endpoint_id, Ordering::Relaxed);
+            self.instance_id
+                .store(identity.instance_id, Ordering::Relaxed);
+            self.submitted.store(submitted, Ordering::Relaxed);
+            self.ready.store(ready, Ordering::Relaxed);
+            self.published.store(true, Ordering::Relaxed);
+        });
+    }
+    fn identity(&self) -> Option<BounceSourceCallbackIdentity> {
+        self.published
+            .load(Ordering::Relaxed)
+            .then(|| BounceSourceCallbackIdentity {
+                engine_session: self.engine_session.load(Ordering::Relaxed),
+                project_session: self.project_session.load(Ordering::Relaxed),
+                timeline_generation: self.timeline_generation.load(Ordering::Relaxed),
+                epoch: self.epoch.load(Ordering::Relaxed),
+                transport_request: self.transport_request.load(Ordering::Relaxed),
+                channel_id: self.channel_id.load(Ordering::Relaxed),
+                endpoint_id: self.endpoint_id.load(Ordering::Relaxed),
+                instance_id: self.instance_id.load(Ordering::Relaxed),
+            })
+    }
+}
+
+#[derive(Default)]
+struct WorkerSettlement {
+    publication: SettlementPublication,
+    valid: AtomicBool,
+    terminated: AtomicBool,
+    reset_completed_epoch: AtomicU64,
+    consumed: AtomicU64,
+    terminal: AtomicU64,
+    busy: AtomicU32,
+}
+impl WorkerSettlement {
+    fn increment(&self, value: &AtomicU64) {
+        match value.load(Ordering::Relaxed).checked_add(1) {
+            Some(next) => value.store(next, Ordering::Relaxed),
+            None => self.publication.exhausted.store(true, Ordering::Release),
+        }
+    }
+    fn invalidate(&self) {
+        self.publication.write(|| {
+            self.valid.store(false, Ordering::Relaxed);
+            self.terminated.store(true, Ordering::Relaxed);
+        });
+    }
+}
+
+/// Worker-only ownership scope. Nested reset/admin scopes retain their outer
+/// input busy count. Every popped input terminates even on discard or unwind.
+struct WorkerSettlementOperation<'a> {
+    state: &'a WorkerSettlement,
+    input: bool,
+}
+impl<'a> WorkerSettlementOperation<'a> {
+    fn new(metrics: &'a BridgeMetrics, input: bool) -> Self {
+        let state = &metrics.worker_settlement;
+        state.publication.write(|| {
+            match state.busy.load(Ordering::Relaxed).checked_add(1) {
+                Some(next) => state.busy.store(next, Ordering::Relaxed),
+                None => state.publication.exhausted.store(true, Ordering::Release),
+            }
+            if input {
+                state.increment(&state.consumed);
+            }
+        });
+        Self { state, input }
+    }
+    /// Called explicitly only after the real reset and its existing metadata work.
+    fn reset_completed(&self, epoch: u64) {
+        self.state.publication.write(|| {
+            self.state
+                .reset_completed_epoch
+                .store(epoch, Ordering::Relaxed);
+        });
+    }
+}
+impl Drop for WorkerSettlementOperation<'_> {
+    fn drop(&mut self) {
+        self.state.publication.write(|| {
+            if thread::panicking() {
+                self.state.valid.store(false, Ordering::Relaxed);
+                self.state.terminated.store(true, Ordering::Relaxed);
+            }
+            if self.input {
+                self.state.increment(&self.state.terminal);
+            }
+            match self.state.busy.load(Ordering::Relaxed).checked_sub(1) {
+                Some(next) => self.state.busy.store(next, Ordering::Relaxed),
+                None => self
+                    .state
+                    .publication
+                    .exhausted
+                    .store(true, Ordering::Release),
+            }
+        });
+    }
+}
+
+/// Invalidates before the worker's owned backend values unwind or are destroyed.
+struct WorkerSettlementLifetime<'a>(&'a WorkerSettlement);
+impl Drop for WorkerSettlementLifetime<'_> {
+    fn drop(&mut self) {
+        self.0.invalidate();
+    }
+}
+
 /// Callback-owned half of an insert bridge.
 ///
 /// This type is intentionally not `Clone` or `Copy`: rtrb enforces one producer and one consumer.
@@ -1131,6 +1347,35 @@ pub(crate) struct GenuineBridgeSnapshot {
 }
 
 impl AudioThreadEndpoint {
+    /// Invalidate before callback work or endpoint mutation. No allocation,
+    /// lock, I/O, backend call or retry occurs on this callback-owned surface.
+    pub(crate) fn invalidate_bounce_source_settlement(&self) {
+        self.metrics.callback_settlement.invalidate();
+    }
+
+    pub(crate) fn publish_bounce_source_settlement(
+        &self,
+        identity: BounceSourceCallbackIdentity,
+        callback_ready: bool,
+    ) {
+        let ready = callback_ready
+            && identity.epoch == self.epoch
+            && self.requested_epoch.load(Ordering::Acquire) == self.epoch
+            && self.manifest.slot_count == 1
+            && self.manifest.instance_ids[0] == Some(identity.instance_id)
+            && self.scratch.pending_rt_event_count == 0
+            && self.parameter_edit_admission.load(Ordering::Acquire) == 0
+            && self.scratch.processing_fault.is_none()
+            && !self.metrics.midi_blocked.load(Ordering::Acquire)
+            && self.metrics.faults.load(Ordering::Acquire) == 0
+            && !self.metrics.stopped.load(Ordering::Acquire);
+        self.metrics.callback_settlement.publish(
+            identity,
+            ready,
+            self.metrics.submitted.load(Ordering::Relaxed),
+        );
+    }
+
     /// Fixed-size read-only snapshot; safe for the test callback to copy. Output
     /// ownership is reported independently and is not a quiescence requirement.
     #[cfg(test)]
@@ -1157,13 +1402,22 @@ impl AudioThreadEndpoint {
                 && self.scratch.delayed_dry.submitted,
             pending_inline_events: usize::from(self.scratch.pending_rt_event_count),
             parameter_edits_admitted: self.parameter_edit_admission.load(Ordering::Acquire),
-            input_consumed: self.metrics.genuine_input_consumed.load(Ordering::Acquire),
+            input_consumed: self
+                .metrics
+                .worker_settlement
+                .consumed
+                .load(Ordering::Acquire),
             operations_completed: self
                 .metrics
-                .genuine_operations_completed
+                .worker_settlement
+                .terminal
                 .load(Ordering::Acquire),
-            worker_busy: self.metrics.genuine_worker_busy.load(Ordering::Acquire),
-            worker_epoch: self.metrics.genuine_worker_epoch.load(Ordering::Acquire),
+            worker_busy: self.metrics.worker_settlement.busy.load(Ordering::Acquire),
+            worker_epoch: self
+                .metrics
+                .worker_settlement
+                .reset_completed_epoch
+                .load(Ordering::Acquire),
             capture_busy: self.metrics.bounce_capture_busy.load(Ordering::Acquire),
             bridge_lookahead_quanta: self.scratch.bridge_lookahead_quanta,
             strict_timing: self.scratch.strict_timing,
@@ -1196,6 +1450,7 @@ impl AudioThreadEndpoint {
     /// realtime events and makes every output from another epoch ineligible for rendering. `false`
     /// means the epoch was zero or already current.
     pub fn set_epoch(&mut self, epoch: u64) -> bool {
+        self.invalidate_bounce_source_settlement();
         if epoch == 0 || epoch == self.epoch {
             return false;
         }
@@ -1268,6 +1523,7 @@ impl AudioThreadEndpoint {
         right: &[f32],
         expected_latency_revision: u64,
     ) -> SubmitStatus {
+        self.invalidate_bounce_source_settlement();
         if left.len() != right.len() || left.is_empty() || left.len() > self.max_block_frames() {
             return SubmitStatus::InvalidFrameCount;
         }
@@ -1280,6 +1536,7 @@ impl AudioThreadEndpoint {
         right: &[f32],
         expected_latency_revision: u64,
     ) -> SubmitStatus {
+        self.invalidate_bounce_source_settlement();
         debug_assert_ne!(self.epoch, 0);
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
@@ -1339,7 +1596,13 @@ impl AudioThreadEndpoint {
                 self.scratch
                     .delayed_dry
                     .store(self.epoch, sequence, left, right, true);
-                self.metrics.submitted.fetch_add(1, Ordering::Relaxed);
+                if self.metrics.submitted.fetch_add(1, Ordering::Relaxed) == u64::MAX {
+                    self.metrics
+                        .callback_settlement
+                        .publication
+                        .exhausted
+                        .store(true, Ordering::Release);
+                }
                 SubmitStatus::Submitted { sequence }
             }
             Err(PushError::Full(block)) => {
@@ -1431,6 +1694,7 @@ impl AudioThreadEndpoint {
         output_right: &mut [f32],
         expected_revision: u64,
     ) -> RealtimeProcessStatus {
+        self.invalidate_bounce_source_settlement();
         let frames = input_left.len();
         if frames != input_right.len()
             || frames == 0
@@ -1718,6 +1982,7 @@ impl AudioThreadEndpoint {
 
     /// Reliable safety latch. The worker resets once and rejects all MIDI until a new epoch.
     pub fn block_midi_until_epoch(&self) {
+        self.invalidate_bounce_source_settlement();
         self.metrics.midi_blocked.store(true, Ordering::Release);
     }
     pub fn midi_capabilities(&self) -> (bool, bool) {
@@ -1726,6 +1991,7 @@ impl AudioThreadEndpoint {
     }
 
     pub fn set_transport(&mut self, transport: PluginTransport) {
+        self.invalidate_bounce_source_settlement();
         self.scratch.transport = transport;
     }
 
@@ -1734,6 +2000,7 @@ impl AudioThreadEndpoint {
     }
 
     pub fn try_send_midi(&mut self, slot: Option<usize>, message: MidiMessage) -> bool {
+        self.invalidate_bounce_source_settlement();
         let target = match slot {
             Some(slot) if manifest_accepts_slot(self.manifest, slot) => RtTarget::Slot(slot as u8),
             Some(_) => return false,
@@ -1743,6 +2010,7 @@ impl AudioThreadEndpoint {
     }
 
     pub fn try_set_parameter(&mut self, slot: usize, id: u32, normalized: f32) -> bool {
+        self.invalidate_bounce_source_settlement();
         if !manifest_accepts_slot(self.manifest, slot) || !normalized.is_finite() {
             return false;
         }
@@ -1767,6 +2035,7 @@ impl AudioThreadEndpoint {
         normalized: f32,
         edit_id: ParameterEditId,
     ) -> bool {
+        self.invalidate_bounce_source_settlement();
         if !manifest_accepts_slot(self.manifest, slot) || !normalized.is_finite() {
             return false;
         }
@@ -1786,6 +2055,7 @@ impl AudioThreadEndpoint {
     }
 
     fn try_stage_rt(&mut self, command: RtCommand) -> bool {
+        self.invalidate_bounce_source_settlement();
         let index = usize::from(self.scratch.pending_rt_event_count);
         if index == MAX_RT_EVENTS_PER_BLOCK {
             self.metrics.rt_overflows.fetch_add(1, Ordering::Relaxed);
@@ -1901,6 +2171,11 @@ fn copy_rt_commands_timeline_before_live(source: &[RtCommand], destination: &mut
 
 impl Drop for AudioThreadEndpoint {
     fn drop(&mut self) {
+        self.invalidate_bounce_source_settlement();
+        self.metrics
+            .callback_settlement
+            .retired
+            .store(true, Ordering::Release);
         self.fail_pending_parameter_edits(ParameterEditFailureReason::EndpointDropped);
         self.scratch.pending_rt_event_count = 0;
     }
@@ -2235,6 +2510,26 @@ impl Drop for BounceStateReceiver {
 }
 
 impl PluginChainControl {
+    pub(crate) fn observe_bounce_source_settlement(
+        &self,
+        target: BounceSourceCallbackIdentity,
+    ) -> BounceSourceSettlementObservation {
+        observe_bounce_source_settlement(
+            &self.metrics,
+            self.manifest,
+            &self.parameter_edit_admission,
+            target,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bounce_source_settlement(
+        &self,
+        target: BounceSourceCallbackIdentity,
+    ) -> BounceSourceSettlement {
+        self.observe_bounce_source_settlement(target).settlement
+    }
+
     /// Test-profile identity observation of the already retained metrics owner.
     /// This does not poll, command, clone, prepare, or alter the worker lifetime.
     #[cfg(test)]
@@ -2531,6 +2826,126 @@ impl PluginChainControl {
     }
 }
 
+fn observe_bounce_source_settlement(
+    metrics: &BridgeMetrics,
+    manifest: PluginEndpointManifest,
+    parameter_admission: &AtomicU32,
+    target: BounceSourceCallbackIdentity,
+) -> BounceSourceSettlementObservation {
+    let callback = &metrics.callback_settlement;
+    let worker = &metrics.worker_settlement;
+    let mut observation = BounceSourceSettlementObservation {
+        settlement: BounceSourceSettlement::Waiting,
+        callback_identity: None,
+        callback_ready: false,
+        submitted: 0,
+        reset_completed_epoch: 0,
+        consumed: 0,
+        terminal: 0,
+        busy: 0,
+        worker_valid: false,
+        exhausted: false,
+        coherent: false,
+        requested_epoch: 0,
+        parameter_admission: 0,
+        capture_busy: false,
+    };
+    for _ in 0..LATENCY_SNAPSHOT_READ_ATTEMPTS {
+        // Both opening versions precede either payload. Both closing versions
+        // follow both payloads. Accepting independent snapshots is insufficient.
+        let callback_open = callback.publication.sequence.load(Ordering::Acquire);
+        let worker_open = worker.publication.sequence.load(Ordering::Acquire);
+        if callback_open & 1 != 0 || worker_open & 1 != 0 {
+            continue;
+        }
+        let callback_identity = callback.identity();
+        let callback_ready = callback.ready.load(Ordering::Relaxed);
+        let submitted = callback.submitted.load(Ordering::Relaxed);
+        let reset_completed_epoch = worker.reset_completed_epoch.load(Ordering::Relaxed);
+        let consumed = worker.consumed.load(Ordering::Relaxed);
+        let terminal = worker.terminal.load(Ordering::Relaxed);
+        let busy = worker.busy.load(Ordering::Relaxed);
+        let worker_valid = worker.valid.load(Ordering::Relaxed);
+        let requested_epoch = metrics.requested_epoch.load(Ordering::Acquire);
+        let parameter_admission = parameter_admission.load(Ordering::Acquire);
+        let capture_busy = metrics.bounce_capture_busy.load(Ordering::Acquire);
+        let unhealthy = metrics.faults.load(Ordering::Acquire) != 0
+            || metrics.stopped.load(Ordering::Acquire)
+            || metrics.midi_blocked.load(Ordering::Acquire)
+            || callback.retired.load(Ordering::Acquire)
+            || worker.terminated.load(Ordering::Acquire)
+            || (metrics.output_overflows.load(Ordering::Acquire) != 0
+                && metrics.output_loss_epoch.load(Ordering::Relaxed) == target.epoch);
+        atomic::fence(Ordering::Acquire);
+        let callback_close = callback.publication.sequence.load(Ordering::Acquire);
+        let worker_close = worker.publication.sequence.load(Ordering::Acquire);
+        if callback_open != callback_close || worker_open != worker_close {
+            continue;
+        }
+        let exhausted = callback.publication.exhausted.load(Ordering::Acquire)
+            || worker.publication.exhausted.load(Ordering::Acquire);
+        let invalid = target.epoch == 0
+            || manifest.slot_count != 1
+            || manifest.instance_ids[0] != Some(target.instance_id)
+            || requested_epoch != target.epoch
+            || callback_identity.is_some_and(|identity| identity != target)
+            || unhealthy
+            || exhausted;
+        let ready = callback_identity == Some(target)
+            && callback_ready
+            && worker_valid
+            && reset_completed_epoch == target.epoch
+            && consumed == submitted
+            && terminal == submitted
+            && busy == 0
+            && parameter_admission == 0
+            && !capture_busy;
+        return BounceSourceSettlementObservation {
+            settlement: if invalid {
+                BounceSourceSettlement::Invalid
+            } else if ready {
+                BounceSourceSettlement::Ready
+            } else {
+                BounceSourceSettlement::Waiting
+            },
+            callback_identity,
+            callback_ready,
+            submitted,
+            reset_completed_epoch,
+            consumed,
+            terminal,
+            busy,
+            worker_valid,
+            exhausted,
+            coherent: true,
+            requested_epoch,
+            parameter_admission,
+            capture_busy,
+        };
+    }
+    // A publication collision alone is Waiting. Independently authoritative
+    // supersession, termination, faults or exhaustion still make it Invalid.
+    observation.requested_epoch = metrics.requested_epoch.load(Ordering::Acquire);
+    observation.exhausted = callback.publication.exhausted.load(Ordering::Acquire)
+        || worker.publication.exhausted.load(Ordering::Acquire);
+    if target.epoch == 0
+        || manifest.slot_count != 1
+        || manifest.instance_ids[0] != Some(target.instance_id)
+        || observation.requested_epoch != target.epoch
+        || observation.exhausted
+        || callback.retired.load(Ordering::Acquire)
+        || worker.terminated.load(Ordering::Acquire)
+        || metrics.faults.load(Ordering::Acquire) != 0
+        || metrics.stopped.load(Ordering::Acquire)
+        || metrics.midi_blocked.load(Ordering::Acquire)
+        || (metrics.output_overflows.load(Ordering::Acquire) != 0
+            && metrics.output_loss_epoch.load(Ordering::Relaxed) == target.epoch)
+    {
+        observation.settlement = BounceSourceSettlement::Invalid;
+    }
+    observation
+}
+
 fn manifest_accepts_slot(manifest: PluginEndpointManifest, slot: usize) -> bool {
     slot < manifest.slot_count
         || (manifest.slot_count == 0 && !manifest.is_identified() && slot < MAX_CHAIN_SLOTS)
@@ -2538,14 +2953,10 @@ fn manifest_accepts_slot(manifest: PluginEndpointManifest, slot: usize) -> bool 
 
 #[derive(Default)]
 struct BridgeMetrics {
-    #[cfg(test)]
-    genuine_input_consumed: AtomicU64,
-    #[cfg(test)]
-    genuine_operations_completed: AtomicU64,
-    #[cfg(test)]
-    genuine_worker_busy: AtomicU32,
-    #[cfg(test)]
-    genuine_worker_epoch: AtomicU64,
+    callback_settlement: CallbackSettlement,
+    worker_settlement: WorkerSettlement,
+    // Shared by the callback, worker guard and settlement reader: no mirror authority.
+    requested_epoch: Arc<AtomicU64>,
     bounce_capture_busy: AtomicBool,
     midi_capabilities: AtomicU32,
     midi_blocked: AtomicBool,
@@ -3116,7 +3527,8 @@ impl PluginChain {
         metrics
             .max_block_frames
             .store(config.max_block_frames as u32, Ordering::Relaxed);
-        let requested_epoch = Arc::new(AtomicU64::new(INITIAL_TRANSPORT_EPOCH));
+        let requested_epoch = Arc::clone(&metrics.requested_epoch);
+        requested_epoch.store(INITIAL_TRANSPORT_EPOCH, Ordering::Relaxed);
         let parameter_edit_admission = Arc::new(AtomicU32::new(0));
 
         let worker_metrics = Arc::clone(&metrics);
@@ -3209,6 +3621,9 @@ fn run_worker(
     requested_epoch: Arc<AtomicU64>,
 ) {
     let mut slots = Vec::with_capacity(loaded.len());
+    // Declared after slots so unwinding invalidates before destroying backends.
+    let _settlement_lifetime = WorkerSettlementLifetime(&metrics.worker_settlement);
+    let initial_operation = WorkerSettlementOperation::new(&metrics, false);
     // This evidence is scoped to initialization; ordinary post-admission timing stays mutable.
     {
         let mut initial_expected_timing = [None; MAX_CHAIN_SLOTS];
@@ -3282,10 +3697,17 @@ fn run_worker(
         );
     } // Explicit end of the temporary initial-snapshot expectation, before the worker loop.
 
-    #[cfg(test)]
-    metrics
-        .genuine_worker_epoch
-        .store(INITIAL_TRANSPORT_EPOCH, Ordering::Release);
+    metrics.worker_settlement.publication.write(|| {
+        metrics
+            .worker_settlement
+            .reset_completed_epoch
+            .store(INITIAL_TRANSPORT_EPOCH, Ordering::Relaxed);
+        metrics
+            .worker_settlement
+            .valid
+            .store(true, Ordering::Relaxed);
+    });
+    drop(initial_operation);
     let mut dry = StereoBlock::silence();
     let mut active_epoch = INITIAL_TRANSPORT_EPOCH;
     let mut shutdown = false;
@@ -3296,25 +3718,32 @@ fn run_worker(
         if requested != 0 && requested != active_epoch {
             active_epoch = requested;
             dry = StereoBlock::silence();
+            let reset_operation = WorkerSettlementOperation::new(&metrics, false);
             reset_worker_epoch(active_epoch, &mut slots, &mut events, &metrics);
             metrics.worker_epoch_resets.fetch_add(1, Ordering::Relaxed);
             update_latency_and_tail(&mut slots, &mut events, &metrics);
+            reset_operation.reset_completed(active_epoch);
         }
         let blocked = metrics.midi_blocked.load(Ordering::Acquire);
         if blocked && !midi_panic_applied {
+            let reset_operation = WorkerSettlementOperation::new(&metrics, false);
             reset_worker_epoch(active_epoch, &mut slots, &mut events, &metrics);
+            reset_operation.reset_completed(active_epoch);
         }
         midi_panic_applied = blocked;
         if Instant::now() >= next_native_poll {
+            let _metadata_operation = WorkerSettlementOperation::new(&metrics, false);
             poll_native_editors(&mut slots, &mut events, &metrics);
             update_latency_and_tail(&mut slots, &mut events, &metrics);
             next_native_poll = Instant::now() + Duration::from_millis(100);
         }
         drain_parameter_edit_failures(&mut parameter_edit_failures, &mut parameter_edit_receipts);
+        let admin_operation = WorkerSettlementOperation::new(&metrics, false);
         let mut admin_metadata_changed = false;
         for _ in 0..MAX_ADMIN_COMMANDS_PER_WORKER_TURN {
             match admin.try_recv() {
                 Ok(AdminCommand::Shutdown) => {
+                    metrics.worker_settlement.invalidate();
                     shutdown = true;
                     break;
                 }
@@ -3366,9 +3795,11 @@ fn run_worker(
                     if active_epoch != epoch {
                         active_epoch = epoch;
                         dry = StereoBlock::silence();
+                        let reset_operation = WorkerSettlementOperation::new(&metrics, false);
                         reset_worker_epoch(active_epoch, &mut slots, &mut events, &metrics);
                         metrics.worker_epoch_resets.fetch_add(1, Ordering::Relaxed);
                         update_latency_and_tail(&mut slots, &mut events, &metrics);
+                        reset_operation.reset_completed(active_epoch);
                     }
                     admin_metadata_changed |= capture_worker_state(
                         slot,
@@ -3385,6 +3816,7 @@ fn run_worker(
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
+                    metrics.worker_settlement.invalidate();
                     shutdown = true;
                     break;
                 }
@@ -3396,10 +3828,10 @@ fn run_worker(
         if admin_metadata_changed {
             update_latency_and_tail(&mut slots, &mut events, &metrics);
         }
+        drop(admin_operation);
         match input.pop() {
             Ok(mut block) => {
-                #[cfg(test)]
-                let _observed_input = GenuineWorkerOperation::new(&metrics, true);
+                let _input_operation = WorkerSettlementOperation::new(&metrics, true);
                 let requested = requested_epoch.load(Ordering::Acquire);
                 if block.epoch == 0 || block.epoch != requested {
                     fail_parameter_edits_from_worker_block(
@@ -3415,9 +3847,11 @@ fn run_worker(
                 if block.epoch != active_epoch {
                     active_epoch = block.epoch;
                     dry = StereoBlock::silence();
+                    let reset_operation = WorkerSettlementOperation::new(&metrics, false);
                     reset_worker_epoch(active_epoch, &mut slots, &mut events, &metrics);
                     metrics.worker_epoch_resets.fetch_add(1, Ordering::Relaxed);
                     update_latency_and_tail(&mut slots, &mut events, &metrics);
+                    reset_operation.reset_completed(active_epoch);
                 }
                 let expected_latency_revision = block.expected_latency_revision;
                 let mut latency_attestation_valid = expected_latency_revision == 0
@@ -3507,10 +3941,10 @@ fn run_worker(
         }
     }
 
+    metrics.worker_settlement.invalidate();
     drain_parameter_edit_failures(&mut parameter_edit_failures, &mut parameter_edit_receipts);
     while let Ok(block) = input.pop() {
-        #[cfg(test)]
-        let _observed_input = GenuineWorkerOperation::new(&metrics, true);
+        let _input_operation = WorkerSettlementOperation::new(&metrics, true);
         fail_parameter_edits_from_worker_block(
             &block,
             ParameterEditFailureReason::WorkerStopped,
@@ -3590,48 +4024,12 @@ fn catch_backend<T>(operation: impl FnOnce() -> Result<T, String>) -> Result<T, 
     }
 }
 
-/// Test-only completion accounting at actual worker ownership boundaries.
-/// A popped input reaches exactly one terminal outcome, including discard,
-/// output overflow or unwind. This is separate from successful output.push.
-#[cfg(test)]
-struct GenuineWorkerOperation<'a> {
-    metrics: &'a BridgeMetrics,
-    input: bool,
-}
-#[cfg(test)]
-impl<'a> GenuineWorkerOperation<'a> {
-    fn new(metrics: &'a BridgeMetrics, input: bool) -> Self {
-        metrics.genuine_worker_busy.fetch_add(1, Ordering::AcqRel);
-        if input {
-            metrics
-                .genuine_input_consumed
-                .fetch_add(1, Ordering::Release);
-        }
-        Self { metrics, input }
-    }
-}
-#[cfg(test)]
-impl Drop for GenuineWorkerOperation<'_> {
-    fn drop(&mut self) {
-        if self.input {
-            self.metrics
-                .genuine_operations_completed
-                .fetch_add(1, Ordering::Release);
-        }
-        self.metrics
-            .genuine_worker_busy
-            .fetch_sub(1, Ordering::Release);
-    }
-}
-
 fn reset_worker_epoch(
     epoch: u64,
     slots: &mut [WorkerSlot],
     events: &mut Producer<RuntimeEvent>,
     metrics: &BridgeMetrics,
 ) {
-    #[cfg(test)]
-    let _observed_reset = GenuineWorkerOperation::new(metrics, false);
     #[cfg(test)]
     genuine_observer::record_worker(
         "reset_worker_epoch attempt",
@@ -3679,7 +4077,6 @@ fn reset_worker_epoch(
     }
     #[cfg(test)]
     {
-        metrics.genuine_worker_epoch.store(epoch, Ordering::Release);
         genuine_observer::record_worker(
             "reset_worker_epoch returned",
             epoch,
@@ -3983,12 +4380,28 @@ fn capture_instrument_bounce_on_worker(
 ) -> Result<BounceStateReceipt, BounceCaptureError> {
     let reject = |message: &str| BounceCaptureError::Rejected(message.into());
     fence.checkpoint()?;
-    if expected_epoch == 0
-        || active_epoch != expected_epoch
-        || requested_epoch.load(Ordering::Acquire) != expected_epoch
-        || !input_empty
-        || parameter_admission.load(Ordering::Acquire) != 0
-    {
+    let sampled_requested_epoch = requested_epoch.load(Ordering::Acquire);
+    let sampled_parameter_admission = parameter_admission.load(Ordering::Acquire);
+    let quiescent = expected_epoch != 0
+        && active_epoch == expected_epoch
+        && sampled_requested_epoch == expected_epoch
+        && input_empty
+        && sampled_parameter_admission == 0;
+    #[cfg(test)]
+    genuine_observer::record_hooks(
+        "canonical capture guard diagnostic isolation",
+        genuine_observer::capture_guard_test_observer_inactive(),
+    );
+    #[cfg(test)]
+    genuine_observer::record_worker_capture_guard(genuine_observer::WorkerCaptureGuard {
+        expected_epoch,
+        active_epoch,
+        requested_epoch: sampled_requested_epoch,
+        input_empty,
+        parameter_admission: sampled_parameter_admission,
+        accepted: quiescent,
+    });
+    if !quiescent {
         return Err(reject(
             "Instrument bounce source is not quiescent at the exact requested epoch",
         ));
@@ -7520,7 +7933,8 @@ mod tests {
         metrics
             .current_epoch
             .store(INITIAL_TRANSPORT_EPOCH, Ordering::Relaxed);
-        let requested_epoch = Arc::new(AtomicU64::new(INITIAL_TRANSPORT_EPOCH));
+        let requested_epoch = Arc::clone(&metrics.requested_epoch);
+        requested_epoch.store(INITIAL_TRANSPORT_EPOCH, Ordering::Relaxed);
         let parameter_edit_admission = Arc::new(AtomicU32::new(0));
         let (parameter_edit_failures, _parameter_edit_failure_rx) =
             RingBuffer::new(MAX_OUTSTANDING_PARAMETER_EDITS as usize);
@@ -10265,38 +10679,44 @@ mod genuine_bridge_observation_tests {
     fn popped_input_completion_counts_discard_without_output_delivery() {
         let metrics = BridgeMetrics::default();
         {
-            let _input = GenuineWorkerOperation::new(&metrics, true);
-            assert_eq!(metrics.genuine_input_consumed.load(Ordering::Acquire), 1);
+            let _input = WorkerSettlementOperation::new(&metrics, true);
             assert_eq!(
-                metrics.genuine_operations_completed.load(Ordering::Acquire),
+                metrics.worker_settlement.consumed.load(Ordering::Acquire),
+                1
+            );
+            assert_eq!(
+                metrics.worker_settlement.terminal.load(Ordering::Acquire),
                 0
             );
-            assert_eq!(metrics.genuine_worker_busy.load(Ordering::Acquire), 1);
+            assert_eq!(metrics.worker_settlement.busy.load(Ordering::Acquire), 1);
         }
         assert_eq!(metrics.completed.load(Ordering::Acquire), 0);
         assert_eq!(
-            metrics.genuine_operations_completed.load(Ordering::Acquire),
+            metrics.worker_settlement.terminal.load(Ordering::Acquire),
             1
         );
-        assert_eq!(metrics.genuine_worker_busy.load(Ordering::Acquire), 0);
+        assert_eq!(metrics.worker_settlement.busy.load(Ordering::Acquire), 0);
     }
 
     #[test]
     fn reset_work_and_unwind_keep_input_accounting_distinct() {
         let metrics = BridgeMetrics::default();
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
-            let _input = GenuineWorkerOperation::new(&metrics, true);
-            let _reset = GenuineWorkerOperation::new(&metrics, false);
-            assert_eq!(metrics.genuine_worker_busy.load(Ordering::Acquire), 2);
+            let _input = WorkerSettlementOperation::new(&metrics, true);
+            let _reset = WorkerSettlementOperation::new(&metrics, false);
+            assert_eq!(metrics.worker_settlement.busy.load(Ordering::Acquire), 2);
             panic!("plugin-free observed unwind");
         }));
         assert!(result.is_err());
-        assert_eq!(metrics.genuine_input_consumed.load(Ordering::Acquire), 1);
         assert_eq!(
-            metrics.genuine_operations_completed.load(Ordering::Acquire),
+            metrics.worker_settlement.consumed.load(Ordering::Acquire),
             1
         );
-        assert_eq!(metrics.genuine_worker_busy.load(Ordering::Acquire), 0);
+        assert_eq!(
+            metrics.worker_settlement.terminal.load(Ordering::Acquire),
+            1
+        );
+        assert_eq!(metrics.worker_settlement.busy.load(Ordering::Acquire), 0);
         assert_eq!(metrics.completed.load(Ordering::Acquire), 0);
     }
 }

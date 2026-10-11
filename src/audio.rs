@@ -60,8 +60,8 @@ use crate::plugin_parameter_edit::{
     CallbackEditReceipt, CallbackRejectReason, ParameterEditSubmission, ParameterEndpointKind,
 };
 use crate::plugins::plugin_runtime::{
-    AudioThreadEndpoint, ParameterEditId as RuntimeParameterEditId, PluginEndpointManifest,
-    PluginEndpointSnapshot, PluginLatencySnapshot,
+    AudioThreadEndpoint, BounceSourceCallbackIdentity, ParameterEditId as RuntimeParameterEditId,
+    PluginEndpointManifest, PluginEndpointSnapshot, PluginLatencySnapshot,
 };
 use crate::timeline::{
     AutomationRampShape, ChannelBaseDescriptor, ChasedAudioClip, ChasedNote,
@@ -2482,9 +2482,14 @@ impl AudioEngine {
             .store(enabled, Ordering::Release);
     }
 
+    /// Latest issued legacy mailbox request. This is not a Timeline activation request ID.
+    pub(crate) fn transport_request_id(&self) -> u64 {
+        self.transport_mailbox.control_thread_request_id()
+    }
+
     #[cfg(test)]
     pub(crate) fn test_transport_request_id(&self) -> u64 {
-        self.transport_mailbox.control_thread_request_id()
+        self.transport_request_id()
     }
 
     pub fn set_playing(&self, playing: bool) {
@@ -3151,6 +3156,7 @@ fn render_transport_chunk(
             dsp.genuine_segment_start(status, transport, segment_frames, rendered);
         let capture_device_frame = transport.device_frame;
         if dsp.plugin_fault.is_some() || dsp.plugin_processing_suspended() {
+            dsp.bounce_source_callback_healthy = false;
             dsp.master_block[..segment_frames].fill([0.0; 2]);
             consume(rendered, &dsp.master_block[..segment_frames]);
             #[cfg(test)]
@@ -3187,6 +3193,13 @@ fn render_transport_chunk(
             record.timeline_render_active = dsp.timeline_plan_render_active;
             record
         });
+        if dsp
+            .timeline_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.stats().ownership_needs_resync)
+        {
+            dsp.bounce_source_callback_healthy = false;
+        }
         dsp.configure_plugin_transport(
             transport.timeline_frame,
             transport.beat_q32,
@@ -3256,6 +3269,7 @@ fn render_transport_chunk(
         }
         dsp.observe_plugin_processing_health();
         if dsp.plugin_fault.is_some() {
+            dsp.bounce_source_callback_healthy = false;
             dsp.master_block[..segment_frames].fill([0.0; 2]);
             transport.request.playing = false;
             transport.request.loop_enabled = false;
@@ -3357,6 +3371,7 @@ where
     Ok(device.build_output_stream(
         *config,
         move |output: &mut [T], _| {
+            dsp.begin_bounce_source_callback();
             observe_backend_output_callback(&callback_telemetry, output.len(), channels);
             dsp.set_device_frame(transport.device_frame);
             dsp.callback_transport_request_id = transport.request.request_id;
@@ -3431,6 +3446,10 @@ where
                     },
                 );
             }
+            dsp.finish_bounce_source_callback(
+                &transport,
+                commands.slots() != 0 || !output.len().is_multiple_of(channels),
+            );
         },
         move |error| {
             observe_backend_stream_error(&error_status, &error_telemetry, error.kind());
@@ -3640,6 +3659,7 @@ impl TestAudioCallback {
     pub(crate) fn pump(&mut self, engine: &AudioEngine, frames: usize) {
         assert_eq!(engine.engine_session, self.dsp.engine_session);
         assert!(frames > 0 && frames <= MAX_MIXER_BLOCK_FRAMES);
+        self.dsp.begin_bounce_source_callback();
         self.dsp.genuine_begin_pump();
         self.last_output_frames = frames;
         self.last_output[..frames].fill([0.0; 2]);
@@ -3707,6 +3727,8 @@ impl TestAudioCallback {
                 last_output[offset..offset + output.len()].copy_from_slice(output);
             },
         );
+        self.dsp
+            .finish_bounce_source_callback(&self.transport, self.commands.slots() != 0);
     }
 
     pub(crate) fn last_output(&self) -> &[[f32; 2]] {
@@ -5522,6 +5544,19 @@ impl PreparedFixedEndpoint {
         self.adapter.stats()
     }
 
+    fn bounce_source_callback_input_empty(&self) -> bool {
+        self.events.scratch.system.pending_len == 0
+            && self.events.scratch.timeline.pending_len == 0
+            && self.events.scratch.live.pending_len == 0
+            && !self.events.scratch.live_faulted
+            && self.partial_quantum_usage == EndpointQuantumClassUsage::default()
+            && self.stopped_epoch_safety.is_none()
+            && !self.has_admitted_live_edit_marker()
+        // `current` is the already handed-off adapter view, not queued work. The adapter
+        // and endpoint add their real fixed-input, fixed-event and inline-event checks.
+        // Output FIFO, held output and accumulation pre-roll intentionally remain owned.
+    }
+
     /// Refresh the callback-owned coherent cache. A bounded seqlock collision
     /// (`None`) deliberately retains the previous graph identity.
     fn refresh_latency_snapshot(&mut self) -> bool {
@@ -6321,6 +6356,7 @@ struct DspState {
     project_session: Arc<AtomicU64>,
     removal_transport_mailbox: Option<Arc<TransportMailbox>>,
     callback_transport_request_id: u64,
+    bounce_source_callback_healthy: bool,
     plugin_timing: PreparedPluginTimingPlan,
     plugin_timing_activation: Option<PreparedPluginTimingPlan>,
     requested_plugin_timing_revision: u64,
@@ -6563,6 +6599,7 @@ impl DspState {
             project_session: Arc::new(AtomicU64::new(0)),
             removal_transport_mailbox: None,
             callback_transport_request_id: 0,
+            bounce_source_callback_healthy: false,
             plugin_timing,
             plugin_timing_activation: None,
             requested_plugin_timing_revision: 1,
@@ -6685,6 +6722,93 @@ impl DspState {
         })
     }
 
+    /// Revoke before callback mutation, including commands and Timeline activation.
+    fn begin_bounce_source_callback(&mut self) {
+        self.invalidate_bounce_source_settlements();
+        self.bounce_source_callback_healthy = true;
+    }
+
+    fn invalidate_bounce_source_settlements(&self) {
+        for slot in self.generator_endpoints.iter().flatten() {
+            slot.endpoint.adapter.invalidate_bounce_source_settlement();
+        }
+    }
+
+    /// Shared native/device-free end-of-callback publication. This observes existing state;
+    /// it never services DSP, consumes output, or waits for the independent worker.
+    fn finish_bounce_source_callback(
+        &self,
+        transport: &RealtimeTransport,
+        command_transition_pending: bool,
+    ) {
+        let Some(runtime) = self.timeline_runtime.as_ref() else {
+            return;
+        };
+        let Some(generation) = runtime.active_revision() else {
+            return;
+        };
+        let project_session = self.project_session.load(Ordering::Acquire);
+        if !self.bounce_source_callback_healthy
+            || self.raw_callback_frames == 0
+            || transport.request.playing
+            || command_transition_pending
+            || self.plugin_fault.is_some()
+            || self.plugin_processing_suspended()
+            || runtime.is_shutdown()
+            || runtime.pending_commands() != 0
+            || runtime.pending_transport_activation().is_some()
+            || runtime.stats().ownership_needs_resync
+            || generation == 0
+            || self.engine_session == 0
+            || project_session == 0
+            || self.transport_epoch != transport.epoch
+            || runtime.active_epoch() != Some(transport.epoch)
+            || !self.mixer_graph_binding_is_exact()
+            || !self
+                .timeline_generator_routes
+                .is_bound_to(generation, transport.epoch)
+        {
+            return;
+        }
+        let parameter_admission_empty = self
+            .parameter_edit_callback_admission
+            .load(Ordering::Acquire)
+            == 0;
+        for (index, slot) in self.generator_endpoints.iter().enumerate() {
+            let Some(slot) = slot else {
+                continue;
+            };
+            let exact_route = self
+                .timeline_generator_routes
+                .route_for_channel(slot.channel_id)
+                .is_some_and(|route| {
+                    route.endpoint_id == slot.endpoint_id
+                        && route.plugin_instance_id == slot.plugin_instance_id
+                        && route.mixer_track == slot.mixer_track
+                });
+            if slot.endpoint.project_session != project_session || !exact_route {
+                continue;
+            }
+            let midi_safety_pending = self.paused_midi_safety[index]
+                .is_some_and(|safety| self.exact_midi_generator_index(safety.stamp) == Some(index));
+            slot.endpoint.adapter.publish_bounce_source_settlement(
+                BounceSourceCallbackIdentity {
+                    engine_session: self.engine_session,
+                    project_session,
+                    timeline_generation: generation,
+                    epoch: transport.epoch,
+                    transport_request: transport.request.request_id,
+                    channel_id: slot.channel_id,
+                    endpoint_id: slot.endpoint_id,
+                    instance_id: slot.plugin_instance_id,
+                },
+                parameter_admission_empty
+                    && !midi_safety_pending
+                    && slot.endpoint.bounce_source_callback_input_empty(),
+            );
+        }
+    }
+
     /// Services the bounded ownership/lifecycle mailbox and invalidates any
     /// callback-owned render state whose active timeline identity changed.
     fn apply_pending_timeline_commands(&mut self) -> usize {
@@ -6710,6 +6834,7 @@ impl DspState {
     }
 
     fn clear_timeline_render_binding(&mut self) {
+        self.invalidate_bounce_source_settlements();
         self.block_plugin_midi_until_epoch();
         for slot in self.generator_endpoints.iter_mut().flatten() {
             if slot.endpoint.midi_port_input {
@@ -8612,6 +8737,8 @@ impl DspState {
         ticket: TimelineTransportActivationTicket,
         reason: TimelineTransportActivationRejectReason,
     ) {
+        self.bounce_source_callback_healthy = false;
+        self.invalidate_bounce_source_settlements();
         self.plugin_timing_activation = None;
         self.timeline_executor.abort_staged_reset();
         self.timeline_automation.abort_staged_reset();
@@ -9127,6 +9254,8 @@ impl DspState {
     }
 
     fn fail_timeline_block(&mut self) {
+        self.bounce_source_callback_healthy = false;
+        self.invalidate_bounce_source_settlements();
         // A later endpoint-batch/precommit read can observe drift after the raw callback
         // refresh succeeded. Preserve that positive evidence before clearing the binding;
         // otherwise the authorized-gap suspension guard would hide the fault indefinitely.
@@ -10005,6 +10134,7 @@ impl DspState {
     /// identity/latency drift still latches a fault. No plugin path may submit until an exact
     /// newly prepared topology revision commits, including paused MIDI and parameter service.
     fn begin_plugin_topology_replan(&mut self) {
+        self.invalidate_bounce_source_settlements();
         if !self.mixer_graph_was_activated {
             return;
         }
@@ -10260,6 +10390,10 @@ impl DspState {
     }
 
     fn retire_endpoint_resource(&mut self, resource: RetiredEndpointResource) {
+        resource
+            ._endpoint
+            .adapter
+            .invalidate_bounce_source_settlement();
         let Some(retired) = self.retired_insert_endpoints.as_mut() else {
             std::mem::forget(resource);
             return;
@@ -10416,6 +10550,7 @@ impl DspState {
                 None,
             );
         }
+        self.invalidate_bounce_source_settlements();
         self.begin_plugin_topology_replan();
         let replaced = self.generator_endpoints[target].take();
         let replaced_endpoint_id = replaced.as_ref().map(|slot| slot.endpoint_id);
@@ -10534,6 +10669,7 @@ impl DspState {
         }
         let result = self.validate_generator_removal_stamp(stamp);
         if let Ok(index) = result {
+            self.invalidate_bounce_source_settlements();
             #[cfg(test)]
             if self.test_genuine_observation.is_some() {
                 self.genuine_begin_lifecycle_mutation(
@@ -10569,6 +10705,7 @@ impl DspState {
     }
 
     fn remove_generator_endpoint(&mut self, channel_id: u32) {
+        self.invalidate_bounce_source_settlements();
         #[cfg(test)]
         if self.test_genuine_observation.is_some() {
             self.genuine_lifecycle_operand(
@@ -10605,6 +10742,7 @@ impl DspState {
     }
 
     fn clear_generator_endpoints(&mut self, request_id: u64) {
+        self.invalidate_bounce_source_settlements();
         if self.generator_endpoints.iter().any(Option::is_some) {
             self.begin_plugin_topology_replan();
         }
@@ -12085,6 +12223,8 @@ impl DspState {
         expected_sequence: u64,
         reason: PluginProcessingFaultReason,
     ) {
+        self.bounce_source_callback_healthy = false;
+        self.invalidate_bounce_source_settlements();
         if self.plugin_fault.is_some() {
             return;
         }
@@ -13576,6 +13716,8 @@ impl DspState {
     }
 
     fn fail_mixer_graph_render(&mut self, frames: usize) {
+        self.bounce_source_callback_healthy = false;
+        self.invalidate_bounce_source_settlements();
         for track in 0..TRACK_COUNT {
             let start = track * MAX_MIXER_BLOCK_FRAMES;
             self.track_block[start..start + frames].fill([0.0; 2]);
@@ -14054,6 +14196,8 @@ impl DspState {
 
 impl Drop for DspState {
     fn drop(&mut self) {
+        // Endpoint Drop deliberately does not run below. Revoke its shared certificate first.
+        self.invalidate_bounce_source_settlements();
         // Normal shutdown clears and retires every endpoint before the CPAL stream
         // is released. This guard prevents an unexpected backend-side callback
         // teardown from ever running endpoint destruction on its real-time thread.
@@ -14205,6 +14349,11 @@ fn finite_clamp(value: f32, minimum: f32, maximum: f32, fallback: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    mod capture_settlement_tests {
+        use super::*;
+        include!("audio_capture_settlement_tests.rs");
+    }
+
     use super::*;
     use crate::plugin_parameter_edit::ParameterEditRoute;
     use crate::plugins::plugin_runtime::{
