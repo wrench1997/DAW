@@ -23,6 +23,7 @@ from urllib.parse import unquote, urlsplit
 TARGET = "x86_64-pc-windows-msvc"
 TOOLCHAIN = "1.99.0-x86_64-pc-windows-msvc"
 RUSTFLAGS = "-C target-feature=+crt-static"
+PRODUCTION_FEATURES = ("vst2", "vst3")
 BINARIES = ("citrus-studio.exe", "vst3-host-helper.exe")
 SOURCE_FILES = (
     "LICENSE", "THIRD_PARTY_NOTICES.md", "README.md", "DEV_STATE.md",
@@ -581,6 +582,7 @@ OPTIONAL_SOURCE_FILES = frozenset((
     "docs/WAV_EXPORT_OPTIONS.md", "docs/MIXER_METERING.md", "docs/LOCAL_SAMPLE_BROWSER.md",
     "docs/HEADLESS_UI_QA.md", "docs/NATIVE_VST3_EDITORS.md", "docs/FL_INSPIRED_NATIVE_THEME.md", "docs/MULTIWINDOW_WORKSPACE.md",
     "docs/COMPACT_WORKSPACE.md",
+    "docs/SELECTED_CLIP_QUALIFICATION.md", "docs/SELECTED_CLIP_APP.md",
     "docs/PIANO_KEYBOARD_EDITING.md", "docs/PIANO_MOUSE_WORKFLOW.md",
     "docs/PIANO_NOTE_EXPRESSION.md", "docs/PIANO_RANGES_AND_SNAP.md",
     "docs/VST3_SCANNING.md", "docs/REAL_VST3_VALIDATION.md",
@@ -784,6 +786,7 @@ def validate_inventory(inventory, root_version, payload=None):
     require(isinstance(packages, list) and 0 < len(packages) <= 10000, "Missing/oversized dependency inventory")
     seen = set()
     roots = 0
+    root_features = None
     vendors = 0
     fields = {"name", "version", "source", "checksum", "license", "features"}
     for package in packages:
@@ -816,6 +819,7 @@ def validate_inventory(inventory, root_version, payload=None):
             require(checksum is None, "Local package must not have a registry checksum")
             if name == "citrus-studio" and version == root_version:
                 roots += 1
+                root_features = features
                 require("vendor_provenance" not in package, "Root has vendor provenance")
             else:
                 require((name, version, license_expression) == ("vst3-host", "0.9.0", "MIT"),
@@ -826,6 +830,10 @@ def validate_inventory(inventory, root_version, payload=None):
     require(roots == 1 and vendors <= 1, "Missing/duplicate root or vendor dependency")
     require(packages == sorted(packages, key=lambda p: (p["name"], p["version"])),
             "Noncanonical dependency order")
+    # Build provenance accepts this same exact profile. Enforce it on the actual
+    # resolved root at creation and verification, after identity/schema checks.
+    require(root_features == list(PRODUCTION_FEATURES),
+            "Root dependency features must match production build provenance")
     if payload is not None:
         present = set(payload) & VENDOR_FILES
         require(present == (VENDOR_FILES if vendors else set()), "Vendor dependency/bundle mismatch")
@@ -913,8 +921,8 @@ def validate_build_info(info):
     require(info.get("target") == TARGET and info.get("toolchain") == TOOLCHAIN,
             "Wrong preview toolchain/target")
     require(info.get("rustflags") == RUSTFLAGS, "Expected static CRT RUSTFLAGS")
-    require(info.get("profile") == "release" and info.get("features") == ["vst2", "vst3"],
-            "Expected optimized all-features build")
+    require(info.get("profile") == "release" and info.get("features") == list(PRODUCTION_FEATURES),
+            "Expected optimized production-feature build")
     require("release: 1.99.0\n" in info.get("rustc", "") + "\n" and
             f"host: {TARGET}\n" in info.get("rustc", "") + "\n", "Wrong rustc version/host")
     require(info.get("cargo", "").startswith("cargo 1.99.0 "), "Wrong Cargo version")

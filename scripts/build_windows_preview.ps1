@@ -20,6 +20,8 @@ $Repo = Split-Path -Parent $PSScriptRoot
 Set-Location $Repo
 $Toolchain = "1.99.0-x86_64-pc-windows-msvc"
 $Target = "x86_64-pc-windows-msvc"
+$ProductionFeatures = @("vst2", "vst3")
+$ProductionFeatureArgument = $ProductionFeatures -join ","
 $Python = (Get-Command python -ErrorAction Stop).Source
 Invoke-Checked $Python @("-c", "import sys; assert sys.version_info >= (3, 11), 'Python 3.11+ required'")
 if (Read-Checked git @("status", "--porcelain", "--untracked-files=normal")) {
@@ -68,7 +70,7 @@ Invoke-Checked cargo @("+$Toolchain", "fmt", "--all", "--", "--check")
 Invoke-Checked cargo @("+$Toolchain", "test", "--locked", "--all-features", "--all-targets", "--target", $Target)
 Invoke-Checked cargo @("+$Toolchain", "clippy", "--locked", "--all-features", "--all-targets", "--target", $Target, "--", "-D", "warnings")
 Invoke-Checked cargo @("+$Toolchain", "check", "--locked", "--no-default-features", "--all-targets", "--target", $Target)
-Invoke-Checked cargo @("+$Toolchain", "build", "--locked", "--release", "--all-features", "--bins", "--target", $Target)
+Invoke-Checked cargo @("+$Toolchain", "build", "--locked", "--release", "--no-default-features", "--features", $ProductionFeatureArgument, "--bins", "--target", $Target)
 
 # JSON contains only selected public build facts, never the environment, user
 # profile, entire target tree or raw Cargo metadata with absolute local paths.
@@ -77,7 +79,7 @@ $BuildInfo = [ordered]@{
     toolchain = $Toolchain
     rustflags = $env:RUSTFLAGS
     profile = "release"
-    features = @("vst2", "vst3")
+    features = $ProductionFeatures
     source_commit = $Commit
     source_epoch = [long] $Epoch
     cargo_lock_sha256 = $LockHash
@@ -94,7 +96,7 @@ $BuildInfo = [ordered]@{
 $BuildInfoPath = Join-Path $Out "build-info.json"
 $BuildInfo | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $BuildInfoPath -Encoding utf8NoBOM
 $MetadataPath = Join-Path $Out "cargo-metadata.private.json"
-$Metadata = Read-Checked cargo @("+$Toolchain", "metadata", "--locked", "--all-features", "--filter-platform", $Target, "--format-version", "1")
+$Metadata = Read-Checked cargo @("+$Toolchain", "metadata", "--locked", "--no-default-features", "--features", $ProductionFeatureArgument, "--filter-platform", $Target, "--format-version", "1")
 $Metadata | Set-Content -LiteralPath $MetadataPath -Encoding utf8NoBOM
 $Binaries = Join-Path $env:CARGO_TARGET_DIR "$Target\release"
 Invoke-Checked $Python @("-B", "scripts/package_windows_preview.py", "create", "--repo", $Repo, "--binaries", $Binaries, "--metadata", $MetadataPath, "--build-info", $BuildInfoPath, "--output", $Out)

@@ -9,7 +9,10 @@ security, signing or license acceptance.
 ## Inputs and runtime policy
 
 - Rust/Cargo **1.99.0**, installed with official `rustup`; explicit target
-  `x86_64-pc-windows-msvc`, `--locked`, all features (`vst2`, `vst3`).
+  `x86_64-pc-windows-msvc`, `--locked`. The packaged Release build and its paired
+  Cargo metadata both use `--no-default-features --features vst2,vst3`.
+  This explicit production profile excludes the root `default` marker and both
+  experimental features; the recorded feature list is exactly `["vst2", "vst3"]`.
 - Optimized `release` profile, `RUSTFLAGS=-C target-feature=+crt-static` and
   `CARGO_INCREMENTAL=0`. The explicit target keeps target CRT flags out of host
   proc-macro builds. Rust documents this option in its
@@ -69,7 +72,8 @@ The runner performs:
 1. Python packaging and helper-harness regression tests.
 2. Formatting, locked all-feature/all-target tests, Clippy with denied warnings,
    and a no-default-features check using the pinned MSVC/static-CRT configuration.
-3. Optimized all-feature builds of both binary targets.
+3. Optimized production-feature builds of both binary targets using
+   `--no-default-features --features vst2,vst3`.
 4. PE/import checks, exact-whitelist packaging, checksums and archive validation.
 5. Fresh extraction of the **final ZIP**, followed by the existing bounded
    plugin-free helper protocol smoke with PATH reduced to Windows system paths.
@@ -82,10 +86,20 @@ manifest license expression and selected features enter `DEPENDENCIES.json`, plu
 the bounded reviewed vendor provenance when selected.
 Raw metadata with local paths stays in ignored build output and is not uploaded.
 The local root must match the repository manifest identity, version, exact manifest
-location and Cargo graph root/workspace. Registry packages retain the fixed
+location and Cargo graph root/workspace. Its canonical resolved features must
+exactly match the production build provenance on both package creation and archive
+verification, even if an altered archive has freshly recomputed checksums.
+Registry packages retain the fixed
 crates.io source and locked checksum requirement. The only approved additional
 local dependency is the MIT `vst3-host 0.9.0` extension described below; arbitrary
 path/git/registry overrides and spoofed root packages fail closed.
+
+The preflight tests and Clippy, and the ordinary Windows quality CI's tests,
+Clippy and all-bin build, retain their all-feature coverage. Those checks do not
+change the narrower packaged profile. The
+[selected-clip qualification](SELECTED_CLIP_QUALIFICATION.md) covers a bounded
+Linux experimental workflow and supplies no Windows selected-clip plugin-runtime
+support claim or Windows GUI/device acceptance.
 
 To run locally on an authorized Windows development machine with PowerShell 7+:
 
@@ -118,7 +132,8 @@ The explicitly reviewed optional `docs/PROJECT_MEDIA.md` and
 `docs/OFFLINE_EXPORT_WORKFLOW.md`, `docs/AUDIO_SPLIT_FIDELITY.md` and
 `docs/WAV_EXPORT_OPTIONS.md`, `docs/MIXER_METERING.md` and
 `docs/LOCAL_SAMPLE_BROWSER.md`, `docs/HEADLESS_UI_QA.md` and
-`docs/NATIVE_VST3_EDITORS.md` are included
+`docs/NATIVE_VST3_EDITORS.md`, together with
+`docs/SELECTED_CLIP_QUALIFICATION.md` and `docs/SELECTED_CLIP_APP.md`, are included
 when present in the source checkout.
 This supports their independent implementation branches without requiring an
 unrelated code merge to test the packager. Any new

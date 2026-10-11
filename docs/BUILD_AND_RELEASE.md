@@ -32,6 +32,8 @@
 
 `.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build、独立的 helper harness 回归 / 实际 helper 协议 smoke 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；含 helper 自动 smoke 的运行已在 Rust/Cargo 1.99.0、Python 3.12.10 上全部通过。后续源码候选分别在相同门禁验证，确切提交/结果见 GitHub Actions 和 WORK_LOG。开发 smoke 不替代下述历史固定 gnullvm 发布流程、Release helper smoke、干净 Windows 实机验收与打包校验。
 
+独立的 [MSVC developer preview](WINDOWS_PREVIEW.md) 打包 Release 与配套 Cargo metadata 明确使用 `--no-default-features --features vst2,vst3`，其根 feature 清单必须与构建记录完全一致。preview 的测试/Clippy 及普通开发 CI 继续覆盖 all-features；下文历史 gnullvm 契约不因此改写。Linux 实验性 selected-clip 验收不构成 Windows 插件 runtime、GUI 或设备支持声明。
+
 ## 发布契约
 
 一个可运行的 Windows 发布包必须在同一 ZIP 根目录中携带以下三个二进制文件：

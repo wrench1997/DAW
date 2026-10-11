@@ -190,6 +190,17 @@ class PackageTests(unittest.TestCase):
             for info, data in entries:
                 handle.writestr(info, data)
 
+    def change_payload(self, archive, change):
+        """Rehash everything so these tests reach semantic checks, not just SHA checks."""
+        def rewrite(entries):
+            payload = {i.filename.split("/", 1)[1]: data for i, data in entries}
+            change(payload)
+            payload["SHA256SUMS.txt"] = "".join(
+                f"{pkg.digest(payload[p])}  {p}\n"
+                for p in sorted(set(payload) - {"SHA256SUMS.txt"})).encode("ascii")
+            return [(f"{archive.stem}/{p}", value) for p, value in sorted(payload.items())]
+        self.rewrite(archive, rewrite)
+
     def test_create_verify_extract_and_exact_whitelist(self):
         archive = self.create()
         extracted = self.root / "extracted"
@@ -213,6 +224,77 @@ class PackageTests(unittest.TestCase):
 
     def test_deterministic_archive_for_identical_inputs(self):
         self.assertEqual(self.create("one").read_bytes(), self.create("two").read_bytes())
+
+    def test_production_features_round_trip_and_metadata_order_normalization(self):
+        for index, features in enumerate((["vst2", "vst3"], ["vst3", "vst2"])):
+            with self.subTest(features=features):
+                self.metadata["resolve"]["nodes"][0]["features"] = features
+                archive = self.create(f"production-{index}")
+                info = pkg.verify_package(archive)
+                with zipfile.ZipFile(archive) as handle:
+                    inventory = json.loads(handle.read(f"{archive.stem}/DEPENDENCIES.json"))
+                root = next(p for p in inventory["packages"] if p["name"] == "citrus-studio")
+                self.assertEqual(info["features"], ["vst2", "vst3"])
+                self.assertEqual(root["features"], info["features"])
+
+    def test_metadata_root_features_must_match_production_build_provenance(self):
+        for features in (["default", "vst2", "vst3"],
+                         ["experimental-fresh-helper", "vst2", "vst3"],
+                         ["experimental-scoped-worker", "vst2", "vst3"],
+                         ["vst2"], ["vst3"], []):
+            with self.subTest(features=features):
+                self.metadata["resolve"]["nodes"][0]["features"] = features
+                self.assertEqual(self.info["features"], ["vst2", "vst3"])
+                with self.assertRaisesRegex(pkg.PackageError, "Root dependency features"):
+                    self.create()
+                self.assertFalse((self.root / "out").exists())
+
+    def test_duplicate_metadata_root_features_are_not_silently_deduplicated(self):
+        self.metadata["resolve"]["nodes"][0]["features"] = ["vst3", "vst2", "vst2"]
+        with self.assertRaisesRegex(pkg.PackageError, "Noncanonical dependency features"):
+            self.create()
+        self.assertFalse((self.root / "out").exists())
+
+    def test_build_info_requires_exact_production_features(self):
+        for features in (["default", "vst2", "vst3"],
+                         ["experimental-fresh-helper", "vst2", "vst3"],
+                         ["experimental-scoped-worker", "vst2", "vst3"],
+                         ["vst2"], ["vst3"], [], ["vst3", "vst2"],
+                         ["vst2", "vst2", "vst3"]):
+            with self.subTest(features=features), self.assertRaisesRegex(
+                    pkg.PackageError, "Expected optimized production-feature build"):
+                pkg.validate_build_info({**self.info, "features": features})
+
+    def test_rehashed_root_feature_mismatch_fails_before_extraction(self):
+        cases = [(["default", "vst2", "vst3"], "Root dependency features"),
+                 (["experimental-fresh-helper", "vst2", "vst3"], "Root dependency features"),
+                 (["experimental-scoped-worker", "vst2", "vst3"], "Root dependency features"),
+                 (["vst3"], "Root dependency features"),
+                 (["vst2", "vst2", "vst3"], "Noncanonical dependency features"),
+                 (["vst3", "vst2"], "Noncanonical dependency features")]
+        for index, (features, error) in enumerate(cases):
+            with self.subTest(features=features):
+                archive = self.create(f"root-features-{index}")
+                def change(payload):
+                    inventory = json.loads(payload["DEPENDENCIES.json"])
+                    root = next(p for p in inventory["packages"] if p["name"] == "citrus-studio")
+                    root["features"] = features
+                    payload["DEPENDENCIES.json"] = pkg.json_bytes(inventory)
+                self.change_payload(archive, change)
+                destination = self.root / f"rejected-features-{index}"
+                with self.assertRaisesRegex(pkg.PackageError, error):
+                    pkg.verify_package(archive, destination)
+                self.assertFalse(destination.exists())
+
+    def test_selected_clip_public_guides_are_packaged_with_link_closure(self):
+        guides = ("docs/SELECTED_CLIP_QUALIFICATION.md", "docs/SELECTED_CLIP_APP.md")
+        for name in guides:
+            (self.repo / name).write_text("[README](../README.md)\n")
+        (self.repo / "README.md").write_text(
+            "[Qualification](docs/SELECTED_CLIP_QUALIFICATION.md)\n"
+            "[App](docs/SELECTED_CLIP_APP.md)\n")
+        info = pkg.verify_package(self.create())
+        self.assertTrue(set(guides) <= set(info["source_documents"]))
 
     def test_optional_media_document_is_included_when_present(self):
         (self.repo / "docs/PROJECT_MEDIA.md").write_text("Media recovery guide\n")
@@ -876,17 +958,6 @@ class VendorTests(PackageTests):
     def refresh_lock(self):
         self.info["cargo_lock_sha256"] = pkg.digest((self.repo / "Cargo.lock").read_bytes())
 
-    def change_payload(self, archive, change):
-        """Rehash everything so these tests reach semantic checks, not just SHA checks."""
-        def rewrite(entries):
-            payload = {i.filename.split("/", 1)[1]: data for i, data in entries}
-            change(payload)
-            payload["SHA256SUMS.txt"] = "".join(
-                f"{pkg.digest(payload[p])}  {p}\n"
-                for p in sorted(set(payload) - {"SHA256SUMS.txt"})).encode("ascii")
-            return [(f"{archive.stem}/{p}", value) for p, value in sorted(payload.items())]
-        self.rewrite(archive, rewrite)
-
     def invalid_archive(self, archive):
         destination = self.root / "rejected-extract"
         with self.assertRaises(pkg.PackageError):
@@ -1156,6 +1227,39 @@ class VendorTests(PackageTests):
             archive = self.create(f"invalid-inventory-{index}")
             self.change_payload(archive, lambda payload: payload.update({"DEPENDENCIES.json": pkg.json_bytes(malformed)}))
             self.invalid_archive(archive)
+
+
+class PreviewBuildContractTests(unittest.TestCase):
+    """Read source arguments only; these tests do not execute PowerShell or Cargo."""
+
+    def setUp(self):
+        path = Path(__file__).with_name("build_windows_preview.ps1")
+        self.lines = path.read_text(encoding="utf-8").splitlines()
+
+    def test_build_metadata_and_provenance_share_explicit_production_profile(self):
+        self.assertIn('$ProductionFeatures = @("vst2", "vst3")', self.lines)
+        self.assertIn('$ProductionFeatureArgument = $ProductionFeatures -join ","', self.lines)
+        self.assertIn('    features = $ProductionFeatures', self.lines)
+        build = [line for line in self.lines if line.startswith('Invoke-Checked cargo @("+$Toolchain", "build",')]
+        self.assertEqual(build, [
+            'Invoke-Checked cargo @("+$Toolchain", "build", "--locked", "--release", '
+            '"--no-default-features", "--features", $ProductionFeatureArgument, "--bins", "--target", $Target)'])
+        metadata = [line for line in self.lines if line.startswith('$Metadata = Read-Checked cargo ')]
+        self.assertEqual(metadata, [
+            '$Metadata = Read-Checked cargo @("+$Toolchain", "metadata", "--locked", '
+            '"--no-default-features", "--features", $ProductionFeatureArgument, '
+            '"--filter-platform", $Target, "--format-version", "1")'])
+
+    def test_all_feature_quality_and_core_checks_are_retained(self):
+        self.assertIn(
+            'Invoke-Checked cargo @("+$Toolchain", "test", "--locked", "--all-features", '
+            '"--all-targets", "--target", $Target)', self.lines)
+        self.assertIn(
+            'Invoke-Checked cargo @("+$Toolchain", "clippy", "--locked", "--all-features", '
+            '"--all-targets", "--target", $Target, "--", "-D", "warnings")', self.lines)
+        self.assertIn(
+            'Invoke-Checked cargo @("+$Toolchain", "check", "--locked", "--no-default-features", '
+            '"--all-targets", "--target", $Target)', self.lines)
 
 
 class ProvenanceConstantsTests(unittest.TestCase):
