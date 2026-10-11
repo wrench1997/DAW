@@ -147,6 +147,11 @@ impl Default for OwnedTopologySlot {
 pub(crate) struct OwnedTopologyLedger {
     run: [u8; 32],
     failed: std::cell::Cell<bool>,
+    // Fixed, observation-only provenance. Neither retention nor emission can
+    // grant authority or replace the original sticky ledger failure.
+    first_rejected_issued_state: Option<TimelineAppState>,
+    issued_failure_observation_attempted: bool,
+    issued_failure_diagnostic_error: Option<String>,
     pub slots: [OwnedTopologySlot; 4],
     settled: usize,
     observed_receipts: u64,
@@ -192,6 +197,9 @@ impl OwnedTopologyLedger {
         Self {
             run,
             failed: std::cell::Cell::new(false),
+            first_rejected_issued_state: None,
+            issued_failure_observation_attempted: false,
+            issued_failure_diagnostic_error: None,
             slots: [OwnedTopologySlot::default(); 4],
             settled: 0,
             observed_receipts: 0,
@@ -200,6 +208,50 @@ impl OwnedTopologyLedger {
                 failures: 0,
             },
         }
+    }
+    pub(crate) fn first_rejected_issued_state(&self) -> Option<TimelineAppState> {
+        self.first_rejected_issued_state
+    }
+    fn preserve_issued_failure(
+        &mut self,
+        result: Check,
+        callsite: &'static str,
+        poll: usize,
+        stage: Option<usize>,
+        emit: impl FnOnce(Value) -> Check,
+    ) -> Check {
+        if let (Err(primary), Some(state)) = (&result, self.first_rejected_issued_state)
+            && !self.issued_failure_observation_attempted
+        {
+            // Consume the single diagnostic attempt before serialization or
+            // I/O. A failed emission never retries or discards the Copy tuple.
+            self.issued_failure_observation_attempted = true;
+            let diagnostic = catch_unwind(AssertUnwindSafe(|| {
+                emit(json!({
+                    "callsite":callsite,"poll":poll,"stage_index":stage,
+                    "stage":stage.and_then(|index| STAGES.get(index)),
+                    "primary_error":primary,"app":timeline_state_evidence(state)
+                }))
+            }))
+            .unwrap_or_else(|_| {
+                Err("issued failure diagnostic serialization/emission unwound".into())
+            });
+            if let Err(secondary) = diagnostic {
+                // Keep a bounded secondary report without changing the Check
+                // returned to the existing stage/summary failure path.
+                let mut end = secondary.len().min(512);
+                while !secondary.is_char_boundary(end) {
+                    end -= 1;
+                }
+                self.issued_failure_diagnostic_error = Some(secondary[..end].to_owned());
+                let secondary = self.issued_failure_diagnostic_error.as_deref().unwrap();
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "owned topology issued failure diagnostic error (secondary): {secondary}; primary: {primary}"
+                );
+            }
+        }
+        result
     }
     pub(crate) fn open(&self) -> Option<&OwnedTopologySlot> {
         self.slots
@@ -1885,13 +1937,35 @@ impl GenuineFixture {
                 after,
             } = record.kind
             {
-                self.topology.timeline_event(event, before, after)?;
+                let result = self.topology.timeline_event(event, before, after);
+                self.preserve_owned_topology_issued_failure(
+                    result,
+                    "consume_owned_topology_poll.timeline_event",
+                )?;
             }
         }
         self.topology_records = records.len();
-        self.topology
-            .observe_issued(self.app().genuine_timeline_app_state())?;
+        let state = self.app().genuine_timeline_app_state();
+        let result = self.topology.observe_issued(state);
+        self.preserve_owned_topology_issued_failure(
+            result,
+            "consume_owned_topology_poll.observe_issued",
+        )?;
         Ok(())
+    }
+    fn preserve_owned_topology_issued_failure(
+        &mut self,
+        result: Check,
+        callsite: &'static str,
+    ) -> Check {
+        let journal = &mut self.journal;
+        self.topology.preserve_issued_failure(
+            result,
+            callsite,
+            self.budget.polls,
+            self.active_stage,
+            |evidence| journal.emit("owned_topology_first_rejected_issued_state", evidence),
+        )
     }
     pub(super) fn refresh_owned_topology(&mut self, ordinary_health_clear: bool) -> Check {
         let records = self.all_observations();
@@ -1955,8 +2029,12 @@ impl GenuineFixture {
             self.last_topology_health_evidence = Some(health_evidence);
         }
         self.topology.observe_timeline_owner(issued, live)?;
-        self.topology
-            .observe_issued(self.app().genuine_timeline_app_state())?;
+        let state = self.app().genuine_timeline_app_state();
+        let result = self.topology.observe_issued(state);
+        self.preserve_owned_topology_issued_failure(
+            result,
+            "refresh_owned_topology.observe_issued",
+        )?;
         if self.topology.settle(evidence, &snapshot)? {
             self.journal
                 .emit("owned_topology_settled", self.topology.evidence())?;
@@ -2014,8 +2092,11 @@ impl OwnedTopologyLedger {
     }
     pub(crate) fn observe_issued(&mut self, state: TimelineAppState) -> Check {
         require(!self.failed.get(), "owned topology ledger already terminal")?;
+        let supplied_state = state;
         let result = self.observe_issued_inner(state);
         if result.is_err() {
+            self.first_rejected_issued_state
+                .get_or_insert(supplied_state);
             self.failed.set(true);
         }
         result

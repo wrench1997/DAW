@@ -15,10 +15,20 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
-// Failure-only diagnostics for the private, device-free topology qualification.
-// Copy retained fields only; never query a worker, service an owner, or reset time.
+// Read-only test identity and failure diagnostics for device-free qualification.
+// Borrow retained fields/publication only; never service an owner or reset time.
 #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
 impl PendingClipRestoration {
+    pub(in crate::app) fn genuine_test_candidate(&self) -> Option<&Project> {
+        self.candidate.as_ref()
+    }
+
+    pub(in crate::app) fn genuine_test_chain_audio_worker(&self) -> Option<usize> {
+        self.chain
+            .as_ref()
+            .map(|chain| chain.audio.genuine_snapshot().worker_id)
+    }
+
     pub(in crate::app) fn genuine_diagnostic_ready(&self) -> bool {
         self.ready
     }

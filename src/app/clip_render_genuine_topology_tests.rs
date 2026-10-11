@@ -929,3 +929,280 @@ fn retained_app_worker_is_authoritative_before_backend_observer_arrives() {
         }
     }
 }
+
+#[test]
+fn issued_failure_evidence_retains_exact_first_rejected_tuple_with_or_without_claim() {
+    let c = claim(OwnedTopologyKind::UndoInstall);
+    // Unequal identity domains make loss, aliasing or resampling visible. These
+    // copied negatives are pure ledger inputs, never actual App receipts.
+    let healthy = TimelineAppState {
+        phase: TimelinePhase::InstallReady,
+        project_session: c.project,
+        engine_session: Some(c.engine),
+        sync_session: 211,
+        desired_generation: 223,
+        observed_fingerprint: 227,
+        compiled_generation: Some(229),
+        compiled_fingerprint: Some(233),
+        source_generation: Some(239),
+        source_fingerprint: Some(241),
+        sync_source_generation: Some(251),
+        desired_seek_serial: 257,
+        desired_seek_frame: 263,
+        loop_token: Some(269),
+        loop_disable_request: Some(271),
+        retry_count: 0,
+        stale_confirmations: 0,
+        confirmed_identity: Some((277, 281)),
+        retry_required: false,
+        retry_pending: None,
+    };
+    let serialized_healthy = json!({
+        "phase":{"variant":"InstallReady"},"project_session":9,"engine_session":7,
+        "sync_session":211,"desired_generation":223,"observed_fingerprint":227,
+        "compiled_generation":229,"compiled_fingerprint":233,"source_generation":239,
+        "source_fingerprint":241,"sync_source_generation":251,"desired_seek_serial":257,
+        "desired_seek_frame":263,"loop_token":269,"loop_disable_request":271,
+        "retry_count":0,"stale_confirmations":0,"confirmed_identity":[277,281],
+        "retry_required":false,"retry_pending":null
+    });
+    assert_eq!(timeline_state_evidence(healthy), serialized_healthy);
+    for with_claim in [false, true] {
+        for operand in 0..7 {
+            let mut l = if with_claim {
+                let mut l = ledger(c.kind);
+                l.claim(c).unwrap();
+                l
+            } else {
+                OwnedTopologyLedger::new(RUN)
+            };
+            let result = l.observe_issued(healthy);
+            assert_eq!(result, Ok(()));
+            assert_eq!(l.first_rejected_issued_state(), None);
+            assert_eq!(
+                l.preserve_issued_failure(result, "pure.healthy", 283, Some(6), |_| {
+                    panic!("healthy input must not serialize or emit rejection evidence")
+                }),
+                Ok(())
+            );
+            assert!(!l.issued_failure_observation_attempted);
+            let mut rejected = healthy;
+            let mut expected = serialized_healthy.clone();
+            match operand {
+                0 => {
+                    rejected.phase = TimelinePhase::Faulted;
+                    expected["phase"] = json!({"variant":"Faulted"});
+                }
+                1 => {
+                    rejected.phase = TimelinePhase::FaultClearReady { revision: 293 };
+                    expected["phase"] = json!({"variant":"FaultClearReady","revision":293});
+                }
+                2 => {
+                    rejected.phase = TimelinePhase::FaultClearQueued {
+                        request_id: 307,
+                        revision: 311,
+                    };
+                    expected["phase"] = json!({
+                        "variant":"FaultClearQueued","timeline_request_id":307,"revision":311
+                    });
+                }
+                3 => {
+                    rejected.retry_required = true;
+                    expected["retry_required"] = json!(true);
+                }
+                4 => {
+                    rejected.retry_pending = Some((313, 317));
+                    expected["retry_pending"] = json!([313, 317]);
+                }
+                5 => {
+                    rejected.retry_count = 331;
+                    expected["retry_count"] = json!(331);
+                }
+                6 => {
+                    rejected.stale_confirmations = 337;
+                    expected["stale_confirmations"] = json!(337);
+                }
+                _ => unreachable!(),
+            }
+            let result = l.observe_issued(rejected);
+            assert_eq!(result, Err("terminal App Timeline fault or retry".into()));
+            assert_eq!(l.first_rejected_issued_state(), Some(rejected));
+            assert!(l.failed.get());
+            assert!(!l.clear());
+            assert_eq!(l.open().is_some(), with_claim);
+            let mut emitted = Vec::new();
+            assert_eq!(
+                l.preserve_issued_failure(
+                    result.clone(),
+                    "pure.observe_issued",
+                    347,
+                    Some(6),
+                    |row| {
+                        emitted.push(row);
+                        Ok(())
+                    }
+                ),
+                result
+            );
+            assert_eq!(emitted.len(), 1);
+            assert_eq!(emitted[0]["app"], expected);
+            assert_eq!(
+                emitted[0]["primary_error"],
+                "terminal App Timeline fault or retry"
+            );
+            assert_eq!(emitted[0]["callsite"], "pure.observe_issued");
+            assert_eq!(emitted[0]["poll"], 347);
+            assert_eq!(emitted[0]["stage_index"], 6);
+            assert_eq!(emitted[0]["stage"], STAGES[6]);
+            assert!(l.issued_failure_diagnostic_error.is_none());
+            let mut later_error = healthy;
+            later_error.phase = TimelinePhase::FaultClearQueued {
+                request_id: 349,
+                revision: 353,
+            };
+            later_error.source_generation = Some(359);
+            later_error.retry_count = 367;
+            for later in [later_error, healthy] {
+                let result = l.observe_issued(later);
+                assert_eq!(result, Err("owned topology ledger already terminal".into()));
+                assert_eq!(
+                    l.preserve_issued_failure(result.clone(), "pure.later", 373, None, |_| {
+                        panic!("first rejection must emit at most once")
+                    }),
+                    result
+                );
+                assert_eq!(l.first_rejected_issued_state(), Some(rejected));
+                assert_eq!(timeline_state_evidence(rejected), expected);
+                assert!(l.failed.get());
+                assert!(!l.clear());
+            }
+        }
+    }
+}
+
+#[test]
+fn issued_failure_evidence_nested_calls_and_serialization_preserve_primary_error() {
+    struct RefusesSerialization;
+    impl serde::Serialize for RefusesSerialization {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("deliberate serializer failure"))
+        }
+    }
+    let event = TimelineRuntimeEvent::Installed {
+        request_id: 101,
+        revision: 4,
+    };
+    let c = claim(OwnedTopologyKind::UndoInstall);
+    let healthy = app_state(c, TimelinePhase::InstallReady);
+    let mut no_claim = OwnedTopologyLedger::new(RUN);
+    assert_eq!(no_claim.timeline_event(event, healthy, healthy), Ok(()));
+    assert_eq!(no_claim.first_rejected_issued_state(), None);
+    // An existing outer event rejection must keep its original precedence;
+    // do not invent an observe_issued input if that wrapper was never reached.
+    let mut terminal = healthy;
+    terminal.phase = TimelinePhase::Faulted;
+    let result = no_claim.timeline_event(event, healthy, terminal);
+    assert_eq!(
+        result,
+        Err("actual Timeline event caused fault/retry/stale confirmation".into())
+    );
+    assert_eq!(
+        no_claim.preserve_issued_failure(result.clone(), "pure.outer_event", 379, Some(6), |_| {
+            panic!("no rejected issued input exists at the outer event guard")
+        }),
+        result
+    );
+    assert_eq!(no_claim.first_rejected_issued_state(), None);
+    assert_eq!(
+        no_claim.observe_issued(terminal),
+        Err("owned topology ledger already terminal".into())
+    );
+    assert_eq!(no_claim.first_rejected_issued_state(), None);
+    for reject_before in [true, false] {
+        for emission_failure in 0..3 {
+            let (mut l, c, r) = accepted(OwnedTopologyKind::UndoInstall);
+            l.consume_app_poll(c.next_poll, &[r.event], true).unwrap();
+            l.observe_timeline_owner(Some(target(c)), true).unwrap();
+            let mut before = app_state(
+                c,
+                TimelinePhase::InstallQueued {
+                    request_id: 101,
+                    generation: 4,
+                },
+            );
+            let mut after = app_state(c, TimelinePhase::LoopReady);
+            let primary = if reject_before {
+                before.retry_required = true;
+                "terminal App Timeline fault or retry"
+            } else {
+                after.project_session = 383;
+                after.sync_session = 389;
+                "Timeline session, rejected/stale/retry drift"
+            };
+            let rejected = if reject_before { before } else { after };
+            let result = l.timeline_event(event, before, after);
+            assert_eq!(result, Err(primary.into()));
+            assert_eq!(l.first_rejected_issued_state(), Some(rejected));
+            assert_eq!(l.open().unwrap().requests.installed, !reject_before);
+            let mut attempts = 0;
+            let mut emitted = None;
+            assert_eq!(
+                l.preserve_issued_failure(
+                    result.clone(),
+                    "pure.timeline_event",
+                    397,
+                    Some(6),
+                    |row| {
+                        attempts += 1;
+                        emitted = Some(row);
+                        match emission_failure {
+                            0 => json_bytes(&RefusesSerialization).map(|_| ()),
+                            1 => Err("deliberate journal failure".into()),
+                            2 => panic!("deliberate serializer unwind"),
+                            _ => unreachable!(),
+                        }
+                    }
+                ),
+                result
+            );
+            let emitted = emitted.unwrap();
+            assert_eq!(emitted["app"], timeline_state_evidence(rejected));
+            assert_eq!(emitted["primary_error"], primary);
+            assert_eq!(emitted["callsite"], "pure.timeline_event");
+            assert_eq!(emitted["poll"], 397);
+            assert_eq!(emitted["stage_index"], 6);
+            let secondary = match emission_failure {
+                0 => "deliberate serializer failure",
+                1 => "deliberate journal failure",
+                2 => "issued failure diagnostic serialization/emission unwound",
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                l.issued_failure_diagnostic_error.as_deref(),
+                Some(secondary)
+            );
+            let later = l.timeline_event(event, healthy, healthy);
+            assert_eq!(later, Err("owned topology ledger already terminal".into()));
+            assert_eq!(
+                l.preserve_issued_failure(later.clone(), "pure.later_event", 401, None, |_| {
+                    attempts += 1;
+                    Ok(())
+                }),
+                later
+            );
+            assert_eq!(attempts, 1);
+            assert_eq!(l.first_rejected_issued_state(), Some(rejected));
+            assert_eq!(
+                l.issued_failure_diagnostic_error.as_deref(),
+                Some(secondary)
+            );
+            assert_eq!(
+                l.observe_issued(healthy),
+                Err("owned topology ledger already terminal".into())
+            );
+            assert_eq!(l.first_rejected_issued_state(), Some(rejected));
+            assert!(l.failed.get());
+            assert!(!l.clear());
+        }
+    }
+}
