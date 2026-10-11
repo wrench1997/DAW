@@ -4,10 +4,9 @@
 //! claim that an SDK restoration took place. The runtime adapter has its own tests.
 //! No helper, device, native editor, or genuine plug-in is invoked here.
 use super::*;
-use crate::app::clip_render_job::{
-    ClipRenderPhase,
-    tests::{FIXTURE_ADMISSION, FIXTURE_POISONED, Fixture},
-};
+#[cfg(target_os = "linux")]
+use crate::app::clip_render_job::ClipRenderPhase;
+use crate::app::clip_render_job::tests::{FIXTURE_ADMISSION, FIXTURE_POISONED, Fixture};
 use crate::instrument_bounce::{BounceAudioBus, BouncePluginState};
 use crate::plugins::plugin_runtime::{PluginPrepareConfig, test_capture_source::TestCaptureSource};
 use std::{
@@ -365,6 +364,7 @@ fn failed_restoration_stays_play_blocked_even_when_old_endpoint_and_timeline_are
     assert!(!fixture.app().playing);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_committed_failure_blocks_play_after_stop_and_further_polls() {
     let mut fixture = Fixture::new();
@@ -1261,6 +1261,7 @@ static RESTORATION_FACTORY_CALLS: AtomicUsize = AtomicUsize::new(0);
 /// This seam tests the App controller only. The production expectation is built
 /// and its exact spec validated before this hook; actual vendor state/base/Start
 /// attestation is tested separately by the source-restoration protocol fixtures.
+#[cfg(target_os = "linux")]
 pub(in crate::app) fn authoritative_mock_restoration_factory(
     candidate: &Project,
     instance_id: u64,
@@ -1306,6 +1307,7 @@ pub(in crate::app) fn authoritative_mock_restoration_factory(
     Ok(chain)
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for_held_restoration_ready(fixture: &Fixture, channel: u32) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -1342,6 +1344,7 @@ fn wait_for_held_restoration_ready(fixture: &Fixture, channel: u32) {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn assert_ordinary_ring_full_before_handoff(fixture: &mut Fixture) {
     assert!(
         !fixture
@@ -1354,6 +1357,7 @@ fn assert_ordinary_ring_full_before_handoff(fixture: &mut Fixture) {
     );
 }
 
+#[cfg(target_os = "linux")]
 fn assert_exclusive_compiled_source(app: &CitrusApp, expect_audio: bool) {
     let (_, timeline) = app
         .latest_compiled_timeline()
@@ -1399,6 +1403,7 @@ fn assert_exclusive_compiled_source(app: &CitrusApp, expect_audio: bool) {
     assert!(app.timeline_audio_matches_desired());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_ready_restoration_full_ring_retains_owner_until_same_owner_callback_install() {
     let mut fixture = converted_fixture_with_mock_restoration();
@@ -1591,6 +1596,7 @@ fn actual_ready_restoration_full_ring_retains_owner_until_same_owner_callback_in
     assert_one_healthy_restoration_join(&observer, owner.0);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_conversion_undo_ready_install_new_timeline_and_redo_preserve_authoritative_source() {
     let mut fixture = Fixture::new();
@@ -1822,6 +1828,7 @@ fn actual_conversion_undo_ready_install_new_timeline_and_redo_preserve_authorita
     assert_exclusive_compiled_source(fixture.app(), false);
 }
 
+#[cfg(target_os = "linux")]
 fn assert_redo_uses_retained_pcm_after_external_file_change(delete_file: bool) {
     let mut fixture = Fixture::new();
     RESTORATION_FACTORY_CALLS.store(0, Ordering::Release);
@@ -1886,11 +1893,13 @@ fn assert_redo_uses_retained_pcm_after_external_file_change(delete_file: bool) {
     // its exact already-verified allocation and exact current asset binding.
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_undo_redo_reuses_verified_arc_after_published_wav_is_modified() {
     assert_redo_uses_retained_pcm_after_external_file_change(false);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_undo_redo_reuses_verified_arc_after_published_wav_is_deleted() {
     assert_redo_uses_retained_pcm_after_external_file_change(true);
@@ -1967,6 +1976,7 @@ fn fill_ordinary_ring_and_prove_stop_all_rejected(app: &mut CitrusApp) -> u64 {
     audio.snapshot().command_queue_full
 }
 
+#[cfg(target_os = "linux")]
 fn drive_restoration_and_assert_silent_gate(
     fixture: &mut Fixture,
     previous_generation: u64,
@@ -2034,6 +2044,7 @@ fn drive_restoration_and_assert_silent_gate(
     (app.timeline_desired_generation, snapshot.transport_epoch)
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_undo_redo_new_timeline_clears_callback_residues_when_ordinary_stop_all_queue_is_full() {
     let mut fixture = Fixture::new();
@@ -2169,6 +2180,7 @@ fn actual_undo_redo_new_timeline_clears_callback_residues_when_ordinary_stop_all
     // history. Nonzero fixed-quantum FIFO reset has separate stamped-removal tests.
 }
 
+#[cfg(target_os = "linux")]
 fn converted_fixture_with_mock_restoration() -> Fixture {
     let mut fixture = Fixture::new();
     RESTORATION_FACTORY_CALLS.store(0, Ordering::Release);
@@ -2185,6 +2197,7 @@ fn converted_fixture_with_mock_restoration() -> Fixture {
     fixture
 }
 
+#[cfg(target_os = "linux")]
 fn assert_receipt_panic_keeps_admission_closed(fixture: &mut Fixture) {
     assert!(fixture.app().clip_restoration_failed);
     assert!(fixture.app().clip_restoration_playback_pending);
@@ -2250,6 +2263,7 @@ fn assert_receipt_panic_keeps_admission_closed(fixture: &mut Fixture) {
     assert!(fixture.app().project_lifecycle.is_idle());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_installed_receipt_panic_retains_exact_pending_owner_and_blocks_later_admission() {
     let mut fixture = converted_fixture_with_mock_restoration();
@@ -2320,6 +2334,7 @@ fn actual_installed_receipt_panic_retains_exact_pending_owner_and_blocks_later_a
     // Fixture owns this callback and exact pending guard through bounded cleanup.
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_removed_receipt_panic_retains_exact_running_owner_and_blocks_later_admission() {
     let mut fixture = converted_fixture_with_mock_restoration();
@@ -2396,6 +2411,7 @@ fn actual_removed_receipt_panic_retains_exact_running_owner_and_blocks_later_adm
     // Fixture's retained-join cleanup owns it even after the callback removed it.
 }
 
+#[cfg(target_os = "linux")]
 fn recovery_refusal_fixture(restored: bool) -> Fixture {
     let mut fixture = converted_fixture_with_mock_restoration();
     let channel = fixture.app().project.channels[0].id;
@@ -2426,6 +2442,7 @@ fn recovery_refusal_fixture(restored: bool) -> Fixture {
     fixture
 }
 
+#[cfg(target_os = "linux")]
 fn retained_recovery_source_guard(fixture: &Fixture, restored: bool) -> &PluginWorkerGuard {
     let channel = fixture.app().project.channels[0].id;
     if restored {
@@ -2439,6 +2456,7 @@ fn retained_recovery_source_guard(fixture: &Fixture, restored: bool) -> &PluginW
     }
 }
 
+#[cfg(target_os = "linux")]
 fn assert_recovery_refusal_preserves_source(
     fixture: &Fixture,
     restored: bool,
@@ -2470,6 +2488,7 @@ fn assert_recovery_refusal_preserves_source(
     assert!(!fixture.app().playing);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_direct_recovery_refusal_keeps_recovery_available_with_pending_or_bound_source() {
     for restored in [false, true] {
@@ -2496,6 +2515,7 @@ fn actual_direct_recovery_refusal_keeps_recovery_available_with_pending_or_bound
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_deferred_recovery_refusal_keeps_recovery_available_with_pending_or_bound_source() {
     for restored in [false, true] {
@@ -2525,6 +2545,7 @@ fn actual_deferred_recovery_refusal_keeps_recovery_available_with_pending_or_bou
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_open_and_new_refusals_do_not_report_success_or_replace_the_session() {
     let assert_refused =

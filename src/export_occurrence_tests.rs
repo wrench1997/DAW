@@ -10,6 +10,7 @@ fn directory(name: &str) -> PathBuf {
     directory
 }
 
+#[cfg(target_os = "linux")]
 fn publish(
     path: &Path,
     fixture: WavWriteFixture,
@@ -26,6 +27,44 @@ fn publish(
         &ExportControl::default(),
         policy,
     )
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn owned_float32_unsupported_platform_refuses_before_any_file_side_effect() {
+    let dir = directory("unsupported");
+    let missing = dir.join("new.wav");
+    let existing = dir.join("existing.wav");
+    std::fs::write(&existing, b"original destination").unwrap();
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    for path in [&missing, &existing] {
+        let failure = write_stereo_float32_create_new_checked(
+            path,
+            8000,
+            &[StereoFrame {
+                left: 0.25,
+                right: -0.5,
+            }; 129],
+            &ExportControl::default(),
+            Instant::now() + Duration::from_secs(60),
+        )
+        .unwrap_err();
+        assert_eq!(failure.primary.kind, PublicationErrorKind::Unsupported);
+        assert_eq!(failure.primary.operation, PublicationOperation::Write);
+        assert_eq!(failure.primary.io_kind, Some(std::io::ErrorKind::Unsupported));
+        assert_eq!(failure.evidence.phase, PublicationPhase::PreLink);
+        assert!(failure.evidence.retained_destination.is_none());
+        assert!(failure.evidence.retained_stage.is_none());
+        assert!(failure.evidence.identity.is_none());
+        assert!(failure.stage_unlink.is_none());
+        assert!(failure.parent_sync.is_none());
+        assert!(failure.abort.is_none());
+        assert!(!missing.exists());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"original destination");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    }
+    std::fs::remove_file(existing).unwrap();
+    std::fs::remove_dir(dir).unwrap();
 }
 
 #[cfg(target_os = "linux")]

@@ -18,15 +18,15 @@ thread_local! {
 pub(super) fn genuine_hooks_inactive() -> bool {
     TEST_PCM_LIMIT.with(|limit| limit.get() == MAX_RETAINED_CLIP_PCM_BYTES)
 }
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(in crate::app) struct TestPcmLimit(usize);
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 impl Drop for TestPcmLimit {
     fn drop(&mut self) {
         TEST_PCM_LIMIT.with(|limit| limit.set(self.0));
     }
 }
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(in crate::app) fn lower_test_pcm_limit(bytes: usize) -> TestPcmLimit {
     assert!(bytes <= MAX_RETAINED_CLIP_PCM_BYTES);
     TestPcmLimit(TEST_PCM_LIMIT.with(|limit| limit.replace(bytes)))

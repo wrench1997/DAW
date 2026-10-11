@@ -414,7 +414,7 @@ impl InstrumentBouncePlan {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(crate) fn retained_project_state_bytes(&self) -> usize {
         self.spec.initial_state.len()
     }

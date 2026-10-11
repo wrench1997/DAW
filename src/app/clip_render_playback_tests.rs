@@ -2,11 +2,17 @@
 //! Setup stops at exact source join, not the formerly failing final Timeline.
 //! All workers and generated media remain under Fixture's bounded retained cleanup.
 use super::*;
+#[cfg(target_os = "linux")]
 use crate::app::clip_render_glue::tests::authoritative_mock_restoration_factory;
-use crate::app::clip_render_job::{ClipRenderPhase, tests::Fixture};
+#[cfg(target_os = "linux")]
+use crate::app::clip_render_job::ClipRenderPhase;
+use crate::app::clip_render_job::tests::Fixture;
+#[cfg(target_os = "linux")]
 use crate::model::ProjectAutomation;
+#[cfg(target_os = "linux")]
 use crate::timeline::TimelineEventKind;
 
+#[cfg(target_os = "linux")]
 fn joined_conversion() -> Fixture {
     let mut fixture = Fixture::new();
     fixture.begin();
@@ -32,6 +38,7 @@ fn bytes<T: serde::Serialize>(value: &T) -> Vec<u8> {
     serde_json::to_vec(value).unwrap()
 }
 
+#[cfg(target_os = "linux")]
 fn automation(id: u64, target: AutomationTarget) -> ProjectAutomation {
     let mut lane = AutomationLane::new(target);
     lane.insert_point(AutomationPoint::new(0.0, 0.25)).unwrap();
@@ -43,6 +50,7 @@ fn automation(id: u64, target: AutomationTarget) -> ProjectAutomation {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn note(id: u64, channel: u32, pitch: u8, start: f32, length: f32) -> PianoNote {
     PianoNote {
         id,
@@ -57,6 +65,7 @@ fn note(id: u64, channel: u32, pitch: u8, start: f32, length: f32) -> PianoNote 
     }
 }
 
+#[cfg(target_os = "linux")]
 fn add_unrelated_native_channel(project: &mut Project) -> u32 {
     let mut channel = project.channels[0].clone();
     channel.id = project
@@ -78,6 +87,7 @@ fn add_unrelated_native_channel(project: &mut Project) -> u32 {
     id
 }
 
+#[cfg(target_os = "linux")]
 fn note_edges(timeline: &CompiledTimeline, channel: u32) -> Vec<(u64, bool, u8)> {
     timeline
         .events()
@@ -94,6 +104,7 @@ fn note_edges(timeline: &CompiledTimeline, channel: u32) -> Vec<(u64, bool, u8)>
         .collect()
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn exact_disabled_projection_preserves_persisted_project_and_audio_route_gain() {
     let mut fixture = joined_conversion();
@@ -237,6 +248,7 @@ fn ordinary_unbound_disabled_source_keeps_existing_compiler_semantics() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn wrong_bound_descriptor_path_or_session_fails_without_rewriting_project() {
     let mut fixture = joined_conversion();
@@ -272,6 +284,7 @@ fn wrong_bound_descriptor_path_or_session_fails_without_rewriting_project() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn exact_binding_readmission_changes_projection_revision_without_changing_project_bytes() {
     let mut fixture = joined_conversion();
@@ -302,6 +315,7 @@ fn exact_binding_readmission_changes_projection_revision_without_changing_projec
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn ambiguous_duplicate_or_shared_bound_source_ownership_fails_closed() {
     let mut fixture = joined_conversion();
@@ -347,6 +361,7 @@ fn ambiguous_duplicate_or_shared_bound_source_ownership_fails_closed() {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn pattern_mode_retained_midi_cannot_fall_back_to_native_notes() {
     let mut fixture = joined_conversion();
@@ -416,6 +431,7 @@ fn pattern_mode_retained_midi_cannot_fall_back_to_native_notes() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn muted_target_note_extent_preserves_unrelated_long_period_repetition_timing() {
     let mut fixture = joined_conversion();
@@ -454,6 +470,7 @@ fn muted_target_note_extent_preserves_unrelated_long_period_repetition_timing() 
     assert_eq!(starts, vec![12_000, 492_000, 972_000]);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_undo_restores_enabled_route_and_redo_projects_disabled_route_away() {
     let mut fixture = joined_conversion();
@@ -508,6 +525,7 @@ fn actual_undo_restores_enabled_route_and_redo_projects_disabled_route_away() {
     assert!(!fixture.app().playing);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn same_bytes_reopen_clears_session_projection_and_forces_new_compile_identity() {
     let mut fixture = joined_conversion();
@@ -559,6 +577,7 @@ fn same_bytes_reopen_clears_session_projection_and_forces_new_compile_identity()
     assert!(fixture.app().pending_generator_chains.is_empty());
 }
 
+#[cfg(target_os = "linux")]
 fn fill_remaining_command_slots(fixture: &mut Fixture) -> usize {
     for admitted in 0..=64 {
         if !fixture
@@ -574,6 +593,7 @@ fn fill_remaining_command_slots(fixture: &mut Fixture) -> usize {
     panic!("bounded real callback command ring did not fill");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_dormant_audition_cannot_enqueue_native_note_but_unbound_disabled_keeps_existing_behavior()
 {

@@ -3475,12 +3475,17 @@ pub(crate) struct TestAudioCallback {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TestRestorationResidues {
+    // Preserve portable fixture snapshots; these fields are asserted only by
+    // the Linux publication-dependent restoration coverage.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) raw_track_delays: usize,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) generator_pdc: bool,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) active_graph_routes: usize,
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TestRestorationResetCoverage {
     pub(crate) extant: TestRestorationResidues,
@@ -3489,19 +3494,28 @@ pub(crate) struct TestRestorationResetCoverage {
 
 #[cfg(test)]
 struct TestRestorationResetArm {
+    // Preserve portable fixture snapshots; these fields are asserted only by
+    // the Linux publication-dependent restoration coverage.
     channel_id: u32,
     target_generation: Option<u64>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     engine_session: u64,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     project_session: u64,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     initial: TestRestorationHistories,
 }
 
 #[cfg(test)]
 struct TestRestorationResetObservation {
+    // Preserve portable fixture snapshots; these fields are asserted only by
+    // the Linux publication-dependent restoration coverage.
     arm: TestRestorationResetArm,
     revision: u64,
     epoch: u64,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     before: TestRestorationHistories,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     after_epoch: TestRestorationHistories,
     after_commit: Option<TestRestorationHistories>,
 }
@@ -3511,8 +3525,13 @@ type TestRestorationDelayHistory = (u64, [f32; 2]);
 
 #[cfg(test)]
 struct TestRestorationHistories {
+    // Preserve portable fixture snapshots; these fields are asserted only by
+    // the Linux publication-dependent restoration coverage.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     engine_session: u64,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     project_session: u64,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     transport_epoch: u64,
     active_voices: usize,
     active_audio_voices: usize,
@@ -3539,6 +3558,7 @@ impl TestRestorationHistories {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn assert_cleared(&self) {
         assert_eq!(self.active_voices, 0);
         assert_eq!(self.active_audio_voices, 0);
@@ -3553,6 +3573,7 @@ impl TestRestorationHistories {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn assert_reset_from(&self, before: &Self) {
         assert_eq!(self.engine_session, before.engine_session);
         assert_eq!(self.project_session, before.project_session);
@@ -3738,6 +3759,7 @@ impl TestAudioCallback {
     /// Poison now for queued/full-ring evidence and arm a separate, one-shot reset-contract
     /// observation. The latter injects again at the exact real activation boundary: it does not
     /// claim that this first poison survives arbitrary intervening callback advancement.
+    #[cfg(target_os = "linux")]
     pub(crate) fn poison_restoration_residues(
         &mut self,
         channel_id: u32,
@@ -3759,6 +3781,7 @@ impl TestAudioCallback {
 
     /// Bind the observation only after App allocates its exact restoration gate generation.
     /// Intermediate activations cannot consume the arm; repeated same-generation calls are safe.
+    #[cfg(target_os = "linux")]
     pub(crate) fn target_restoration_reset_generation(&mut self, generation: u64) {
         assert_ne!(generation, 0);
         if let Some(arm) = self.dsp.test_restoration_reset_arm.as_mut() {
@@ -3775,6 +3798,7 @@ impl TestAudioCallback {
 
     /// Consume immutable snapshots taken inside the exact activation, before any render.
     /// No post-render draining, tap changes, or test-side reset can manufacture this evidence.
+    #[cfg(target_os = "linux")]
     pub(crate) fn assert_restoration_residues_cleared(
         &mut self,
         channel_id: u32,

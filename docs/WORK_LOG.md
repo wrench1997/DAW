@@ -2286,3 +2286,32 @@ At `a9700799`, build031 freshly compiled the App test harness and ordinary helpe
 The accepted development branch fast-forwarded from `fdec174` to this exact qualified source without conflict resolution. Public documentation now states the Linux experimental opt-in and qualification limits and labels earlier preparation-only narratives historical. The Windows preview Release build and matching dependency metadata explicitly select only `vst2,vst3`; all-feature quality checks remain. Package creation and verification require the canonical root feature list to match that production provenance, with normalization and rehashed-inventory tampering regressions. No Rust, Cargo, vendored source, workflow upload setting or default feature changed in these public/package follow-ups.
 
 The final integration gate is separately frozen: source/provenance and actual document-closure checks, Python packaging/script regressions, then the 1,730 nonignored names from the retained build031 executable in isolated serial processes. That reused executable keeps its original `a9700799` compilation identity; integrated Rust/Cargo/vendor and embedded-fixture bytes are checked for equality. The ignored genuine selector is excluded. Final Windows quality and production-preview checks must be attributed to the exact integrated commit. Neither this source preparation nor the Linux result establishes Windows selected-clip runtime, physical-device output or release acceptance.
+
+
+## 2026-10-11: align selected-clip tests with the supported publication platform
+
+The first Windows integration runs at `185bf2a` compiled the current all-feature
+App successfully, then failed executed tests: quality reported 1,403 passed and
+64 failed; preview reported 1,406 passed and 61 failed. The preview Python suite
+ran 253 cases with four platform skips. Later Clippy, native-editor and package
+smoke stages were not reached. Those failures are preserved, not replaced by
+the earlier Linux results.
+
+The test-only correction gates exactly 54 cases whose setup requires successful
+Linux-only create-new occurrence publication. It retains portable callback,
+worker, ownership, cleanup, deadline and unsupported-App coverage. The portable
+path-bound test now builds a real absolute temporary-directory prefix while
+checking the same 4,096/4,097 UTF-8 byte boundary without creating long paths.
+A new non-Linux test calls the canonical checked writer and requires typed
+Unsupported/PreLink refusal with no new destination or staging files and an
+unchanged existing destination. Test-only helper selectors and documented
+field-local lint annotations follow their actual platform consumers; production
+function bodies and the canonical publication refusal remain unchanged.
+
+The approved follow-through is one fresh Linux App test compilation and 66
+affected/portable exact cases, plus formatting and diff checks, then both Windows
+workflows at the resulting exact commit. These correction gates are pending at
+this checkpoint. The prior 1,730 Rust and 253 zero-skip Python integration passes
+remain attributed to `185bf2a` using the original `a9700799`/build031 executable.
+The separately qualified genuine007 Linux Surge workflow is unchanged; this
+correction does not claim Windows selected-clip plugin runtime support.

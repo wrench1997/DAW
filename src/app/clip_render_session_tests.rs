@@ -1,13 +1,19 @@
 //! Actual callback/identified-worker retirement at the post-decision intent
 //! seam. Source recreation is explicitly mocked; there is no SDK or helper.
+#[cfg(target_os = "linux")]
 use super::*;
+#[cfg(target_os = "linux")]
 use crate::app::clip_render_glue::tests::authoritative_mock_restoration_factory;
+#[cfg(target_os = "linux")]
 use crate::app::clip_render_job::{ClipRenderPhase, tests::Fixture};
+#[cfg(target_os = "linux")]
 use crate::instrument_bounce::{BouncePluginMetadata, BouncePluginState};
+#[cfg(target_os = "linux")]
 use crate::plugins::plugin_runtime::{
     PluginChain, PluginPrepareConfig, test_capture_source::TestCaptureSource,
 };
 
+#[cfg(target_os = "linux")]
 fn converted_and_restored(panic_on_shutdown: bool) -> Fixture {
     converted_and_restored_with_factory(if panic_on_shutdown {
         panicking_restoration_factory
@@ -15,6 +21,7 @@ fn converted_and_restored(panic_on_shutdown: bool) -> Fixture {
         authoritative_mock_restoration_factory
     })
 }
+#[cfg(target_os = "linux")]
 fn converted_and_restored_with_factory(
     factory: crate::app::clip_render_glue::RestorationTestFactory,
 ) -> Fixture {
@@ -40,6 +47,7 @@ fn converted_and_restored_with_factory(
     assert_eq!(fixture.app().retained_clip_media.len(), 1);
     fixture
 }
+#[cfg(target_os = "linux")]
 fn panicking_restoration_factory(
     candidate: &Project,
     instance_id: u64,
@@ -67,6 +75,7 @@ fn panicking_restoration_factory(
     drop(handle);
     Ok(chain)
 }
+#[cfg(target_os = "linux")]
 fn reach_removed_but_unpolled_join(fixture: &mut Fixture) {
     fixture.app_mut().drive_clip_session_retirement(); // Queue old-epoch StopAll.
     fixture.pump_callback_only();
@@ -96,6 +105,7 @@ fn reach_removed_but_unpolled_join(fixture: &mut Fixture) {
     assert!(!fixture.app_mut().cancel_clip_session_retirement());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_restored_source_new_intent_waits_for_callback_then_exact_join() {
     let mut fixture = converted_and_restored(false);
@@ -121,6 +131,7 @@ fn actual_restored_source_new_intent_waits_for_callback_then_exact_join() {
     assert!(fixture.app().running_generator_chains.is_empty());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_restored_source_quit_intent_does_not_arm_exit_before_removal_and_join() {
     let mut fixture = converted_and_restored(false);
@@ -137,6 +148,7 @@ fn actual_restored_source_quit_intent_does_not_arm_exit_before_removal_and_join(
     assert!(fixture.app().running_generator_chains.is_empty());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_session_retirement_queue_full_keeps_old_bindings_and_retries_same_source() {
     let mut fixture = converted_and_restored(false);
@@ -176,6 +188,7 @@ fn actual_session_retirement_queue_full_keeps_old_bindings_and_retries_same_sour
     assert_ne!(fixture.app().project_session, session);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_session_retirement_engine_loss_retains_exact_guard_and_does_not_change_session() {
     let mut fixture = converted_and_restored(false);
@@ -215,6 +228,7 @@ fn actual_session_retirement_engine_loss_retains_exact_guard_and_does_not_change
     assert!(fixture.app().clip_session_retirement_pending());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_joined_source_shutdown_panic_keeps_session_intent_failed_paused() {
     let mut fixture = converted_and_restored(true);
@@ -245,6 +259,7 @@ fn actual_joined_source_shutdown_panic_keeps_session_intent_failed_paused() {
     assert!(!fixture.app().playing);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_open_is_prepared_once_before_removal_and_does_not_reread_after_join() {
     let mut fixture = converted_and_restored(false);
@@ -276,6 +291,7 @@ fn actual_open_is_prepared_once_before_removal_and_does_not_reread_after_join() 
     assert_eq!(fixture.app().saved_path.as_deref(), Some(path.as_path()));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_open_preflight_failure_retains_exact_intent_without_retiring_source() {
     let mut fixture = converted_and_restored(false);
@@ -338,6 +354,7 @@ fn actual_open_preflight_failure_retains_exact_intent_without_retiring_source() 
     assert_eq!(fixture.bytes(), before);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn early_session_admission_refusal_is_not_sent_and_can_be_dismissed_without_targets() {
     let mut fixture = converted_and_restored(false);
@@ -385,6 +402,7 @@ fn early_session_admission_refusal_is_not_sent_and_can_be_dismissed_without_targ
     assert!(!fixture.app().playing);
 }
 
+#[cfg(target_os = "linux")]
 fn faulting_restoration_factory(
     candidate: &Project,
     instance_id: u64,
@@ -413,6 +431,7 @@ fn faulting_restoration_factory(
     drop(handle);
     Ok(chain)
 }
+#[cfg(target_os = "linux")]
 fn already_faulted_source_intent(intent: ProjectIntent) {
     let mut fixture = converted_and_restored_with_factory(faulting_restoration_factory);
     let channel = fixture.app().project.channels[0].id;
@@ -493,15 +512,18 @@ fn already_faulted_source_intent(intent: ProjectIntent) {
     }
     assert!(fixture.app().running_generator_chains.is_empty());
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_already_faulted_bound_source_new_still_waits_for_exact_removal_and_join() {
     already_faulted_source_intent(ProjectIntent::New);
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_already_faulted_bound_source_quit_still_waits_for_exact_removal_and_join() {
     already_faulted_source_intent(ProjectIntent::Quit);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn dirty_discard_quit_cancel_preserves_old_session_and_recovery_authority() {
     let mut fixture = converted_and_restored(false);
@@ -539,6 +561,7 @@ fn dirty_discard_quit_cancel_preserves_old_session_and_recovery_authority() {
     assert!(!fixture.app().playing);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn incomplete_open_preflight_still_drains_an_exact_guard_transferred_on_engine_loss() {
     let mut fixture = converted_and_restored(false);

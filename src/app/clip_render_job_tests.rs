@@ -226,18 +226,21 @@ impl Fixture {
     pub(in crate::app) fn ctx(&self) -> egui::Context {
         self.ctx.clone()
     }
+    #[cfg(target_os = "linux")]
     pub(in crate::app) fn directory(&self) -> &Path {
         &self.directory
     }
     pub(in crate::app) fn callback(&self) -> &audio::TestAudioCallback {
         self.callback.as_ref().expect("fixture callback retained")
     }
+    #[cfg(target_os = "linux")]
     pub(in crate::app) fn callback_mut(&mut self) -> &mut audio::TestAudioCallback {
         self.callback.as_mut().expect("fixture callback retained")
     }
     pub(in crate::app) fn source_handle(&self) -> &TestCaptureSource {
         &self.source
     }
+    #[cfg(target_os = "linux")]
     pub(in crate::app) fn original_source_joined(&self) -> bool {
         self.app
             .clip_render_job
@@ -628,6 +631,7 @@ impl Drop for Fixture {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_controller_two_captures_writer_verifier_removal_join_and_timeline() {
     let mut fixture = Fixture::new();
@@ -681,6 +685,7 @@ fn actual_controller_two_captures_writer_verifier_removal_join_and_timeline() {
     assert!(fixture.app.timeline_audio_matches_desired());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_controller_cancel_after_file_commit_keeps_original_history_and_file() {
     let mut fixture = Fixture::new();
@@ -723,6 +728,7 @@ fn actual_controller_cancel_after_file_commit_keeps_original_history_and_file() 
     assert_eq!(fixture.source.capture_count(), 1);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_controller_unnotified_opaque_and_base_drift_refuses_after_second_capture() {
     let mut fixture = Fixture::new();
@@ -760,6 +766,7 @@ fn actual_controller_unnotified_opaque_and_base_drift_refuses_after_second_captu
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_controller_cancel_ready_to_commit_does_not_remove_source() {
     let mut fixture = Fixture::new();
@@ -790,6 +797,7 @@ fn actual_controller_cancel_ready_to_commit_does_not_remove_source() {
     assert!(!fixture.app.clip_render_job.as_ref().unwrap().removal_queued);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_controller_edit_away_and_back_is_rejected_by_app_revision() {
     let mut fixture = Fixture::new();
@@ -824,6 +832,7 @@ fn actual_controller_edit_away_and_back_is_rejected_by_app_revision() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_controller_cancellation_during_second_capture_retains_capture_owner() {
     let mut fixture = Fixture::new();
@@ -871,6 +880,7 @@ fn actual_controller_cancellation_during_second_capture_retains_capture_owner() 
     ));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_callback_stale_project_removal_refuses_without_model_swap() {
     let mut fixture = Fixture::new();
@@ -908,6 +918,7 @@ fn actual_callback_stale_project_removal_refuses_without_model_swap() {
     assert_eq!(fixture.app.running_generator_chains.len(), 1);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_controller_committed_engine_failure_stays_paused_after_status_hidden() {
     let mut fixture = Fixture::new();
@@ -953,6 +964,7 @@ fn actual_controller_committed_engine_failure_stays_paused_after_status_hidden()
     assert!(!fixture.app.cancel_clip_render_job());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_controller_duplicate_start_and_unknown_removal_keep_original_owner() {
     let mut fixture = Fixture::new();
@@ -992,6 +1004,7 @@ fn actual_controller_duplicate_start_and_unknown_removal_keep_original_owner() {
     });
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_second_capture_backend_fault_keeps_precedence_over_app_cancel() {
     let mut fixture = Fixture::new();
@@ -1129,6 +1142,7 @@ fn actual_legacy_string_capture_poll_is_display_projection_of_typed_fault() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn verifier_owner_mismatch_cannot_drain_actual_abandoned_controller_worker() {
     let mut fixture = Fixture::new();
@@ -1251,6 +1265,7 @@ fn actual_admission_refuses_unpersisted_legacy_piano_notes() {
     assert_eq!(fixture.bytes(), before);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_verified_pcm_over_budget_retains_file_without_model_or_cache_insertion() {
     let mut fixture = Fixture::new(); // Owns the shared admission before override.
@@ -1317,6 +1332,7 @@ fn checked_tail_uses_zero_cutoff_for_tiny_positive_seconds() {
     assert!(checked_fixed_tail_frames(0.0, 0).is_err());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_removal_enqueue_does_not_publish_a_new_transport_mailbox_request() {
     let mut fixture = Fixture::new();
@@ -1379,6 +1395,7 @@ fn actual_removal_enqueue_does_not_publish_a_new_transport_mailbox_request() {
     });
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_coincident_timeline_readiness_cannot_clear_committed_playback_drift_failure() {
     let mut fixture = Fixture::new();
@@ -1431,6 +1448,7 @@ fn actual_coincident_timeline_readiness_cannot_clear_committed_playback_drift_fa
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_final_timeline_route_failure_is_sticky_after_commit_and_source_join() {
     let mut fixture = Fixture::new();
@@ -1520,6 +1538,7 @@ fn actual_final_timeline_route_failure_is_sticky_after_commit_and_source_join() 
     assert!(fixture.app.clip_render_blocks_playback());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_unissued_full_ring_removal_does_not_revive_after_recorded_failure() {
     let mut fixture = Fixture::new();

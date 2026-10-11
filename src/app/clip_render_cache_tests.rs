@@ -1,8 +1,10 @@
 //! Actual controller publications supply every sealed PCM used below. No
 //! fabricated receipt, replacement sample buffer, SDK, or file decoder is used.
 use super::*;
+#[cfg(target_os = "linux")]
 use crate::app::clip_render_job::{ClipRenderPhase, tests::Fixture};
 
+#[cfg(target_os = "linux")]
 fn complete(fixture: &mut Fixture) -> u64 {
     fixture.begin();
     fixture.until(|fixture| {
@@ -27,6 +29,7 @@ fn exact_aggregate_arithmetic_and_separate_metadata_bounds() {
     assert!(retained_budget(0, 8, MAX_RETAINED_CLIP_ENTRIES - 1).is_ok());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn successful_commit_retains_actual_compact_producer_pcm_once() {
     let mut fixture = Fixture::new();
@@ -59,6 +62,7 @@ fn successful_commit_retains_actual_compact_producer_pcm_once() {
     assert_eq!(fixture.app().retained_clip_pcm_bytes, bytes);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn retained_restore_refuses_id_path_rate_channel_frame_and_cache_substitution() {
     let mut fixture = Fixture::new();
@@ -142,6 +146,7 @@ fn retained_restore_refuses_id_path_rate_channel_frame_and_cache_substitution() 
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn deleted_or_replaced_file_cannot_change_the_retained_session_pcm() {
     let mut fixture = Fixture::new();
@@ -179,6 +184,7 @@ fn deleted_or_replaced_file_cannot_change_the_retained_session_pcm() {
     assert_eq!(fixture.app().retained_clip_pcm_bytes, bytes);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn every_existing_asset_id_collision_refuses_without_overwrite() {
     // The first completed actual producer contributes the existing sealed owner.
@@ -237,15 +243,26 @@ fn every_existing_asset_id_collision_refuses_without_overwrite() {
 
 #[test]
 fn bounded_path_copy_refuses_oversize_and_relative_paths() {
-    let exact = format!("/{}", "a".repeat(MAX_RETAINED_PATH_BYTES - 1));
+    let prefix = std::env::temp_dir().join("bounded-path-é");
+    assert!(prefix.is_absolute());
+    let prefix = prefix.to_str().expect("test temporary path must be UTF-8");
+    let padding = MAX_RETAINED_PATH_BYTES
+        .checked_sub(prefix.len())
+        .expect("test temporary path must fit within the byte bound");
+    let exact = format!("{prefix}{}", "a".repeat(padding));
+    assert_eq!(exact.len(), MAX_RETAINED_PATH_BYTES);
+    assert!(Path::new(&exact).is_absolute());
     assert_eq!(
         copied_path(Path::new(&exact)).unwrap(),
         PathBuf::from(&exact)
     );
-    assert!(copied_path(Path::new(&(exact + "a"))).is_err());
+    let oversize = exact + "a";
+    assert_eq!(oversize.len(), MAX_RETAINED_PATH_BYTES + 1);
+    assert!(copied_path(Path::new(&oversize)).is_err());
     assert!(copied_path(Path::new("relative.wav")).is_err());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_generic_register_and_late_loader_completion_cannot_replace_sealed_pcm() {
     let mut fixture = Fixture::new();
@@ -309,6 +326,7 @@ fn actual_generic_register_and_late_loader_completion_cannot_replace_sealed_pcm(
     ));
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn actual_session_transition_releases_completed_retained_authority() {
     let mut fixture = Fixture::new();
