@@ -255,8 +255,7 @@ fn actual_app_intervening_seek_cannot_become_the_first_preparatory_target() {
 }
 
 #[test]
-fn actual_app_frozen_stop_rejects_request_seek_generation_session_endpoint_and_epoch_supersession()
-{
+fn actual_app_frozen_stop_rejects_request_seek_generation_session_and_endpoint_supersession() {
     for mutation in 0..6 {
         let mut fixture = Fixture::new();
         let before = fixture.bytes();
@@ -294,7 +293,11 @@ fn actual_app_frozen_stop_rejects_request_seek_generation_session_endpoint_and_e
             5 => {
                 let audio = fixture.app.audio.as_ref().unwrap();
                 let frame = audio.snapshot().timeline_frame;
-                audio.seek_transport_to_frame(0.0, frame);
+                // Timeline ownership may ignore the legacy seek itself. This
+                // case proves only supersession of the issued mailbox barrier.
+                let request = audio.seek_transport_to_frame(0.0, frame);
+                assert_ne!(request, target.transport_request);
+                assert_eq!(audio.transport_request_id(), request);
                 fixture.pump_callback_only();
             }
             _ => unreachable!(),
@@ -398,7 +401,16 @@ fn actual_app_reset_and_process_gate_unwind_releases_and_joins_exact_owner() {
             fixture.assert_no_stop_capture();
             panic!("intentional reset/Process settlement fixture unwind");
         }));
-        assert!(result.is_err());
+        let panic = result.expect_err("the held-gate branch must reach its intentional unwind");
+        let panic_text = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+        assert_eq!(
+            panic_text,
+            Some("intentional reset/Process settlement fixture unwind"),
+            "a prerequisite assertion must not satisfy the unwind proof (hold_process={hold_process})"
+        );
         assert!(
             !FIXTURE_POISONED.load(Ordering::Acquire),
             "gate release must precede the exact retained worker join"
