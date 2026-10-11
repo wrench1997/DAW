@@ -7,6 +7,8 @@
 //! history operations, restoration installation and joins are production paths.
 #[path = "clip_render_current_source_dispatch_tests.rs"]
 mod current_source_dispatch_tests;
+#[path = "clip_render_restoration_dispatch_order_tests.rs"]
+mod restoration_dispatch_order_tests;
 #[path = "clip_render_restoration_route_pending_tests.rs"]
 mod restoration_route_pending_tests;
 use super::*;

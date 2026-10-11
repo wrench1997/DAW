@@ -14650,6 +14650,28 @@ impl CitrusApp {
             && source.fingerprint == self.clip_timeline_fingerprint(sample_rate)
     }
 
+    /// Restoration must issue its own successor before any current source can
+    /// dispatch. Compilation authority and route readiness remain separate gates.
+    fn clip_restoration_allows_timeline_generation(&self, generation: u64) -> bool {
+        if self.clip_restoration_failed {
+            return false;
+        }
+        if !self.clip_restoration_playback_pending {
+            return true;
+        }
+        if self.clip_session_retirement_pending() {
+            return false;
+        }
+        let Some((engine, issued_generation)) = self.clip_restoration_timeline else {
+            return false;
+        };
+        issued_generation == generation
+            && generation == self.timeline_desired_generation
+            && self.audio.as_ref().is_some_and(|audio| {
+                audio.engine_session() == engine && audio.project_session() == self.project_session
+            })
+    }
+
     fn recover_timeline_runtime_if_needed(&mut self) {
         if self.plugin_processing_blocks_playback() {
             return;
@@ -14673,6 +14695,9 @@ impl CitrusApp {
             return;
         };
         if !self.timeline_audio_source_has_current_authority() {
+            return;
+        }
+        if !self.clip_restoration_allows_timeline_generation(source.generation) {
             return;
         }
         let frame = snapshot
@@ -14867,6 +14892,19 @@ impl CitrusApp {
         {
             return;
         }
+        if matches!(
+            self.timeline_audio_sync.phase,
+            TimelineAudioSyncPhase::InstallReady
+                | TimelineAudioSyncPhase::LoopReady
+                | TimelineAudioSyncPhase::SeekReady
+                | TimelineAudioSyncPhase::AwaitingActivation {
+                    activation_request_id: 0,
+                    ..
+                }
+        ) && !self.clip_restoration_allows_timeline_generation(generation)
+        {
+            return;
+        }
         if self.audio.is_none() {
             return;
         }
@@ -14947,6 +14985,9 @@ impl CitrusApp {
         if !self.timeline_audio_source_has_current_authority() {
             return;
         }
+        if !self.clip_restoration_allows_timeline_generation(generation) {
+            return;
+        }
         let Some(loop_token) = self.timeline_audio_sync.loop_token else {
             self.timeline_audio_sync.last_error =
                 Some("Waiting for the exact loop chase token before activation".into());
@@ -15018,14 +15059,17 @@ impl CitrusApp {
         if self.clip_session_retirement_pending() || !self.clip_render_allows_timeline_dispatch() {
             return;
         }
-        let Some(timeline) = self
+        let Some((timeline, generation)) = self
             .timeline_audio_source
             .as_ref()
-            .map(|source| Arc::clone(&source.timeline))
+            .map(|source| (Arc::clone(&source.timeline), source.generation))
         else {
             return;
         };
         if !self.ensure_timeline_generator_routes_ready(&timeline) {
+            return;
+        }
+        if !self.clip_restoration_allows_timeline_generation(generation) {
             return;
         }
         let source = self
@@ -15085,14 +15129,17 @@ impl CitrusApp {
         if self.clip_session_retirement_pending() || !self.clip_render_allows_timeline_dispatch() {
             return;
         }
-        let Some(timeline) = self
+        let Some((timeline, generation)) = self
             .timeline_audio_source
             .as_ref()
-            .map(|source| Arc::clone(&source.timeline))
+            .map(|source| (Arc::clone(&source.timeline), source.generation))
         else {
             return;
         };
         if !self.ensure_timeline_generator_routes_ready(&timeline) {
+            return;
+        }
+        if !self.clip_restoration_allows_timeline_generation(generation) {
             return;
         }
         if !self.ensure_timeline_audio_assets_ready(&timeline) {

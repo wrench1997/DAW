@@ -22,9 +22,9 @@ thread_local! {
     };
 }
 
-struct HeldPrepareOwner;
+pub(super) struct HeldPrepareOwner;
 impl HeldPrepareOwner {
-    fn reserve() -> Self {
+    pub(super) fn reserve() -> Self {
         HELD_PREPARE.with(|slot| {
             let mut slot = slot.borrow_mut();
             assert!(!slot.reserved && slot.source.is_none());
@@ -32,13 +32,13 @@ impl HeldPrepareOwner {
         });
         Self
     }
-    fn is_held(&self) -> bool {
+    pub(super) fn is_held(&self) -> bool {
         HELD_PREPARE.with(|slot| {
             let slot = slot.borrow();
             slot.reserved && slot.source.is_some() && !slot.released
         })
     }
-    fn release(&self) {
+    pub(super) fn release(&self) {
         HELD_PREPARE.with(|slot| {
             let mut slot = slot.borrow_mut();
             if let Some(source) = &slot.source {
@@ -55,7 +55,7 @@ impl Drop for HeldPrepareOwner {
     }
 }
 
-fn held_restoration_factory(
+pub(super) fn held_restoration_factory(
     candidate: &Project,
     instance_id: u64,
     spec: PluginLoadSpec,
