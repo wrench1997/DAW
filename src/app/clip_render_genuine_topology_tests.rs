@@ -1233,7 +1233,10 @@ fn rejected_claim_evidence_preserves_exact_first_owner_pair() {
         assert_eq!(retained, &claim_evidence(supplied));
         assert_eq!(retained["endpoint"], supplied.endpoint);
         assert_eq!(retained["worker"], supplied.worker);
-        assert_eq!(retained["previous_endpoint"], json!(supplied.previous_endpoint));
+        assert_eq!(
+            retained["previous_endpoint"],
+            json!(supplied.previous_endpoint)
+        );
         assert_eq!(retained["previous_worker"], json!(supplied.previous_worker));
     }
 
