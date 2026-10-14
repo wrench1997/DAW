@@ -10,7 +10,8 @@ use crate::{
         render::{BackendFailure, BlockReply, DisposalObservation, RenderBackend},
     },
     plugins::plugin_runtime::{
-        BounceSourceCallbackIdentity, BounceSourceSettlement, PluginTransport,
+        BounceSourceCallbackIdentity, BounceSourceSettlement, BounceSourceSettlementObservation,
+        PluginTransport,
     },
 };
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -174,20 +175,50 @@ fn settle_initial_source(fixture: &mut Fixture) {
         let (generation, epoch) = audio.confirmed_timeline_identity().unwrap();
         let channel_id = app.project.channels[0].id;
         let source = &app.running_generator_chains[&channel_id];
-        source
-            .control
-            .observe_bounce_source_settlement(BounceSourceCallbackIdentity {
-                engine_session: audio.engine_session(),
-                project_session: app.project_session,
-                timeline_generation: generation,
-                epoch,
-                transport_request: audio.transport_request_id(),
-                channel_id,
-                endpoint_id: source.endpoint_id,
-                instance_id: source.instance_id,
-            })
-            .settlement
-            == BounceSourceSettlement::Ready
+        app.stopped_bounce_observe(channel_id).is_ok()
+            && source
+                .control
+                .observe_bounce_source_settlement(BounceSourceCallbackIdentity {
+                    engine_session: audio.engine_session(),
+                    project_session: app.project_session,
+                    timeline_generation: generation,
+                    epoch,
+                    transport_request: audio.transport_request_id(),
+                    channel_id,
+                    endpoint_id: source.endpoint_id,
+                    instance_id: source.instance_id,
+                })
+                .settlement
+                == BounceSourceSettlement::Ready
+    });
+}
+fn reviewed_source_settlement(
+    fixture: &Fixture,
+    binding: LiveBinding,
+) -> BounceSourceSettlementObservation {
+    let app = fixture.app();
+    let audio = app.audio.as_ref().unwrap();
+    app.running_generator_chains[&binding.stamp.channel_id]
+        .control
+        .observe_bounce_source_settlement(BounceSourceCallbackIdentity {
+            engine_session: binding.stamp.engine_session,
+            project_session: binding.stamp.project_session,
+            timeline_generation: binding.stamp.timeline_revision,
+            epoch: binding.stamp.epoch,
+            transport_request: audio.transport_request_id(),
+            channel_id: binding.stamp.channel_id,
+            endpoint_id: binding.stamp.endpoint_id,
+            instance_id: binding.stamp.instance_id,
+        })
+}
+fn settle_reviewed_source(fixture: &mut Fixture, review: &WholeSongExportReview) {
+    fixture.until(|fixture| {
+        fixture
+            .app()
+            .stopped_bounce_observe(review.initial.stamp.channel_id)
+            .is_ok_and(|current| current == review.initial)
+            && reviewed_source_settlement(fixture, review.initial).settlement
+                == BounceSourceSettlement::Ready
     });
 }
 fn tick(fixture: &mut Fixture) {
@@ -815,11 +846,82 @@ fn authoritative_whole_parameter_route(fixture: &mut Fixture) -> ParameterEditRo
 }
 
 #[test]
+fn actual_whole_review_callback_ack_does_not_complete_a_held_prior_worker_reset() {
+    let mut fixture = Fixture::new();
+    settle_initial_source(&mut fixture);
+    let selected = options(&fixture);
+    let old_review = fixture
+        .app()
+        .prepare_whole_song_export_review(selected, true)
+        .unwrap();
+    let old_epoch = old_review.initial.stamp.epoch;
+    let old_resets = fixture.source_handle().reset_count();
+    fixture.source_handle().pause_reset();
+    // A real pre-existing seek can be callback-acknowledged while its reset
+    // remains owned by the worker. No export or synthetic ACK is issued here.
+    fixture.app_mut().publish_transport_seek(0.5);
+    fixture.until(|fixture| {
+        fixture.source_handle().reset_count() > old_resets
+            && fixture
+                .app()
+                .prepare_whole_song_export_review(selected, true)
+                .is_ok_and(|review| review.initial.stamp.epoch != old_epoch)
+    });
+    let current_review = fixture
+        .app()
+        .prepare_whole_song_export_review(selected, true)
+        .unwrap();
+    let held = reviewed_source_settlement(&fixture, current_review.initial);
+    assert_eq!(held.settlement, BounceSourceSettlement::Waiting);
+    assert!(held.coherent && held.busy > 0);
+    assert_eq!(held.requested_epoch, current_review.initial.stamp.epoch);
+    assert_ne!(
+        held.reset_completed_epoch,
+        current_review.initial.stamp.epoch
+    );
+    assert_eq!(fixture.source_handle().capture_count(), 0);
+
+    let request = fixture.app().audio.as_ref().unwrap().transport_request_id();
+    let held_resets = fixture.source_handle().reset_count();
+    let before = fixture.bytes();
+    let path = fixture.directory().join("held-prior-reset-refusal.wav");
+    let reason = fixture
+        .app_mut()
+        .begin_whole_song_export(old_review, path.clone())
+        .err()
+        .unwrap();
+    assert!(reason.contains("reviewed source or Project changed"));
+    assert!(fixture.app().whole_song_export_job.is_none());
+    assert_eq!(
+        fixture.app().audio.as_ref().unwrap().transport_request_id(),
+        request
+    );
+    assert_eq!(fixture.source_handle().reset_count(), held_resets);
+    assert_eq!(fixture.source_handle().capture_count(), 0);
+    assert!(!path.exists());
+    assert_eq!(fixture.bytes(), before);
+
+    fixture.source_handle().release_reset();
+    settle_reviewed_source(&mut fixture, &current_review);
+    let settled = reviewed_source_settlement(&fixture, current_review.initial);
+    assert_eq!(settled.settlement, BounceSourceSettlement::Ready);
+    assert_eq!(
+        settled.reset_completed_epoch,
+        current_review.initial.stamp.epoch
+    );
+    assert_eq!(fixture.source_handle().capture_count(), 0);
+    assert_eq!(fixture.bytes(), before);
+}
+
+#[test]
 fn actual_whole_frozen_destination_review_refuses_a_real_parameter_receipt_before_any_stop_or_capture()
  {
     let mut fixture = Fixture::new();
     settle_initial_source(&mut fixture);
     let route = authoritative_whole_parameter_route(&mut fixture);
+    // The authoritative state receipt can itself change the Timeline image.
+    // Freeze the initial review only after that current image and worker settle.
+    settle_initial_source(&mut fixture);
     let selected = options(&fixture);
     let (selected, confirmed) = reviewed_options(&mut fixture, selected, true).unwrap();
     let review = fixture
@@ -940,8 +1042,16 @@ fn actual_whole_frozen_destination_review_refuses_a_real_parameter_receipt_befor
     assert_eq!(fixture.app().plugin_parameter_edits.reserved_len(), 0);
     assert!(fixture.app().plugin_parameter_edit_draft_desired.is_empty());
     assert_eq!(fixture.source_handle().capture_count(), captures);
-    // The accepted edit may legitimately publish its new Timeline. Measure the
-    // old-review refusal from this settled boundary, before it can issue Stop.
+    // Review binds callback/Project/native identity, but does not attest the
+    // worker's asynchronous epoch reset. Finish the accepted edit's real prior
+    // work before measuring whether rejecting the old review issues any more.
+    settle_reviewed_source(&mut fixture, &fresh_review);
+    let settlement = reviewed_source_settlement(&fixture, fresh_review.initial);
+    assert_eq!(settlement.settlement, BounceSourceSettlement::Ready);
+    assert_eq!(
+        settlement.reset_completed_epoch,
+        fresh_review.initial.stamp.epoch
+    );
     let request = fixture.app().audio.as_ref().unwrap().transport_request_id();
     let resets = fixture.source_handle().reset_count();
     let after_edit = fixture.bytes();

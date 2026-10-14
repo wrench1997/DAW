@@ -5,9 +5,10 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
-Source71（`33830ed`）最新云端实测：quality 的独立 factory 回归 31 passed；完整 root 套件主程序 2256、helper 52、协议 13，共 2321 passed / 11 ignored。严格 Clippy、双 bin 构建、helper 协议 smoke 和无默认 feature 检查均通过；两处原子计数兼容修复及三项新增回归已取得云端验证，Rust 1.97.1 发布工具链不变。
+Source72（`87e3141`）最新云端实测：quality 的独立 factory 回归 31 passed；完整 root 套件主程序 2257、helper 52、协议 13，共 2322 passed / 11 ignored。严格 Clippy、双 bin 构建、helper 协议 smoke 和无默认 feature 检查均通过；原子计数兼容修复已有 Source71/72 验证，Rust 1.97.1 发布工具链不变。
 quality 整体仍为 failure：最后的 native paint 前/后捕获失败，同进程按钮的 PrintWindow 诊断也返回 false；control/state/lifecycle/cleanup 独立通过。这不证明 Kontakt 界面故障，也不是 GUI 验收通过。
-preview 在另一项启动状态夹具中失败：2255 passed / 1 failed / 11 ignored，音频重启后的 clean 断言失败。源码发现夹具修改模型后遗漏 saved fingerprint，750ms 周期检查可能正确置 dirty。当前仅修正测试初始化，使用生产 `mark_saved()` 建完整基线，并强制到期检查和负/正对照；保留原重启/状态/撤销断言。格式通过，修复后的编译及云端回归未运行；旧日志未记录失败时基线值，不能将推断写成实测原因。
+preview 为 2255 passed / 2 failed / 11 ignored：保存超时后的后台 ownership 断言、旧整曲 Review 拒绝后的 reset 计数断言失败。源码发现测试持有 gate 会自行在 5 秒到期，以及 Review 已绑定不等于先前 worker reset 已完成。当前仅修正两个测试模块：显式 hold/release、Drop 释放后实际 join；等待同一 binding 的真实 settlement Ready 后再采拒绝计数，并新增受控 held-reset 回归。原产品期限、ownership、计数、文件、状态及历史保护断言保留。格式通过，新增修复尚未编译/运行；原日志未记录 gate 到期或 reset 完成时序，源码解释仍待回归确认。
+上轮 saved-fingerprint 夹具修复的原重启用例与新负/正对照在本轮均通过，没有放宽产品 dirty 判断。
 Source70 新默认 helper/QA 此前在协调窗口内实际构建成功；尚未为后续修复源码重建本机二进制，也未启动新 NI 实验。Source69 单次 Kontakt 诊断仍失败：额外消息 pass 实际返回、队列为空，ExitDll 仍未返回，helper 被原期限强制结束并实际回收。
 该诊断保持默认关闭，不计为修复。独立 factory-only 查询已实现：复用现有 helper 与保留式清理，只读 factory 声明，不调用组件/控制器/view 实例化；它尚未接入生产扫描，不改变现有 verified 索引或运行时默认类选择。
 历史 `b37cc39` 的四项失败修复已有 Source70/71 云端回归通过，原失败日志和断言保留。完整 vendor 补丁实际重放 74 个源文件逐字节一致，170 项打包测试通过；后续 root-only 修复未改这些输入。factory-only NI 实测仍未运行；新实验以相关源码/后台 CI 步骤、实际新默认构建及资源交接为门，不以云端截图失败冒充后台未编译或插件界面故障，也不冒称整个 quality 通过。

@@ -615,10 +615,47 @@ The test-only repair now builds the complete baseline through existing
 `mark_saved()` in the device/file-free harness. It forces the real dirty-check
 branch to be due, adds deterministic stale/complete baseline negative/positive
 controls, and prints history/saved/current fingerprints on the original failure.
-All existing restart, state-byte, dirty and Undo assertions remain. Formatting
-passed; this new fixture revision has not been compiled or tested. Preserve
+All existing restart, state-byte, dirty and Undo assertions remain. Source72
+actually passed both the original restart case and the new baseline controls.
+Preserve
 `ci-33830ed-windows-{quality,preview}-01.log` and the corresponding
 `source71-*-ci-{actual-terminal,jobs-actual-terminal}-01.json` outside Git.
+
+The actual [Source72 quality run38643946938](https://github.com/wrench1997/DAW/actions/runs/38643946938)
+passed31 dependency tests and the complete root suite:2257 app+52 helper+13
+protocol,2322 passed/11 ignored. Strict Clippy, both bins, protocol/harness smoke,
+no-default-feature and fixture builds passed again. Only the final native paint
+before/after capture failed; the whole workflow remains failure and GUI remains
+unqualified.
+
+[Preview run38643946888](https://github.com/wrench1997/DAW/actions/runs/38643946888)
+instead reported2255 passed/2 failed/11 ignored. The exact failures were
+`state_save_ui_dispatched_capture_timeout_still_finishes_with_unacked_transport`
+at its outstanding-admin-work assertion, and
+`actual_whole_frozen_destination_review_refuses_a_real_parameter_receipt_before_any_stop_or_capture`
+at reset count2 versus1. Their earlier rejection-reason/transport invariance
+assertions passed; this does not identify which operation completed that reset.
+
+The new test-only repairs address two source timing gaps. Startup's intentionally
+held admin/reset calls previously returned their own fixture error after5s,
+independently of the UI's capture timeout. Explicit Condvar gates now release
+only by test action or fixture Drop, which releases both before retained join.
+The timeout case records actual call entry/return, retains the outstanding-work
+and recording fences, then proves exactly one return after explicit release
+without another UI/callback pump. Observation/cleanup deadlines are unchanged.
+
+Whole-song Review binds current callback/Project/native identity but does not
+attest completion of the worker's earlier epoch reset. The fixture now confirms
+the same binding's actual settlement Ready/reset-completed epoch before sampling
+the rejection counters. A new held-reset regression separates callback ACK and
+Review availability from worker Waiting, checks that rejecting the old Review
+changes no transport/file/model/capture count, then releases the original gate
+and verifies Ready. These are source-supported explanations; the old logs did
+not capture gate expiry or the competing reset's completion. Both repaired
+modules passed formatting, not Rust compilation or execution yet. Product
+deadlines and original safety assertions are unchanged.
+Preserve `ci-87e3141-windows-{quality,preview}-01.log` and corresponding
+`source72-*-ci-{actual-terminal,jobs-actual-terminal}-01.json` outside Git.
 
 The next no-GUI factory diagnostic is admitted by actual successful source/backend
 CI steps and new default helper/QA builds, with exact source/binary bindings and

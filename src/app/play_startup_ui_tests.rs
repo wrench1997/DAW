@@ -5,7 +5,7 @@ use plugins::plugin_runtime::{
     RetainedShutdownPoll,
 };
 use std::sync::{
-    Mutex,
+    Condvar, Mutex,
     atomic::{AtomicBool, AtomicU32, Ordering},
 };
 
@@ -70,14 +70,45 @@ fn master_capture_processing_fault_ui_stops_at_callback_ack_and_reports_partial_
     );
 }
 
+/// The test owns release, including on assertion unwind. A slow UI frame must
+/// never turn a deliberately held backend call into an unrelated fixture error.
+#[derive(Default)]
+struct StartGate {
+    held: Mutex<bool>,
+    released: Condvar,
+}
+
+impl StartGate {
+    fn hold(&self) {
+        *self.held.lock().unwrap() = true;
+    }
+
+    fn release(&self) {
+        *self.held.lock().unwrap() = false;
+        self.released.notify_all();
+    }
+
+    fn is_held(&self) -> bool {
+        *self.held.lock().unwrap()
+    }
+
+    fn wait(&self) {
+        let mut held = self.held.lock().unwrap();
+        while *held {
+            held = self.released.wait(held).unwrap();
+        }
+    }
+}
+
 #[derive(Default)]
 struct StartProbe {
-    reset_held: AtomicBool,
+    reset_gate: StartGate,
     reset_entered: AtomicBool,
     reset_completed: AtomicU32,
-    admin_held: AtomicBool,
+    admin_gate: StartGate,
     admin_entered: AtomicBool,
     save_calls: AtomicU32,
+    save_returns: AtomicU32,
     save_error: AtomicBool,
     music_processes: AtomicU32,
     first_music_position: Mutex<Option<i64>>,
@@ -113,13 +144,7 @@ impl PluginBackend for StartBackend {
     }
     fn reset_processing(&mut self) -> Result<(), String> {
         self.probe.reset_entered.store(true, Ordering::Release);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while self.probe.reset_held.load(Ordering::Acquire) {
-            if Instant::now() >= deadline {
-                return Err("fixture reset gate expired".into());
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        self.probe.reset_gate.wait();
         self.note = false;
         self.probe.reset_completed.fetch_add(1, Ordering::Release);
         Ok(())
@@ -153,17 +178,14 @@ impl PluginBackend for StartBackend {
     fn save_state(&mut self) -> Result<Vec<u8>, String> {
         self.probe.save_calls.fetch_add(1, Ordering::Release);
         self.probe.admin_entered.store(true, Ordering::Release);
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while self.probe.admin_held.load(Ordering::Acquire) {
-            if Instant::now() >= deadline {
-                return Err("fixture admin gate expired".into());
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        if self.probe.save_error.load(Ordering::Acquire) {
-            return Err("fixture native state capture failed".into());
-        }
-        Ok(Vec::new())
+        self.probe.admin_gate.wait();
+        let result = if self.probe.save_error.load(Ordering::Acquire) {
+            Err("fixture native state capture failed".into())
+        } else {
+            Ok(Vec::new())
+        };
+        self.probe.save_returns.fetch_add(1, Ordering::Release);
+        result
     }
     fn load_state(&mut self, _: &[u8]) -> Result<(), String> {
         Ok(())
@@ -300,15 +322,25 @@ impl StartFixture {
         }
         assert!(
             predicate(self),
-            "phase={:?}, snapshot={:?}, toast={:?}",
+            "phase={:?}, snapshot={:?}, toast={:?}, reset_held={}, reset_entered={}, reset_completed={}, admin_held={}, admin_entered={}, save_calls={}, save_returns={}, admin_outstanding={}",
             self.ui.app.timeline_audio_sync.phase,
             self.snapshot(),
-            self.ui.app.toast
+            self.ui.app.toast,
+            self.probe.reset_gate.is_held(),
+            self.probe.reset_entered.load(Ordering::Acquire),
+            self.probe.reset_completed.load(Ordering::Acquire),
+            self.probe.admin_gate.is_held(),
+            self.probe.admin_entered.load(Ordering::Acquire),
+            self.probe.save_calls.load(Ordering::Acquire),
+            self.probe.save_returns.load(Ordering::Acquire),
+            self.ui.app.running_generator_chains[&self.channel]
+                .control
+                .has_outstanding_admin_work()
         );
     }
     fn hold_reset_and_press_play(&mut self) {
         self.probe.reset_entered.store(false, Ordering::Release);
-        self.probe.reset_held.store(true, Ordering::Release);
+        self.probe.reset_gate.hold();
         self.ui.key(egui::Key::Space, egui::Modifiers::NONE);
         assert!(self.ui.app.prepared_playback_start.is_some());
         assert!(!self.ui.app.playing);
@@ -318,8 +350,8 @@ impl StartFixture {
 
 impl Drop for StartFixture {
     fn drop(&mut self) {
-        self.probe.reset_held.store(false, Ordering::Release);
-        self.probe.admin_held.store(false, Ordering::Release);
+        self.probe.reset_gate.release();
+        self.probe.admin_gate.release();
         drop(self.callback.take());
         if let Some(mut chain) = self.ui.app.running_generator_chains.remove(&self.channel) {
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -371,7 +403,7 @@ fn hold_first_loop_restart(f: &mut StartFixture) {
     let before_wrap = f.snapshot();
     let completed_resets = f.probe.reset_completed.load(Ordering::Acquire);
     f.probe.reset_entered.store(false, Ordering::Release);
-    f.probe.reset_held.store(true, Ordering::Release);
+    f.probe.reset_gate.hold();
     f.until(|f| {
         f.snapshot().transport_loop_restart_pending && f.probe.reset_entered.load(Ordering::Acquire)
     });
@@ -420,7 +452,7 @@ fn playback_loop_ui_waits_then_first_note_onset_matches_pdc_in_the_same_epoch() 
         );
     }
     *f.probe.first_music_position.lock().unwrap() = None;
-    f.probe.reset_held.store(false, Ordering::Release);
+    f.probe.reset_gate.release();
     let latency = f.snapshot().pdc_output_latency_samples as usize;
     let mut output = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -466,7 +498,7 @@ fn playback_loop_ui_timeout_cancels_before_late_reset_can_resume() {
             .0
             .contains("Loop restart preparation timed out")
     );
-    f.probe.reset_held.store(false, Ordering::Release);
+    f.probe.reset_gate.release();
     f.until(|f| {
         f.probe.reset_completed.load(Ordering::Acquire) > reset_count
             && f.ui
@@ -498,7 +530,7 @@ fn playback_loop_ui_pause_and_stop_cancel_without_delayed_resume() {
         } else {
             f.ui.key(egui::Key::Space, egui::Modifiers::NONE);
         }
-        f.probe.reset_held.store(false, Ordering::Release);
+        f.probe.reset_gate.release();
         f.until(|f| {
             f.probe.reset_completed.load(Ordering::Acquire) > reset_count
                 && f.ui
@@ -528,7 +560,7 @@ fn playback_loop_ui_seek_cancels_wait_before_publishing_a_new_activation() {
     f.ui.app.publish_transport_seek(1.0);
     assert!(!f.ui.app.playing);
     assert!(f.ui.app.loop_restart_wait.is_none());
-    f.probe.reset_held.store(false, Ordering::Release);
+    f.probe.reset_gate.release();
     f.until(|f| {
         f.probe.reset_completed.load(Ordering::Acquire) > reset_count
             && f.ui.app.timeline_audio_matches_desired()
@@ -555,7 +587,7 @@ fn playback_loop_ui_observed_cancel_survives_reset_finishing_before_the_action()
     hold_first_loop_restart(&mut f);
     f.ui.app.loop_restart_wait = None;
     assert!(f.ui.app.has_current_loop_restart_wait());
-    f.probe.reset_held.store(false, Ordering::Release);
+    f.probe.reset_gate.release();
     let deadline = Instant::now() + Duration::from_secs(5);
     while !f.snapshot().transport_playing {
         assert!(Instant::now() < deadline, "loop did not resume");
@@ -584,7 +616,7 @@ fn playback_loop_ui_observed_cancel_survives_reset_finishing_before_the_action()
 fn playback_loop_ui_resumed_playback_uses_normal_pause_before_ui_wait_cleanup() {
     let mut f = StartFixture::new();
     hold_first_loop_restart(&mut f);
-    f.probe.reset_held.store(false, Ordering::Release);
+    f.probe.reset_gate.release();
     let deadline = Instant::now() + Duration::from_secs(5);
     // Let the real callback resume while the UI deliberately retains its last
     // waiting observation. That stale observation cannot suppress normal Pause.
@@ -675,7 +707,7 @@ fn playback_startup_ui_delayed_reset_stays_stopped_then_first_note_onset_matches
         );
         assert_eq!(f.probe.music_processes.load(Ordering::Acquire), 0);
     }
-    f.probe.reset_held.store(false, Ordering::Release);
+    f.probe.reset_gate.release();
     // Stop before callback playback to collect its actual first output frame.
     f.until(|f| {
         f.ui.app
@@ -719,7 +751,7 @@ fn playback_startup_ui_stop_and_second_play_cancel_without_delayed_autoplay() {
             f.ui.key(egui::Key::Space, egui::Modifiers::NONE);
         }
         assert!(f.ui.app.prepared_playback_start.is_none());
-        f.probe.reset_held.store(false, Ordering::Release);
+        f.probe.reset_gate.release();
         for _ in 0..25 {
             f.pump();
         }
@@ -746,7 +778,7 @@ fn playback_startup_ui_edit_seek_and_timeout_invalidate_pending_start() {
         }
         f.ui.run(Vec::new());
         assert!(f.ui.app.prepared_playback_start.is_none());
-        f.probe.reset_held.store(false, Ordering::Release);
+        f.probe.reset_gate.release();
         for _ in 0..25 {
             f.pump();
         }
@@ -768,7 +800,7 @@ fn playback_startup_ui_edit_cancels_an_issued_guard_before_the_next_ui_poll() {
     });
     assert!(!f.snapshot().transport_playing);
     f.probe.admin_entered.store(false, Ordering::Release);
-    f.probe.admin_held.store(true, Ordering::Release);
+    f.probe.admin_gate.hold();
     assert!(
         f.ui.app.running_generator_chains[&f.channel]
             .control
@@ -788,7 +820,7 @@ fn playback_startup_ui_edit_cancels_an_issued_guard_before_the_next_ui_poll() {
     let mut candidate = f.ui.app.project.clone();
     candidate.active_pattern_mut().notes[0].note = 64;
     f.ui.app.commit_editor_project(candidate);
-    f.probe.admin_held.store(false, Ordering::Release);
+    f.probe.admin_gate.release();
     // No UI poll may be required to cancel an already-issued stale guard.
     for _ in 0..25 {
         f.callback
@@ -825,7 +857,7 @@ fn state_save_ui_overdue_recovery_defers_until_stop_ack_then_captures_once() {
         assert!(f.snapshot().plugin_processing_fault.is_none());
     }
     assert!(!path.exists());
-    f.probe.admin_held.store(true, Ordering::Release);
+    f.probe.admin_gate.hold();
     f.ui.app.stop();
     // Stop is a mailbox request. Neither a false UI flag nor the old callback
     // position proves it has been applied to the actual callback yet.
@@ -846,7 +878,7 @@ fn state_save_ui_overdue_recovery_defers_until_stop_ack_then_captures_once() {
     assert!(f.ui.app.input_recorder.is_none());
     assert!(f.ui.app.midi_recording.is_idle());
     assert!(!f.ui.app.playing);
-    f.probe.admin_held.store(false, Ordering::Release);
+    f.probe.admin_gate.release();
     f.until(|f| path.exists() && f.ui.app.save_barrier.is_none());
     assert_eq!(
         f.probe.save_calls.load(Ordering::Acquire),
@@ -890,8 +922,8 @@ fn state_save_ui_recovery_does_not_capture_during_play_preparation() {
     f.ui.app.stop();
     f.ui.app.autosave();
     assert!(f.ui.app.save_barrier.is_none());
-    f.probe.reset_held.store(false, Ordering::Release);
-    f.probe.admin_held.store(true, Ordering::Release);
+    f.probe.reset_gate.release();
+    f.probe.admin_gate.hold();
     f.until(|f| f.probe.admin_entered.load(Ordering::Acquire));
     assert_eq!(f.probe.music_processes.load(Ordering::Acquire), 0);
     assert!(!f.snapshot().transport_playing);
@@ -906,7 +938,7 @@ fn state_save_ui_manual_wait_is_not_a_capture_timeout_and_stop_keys_work() {
         f.ui.key(egui::Key::Space, egui::Modifiers::NONE);
         f.until(|f| f.ui.app.playing && f.snapshot().transport_playing);
         f.ui.app.dirty = true;
-        f.probe.admin_held.store(true, Ordering::Release);
+        f.probe.admin_gate.hold();
         f.ui.app.begin_project_save(ProjectSaveRequest::Manual {
             path: path.clone(),
             lifecycle: None,
@@ -931,7 +963,7 @@ fn state_save_ui_manual_wait_is_not_a_capture_timeout_and_stop_keys_work() {
         assert!(!f.snapshot().transport_playing);
         f.ui.app.begin_prepared_playback_start(true);
         assert!(f.ui.app.prepared_playback_start.is_none());
-        f.probe.admin_held.store(false, Ordering::Release);
+        f.probe.admin_gate.release();
         f.until(|f| path.exists() && f.ui.app.save_barrier.is_none());
         assert!(!f.ui.app.dirty);
         assert_eq!(
@@ -949,14 +981,14 @@ fn state_save_ui_failed_native_capture_keeps_dirty_and_last_confirmed_state() {
     let mut f = StartFixture::new();
     f.ui.app.project.plugin_instances[0].opaque_state = vec![4, 5, 6];
     f.ui.app.dirty = true;
-    f.probe.admin_held.store(true, Ordering::Release);
+    f.probe.admin_gate.hold();
     f.probe.save_error.store(true, Ordering::Release);
     f.ui.app.begin_project_save(ProjectSaveRequest::Manual {
         path: path.clone(),
         lifecycle: None,
     });
     f.until(|f| f.probe.admin_entered.load(Ordering::Acquire));
-    f.probe.admin_held.store(false, Ordering::Release);
+    f.probe.admin_gate.release();
     f.until(|f| path.exists() && f.ui.app.save_barrier.is_none());
     assert!(f.ui.app.dirty);
     assert_eq!(f.ui.app.project.plugin_instances[0].opaque_state, [4, 5, 6]);
@@ -980,17 +1012,34 @@ fn state_save_ui_dispatched_capture_timeout_still_finishes_with_unacked_transpor
     let path = files.0.join("Timed-out-state.citrus");
     let mut f = StartFixture::new();
     f.ui.app.dirty = true;
-    f.probe.admin_held.store(true, Ordering::Release);
+    let save_returns_before = f.probe.save_returns.load(Ordering::Acquire);
+    f.probe.admin_gate.hold();
     f.ui.app.begin_project_save(ProjectSaveRequest::Manual {
         path: path.clone(),
         lifecycle: None,
     });
     f.until(|f| f.probe.admin_entered.load(Ordering::Acquire));
+    assert_eq!(
+        f.probe.save_calls.load(Ordering::Acquire),
+        f.initial_save_calls + 1,
+        "the save barrier must enter its own real backend capture"
+    );
+    assert_eq!(
+        f.probe.save_returns.load(Ordering::Acquire),
+        save_returns_before
+    );
+    assert!(
+        f.ui.app.running_generator_chains[&f.channel]
+            .control
+            .has_outstanding_admin_work(),
+        "a backend capture that has entered and is held must own its admin lease"
+    );
     assert!(f.ui.app.save_barrier.as_ref().unwrap().requests_initialized);
     assert!(!f.ui.app.save_barrier.as_ref().unwrap().waiting.is_empty());
     // An external transport request remains unacknowledged while the real
     // backend is held. A dispatched capture must still reach its own timeout.
     f.ui.app.audio.as_ref().unwrap().set_playing(true);
+    assert!(f.ui.app.plugin_state_save_transport_busy());
     f.ui.app.save_barrier.as_mut().unwrap().started_at =
         Instant::now() - PLUGIN_STATE_SAVE_TIMEOUT - Duration::from_secs(1);
     f.ui.app.poll_save_barrier();
@@ -1012,13 +1061,53 @@ fn state_save_ui_dispatched_capture_timeout_still_finishes_with_unacked_transpor
     assert!(
         f.ui.app.running_generator_chains[&f.channel]
             .control
-            .has_outstanding_admin_work()
+            .has_outstanding_admin_work(),
+        "UI timeout cannot finish the held backend capture: gate_held={}, entered={}, save_calls={}, save_returns={} (before={save_returns_before}), snapshot={:?}",
+        f.probe.admin_gate.is_held(),
+        f.probe.admin_entered.load(Ordering::Acquire),
+        f.probe.save_calls.load(Ordering::Acquire),
+        f.probe.save_returns.load(Ordering::Acquire),
+        f.snapshot()
+    );
+    assert!(f.probe.admin_gate.is_held());
+    assert_eq!(
+        f.probe.save_returns.load(Ordering::Acquire),
+        save_returns_before
     );
     f.ui.app.toggle_record();
     assert!(f.ui.app.input_recorder.is_none());
     assert!(f.ui.app.midi_recording.is_idle());
     assert!(!f.ui.app.playing);
     assert!(!f.snapshot().transport_playing);
+
+    // The UI barrier has finished, but only this explicit backend release may
+    // finish the real call and release its lease. Keep the transport unacked;
+    // no further UI frame or callback is needed to observe worker completion.
+    f.probe.admin_gate.release();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while f.ui.app.running_generator_chains[&f.channel]
+        .control
+        .has_outstanding_admin_work()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "released capture retained admin work: save_calls={}, save_returns={}, snapshot={:?}",
+            f.probe.save_calls.load(Ordering::Acquire),
+            f.probe.save_returns.load(Ordering::Acquire),
+            f.snapshot()
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        f.probe.save_returns.load(Ordering::Acquire),
+        save_returns_before + 1
+    );
+    assert_eq!(
+        f.probe.save_calls.load(Ordering::Acquire),
+        f.initial_save_calls + 1
+    );
+    assert!(f.ui.app.save_barrier.is_none());
+    assert!(f.ui.app.dirty);
 }
 
 #[test]
