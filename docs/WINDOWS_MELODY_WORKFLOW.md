@@ -391,6 +391,36 @@ the latter is neither compiled nor part of this commit. Only the logger source
 and two verification documents are committed, with generated evidence and works
 retained outside Git.
 
+Source66 actually exercised the numeric identity fields on pushed `07e08de`.
+Default helper/test artifact builds passed; all 284 source pins were unchanged.
+Test PID15736 exited101 (outer 5.499s, zero validation errors), and the production
+receipt records helper PID8828 forcibly terminated and actually reaped with exit1.
+Shutdown's main trace records native TID18888, component terminate result0 and
+the Drop body returning, then ExitDll Before at 563264800ns with no Returned.
+The ordinary scan still stopped with UncleanRetirement. No NOIRE state, MIDI/DSP,
+editor, device, project save/reopen or export was requested.
+
+The target-only collector passed a compile-only installed SDK x64 layout check.
+Its initial synthetic wrong-PID/TID callback regression actually failed; preserved
+wrapper failures first exposed array-expression and reflection PSObject fixture
+bugs. Revised collector03 then passed Add-Type, managed ABI and 264 checks across
+20 fixtures, including null/error/partial callbacks and retained process/thread
+liveness. Strict original-emitter incarnation remains unproven. These managed
+results do not establish actual WCT collection.
+
+The native collector refused with `Direct child enumeration exceeded cap 128.`;
+no WCT session opened and Chains is empty. Owner completion and raw EOF were
+confirmed before ending the same NoExit host, followed by a fresh zero owned
+Cargo/helper/test inventory. Read-only review found that continue in the do-while
+skips Process32NextW and can count the same candidate repeatedly. This is not
+evidence of 128 distinct children or a deadlock. The actual candidate image path
+was not recorded; an adjacent helper file precheck does not prove the child image.
+A new target-only enumeration correction and regressions remain uncompiled/unrun.
+Preserve `windows-kontakt-default-scan-run-03*`, source-check cohorts01..05 and
+`waitchain-sdk-layout-build-01/`. Another scan needs a new bound cohort and an
+explicit resource handoff; budgets, privileges and healthy-exit requirements stay
+unchanged.
+
 Use private new directories and explicit opt-in ignored QA only after the coordinated desktop/build window is available. Preserve the original project and identify the exact test/helper/source inputs.
 Normal source checks can be reproduced independently; real NI tests are intentionally excluded:
 

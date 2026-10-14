@@ -51,6 +51,12 @@ Source64 在提交 `9795f16` 上用同一入口实测退出诊断，默认 helpe
 
 Source65 仅给原退出日志补固定数字 PID 和 Windows 原生 TID；身份 API 在原 opt-in 与 128 条额度放行后才调用，未改 SDK、清理顺序、预算或权限。新增纯格式回归与原 46 项 helper 回归实际全部通过（47 passed），默认/all-feature root `Clippy --all-targets -D warnings`、root/private fmt、diff 共 6 项全 exit0，284 输入 pins 前后不变；依赖 SDK 原有 4 项未使用代码警告保留。最初本机门禁脚本误保留 Source63 manifest 路径，前置校验报 `Source65 manifest drift`，未启动 Cargo；新脚本 02 正确绑定后通过，原失败记录保留。证据在 `source65-exit-*-02`；新版身份日志尚未对真实 Kontakt 运行，等待链实验仅保留在 ignored target 中、未编译或实测。本次只提交该源码和两份文档，构建、脚本、收据、音频及作品留在 Git 外。
 
+Source66 在已推送 `07e08de` 上实测身份日志：普通 helper/test artifact 构建通过，284 输入 pins 前后不变；唯一测试 PID15736 exit101，外层 5.499 秒、校验错误数 0。实际 helper PID8828、主退出日志 TID18888；组件 terminate result0 和 Drop 正文已返回，随后 ExitDll Before（563264800ns）仍无 Returned，生产再次强制终止并实际回收（exit1），普通扫描仍为 UncleanRetirement。没有 NOIRE 状态、MIDI/DSP、编辑器、声卡、保存重开或导出请求。
+
+本机外部等待链实验的 SDK x64 结构实际编译检查通过；初版错误 PID/TID 的合成回调确实误标匹配，原失败保留。修正版03实际 Add-Type、托管 ABI、264 项检查/20 组用例通过，覆盖错误身份、错误/空回调、partial 结果及原进程/线程存活边界；严格原 emitter incarnation 仍未证明。最初检查脚本的数组拼接和反射 PSObject 错误已分别保留并在新脚本修正。这些纯检查不等于实际等待链成功。
+
+实机采集被 `Direct child enumeration exceeded cap 128.` 拒绝，WCT session 未打开、Chains 为空；采集 owner 和 raw EOF 均完成后才退出同一 NoExit 宿主，fresh owned Cargo/helper/test 为 0。源码复核发现 do-while 中 continue 跳过 Process32NextW、重复同一候选直到上限；不能把 128 计数解释为 128 个不同子进程，也不能宣称已有死锁证据。实际候选的可执行路径没有记录，私有相邻 helper 的文件预检不替代实际 child image 绑定。新枚举修正及其回归仍在 target 准备、未编译/实测；原预算、权限和健康退出要求不改。证据在 `windows-kontakt-default-scan-run-03*`、`waitchain-observer-source-checks-01..05/`、`waitchain-sdk-layout-build-01/`；新采集仍需独立源码/二进制绑定和再次协调窗口。
+
 - Channel Rack、钢琴卷帘和 Playlist 的视图布局、缩放、定位/放置与按钮反馈已调整。
 - 钢琴黑白键几何、按下/松开及播放反馈、键盘试听和试听取消已接入实际状态。
 - 播放启动与循环重启等待 Timeline、参数和插件实际确认，避免错误首音/旧 epoch。
