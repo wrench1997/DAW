@@ -584,13 +584,47 @@ the final preview archive was not verified. Actual logs and terminal run JSON
 remain in `ci-2e0fcdd-windows-{quality,preview}-01.log` and
 `source70-{quality,preview}-ci-actual-terminal-01.json` outside Git.
 
-The repair now uses short compare_exchange_weak loops with the same original
+The Source71 repair uses short compare_exchange_weak loops with the same original
 Acquire/AcqRel or Relaxed orderings, overflow rejection,128-record limit and lease
 release behavior. It retains the pinned Rust1.97.1 release toolchain rather than
 silencing warnings or adopting a newer-only API. Three boundary/concurrency
-regressions were added and formatting passed; the repaired source still needs
-Rust compilation/tests and cloud Clippy. Existing vendor replay/package inputs
-are unchanged by this root-only repair.
+regressions were added. The actual
+[quality run38641052438](https://github.com/wrench1997/DAW/actions/runs/38641052438)
+passed31 dependency factory tests,2256 app+52 helper+13 protocol tests (2321 passed,
+11 ignored), strict all-target Clippy, both bins, helper protocol/harness smoke,
+the no-default-feature check and source-built editor fixtures. Existing vendor
+replay/package inputs are unchanged by this root-only repair.
+
+That quality run still concluded failure: native paint before/after edit returned
+`PRINTWINDOW_ACCEPTANCE_FAILURE`. Target and same-process button probes both
+returned false; native attach/resize/DPI, modal IPC, control/dirty feedback,
+stopped-edit state, session completion and lifecycle/Shutdown/EOF/crash cleanup
+passed separately. Repaint comparison was skipped because pixels were unavailable.
+This cloud fixture result does not establish a Kontakt UI defect or UI acceptance.
+
+[Preview run38641052404](https://github.com/wrench1997/DAW/actions/runs/38641052404)
+instead stopped in the app suite:2255 passed/1 failed/11 ignored. The exact failure
+was `startup_state_history_audio_restart_retains_nonempty_request_zero_verification`
+at its `!ui.app.dirty` assertion; Clippy and final packaging were not reached.
+Source review found that the fixture modified notes/plugin state after establishing
+its piano baseline, then synchronized only history. A due750ms dirty check can
+correctly detect the stale saved fingerprint. The old failure log did not capture
+those baseline values, so this is a source-supported explanation awaiting rerun.
+
+The test-only repair now builds the complete baseline through existing
+`mark_saved()` in the device/file-free harness. It forces the real dirty-check
+branch to be due, adds deterministic stale/complete baseline negative/positive
+controls, and prints history/saved/current fingerprints on the original failure.
+All existing restart, state-byte, dirty and Undo assertions remain. Formatting
+passed; this new fixture revision has not been compiled or tested. Preserve
+`ci-33830ed-windows-{quality,preview}-01.log` and the corresponding
+`source71-*-ci-{actual-terminal,jobs-actual-terminal}-01.json` outside Git.
+
+The next no-GUI factory diagnostic is admitted by actual successful source/backend
+CI steps and new default helper/QA builds, with exact source/binary bindings and
+an explicit resource handoff. Record the whole workflow's actual conclusion;
+independent cloud editor-paint failure does not replace those step results and
+cannot be relabeled as a complete quality or GUI pass.
 
 In the explicitly handed-off local window, the new default helper and QA Cargo
 artifacts actually built exit0 with source/binary bindings and no pin errors.

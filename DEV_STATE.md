@@ -5,11 +5,12 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
-Source70（`2e0fcdd`）最新云端实测：quality 的独立 factory 回归 31 passed；quality/preview 均通过完整 root 套件，主程序 2254、helper 51、协议 13，共 2318 passed / 11 ignored。此前四个失败项本轮全部通过。
-两条流水线仍失败于后续严格 Clippy：新工具链弃用 `Atomic::fetch_update`，涉及 `plugin_runtime.rs` 和 `load_response_timing/mod.rs`；后续双 bin 构建/smoke 及成品预览未到达，不计为通过。当前源码改用原内存序的 CAS 循环，保留 Rust 1.97.1 发布工具链，新增三项边界/并发回归；格式通过，修复后的编译/测试/Clippy 待下一轮云端验证。
-Source70 新默认 helper/QA 在协调窗口内实际构建成功；没有启动 NI、GUI 或声卡。此前 Source69 单次 Kontakt 诊断仍失败：额外消息 pass 实际返回、队列为空，ExitDll 仍未返回，helper 被原期限强制结束并实际回收。
+Source71（`33830ed`）最新云端实测：quality 的独立 factory 回归 31 passed；完整 root 套件主程序 2256、helper 52、协议 13，共 2321 passed / 11 ignored。严格 Clippy、双 bin 构建、helper 协议 smoke 和无默认 feature 检查均通过；两处原子计数兼容修复及三项新增回归已取得云端验证，Rust 1.97.1 发布工具链不变。
+quality 整体仍为 failure：最后的 native paint 前/后捕获失败，同进程按钮的 PrintWindow 诊断也返回 false；control/state/lifecycle/cleanup 独立通过。这不证明 Kontakt 界面故障，也不是 GUI 验收通过。
+preview 在另一项启动状态夹具中失败：2255 passed / 1 failed / 11 ignored，音频重启后的 clean 断言失败。源码发现夹具修改模型后遗漏 saved fingerprint，750ms 周期检查可能正确置 dirty。当前仅修正测试初始化，使用生产 `mark_saved()` 建完整基线，并强制到期检查和负/正对照；保留原重启/状态/撤销断言。格式通过，修复后的编译及云端回归未运行；旧日志未记录失败时基线值，不能将推断写成实测原因。
+Source70 新默认 helper/QA 此前在协调窗口内实际构建成功；尚未为后续修复源码重建本机二进制，也未启动新 NI 实验。Source69 单次 Kontakt 诊断仍失败：额外消息 pass 实际返回、队列为空，ExitDll 仍未返回，helper 被原期限强制结束并实际回收。
 该诊断保持默认关闭，不计为修复。独立 factory-only 查询已实现：复用现有 helper 与保留式清理，只读 factory 声明，不调用组件/控制器/view 实例化；它尚未接入生产扫描，不改变现有 verified 索引或运行时默认类选择。
-历史 `b37cc39` 的共同失败涉及 LF/CRLF 源字节断言及已故障 source 夹具；另分别出现观察 witness 释放断言、fixture 准入超时。对应修复已有上述云端回归通过，原失败日志和断言保留。完整 vendor 补丁实际重放 74 个源文件逐字节一致，170 项打包测试通过。factory-only NI 实测仍未运行；新实验只在对应门禁及资源交接就绪后单次执行，不沿用旧二进制。
+历史 `b37cc39` 的四项失败修复已有 Source70/71 云端回归通过，原失败日志和断言保留。完整 vendor 补丁实际重放 74 个源文件逐字节一致，170 项打包测试通过；后续 root-only 修复未改这些输入。factory-only NI 实测仍未运行；新实验以相关源码/后台 CI 步骤、实际新默认构建及资源交接为门，不以云端截图失败冒充后台未编译或插件界面故障，也不冒称整个 quality 通过。
 
 ## 当前支持边界
 

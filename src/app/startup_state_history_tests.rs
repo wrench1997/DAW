@@ -182,7 +182,7 @@ fn consume_state_history_capture(app: &mut CitrusApp, worker: &StateHistoryWorke
     app.capture_history();
 }
 
-fn state_history_fixture(empty: bool) -> (UiHarness, u64) {
+fn state_history_model_fixture(empty: bool) -> (UiHarness, u64) {
     let mut ui = UiHarness::floating();
     piano_clipboard_fixture(&mut ui);
     ui.app.project.active_pattern_mut().notes.truncate(1);
@@ -201,12 +201,61 @@ fn state_history_fixture(empty: bool) -> (UiHarness, u64) {
     if !empty {
         ui.app.project.plugin_instances[0].opaque_state = 0.25f32.to_le_bytes().to_vec();
     }
+    (ui, id)
+}
+
+fn state_history_fixture(empty: bool) -> (UiHarness, u64) {
+    let (mut ui, id) = state_history_model_fixture(empty);
+    // All fixture-only model changes represent the initially saved project.
+    // Synchronizing only history leaves the piano fixture's older saved
+    // fingerprint behind, so a correctly due dirty check marks this setup dirty.
+    // Use the same complete saved baseline as a normal Open/Save, with no path
+    // or autosave file in this device-free fixture.
+    assert!(ui.app.autosave_path.is_none());
+    ui.app.mark_saved();
+    ui.app.undo_stack.clear();
+    ui.app.redo_stack.clear();
+    // Exercise the real periodic branch regardless of how fast CI renders the
+    // setup frames; elapsed wall time must not determine the fixture baseline.
+    ui.app.last_dirty_check = Instant::now() - Duration::from_secs(1);
+    ui.settle();
+    assert_eq!(ui.app.history_fingerprint, ui.app.project_fingerprint);
+    assert!(!ui.app.dirty, "the complete saved fixture must start clean");
+    (ui, id)
+}
+
+#[test]
+fn startup_state_history_fixture_saved_baseline_handles_due_dirty_check() {
+    let (mut ui, _) = state_history_model_fixture(false);
+    let current = project_fingerprint(&ui.app.project);
+    assert_ne!(
+        ui.app.project_fingerprint, current,
+        "the fixture's final note/plugin edits must differ from its earlier piano baseline"
+    );
+    // Reproduce the former incomplete setup deterministically, before any
+    // worker is attached: a clean history observer is not a saved baseline.
     ui.app.sync_history_observer();
     ui.app.undo_stack.clear();
     ui.app.redo_stack.clear();
     ui.app.dirty = false;
-    ui.settle();
-    (ui, id)
+    ui.app.last_dirty_check = Instant::now() - Duration::from_secs(1);
+    ui.app.update_project_state();
+    assert!(ui.app.dirty, "the stale saved baseline must be detected");
+    assert_eq!(project_fingerprint(&ui.app.project), current);
+    assert!(ui.app.undo_stack.is_empty());
+    assert!(ui.app.redo_stack.is_empty());
+
+    ui.app.mark_saved();
+    ui.app.last_dirty_check = Instant::now() - Duration::from_secs(1);
+    ui.app.update_project_state();
+    assert_eq!(ui.app.project_fingerprint, current);
+    assert_eq!(ui.app.history_fingerprint, current);
+    assert!(
+        !ui.app.dirty,
+        "a due check must preserve the complete saved baseline"
+    );
+    assert!(ui.app.undo_stack.is_empty());
+    assert!(ui.app.redo_stack.is_empty());
 }
 
 #[test]
@@ -327,7 +376,15 @@ fn startup_state_history_audio_restart_retains_nonempty_request_zero_verificatio
     );
     assert_eq!(project_fingerprint(&ui.app.project), before);
     assert_eq!(f32::from_bits(worker.value.load(Ordering::SeqCst)), 0.25);
-    assert!(!ui.app.dirty);
+    assert!(
+        !ui.app.dirty,
+        "restart verification dirtied the project: history={}, saved={}, current={}, undo={}, redo={}",
+        ui.app.history_fingerprint,
+        ui.app.project_fingerprint,
+        project_fingerprint(&ui.app.project),
+        ui.app.undo_stack.len(),
+        ui.app.redo_stack.len()
+    );
     assert!(ui.app.undo_stack.is_empty());
 }
 
