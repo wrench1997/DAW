@@ -64,6 +64,9 @@ type SharedPlugin = PluginOwner<Mutex<Option<Plugin>>>;
 #[path = "strict_metadata_bundle/mod.rs"]
 mod strict_metadata_bundle;
 
+#[path = "load_response_timing/mod.rs"]
+mod load_response_timing;
+
 fn main() {
     // Before anything else -- certainly before a plugin binary is loaded and can run its own
     // code -- take the protocol channel away from stdout. A hosted plugin shares this
@@ -72,6 +75,8 @@ fn main() {
     // command from its reply. On Windows the channel owns a private handle and redirects
     // both the Win32 stdout handle and CRT descriptor 1; failed isolation exits before load.
     let protocol = ProtocolChannel::claim();
+
+    load_response_timing::initialize_from_environment();
 
     eprintln!("VST3 Host Helper Process Started");
 
@@ -136,6 +141,10 @@ fn parse_line(line: io::Result<String>, protocol: &mut ProtocolChannel) -> Optio
 }
 
 fn respond(protocol: &mut ProtocolChannel, response: &HostResponse) {
+    if load_response_timing::enabled() {
+        load_response_timing::respond(protocol, || serde_json::to_string(response));
+        return;
+    }
     if let Ok(json) = serde_json::to_string(response) {
         let _ = writeln!(protocol, "{}", json);
         let _ = protocol.flush();
@@ -204,6 +213,29 @@ struct GuiRequest {
 /// Handle a command against the shared plugin. GUI commands are delegated to `gui` (the
 /// main-thread channel) when present; without it they report "not supported".
 fn handle(
+    command: HostCommand,
+    plugin: &SharedPlugin,
+    sample_rate: &mut f64,
+    #[allow(unused_variables)] gui: Option<&GuiChannel>,
+) -> HostResponse {
+    let diagnose_load =
+        load_response_timing::enabled() && matches!(&command, HostCommand::LoadPlugin { .. });
+    if diagnose_load {
+        load_response_timing::begin_load();
+    }
+    let response = handle_inner(command, plugin, sample_rate, gui);
+    if diagnose_load {
+        let outcome = match &response {
+            HostResponse::PluginInfo { .. } => load_response_timing::LoadOutcome::PluginInfo,
+            HostResponse::Error { .. } => load_response_timing::LoadOutcome::Error,
+            _ => load_response_timing::LoadOutcome::UnexpectedResponse,
+        };
+        load_response_timing::load_returned(outcome);
+    }
+    response
+}
+
+fn handle_inner(
     command: HostCommand,
     plugin: &SharedPlugin,
     sample_rate: &mut f64,

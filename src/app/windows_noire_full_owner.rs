@@ -338,6 +338,12 @@ impl FullParent {
             .as_ref()
             .ok_or("complete actual callback is no longer owned".into())
     }
+    /// Actual callback destruction and guard joins, independently of the
+    /// final model/input checks. A caller can fail qualification after this
+    /// boundary without mistaking a model error for a still-live resource.
+    pub(super) fn resources_joined(&self) -> bool {
+        self.joins_complete
+    }
     pub(super) fn paused(&self) -> bool {
         let app = self.app();
         let Some((generation, epoch)) = app

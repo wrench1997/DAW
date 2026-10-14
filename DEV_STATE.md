@@ -82,6 +82,11 @@ run08 的 NI component 177 字节不同；已知 host envelope 相同，期间�
 | source37 完整 owner | 针对性 14 passed；严格 Clippy exit101：`new_ret_no_self` | 原失败记录保留；模型/所有权策略测试，不构造实际 NOIRE worker |
 | source38 当前 owner/质量 | 14 passed /0 failed，body 1.76 秒；严格 all-feature/all-target Clippy、root/include fmt、diff 全 exit0 | 构造函数改名、释放时先销毁 callback；248 项源码输入冻结，不等于原曲实测 |
 | 私有文件审核 candidate02 | PCM/WAV 35 passed、state sidecar 28 passed | 实际 Windows 文件夹具；不证明 SDK、writer join 或 NOIRE 声音 |
+| source39 原曲初始化夹具 | 8 项证据回归 passed；Clippy exit101，5 处 `cloned_ref_to_slice_refs` | 保留原失败；尚未运行原生源 |
+| source40 修正及构建 | 同 8 项 passed；严格 all-feature/all-target Clippy、fmt/diff、正式 helper build 全 exit0 | 仅把路径和单记录列表改为借用；249 项源码输入冻结 |
+| source40 完整原曲 init run01 | 实际 28.4428 秒、exit101；扫描报 5 秒 helper 响应超时 | 0 source/StateLoad/clone/Process/WAV；原 405 notes/160 beats、工程和二进制 SHA 未变 |
+| source41 提交前回归 | 完整工程相关 34 passed /2 ignored；helper 35 passed；Clippy exit101：`write_literal` | 新诊断测试的一处格式写法；原失败保留，未启动 NI |
+| source42 当前提交门禁 | helper 35 passed；严格 default/all-feature/all-target Clippy、fmt/include/diff、helper build 全 exit0 | 仅修正测试中的动态格式参考；完整工程 34 项复用 source41 未改源码，不是完整套件或原生发声验收 |
 
 source34 root 完整命令耗时 805.36 秒，主程序测试耗时 635.87 秒，真实终态已保存。
 vendor 失败项 `internal::module_info::tests::reads_sdk_generated_bundle_metadata` 要求外部
@@ -94,7 +99,9 @@ source35 历史 MIDI 库存 49 payloads 核验 PASS，仅验证历史库存；Ko
 source36 相对 source35 仅 helper 内部 Failure 表示变化，wire、查询顺序与准入保护保持。
 source38 新增显式完整工程测试 owner；未修改普通构建的 UI/音频行为，未重新跑 source34 完整套件。
 source38 首次 runner 引用了旧 manifest，预检 exit1 且未启动 Cargo；修正 runner 后全部门禁通过。
-当前源码门禁已完成：复用未变的 source34 主程序/vendor 和 source35 fixture/Python，另跑新 helper/质量。
+source40 原生 run01 在独立空实例扫描时失败，尚未进入完整源初始化；不能归因为 NOIRE 状态加载。
+source42 首次 runner 误引用 source41 manifest，预检 exit1 且未启动 Cargo；原记录保留，修正引用后门禁通过。
+本次提交门禁对应 source42 helper/质量及未改的 source41 完整工程回归；source34 完整套件、source35 fixture/Python 仍为各自历史结果。
 实际 load-only 保留原音符、状态、路由和自动化；所有这些检查均不构成新声学/NI 实测。
 
 fresh guard 的回归覆盖安装入队拒绝、真实 callback 安装失败、晚完成、panic、引擎丢失、
@@ -122,6 +129,14 @@ source32 的选定元数据 bundle 从源码计数上将 Q128 wrapper IPC 11 次
 - 初始化：Whole run03 在 source ready 前报 `qualification poll/pump deadline or bound exceeded`。
   18 条观察、0 capture/clone/Process、无 WAV；cleanup 缺实际 source Join，原因未确定。
   已补有界只读初始化诊断和 fresh guard 保留；不能仅提高期限后称问题解决。
+- 完整源 run01：以固定 source40 私有 test/helper 和原 Saved13 运行初始化 selector，
+  production scan 返回 `Timed out after 5s waiting for helper response (plugin may have hung)`。
+  NI 自身两条初始化日志相距 3.151 秒，不代表整个宿主 LoadPlugin 已返回。
+  待定位 LoadPlugin、Windows plugin_changed 与回复写入/读回；未放宽扫描或初始化期限。
+  已新增 Windows helper 加载/回复计时，进程启动时仅精确值
+  `CITRUS_VST3_HELPER_LOAD_DIAGNOSTIC=windows-load-response-timing-v1` 启用。
+  记录实际返回、序列化、写入和 flush 结果；默认关闭，不输出路径、音色状态、参数或音频。
+  新增 10 项纯诊断回归通过；此诊断尚未对 Kontakt 重跑，不能称超时已修复。
 - 回归：source32 的测试 import 遗漏导致 E0433；source33 编译已通过。
   source33 两项失败分别为旧 `LatencySamples:1` IPC 断言和 mock stdout `OSError: [Errno 22] Invalid argument`。
   source34 修夹具后 root 通过；vendor 缺素材、fixture 格式及 source35 Clippy 失败仍保留。

@@ -1,0 +1,674 @@
+//! Explicit Windows load-response timing, never protocol output or plugin data.
+//!
+//! Only the exact opt-in value enables this module. The Windows startup check uses
+//! stack storage; disabled command paths do not read a clock, enter TLS, allocate a
+//! diagnostic buffer, or touch stderr. Each enabled load is correlated on the
+//! command-owning thread through its actual response flush attempt. A successful
+//! write/flush proves only the helper's I/O results, not receipt by the parent.
+
+use std::cell::Cell;
+use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
+
+#[cfg(any(windows, test))]
+const OPT_IN: &str = "windows-load-response-timing-v1";
+static ENABLED: AtomicBool = AtomicBool::new(false);
+static NEXT_LOAD: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    static ACTIVE: Cell<Option<Trace>> = const { Cell::new(None) };
+}
+
+#[derive(Clone, Copy)]
+struct Trace {
+    load: u64,
+    start: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LoadOutcome {
+    PluginInfo,
+    Error,
+    UnexpectedResponse,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SerializationOutcome {
+    Ok {
+        json_bytes: usize,
+    },
+    Error {
+        category: &'static str,
+        line: usize,
+        column: usize,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IoOutcome {
+    Ok,
+    Error {
+        kind: io::ErrorKind,
+        os_code: Option<i32>,
+    },
+}
+
+impl IoOutcome {
+    fn from_result<T>(result: &io::Result<T>) -> Self {
+        match result {
+            Ok(_) => Self::Ok,
+            Err(error) => Self::Error {
+                kind: error.kind(),
+                os_code: error.raw_os_error(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Event {
+    HandleEntry,
+    HandleReturned(LoadOutcome),
+    #[cfg(any(windows, test))]
+    PluginChangedBefore,
+    #[cfg(any(windows, test))]
+    PluginChangedAfter,
+    SerializeBefore,
+    SerializeReturned(SerializationOutcome),
+    WriteBefore {
+        expected_bytes: usize,
+    },
+    WriteReturned {
+        outcome: IoOutcome,
+        accepted_bytes: usize,
+        expected_bytes: usize,
+    },
+    FlushBefore,
+    FlushReturned(IoOutcome),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Record {
+    load: u64,
+    elapsed_ns: u128,
+    event: Event,
+}
+
+impl Trace {
+    fn record(
+        self,
+        event: Event,
+        clock: &mut impl FnMut() -> Instant,
+        sink: &mut impl FnMut(Record),
+    ) {
+        let now = clock();
+        sink(Record {
+            load: self.load,
+            elapsed_ns: now.saturating_duration_since(self.start).as_nanos(),
+            event,
+        });
+    }
+}
+
+pub(super) fn enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
+
+pub(super) fn initialize_from_environment() {
+    ENABLED.store(environment_opt_in(), Ordering::Relaxed);
+}
+
+#[cfg(any(windows, test))]
+fn exact_opt_in(value: &[u16]) -> bool {
+    value.len() == OPT_IN.len()
+        && value
+            .iter()
+            .copied()
+            .zip(OPT_IN.bytes())
+            .all(|(wide, byte)| wide == u16::from(byte))
+}
+
+#[cfg(windows)]
+fn environment_opt_in() -> bool {
+    const NAME_BYTES: &[u8] = b"CITRUS_VST3_HELPER_LOAD_DIAGNOSTIC\0";
+    const fn wide_name<const N: usize>(bytes: &[u8]) -> [u16; N] {
+        let mut wide = [0; N];
+        let mut i = 0;
+        while i < N {
+            wide[i] = bytes[i] as u16;
+            i += 1;
+        }
+        wide
+    }
+    const NAME: [u16; NAME_BYTES.len()] = wide_name(NAME_BYTES);
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetEnvironmentVariableW(name: *const u16, buffer: *mut u16, size: u32) -> u32;
+    }
+    let mut value = [0_u16; 64];
+    // SAFETY: a NUL-terminated constant key and live stack output of the supplied
+    // size. Missing or overlong values disable the diagnostic; no environment edit.
+    let length =
+        unsafe { GetEnvironmentVariableW(NAME.as_ptr(), value.as_mut_ptr(), value.len() as u32) }
+            as usize;
+    length < value.len() && exact_opt_in(&value[..length])
+}
+
+#[cfg(not(windows))]
+fn environment_opt_in() -> bool {
+    false
+}
+
+pub(super) fn begin_load() {
+    if !enabled() {
+        return;
+    }
+    let trace = Trace {
+        load: NEXT_LOAD.fetch_add(1, Ordering::Relaxed),
+        start: Instant::now(),
+    };
+    ACTIVE.with(|active| active.set(Some(trace)));
+    // The entry is the same sample used as this load's monotonic origin.
+    emit_stderr(Record {
+        load: trace.load,
+        elapsed_ns: 0,
+        event: Event::HandleEntry,
+    });
+}
+
+fn current_trace() -> Option<Trace> {
+    if enabled() {
+        ACTIVE.with(Cell::get)
+    } else {
+        None
+    }
+}
+
+fn mark(event: Event) {
+    if let Some(trace) = current_trace() {
+        trace.record(event, &mut Instant::now, &mut emit_stderr);
+    }
+}
+
+pub(super) fn load_returned(outcome: LoadOutcome) {
+    mark(Event::HandleReturned(outcome));
+}
+
+#[cfg(windows)]
+pub(super) fn plugin_changed_before() {
+    mark(Event::PluginChangedBefore);
+}
+
+#[cfg(windows)]
+pub(super) fn plugin_changed_after() {
+    mark(Event::PluginChangedAfter);
+}
+
+/// Keep the production serializer and formatted write, once each, including the
+/// original flush attempt after a failed write. Only a currently active load logs.
+pub(super) fn respond<W: Write>(
+    protocol: &mut W,
+    serialize: impl FnOnce() -> serde_json::Result<String>,
+) {
+    respond_pipeline(
+        protocol,
+        serialize,
+        current_trace(),
+        &mut Instant::now,
+        &mut emit_stderr,
+    );
+    if enabled() {
+        ACTIVE.with(|active| active.set(None));
+    }
+}
+
+fn respond_pipeline<W: Write>(
+    protocol: &mut W,
+    serialize: impl FnOnce() -> serde_json::Result<String>,
+    trace: Option<Trace>,
+    clock: &mut impl FnMut() -> Instant,
+    sink: &mut impl FnMut(Record),
+) {
+    let Some(trace) = trace else {
+        if let Ok(json) = serialize() {
+            let _ = writeln!(protocol, "{}", json);
+            let _ = protocol.flush();
+        }
+        return;
+    };
+    trace.record(Event::SerializeBefore, clock, sink);
+    let serialized = serialize();
+    let json = match serialized {
+        Ok(json) => {
+            trace.record(
+                Event::SerializeReturned(SerializationOutcome::Ok {
+                    json_bytes: json.len(),
+                }),
+                clock,
+                sink,
+            );
+            json
+        }
+        Err(error) => {
+            let category = match error.classify() {
+                serde_json::error::Category::Io => "io",
+                serde_json::error::Category::Syntax => "syntax",
+                serde_json::error::Category::Data => "data",
+                serde_json::error::Category::Eof => "eof",
+            };
+            trace.record(
+                Event::SerializeReturned(SerializationOutcome::Error {
+                    category,
+                    line: error.line(),
+                    column: error.column(),
+                }),
+                clock,
+                sink,
+            );
+            return;
+        }
+    };
+    let expected_bytes = json.len().saturating_add(1);
+    trace.record(Event::WriteBefore { expected_bytes }, clock, sink);
+    let mut counted = CountedWrite {
+        inner: protocol,
+        accepted_bytes: 0,
+    };
+    let write = writeln!(counted, "{}", json);
+    trace.record(
+        Event::WriteReturned {
+            outcome: IoOutcome::from_result(&write),
+            accepted_bytes: counted.accepted_bytes,
+            expected_bytes,
+        },
+        clock,
+        sink,
+    );
+    trace.record(Event::FlushBefore, clock, sink);
+    let flush = counted.flush();
+    trace.record(
+        Event::FlushReturned(IoOutcome::from_result(&flush)),
+        clock,
+        sink,
+    );
+}
+
+/// ProtocolChannel uses Write's default write_fmt/write_all; this wrapper does too.
+/// Each write and its exact buffer are forwarded once, retaining the original
+/// formatted write's partial-write/Interrupted handling. Under Write's contract,
+/// Ok(n) is the accepted byte range; Err accepts no bytes from that individual call.
+/// Counts describe accepted writes, never a parent acknowledgement or persisted data.
+struct CountedWrite<'a, W> {
+    inner: &'a mut W,
+    accepted_bytes: usize,
+}
+
+impl<W: Write> Write for CountedWrite<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let result = self.inner.write(bytes);
+        if let Ok(count) = &result {
+            self.accepted_bytes = self.accepted_bytes.saturating_add(*count);
+        }
+        result
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn emit_stderr(record: Record) {
+    write_record(&mut io::stderr().lock(), record);
+}
+
+fn write_record(stderr: &mut impl Write, record: Record) {
+    // No arbitrary Error Display, plugin identity, path, state, parameters or PCM.
+    // A closed diagnostic sink must not panic or alter the actual protocol result.
+    let _ = write!(
+        stderr,
+        "[citrus-load-response-timing-v1] load={} elapsed_ns={} ",
+        record.load, record.elapsed_ns
+    );
+    let _ = match record.event {
+        Event::HandleEntry => writeln!(stderr, "stage=handle_entry"),
+        Event::HandleReturned(outcome) => {
+            writeln!(stderr, "stage=handle_returned outcome={outcome:?}")
+        }
+        #[cfg(any(windows, test))]
+        Event::PluginChangedBefore => writeln!(stderr, "stage=plugin_changed_before"),
+        #[cfg(any(windows, test))]
+        Event::PluginChangedAfter => writeln!(stderr, "stage=plugin_changed_after"),
+        Event::SerializeBefore => writeln!(stderr, "stage=serialize_before"),
+        Event::SerializeReturned(outcome) => {
+            writeln!(stderr, "stage=serialize_returned outcome={outcome:?}")
+        }
+        Event::WriteBefore { expected_bytes } => {
+            writeln!(stderr, "stage=write_before expected_bytes={expected_bytes}")
+        }
+        Event::WriteReturned {
+            outcome,
+            accepted_bytes,
+            expected_bytes,
+        } => writeln!(
+            stderr,
+            "stage=write_returned outcome={outcome:?} accepted_byte_range=0..{accepted_bytes} expected_bytes={expected_bytes}"
+        ),
+        Event::FlushBefore => writeln!(stderr, "stage=flush_before"),
+        Event::FlushReturned(outcome) => {
+            writeln!(stderr, "stage=flush_returned outcome={outcome:?}")
+        }
+    };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct ProtocolProbe {
+        bytes: Vec<u8>,
+        calls: Vec<&'static str>,
+        write_limit: Option<usize>,
+        fail_after: Option<usize>,
+        interrupted_once: bool,
+        fail_flush: bool,
+    }
+
+    impl Write for ProtocolProbe {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.calls.push("write");
+            if self.interrupted_once {
+                self.interrupted_once = false;
+                return Err(io::ErrorKind::Interrupted.into());
+            }
+            let remaining = self
+                .fail_after
+                .map_or(usize::MAX, |limit| limit.saturating_sub(self.bytes.len()));
+            if remaining == 0 {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
+            let count = bytes
+                .len()
+                .min(remaining)
+                .min(self.write_limit.unwrap_or(usize::MAX));
+            self.bytes.extend_from_slice(&bytes[..count]);
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.calls.push("flush");
+            if self.fail_flush {
+                Err(io::ErrorKind::Other.into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn run(probe: &mut ProtocolProbe, serialized: serde_json::Result<String>) -> Vec<Record> {
+        let start = Instant::now();
+        let trace = Trace { load: 7, start };
+        let mut ticks = 0;
+        let mut records = Vec::new();
+        respond_pipeline(
+            probe,
+            || serialized,
+            Some(trace),
+            &mut || {
+                ticks += 1;
+                start + Duration::from_nanos(ticks)
+            },
+            &mut |record| records.push(record),
+        );
+        records
+    }
+
+    #[test]
+    fn opt_in_is_exact_and_bounded() {
+        assert!(exact_opt_in(&OPT_IN.encode_utf16().collect::<Vec<_>>()));
+        for value in [
+            "",
+            "1",
+            "windows-load-response-timing-v1 ",
+            "WINDOWS-LOAD-RESPONSE-TIMING-V1",
+            "windows-load-response-timing-v2",
+        ] {
+            assert!(!exact_opt_in(&value.encode_utf16().collect::<Vec<_>>()));
+        }
+    }
+
+    #[test]
+    fn disabled_path_never_invokes_clock_or_diagnostic_sink() {
+        let mut protocol = ProtocolProbe::default();
+        let mut serializations = 0;
+        respond_pipeline(
+            &mut protocol,
+            || {
+                serializations += 1;
+                serde_json::to_string(&"unchanged reply")
+            },
+            None,
+            &mut || panic!("disabled clock"),
+            &mut |_| panic!("disabled sink"),
+        );
+        assert_eq!(serializations, 1);
+        assert_eq!(protocol.bytes, b"\"unchanged reply\"\n");
+        assert_eq!(protocol.calls.last(), Some(&"flush"));
+    }
+
+    #[test]
+    fn disabled_serialization_failure_has_no_clock_log_write_or_flush() {
+        use serde::ser::Error;
+        let mut protocol = ProtocolProbe::default();
+        respond_pipeline(
+            &mut protocol,
+            || Err(serde_json::Error::custom("unused payload")),
+            None,
+            &mut || panic!("disabled clock"),
+            &mut |_| panic!("disabled sink"),
+        );
+        assert!(protocol.bytes.is_empty());
+        assert!(protocol.calls.is_empty());
+    }
+
+    #[test]
+    fn closed_diagnostic_sink_cannot_stop_a_response_or_report_an_acknowledgement() {
+        let start = Instant::now();
+        let mut protocol = ProtocolProbe::default();
+        let mut diagnostics = ProtocolProbe {
+            fail_after: Some(0),
+            ..Default::default()
+        };
+        let mut stages = Vec::new();
+        respond_pipeline(
+            &mut protocol,
+            || Ok("reply".into()),
+            Some(Trace { load: 1, start }),
+            &mut || start,
+            &mut |record| {
+                stages.push(record.event);
+                write_record(&mut diagnostics, record);
+            },
+        );
+        assert!(diagnostics.bytes.is_empty());
+        assert_eq!(protocol.bytes, b"reply\n");
+        assert_eq!(protocol.calls.last(), Some(&"flush"));
+        assert_eq!(stages.last(), Some(&Event::FlushReturned(IoOutcome::Ok)));
+    }
+
+    #[test]
+    fn control_markers_and_response_share_one_load_clock_and_order() {
+        let start = Instant::now();
+        let trace = Trace { load: 19, start };
+        let mut tick = 0;
+        let mut clock = || {
+            tick += 1;
+            start + Duration::from_nanos(tick)
+        };
+        let mut records = Vec::new();
+        let mut sink = |record| records.push(record);
+        trace.record(Event::HandleEntry, &mut clock, &mut sink);
+        trace.record(
+            Event::HandleReturned(LoadOutcome::Error),
+            &mut clock,
+            &mut sink,
+        );
+        trace.record(Event::PluginChangedBefore, &mut clock, &mut sink);
+        trace.record(Event::PluginChangedAfter, &mut clock, &mut sink);
+        let mut protocol = ProtocolProbe::default();
+        respond_pipeline(
+            &mut protocol,
+            || Ok("error reply".into()),
+            Some(trace),
+            &mut clock,
+            &mut sink,
+        );
+        assert_eq!(records.len(), 10);
+        assert!(records.iter().all(|record| record.load == 19));
+        assert!(
+            records
+                .windows(2)
+                .all(|pair| pair[0].elapsed_ns < pair[1].elapsed_ns)
+        );
+        assert_eq!(records[4].event, Event::SerializeBefore);
+        assert_eq!(records[9].event, Event::FlushReturned(IoOutcome::Ok));
+        assert_eq!(protocol.bytes, b"error reply\n");
+    }
+
+    #[test]
+    fn successful_response_records_order_without_changing_wire_bytes_or_writes() {
+        let json = serde_json::to_string(&[1, 2, 3]).unwrap();
+        let mut reference = ProtocolProbe::default();
+        writeln!(&mut reference, "{}", json).unwrap();
+        reference.flush().unwrap();
+        let mut observed = ProtocolProbe::default();
+        let records = run(&mut observed, Ok(json.clone()));
+        assert_eq!(observed.bytes, reference.bytes);
+        assert_eq!(observed.calls, reference.calls);
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.event)
+                .collect::<Vec<_>>(),
+            [
+                Event::SerializeBefore,
+                Event::SerializeReturned(SerializationOutcome::Ok {
+                    json_bytes: json.len()
+                }),
+                Event::WriteBefore {
+                    expected_bytes: json.len() + 1
+                },
+                Event::WriteReturned {
+                    outcome: IoOutcome::Ok,
+                    accepted_bytes: json.len() + 1,
+                    expected_bytes: json.len() + 1
+                },
+                Event::FlushBefore,
+                Event::FlushReturned(IoOutcome::Ok),
+            ]
+        );
+        assert!(records.iter().all(|record| record.load == 7));
+        assert!(
+            records
+                .windows(2)
+                .all(|pair| pair[0].elapsed_ns < pair[1].elapsed_ns)
+        );
+    }
+
+    #[test]
+    fn serialization_failure_is_not_a_written_or_flushed_reply() {
+        use serde::ser::Error;
+        let error = serde_json::Error::custom("sensitive path or state must never be logged");
+        let mut protocol = ProtocolProbe::default();
+        let records = run(&mut protocol, Err(error));
+        assert!(protocol.bytes.is_empty());
+        assert!(protocol.calls.is_empty());
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[1].event,
+            Event::SerializeReturned(SerializationOutcome::Error {
+                category: "data",
+                line: 0,
+                column: 0
+            })
+        );
+    }
+
+    #[test]
+    fn partial_write_error_keeps_actual_range_and_still_attempts_original_flush() {
+        let mut protocol = ProtocolProbe {
+            fail_after: Some(3),
+            ..Default::default()
+        };
+        let records = run(&mut protocol, Ok("abcdef".into()));
+        assert_eq!(protocol.bytes, b"abc");
+        assert_eq!(protocol.calls.last(), Some(&"flush"));
+        assert_eq!(
+            records[3].event,
+            Event::WriteReturned {
+                outcome: IoOutcome::Error {
+                    kind: io::ErrorKind::BrokenPipe,
+                    os_code: None
+                },
+                accepted_bytes: 3,
+                expected_bytes: 7,
+            }
+        );
+        assert_eq!(records[5].event, Event::FlushReturned(IoOutcome::Ok));
+    }
+
+    #[test]
+    fn failed_flush_stays_failed_after_successful_complete_write() {
+        let mut protocol = ProtocolProbe {
+            fail_flush: true,
+            ..Default::default()
+        };
+        let records = run(&mut protocol, Ok("reply".into()));
+        assert_eq!(protocol.bytes, b"reply\n");
+        assert_eq!(
+            records[3].event,
+            Event::WriteReturned {
+                outcome: IoOutcome::Ok,
+                accepted_bytes: 6,
+                expected_bytes: 6
+            }
+        );
+        assert_eq!(
+            records[5].event,
+            Event::FlushReturned(IoOutcome::Error {
+                kind: io::ErrorKind::Other,
+                os_code: None
+            })
+        );
+    }
+
+    #[test]
+    fn interrupted_and_partial_writes_preserve_existing_write_fmt_behavior() {
+        let json = String::from("abcdef");
+        let mut reference = ProtocolProbe {
+            write_limit: Some(2),
+            interrupted_once: true,
+            ..Default::default()
+        };
+        writeln!(&mut reference, "{}", json).unwrap();
+        reference.flush().unwrap();
+        let mut observed = ProtocolProbe {
+            write_limit: Some(2),
+            interrupted_once: true,
+            ..Default::default()
+        };
+        let records = run(&mut observed, Ok(json));
+        assert_eq!(observed.bytes, reference.bytes);
+        assert_eq!(observed.calls, reference.calls);
+        assert_eq!(
+            records[3].event,
+            Event::WriteReturned {
+                outcome: IoOutcome::Ok,
+                accepted_bytes: 7,
+                expected_bytes: 7
+            }
+        );
+    }
+}

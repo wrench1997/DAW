@@ -1247,6 +1247,7 @@ mod native {
                 Err(message) => HostResponse::Error { message },
             },
             command => {
+                let loads_plugin = matches!(&command, HostCommand::LoadPlugin { .. });
                 let changes_plugin = matches!(
                     command,
                     HostCommand::LoadPlugin { .. } | HostCommand::UnloadPlugin
@@ -1269,7 +1270,13 @@ mod native {
                 }
                 let response = handle(command, &editor.plugin, sample_rate, None);
                 if changes_plugin {
+                    if loads_plugin {
+                        crate::load_response_timing::plugin_changed_before();
+                    }
                     editor.plugin_changed();
+                    if loads_plugin {
+                        crate::load_response_timing::plugin_changed_after();
+                    }
                 }
                 response
             }
