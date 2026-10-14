@@ -26,6 +26,65 @@ use std::{
     time::Instant,
 };
 
+// Explicit complete-song transcript building blocks. The existing memory
+// collector and its caps remain unchanged until a separately owned sink is
+// installed; these modules do not activate observation or an SDK operation.
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod stream_app_control;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod stream_body;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod stream_codec;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod stream_control;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod stream_envelope;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod stream_instances;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod stream_instances_tests;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod stream_sink;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod stream_spool;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod stream_spool_tests;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod stream_state;
+
 pub(crate) const MAX_RECORDS: usize = 32_768;
 pub(crate) const MAX_RECORD_BATCH: usize = 64;
 pub(crate) const MAX_WORKER_IDENTITIES: usize = 4;

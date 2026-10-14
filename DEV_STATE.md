@@ -86,7 +86,12 @@ run08 的 NI component 177 字节不同；已知 host envelope 相同，期间�
 | source40 修正及构建 | 同 8 项 passed；严格 all-feature/all-target Clippy、fmt/diff、正式 helper build 全 exit0 | 仅把路径和单记录列表改为借用；249 项源码输入冻结 |
 | source40 完整原曲 init run01 | 实际 28.4428 秒、exit101；扫描报 5 秒 helper 响应超时 | 0 source/StateLoad/clone/Process/WAV；原 405 notes/160 beats、工程和二进制 SHA 未变 |
 | source41 提交前回归 | 完整工程相关 34 passed /2 ignored；helper 35 passed；Clippy exit101：`write_literal` | 新诊断测试的一处格式写法；原失败保留，未启动 NI |
-| source42 当前提交门禁 | helper 35 passed；严格 default/all-feature/all-target Clippy、fmt/include/diff、helper build 全 exit0 | 仅修正测试中的动态格式参考；完整工程 34 项复用 source41 未改源码，不是完整套件或原生发声验收 |
+| source42 提交门禁 | helper 35 passed；严格 default/all-feature/all-target Clippy、fmt/include/diff、helper build 全 exit0 | 仅修正测试中的动态格式参考；完整工程 34 项复用 source41 未改源码，不是完整套件或原生发声验收 |
+| source42 完整原曲 init run02 | 实际 57.10 秒、exit0；102 条观察、原状态加载确认、实际源 worker Join 一次 | 完整 405 notes/160 beats、历史/路由/自动化/文件和二进制 SHA 未变；无试听、保存冷重开、转换或 WAV 验收 |
+| source43 流式基础迁入源码 | 115 passed；Clippy exit101，5 项新 decoder/样式/枚举大小问题 | 原失败保留；测试实际 1.26 秒，不证明 NI 吞吐或完整歌曲 |
+| source44 流式基础修正 | 116 passed（1.27 秒）；strict default/all-feature Clippy、fmt/include/diff 全 exit0 | 257 源码输入冻结；固定 64×2KiB 池、64KiB 完整记录、健康背压与真实 writer Join 已测；尚未安装实际流式观察 sink |
+| source45 全部流式模块首次门禁 | 198 passed（1.57 秒）；strict Clippy exit101，15 项未使用代码和样式问题 | 263 源码输入冻结；实例字典、状态 sidecar 和 stream sink 已注册为测试模块；原失败日志保留，无 NI/完整歌曲验收 |
+| source46 本次提交门禁 | 200 passed（1.46 秒）；root strict default/all-feature/all-target Clippy、fmt/include/diff 全 exit0 | 移除无实际实例对应的 FinalSource；新增真实取消/recovery/同 writer Join 验证；263 源码输入冻结，无 NI/完整歌曲验收 |
 
 source34 root 完整命令耗时 805.36 秒，主程序测试耗时 635.87 秒，真实终态已保存。
 vendor 失败项 `internal::module_info::tests::reads_sdk_generated_bundle_metadata` 要求外部
@@ -114,7 +119,7 @@ source32 的选定元数据 bundle 从源码计数上将 Q128 wrapper IPC 11 次
 完整输入加载器保留 Saved13 全部 405 notes、5 patterns/placements、160 beats 含 coda。
 原 source 直接接 MASTER，channel `.55`、Master base `.7`、全局 `.7 → .56` 自动化保留。
 完整工程 owner 已接入显式 Windows 测试模块，沿用生产队列、实际回调和 worker 确认。
-保留全部 Project/history/dirty/saved path，仅允许源的会话 runtime_status 更新；未运行原曲原生初始化。
+保留全部 Project/history/dirty/saved path，仅允许源的会话 runtime_status 更新；source42 run02 已实际初始化原曲源。
 类别按 `|` 分隔的精确 Instrument token 匹配；清理未完成时整 owner 留在失败 quarantine。
 只有实际 join 完成后才允许释放；quarantine 的继续恢复接口尚未实现，禁止超时当成功。
 完整状态比较放在阶段边界，避免每 8ms 复制原曲及历史；尚未执行流式原曲导出。
@@ -122,6 +127,10 @@ source32 的选定元数据 bundle 从源码计数上将 Q128 wrapper IPC 11 次
 独立 state-file auditor 首轮 23 项有 11 failures/6 errors，保留原记录；candidate02 已实跑 28 passed。
 完整 PCM/WAV auditor candidate02 已实跑 35 passed：各 API 自身身份基线、短读后锁定失败。
 这些都是私有文件夹具审核，不代表 SDK、写入线程实际退出或真实 NOIRE 长曲音频通过。
+source44 已将控制/App/native 编解码、完整身份外层和 spool 迁入测试源码并实际检查。
+source46 已注册并实测实例字典、状态 sidecar 和 stream sink；取消后保留原分配，实际 Join 后仍拒绝成功。
+23 类实时借用 tap、实际收口/replay 和完整歌曲 driver 仍在接线；默认内存观察器及其限制没有提高或清空。
+本次只提交 16 个相关源码/回归/文档文件；14 个本地作品及 target 验证记录、插件状态、PCM、二进制由现有忽略规则排除并保留。
 
 ## 失败复现与下一步
 
@@ -136,7 +145,9 @@ source32 的选定元数据 bundle 从源码计数上将 Q128 wrapper IPC 11 次
   已新增 Windows helper 加载/回复计时，进程启动时仅精确值
   `CITRUS_VST3_HELPER_LOAD_DIAGNOSTIC=windows-load-response-timing-v1` 启用。
   记录实际返回、序列化、写入和 flush 结果；默认关闭，不输出路径、音色状态、参数或音频。
-  新增 10 项纯诊断回归通过；此诊断尚未对 Kontakt 重跑，不能称超时已修复。
+  新增 10 项纯诊断回归通过；run02 已对 Kontakt 实跑并初始化完整原曲源。
+  扫描与实际源从各自 handler 进入至 flush 返回分别为 3.404 秒、2.367 秒，两个实际 PluginInfo 写入均成功。
+  本次成功不能解释 run01 超时；同轮资源警告 `cannot resolve resource: resources_ENG` / `lib_ENG` 保留，未更改 NI 文件。
 - 回归：source32 的测试 import 遗漏导致 E0433；source33 编译已通过。
   source33 两项失败分别为旧 `LatencySamples:1` IPC 断言和 mock stdout `OSError: [Errno 22] Invalid argument`。
   source34 修夹具后 root 通过；vendor 缺素材、fixture 格式及 source35 Clippy 失败仍保留。
