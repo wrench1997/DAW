@@ -464,12 +464,19 @@ pub(super) mod shutdown {
             sdk_result: event.sdk_result,
         });
     }
-    fn write_record(stderr: &mut impl Write, record: ShutdownRecord) {
+    #[derive(Clone, Copy)]
+    struct Identity {
+        pid: u32,
+        native_tid: u32,
+    }
+    fn write_record(stderr: &mut impl Write, identity: Identity, record: ShutdownRecord) {
         // Fixed vocabulary and primitive facts only. This prefix is not a Load
         // response, metadata receipt, process exit, or proof of OS child reap.
         let _ = writeln!(
             stderr,
-            "[citrus-shutdown-timing-v1] trace={:?} cause={:?} elapsed_ns={} stage={} edge={:?} queued={:?} sdk_result={:?}",
+            "[citrus-shutdown-timing-v1] pid={} tid={} trace={:?} cause={:?} elapsed_ns={} stage={} edge={:?} queued={:?} sdk_result={:?}",
+            identity.pid,
+            identity.native_tid,
             record.trace.role,
             record.trace.cause,
             record.elapsed_ns,
@@ -481,7 +488,18 @@ pub(super) mod shutdown {
     }
     #[cfg(windows)]
     fn emit(record: ShutdownRecord) {
-        write_record(&mut io::stderr().lock(), record);
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThreadId() -> u32;
+        }
+        // Only record's enabled, budget-reserved sink invokes this function.
+        // SAFETY: GetCurrentThreadId has no operands and returns the actual
+        // calling Windows thread ID, not Rust's opaque ThreadId representation.
+        let identity = Identity {
+            pid: std::process::id(),
+            native_tid: unsafe { GetCurrentThreadId() },
+        };
+        write_record(&mut io::stderr().lock(), identity, record);
     }
     #[cfg(windows)]
     fn reader(cause: Option<Cause>, event: Event) {
@@ -656,6 +674,11 @@ pub(super) mod shutdown {
         use super::*;
         use std::cell::RefCell;
         use std::time::Duration;
+
+        const TEST_IDENTITY: Identity = Identity {
+            pid: 12345,
+            native_tid: 67890,
+        };
 
         #[derive(Default)]
         struct ClosedSink {
@@ -852,11 +875,11 @@ pub(super) mod shutdown {
                 Some(-17),
                 &budget,
                 &mut || start + Duration::from_nanos(3),
-                &mut |row| write_record(&mut output, row)
+                &mut |row| write_record(&mut output, TEST_IDENTITY, row)
             ));
             let text = std::str::from_utf8(&output).unwrap();
             assert!(text.starts_with(
-                "[citrus-shutdown-timing-v1] trace=Main cause=Shutdown elapsed_ns=3 "
+                "[citrus-shutdown-timing-v1] pid=12345 tid=67890 trace=Main cause=Shutdown elapsed_ns=3 "
             ));
             assert!(text.contains("stage=component_terminate edge=Returned"));
             assert!(text.contains("sdk_result=Some(-17)"));
@@ -911,7 +934,7 @@ pub(super) mod shutdown {
                         },
                         &budget,
                         &mut || start,
-                        &mut |row| write_record(&mut diagnostic, row),
+                        &mut |row| write_record(&mut diagnostic, TEST_IDENTITY, row),
                     );
                 },
             );
@@ -1051,6 +1074,7 @@ pub(super) mod shutdown {
                 let mut output = Vec::new();
                 write_record(
                     &mut output,
+                    TEST_IDENTITY,
                     ShutdownRecord {
                         trace: ShutdownTrace {
                             role: Role::Main,
@@ -1070,6 +1094,33 @@ pub(super) mod shutdown {
                         .contains("queued=Some(false) sdk_result=None")
                 );
             }
+        }
+        #[test]
+        fn shutdown_identity_output_uses_explicit_numeric_pid_and_native_tid() {
+            let mut output = Vec::new();
+            write_record(
+                &mut output,
+                Identity {
+                    pid: u32::MAX,
+                    native_tid: 314159,
+                },
+                ShutdownRecord {
+                    trace: ShutdownTrace {
+                        role: Role::Main,
+                        cause: Cause::Shutdown,
+                        start: Instant::now(),
+                    },
+                    elapsed_ns: 17,
+                    phase: Phase::SdkExitDll,
+                    edge: Edge::Before,
+                    queued: None,
+                    sdk_result: None,
+                },
+            );
+            assert_eq!(
+                std::str::from_utf8(&output).unwrap(),
+                "[citrus-shutdown-timing-v1] pid=4294967295 tid=314159 trace=Main cause=Shutdown elapsed_ns=17 stage=windows_exit_dll edge=Before queued=None sdk_result=None\n"
+            );
         }
     }
 }

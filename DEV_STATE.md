@@ -43,7 +43,13 @@ Source61 外层的 `Root typed reap fields disagree with the actual bound receip
 
 Source62 退出诊断初版复用原精确 `windows-load-response-timing-v1` opt-in，独立 reader/main trace、首个退出原因及每进程 128 条退出记录上限；未启用时不读 clock/TLS、不分配或写日志。记录命令消费、dispatcher 清理、整个插件 slot 清空、OLE 及 Windows run 返回，现有 6 个 SDK teardown 阶段归入退出 trace。SDK Drop/ExitDll body returned 不称为 FreeLibrary 完成；只有实际外层返回才记录相应 returned。6 项新增纯回归及原 39 项 helper 回归实际通过，default/all-feature 严格 Clippy、root/private fmt 和 diff 共 6 项门禁 exit0；未运行新诊断实机。无 vendor 或预算改动。
 
-Source62 只读审查另外发现异常语义问题：拆出 dispatcher 字段使 Editor Rust unwind 时剩余局部变量改成 receiver→protocol，而原 aggregate dropglue 是 protocol→receiver，disabled 路径也受影响。该初版不能以门禁通过宣称顺序完全保留；Source63 已恢复完整 dispatcher 的聚合析构，仅括住原显式 editor.close，并补诊断开/关 × Editor 正常/unwind 四组合回归。复核确认原问题解决；修正版实际 46 项 helper 回归通过，default/all-feature 严格 Clippy、root/private fmt、diff 共 6 项门禁全 exit0，全部 284 pins 前后不变。原 Source62 冻结、45 项通过和 review 问题分别保留。新退出诊断尚未运行真实 Kontakt，不能据此宣布退出卡顿已修复；证据在 `source63-exit-*`，作品及初始三个受保护文件未改。
+Source62 只读审查另外发现异常语义问题：拆出 dispatcher 字段使 Editor Rust unwind 时剩余局部变量改成 receiver→protocol，而原 aggregate dropglue 是 protocol→receiver，disabled 路径也受影响。该初版不能以门禁通过宣称顺序完全保留；Source63 已恢复完整 dispatcher 的聚合析构，仅括住原显式 editor.close，并补诊断开/关 × Editor 正常/unwind 四组合回归。复核确认原问题解决；修正版实际 46 项 helper 回归通过，default/all-feature 严格 Clippy、root/private fmt、diff 共 6 项门禁全 exit0，全部 284 pins 前后不变。原 Source62 冻结、45 项通过和 review 问题分别保留。Source63 门禁阶段未运行真实 Kontakt，不能据此宣布退出卡顿已修复；证据在 `source63-exit-*`，作品及初始三个受保护文件未改。
+
+Source64 在提交 `9795f16` 上用同一入口实测退出诊断，默认 helper 和实际 Cargo 测试 EXE 构建通过，全部 284 输入前后不变。测试 PID18440 实际 exit101，外层 5.565 秒、校验错误数 0；helper PID25912 元数据返回后仍未自然退出，最终强制终止并实际回收（`kill_requested=true`、exit1、`reaped=true`）。实际错误仍为 `Plugin scan stopped: metadata returned but helper did not retire cleanly; previous index retained`，App 索引 UI 未测。
+
+同一次日志确认 Shutdown 已消费、editor.close 和完整 dispatcher 析构已返回，组件 terminate 返回原始 SDK result0，插件 Drop 正文也已返回；随后 `windows_exit_dll edge=Before` 出现，但原清理期限内没有 Returned。整体 slot 清空、OLE 和 Windows run 也没有返回标记，范围缩小到 ExitDll 内部，不能称为 FreeLibrary 卡住或退出已修复。模块对象释放顺序复核未发现能解释本次失败的问题。复现仍使用精确 ignored selector、私有相邻 helper 及 `CITRUS_VST3_HELPER_LOAD_DIAGNOSTIC=windows-load-response-timing-v1`，加载和清理预算未改；证据在 `windows-kontakt-default-scan-run-02/` 和对应 `-stderr.log`、`-terminal.json`。未请求 NOIRE 状态、MIDI/DSP、编辑器、声卡、保存重开或导出。
+
+Source65 仅给原退出日志补固定数字 PID 和 Windows 原生 TID；身份 API 在原 opt-in 与 128 条额度放行后才调用，未改 SDK、清理顺序、预算或权限。新增纯格式回归与原 46 项 helper 回归实际全部通过（47 passed），默认/all-feature root `Clippy --all-targets -D warnings`、root/private fmt、diff 共 6 项全 exit0，284 输入 pins 前后不变；依赖 SDK 原有 4 项未使用代码警告保留。最初本机门禁脚本误保留 Source63 manifest 路径，前置校验报 `Source65 manifest drift`，未启动 Cargo；新脚本 02 正确绑定后通过，原失败记录保留。证据在 `source65-exit-*-02`；新版身份日志尚未对真实 Kontakt 运行，等待链实验仅保留在 ignored target 中、未编译或实测。本次只提交该源码和两份文档，构建、脚本、收据、音频及作品留在 Git 外。
 
 - Channel Rack、钢琴卷帘和 Playlist 的视图布局、缩放、定位/放置与按钮反馈已调整。
 - 钢琴黑白键几何、按下/松开及播放反馈、键盘试听和试听取消已接入实际状态。

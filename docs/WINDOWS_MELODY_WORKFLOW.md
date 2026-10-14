@@ -350,9 +350,46 @@ four-case regression. Read-only review confirms the original order is restored.
 Actual corrected acceptance passed all 46 helper regressions, default/all-feature
 strict Clippy, root/private formatting and diff checks (six gates, exit0, all 284
 pins unchanged). Evidence is in `source63-exit-*`. Original Source62 manifest and
-successful gate receipts remain intact alongside the review finding. The new exit
-trace has not run against actual Kontakt; the native retirement problem is still
-unresolved, and the works/protected files are unchanged.
+successful gate receipts remain intact alongside the review finding. That gate
+cohort did not run actual Kontakt; the native retirement problem remained
+unresolved, and the works/protected files were unchanged.
+
+Source64 ran the same exact ignored selector against committed `9795f16`, with
+the existing `CITRUS_VST3_HELPER_LOAD_DIAGNOSTIC=windows-load-response-timing-v1`
+opt-in and a new private adjacent helper. Default helper and actual Cargo test
+artifact builds passed; all 284 input pins remained unchanged. Test PID18440
+actually exited101 (outer 5.565s, zero validation errors). Helper PID25912 returned
+metadata, required forced termination and was actually reaped: `kill_requested=true`,
+exit1, `reaped=true`, with no load/shutdown/kill/wait/pipe error fields. Production
+still stopped with `Plugin scan stopped: metadata returned but helper did not
+retire cleanly; previous index retained`. The App index UI was not exercised.
+
+The same raw log records Shutdown consumption, editor.close and aggregate
+dispatcher destruction returning, component terminate returning original SDK
+result0, and the plugin Drop body returning. It then records
+`windows_exit_dll edge=Before` without Returned before the unchanged cleanup
+deadline. Whole-slot clear, OLE and Windows run have no returned markers. This
+localizes the observed stall inside ExitDll; it is not evidence of a FreeLibrary
+stall or a fixed retirement path. Read-only module lifetime review found no
+release-order defect explaining this attempt. Preserve
+`windows-kontakt-default-scan-run-02/` and its sibling `-stderr.log`/`-terminal.json`.
+No NOIRE state, MIDI/DSP, editor open, audio device, save/reopen or export was
+requested. Keep the original five-second load and 250/2250ms cleanup budgets.
+
+Source65 adds only fixed numeric PID and Windows native TID to the existing exit
+prefix, obtained after the original opt-in and 128-record reservation permit
+emission. SDK calls, destruction order, deadlines and privileges are unchanged.
+The added pure formatting regression and all 46 existing helper tests actually
+passed (47 total); default/all-feature root strict all-target Clippy, root/private
+formatting and diff checks all exited0, with all 284 pins unchanged. Four existing
+dependency unused-code warnings remain. The first local wrapper retained the
+Source63 manifest path and failed preflight with `Source65 manifest drift` before
+Cargo started; new wrapper 02 binds the correct manifest and passed. Preserve the
+first failure and `source65-exit-*-02` receipts. Actual Kontakt execution of the
+new identity fields and the target-only wait-chain experiment remain unrun;
+the latter is neither compiled nor part of this commit. Only the logger source
+and two verification documents are committed, with generated evidence and works
+retained outside Git.
 
 Use private new directories and explicit opt-in ignored QA only after the coordinated desktop/build window is available. Preserve the original project and identify the exact test/helper/source inputs.
 Normal source checks can be reproduced independently; real NI tests are intentionally excluded:
