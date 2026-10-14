@@ -13,7 +13,7 @@
 use super::request::{FlatInputView, RequestView, StateContextView};
 use super::{Budget, ErrorKind, LimitSite, ReplyShape, MAX_LINE};
 use crate::audio::{AudioBusBuffer, BusDirection, MediaType};
-use crate::discovery::ClassCompatibility;
+use crate::discovery::{ClassCompatibility, FactoryClassMetadata, FactoryInfo, FactoryMetadata};
 use crate::midi::MidiEvent;
 use crate::parameters::Parameter;
 use crate::plugin::{
@@ -34,6 +34,8 @@ const MAX_BUSES: usize = 8;
 const MAX_CHANNELS: usize = 32;
 const MAX_FRAMES: usize = 4096;
 const MAX_COMPAT: usize = 256;
+const MAX_FACTORY_CLASSES: usize = 4096;
+const MAX_FACTORY_SUB_CATEGORIES: usize = 256;
 const MAX_DEPTH: usize = 16;
 const MAX_PARAMETERS: usize = 4096;
 const MAX_PARAMETER_TEXT: usize = 1024;
@@ -117,6 +119,9 @@ fn check_transport(transport: &Option<ProcessTransport>) -> Result<()> {
 fn check_request(command: &RequestView<'_>, shape: &ReplyShape) -> Result<()> {
     check_shape(shape)?;
     match (command, shape) {
+        (RequestView::ProbeFactory { path }, ReplyShape::FactoryMetadata) => {
+            limit(path.len(), MAX_TEXT)?;
+        }
         (
             RequestView::LoadPlugin {
                 path,
@@ -487,6 +492,11 @@ impl Writer<'_> {
             RequestView::GetParameter { id } => {
                 self.put(b"{\"GetParameter\":{\"id\":")?;
                 self.number(id)?;
+                self.put(b"}}")?;
+            }
+            RequestView::ProbeFactory { path } => {
+                self.put(b"{\"ProbeFactory\":{\"path\":")?;
+                self.text(path)?;
                 self.put(b"}}")?;
             }
             RequestView::LoadPlugin {
@@ -1606,6 +1616,208 @@ impl<'a> Parser<'a, '_> {
         }
         Ok(entries)
     }
+    fn optional_text(&mut self) -> Result<Option<String>> {
+        if self.peek()? == Some(b'n') {
+            self.literal(b"null")?;
+            Ok(None)
+        } else {
+            self.text(MAX_TEXT).map(Some)
+        }
+    }
+    fn factory_class_id(&mut self) -> Result<String> {
+        let token = self.token(MAX_ID)?;
+        if token.decoded != 32 {
+            return Err(ErrorKind::MalformedReply);
+        }
+        let mut cursor = TokenBytes::new(token);
+        let mut nonzero = false;
+        while let Some(byte) = cursor.next(self.budget)? {
+            if !matches!(byte, b'0'..=b'9' | b'A'..=b'F') {
+                return Err(ErrorKind::MalformedReply);
+            }
+            nonzero |= byte != b'0';
+        }
+        if !nonzero {
+            return Err(ErrorKind::MalformedReply);
+        }
+        if self.materialize {
+            owned_text(token, self.budget)
+        } else {
+            Ok(String::new())
+        }
+    }
+    fn factory_info(&mut self) -> Result<FactoryInfo> {
+        self.open(b'{')?;
+        let mut first = true;
+        let mut seen = 0;
+        let mut factory = FactoryInfo::default();
+        while self.next(&mut first, b'}')? {
+            let key = self.key()?;
+            if key.is(b"vendor") {
+                unique(&mut seen, 1)?;
+                factory.vendor = self.text(MAX_TEXT)?;
+            } else if key.is(b"url") {
+                unique(&mut seen, 2)?;
+                factory.url = self.text(MAX_TEXT)?;
+            } else if key.is(b"email") {
+                unique(&mut seen, 4)?;
+                factory.email = self.text(MAX_TEXT)?;
+            } else if key.is(b"flags") {
+                unique(&mut seen, 8)?;
+                factory.flags = self
+                    .number()?
+                    .parse()
+                    .map_err(|_| ErrorKind::MalformedReply)?;
+            } else {
+                return Err(ErrorKind::MalformedReply);
+            }
+        }
+        required(seen, 15)?;
+        Ok(factory)
+    }
+    fn factory_sub_categories(&mut self) -> Result<Option<Vec<String>>> {
+        if self.peek()? == Some(b'n') {
+            self.literal(b"null")?;
+            return Ok(None);
+        }
+        self.open(b'[')?;
+        let mut first = true;
+        let mut entries = Vec::new();
+        let mut count = 0usize;
+        while self.next(&mut first, b']')? {
+            if count == MAX_FACTORY_SUB_CATEGORIES {
+                return Err(ErrorKind::Limit);
+            }
+            let entry = self.text(MAX_TEXT)?;
+            if self.materialize {
+                self.budget.grow(&mut entries, count + 1)?;
+                entries.push(entry);
+            }
+            count += 1;
+        }
+        Ok(Some(entries))
+    }
+    fn factory_class(&mut self) -> Result<FactoryClassMetadata> {
+        self.open(b'{')?;
+        let mut first = true;
+        let mut seen = 0;
+        let (mut class_id, mut name, mut category) = (String::new(), String::new(), String::new());
+        let mut cardinality = 0;
+        let (mut vendor, mut version, mut sdk_version) = (None, None, None);
+        let (mut sub_categories, mut class_flags) = (None, None);
+        while self.next(&mut first, b'}')? {
+            let key = self.key()?;
+            if key.is(b"class_id") {
+                unique(&mut seen, 1)?;
+                class_id = self.factory_class_id()?;
+            } else if key.is(b"name") {
+                unique(&mut seen, 2)?;
+                name = self.text(MAX_TEXT)?;
+            } else if key.is(b"category") {
+                unique(&mut seen, 4)?;
+                category = self.text(MAX_TEXT)?;
+            } else if key.is(b"cardinality") {
+                unique(&mut seen, 8)?;
+                cardinality = self
+                    .number()?
+                    .parse()
+                    .map_err(|_| ErrorKind::MalformedReply)?;
+            } else if key.is(b"vendor") {
+                unique(&mut seen, 16)?;
+                vendor = self.optional_text()?;
+            } else if key.is(b"version") {
+                unique(&mut seen, 32)?;
+                version = self.optional_text()?;
+            } else if key.is(b"sdk_version") {
+                unique(&mut seen, 64)?;
+                sdk_version = self.optional_text()?;
+            } else if key.is(b"sub_categories") {
+                unique(&mut seen, 128)?;
+                sub_categories = self.factory_sub_categories()?;
+            } else if key.is(b"class_flags") {
+                unique(&mut seen, 256)?;
+                class_flags = if self.peek()? == Some(b'n') {
+                    self.literal(b"null")?;
+                    None
+                } else {
+                    Some(self.u32()?)
+                };
+            } else {
+                return Err(ErrorKind::MalformedReply);
+            }
+        }
+        // Every Option is explicit on this new wire: null means unknown;
+        // successful empty getters remain Some(empty), not guessed defaults.
+        required(seen, 511)?;
+        Ok(FactoryClassMetadata {
+            class_id,
+            name,
+            category,
+            cardinality,
+            vendor,
+            version,
+            sdk_version,
+            sub_categories,
+            class_flags,
+        })
+    }
+    fn factory_classes(&mut self) -> Result<Vec<FactoryClassMetadata>> {
+        self.open(b'[')?;
+        let mut first = true;
+        let mut classes = Vec::new();
+        let mut count = 0usize;
+        while self.next(&mut first, b']')? {
+            if count == MAX_FACTORY_CLASSES {
+                return Err(ErrorKind::Limit);
+            }
+            let class = self.factory_class()?;
+            if self.materialize {
+                self.budget.grow(&mut classes, count + 1)?;
+                classes.push(class);
+            }
+            count += 1;
+        }
+        Ok(classes)
+    }
+    fn factory_metadata(&mut self) -> Result<HostResponse> {
+        self.open(b'{')?;
+        let mut outer = true;
+        if !self.next(&mut outer, b'}')? || !self.key()?.is(b"metadata") {
+            return Err(ErrorKind::MalformedReply);
+        }
+        self.open(b'{')?;
+        let mut first = true;
+        let mut seen = 0;
+        let mut path = String::new();
+        let mut factory = FactoryInfo::default();
+        let mut classes = Vec::new();
+        while self.next(&mut first, b'}')? {
+            let key = self.key()?;
+            if key.is(b"path") {
+                unique(&mut seen, 1)?;
+                path = self.text(MAX_TEXT)?;
+            } else if key.is(b"factory") {
+                unique(&mut seen, 2)?;
+                factory = self.factory_info()?;
+            } else if key.is(b"classes") {
+                unique(&mut seen, 4)?;
+                classes = self.factory_classes()?;
+            } else {
+                return Err(ErrorKind::MalformedReply);
+            }
+        }
+        required(seen, 7)?;
+        if self.next(&mut outer, b'}')? {
+            return Err(ErrorKind::MalformedReply);
+        }
+        Ok(HostResponse::FactoryMetadata {
+            metadata: FactoryMetadata {
+                path: path.into(),
+                factory,
+                classes,
+            },
+        })
+    }
     fn plugin_info(&mut self) -> Result<HostResponse> {
         self.open(b'{')?;
         let mut first = true;
@@ -1696,6 +1908,11 @@ impl<'a> Parser<'a, '_> {
                 return Err(ErrorKind::WrongReply);
             }
             self.metadata_response(&variant)?
+        } else if variant.is(b"FactoryMetadata") {
+            if *shape != ReplyShape::FactoryMetadata {
+                return Err(ErrorKind::WrongReply);
+            }
+            self.factory_metadata()?
         } else if variant.is(b"PluginInfo") {
             if *shape != ReplyShape::PluginInfo {
                 return Err(ErrorKind::WrongReply);

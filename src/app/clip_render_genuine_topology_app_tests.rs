@@ -124,24 +124,7 @@ impl TopologyFixture {
         Self::queued_initial_with_held_prepare(false)
     }
     fn queued_initial_with_held_prepare(held: bool) -> Self {
-        let admission_deadline = Instant::now() + MOCK_WAIT;
-        let admission = loop {
-            assert!(
-                Instant::now() < admission_deadline,
-                "serial mock admission timed out before spawn"
-            );
-            assert!(
-                !FIXTURE_POISONED.load(Ordering::Acquire),
-                "exact failed fixture is retained"
-            );
-            match FIXTURE_ADMISSION.try_lock() {
-                Ok(guard) => break guard,
-                Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    std::thread::sleep(Duration::from_millis(1))
-                }
-            }
-        };
+        let admission = fixture_admission();
         SOURCE_SLOTS.with(|slots| {
             assert!(
                 slots.borrow().iter().all(Option::is_none),

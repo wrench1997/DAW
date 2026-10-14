@@ -100,6 +100,412 @@ fn wire(response: &HostResponse) -> Vec<u8> {
     serde_json::to_vec(response).unwrap()
 }
 
+fn factory_reply() -> HostResponse {
+    let unknown = FactoryClassMetadata {
+        class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+        name: "F1 declaration".into(),
+        category: "Audio Module Class".into(),
+        cardinality: i32::MAX,
+        vendor: None,
+        version: None,
+        sdk_version: None,
+        sub_categories: None,
+        class_flags: None,
+    };
+    let mut empty = unknown.clone();
+    empty.class_id = "FEDCBA9876543210FEDCBA9876543210".into();
+    empty.name = "Successful empty getters 🦀".into();
+    empty.vendor = Some(String::new());
+    empty.version = Some(String::new());
+    empty.sdk_version = Some(String::new());
+    empty.sub_categories = Some(Vec::new());
+    empty.class_flags = Some(u32::MAX);
+    HostResponse::FactoryMetadata {
+        metadata: FactoryMetadata {
+            path: "factory/\"\\\n🦀.vst3".into(),
+            factory: FactoryInfo {
+                vendor: "Factory vendor".into(),
+                url: String::new(),
+                email: "factory@example.invalid".into(),
+                flags: i32::MIN,
+            },
+            classes: vec![unknown, empty],
+        },
+    }
+}
+
+#[test]
+fn factory_request_and_typed_reply_preserve_serde_wire_order_and_unknowns() {
+    assert_command(
+        &HostCommand::ProbeFactory {
+            path: "factory/\"\\\n🦀.vst3".into(),
+        },
+        &ReplyShape::FactoryMetadata,
+    );
+    let expected = factory_reply();
+    let bytes = wire(&expected);
+    let mut budget = new_budget();
+    assert!(
+        allocation_free(|| preflight(&bytes, &ReplyShape::FactoryMetadata, &mut budget))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(budget.live, 0);
+    let actual = decode(&bytes, &ReplyShape::FactoryMetadata, &mut budget).unwrap();
+    assert_eq!(wire(&actual), bytes);
+    let HostResponse::FactoryMetadata { metadata } = actual else {
+        panic!("closed factory shape");
+    };
+    assert_eq!(metadata.classes[0].vendor, None);
+    assert_eq!(metadata.classes[0].sub_categories, None);
+    assert_eq!(metadata.classes[1].vendor.as_deref(), Some(""));
+    assert_eq!(metadata.classes[1].sub_categories, Some(Vec::new()));
+    assert_eq!(metadata.classes[1].class_flags, Some(u32::MAX));
+    assert!(
+        budget.live >= metadata.classes.capacity() * std::mem::size_of::<FactoryClassMetadata>()
+    );
+}
+
+#[test]
+fn factory_wire_rejects_unknown_missing_duplicate_and_wrong_typed_fields() {
+    let value = serde_json::to_value(factory_reply()).unwrap();
+    for field in ["path", "factory", "classes"] {
+        let mut bad = value.clone();
+        bad["FactoryMetadata"]["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        error(
+            &serde_json::to_vec(&bad).unwrap(),
+            &ReplyShape::FactoryMetadata,
+            ErrorKind::MalformedReply,
+        );
+    }
+    for field in ["vendor", "url", "email", "flags"] {
+        let mut bad = value.clone();
+        bad["FactoryMetadata"]["metadata"]["factory"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        error(
+            &serde_json::to_vec(&bad).unwrap(),
+            &ReplyShape::FactoryMetadata,
+            ErrorKind::MalformedReply,
+        );
+    }
+    for field in [
+        "class_id",
+        "name",
+        "category",
+        "cardinality",
+        "vendor",
+        "version",
+        "sdk_version",
+        "sub_categories",
+        "class_flags",
+    ] {
+        let mut bad = value.clone();
+        bad["FactoryMetadata"]["metadata"]["classes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        error(
+            &serde_json::to_vec(&bad).unwrap(),
+            &ReplyShape::FactoryMetadata,
+            ErrorKind::MalformedReply,
+        );
+    }
+    for (field, replacement) in [
+        ("vendor", serde_json::json!(42)),
+        ("cardinality", serde_json::json!(2147483648_u64)),
+        ("class_flags", serde_json::json!(-1)),
+        ("sub_categories", serde_json::json!(false)),
+        ("has_gui", serde_json::json!(true)),
+    ] {
+        let mut bad = value.clone();
+        bad["FactoryMetadata"]["metadata"]["classes"][0][field] = replacement;
+        error(
+            &serde_json::to_vec(&bad).unwrap(),
+            &ReplyShape::FactoryMetadata,
+            ErrorKind::MalformedReply,
+        );
+    }
+    let bytes = String::from_utf8(wire(&factory_reply())).unwrap();
+    for bad in [
+        bytes.replacen("\"metadata\":{", "\"metadata\":{},\"metadata\":{", 1),
+        bytes.replacen("\"classes\":[", "\"classes\":[],\"classes\":[", 1),
+        bytes.replacen("\"vendor\":null", "\"vendor\":null,\"vendor\":null", 1),
+    ] {
+        error(
+            bad.as_bytes(),
+            &ReplyShape::FactoryMetadata,
+            ErrorKind::MalformedReply,
+        );
+    }
+    error(
+        &wire(&factory_reply()),
+        &ReplyShape::PluginInfo,
+        ErrorKind::WrongReply,
+    );
+    error(
+        &wire(&info(Vec::new())),
+        &ReplyShape::FactoryMetadata,
+        ErrorKind::WrongReply,
+    );
+}
+
+#[test]
+fn factory_path_class_id_text_classes_and_subcategories_have_closed_limits() {
+    assert_command(
+        &HostCommand::ProbeFactory {
+            path: "x".repeat(MAX_TEXT),
+        },
+        &ReplyShape::FactoryMetadata,
+    );
+    assert_eq!(
+        encode(
+            &HostCommand::ProbeFactory {
+                path: "x".repeat(MAX_TEXT + 1)
+            },
+            &ReplyShape::FactoryMetadata,
+            &mut new_budget()
+        )
+        .unwrap_err(),
+        ErrorKind::Limit
+    );
+    assert_eq!(
+        encode(
+            &HostCommand::ProbeFactory { path: "x".into() },
+            &ReplyShape::PluginInfo,
+            &mut new_budget()
+        )
+        .unwrap_err(),
+        ErrorKind::Shape
+    );
+    let HostResponse::FactoryMetadata { mut metadata } = factory_reply() else {
+        unreachable!()
+    };
+    let class = metadata.classes.remove(0);
+    metadata.classes = vec![class.clone(); MAX_FACTORY_CLASSES];
+    let accepted = HostResponse::FactoryMetadata {
+        metadata: metadata.clone(),
+    };
+    assert!(decode(
+        &wire(&accepted),
+        &ReplyShape::FactoryMetadata,
+        &mut new_budget()
+    )
+    .is_ok());
+    metadata.classes.push(class.clone());
+    error(
+        &wire(&HostResponse::FactoryMetadata { metadata }),
+        &ReplyShape::FactoryMetadata,
+        ErrorKind::Limit,
+    );
+    for (field, accepted, rejected) in [
+        (
+            "path",
+            serde_json::json!("x".repeat(MAX_TEXT)),
+            serde_json::json!("x".repeat(MAX_TEXT + 1)),
+        ),
+        (
+            "name",
+            serde_json::json!("x".repeat(MAX_TEXT)),
+            serde_json::json!("x".repeat(MAX_TEXT + 1)),
+        ),
+        (
+            "vendor",
+            serde_json::json!("x".repeat(MAX_TEXT)),
+            serde_json::json!("x".repeat(MAX_TEXT + 1)),
+        ),
+        (
+            "sub_categories",
+            serde_json::json!(vec!["x"; MAX_FACTORY_SUB_CATEGORIES]),
+            serde_json::json!(vec!["x"; MAX_FACTORY_SUB_CATEGORIES + 1]),
+        ),
+    ] {
+        let mut value = serde_json::to_value(factory_reply()).unwrap();
+        if field == "path" {
+            value["FactoryMetadata"]["metadata"][field] = accepted;
+        } else {
+            value["FactoryMetadata"]["metadata"]["classes"][0][field] = accepted;
+        }
+        assert!(decode(
+            &serde_json::to_vec(&value).unwrap(),
+            &ReplyShape::FactoryMetadata,
+            &mut new_budget()
+        )
+        .is_ok());
+        if field == "path" {
+            value["FactoryMetadata"]["metadata"][field] = rejected;
+        } else {
+            value["FactoryMetadata"]["metadata"]["classes"][0][field] = rejected;
+        }
+        error(
+            &serde_json::to_vec(&value).unwrap(),
+            &ReplyShape::FactoryMetadata,
+            ErrorKind::Limit,
+        );
+    }
+}
+
+#[test]
+fn factory_class_id_must_be_nonzero_canonical_uppercase_hex() {
+    for id in [
+        String::new(),
+        "0".repeat(32),
+        "a".repeat(32),
+        "G".repeat(32),
+        "1".repeat(31),
+        "1".repeat(33),
+        "1".repeat(MAX_ID),
+    ] {
+        let mut value = serde_json::to_value(factory_reply()).unwrap();
+        value["FactoryMetadata"]["metadata"]["classes"][0]["class_id"] = serde_json::json!(id);
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let mut budget = new_budget();
+        assert!(matches!(
+            allocation_free(|| preflight(&bytes, &ReplyShape::FactoryMetadata, &mut budget)),
+            Err(ErrorKind::MalformedReply)
+        ));
+        assert_eq!(budget.live, 0);
+    }
+    let mut value = serde_json::to_value(factory_reply()).unwrap();
+    value["FactoryMetadata"]["metadata"]["classes"][0]["class_id"] =
+        serde_json::json!("1".repeat(MAX_ID + 1));
+    error(
+        &serde_json::to_vec(&value).unwrap(),
+        &ReplyShape::FactoryMetadata,
+        ErrorKind::Limit,
+    );
+}
+
+#[test]
+fn factory_codec_checks_cancel_deadline_allocation_and_payload_budget() {
+    let command = HostCommand::ProbeFactory { path: "x".into() };
+    let bytes = wire(&factory_reply());
+    for cancelled in [false, true] {
+        let mut budget = new_budget();
+        if cancelled {
+            budget.cancel.cancelled.store(true, Ordering::Release);
+        } else {
+            budget.deadline = Instant::now();
+        }
+        let expected = if cancelled {
+            ErrorKind::Cancelled
+        } else {
+            ErrorKind::Deadline
+        };
+        assert_eq!(
+            allocation_free(|| encode(&command, &ReplyShape::FactoryMetadata, &mut budget))
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            allocation_free(|| decode(&bytes, &ReplyShape::FactoryMetadata, &mut budget))
+                .unwrap_err(),
+            expected
+        );
+        assert_eq!(budget.live, 0);
+    }
+    let mut budget = new_budget();
+    budget.reserve(MAX_PAYLOAD).unwrap();
+    assert_eq!(
+        decode(&bytes, &ReplyShape::FactoryMetadata, &mut budget).unwrap_err(),
+        ErrorKind::Limit
+    );
+    assert_eq!(budget.live, MAX_PAYLOAD);
+    let mut budget = new_budget();
+    let _hook = budget_test_hooks::fail_next_allocation();
+    assert_eq!(
+        decode(&bytes, &ReplyShape::FactoryMetadata, &mut budget).unwrap_err(),
+        ErrorKind::Allocation
+    );
+    assert_eq!(budget.live, 0);
+}
+
+#[test]
+fn factory_empty_list_and_nonempty_subcategories_preserve_exact_order() {
+    let HostResponse::FactoryMetadata { mut metadata } = factory_reply() else {
+        unreachable!()
+    };
+    metadata.classes.clear();
+    let empty = HostResponse::FactoryMetadata {
+        metadata: metadata.clone(),
+    };
+    assert_eq!(
+        wire(
+            &decode(
+                &wire(&empty),
+                &ReplyShape::FactoryMetadata,
+                &mut new_budget()
+            )
+            .unwrap()
+        ),
+        wire(&empty)
+    );
+    let HostResponse::FactoryMetadata { mut metadata } = factory_reply() else {
+        unreachable!()
+    };
+    metadata.classes[0].sub_categories = Some(vec!["Instrument".into(), "Synth".into(), "".into()]);
+    let expected = HostResponse::FactoryMetadata { metadata };
+    assert_eq!(
+        wire(
+            &decode(
+                &wire(&expected),
+                &ReplyShape::FactoryMetadata,
+                &mut new_budget()
+            )
+            .unwrap()
+        ),
+        wire(&expected)
+    );
+}
+
+#[test]
+fn factory_large_reply_cooperatively_cancels_and_expires_in_both_decode_passes() {
+    let HostResponse::FactoryMetadata { mut metadata } = factory_reply() else {
+        unreachable!()
+    };
+    metadata.classes[0].name = "long 🦀 text".repeat(2048);
+    metadata.classes[0].sub_categories = Some(vec!["Instrument".into(); 128]);
+    let bytes = wire(&HostResponse::FactoryMetadata { metadata });
+    let validation_checks = {
+        let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
+        assert!(
+            preflight(&bytes, &ReplyShape::FactoryMetadata, &mut new_budget())
+                .unwrap()
+                .is_none()
+        );
+        budget_test_hooks::checks()
+    };
+    let all_checks = {
+        let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
+        decode(&bytes, &ReplyShape::FactoryMetadata, &mut new_budget()).unwrap();
+        budget_test_hooks::checks()
+    };
+    assert!(all_checks > validation_checks + 2);
+    for at in [2, validation_checks, validation_checks + 2, all_checks] {
+        for expired in [false, true] {
+            let mut budget = new_budget();
+            let _hook = if expired {
+                budget_test_hooks::expire_at_check(at)
+            } else {
+                budget_test_hooks::cancel_at_check(at)
+            };
+            assert_eq!(
+                decode(&bytes, &ReplyShape::FactoryMetadata, &mut budget).unwrap_err(),
+                if expired {
+                    ErrorKind::Deadline
+                } else {
+                    ErrorKind::Cancelled
+                }
+            );
+            assert_eq!(budget.live, 0);
+        }
+    }
+}
+
 fn audio_wire(channels: Vec<Vec<f32>>) -> Vec<u8> {
     wire(&HostResponse::AudioOutput {
         outputs: channels,

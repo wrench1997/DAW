@@ -519,10 +519,60 @@ retirement is prepared as a diagnostic hypothesis. Only the exact independent
 opt-in enables it. The TLS borrow is released before callbacks; no IPC resumes,
 and intact dispatcher destruction and existing cleanup deadlines are retained.
 It stops on empty queue, WM_QUIT or 32 messages; callback time remains unbounded.
-Four pure regression tests are added and source review passed, including a
-non-Windows-test dead-code correction. Formatting, compilation, Clippy, tests and
-actual NI outcome remain unrun for this source; the existing GitHub Windows CI is
-the next check. Do not call it a fix or admit an unclean scan.
+Source69 passed all 51 helper tests, including the four new pure regressions,
+default helper/QA artifact builds, and helper-only all-feature Clippy. The remote
+Windows formatting check passed; complete root all-target CI was still running
+at admission. The narrow native experiment was admitted by the actual local
+same-profile gates, not by an invented completed-CI result.
+
+The sole actual test PID56664 exited101 (outer5.711s, validation errors0). Helper
+PID61080/main log TID64468 executed the opt-in pass: Returned, messages0, no quit
+and no count cap. Component terminate returned0, the Drop body returned, and
+ExitDll Before at600477900ns again had no Returned. Original cleanup forcibly
+terminated and actually reaped exit1; metadata remained UncleanRetirement and
+the previous index was retained. An empty queue in this pass does not exclude a
+later asynchronous message dependency. The pass is not promoted as a fix.
+
+The external capture actually returned true:127646B, SHA256
+`5948b48cd7946411ce8effdb6d4e57f0588d5fd61dc36ec613b2ee35c4affbca`.
+WCT Close/owner/raw EOF and dump owner/resource closure completed before the same
+NoExit session18149 explicitly exited101; fresh owned-heavy count0 preceded
+explicit handback. Preserve `source69-*` and the actual/future runners outside
+Git. This capture has not yet been decoded or compared with the prior stack.
+
+The source-only implementation now provides a distinct factory-only metadata
+request through the existing helper and retained transport. Its host path calls
+no component/controller/view instantiation; declaration-only metadata preserves
+unknown fields instead of inventing bus/MIDI/editor capabilities. It does not
+activate a new production scanner or change default-class/verified semantics.
+Module drop must return before metadata is sent, and checked healthy retirement
+remains separate. The ignored actual QA caller retains the same cleanup owner
+through Pending and requires an independently byte-bound helper/test runner.
+
+Both remote `b37cc39` Windows jobs subsequently failed, each reporting
+2247 passed/4 failed/10 ignored. Quality run38633329267 failed the Saved13 source
+body byte guard, both already-faulted source-intent cases, and the run-local
+observer witness-drop assertion. Preview run38633329186 instead failed the same
+first three cases plus a whole-export fixture admission timeout. Later full-root
+Clippy/build, final preview verification and native fixture acceptance were
+skipped, not passed. Preserve `ci-b37cc39-windows-{quality,preview}-01.log` locally.
+The source-body failure was reproduced by Git checkout line endings: the existing
+8154-byte LF section has the expected digest; its8352-byte CRLF form matches the
+remote failure. A targeted repository LF rule now preserves the frozen section
+and original expected digest. The fault-injection fixture now waits for actual
+source settlement Ready before injecting its exact error; this ordering repair
+still needs a rerun because the old log omitted the actual outcome. Retired
+test-observer snapshots now release witnesses despite a held Arc and reject late
+taps. Shared App fixtures no longer apply a work deadline while queued before
+owning resources; sticky failed-owner rejection and actual work/cleanup deadlines
+remain. Concurrent retirement and failed-admission regressions were added.
+
+The current factory/QA and fixture sources passed rustfmt. The complete vendor
+patch actually replayed all74 source files byte-for-byte, and all170 packaging
+tests passed. New Rust compilation/tests and the factory-only NI experiment have
+not run. The Windows quality workflow adds the dependency's factory/mock-child
+tests explicitly, because root cargo test does not execute dependency unit tests.
+These source and Python checks used no local NI, GUI, GPU or audio device.
 
 The existing GitHub Windows quality/preview workflows can run source checks away
 from the local desktop. A cloud coding environment still needs the repository and

@@ -6,7 +6,7 @@
 use super::*;
 #[cfg(any(target_os = "linux", windows))]
 use crate::app::clip_render_job::ClipRenderPhase;
-use crate::app::clip_render_job::tests::{FIXTURE_ADMISSION, FIXTURE_POISONED, Fixture};
+use crate::app::clip_render_job::tests::{FIXTURE_POISONED, Fixture, fixture_admission};
 use crate::instrument_bounce::{BounceAudioBus, BouncePluginState};
 use crate::plugins::plugin_runtime::{PluginPrepareConfig, test_capture_source::TestCaptureSource};
 use std::{
@@ -682,24 +682,7 @@ impl RestorationFixture {
     }
 
     fn with_preparation(max_block_frames: usize, held: bool, instance_id: u64) -> Self {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let admission = loop {
-            assert!(
-                !FIXTURE_POISONED.load(Ordering::Acquire),
-                "earlier restoration cleanup is unproven; exact owner/evidence remain quarantined"
-            );
-            match FIXTURE_ADMISSION.try_lock() {
-                Ok(guard) => break guard,
-                Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    assert!(
-                        Instant::now() < deadline,
-                        "restoration fixture admission timed out before spawn"
-                    );
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            }
-        };
+        let admission = fixture_admission();
         let mut app = bare_app();
         app.project = source_project();
         app.history_snapshot = app.project.clone();

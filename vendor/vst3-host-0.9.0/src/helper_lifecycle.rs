@@ -86,6 +86,7 @@ pub struct RequestContext {
 impl RequestContext {
     pub(crate) fn from_request(request: RequestView<'_>) -> Self {
         let operation = match request {
+            RequestView::ProbeFactory { .. } => "ProbeFactory",
             RequestView::LoadPlugin { .. } => "LoadPlugin",
             RequestView::LoadState { .. } => "LoadState",
             RequestView::SaveState => "SaveState",

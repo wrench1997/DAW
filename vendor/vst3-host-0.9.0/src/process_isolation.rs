@@ -545,6 +545,11 @@ pub struct StrictMetadataSnapshot {
 /// can never drift apart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HostCommand {
+    /// Read live factory declarations without creating any plugin class.
+    ProbeFactory {
+        /// Path to the `.vst3` bundle. Requires an otherwise unloaded helper.
+        path: String,
+    },
     /// Load a plugin from the specified path, configured for the given audio settings.
     LoadPlugin {
         /// Path to the `.vst3` bundle.
@@ -917,6 +922,11 @@ pub enum HostCommand {
 /// Responses from the isolated plugin process
 #[derive(Debug, Serialize, Deserialize)]
 pub enum HostResponse {
+    /// Live factory declarations after normal module retirement; no runtime capabilities.
+    FactoryMetadata {
+        /// Factory identity and classes in their declared order, not `PluginInfo`.
+        metadata: crate::discovery::FactoryMetadata,
+    },
     /// Operation succeeded with message
     Success {
         /// Human-readable success detail.
@@ -2024,6 +2034,55 @@ pub enum IsolationError {
 mod wire_tests {
     use super::*;
     use crate::midi::{MidiChannel, MidiEvent};
+
+    #[test]
+    fn factory_probe_command_and_distinct_metadata_response_round_trip() {
+        let command = HostCommand::ProbeFactory {
+            path: "factory-only.vst3".into(),
+        };
+        let encoded = serde_json::to_string(&command).unwrap();
+        assert_eq!(encoded, r#"{"ProbeFactory":{"path":"factory-only.vst3"}}"#);
+        assert!(matches!(
+            serde_json::from_str::<HostCommand>(&encoded).unwrap(),
+            HostCommand::ProbeFactory { path } if path == "factory-only.vst3"
+        ));
+
+        let metadata = crate::discovery::FactoryMetadata {
+            path: "factory-only.vst3".into(),
+            factory: crate::discovery::FactoryInfo {
+                vendor: "Factory".into(),
+                url: String::new(),
+                email: String::new(),
+                flags: 16,
+            },
+            classes: vec![crate::discovery::FactoryClassMetadata {
+                class_id: "00112233445566778899AABBCCDDEEFF".into(),
+                name: "夜雨 🎹".into(),
+                category: "Component Controller Class".into(),
+                cardinality: i32::MAX,
+                vendor: None,
+                version: Some(String::new()),
+                sdk_version: None,
+                sub_categories: Some(Vec::new()),
+                class_flags: Some(u32::MAX),
+            }],
+        };
+        let value = serde_json::to_value(HostResponse::FactoryMetadata {
+            metadata: metadata.clone(),
+        })
+        .unwrap();
+        assert!(value.get("PluginInfo").is_none());
+        let class = &value["FactoryMetadata"]["metadata"]["classes"][0];
+        assert!(class["vendor"].is_null());
+        assert_eq!(class["version"], "");
+        assert_eq!(class["sub_categories"], serde_json::json!([]));
+        let HostResponse::FactoryMetadata { metadata: decoded } =
+            serde_json::from_value(value).unwrap()
+        else {
+            panic!("factory metadata must not be decoded as runtime PluginInfo");
+        };
+        assert_eq!(decoded, metadata);
+    }
 
     #[test]
     fn audio_output_carries_midi_across_the_wire() {

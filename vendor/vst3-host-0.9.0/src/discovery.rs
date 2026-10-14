@@ -10,8 +10,12 @@ use std::time::Duration;
 /// treating it as hung and killing the child process.
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[path = "discovery_factory.rs"]
+mod factory;
+pub use factory::{probe_factory_metadata, FactoryClassMetadata, FactoryMetadata};
+
 /// Factory-level metadata (the plugin vendor's identity).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FactoryInfo {
     /// Vendor / manufacturer name.
     pub vendor: String,

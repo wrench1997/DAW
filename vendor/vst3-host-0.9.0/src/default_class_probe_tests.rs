@@ -1,6 +1,7 @@
 //! Actual child/pipe protocol regressions for the ordinary default-class API.
 //! No plugin SDK, native editor, hardware audio or Kontakt is involved.
 use super::*;
+use crate::discovery::{FactoryClassMetadata, FactoryInfo, FactoryMetadata};
 use crate::fresh_helper::tests::{arm_probe_setup_failure, arm_probe_wait_failure, python, serial};
 use crate::process_isolation::{HostCommand, HostResponse};
 
@@ -66,6 +67,280 @@ fn failure(result: Result<LoadedPlugin, Failure>) -> Failure {
         Err(failure) => failure,
         Ok(_) => panic!("expected an actual failed default probe exchange"),
     }
+}
+
+fn factory_metadata() -> FactoryMetadata {
+    let class = FactoryClassMetadata {
+        class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
+        name: "Declared instrument".into(),
+        category: "Audio Module Class".into(),
+        cardinality: i32::MAX,
+        vendor: None,
+        version: None,
+        sdk_version: None,
+        sub_categories: None,
+        class_flags: None,
+    };
+    let mut controller = class.clone();
+    controller.class_id = "FEDCBA9876543210FEDCBA9876543210".into();
+    controller.name = "Declared controller".into();
+    controller.category = "Component Controller Class".into();
+    controller.vendor = Some(String::new());
+    controller.sub_categories = Some(Vec::new());
+    controller.class_flags = Some(0);
+    FactoryMetadata {
+        path: "fixture-factory.vst3".into(),
+        factory: FactoryInfo {
+            vendor: "Factory only".into(),
+            url: String::new(),
+            email: String::new(),
+            flags: -1,
+        },
+        classes: vec![class, controller],
+    }
+}
+fn factory_ledger(reply: HostResponse, ending: &str) -> String {
+    let expected = serde_json::to_string(&HostCommand::ProbeFactory {
+        path: "fixture-factory.vst3".into(),
+    })
+    .unwrap();
+    let response = serde_json::to_string(&reply).unwrap();
+    format!(
+        "import json,sys,time\nassert json.loads(sys.stdin.readline())==json.loads({expected:?})\nprint({response:?},flush=True)\n{ending}\n"
+    )
+}
+fn factory_failure(result: Result<FactoryMetadata, Failure>) -> Failure {
+    match result {
+        Err(failure) => failure,
+        Ok(_) => panic!("expected a failed factory-only exchange"),
+    }
+}
+
+#[test]
+fn factory_probe_sends_only_factory_request_preserves_unknowns_and_reaps_shutdown() {
+    let _serial = serial();
+    let expected = factory_metadata();
+    let mut probe = probe(&factory_ledger(
+        HostResponse::FactoryMetadata {
+            metadata: expected.clone(),
+        },
+        "assert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''",
+    ));
+    let actual_pid = probe.helper_pid().unwrap();
+    let exchange_deadline = deadline();
+    let actual = probe
+        .probe_factory("fixture-factory.vst3", exchange_deadline)
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(actual.classes[0].vendor, None);
+    assert_eq!(actual.classes[1].vendor.as_deref(), Some(""));
+    assert_eq!(actual.classes[1].sub_categories, Some(Vec::new()));
+    assert_eq!(probe.helper_pid(), Some(actual_pid));
+    clean_finish(&mut probe, exchange_deadline);
+    assert_eq!(probe.helper_pid(), None);
+    assert!(
+        matches!(probe.continue_cleanup().unwrap().state, CleanupState::Reaped(status) if status.success())
+    );
+}
+
+#[test]
+fn factory_and_default_load_share_one_attempt_seal_in_both_directions() {
+    let _serial = serial();
+    let ending = "assert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''";
+    let mut factory = probe(&factory_ledger(
+        HostResponse::FactoryMetadata {
+            metadata: factory_metadata(),
+        },
+        ending,
+    ));
+    let exchange_deadline = deadline();
+    factory
+        .probe_factory("fixture-factory.vst3", exchange_deadline)
+        .unwrap();
+    for rejected in [
+        factory_failure(factory.probe_factory("never-probed.vst3", deadline())),
+        failure(factory.load_default_class("never-loaded.vst3", deadline())),
+    ] {
+        assert_eq!(rejected.kind, FailureKind::Terminal);
+        assert_eq!(rejected.delivery, Delivery::NotSent);
+        assert!(rejected.request_context.is_none());
+    }
+    clean_finish(&mut factory, exchange_deadline);
+    let mut loaded = probe(&ledger(info(), ending));
+    let exchange_deadline = deadline();
+    loaded
+        .load_default_class("fixture-default.vst3", exchange_deadline)
+        .unwrap();
+    let rejected = factory_failure(loaded.probe_factory("never-probed.vst3", deadline()));
+    assert_eq!(rejected.kind, FailureKind::Terminal);
+    assert_eq!(rejected.delivery, Delivery::NotSent);
+    clean_finish(&mut loaded, exchange_deadline);
+}
+
+#[test]
+fn factory_probe_reported_error_and_crash_are_typed_not_retried_or_reloaded() {
+    let _serial = serial();
+    for (reply, kind, message) in [
+        (
+            HostResponse::Error {
+                message: "factory getter failed".into(),
+            },
+            FailureKind::OperationRejected,
+            "factory getter failed",
+        ),
+        (
+            HostResponse::Crashed {
+                message: "factory-only crash".into(),
+            },
+            FailureKind::ReportedCrash,
+            "factory-only crash",
+        ),
+    ] {
+        let mut probe = probe(&factory_ledger(reply, "assert sys.stdin.read()==''"));
+        let actual_pid = probe.helper_pid().unwrap();
+        let error = factory_failure(probe.probe_factory("fixture-factory.vst3", deadline()));
+        assert_eq!(error.kind, kind);
+        assert_eq!(error.delivery, Delivery::MayHaveApplied);
+        assert_eq!(error.diagnostic.as_deref(), Some(message));
+        assert_eq!(error.request_context.unwrap().operation, "ProbeFactory");
+        assert_eq!(
+            failure(probe.load_default_class("never-loaded.vst3", deadline())).kind,
+            FailureKind::Terminal
+        );
+        assert_eq!(probe.helper_pid(), Some(actual_pid));
+        clean_finish(&mut probe, Instant::now());
+    }
+}
+
+#[test]
+fn factory_probe_rejects_wrong_shape_and_wrong_requested_path() {
+    let _serial = serial();
+    let mut wrong_path = factory_metadata();
+    wrong_path.path = "another-module.vst3".into();
+    for reply in [
+        info(),
+        HostResponse::FactoryMetadata {
+            metadata: wrong_path,
+        },
+    ] {
+        let mut probe = probe(&factory_ledger(reply, "assert sys.stdin.read()==''"));
+        let error = factory_failure(probe.probe_factory("fixture-factory.vst3", deadline()));
+        assert_eq!(error.kind, FailureKind::WrongReply);
+        assert_eq!(error.delivery, Delivery::MayHaveApplied);
+        assert_eq!(error.request_context.unwrap().operation, "ProbeFactory");
+        assert!(error.diagnostic.is_none());
+        assert_eq!(
+            factory_failure(probe.probe_factory("fixture-factory.vst3", deadline())).kind,
+            FailureKind::Terminal
+        );
+        clean_finish(&mut probe, Instant::now());
+    }
+}
+
+#[test]
+fn factory_probe_expired_or_precancelled_attempt_delivers_no_bytes_and_cannot_load() {
+    let _serial = serial();
+    for cancel in [false, true] {
+        let mut probe = probe("import sys\nassert sys.stdin.read()==''\n");
+        let actual_pid = probe.helper_pid().unwrap();
+        if cancel {
+            probe.cancellation().cancel();
+        }
+        let error = factory_failure(probe.probe_factory(
+            "fixture-factory.vst3",
+            if cancel { deadline() } else { Instant::now() },
+        ));
+        assert_eq!(
+            error.kind,
+            if cancel {
+                FailureKind::Cancelled
+            } else {
+                FailureKind::Deadline
+            }
+        );
+        assert_eq!(error.delivery, Delivery::NotSent);
+        assert_eq!(error.request_context.unwrap().operation, "ProbeFactory");
+        assert_eq!(
+            failure(probe.load_default_class("never-loaded.vst3", deadline())).kind,
+            FailureKind::Terminal
+        );
+        assert_eq!(probe.helper_pid(), Some(actual_pid));
+        clean_finish(&mut probe, Instant::now());
+    }
+}
+
+#[test]
+fn factory_probe_timeout_retains_same_owner_until_forced_reap() {
+    let _serial = serial();
+    let mut probe = probe("import sys,time\nsys.stdin.readline()\ntime.sleep(30)\n");
+    let actual_pid = probe.helper_pid().unwrap();
+    let exchange_deadline = Instant::now() + Duration::from_millis(120);
+    let error = factory_failure(probe.probe_factory("fixture-factory.vst3", exchange_deadline));
+    assert_eq!(error.kind, FailureKind::Deadline);
+    assert_eq!(error.delivery, Delivery::MayHaveApplied);
+    assert_eq!(error.request_context.unwrap().operation, "ProbeFactory");
+    assert_eq!(probe.helper_pid(), Some(actual_pid));
+    let result = probe.dispose(exchange_deadline, deadline());
+    assert!(matches!(result.state, CleanupState::Reaped(_)));
+    assert!(result.kill_requested);
+    assert_eq!(probe.helper_pid(), None);
+}
+
+#[test]
+fn factory_probe_cross_thread_cancel_wakes_same_inflight_owner_without_load_retry() {
+    let _serial = serial();
+    let mut probe = probe("import sys,time\nsys.stdin.readline()\ntime.sleep(30)\n");
+    let cancel = probe.cancellation();
+    let join = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(150));
+        cancel.cancel();
+    });
+    let error = factory_failure(probe.probe_factory("fixture-factory.vst3", deadline()));
+    join.join().unwrap();
+    assert_eq!(error.kind, FailureKind::Cancelled);
+    assert_eq!(error.delivery, Delivery::MayHaveApplied);
+    assert_eq!(error.request_context.unwrap().operation, "ProbeFactory");
+    assert_eq!(
+        failure(probe.load_default_class("never-loaded.vst3", deadline())).kind,
+        FailureKind::Terminal
+    );
+    let result = probe.dispose(Instant::now(), deadline());
+    assert!(matches!(result.state, CleanupState::Reaped(_)));
+    assert!(result.kill_requested);
+}
+
+#[test]
+fn factory_probe_oversized_request_is_unsent_but_consumes_single_attempt() {
+    let _serial = serial();
+    let mut probe = probe("import sys\nassert sys.stdin.read()==''\n");
+    let error = factory_failure(probe.probe_factory(&"x".repeat(64 * 1024 + 1), deadline()));
+    assert_eq!(error.kind, FailureKind::Limit);
+    assert_eq!(error.delivery, Delivery::NotSent);
+    assert_eq!(error.request_context.unwrap().operation, "ProbeFactory");
+    assert_eq!(
+        failure(probe.load_default_class("never-loaded.vst3", deadline())).kind,
+        FailureKind::Terminal
+    );
+    clean_finish(&mut probe, Instant::now());
+}
+
+#[test]
+fn factory_declarations_cannot_substitute_failed_healthy_retirement() {
+    let _serial = serial();
+    let mut probe = probe(&factory_ledger(
+        HostResponse::FactoryMetadata { metadata: factory_metadata() },
+        "assert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''\ntime.sleep(30)",
+    ));
+    let exchange_deadline = deadline();
+    assert_eq!(
+        probe
+            .probe_factory("fixture-factory.vst3", exchange_deadline)
+            .unwrap(),
+        factory_metadata()
+    );
+    let result = probe.dispose(exchange_deadline, Instant::now() + Duration::from_secs(1));
+    assert!(matches!(result.state, CleanupState::Reaped(_)));
+    assert!(result.kill_requested);
 }
 
 #[test]

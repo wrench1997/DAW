@@ -9,6 +9,9 @@
 //! simulated 480/960-frame cadence does not attest a native audio device, heard
 //! sound, cold App restoration, clip conversion or an offline export.
 
+#[path = "windows_kontakt_factory_qa.rs"]
+mod factory_qa;
+
 use std::{
     fs::{self, OpenOptions},
     io::Write,

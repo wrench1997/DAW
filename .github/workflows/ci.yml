@@ -40,6 +40,12 @@ jobs:
       - name: Check formatting
         run: cargo +stable-x86_64-pc-windows-msvc fmt --all -- --check
 
+      # Root cargo test does not run dependency unit tests. These factory and
+      # mock-child checks use no installed plug-in, GUI or audio device.
+      - name: Run retained factory metadata regressions
+        timeout-minutes: 10
+        run: cargo +stable-x86_64-pc-windows-msvc test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --lib factory --target-dir target -- --test-threads=1
+
       - name: Run locked all-feature tests
         run: cargo +stable-x86_64-pc-windows-msvc test --locked --all-features --all-targets
 

@@ -56,6 +56,9 @@ impl<'a> FlatInputView<'a> {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum RequestView<'a> {
+    ProbeFactory {
+        path: &'a str,
+    },
     LoadPlugin {
         path: &'a str,
         sample_rate: f64,
@@ -132,6 +135,7 @@ impl<'a> TryFrom<&'a HostCommand> for RequestView<'a> {
 
     fn try_from(command: &'a HostCommand) -> Result<Self, Self::Error> {
         Ok(match command {
+            HostCommand::ProbeFactory { path } => Self::ProbeFactory { path },
             HostCommand::LoadPlugin {
                 path,
                 sample_rate,

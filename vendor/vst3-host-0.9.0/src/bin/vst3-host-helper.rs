@@ -141,6 +141,19 @@ fn handle(
     }
 
     match command {
+        HostCommand::ProbeFactory { path } => {
+            let unloaded = match plugin.lock() {
+                Ok(guard) => guard.is_none(),
+                Err(_) => return err("ProbeFactory", "plugin lock poisoned"),
+            };
+            if !unloaded {
+                return err("ProbeFactory", "requires an unloaded helper");
+            }
+            match vst3_host::discovery::probe_factory_metadata(std::path::Path::new(&path)) {
+                Ok(metadata) => HostResponse::FactoryMetadata { metadata },
+                Err(error) => err("ProbeFactory", error),
+            }
+        }
         HostCommand::LoadPlugin {
             path,
             sample_rate: sr,

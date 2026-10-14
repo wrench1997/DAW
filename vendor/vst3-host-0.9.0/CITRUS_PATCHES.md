@@ -826,3 +826,34 @@ Original archive/commit/LICENSE/VCS pins and all package hard assertions are
 preserved; only the two provenance hashes in each Python file are refreshed.
 Fresh preimages, the exact test-only delta, complete ledger and replay receipts
 are retained in target/backend-reliability-20261014/source58-provenance-01.
+
+
+### Factory-only declarations and retained isolated probe (source70)
+
+Adds discovery::probe_factory_metadata and separate FactoryMetadata/class types.
+The existing platform module loader and factory getters are reused; no component,
+controller or view is created. Factory3 Unicode metadata takes precedence over
+Factory2/Factory1. Optional fields remain unknown when unavailable. Successful
+extended getters must agree with base class identity/category/cardinality;
+counts and fixed text are bounded. All interface references are released before
+normal module unload, and host context remains alive until after unload.
+
+ProbeFactory/FactoryMetadata are additive protocol variants. Both helper entries
+require an unloaded helper and return only after normal module retirement.
+The retained Probe adds one closed factory request, sharing its one-attempt seal,
+absolute exchange budget, cancellation, bounded two-pass codec, path binding and
+existing cleanup. A declared class is not the runtime default or evidence of bus,
+MIDI, editor, latency, tail, parameter, state or audio support. Existing LoadPlugin,
+scan/cache/verified/default-class behavior and strict clone budgets are unchanged.
+
+New mock-COM, wire, codec and real mock-child regressions are authored. Formatting
+passed; compilation, test execution and actual NI behavior remain UNRUN for this
+source at provenance regeneration. Prior Source69 pass/failed-NI results do not
+qualify this new capability. Production activation awaits distinct evidence.
+
+The complete patch was regenerated from the same original archive against all
+74 current source files, excluding only this document/CITRUS.patch.
+Private git apply --check/apply succeeded; complete file inventory and raw bytes
+matched. Patch SHA256: ed3a7915361126d278b7085f0e57edaaf2eaf64a785c6196d9991115783acd94. Original archive/commit/LICENSE/VCS pins are
+unchanged; only the two provenance digest literals in each packaging Python file
+are refreshed. Evidence remains in target/backend-reliability-20261014/source70-provenance-01.

@@ -42,7 +42,27 @@ diff --git a/Cargo.toml.orig b/Cargo.toml.orig
 diff --git a/src/bin/vst3-host-helper.rs b/src/bin/vst3-host-helper.rs
 --- a/src/bin/vst3-host-helper.rs
 +++ b/src/bin/vst3-host-helper.rs
-@@ -443,18 +443,49 @@
+@@ -141,6 +141,19 @@
+     }
+ 
+     match command {
++        HostCommand::ProbeFactory { path } => {
++            let unloaded = match plugin.lock() {
++                Ok(guard) => guard.is_none(),
++                Err(_) => return err("ProbeFactory", "plugin lock poisoned"),
++            };
++            if !unloaded {
++                return err("ProbeFactory", "requires an unloaded helper");
++            }
++            match vst3_host::discovery::probe_factory_metadata(std::path::Path::new(&path)) {
++                Ok(metadata) => HostResponse::FactoryMetadata { metadata },
++                Err(error) => err("ProbeFactory", error),
++            }
++        }
+         HostCommand::LoadPlugin {
+             path,
+             sample_rate: sr,
+@@ -443,18 +456,49 @@
                  Err(e) => err("RemapParameterId", e),
              }
          }),
@@ -98,7 +118,7 @@ diff --git a/src/bin/vst3-host-helper.rs b/src/bin/vst3-host-helper.rs
              let sr = *sample_rate;
              with(plugin, |p| {
                  // Live channel count (sums getBusInfo across output buses), so a negotiated
-@@ -466,11 +497,19 @@
+@@ -466,11 +510,19 @@
                      sample_rate: sr,
                      block_size: frames as usize,
                  };
@@ -122,7 +142,7 @@ diff --git a/src/bin/vst3-host-helper.rs b/src/bin/vst3-host-helper.rs
                      Err(e) => err("Process", e),
                  }
              })
-@@ -479,6 +518,7 @@
+@@ -479,6 +531,7 @@
              inputs,
              outputs,
              frames,
@@ -130,7 +150,7 @@ diff --git a/src/bin/vst3-host-helper.rs b/src/bin/vst3-host-helper.rs
          } => {
              if inputs.len() > 256
                  || outputs.len() > 256
-@@ -506,11 +546,19 @@
+@@ -506,11 +559,19 @@
                      sample_rate: sr,
                      block_size: frames as usize,
                  };
@@ -154,7 +174,7 @@ diff --git a/src/bin/vst3-host-helper.rs b/src/bin/vst3-host-helper.rs
                      Err(e) => err("ProcessBuses", e),
                  }
              })
-@@ -518,6 +566,27 @@
+@@ -518,6 +579,27 @@
          HostCommand::AudioBusLayout => with(plugin, |p| match p.audio_bus_layout() {
              Ok(layout) => HostResponse::AudioBusLayout { layout },
              Err(e) => err("AudioBusLayout", e),
@@ -182,7 +202,7 @@ diff --git a/src/bin/vst3-host-helper.rs b/src/bin/vst3-host-helper.rs
          }),
          HostCommand::SaveState => with(plugin, |p| match p.save_state() {
              Ok(data) => HostResponse::State { data },
-@@ -603,6 +672,10 @@
+@@ -603,6 +685,10 @@
          HostCommand::TakeHostNotifications => with(plugin, |p| HostResponse::HostNotifications {
              notifications: p.take_host_notifications(),
          }),
@@ -193,7 +213,7 @@ diff --git a/src/bin/vst3-host-helper.rs b/src/bin/vst3-host-helper.rs
          HostCommand::TakeDataExchangeBlocks => with(plugin, |p| HostResponse::DataExchangeBlocks {
              blocks: p.take_data_exchange_blocks(),
          }),
-@@ -629,6 +702,10 @@
+@@ -629,6 +715,10 @@
              Ok(flags) => HostResponse::RestartFlags { bits: flags.bits() },
              Err(error) => err("ServiceHostRequests", error),
          }),
@@ -204,7 +224,7 @@ diff --git a/src/bin/vst3-host-helper.rs b/src/bin/vst3-host-helper.rs
          HostCommand::CreateGui => gui_request(gui, true),
          HostCommand::CloseGui => gui_request(gui, false),
          HostCommand::Shutdown => HostResponse::Success {
-@@ -859,3 +936,31 @@
+@@ -859,3 +949,31 @@
          }
      }
  }
@@ -240,16 +260,19 @@ diff --git a/src/default_class_probe.rs b/src/default_class_probe.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/default_class_probe.rs
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,171 @@
 +//! Retained, owner-thread default-class metadata probes on Linux and Windows.
 +//!
-+//! This ordinary process-isolation API loads exactly once with the scanner's
-+//! original default class and 48 kHz/Q128 configuration. It exposes no editor,
++//! This ordinary process-isolation API permits one factory-only query or one
++//! load with the scanner's original default class and 48 kHz/Q128 configuration.
++//! It exposes no editor,
 +//! state, DSP, generic command, recovery or request replay operations. Actual
 +//! metadata and actual child/pipe cleanup remain separate acceptance facts.
 +
++use crate::discovery::FactoryMetadata;
 +use crate::fresh_helper::{self, FreshHelperSession, ReplyShape, RequestView};
 +use crate::helper_lifecycle::unsent;
++use crate::process_isolation::HostResponse;
 +use std::process::Command;
 +use std::time::{Duration, Instant};
 +
@@ -262,13 +285,13 @@ new file mode 100644
 +/// A post-spawn failure retains its actual child owner for checked cleanup.
 +#[must_use = "retain the cleanup owner; dropping transfers unresolved ownership to quarantine"]
 +pub struct SpawnFailure {
-+    /// Original typed setup/admission failure, before any LoadPlugin request.
++    /// Original typed setup/admission failure, before any probe/load request.
 +    pub failure: Failure,
 +    /// Present when a real child exists despite failed setup or spawn expiry.
 +    pub cleanup: Option<Box<Probe>>,
 +}
 +
-+/// One default-class metadata attempt and its same-thread cleanup authority.
++/// One factory-only or default-class metadata attempt and its cleanup authority.
 +/// No Clone, Send, Sync or raw-child interface is available. Dropping transfers
 +/// an unresolved child into the existing process-wide quarantine reservation.
 +#[must_use = "metadata does not prove child termination; finish checked disposal"]
@@ -309,6 +332,34 @@ new file mode 100644
 +        self.session.helper_pid()
 +    }
 +
++    /// Query factory declarations without creating an audio component or editor.
++    /// This consumes the same single attempt as `load_default_class`; neither
++    /// operation can retry the other. Returned declarations are not runtime
++    /// capabilities and do not prove a healthy helper retirement.
++    pub fn probe_factory(
++        &mut self,
++        path: &str,
++        deadline: Instant,
++    ) -> Result<FactoryMetadata, Failure> {
++        if self.attempted {
++            return Err(unsent(fresh_helper::ErrorKind::Terminal));
++        }
++        self.attempted = true;
++        let request = RequestView::ProbeFactory { path };
++        let context = RequestContext::from_request(request);
++        self.session
++            .exchange_view(request, ReplyShape::FactoryMetadata, deadline)
++            .map(|response| match response {
++                HostResponse::FactoryMetadata { metadata } => metadata,
++                _ => unreachable!("factory reply passed the closed shape validator"),
++            })
++            .map_err(|error| {
++                let mut failure = Failure::from(error);
++                failure.request_context = Some(context);
++                failure
++            })
++    }
++
 +    /// Load only the runtime's default class: None, 48 kHz, block128, tempo120,
 +    /// meter4/4. One original absolute deadline covers encoding, delivery,
 +    /// response and validated decode. There is no retry even on helper crash.
@@ -341,11 +392,11 @@ new file mode 100644
 +            })
 +    }
 +
-+    /// Seal load admission, send at most one healthy Shutdown within the
++    /// Seal probe/load admission, send at most one healthy Shutdown within the
 +    /// earlier original protocol/cleanup deadline, close owned pipes and reap.
 +    /// Preserve the scanner's two-second natural-exit preference with 250 ms
 +    /// reserved for kill/reap, clamped to the original cleanup deadline.
-+    /// Failed, cancelled or terminal loads keep the transport's 100 ms policy.
++    /// Failed, cancelled or terminal exchanges keep the transport's 100 ms policy.
 +    /// Pending/Busy and kill_requested alone never prove resource completion.
 +    pub fn dispose(
 +        &mut self,
@@ -363,7 +414,7 @@ new file mode 100644
 +    }
 +
 +    /// Perform one nonwaiting continuation on this same disposed owner. This
-+    /// never sends Shutdown, renews grace, sleeps or replays a load request.
++    /// never sends Shutdown, renews grace, sleeps or replays a probe/load request.
 +    pub fn continue_cleanup(&mut self) -> Result<CleanupObservation, Failure> {
 +        self.session
 +            .continue_cleanup()
@@ -385,10 +436,11 @@ diff --git a/src/default_class_probe_tests.rs b/src/default_class_probe_tests.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/default_class_probe_tests.rs
-@@ -0,0 +1,343 @@
+@@ -0,0 +1,618 @@
 +//! Actual child/pipe protocol regressions for the ordinary default-class API.
 +//! No plugin SDK, native editor, hardware audio or Kontakt is involved.
 +use super::*;
++use crate::discovery::{FactoryClassMetadata, FactoryInfo, FactoryMetadata};
 +use crate::fresh_helper::tests::{arm_probe_setup_failure, arm_probe_wait_failure, python, serial};
 +use crate::process_isolation::{HostCommand, HostResponse};
 +
@@ -454,6 +506,280 @@ new file mode 100644
 +        Err(failure) => failure,
 +        Ok(_) => panic!("expected an actual failed default probe exchange"),
 +    }
++}
++
++fn factory_metadata() -> FactoryMetadata {
++    let class = FactoryClassMetadata {
++        class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
++        name: "Declared instrument".into(),
++        category: "Audio Module Class".into(),
++        cardinality: i32::MAX,
++        vendor: None,
++        version: None,
++        sdk_version: None,
++        sub_categories: None,
++        class_flags: None,
++    };
++    let mut controller = class.clone();
++    controller.class_id = "FEDCBA9876543210FEDCBA9876543210".into();
++    controller.name = "Declared controller".into();
++    controller.category = "Component Controller Class".into();
++    controller.vendor = Some(String::new());
++    controller.sub_categories = Some(Vec::new());
++    controller.class_flags = Some(0);
++    FactoryMetadata {
++        path: "fixture-factory.vst3".into(),
++        factory: FactoryInfo {
++            vendor: "Factory only".into(),
++            url: String::new(),
++            email: String::new(),
++            flags: -1,
++        },
++        classes: vec![class, controller],
++    }
++}
++fn factory_ledger(reply: HostResponse, ending: &str) -> String {
++    let expected = serde_json::to_string(&HostCommand::ProbeFactory {
++        path: "fixture-factory.vst3".into(),
++    })
++    .unwrap();
++    let response = serde_json::to_string(&reply).unwrap();
++    format!(
++        "import json,sys,time\nassert json.loads(sys.stdin.readline())==json.loads({expected:?})\nprint({response:?},flush=True)\n{ending}\n"
++    )
++}
++fn factory_failure(result: Result<FactoryMetadata, Failure>) -> Failure {
++    match result {
++        Err(failure) => failure,
++        Ok(_) => panic!("expected a failed factory-only exchange"),
++    }
++}
++
++#[test]
++fn factory_probe_sends_only_factory_request_preserves_unknowns_and_reaps_shutdown() {
++    let _serial = serial();
++    let expected = factory_metadata();
++    let mut probe = probe(&factory_ledger(
++        HostResponse::FactoryMetadata {
++            metadata: expected.clone(),
++        },
++        "assert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''",
++    ));
++    let actual_pid = probe.helper_pid().unwrap();
++    let exchange_deadline = deadline();
++    let actual = probe
++        .probe_factory("fixture-factory.vst3", exchange_deadline)
++        .unwrap();
++    assert_eq!(actual, expected);
++    assert_eq!(actual.classes[0].vendor, None);
++    assert_eq!(actual.classes[1].vendor.as_deref(), Some(""));
++    assert_eq!(actual.classes[1].sub_categories, Some(Vec::new()));
++    assert_eq!(probe.helper_pid(), Some(actual_pid));
++    clean_finish(&mut probe, exchange_deadline);
++    assert_eq!(probe.helper_pid(), None);
++    assert!(
++        matches!(probe.continue_cleanup().unwrap().state, CleanupState::Reaped(status) if status.success())
++    );
++}
++
++#[test]
++fn factory_and_default_load_share_one_attempt_seal_in_both_directions() {
++    let _serial = serial();
++    let ending = "assert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''";
++    let mut factory = probe(&factory_ledger(
++        HostResponse::FactoryMetadata {
++            metadata: factory_metadata(),
++        },
++        ending,
++    ));
++    let exchange_deadline = deadline();
++    factory
++        .probe_factory("fixture-factory.vst3", exchange_deadline)
++        .unwrap();
++    for rejected in [
++        factory_failure(factory.probe_factory("never-probed.vst3", deadline())),
++        failure(factory.load_default_class("never-loaded.vst3", deadline())),
++    ] {
++        assert_eq!(rejected.kind, FailureKind::Terminal);
++        assert_eq!(rejected.delivery, Delivery::NotSent);
++        assert!(rejected.request_context.is_none());
++    }
++    clean_finish(&mut factory, exchange_deadline);
++    let mut loaded = probe(&ledger(info(), ending));
++    let exchange_deadline = deadline();
++    loaded
++        .load_default_class("fixture-default.vst3", exchange_deadline)
++        .unwrap();
++    let rejected = factory_failure(loaded.probe_factory("never-probed.vst3", deadline()));
++    assert_eq!(rejected.kind, FailureKind::Terminal);
++    assert_eq!(rejected.delivery, Delivery::NotSent);
++    clean_finish(&mut loaded, exchange_deadline);
++}
++
++#[test]
++fn factory_probe_reported_error_and_crash_are_typed_not_retried_or_reloaded() {
++    let _serial = serial();
++    for (reply, kind, message) in [
++        (
++            HostResponse::Error {
++                message: "factory getter failed".into(),
++            },
++            FailureKind::OperationRejected,
++            "factory getter failed",
++        ),
++        (
++            HostResponse::Crashed {
++                message: "factory-only crash".into(),
++            },
++            FailureKind::ReportedCrash,
++            "factory-only crash",
++        ),
++    ] {
++        let mut probe = probe(&factory_ledger(reply, "assert sys.stdin.read()==''"));
++        let actual_pid = probe.helper_pid().unwrap();
++        let error = factory_failure(probe.probe_factory("fixture-factory.vst3", deadline()));
++        assert_eq!(error.kind, kind);
++        assert_eq!(error.delivery, Delivery::MayHaveApplied);
++        assert_eq!(error.diagnostic.as_deref(), Some(message));
++        assert_eq!(error.request_context.unwrap().operation, "ProbeFactory");
++        assert_eq!(
++            failure(probe.load_default_class("never-loaded.vst3", deadline())).kind,
++            FailureKind::Terminal
++        );
++        assert_eq!(probe.helper_pid(), Some(actual_pid));
++        clean_finish(&mut probe, Instant::now());
++    }
++}
++
++#[test]
++fn factory_probe_rejects_wrong_shape_and_wrong_requested_path() {
++    let _serial = serial();
++    let mut wrong_path = factory_metadata();
++    wrong_path.path = "another-module.vst3".into();
++    for reply in [
++        info(),
++        HostResponse::FactoryMetadata {
++            metadata: wrong_path,
++        },
++    ] {
++        let mut probe = probe(&factory_ledger(reply, "assert sys.stdin.read()==''"));
++        let error = factory_failure(probe.probe_factory("fixture-factory.vst3", deadline()));
++        assert_eq!(error.kind, FailureKind::WrongReply);
++        assert_eq!(error.delivery, Delivery::MayHaveApplied);
++        assert_eq!(error.request_context.unwrap().operation, "ProbeFactory");
++        assert!(error.diagnostic.is_none());
++        assert_eq!(
++            factory_failure(probe.probe_factory("fixture-factory.vst3", deadline())).kind,
++            FailureKind::Terminal
++        );
++        clean_finish(&mut probe, Instant::now());
++    }
++}
++
++#[test]
++fn factory_probe_expired_or_precancelled_attempt_delivers_no_bytes_and_cannot_load() {
++    let _serial = serial();
++    for cancel in [false, true] {
++        let mut probe = probe("import sys\nassert sys.stdin.read()==''\n");
++        let actual_pid = probe.helper_pid().unwrap();
++        if cancel {
++            probe.cancellation().cancel();
++        }
++        let error = factory_failure(probe.probe_factory(
++            "fixture-factory.vst3",
++            if cancel { deadline() } else { Instant::now() },
++        ));
++        assert_eq!(
++            error.kind,
++            if cancel {
++                FailureKind::Cancelled
++            } else {
++                FailureKind::Deadline
++            }
++        );
++        assert_eq!(error.delivery, Delivery::NotSent);
++        assert_eq!(error.request_context.unwrap().operation, "ProbeFactory");
++        assert_eq!(
++            failure(probe.load_default_class("never-loaded.vst3", deadline())).kind,
++            FailureKind::Terminal
++        );
++        assert_eq!(probe.helper_pid(), Some(actual_pid));
++        clean_finish(&mut probe, Instant::now());
++    }
++}
++
++#[test]
++fn factory_probe_timeout_retains_same_owner_until_forced_reap() {
++    let _serial = serial();
++    let mut probe = probe("import sys,time\nsys.stdin.readline()\ntime.sleep(30)\n");
++    let actual_pid = probe.helper_pid().unwrap();
++    let exchange_deadline = Instant::now() + Duration::from_millis(120);
++    let error = factory_failure(probe.probe_factory("fixture-factory.vst3", exchange_deadline));
++    assert_eq!(error.kind, FailureKind::Deadline);
++    assert_eq!(error.delivery, Delivery::MayHaveApplied);
++    assert_eq!(error.request_context.unwrap().operation, "ProbeFactory");
++    assert_eq!(probe.helper_pid(), Some(actual_pid));
++    let result = probe.dispose(exchange_deadline, deadline());
++    assert!(matches!(result.state, CleanupState::Reaped(_)));
++    assert!(result.kill_requested);
++    assert_eq!(probe.helper_pid(), None);
++}
++
++#[test]
++fn factory_probe_cross_thread_cancel_wakes_same_inflight_owner_without_load_retry() {
++    let _serial = serial();
++    let mut probe = probe("import sys,time\nsys.stdin.readline()\ntime.sleep(30)\n");
++    let cancel = probe.cancellation();
++    let join = std::thread::spawn(move || {
++        std::thread::sleep(Duration::from_millis(150));
++        cancel.cancel();
++    });
++    let error = factory_failure(probe.probe_factory("fixture-factory.vst3", deadline()));
++    join.join().unwrap();
++    assert_eq!(error.kind, FailureKind::Cancelled);
++    assert_eq!(error.delivery, Delivery::MayHaveApplied);
++    assert_eq!(error.request_context.unwrap().operation, "ProbeFactory");
++    assert_eq!(
++        failure(probe.load_default_class("never-loaded.vst3", deadline())).kind,
++        FailureKind::Terminal
++    );
++    let result = probe.dispose(Instant::now(), deadline());
++    assert!(matches!(result.state, CleanupState::Reaped(_)));
++    assert!(result.kill_requested);
++}
++
++#[test]
++fn factory_probe_oversized_request_is_unsent_but_consumes_single_attempt() {
++    let _serial = serial();
++    let mut probe = probe("import sys\nassert sys.stdin.read()==''\n");
++    let error = factory_failure(probe.probe_factory(&"x".repeat(64 * 1024 + 1), deadline()));
++    assert_eq!(error.kind, FailureKind::Limit);
++    assert_eq!(error.delivery, Delivery::NotSent);
++    assert_eq!(error.request_context.unwrap().operation, "ProbeFactory");
++    assert_eq!(
++        failure(probe.load_default_class("never-loaded.vst3", deadline())).kind,
++        FailureKind::Terminal
++    );
++    clean_finish(&mut probe, Instant::now());
++}
++
++#[test]
++fn factory_declarations_cannot_substitute_failed_healthy_retirement() {
++    let _serial = serial();
++    let mut probe = probe(&factory_ledger(
++        HostResponse::FactoryMetadata { metadata: factory_metadata() },
++        "assert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''\ntime.sleep(30)",
++    ));
++    let exchange_deadline = deadline();
++    assert_eq!(
++        probe
++            .probe_factory("fixture-factory.vst3", exchange_deadline)
++            .unwrap(),
++        factory_metadata()
++    );
++    let result = probe.dispose(exchange_deadline, Instant::now() + Duration::from_secs(1));
++    assert!(matches!(result.state, CleanupState::Reaped(_)));
++    assert!(result.kill_requested);
 +}
 +
 +#[test]
@@ -728,6 +1054,802 @@ new file mode 100644
 +    assert_eq!(error.request_context.unwrap().operation, "LoadPlugin");
 +    assert!(error.diagnostic.is_none());
 +    clean_finish(&mut probe, Instant::now());
++}
+diff --git a/src/discovery.rs b/src/discovery.rs
+--- a/src/discovery.rs
++++ b/src/discovery.rs
+@@ -10,8 +10,12 @@
+ /// treating it as hung and killing the child process.
+ pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+ 
++#[path = "discovery_factory.rs"]
++mod factory;
++pub use factory::{probe_factory_metadata, FactoryClassMetadata, FactoryMetadata};
++
+ /// Factory-level metadata (the plugin vendor's identity).
+-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
++#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+ pub struct FactoryInfo {
+     /// Vendor / manufacturer name.
+     pub vendor: String,
+diff --git a/src/discovery_factory.rs b/src/discovery_factory.rs
+new file mode 100644
+--- /dev/null
++++ b/src/discovery_factory.rs
+@@ -0,0 +1,774 @@
++//! Live factory declarations without creating a component, controller, or view.
++
++use super::FactoryInfo;
++use crate::error::{Error, Result};
++use serde::{Deserialize, Serialize};
++use std::collections::HashSet;
++use std::os::raw::c_char;
++use std::path::{Path, PathBuf};
++use vst3::{ComPtr, Steinberg::Vst::IHostApplication, Steinberg::*};
++
++const MAX_FACTORY_CLASSES: i32 = 4096;
++
++/// Declarations read from a loaded VST3 factory, in its original class order.
++///
++/// This is not [`crate::PluginInfo`] or proof that any class can be instantiated.
++/// Audio/event buses, MIDI, GUI, parameters, latency and tail remain unknown: none
++/// is queried, and no runtime capability is inferred from the category strings.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct FactoryMetadata {
++    /// The module path requested by the caller (not a binary-identity attestation).
++    pub path: PathBuf,
++    /// Identity returned by the successful factory-info getter.
++    pub factory: FactoryInfo,
++    /// All declared classes, including non-audio classes; no default is selected.
++    pub classes: Vec<FactoryClassMetadata>,
++}
++
++/// One live factory declaration, not an instantiated or verified instrument.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
++pub struct FactoryClassMetadata {
++    /// Canonical, uppercase 32-hex-character class id.
++    pub class_id: String,
++    /// Class display name; Unicode factory metadata takes precedence when available.
++    pub name: String,
++    /// Main class category, for example `Audio Module Class` or `Component Controller Class`.
++    pub category: String,
++    /// Declared instantiation cardinality, not a successfully created instance count.
++    pub cardinality: i32,
++    /// Class vendor; unknown with only the original factory interface.
++    pub vendor: Option<String>,
++    /// Class version; unknown with only the original factory interface.
++    pub version: Option<String>,
++    /// Declared SDK version; unknown with only the original factory interface.
++    pub sdk_version: Option<String>,
++    /// Declared subcategories, split on `|`; unknown with only the original interface.
++    pub sub_categories: Option<Vec<String>>,
++    /// Raw class flags; unknown with only the original factory interface.
++    pub class_flags: Option<u32>,
++}
++
++/// Read only factory declarations through the existing platform module loader.
++///
++/// No `createInstance`, `initialize`, component query, or `createView` is called.
++/// Every factory/interface reference is released before normal module unload;
++/// the host context outlives that unload. The result is returned only afterwards.
++/// Base class identity/category/cardinality must agree with any successful
++/// extended getter; failed optional getters fall back without invented values.
++/// Existing `ExitDll`/`FreeLibrary` behavior is unchanged, including failures to
++/// return. Class counts and fixed SDK buffers are bounded, but foreign native
++/// calls cannot be time-bounded in-process. Use a separately bounded helper for
++/// untrusted modules rather than treating this function as a timeout mechanism.
++pub fn probe_factory_metadata(path: &Path) -> Result<FactoryMetadata> {
++    probe_with_loader(path, || crate::internal::module_loader::load_module(path))
++}
++
++fn probe_with_loader(
++    path: &Path,
++    load: impl FnOnce() -> Result<Box<dyn crate::internal::module_loader::VstModule>>,
++) -> Result<FactoryMetadata> {
++    // Reverse local drop order is intentional: factory, module, host context,
++    // host application. Factories may keep the context without addRef until ExitDll.
++    let host_app = crate::internal::com_implementations::create_host_application();
++    let host_ctx = host_app.to_com_ptr::<IHostApplication>();
++    let context = host_ctx
++        .as_ref()
++        .map(|pointer| pointer.as_ptr() as *mut FUnknown)
++        .unwrap_or(std::ptr::null_mut());
++    let module = load()?;
++    let factory = unsafe { ComPtr::<IPluginFactory>::from_raw(module.get_factory()?) }
++        .ok_or_else(|| invalid("GetPluginFactory returned null"))?;
++    let result = read_factory(path, &factory, context);
++    drop(factory);
++    // In particular, a hung ExitDll never produces a successful metadata reply.
++    drop(module);
++    result
++}
++
++fn invalid(message: impl Into<String>) -> Error {
++    Error::PluginLoadFailed(format!("factory-only metadata: {}", message.into()))
++}
++
++fn succeeded(result: tresult) -> bool {
++    result == kResultOk || result == kResultTrue
++}
++
++fn read_factory(
++    path: &Path,
++    factory: &ComPtr<IPluginFactory>,
++    context: *mut FUnknown,
++) -> Result<FactoryMetadata> {
++    unsafe {
++        let factory3 = factory.cast::<IPluginFactory3>();
++        let factory2 = factory.cast::<IPluginFactory2>();
++        if let Some(factory3) = &factory3 {
++            let result = factory3.setHostContext(context);
++            if !succeeded(result) {
++                return Err(invalid(format!("setHostContext failed: {result:#x}")));
++            }
++        }
++        let mut info: PFactoryInfo = std::mem::zeroed();
++        let result = factory.getFactoryInfo(&mut info);
++        if !succeeded(result) {
++            return Err(invalid(format!("getFactoryInfo failed: {result:#x}")));
++        }
++        let factory_info = FactoryInfo {
++            vendor: narrow(&info.vendor),
++            url: narrow(&info.url),
++            email: narrow(&info.email),
++            flags: info.flags,
++        };
++        let count = factory.countClasses();
++        if !(0..=MAX_FACTORY_CLASSES).contains(&count) {
++            return Err(invalid(format!(
++                "class count {count} is outside 0..={MAX_FACTORY_CLASSES}"
++            )));
++        }
++        let mut classes = Vec::with_capacity(count as usize);
++        let mut ids = HashSet::with_capacity(count as usize);
++        for index in 0..count {
++            let class = read_class(factory, factory2.as_ref(), factory3.as_ref(), index)?;
++            if !ids.insert(class.class_id.clone()) {
++                return Err(invalid(format!("class {index} has a duplicate class id")));
++            }
++            classes.push(class);
++        }
++        Ok(FactoryMetadata {
++            path: path.to_path_buf(),
++            factory: factory_info,
++            classes,
++        })
++    }
++}
++
++unsafe fn read_class(
++    factory: &ComPtr<IPluginFactory>,
++    factory2: Option<&ComPtr<IPluginFactory2>>,
++    factory3: Option<&ComPtr<IPluginFactory3>>,
++    index: i32,
++) -> Result<FactoryClassMetadata> {
++    let mut base_info: PClassInfo = std::mem::zeroed();
++    let result = factory.getClassInfo(index, &mut base_info);
++    if !succeeded(result) {
++        return Err(invalid(format!(
++            "class {index} getClassInfo failed: {result:#x}"
++        )));
++    }
++    let base = checked_class(
++        index,
++        &base_info.cid,
++        FactoryClassMetadata {
++            class_id: String::new(),
++            name: narrow(&base_info.name),
++            category: narrow(&base_info.category),
++            cardinality: base_info.cardinality,
++            vendor: None,
++            version: None,
++            sdk_version: None,
++            sub_categories: None,
++            class_flags: None,
++        },
++    )?;
++    if let Some(factory3) = factory3 {
++        let mut info: PClassInfoW = std::mem::zeroed();
++        if succeeded(factory3.getClassInfoUnicode(index, &mut info)) {
++            let class = checked_class(
++                index,
++                &info.cid,
++                FactoryClassMetadata {
++                    class_id: String::new(),
++                    name: wide(&info.name),
++                    category: narrow(&info.category),
++                    cardinality: info.cardinality,
++                    vendor: Some(wide(&info.vendor)),
++                    version: Some(wide(&info.version)),
++                    sdk_version: Some(wide(&info.sdkVersion)),
++                    sub_categories: Some(sub_categories(&info.subCategories)),
++                    class_flags: Some(info.classFlags),
++                },
++            )?;
++            return consistent_class(index, &base, class);
++        }
++    }
++    if let Some(factory2) = factory2 {
++        let mut info: PClassInfo2 = std::mem::zeroed();
++        if succeeded(factory2.getClassInfo2(index, &mut info)) {
++            let class = checked_class(
++                index,
++                &info.cid,
++                FactoryClassMetadata {
++                    class_id: String::new(),
++                    name: narrow(&info.name),
++                    category: narrow(&info.category),
++                    cardinality: info.cardinality,
++                    vendor: Some(narrow(&info.vendor)),
++                    version: Some(narrow(&info.version)),
++                    sdk_version: Some(narrow(&info.sdkVersion)),
++                    sub_categories: Some(sub_categories(&info.subCategories)),
++                    class_flags: Some(info.classFlags),
++                },
++            )?;
++            return consistent_class(index, &base, class);
++        }
++    }
++    Ok(base)
++}
++
++fn consistent_class(
++    index: i32,
++    base: &FactoryClassMetadata,
++    class: FactoryClassMetadata,
++) -> Result<FactoryClassMetadata> {
++    if class.class_id != base.class_id
++        || class.category != base.category
++        || class.cardinality != base.cardinality
++    {
++        return Err(invalid(format!(
++            "class {index} extended metadata disagrees with its base class declaration"
++        )));
++    }
++    Ok(class)
++}
++
++fn checked_class(
++    index: i32,
++    cid: &TUID,
++    mut class: FactoryClassMetadata,
++) -> Result<FactoryClassMetadata> {
++    if cid.iter().all(|&byte| byte == 0) {
++        return Err(invalid(format!("class {index} has an empty class id")));
++    }
++    if class.name.is_empty() || class.category.is_empty() || class.cardinality < 0 {
++        return Err(invalid(format!(
++            "class {index} has an empty name/category or negative cardinality"
++        )));
++    }
++    // A successful getter supplies exactly one fixed-size TUID. Formatting it
++    // through the shared utility preserves Windows' canonical COM byte order.
++    class.class_id = crate::internal::utils::format_class_uid(cid);
++    Ok(class)
++}
++
++fn narrow(value: &[c_char]) -> String {
++    crate::internal::utils::c_str_to_string(value)
++}
++
++fn wide(value: &[u16]) -> String {
++    let end = value.iter().position(|&ch| ch == 0).unwrap_or(value.len());
++    String::from_utf16_lossy(&value[..end])
++}
++
++fn sub_categories(value: &[c_char]) -> Vec<String> {
++    narrow(value)
++        .split('|')
++        .filter(|value| !value.is_empty())
++        .map(str::to_owned)
++        .collect()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::internal::module_loader::VstModule;
++    use std::ffi::c_void;
++    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
++    use std::sync::{Arc, Mutex};
++    use vst3::{Class, ComWrapper};
++
++    struct State {
++        count: i32,
++        factory_result: tresult,
++        unicode_result: tresult,
++        extended_result: tresult,
++        base_result: tresult,
++        context_result: tresult,
++        zero_uid: bool,
++        duplicate_uid: bool,
++        empty_name: bool,
++        unicode_mismatch: bool,
++        extended_mismatch: bool,
++        negative_cardinality: bool,
++        create_calls: AtomicUsize,
++        context_received: AtomicBool,
++        trace: Mutex<Vec<String>>,
++    }
++
++    impl Default for State {
++        fn default() -> Self {
++            Self {
++                count: 2,
++                factory_result: kResultOk,
++                unicode_result: kResultOk,
++                extended_result: kResultOk,
++                base_result: kResultOk,
++                context_result: kResultOk,
++                zero_uid: false,
++                duplicate_uid: false,
++                empty_name: false,
++                unicode_mismatch: false,
++                extended_mismatch: false,
++                negative_cardinality: false,
++                create_calls: AtomicUsize::new(0),
++                context_received: AtomicBool::new(false),
++                trace: Mutex::new(Vec::new()),
++            }
++        }
++    }
++
++    impl State {
++        fn record(&self, event: impl Into<String>) {
++            self.trace.lock().unwrap().push(event.into());
++        }
++
++        fn cid(&self, index: i32) -> TUID {
++            let mut cid = [0 as c_char; 16];
++            if !self.zero_uid {
++                cid[15] = if self.duplicate_uid { 1 } else { index + 1 } as c_char;
++            }
++            cid
++        }
++    }
++
++    struct MockFactory<const EXTENDED: bool>(Arc<State>);
++
++    impl Class for MockFactory<false> {
++        type Interfaces = (IPluginFactory,);
++    }
++
++    impl Class for MockFactory<true> {
++        type Interfaces = (IPluginFactory3,);
++    }
++
++    impl<const EXTENDED: bool> Drop for MockFactory<EXTENDED> {
++        fn drop(&mut self) {
++            self.0.record("factory.drop");
++        }
++    }
++
++    fn put<const N: usize>(buffer: &mut [c_char; N], text: &str) {
++        assert!(text.len() < N);
++        for (slot, byte) in buffer.iter_mut().zip(text.bytes()) {
++            *slot = byte as c_char;
++        }
++    }
++
++    fn put_wide<const N: usize>(buffer: &mut [u16; N], text: &str) {
++        assert!(text.encode_utf16().count() < N);
++        for (slot, word) in buffer.iter_mut().zip(text.encode_utf16()) {
++            *slot = word;
++        }
++    }
++
++    fn category(index: i32) -> &'static str {
++        if index == 0 {
++            "Component Controller Class"
++        } else {
++            "Audio Module Class"
++        }
++    }
++
++    impl<const EXTENDED: bool> IPluginFactoryTrait for MockFactory<EXTENDED> {
++        unsafe fn getFactoryInfo(&self, info: *mut PFactoryInfo) -> tresult {
++            self.0.record("factory.info");
++            assert!(!info.is_null());
++            put(&mut (*info).vendor, "Factory vendor");
++            put(&mut (*info).url, "https://example.invalid");
++            put(&mut (*info).email, "factory@example.invalid");
++            (*info).flags = 16;
++            self.0.factory_result
++        }
++
++        unsafe fn countClasses(&self) -> i32 {
++            self.0.record("factory.count");
++            self.0.count
++        }
++
++        unsafe fn getClassInfo(&self, index: i32, info: *mut PClassInfo) -> tresult {
++            self.0.record(format!("class.base.{index}"));
++            (*info).cid = self.0.cid(index);
++            (*info).cardinality = if self.0.negative_cardinality {
++                -1
++            } else {
++                i32::MAX
++            };
++            put(&mut (*info).category, category(index));
++            if !self.0.empty_name {
++                put(&mut (*info).name, "Base name");
++            }
++            self.0.base_result
++        }
++
++        unsafe fn createInstance(
++            &self,
++            _cid: FIDString,
++            _iid: FIDString,
++            object: *mut *mut c_void,
++        ) -> tresult {
++            self.0.create_calls.fetch_add(1, Ordering::Relaxed);
++            if !object.is_null() {
++                *object = std::ptr::null_mut();
++            }
++            kNotImplemented
++        }
++    }
++
++    impl IPluginFactory2Trait for MockFactory<true> {
++        unsafe fn getClassInfo2(&self, index: i32, info: *mut PClassInfo2) -> tresult {
++            self.0.record(format!("class.extended.{index}"));
++            (*info).cid = self.0.cid(index);
++            if self.0.extended_mismatch {
++                (*info).cid[0] = 1;
++            }
++            (*info).cardinality = i32::MAX;
++            put(&mut (*info).category, category(index));
++            if !self.0.empty_name {
++                put(&mut (*info).name, "Extended name");
++            }
++            put(&mut (*info).vendor, "Extended vendor");
++            put(&mut (*info).version, "2.0");
++            put(&mut (*info).sdkVersion, "VST 3.7.0");
++            put(&mut (*info).subCategories, "Instrument|Piano");
++            (*info).classFlags = u32::MAX;
++            self.0.extended_result
++        }
++    }
++
++    impl IPluginFactory3Trait for MockFactory<true> {
++        unsafe fn getClassInfoUnicode(&self, index: i32, info: *mut PClassInfoW) -> tresult {
++            self.0.record(format!("class.unicode.{index}"));
++            (*info).cid = self.0.cid(index);
++            if self.0.unicode_mismatch {
++                (*info).cid[0] = 1;
++            }
++            (*info).cardinality = i32::MAX;
++            put(&mut (*info).category, category(index));
++            if !self.0.empty_name {
++                put_wide(&mut (*info).name, "夜雨 🎹");
++            }
++            put_wide(&mut (*info).vendor, "音源厂商");
++            put_wide(&mut (*info).version, "3.0");
++            // Deliberately empty: successful empty metadata stays Some("").
++            put(&mut (*info).subCategories, "Instrument|Piano");
++            (*info).classFlags = 2;
++            self.0.unicode_result
++        }
++
++        unsafe fn setHostContext(&self, context: *mut FUnknown) -> tresult {
++            self.0.record("factory.context");
++            self.0
++                .context_received
++                .store(!context.is_null(), Ordering::Relaxed);
++            self.0.context_result
++        }
++    }
++
++    struct MockModule {
++        state: Arc<State>,
++        extended: bool,
++    }
++
++    impl VstModule for MockModule {
++        fn get_factory(&self) -> Result<*mut IPluginFactory> {
++            self.state.record("module.factory");
++            let pointer = if self.extended {
++                ComWrapper::new(MockFactory::<true>(self.state.clone()))
++                    .to_com_ptr::<IPluginFactory>()
++                    .unwrap()
++            } else {
++                ComWrapper::new(MockFactory::<false>(self.state.clone()))
++                    .to_com_ptr::<IPluginFactory>()
++                    .unwrap()
++            };
++            Ok(pointer.into_raw())
++        }
++
++        fn path(&self) -> &Path {
++            Path::new("mock.vst3")
++        }
++    }
++
++    impl Drop for MockModule {
++        fn drop(&mut self) {
++            self.state.record("module.drop");
++        }
++    }
++
++    fn probe(state: &Arc<State>, extended: bool) -> Result<FactoryMetadata> {
++        let result = probe_with_loader(Path::new("mock.vst3"), || {
++            Ok(Box::new(MockModule {
++                state: state.clone(),
++                extended,
++            }))
++        });
++        state.record("probe.returned");
++        assert_eq!(state.create_calls.load(Ordering::Relaxed), 0);
++        let trace = state.trace.lock().unwrap();
++        assert_eq!(
++            &trace[trace.len() - 3..],
++            ["factory.drop", "module.drop", "probe.returned"]
++        );
++        result
++    }
++
++    #[test]
++    fn unicode_factory_keeps_order_non_audio_class_and_unknown_runtime() {
++        let state = Arc::new(State::default());
++        let result = probe(&state, true).unwrap();
++        assert_eq!(result.path, Path::new("mock.vst3"));
++        assert_eq!(result.factory.vendor, "Factory vendor");
++        assert_eq!(result.factory.flags, 16);
++        assert_eq!(result.classes.len(), 2);
++        assert_eq!(result.classes[0].category, "Component Controller Class");
++        assert_eq!(result.classes[1].category, "Audio Module Class");
++        assert_eq!(
++            result.classes[0].class_id,
++            "00000000000000000000000000000001"
++        );
++        assert_eq!(
++            result.classes[1].class_id,
++            "00000000000000000000000000000002"
++        );
++        assert_eq!(result.classes[0].name, "夜雨 🎹");
++        assert_eq!(result.classes[0].vendor.as_deref(), Some("音源厂商"));
++        assert_eq!(result.classes[0].sdk_version.as_deref(), Some(""));
++        assert_eq!(result.classes[0].class_flags, Some(2));
++        assert_eq!(result.classes[0].cardinality, i32::MAX);
++        assert!(state.context_received.load(Ordering::Relaxed));
++        assert_eq!(
++            state.trace.lock().unwrap().as_slice(),
++            [
++                "module.factory",
++                "factory.context",
++                "factory.info",
++                "factory.count",
++                "class.base.0",
++                "class.unicode.0",
++                "class.base.1",
++                "class.unicode.1",
++                "factory.drop",
++                "module.drop",
++                "probe.returned",
++            ]
++        );
++        let json = serde_json::to_value(&result).unwrap();
++        for unknown in [
++            "has_gui",
++            "has_midi_input",
++            "audio_inputs",
++            "latency_samples",
++            "tail_samples",
++            "parameters",
++        ] {
++            assert!(json.get(unknown).is_none());
++            assert!(json["classes"][0].get(unknown).is_none());
++        }
++    }
++
++    #[test]
++    fn failed_unicode_getter_falls_back_to_factory2_without_creating_instance() {
++        let state = Arc::new(State {
++            unicode_result: kNotImplemented,
++            ..State::default()
++        });
++        let result = probe(&state, true).unwrap();
++        assert_eq!(result.classes[0].name, "Extended name");
++        assert_eq!(result.classes[0].version.as_deref(), Some("2.0"));
++        assert_eq!(result.classes[0].class_flags, Some(u32::MAX));
++        assert_eq!(
++            result.classes[0].sub_categories,
++            Some(vec!["Instrument".into(), "Piano".into()])
++        );
++        assert!(state
++            .trace
++            .lock()
++            .unwrap()
++            .iter()
++            .any(|event| event == "class.base.0"));
++    }
++
++    #[test]
++    fn failed_extended_getters_fall_back_to_factory1_with_explicit_unknowns() {
++        let state = Arc::new(State {
++            unicode_result: kNotImplemented,
++            extended_result: kNotImplemented,
++            ..State::default()
++        });
++        let result = probe(&state, true).unwrap();
++        let class = &result.classes[0];
++        assert_eq!(class.name, "Base name");
++        assert_eq!(class.vendor, None);
++        assert_eq!(class.version, None);
++        assert_eq!(class.sdk_version, None);
++        assert_eq!(class.sub_categories, None);
++        assert_eq!(class.class_flags, None);
++    }
++
++    #[test]
++    fn original_factory_without_optional_interfaces_is_supported() {
++        let state = Arc::new(State::default());
++        let result = probe(&state, false).unwrap();
++        assert_eq!(result.classes[0].name, "Base name");
++        assert_eq!(result.classes[0].class_flags, None);
++        assert!(!state.context_received.load(Ordering::Relaxed));
++    }
++
++    #[test]
++    fn negative_or_oversized_class_counts_do_not_enumerate() {
++        for count in [-1, MAX_FACTORY_CLASSES + 1, i32::MAX] {
++            let state = Arc::new(State {
++                count,
++                ..State::default()
++            });
++            let error = probe(&state, true).unwrap_err().to_string();
++            assert!(error.contains("class count"));
++            assert!(!state
++                .trace
++                .lock()
++                .unwrap()
++                .iter()
++                .any(|event| event.starts_with("class.")));
++        }
++    }
++
++    #[test]
++    fn zero_classes_is_empty_metadata_not_a_fallback_instrument() {
++        let state = Arc::new(State {
++            count: 0,
++            ..State::default()
++        });
++        assert!(probe(&state, true).unwrap().classes.is_empty());
++    }
++
++    #[test]
++    fn failed_factory_info_is_not_replaced_by_zero_initialized_metadata() {
++        let state = Arc::new(State {
++            factory_result: kNotImplemented,
++            ..State::default()
++        });
++        let error = probe(&state, true).unwrap_err().to_string();
++        assert!(error.contains("getFactoryInfo failed"));
++        assert!(!state
++            .trace
++            .lock()
++            .unwrap()
++            .iter()
++            .any(|event| event == "factory.count"));
++    }
++
++    #[test]
++    fn failed_host_context_does_not_continue_querying_factory() {
++        let state = Arc::new(State {
++            context_result: kInvalidArgument,
++            ..State::default()
++        });
++        let error = probe(&state, true).unwrap_err().to_string();
++        assert!(error.contains("setHostContext failed"));
++        assert!(!state
++            .trace
++            .lock()
++            .unwrap()
++            .iter()
++            .any(|event| event == "factory.info"));
++    }
++
++    #[test]
++    fn failed_base_class_getter_is_an_error_not_an_omitted_class() {
++        let state = Arc::new(State {
++            unicode_result: kNotImplemented,
++            extended_result: kNotImplemented,
++            base_result: kInvalidArgument,
++            ..State::default()
++        });
++        assert!(probe(&state, true)
++            .unwrap_err()
++            .to_string()
++            .contains("class 0 getClassInfo failed"));
++        assert!(!state
++            .trace
++            .lock()
++            .unwrap()
++            .iter()
++            .any(|event| event.starts_with("class.unicode")));
++    }
++
++    #[test]
++    fn successful_invalid_class_metadata_is_not_hidden_by_fallback() {
++        for state in [
++            State {
++                zero_uid: true,
++                ..State::default()
++            },
++            State {
++                empty_name: true,
++                ..State::default()
++            },
++            State {
++                duplicate_uid: true,
++                ..State::default()
++            },
++            State {
++                negative_cardinality: true,
++                ..State::default()
++            },
++        ] {
++            let state = Arc::new(state);
++            assert!(probe(&state, true).is_err());
++            assert!(!state
++                .trace
++                .lock()
++                .unwrap()
++                .iter()
++                .any(|event| event.starts_with("class.extended")));
++        }
++    }
++
++    #[test]
++    fn successful_advanced_getter_cannot_change_base_class_identity() {
++        for state in [
++            State {
++                unicode_mismatch: true,
++                ..State::default()
++            },
++            State {
++                unicode_result: kNotImplemented,
++                extended_mismatch: true,
++                ..State::default()
++            },
++        ] {
++            let state = Arc::new(state);
++            let error = probe(&state, true).unwrap_err().to_string();
++            assert!(error.contains("extended metadata disagrees"));
++            assert!(!state
++                .trace
++                .lock()
++                .unwrap()
++                .iter()
++                .any(|event| event == "class.base.1"));
++        }
++    }
++
++    #[test]
++    fn extended_category_and_cardinality_must_agree_but_name_may_be_localized() {
++        let state = Arc::new(State::default());
++        let result = probe(&state, false).unwrap();
++        let base = &result.classes[0];
++        let mut localized = base.clone();
++        localized.name = "本地名称".into();
++        assert!(consistent_class(0, base, localized).is_ok());
++        let mut wrong_category = base.clone();
++        wrong_category.category = "Audio Module Class".into();
++        assert!(consistent_class(0, base, wrong_category).is_err());
++        let mut wrong_cardinality = base.clone();
++        wrong_cardinality.cardinality = 1;
++        assert!(consistent_class(0, base, wrong_cardinality).is_err());
++    }
++
++    #[test]
++    fn fixed_buffers_are_bounded_even_without_nul_terminator() {
++        let ascii = [b'x' as c_char; 64];
++        assert_eq!(narrow(&ascii).len(), 64);
++        let unicode = [0x4e00; 64];
++        assert_eq!(wide(&unicode).chars().count(), 64);
++        assert!(sub_categories(&[0; 128]).is_empty());
++    }
 +}
 diff --git a/src/error.rs b/src/error.rs
 --- a/src/error.rs
@@ -1669,7 +2791,7 @@ diff --git a/src/fresh_helper/codec.rs b/src/fresh_helper/codec.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/fresh_helper/codec.rs
-@@ -0,0 +1,2150 @@
+@@ -0,0 +1,2367 @@
 +//! Closed, cooperative, allocation-accounted codec for the fresh-helper subset.
 +//!
 +//! No legacy serde audio/state decoder and no generic JSON value tree is used.
@@ -1685,7 +2807,7 @@ new file mode 100644
 +use super::request::{FlatInputView, RequestView, StateContextView};
 +use super::{Budget, ErrorKind, LimitSite, ReplyShape, MAX_LINE};
 +use crate::audio::{AudioBusBuffer, BusDirection, MediaType};
-+use crate::discovery::ClassCompatibility;
++use crate::discovery::{ClassCompatibility, FactoryClassMetadata, FactoryInfo, FactoryMetadata};
 +use crate::midi::MidiEvent;
 +use crate::parameters::Parameter;
 +use crate::plugin::{
@@ -1706,6 +2828,8 @@ new file mode 100644
 +const MAX_CHANNELS: usize = 32;
 +const MAX_FRAMES: usize = 4096;
 +const MAX_COMPAT: usize = 256;
++const MAX_FACTORY_CLASSES: usize = 4096;
++const MAX_FACTORY_SUB_CATEGORIES: usize = 256;
 +const MAX_DEPTH: usize = 16;
 +const MAX_PARAMETERS: usize = 4096;
 +const MAX_PARAMETER_TEXT: usize = 1024;
@@ -1789,6 +2913,9 @@ new file mode 100644
 +fn check_request(command: &RequestView<'_>, shape: &ReplyShape) -> Result<()> {
 +    check_shape(shape)?;
 +    match (command, shape) {
++        (RequestView::ProbeFactory { path }, ReplyShape::FactoryMetadata) => {
++            limit(path.len(), MAX_TEXT)?;
++        }
 +        (
 +            RequestView::LoadPlugin {
 +                path,
@@ -2159,6 +3286,11 @@ new file mode 100644
 +            RequestView::GetParameter { id } => {
 +                self.put(b"{\"GetParameter\":{\"id\":")?;
 +                self.number(id)?;
++                self.put(b"}}")?;
++            }
++            RequestView::ProbeFactory { path } => {
++                self.put(b"{\"ProbeFactory\":{\"path\":")?;
++                self.text(path)?;
 +                self.put(b"}}")?;
 +            }
 +            RequestView::LoadPlugin {
@@ -3278,6 +4410,208 @@ new file mode 100644
 +        }
 +        Ok(entries)
 +    }
++    fn optional_text(&mut self) -> Result<Option<String>> {
++        if self.peek()? == Some(b'n') {
++            self.literal(b"null")?;
++            Ok(None)
++        } else {
++            self.text(MAX_TEXT).map(Some)
++        }
++    }
++    fn factory_class_id(&mut self) -> Result<String> {
++        let token = self.token(MAX_ID)?;
++        if token.decoded != 32 {
++            return Err(ErrorKind::MalformedReply);
++        }
++        let mut cursor = TokenBytes::new(token);
++        let mut nonzero = false;
++        while let Some(byte) = cursor.next(self.budget)? {
++            if !matches!(byte, b'0'..=b'9' | b'A'..=b'F') {
++                return Err(ErrorKind::MalformedReply);
++            }
++            nonzero |= byte != b'0';
++        }
++        if !nonzero {
++            return Err(ErrorKind::MalformedReply);
++        }
++        if self.materialize {
++            owned_text(token, self.budget)
++        } else {
++            Ok(String::new())
++        }
++    }
++    fn factory_info(&mut self) -> Result<FactoryInfo> {
++        self.open(b'{')?;
++        let mut first = true;
++        let mut seen = 0;
++        let mut factory = FactoryInfo::default();
++        while self.next(&mut first, b'}')? {
++            let key = self.key()?;
++            if key.is(b"vendor") {
++                unique(&mut seen, 1)?;
++                factory.vendor = self.text(MAX_TEXT)?;
++            } else if key.is(b"url") {
++                unique(&mut seen, 2)?;
++                factory.url = self.text(MAX_TEXT)?;
++            } else if key.is(b"email") {
++                unique(&mut seen, 4)?;
++                factory.email = self.text(MAX_TEXT)?;
++            } else if key.is(b"flags") {
++                unique(&mut seen, 8)?;
++                factory.flags = self
++                    .number()?
++                    .parse()
++                    .map_err(|_| ErrorKind::MalformedReply)?;
++            } else {
++                return Err(ErrorKind::MalformedReply);
++            }
++        }
++        required(seen, 15)?;
++        Ok(factory)
++    }
++    fn factory_sub_categories(&mut self) -> Result<Option<Vec<String>>> {
++        if self.peek()? == Some(b'n') {
++            self.literal(b"null")?;
++            return Ok(None);
++        }
++        self.open(b'[')?;
++        let mut first = true;
++        let mut entries = Vec::new();
++        let mut count = 0usize;
++        while self.next(&mut first, b']')? {
++            if count == MAX_FACTORY_SUB_CATEGORIES {
++                return Err(ErrorKind::Limit);
++            }
++            let entry = self.text(MAX_TEXT)?;
++            if self.materialize {
++                self.budget.grow(&mut entries, count + 1)?;
++                entries.push(entry);
++            }
++            count += 1;
++        }
++        Ok(Some(entries))
++    }
++    fn factory_class(&mut self) -> Result<FactoryClassMetadata> {
++        self.open(b'{')?;
++        let mut first = true;
++        let mut seen = 0;
++        let (mut class_id, mut name, mut category) = (String::new(), String::new(), String::new());
++        let mut cardinality = 0;
++        let (mut vendor, mut version, mut sdk_version) = (None, None, None);
++        let (mut sub_categories, mut class_flags) = (None, None);
++        while self.next(&mut first, b'}')? {
++            let key = self.key()?;
++            if key.is(b"class_id") {
++                unique(&mut seen, 1)?;
++                class_id = self.factory_class_id()?;
++            } else if key.is(b"name") {
++                unique(&mut seen, 2)?;
++                name = self.text(MAX_TEXT)?;
++            } else if key.is(b"category") {
++                unique(&mut seen, 4)?;
++                category = self.text(MAX_TEXT)?;
++            } else if key.is(b"cardinality") {
++                unique(&mut seen, 8)?;
++                cardinality = self
++                    .number()?
++                    .parse()
++                    .map_err(|_| ErrorKind::MalformedReply)?;
++            } else if key.is(b"vendor") {
++                unique(&mut seen, 16)?;
++                vendor = self.optional_text()?;
++            } else if key.is(b"version") {
++                unique(&mut seen, 32)?;
++                version = self.optional_text()?;
++            } else if key.is(b"sdk_version") {
++                unique(&mut seen, 64)?;
++                sdk_version = self.optional_text()?;
++            } else if key.is(b"sub_categories") {
++                unique(&mut seen, 128)?;
++                sub_categories = self.factory_sub_categories()?;
++            } else if key.is(b"class_flags") {
++                unique(&mut seen, 256)?;
++                class_flags = if self.peek()? == Some(b'n') {
++                    self.literal(b"null")?;
++                    None
++                } else {
++                    Some(self.u32()?)
++                };
++            } else {
++                return Err(ErrorKind::MalformedReply);
++            }
++        }
++        // Every Option is explicit on this new wire: null means unknown;
++        // successful empty getters remain Some(empty), not guessed defaults.
++        required(seen, 511)?;
++        Ok(FactoryClassMetadata {
++            class_id,
++            name,
++            category,
++            cardinality,
++            vendor,
++            version,
++            sdk_version,
++            sub_categories,
++            class_flags,
++        })
++    }
++    fn factory_classes(&mut self) -> Result<Vec<FactoryClassMetadata>> {
++        self.open(b'[')?;
++        let mut first = true;
++        let mut classes = Vec::new();
++        let mut count = 0usize;
++        while self.next(&mut first, b']')? {
++            if count == MAX_FACTORY_CLASSES {
++                return Err(ErrorKind::Limit);
++            }
++            let class = self.factory_class()?;
++            if self.materialize {
++                self.budget.grow(&mut classes, count + 1)?;
++                classes.push(class);
++            }
++            count += 1;
++        }
++        Ok(classes)
++    }
++    fn factory_metadata(&mut self) -> Result<HostResponse> {
++        self.open(b'{')?;
++        let mut outer = true;
++        if !self.next(&mut outer, b'}')? || !self.key()?.is(b"metadata") {
++            return Err(ErrorKind::MalformedReply);
++        }
++        self.open(b'{')?;
++        let mut first = true;
++        let mut seen = 0;
++        let mut path = String::new();
++        let mut factory = FactoryInfo::default();
++        let mut classes = Vec::new();
++        while self.next(&mut first, b'}')? {
++            let key = self.key()?;
++            if key.is(b"path") {
++                unique(&mut seen, 1)?;
++                path = self.text(MAX_TEXT)?;
++            } else if key.is(b"factory") {
++                unique(&mut seen, 2)?;
++                factory = self.factory_info()?;
++            } else if key.is(b"classes") {
++                unique(&mut seen, 4)?;
++                classes = self.factory_classes()?;
++            } else {
++                return Err(ErrorKind::MalformedReply);
++            }
++        }
++        required(seen, 7)?;
++        if self.next(&mut outer, b'}')? {
++            return Err(ErrorKind::MalformedReply);
++        }
++        Ok(HostResponse::FactoryMetadata {
++            metadata: FactoryMetadata {
++                path: path.into(),
++                factory,
++                classes,
++            },
++        })
++    }
 +    fn plugin_info(&mut self) -> Result<HostResponse> {
 +        self.open(b'{')?;
 +        let mut first = true;
@@ -3368,6 +4702,11 @@ new file mode 100644
 +                return Err(ErrorKind::WrongReply);
 +            }
 +            self.metadata_response(&variant)?
++        } else if variant.is(b"FactoryMetadata") {
++            if *shape != ReplyShape::FactoryMetadata {
++                return Err(ErrorKind::WrongReply);
++            }
++            self.factory_metadata()?
 +        } else if variant.is(b"PluginInfo") {
 +            if *shape != ReplyShape::PluginInfo {
 +                return Err(ErrorKind::WrongReply);
@@ -3824,7 +5163,7 @@ diff --git a/src/fresh_helper/codec_tests.rs b/src/fresh_helper/codec_tests.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/fresh_helper/codec_tests.rs
-@@ -0,0 +1,3470 @@
+@@ -0,0 +1,3876 @@
 +//! Plugin-free source fixtures. These tests must not be compiled or executed
 +//! before the source archive, independent review and explicit execution gate.
 +use super::super::{budget_test_hooks, pump, Cancellation, LimitEvidence, LimitSite, MAX_PAYLOAD};
@@ -3925,6 +5264,412 @@ new file mode 100644
 +
 +fn wire(response: &HostResponse) -> Vec<u8> {
 +    serde_json::to_vec(response).unwrap()
++}
++
++fn factory_reply() -> HostResponse {
++    let unknown = FactoryClassMetadata {
++        class_id: "0123456789ABCDEF0123456789ABCDEF".into(),
++        name: "F1 declaration".into(),
++        category: "Audio Module Class".into(),
++        cardinality: i32::MAX,
++        vendor: None,
++        version: None,
++        sdk_version: None,
++        sub_categories: None,
++        class_flags: None,
++    };
++    let mut empty = unknown.clone();
++    empty.class_id = "FEDCBA9876543210FEDCBA9876543210".into();
++    empty.name = "Successful empty getters 🦀".into();
++    empty.vendor = Some(String::new());
++    empty.version = Some(String::new());
++    empty.sdk_version = Some(String::new());
++    empty.sub_categories = Some(Vec::new());
++    empty.class_flags = Some(u32::MAX);
++    HostResponse::FactoryMetadata {
++        metadata: FactoryMetadata {
++            path: "factory/\"\\\n🦀.vst3".into(),
++            factory: FactoryInfo {
++                vendor: "Factory vendor".into(),
++                url: String::new(),
++                email: "factory@example.invalid".into(),
++                flags: i32::MIN,
++            },
++            classes: vec![unknown, empty],
++        },
++    }
++}
++
++#[test]
++fn factory_request_and_typed_reply_preserve_serde_wire_order_and_unknowns() {
++    assert_command(
++        &HostCommand::ProbeFactory {
++            path: "factory/\"\\\n🦀.vst3".into(),
++        },
++        &ReplyShape::FactoryMetadata,
++    );
++    let expected = factory_reply();
++    let bytes = wire(&expected);
++    let mut budget = new_budget();
++    assert!(
++        allocation_free(|| preflight(&bytes, &ReplyShape::FactoryMetadata, &mut budget))
++            .unwrap()
++            .is_none()
++    );
++    assert_eq!(budget.live, 0);
++    let actual = decode(&bytes, &ReplyShape::FactoryMetadata, &mut budget).unwrap();
++    assert_eq!(wire(&actual), bytes);
++    let HostResponse::FactoryMetadata { metadata } = actual else {
++        panic!("closed factory shape");
++    };
++    assert_eq!(metadata.classes[0].vendor, None);
++    assert_eq!(metadata.classes[0].sub_categories, None);
++    assert_eq!(metadata.classes[1].vendor.as_deref(), Some(""));
++    assert_eq!(metadata.classes[1].sub_categories, Some(Vec::new()));
++    assert_eq!(metadata.classes[1].class_flags, Some(u32::MAX));
++    assert!(
++        budget.live >= metadata.classes.capacity() * std::mem::size_of::<FactoryClassMetadata>()
++    );
++}
++
++#[test]
++fn factory_wire_rejects_unknown_missing_duplicate_and_wrong_typed_fields() {
++    let value = serde_json::to_value(factory_reply()).unwrap();
++    for field in ["path", "factory", "classes"] {
++        let mut bad = value.clone();
++        bad["FactoryMetadata"]["metadata"]
++            .as_object_mut()
++            .unwrap()
++            .remove(field);
++        error(
++            &serde_json::to_vec(&bad).unwrap(),
++            &ReplyShape::FactoryMetadata,
++            ErrorKind::MalformedReply,
++        );
++    }
++    for field in ["vendor", "url", "email", "flags"] {
++        let mut bad = value.clone();
++        bad["FactoryMetadata"]["metadata"]["factory"]
++            .as_object_mut()
++            .unwrap()
++            .remove(field);
++        error(
++            &serde_json::to_vec(&bad).unwrap(),
++            &ReplyShape::FactoryMetadata,
++            ErrorKind::MalformedReply,
++        );
++    }
++    for field in [
++        "class_id",
++        "name",
++        "category",
++        "cardinality",
++        "vendor",
++        "version",
++        "sdk_version",
++        "sub_categories",
++        "class_flags",
++    ] {
++        let mut bad = value.clone();
++        bad["FactoryMetadata"]["metadata"]["classes"][0]
++            .as_object_mut()
++            .unwrap()
++            .remove(field);
++        error(
++            &serde_json::to_vec(&bad).unwrap(),
++            &ReplyShape::FactoryMetadata,
++            ErrorKind::MalformedReply,
++        );
++    }
++    for (field, replacement) in [
++        ("vendor", serde_json::json!(42)),
++        ("cardinality", serde_json::json!(2147483648_u64)),
++        ("class_flags", serde_json::json!(-1)),
++        ("sub_categories", serde_json::json!(false)),
++        ("has_gui", serde_json::json!(true)),
++    ] {
++        let mut bad = value.clone();
++        bad["FactoryMetadata"]["metadata"]["classes"][0][field] = replacement;
++        error(
++            &serde_json::to_vec(&bad).unwrap(),
++            &ReplyShape::FactoryMetadata,
++            ErrorKind::MalformedReply,
++        );
++    }
++    let bytes = String::from_utf8(wire(&factory_reply())).unwrap();
++    for bad in [
++        bytes.replacen("\"metadata\":{", "\"metadata\":{},\"metadata\":{", 1),
++        bytes.replacen("\"classes\":[", "\"classes\":[],\"classes\":[", 1),
++        bytes.replacen("\"vendor\":null", "\"vendor\":null,\"vendor\":null", 1),
++    ] {
++        error(
++            bad.as_bytes(),
++            &ReplyShape::FactoryMetadata,
++            ErrorKind::MalformedReply,
++        );
++    }
++    error(
++        &wire(&factory_reply()),
++        &ReplyShape::PluginInfo,
++        ErrorKind::WrongReply,
++    );
++    error(
++        &wire(&info(Vec::new())),
++        &ReplyShape::FactoryMetadata,
++        ErrorKind::WrongReply,
++    );
++}
++
++#[test]
++fn factory_path_class_id_text_classes_and_subcategories_have_closed_limits() {
++    assert_command(
++        &HostCommand::ProbeFactory {
++            path: "x".repeat(MAX_TEXT),
++        },
++        &ReplyShape::FactoryMetadata,
++    );
++    assert_eq!(
++        encode(
++            &HostCommand::ProbeFactory {
++                path: "x".repeat(MAX_TEXT + 1)
++            },
++            &ReplyShape::FactoryMetadata,
++            &mut new_budget()
++        )
++        .unwrap_err(),
++        ErrorKind::Limit
++    );
++    assert_eq!(
++        encode(
++            &HostCommand::ProbeFactory { path: "x".into() },
++            &ReplyShape::PluginInfo,
++            &mut new_budget()
++        )
++        .unwrap_err(),
++        ErrorKind::Shape
++    );
++    let HostResponse::FactoryMetadata { mut metadata } = factory_reply() else {
++        unreachable!()
++    };
++    let class = metadata.classes.remove(0);
++    metadata.classes = vec![class.clone(); MAX_FACTORY_CLASSES];
++    let accepted = HostResponse::FactoryMetadata {
++        metadata: metadata.clone(),
++    };
++    assert!(decode(
++        &wire(&accepted),
++        &ReplyShape::FactoryMetadata,
++        &mut new_budget()
++    )
++    .is_ok());
++    metadata.classes.push(class.clone());
++    error(
++        &wire(&HostResponse::FactoryMetadata { metadata }),
++        &ReplyShape::FactoryMetadata,
++        ErrorKind::Limit,
++    );
++    for (field, accepted, rejected) in [
++        (
++            "path",
++            serde_json::json!("x".repeat(MAX_TEXT)),
++            serde_json::json!("x".repeat(MAX_TEXT + 1)),
++        ),
++        (
++            "name",
++            serde_json::json!("x".repeat(MAX_TEXT)),
++            serde_json::json!("x".repeat(MAX_TEXT + 1)),
++        ),
++        (
++            "vendor",
++            serde_json::json!("x".repeat(MAX_TEXT)),
++            serde_json::json!("x".repeat(MAX_TEXT + 1)),
++        ),
++        (
++            "sub_categories",
++            serde_json::json!(vec!["x"; MAX_FACTORY_SUB_CATEGORIES]),
++            serde_json::json!(vec!["x"; MAX_FACTORY_SUB_CATEGORIES + 1]),
++        ),
++    ] {
++        let mut value = serde_json::to_value(factory_reply()).unwrap();
++        if field == "path" {
++            value["FactoryMetadata"]["metadata"][field] = accepted;
++        } else {
++            value["FactoryMetadata"]["metadata"]["classes"][0][field] = accepted;
++        }
++        assert!(decode(
++            &serde_json::to_vec(&value).unwrap(),
++            &ReplyShape::FactoryMetadata,
++            &mut new_budget()
++        )
++        .is_ok());
++        if field == "path" {
++            value["FactoryMetadata"]["metadata"][field] = rejected;
++        } else {
++            value["FactoryMetadata"]["metadata"]["classes"][0][field] = rejected;
++        }
++        error(
++            &serde_json::to_vec(&value).unwrap(),
++            &ReplyShape::FactoryMetadata,
++            ErrorKind::Limit,
++        );
++    }
++}
++
++#[test]
++fn factory_class_id_must_be_nonzero_canonical_uppercase_hex() {
++    for id in [
++        String::new(),
++        "0".repeat(32),
++        "a".repeat(32),
++        "G".repeat(32),
++        "1".repeat(31),
++        "1".repeat(33),
++        "1".repeat(MAX_ID),
++    ] {
++        let mut value = serde_json::to_value(factory_reply()).unwrap();
++        value["FactoryMetadata"]["metadata"]["classes"][0]["class_id"] = serde_json::json!(id);
++        let bytes = serde_json::to_vec(&value).unwrap();
++        let mut budget = new_budget();
++        assert!(matches!(
++            allocation_free(|| preflight(&bytes, &ReplyShape::FactoryMetadata, &mut budget)),
++            Err(ErrorKind::MalformedReply)
++        ));
++        assert_eq!(budget.live, 0);
++    }
++    let mut value = serde_json::to_value(factory_reply()).unwrap();
++    value["FactoryMetadata"]["metadata"]["classes"][0]["class_id"] =
++        serde_json::json!("1".repeat(MAX_ID + 1));
++    error(
++        &serde_json::to_vec(&value).unwrap(),
++        &ReplyShape::FactoryMetadata,
++        ErrorKind::Limit,
++    );
++}
++
++#[test]
++fn factory_codec_checks_cancel_deadline_allocation_and_payload_budget() {
++    let command = HostCommand::ProbeFactory { path: "x".into() };
++    let bytes = wire(&factory_reply());
++    for cancelled in [false, true] {
++        let mut budget = new_budget();
++        if cancelled {
++            budget.cancel.cancelled.store(true, Ordering::Release);
++        } else {
++            budget.deadline = Instant::now();
++        }
++        let expected = if cancelled {
++            ErrorKind::Cancelled
++        } else {
++            ErrorKind::Deadline
++        };
++        assert_eq!(
++            allocation_free(|| encode(&command, &ReplyShape::FactoryMetadata, &mut budget))
++                .unwrap_err(),
++            expected
++        );
++        assert_eq!(
++            allocation_free(|| decode(&bytes, &ReplyShape::FactoryMetadata, &mut budget))
++                .unwrap_err(),
++            expected
++        );
++        assert_eq!(budget.live, 0);
++    }
++    let mut budget = new_budget();
++    budget.reserve(MAX_PAYLOAD).unwrap();
++    assert_eq!(
++        decode(&bytes, &ReplyShape::FactoryMetadata, &mut budget).unwrap_err(),
++        ErrorKind::Limit
++    );
++    assert_eq!(budget.live, MAX_PAYLOAD);
++    let mut budget = new_budget();
++    let _hook = budget_test_hooks::fail_next_allocation();
++    assert_eq!(
++        decode(&bytes, &ReplyShape::FactoryMetadata, &mut budget).unwrap_err(),
++        ErrorKind::Allocation
++    );
++    assert_eq!(budget.live, 0);
++}
++
++#[test]
++fn factory_empty_list_and_nonempty_subcategories_preserve_exact_order() {
++    let HostResponse::FactoryMetadata { mut metadata } = factory_reply() else {
++        unreachable!()
++    };
++    metadata.classes.clear();
++    let empty = HostResponse::FactoryMetadata {
++        metadata: metadata.clone(),
++    };
++    assert_eq!(
++        wire(
++            &decode(
++                &wire(&empty),
++                &ReplyShape::FactoryMetadata,
++                &mut new_budget()
++            )
++            .unwrap()
++        ),
++        wire(&empty)
++    );
++    let HostResponse::FactoryMetadata { mut metadata } = factory_reply() else {
++        unreachable!()
++    };
++    metadata.classes[0].sub_categories = Some(vec!["Instrument".into(), "Synth".into(), "".into()]);
++    let expected = HostResponse::FactoryMetadata { metadata };
++    assert_eq!(
++        wire(
++            &decode(
++                &wire(&expected),
++                &ReplyShape::FactoryMetadata,
++                &mut new_budget()
++            )
++            .unwrap()
++        ),
++        wire(&expected)
++    );
++}
++
++#[test]
++fn factory_large_reply_cooperatively_cancels_and_expires_in_both_decode_passes() {
++    let HostResponse::FactoryMetadata { mut metadata } = factory_reply() else {
++        unreachable!()
++    };
++    metadata.classes[0].name = "long 🦀 text".repeat(2048);
++    metadata.classes[0].sub_categories = Some(vec!["Instrument".into(); 128]);
++    let bytes = wire(&HostResponse::FactoryMetadata { metadata });
++    let validation_checks = {
++        let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
++        assert!(
++            preflight(&bytes, &ReplyShape::FactoryMetadata, &mut new_budget())
++                .unwrap()
++                .is_none()
++        );
++        budget_test_hooks::checks()
++    };
++    let all_checks = {
++        let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
++        decode(&bytes, &ReplyShape::FactoryMetadata, &mut new_budget()).unwrap();
++        budget_test_hooks::checks()
++    };
++    assert!(all_checks > validation_checks + 2);
++    for at in [2, validation_checks, validation_checks + 2, all_checks] {
++        for expired in [false, true] {
++            let mut budget = new_budget();
++            let _hook = if expired {
++                budget_test_hooks::expire_at_check(at)
++            } else {
++                budget_test_hooks::cancel_at_check(at)
++            };
++            assert_eq!(
++                decode(&bytes, &ReplyShape::FactoryMetadata, &mut budget).unwrap_err(),
++                if expired {
++                    ErrorKind::Deadline
++                } else {
++                    ErrorKind::Cancelled
++                }
++            );
++            assert_eq!(budget.live, 0);
++        }
++    }
 +}
 +
 +fn audio_wire(channels: Vec<Vec<f32>>) -> Vec<u8> {
@@ -7416,7 +9161,7 @@ diff --git a/src/fresh_helper/mod.rs b/src/fresh_helper/mod.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/fresh_helper/mod.rs
-@@ -0,0 +1,830 @@
+@@ -0,0 +1,846 @@
 +//! Retained owner-thread fresh-child transport shared on Linux and Windows.
 +//!
 +//! Ordinary default-class probes and experimental strict clients share this
@@ -7521,6 +9266,7 @@ new file mode 100644
 +
 +#[derive(Debug, Clone, PartialEq, Eq)]
 +pub(crate) enum ReplyShape {
++    FactoryMetadata,
 +    PluginInfo,
 +    Success,
 +    State,
@@ -7919,7 +9665,12 @@ new file mode 100644
 +        };
 +        let result = (|| {
 +            budget.check()?;
-+            let request = codec::encode_view(&request()?, &expected, &mut budget)?;
++            let request = request()?;
++            let factory_path = match request {
++                RequestView::ProbeFactory { path } => Some(path),
++                _ => None,
++            };
++            let request = codec::encode_view(&request, &expected, &mut budget)?;
 +            let request_charge = request.capacity();
 +            let owner = self.owner.as_mut().ok_or(ErrorKind::Terminal)?;
 +            pump::ensure_no_reply(owner, &budget)?;
@@ -7929,6 +9680,16 @@ new file mode 100644
 +            budget.release(request_charge);
 +            let response = pump::read_reply(owner, &mut budget)?;
 +            let reply = codec::decode(&response.bytes, &expected, &mut budget)?;
++            if let (
++                Some(path),
++                codec::DecodedReply::Response(HostResponse::FactoryMetadata { metadata }),
++            ) = (factory_path, &reply)
++            {
++                if metadata.path != std::path::Path::new(path) {
++                    return Err(ErrorKind::WrongReply);
++                }
++                budget.check()?;
++            }
 +            let child_exited = if matches!(reply, codec::DecodedReply::Response(_)) {
 +                let exited = pump::observe_child(owner)?;
 +                budget.check()?;
@@ -9493,7 +11254,7 @@ diff --git a/src/fresh_helper/request.rs b/src/fresh_helper/request.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/fresh_helper/request.rs
-@@ -0,0 +1,216 @@
+@@ -0,0 +1,220 @@
 +//! Synchronous, stack-only view of the deliberately closed request subset.
 +//!
 +//! Caller-owned state, audio and text remain borrowed through validation, size
@@ -9552,6 +11313,9 @@ new file mode 100644
 +
 +#[derive(Debug, Clone, Copy)]
 +pub(crate) enum RequestView<'a> {
++    ProbeFactory {
++        path: &'a str,
++    },
 +    LoadPlugin {
 +        path: &'a str,
 +        sample_rate: f64,
@@ -9628,6 +11392,7 @@ new file mode 100644
 +
 +    fn try_from(command: &'a HostCommand) -> Result<Self, Self::Error> {
 +        Ok(match command {
++            HostCommand::ProbeFactory { path } => Self::ProbeFactory { path },
 +            HostCommand::LoadPlugin {
 +                path,
 +                sample_rate,
@@ -11822,7 +13587,7 @@ diff --git a/src/helper_lifecycle.rs b/src/helper_lifecycle.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/helper_lifecycle.rs
-@@ -0,0 +1,351 @@
+@@ -0,0 +1,352 @@
 +//! Shared retained-helper evidence used by ordinary default-class probes and
 +//! experimental strict clients. Transport, delivery and cleanup facts have one
 +//! definition and conversion; neither API guesses reap from process absence.
@@ -11911,6 +13676,7 @@ new file mode 100644
 +impl RequestContext {
 +    pub(crate) fn from_request(request: RequestView<'_>) -> Self {
 +        let operation = match request {
++            RequestView::ProbeFactory { .. } => "ProbeFactory",
 +            RequestView::LoadPlugin { .. } => "LoadPlugin",
 +            RequestView::LoadState { .. } => "LoadState",
 +            RequestView::SaveState => "SaveState",
@@ -36249,12 +38015,10 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
  
  /// Whether a command belongs to the slow class — module load and state I/O — which gets
  /// [`DEFAULT_SLOW_COMMAND_TIMEOUT`] instead of the per-block response deadline.
-@@ -424,6 +474,68 @@
- fn clamped_bus_count<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i32, D::Error> {
-     let raw = i32::deserialize(deserializer)?;
+@@ -426,6 +476,68 @@
      Ok(raw.clamp(0, MAX_WIRE_BUSES))
-+}
-+
+ }
+ 
 +/// Closed policy for the already-reviewed actual Kontakt factory only.
 +#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 +pub enum SelectedMetadataPolicy {
@@ -36315,10 +38079,24 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
 +    pub latency_samples: u32,
 +    /// Exact processor tail, retaining zero and u32::MAX.
 +    pub tail_samples: u32,
- }
- 
++}
++
  /// Commands that can be sent to the isolated plugin process.
-@@ -455,7 +567,12 @@
+ ///
+ /// This enum is the single source of truth for the isolation IPC protocol — the
+@@ -433,6 +545,11 @@
+ /// can never drift apart.
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ pub enum HostCommand {
++    /// Read live factory declarations without creating any plugin class.
++    ProbeFactory {
++        /// Path to the `.vst3` bundle. Requires an otherwise unloaded helper.
++        path: String,
++    },
+     /// Load a plugin from the specified path, configured for the given audio settings.
+     LoadPlugin {
+         /// Path to the `.vst3` bundle.
+@@ -455,7 +572,12 @@
      },
      /// Unload the current plugin
      UnloadPlugin,
@@ -36332,7 +38110,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
      CreateGui,
      /// Close plugin GUI
      CloseGui,
-@@ -549,6 +666,19 @@
+@@ -549,6 +671,19 @@
      },
      /// Release all notes currently tracked by the plugin.
      MidiPanic,
@@ -36352,7 +38130,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
      /// Process one block of audio. `inputs` is per-channel; `frames` is the block length.
      Process {
          /// Per-channel input samples (`[channel][frame]`), carried as base64 bit patterns.
-@@ -556,6 +686,9 @@
+@@ -556,6 +691,9 @@
          inputs: Vec<Vec<f32>>,
          /// Number of frames in this block.
          frames: u32,
@@ -36362,7 +38140,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
      },
      /// Process one block while preserving every VST3 audio bus.
      ProcessBuses {
-@@ -565,9 +698,18 @@
+@@ -565,9 +703,18 @@
          outputs: Vec<crate::audio::AudioBusConfig>,
          /// Number of frames in this block.
          frames: u32,
@@ -36381,7 +38159,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
      /// Serialize the plugin's current state to an opaque byte blob.
      SaveState,
      /// Restore the plugin's state from a blob previously returned by `SaveState`.
-@@ -748,6 +890,8 @@
+@@ -748,6 +895,8 @@
      TakeParameterChanges,
      /// Drain ordered `IComponentHandler2` requests from the helper.
      TakeHostNotifications,
@@ -36390,10 +38168,23 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
      /// Dispatch and drain owned VST3 data-exchange blocks from the helper.
      TakeDataExchangeBlocks,
      /// Execute an item from a pending plugin-provided context menu.
-@@ -788,6 +932,16 @@
+@@ -773,6 +922,11 @@
+ /// Responses from the isolated plugin process
+ #[derive(Debug, Serialize, Deserialize)]
+ pub enum HostResponse {
++    /// Live factory declarations after normal module retirement; no runtime capabilities.
++    FactoryMetadata {
++        /// Factory identity and classes in their declared order, not `PluginInfo`.
++        metadata: crate::discovery::FactoryMetadata,
++    },
+     /// Operation succeeded with message
+     Success {
+         /// Human-readable success detail.
+@@ -787,6 +941,16 @@
+     Crashed {
          /// Crash detail.
          message: String,
-     },
++    },
 +    /// Pure reset-origin capability and current processing status.
 +    ResetOriginSupport {
 +        /// Contract version, configured frame limit, and processing status.
@@ -36403,11 +38194,10 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
 +    ResetOriginReport {
 +        /// Discard counts and loss/error diagnostics, without process output values.
 +        report: crate::plugin::ResetOriginReport,
-+    },
+     },
      /// Per-channel audio output data (`[channel][frame]`), plus any MIDI the plugin
      /// emitted during the block (arpeggiators, MPE, etc.).
-     AudioOutput {
-@@ -795,19 +949,74 @@
+@@ -795,19 +959,74 @@
          #[serde(with = "audio_codec")]
          outputs: Vec<Vec<f32>>,
          /// Owned VST3 events the plugin emitted this block, in order.
@@ -36482,7 +38272,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
      },
      /// A single parameter value (normalized).
      ParameterValue {
-@@ -838,6 +1047,11 @@
+@@ -838,6 +1057,11 @@
          width: i32,
          /// Editor height in pixels.
          height: i32,
@@ -36494,7 +38284,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
      },
      /// Plugin information
      PluginInfo {
-@@ -898,6 +1112,11 @@
+@@ -898,6 +1122,11 @@
          /// The queued host requests.
          notifications: Vec<crate::plugin::HostNotification>,
      },
@@ -36506,7 +38296,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
      /// Owned VST3 data-exchange blocks drained from the helper.
      DataExchangeBlocks {
          /// Block snapshots, in delivery order.
-@@ -969,58 +1188,209 @@
+@@ -969,58 +1198,209 @@
  /// descriptor 1 at stderr, so plugin output is merged into the helper's stderr instead. Call
  /// it once, before any plugin code can run.
  ///
@@ -36756,7 +38546,60 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
      pub fn claim() -> Self {
          Self {
              inner: std::io::stdout(),
-@@ -1660,6 +2030,8 @@
+@@ -1656,10 +2036,61 @@
+     use crate::midi::{MidiChannel, MidiEvent};
+ 
+     #[test]
++    fn factory_probe_command_and_distinct_metadata_response_round_trip() {
++        let command = HostCommand::ProbeFactory {
++            path: "factory-only.vst3".into(),
++        };
++        let encoded = serde_json::to_string(&command).unwrap();
++        assert_eq!(encoded, r#"{"ProbeFactory":{"path":"factory-only.vst3"}}"#);
++        assert!(matches!(
++            serde_json::from_str::<HostCommand>(&encoded).unwrap(),
++            HostCommand::ProbeFactory { path } if path == "factory-only.vst3"
++        ));
++
++        let metadata = crate::discovery::FactoryMetadata {
++            path: "factory-only.vst3".into(),
++            factory: crate::discovery::FactoryInfo {
++                vendor: "Factory".into(),
++                url: String::new(),
++                email: String::new(),
++                flags: 16,
++            },
++            classes: vec![crate::discovery::FactoryClassMetadata {
++                class_id: "00112233445566778899AABBCCDDEEFF".into(),
++                name: "夜雨 🎹".into(),
++                category: "Component Controller Class".into(),
++                cardinality: i32::MAX,
++                vendor: None,
++                version: Some(String::new()),
++                sdk_version: None,
++                sub_categories: Some(Vec::new()),
++                class_flags: Some(u32::MAX),
++            }],
++        };
++        let value = serde_json::to_value(HostResponse::FactoryMetadata {
++            metadata: metadata.clone(),
++        })
++        .unwrap();
++        assert!(value.get("PluginInfo").is_none());
++        let class = &value["FactoryMetadata"]["metadata"]["classes"][0];
++        assert!(class["vendor"].is_null());
++        assert_eq!(class["version"], "");
++        assert_eq!(class["sub_categories"], serde_json::json!([]));
++        let HostResponse::FactoryMetadata { metadata: decoded } =
++            serde_json::from_value(value).unwrap()
++        else {
++            panic!("factory metadata must not be decoded as runtime PluginInfo");
++        };
++        assert_eq!(decoded, metadata);
++    }
++
++    #[test]
+     fn audio_output_carries_midi_across_the_wire() {
          // The Process response carries emitted MIDI alongside audio; check the variant
          // round-trips through the JSON transport host and helper share.
          let resp = HostResponse::AudioOutput {
@@ -36765,7 +38608,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
              outputs: vec![vec![0.0, 0.5], vec![-0.5, 0.0]],
              output_events: vec![
                  MidiEvent::NoteOn {
-@@ -1682,6 +2054,7 @@
+@@ -1682,6 +2113,7 @@
              HostResponse::AudioOutput {
                  outputs,
                  output_events,
@@ -36773,7 +38616,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
              } => {
                  assert_eq!(outputs, vec![vec![0.0, 0.5], vec![-0.5, 0.0]]);
                  assert_eq!(output_events.len(), 2);
-@@ -1809,6 +2182,8 @@
+@@ -1809,6 +2241,8 @@
          }
  
          let response = HostResponse::AudioOutput {
@@ -36782,7 +38625,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
              outputs: Vec::new(),
              output_events: vec![event.clone()],
          };
-@@ -2108,6 +2483,32 @@
+@@ -2108,6 +2542,32 @@
          {
              HostResponse::ParameterEdits { edits: back } => assert_eq!(back, edits),
              other => panic!("ParameterEdits round-trip changed the variant: {other:?}"),
@@ -36815,7 +38658,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
          }
      }
  
-@@ -2339,6 +2740,8 @@
+@@ -2339,6 +2799,8 @@
              f32::MIN_POSITIVE,
          ];
          let resp = HostResponse::AudioOutput {
@@ -36824,7 +38667,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
              outputs: vec![channel.clone(), vec![]],
              output_events: Vec::new(),
          };
-@@ -2360,12 +2763,13 @@
+@@ -2360,12 +2822,13 @@
  
          // The same for the host -> helper direction.
          let cmd = HostCommand::Process {
@@ -36839,7 +38682,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
                  assert_eq!(frames, 2);
                  assert!(inputs[0][0].is_nan());
                  assert_eq!(inputs[0][1], 1.0);
-@@ -2377,6 +2781,7 @@
+@@ -2377,6 +2840,7 @@
      #[test]
      fn bus_audio_wire_preserves_bus_boundaries_activation_and_sample_bits() {
          let command = HostCommand::ProcessBuses {
@@ -36847,7 +38690,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
              inputs: vec![
                  crate::audio::AudioBusBuffer {
                      active: true,
-@@ -2405,6 +2810,7 @@
+@@ -2405,6 +2869,7 @@
                  inputs,
                  outputs,
                  frames,
@@ -36855,7 +38698,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
              } => {
                  assert_eq!(frames, 2);
                  assert_eq!(inputs.len(), 2);
-@@ -2484,6 +2890,8 @@
+@@ -2484,6 +2949,8 @@
              .collect();
          let plain = serde_json::to_string(&block).expect("plain json").len();
          let encoded = serde_json::to_string(&HostResponse::AudioOutput {
@@ -36864,7 +38707,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
              outputs: block,
              output_events: Vec::new(),
          })
-@@ -2568,8 +2976,21 @@
+@@ -2568,8 +3035,21 @@
              class_id: None,
          }));
          assert!(!is_slow_command(&HostCommand::Process {
@@ -36886,7 +38729,7 @@ diff --git a/src/process_isolation.rs b/src/process_isolation.rs
          }));
          assert!(!is_slow_command(&HostCommand::GetAllParameters));
      }
-@@ -2803,3 +3224,122 @@
+@@ -2803,3 +3283,122 @@
          })
      }
  }

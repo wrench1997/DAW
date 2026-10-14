@@ -168,7 +168,70 @@ fn source_project() -> Project {
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 pub(in crate::app) static FIXTURE_POISONED: AtomicBool = AtomicBool::new(false);
-pub(in crate::app) static FIXTURE_ADMISSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static FIXTURE_ADMISSION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn wait_for_fixture_admission<'a>(
+    admission: &'a std::sync::Mutex<()>,
+    poisoned: &AtomicBool,
+) -> std::sync::MutexGuard<'a, ()> {
+    // This is queueing before creating an App, callback, worker or directory.
+    // A wall-clock deadline here charges all earlier serial tests to this one
+    // and can expire on a healthy parallel CI runner. Owned work still has its
+    // existing bounded waits and retained cleanup; sticky cleanup failure must
+    // reject waiters even when the failed owner keeps the admission guard.
+    loop {
+        assert!(
+            !poisoned.load(Ordering::Acquire),
+            "prior App fixture cleanup is unproven; its owners/files remain retained"
+        );
+        let guard = match admission.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
+        if let Some(guard) = guard {
+            assert!(
+                !poisoned.load(Ordering::Acquire),
+                "prior App fixture cleanup is unproven; its owners/files remain retained"
+            );
+            return guard;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+pub(in crate::app) fn fixture_admission() -> std::sync::MutexGuard<'static, ()> {
+    wait_for_fixture_admission(&FIXTURE_ADMISSION, &FIXTURE_POISONED)
+}
+
+#[test]
+fn admission_waiter_refuses_sticky_cleanup_failure_without_taking_retained_guard() {
+    let admission = std::sync::Mutex::new(());
+    let poisoned = AtomicBool::new(false);
+    let held = admission.lock().unwrap();
+    let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+    let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| {
+            entered_tx.send(()).unwrap();
+            let refused = std::panic::catch_unwind(|| {
+                let _guard = wait_for_fixture_admission(&admission, &poisoned);
+            })
+            .is_err();
+            finished_tx.send(refused).unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        poisoned.store(true, Ordering::Release);
+        assert!(finished_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        waiter.join().unwrap();
+        // Failure never needs to unlock, drop or replace the retained owner.
+        assert!(matches!(
+            admission.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        drop(held);
+    });
+}
 
 #[derive(Default)]
 struct OwnedApp(Option<Box<CitrusApp>>);
@@ -286,24 +349,7 @@ impl Fixture {
         Self::new_configured(0, false, true)
     }
     fn new_configured(reported_tail: u32, tight_note_off: bool, observe_whole_drop: bool) -> Self {
-        let admission_deadline = Instant::now() + Duration::from_secs(10);
-        let admission = loop {
-            assert!(
-                Instant::now() < admission_deadline,
-                "App fixture admission timed out before any source was spawned"
-            );
-            assert!(
-                !FIXTURE_POISONED.load(Ordering::Acquire),
-                "prior App fixture cleanup is unproven; its owners/files remain retained"
-            );
-            match FIXTURE_ADMISSION.try_lock() {
-                Ok(guard) => break guard,
-                Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    std::thread::sleep(Duration::from_millis(1))
-                }
-            }
-        };
+        let admission = fixture_admission();
         let whole_drop_observer = observe_whole_drop.then(|| {
             crate::genuine_app_observer::ObservationRun::install()
                 .expect("one serial Fixture owns the actual shutdown observations")

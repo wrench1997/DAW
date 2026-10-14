@@ -1,12 +1,15 @@
 //! Retained, owner-thread default-class metadata probes on Linux and Windows.
 //!
-//! This ordinary process-isolation API loads exactly once with the scanner's
-//! original default class and 48 kHz/Q128 configuration. It exposes no editor,
+//! This ordinary process-isolation API permits one factory-only query or one
+//! load with the scanner's original default class and 48 kHz/Q128 configuration.
+//! It exposes no editor,
 //! state, DSP, generic command, recovery or request replay operations. Actual
 //! metadata and actual child/pipe cleanup remain separate acceptance facts.
 
+use crate::discovery::FactoryMetadata;
 use crate::fresh_helper::{self, FreshHelperSession, ReplyShape, RequestView};
 use crate::helper_lifecycle::unsent;
+use crate::process_isolation::HostResponse;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -19,13 +22,13 @@ pub use crate::helper_lifecycle::{
 /// A post-spawn failure retains its actual child owner for checked cleanup.
 #[must_use = "retain the cleanup owner; dropping transfers unresolved ownership to quarantine"]
 pub struct SpawnFailure {
-    /// Original typed setup/admission failure, before any LoadPlugin request.
+    /// Original typed setup/admission failure, before any probe/load request.
     pub failure: Failure,
     /// Present when a real child exists despite failed setup or spawn expiry.
     pub cleanup: Option<Box<Probe>>,
 }
 
-/// One default-class metadata attempt and its same-thread cleanup authority.
+/// One factory-only or default-class metadata attempt and its cleanup authority.
 /// No Clone, Send, Sync or raw-child interface is available. Dropping transfers
 /// an unresolved child into the existing process-wide quarantine reservation.
 #[must_use = "metadata does not prove child termination; finish checked disposal"]
@@ -66,6 +69,34 @@ impl Probe {
         self.session.helper_pid()
     }
 
+    /// Query factory declarations without creating an audio component or editor.
+    /// This consumes the same single attempt as `load_default_class`; neither
+    /// operation can retry the other. Returned declarations are not runtime
+    /// capabilities and do not prove a healthy helper retirement.
+    pub fn probe_factory(
+        &mut self,
+        path: &str,
+        deadline: Instant,
+    ) -> Result<FactoryMetadata, Failure> {
+        if self.attempted {
+            return Err(unsent(fresh_helper::ErrorKind::Terminal));
+        }
+        self.attempted = true;
+        let request = RequestView::ProbeFactory { path };
+        let context = RequestContext::from_request(request);
+        self.session
+            .exchange_view(request, ReplyShape::FactoryMetadata, deadline)
+            .map(|response| match response {
+                HostResponse::FactoryMetadata { metadata } => metadata,
+                _ => unreachable!("factory reply passed the closed shape validator"),
+            })
+            .map_err(|error| {
+                let mut failure = Failure::from(error);
+                failure.request_context = Some(context);
+                failure
+            })
+    }
+
     /// Load only the runtime's default class: None, 48 kHz, block128, tempo120,
     /// meter4/4. One original absolute deadline covers encoding, delivery,
     /// response and validated decode. There is no retry even on helper crash.
@@ -98,11 +129,11 @@ impl Probe {
             })
     }
 
-    /// Seal load admission, send at most one healthy Shutdown within the
+    /// Seal probe/load admission, send at most one healthy Shutdown within the
     /// earlier original protocol/cleanup deadline, close owned pipes and reap.
     /// Preserve the scanner's two-second natural-exit preference with 250 ms
     /// reserved for kill/reap, clamped to the original cleanup deadline.
-    /// Failed, cancelled or terminal loads keep the transport's 100 ms policy.
+    /// Failed, cancelled or terminal exchanges keep the transport's 100 ms policy.
     /// Pending/Busy and kill_requested alone never prove resource completion.
     pub fn dispose(
         &mut self,
@@ -120,7 +151,7 @@ impl Probe {
     }
 
     /// Perform one nonwaiting continuation on this same disposed owner. This
-    /// never sends Shutdown, renews grace, sleeps or replays a load request.
+    /// never sends Shutdown, renews grace, sleeps or replays a probe/load request.
     pub fn continue_cleanup(&mut self) -> Result<CleanupObservation, Failure> {
         self.session
             .continue_cleanup()

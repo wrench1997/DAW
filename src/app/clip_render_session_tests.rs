@@ -10,7 +10,8 @@ use crate::app::clip_render_job::{ClipRenderPhase, tests::Fixture};
 use crate::instrument_bounce::{BouncePluginMetadata, BouncePluginState};
 #[cfg(any(target_os = "linux", windows))]
 use crate::plugins::plugin_runtime::{
-    PluginChain, PluginPrepareConfig, test_capture_source::TestCaptureSource,
+    BounceSourceCallbackIdentity, BounceSourceSettlement, PluginChain, PluginPrepareConfig,
+    test_capture_source::TestCaptureSource,
 };
 
 #[cfg(any(target_os = "linux", windows))]
@@ -434,6 +435,32 @@ fn faulting_restoration_factory(
 #[cfg(any(target_os = "linux", windows))]
 fn already_faulted_source_intent(intent: ProjectIntent) {
     let mut fixture = converted_and_restored_with_factory(faulting_restoration_factory);
+    // Timeline activation can precede the restored worker's epoch reset and
+    // consumption of callback work. A capture sent before that real settlement
+    // is correctly Rejected, without entering our backend fault injection.
+    fixture.until(|fixture| {
+        let app = fixture.app();
+        let audio = app.audio.as_ref().unwrap();
+        let Some((generation, epoch)) = audio.confirmed_timeline_identity() else {
+            return false;
+        };
+        let channel_id = app.project.channels[0].id;
+        let source = &app.running_generator_chains[&channel_id];
+        source
+            .control
+            .observe_bounce_source_settlement(BounceSourceCallbackIdentity {
+                engine_session: audio.engine_session(),
+                project_session: app.project_session,
+                timeline_generation: generation,
+                epoch,
+                transport_request: audio.transport_request_id(),
+                channel_id,
+                endpoint_id: source.endpoint_id,
+                instance_id: source.instance_id,
+            })
+            .settlement
+            == BounceSourceSettlement::Ready
+    });
     let channel = fixture.app().project.channels[0].id;
     let epoch = fixture
         .app()
@@ -459,12 +486,14 @@ fn already_faulted_source_intent(intent: ProjectIntent) {
         }
     };
     assert!(receiver.termination_acknowledged());
-    assert!(matches!(
-        outcome,
-        Err(crate::instrument_bounce::BounceCaptureError::BackendFailed(
-            _
-        ))
-    ));
+    assert!(
+        matches!(
+            &outcome,
+            Err(crate::instrument_bounce::BounceCaptureError::BackendFailed(message))
+                if message == "actual restored backend fault before session retirement"
+        ),
+        "expected the actual injected backend failure, got {outcome:?}"
+    );
     drop(receiver);
     let source = &fixture.app().running_generator_chains[&channel];
     let inactive = source.control.plugin_endpoint_snapshot().unwrap();

@@ -461,6 +461,10 @@ pub(crate) struct ObservationSnapshot {
     record_cap: usize,
     byte_cap: usize,
     worker_identities: [Option<WorkerIdentityWitness>; MAX_WORKER_IDENTITIES],
+    // Detachment stops new lookups, but an in-flight tap can already own an
+    // Arc. Retirement under this same mutex prevents that tap from rebuilding
+    // records or witness ownership after the driver releases the run.
+    retired: bool,
     #[cfg(all(
         any(target_os = "linux", windows),
         feature = "experimental-fresh-helper"
@@ -497,6 +501,7 @@ impl ObservationSnapshot {
             record_cap,
             byte_cap,
             worker_identities: std::array::from_fn(|_| None),
+            retired: false,
             #[cfg(all(
                 any(target_os = "linux", windows),
                 feature = "experimental-fresh-helper"
@@ -508,6 +513,11 @@ impl ObservationSnapshot {
             ))]
             stream_taken: false,
         })
+    }
+    fn retired() -> Self {
+        let mut state = Self::new(0, 0).expect("zero-capacity observer tombstone");
+        state.retired = true;
+        state
     }
     fn fail(&mut self, failure: &'static str) {
         self.failure.get_or_insert(failure);
@@ -790,11 +800,17 @@ fn with_active(f: impl FnOnce(&mut ObservationSnapshot)) {
 }
 fn with_run(run: &Arc<Mutex<ObservationSnapshot>>, f: impl FnOnce(&mut ObservationSnapshot)) {
     match run.lock() {
-        Ok(mut state) => f(&mut state),
+        Ok(mut state) => {
+            if !state.retired {
+                f(&mut state);
+            }
+        }
         Err(poison) => {
             let mut state = poison.into_inner();
-            state.fail("observer mutex poisoned");
-            f(&mut state);
+            if !state.retired {
+                state.fail("observer mutex poisoned");
+                f(&mut state);
+            }
         }
     }
 }
@@ -983,10 +999,7 @@ impl ObservationRun {
     pub(crate) fn finish(self) -> ObservationSnapshot {
         self.detach();
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        std::mem::replace(
-            &mut *state,
-            ObservationSnapshot::new(0, 0).expect("zero-capacity observer"),
-        )
+        std::mem::replace(&mut *state, ObservationSnapshot::retired())
     }
     fn detach(&self) {
         let mut slot = ACTIVE.lock().unwrap_or_else(|p| p.into_inner());
@@ -1002,6 +1015,14 @@ impl ObservationRun {
 impl Drop for ObservationRun {
     fn drop(&mut self) {
         self.detach();
+        // A worker may have upgraded ACTIVE before detach. Release the run's
+        // payload now rather than waiting for that temporary Arc to disappear;
+        // every delayed tap sees the retired tombstone under the same lock.
+        let retired = {
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            std::mem::replace(&mut *state, ObservationSnapshot::retired())
+        };
+        drop(retired);
     }
 }
 
@@ -2018,6 +2039,69 @@ pub(crate) fn record_runtime_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retired_run_releases_payload_with_held_tap_and_never_rebuilds_after_drop_or_finish() {
+        use std::{
+            panic::{AssertUnwindSafe, catch_unwind},
+            sync::mpsc,
+            thread,
+            time::Duration,
+        };
+
+        for poisoned in [false, true] {
+            for finish in [false, true] {
+                // A private run avoids activating the process-wide collector;
+                // the held Arc models a tap that already passed active().
+                let mut snapshot = ObservationSnapshot::new(1, 0).unwrap();
+                snapshot.push(None, 0, || {
+                    RecordKind::Lifecycle("retained before retirement")
+                });
+                let record = Arc::downgrade(&snapshot.records[0]);
+                let run = ObservationRun {
+                    state: Arc::new(Mutex::new(snapshot)),
+                };
+                if poisoned {
+                    assert!(
+                        catch_unwind(AssertUnwindSafe(|| {
+                            run.with_snapshot(|_| panic!("intentional held-tap poison"));
+                        }))
+                        .is_err()
+                    );
+                }
+                let held = Arc::clone(&run.state);
+                let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+                let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+                thread::scope(|scope| {
+                    let tap = scope.spawn(move || {
+                        ready_tx.send(()).unwrap();
+                        resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        with_run(&held, |_| panic!("retired tap must stay lazy"));
+                        let state = held.lock().unwrap_or_else(|p| p.into_inner());
+                        assert!(state.retired);
+                        assert!(state.records.is_empty());
+                        assert!(state.worker_identities.iter().all(Option::is_none));
+                        assert_eq!(state.failure, None);
+                    });
+                    ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    if finish {
+                        let snapshot = run.finish();
+                        assert_eq!(snapshot.records.len(), 1);
+                        assert!(record.upgrade().is_some());
+                        drop(snapshot);
+                    } else {
+                        drop(run);
+                    }
+                    assert!(
+                        record.upgrade().is_none(),
+                        "a held tap cannot retain the retired run's payload"
+                    );
+                    resume_tx.send(()).unwrap();
+                    tap.join().unwrap();
+                });
+            }
+        }
+    }
     fn timeline_state(phase: TimelinePhase) -> TimelineAppState {
         TimelineAppState {
             phase,

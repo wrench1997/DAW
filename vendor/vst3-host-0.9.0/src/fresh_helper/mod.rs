@@ -102,6 +102,7 @@ pub(crate) struct ExchangeFailure {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReplyShape {
+    FactoryMetadata,
     PluginInfo,
     Success,
     State,
@@ -500,7 +501,12 @@ impl FreshHelperSession {
         };
         let result = (|| {
             budget.check()?;
-            let request = codec::encode_view(&request()?, &expected, &mut budget)?;
+            let request = request()?;
+            let factory_path = match request {
+                RequestView::ProbeFactory { path } => Some(path),
+                _ => None,
+            };
+            let request = codec::encode_view(&request, &expected, &mut budget)?;
             let request_charge = request.capacity();
             let owner = self.owner.as_mut().ok_or(ErrorKind::Terminal)?;
             pump::ensure_no_reply(owner, &budget)?;
@@ -510,6 +516,16 @@ impl FreshHelperSession {
             budget.release(request_charge);
             let response = pump::read_reply(owner, &mut budget)?;
             let reply = codec::decode(&response.bytes, &expected, &mut budget)?;
+            if let (
+                Some(path),
+                codec::DecodedReply::Response(HostResponse::FactoryMetadata { metadata }),
+            ) = (factory_path, &reply)
+            {
+                if metadata.path != std::path::Path::new(path) {
+                    return Err(ErrorKind::WrongReply);
+                }
+                budget.check()?;
+            }
             let child_exited = if matches!(reply, codec::DecodedReply::Response(_)) {
                 let exited = pump::observe_child(owner)?;
                 budget.check()?;

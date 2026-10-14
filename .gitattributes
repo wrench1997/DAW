@@ -38,3 +38,7 @@
 # Independent Saved13 geometry is admitted by its exact reviewed source hash.
 # Keep the frozen builder bytes identical on Windows and Linux checkouts.
 /scripts/build_full_spec.py -text
+
+# The short Saved13 QA loader has a reviewed raw-byte section pin in Rust tests.
+# CRLF checkout changes that source pin even though the Rust tokens are unchanged.
+/src/app/windows_noire_bounce_qa.rs text eol=lf

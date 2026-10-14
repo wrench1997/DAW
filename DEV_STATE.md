@@ -5,6 +5,12 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
+本轮最新实测：Source69 的 51 项 helper 回归、默认 helper/QA 构建和 helper 全功能 Clippy 通过。
+单次 Kontakt 诊断仍失败：额外消息 pass 实际返回、队列为空，ExitDll 仍未返回，helper 被原期限强制结束并实际回收。
+该诊断保持默认关闭，不计为修复。独立 factory-only 查询已实现：复用现有 helper 与保留式清理，只读 factory 声明，不调用组件/控制器/view 实例化；它尚未接入生产扫描，不改变现有 verified 索引或运行时默认类选择。
+`b37cc39` 的两条云端 Windows 流水线现已失败：各 2247 passed / 4 failed / 10 ignored，完整 Clippy/构建与成品 smoke 未到达。
+共同失败涉及 LF/CRLF 源字节断言及已故障 source 夹具；另分别出现观察 witness 释放断言、fixture 准入超时。对应源码修复及回归已补齐，原日志和断言保留。新 factory 路径、QA 及夹具修复已格式化；完整 vendor 补丁实际重放 74 个源文件逐字节一致，170 项打包测试通过。新增 Rust 编译/回归和 factory-only NI 实测仍未运行；云端 quality 流水线增加独立依赖 factory/mock-child 回归，不以 root 测试冒充依赖测试。
+
 ## 当前支持边界
 
 | 路径 | 已实现 | 当前结论 |
@@ -222,7 +228,7 @@ source51 的旧 PowerShell 执行器策略拒绝、复制 runner 漏改 source49
 ## 失败复现与下一步
 
 - 最新只读栈/PE 导出核对支持 Kontakt ExitDll 下方存在条件变量等待；信号来源与根因仍未证明。
-  有界单次 Windows 消息处理仅为默认关闭的新诊断假设；新增 4 项纯回归并完成源码审查，格式/编译/Clippy/回归待云端 CI，NI 实测未跑，不计为修复。
+  单次消息 pass 的新增 4 项纯回归已通过，Source69 实际运行 messages0 且退出仍失败；不把这个负结果扩大成所有消息/异步依赖均已排除。
 - GitHub 已配置云端 Windows 质量检查和 preview 构建；当前聊天仍在本机，尚未建立云端开发环境。
   后台源码和无设备回归可移出桌面；Kontakt/NOIRE、用户作品与 iCON 监听留本机集中验收。
 
