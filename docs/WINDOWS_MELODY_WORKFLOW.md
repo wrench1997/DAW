@@ -349,7 +349,7 @@ explicit editor.close, and adds a diagnostic on/off by Editor normal/unwind
 four-case regression. Read-only review confirms the original order is restored.
 Actual corrected acceptance passed all 46 helper regressions, default/all-feature
 strict Clippy, root/private formatting and diff checks (six gates, exit0, all 284
-pins unchanged). Evidence is in `source63-exit-*`. Original Source62 source and
+pins unchanged). Evidence is in `source63-exit-*`. Original Source62 manifest and
 successful gate receipts remain intact alongside the review finding. The new exit
 trace has not run against actual Kontakt; the native retirement problem is still
 unresolved, and the works/protected files are unchanged.
