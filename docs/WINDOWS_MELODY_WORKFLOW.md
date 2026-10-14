@@ -504,6 +504,33 @@ handback. There was no recompilation, new NI capture, editor or device request.
 Preserve `minidump-reader-pure-02/`, `source68-minidump-metadata-02.json` and
 `source68-offline-frames-01/` alongside the original rejected reader01 result.
 
+The subsequent source/evidence-only PE export review matched AMD64, timestamp,
+image size and checksum for four current PE files against the dump.
+The main-thread RVAs fall just after public exports NtWaitForAlertByThreadId,
+RtlSleepConditionVariableSRW, SleepConditionVariableSRW and _Cnd_wait; the Kontakt
+return frame is ExitDll+9. This supports a condition-variable wait interpretation,
+not exact function membership, loaded-byte identity, wait ownership or a cause.
+NI private frames remain unnamed. Preserve `source68-export-map-01.ps1` and its
+JSON outside Git; no new NI, compiler, device or desktop operation was used.
+
+An independent, default-disabled single native-message pass before final editor
+retirement is prepared as a diagnostic hypothesis. Only the exact independent
+`CITRUS_VST3_HELPER_SHUTDOWN_MESSAGE_PASS=windows-bounded-retirement-pass-v1`
+opt-in enables it. The TLS borrow is released before callbacks; no IPC resumes,
+and intact dispatcher destruction and existing cleanup deadlines are retained.
+It stops on empty queue, WM_QUIT or 32 messages; callback time remains unbounded.
+Four pure regression tests are added and source review passed, including a
+non-Windows-test dead-code correction. Formatting, compilation, Clippy, tests and
+actual NI outcome remain unrun for this source; the existing GitHub Windows CI is
+the next check. Do not call it a fix or admit an unclean scan.
+
+The existing GitHub Windows quality/preview workflows can run source checks away
+from the local desktop. A cloud coding environment still needs the repository and
+tool setup; this local chat has not moved. Keep licensed Kontakt/NOIRE, private
+projects/state/audio and iCON monitoring on this machine. The next local acceptance
+is normal helper retirement followed by one intact Pure save/cold-reopen/export
+flow. Conversion state consistency/Undo and effects/general PDC remain open.
+
 Use private new directories and explicit opt-in ignored QA only after the coordinated desktop/build window is available. Preserve the original project and identify the exact test/helper/source inputs.
 Normal source checks can be reproduced independently; real NI tests are intentionally excluded:
 

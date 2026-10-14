@@ -221,6 +221,11 @@ source51 的旧 PowerShell 执行器策略拒绝、复制 runner 漏改 source49
 
 ## 失败复现与下一步
 
+- 最新只读栈/PE 导出核对支持 Kontakt ExitDll 下方存在条件变量等待；信号来源与根因仍未证明。
+  有界单次 Windows 消息处理仅为默认关闭的新诊断假设；新增 4 项纯回归并完成源码审查，格式/编译/Clippy/回归待云端 CI，NI 实测未跑，不计为修复。
+- GitHub 已配置云端 Windows 质量检查和 preview 构建；当前聊天仍在本机，尚未建立云端开发环境。
+  后台源码和无设备回归可移出桌面；Kontakt/NOIRE、用户作品与 iCON 监听留本机集中验收。
+
 - 转换：在独立已加载 Pure 工程停止 source，启动短片段转换；两次状态捕获不一致时明确拒绝。
 - 初始化：Whole run03 在 source ready 前报 `qualification poll/pump deadline or bound exceeded`。
   18 条观察、0 capture/clone/Process、无 WAV；cleanup 缺实际 source Join，原因未确定。

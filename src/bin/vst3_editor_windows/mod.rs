@@ -15,9 +15,63 @@ const MAX_EDITOR_DIMENSION: i32 = 16_384;
 const COMMAND_QUEUE_CAPACITY: usize = 4;
 const MESSAGE_BATCH: usize = 32;
 const COMMAND_BATCH: usize = 4;
+#[cfg(target_os = "windows")]
+const SHUTDOWN_MESSAGE_PASS_ENV: &str = "CITRUS_VST3_HELPER_SHUTDOWN_MESSAGE_PASS";
+const SHUTDOWN_MESSAGE_PASS_OPT_IN: &str = "windows-bounded-retirement-pass-v1";
 // Accommodate upstream's 64 MiB state envelope in base64, while bounding malformed
 // input before JSON parsing. The queue is also bounded; the reader backpressures stdin.
 const MAX_COMMAND_BYTES: usize = 96 * 1024 * 1024;
+
+fn shutdown_message_pass_opt_in(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new(SHUTDOWN_MESSAGE_PASS_OPT_IN))
+}
+
+// The callback seam keeps the experiment separate from both the timing flag and
+// retirement itself. With no exact opt-in, the native pass is never invoked.
+fn with_shutdown_message_pass(enabled: bool, pass: impl FnOnce(), retire: impl FnOnce()) {
+    if enabled {
+        pass();
+    }
+    retire();
+}
+
+enum ShutdownMessageStep {
+    Empty,
+    Quit,
+    Dispatched,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ShutdownMessagePassObservation {
+    messages: usize,
+    quit_observed: bool,
+    cap_reached: bool,
+}
+
+fn bounded_shutdown_message_pass(
+    mut next: impl FnMut() -> ShutdownMessageStep,
+) -> ShutdownMessagePassObservation {
+    let mut observation = ShutdownMessagePassObservation {
+        messages: 0,
+        quit_observed: false,
+        cap_reached: false,
+    };
+    for _ in 0..MESSAGE_BATCH {
+        match next() {
+            ShutdownMessageStep::Empty => return observation,
+            ShutdownMessageStep::Quit => {
+                observation.messages += 1;
+                observation.quit_observed = true;
+                return observation;
+            }
+            ShutdownMessageStep::Dispatched => observation.messages += 1,
+        }
+    }
+    // This says only that the explicit loop exhausted its count. It does not
+    // inspect whether another message is queued, or bound time inside callbacks.
+    observation.cap_reached = true;
+    observation
+}
 
 fn requires_editor_detach(command: &vst3_host::process_isolation::HostCommand) -> bool {
     use vst3_host::process_isolation::HostCommand;
@@ -249,6 +303,7 @@ mod native {
     use crate::load_response_timing::shutdown::{self, Cause, Phase};
     use crate::{SharedPlugin, err, handle, respond};
     use std::cell::RefCell;
+    use std::io::Write;
     use std::mem::zeroed;
     use std::ptr::{null, null_mut};
     use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
@@ -410,6 +465,41 @@ mod native {
             return 0;
         }
         unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
+
+    fn shutdown_message_pass(command_window: HWND) {
+        // Exactly two fixed stderr records at most per opted-in helper run;
+        // failed diagnostic writes cannot turn a returned pass into a panic.
+        let pid = std::process::id();
+        let _ = writeln!(
+            io::stderr().lock(),
+            "[citrus-shutdown-message-pass-v1] pid={pid} stage=retirement_message_pass edge=Before max_messages={MESSAGE_BATCH}"
+        );
+        let observation = bounded_shutdown_message_pass(|| {
+            let mut message = unsafe { zeroed() };
+            // Current-thread, no-wait pass only. Peek/Dispatch may still invoke
+            // blocking or reentrant native callbacks; the count is not a time bound.
+            if unsafe { PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) } == 0 {
+                return ShutdownMessageStep::Empty;
+            }
+            if message.message == WM_QUIT {
+                return ShutdownMessageStep::Quit;
+            }
+            unsafe {
+                TranslateMessage(&message);
+                NATIVE_DISPATCH_ACTIVE.with(|active| active.set(message.hwnd != command_window));
+                DispatchMessageW(&message);
+                NATIVE_DISPATCH_ACTIVE.with(|active| active.set(false));
+            }
+            ShutdownMessageStep::Dispatched
+        });
+        let _ = writeln!(
+            io::stderr().lock(),
+            "[citrus-shutdown-message-pass-v1] pid={pid} stage=retirement_message_pass edge=Returned messages={} quit_observed={} cap_reached={}",
+            observation.messages,
+            observation.quit_observed,
+            observation.cap_reached,
+        );
     }
 
     #[link(name = "ole32")]
@@ -1306,6 +1396,9 @@ mod native {
     }
 
     pub(crate) fn run(plugin: SharedPlugin, mut protocol: ProtocolChannel) {
+        // Snapshot the separate, exact behavioral opt-in before any plugin load.
+        let shutdown_message_pass_enabled =
+            shutdown_message_pass_opt_in(std::env::var_os(SHUTDOWN_MESSAGE_PASS_ENV).as_deref());
         // This happens before any plugin binary is loaded. On supported Windows 10/11
         // builds physical pixels and WM_DPICHANGED provide the editor's content scale.
         // If a manifest already chose DPI awareness, Windows leaves it unchanged.
@@ -1404,7 +1497,7 @@ mod native {
         }
         shutdown::main_loop_exited();
         COMMAND_DISPATCHER.with(|cell| {
-            if let Some(mut dispatcher) = cell.borrow_mut().take() {
+            let retire = |mut dispatcher: CommandDispatcher| {
                 if let Err(error) =
                     shutdown::around_phase(Phase::EditorClose, || dispatcher.editor.close())
                 {
@@ -1414,6 +1507,25 @@ mod native {
                 // original Editor -> Protocol -> Receiver order even when
                 // Editor::drop unwinds. A close return is not a drop return.
                 shutdown::around_phase(Phase::DispatcherDrop, || drop(dispatcher));
+            };
+            if shutdown_message_pass_enabled {
+                // Release the TLS borrow before diagnostic native callbacks.
+                // TLS stays None, so command-window wakes cannot resume IPC/drain.
+                let dispatcher = cell.borrow_mut().take();
+                if let Some(dispatcher) = dispatcher {
+                    with_shutdown_message_pass(
+                        true,
+                        || shutdown_message_pass(command_window.0),
+                        || retire(dispatcher),
+                    );
+                }
+            } else if let Some(dispatcher) = cell.borrow_mut().take() {
+                // Retain the original disabled-path if-let RefMut lifetime.
+                with_shutdown_message_pass(
+                    false,
+                    || shutdown_message_pass(command_window.0),
+                    || retire(dispatcher),
+                );
             }
         });
         // Plugin destruction, including DSP shutdown, also stays on this main thread.
@@ -1430,6 +1542,159 @@ mod native {
 mod tests {
     use super::*;
     use std::io::{BufReader, Cursor};
+
+    #[test]
+    fn shutdown_message_pass_requires_its_exact_separate_opt_in() {
+        use std::ffi::OsStr;
+        assert!(shutdown_message_pass_opt_in(Some(OsStr::new(
+            "windows-bounded-retirement-pass-v1"
+        ))));
+        assert!(!shutdown_message_pass_opt_in(None));
+        for value in [
+            "",
+            "1",
+            "windows-load-response-timing-v1",
+            "windows-bounded-retirement-pass-v1 ",
+            " windows-bounded-retirement-pass-v1",
+            "WINDOWS-BOUNDED-RETIREMENT-PASS-V1",
+            "windows-bounded-retirement-pass-v1-extra",
+        ] {
+            assert!(!shutdown_message_pass_opt_in(Some(OsStr::new(value))));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            let invalid = std::ffi::OsString::from_wide(&[0xd800]);
+            assert!(!shutdown_message_pass_opt_in(Some(&invalid)));
+        }
+    }
+
+    #[test]
+    fn shutdown_message_pass_runs_once_after_tls_take_before_intact_retirement() {
+        use std::cell::RefCell;
+        struct DropStep<'a>(&'static str, &'a RefCell<Vec<&'static str>>);
+        impl Drop for DropStep<'_> {
+            fn drop(&mut self) {
+                self.1.borrow_mut().push(self.0);
+            }
+        }
+        struct Dispatcher<'a> {
+            _editor: DropStep<'a>,
+            _protocol: DropStep<'a>,
+            _receiver: DropStep<'a>,
+        }
+        for enabled in [false, true] {
+            let operations = RefCell::new(Vec::new());
+            let calls = Cell::new(0);
+            let tls = RefCell::new(Some(Dispatcher {
+                _editor: DropStep("editor_drop", &operations),
+                _protocol: DropStep("protocol_drop", &operations),
+                _receiver: DropStep("receiver_drop", &operations),
+            }));
+            let pass = || {
+                // An available borrow and None model an inert host wake.
+                assert!(tls.borrow_mut().is_none());
+                calls.set(calls.get() + 1);
+                operations.borrow_mut().push("message_pass");
+            };
+            let retire = |dispatcher| {
+                assert_eq!(tls.try_borrow_mut().is_err(), !enabled);
+                operations.borrow_mut().push("editor_close");
+                drop(dispatcher);
+            };
+            if enabled {
+                let dispatcher = tls.borrow_mut().take().unwrap();
+                with_shutdown_message_pass(true, pass, || retire(dispatcher));
+            } else if let Some(dispatcher) = tls.borrow_mut().take() {
+                with_shutdown_message_pass(false, pass, || retire(dispatcher));
+            }
+            operations.borrow_mut().push("module_clear");
+            assert_eq!(calls.get(), usize::from(enabled));
+            let mut expected = Vec::new();
+            if enabled {
+                expected.push("message_pass");
+            }
+            expected.extend([
+                "editor_close",
+                "editor_drop",
+                "protocol_drop",
+                "receiver_drop",
+                "module_clear",
+            ]);
+            assert_eq!(*operations.borrow(), expected);
+        }
+        with_shutdown_message_pass(false, || panic!("disabled native callback"), || {});
+    }
+
+    #[test]
+    fn shutdown_message_pass_stops_on_empty_or_quit_without_another_peek() {
+        for (steps, expected_messages, expected_quit) in [
+            (vec![ShutdownMessageStep::Empty], 0, false),
+            (vec![ShutdownMessageStep::Quit], 1, true),
+            (
+                vec![ShutdownMessageStep::Dispatched, ShutdownMessageStep::Empty],
+                1,
+                false,
+            ),
+            (
+                vec![
+                    ShutdownMessageStep::Dispatched,
+                    ShutdownMessageStep::Dispatched,
+                    ShutdownMessageStep::Quit,
+                ],
+                3,
+                true,
+            ),
+        ] {
+            let mut steps = steps.into_iter();
+            let observed = bounded_shutdown_message_pass(|| steps.next().expect("extra peek"));
+            assert_eq!(
+                observed,
+                ShutdownMessagePassObservation {
+                    messages: expected_messages,
+                    quit_observed: expected_quit,
+                    cap_reached: false,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn shutdown_message_pass_caps_flood_without_a_thirty_third_peek() {
+        let mut peeks = 0;
+        let observed = bounded_shutdown_message_pass(|| {
+            peeks += 1;
+            assert!(peeks <= MESSAGE_BATCH);
+            ShutdownMessageStep::Dispatched
+        });
+        assert_eq!(peeks, 32);
+        assert_eq!(
+            observed,
+            ShutdownMessagePassObservation {
+                messages: 32,
+                quit_observed: false,
+                cap_reached: true,
+            }
+        );
+        let mut peeks = 0;
+        let observed = bounded_shutdown_message_pass(|| {
+            peeks += 1;
+            if peeks == MESSAGE_BATCH {
+                ShutdownMessageStep::Quit
+            } else {
+                ShutdownMessageStep::Dispatched
+            }
+        });
+        assert_eq!(peeks, 32);
+        assert_eq!(
+            observed,
+            ShutdownMessagePassObservation {
+                messages: 32,
+                quit_observed: true,
+                cap_reached: false,
+            }
+        );
+    }
 
     #[test]
     fn state_capture_and_restore_require_editor_detachment() {
