@@ -76,6 +76,9 @@ pub struct PluginDescriptor {
     /// Older caches have no authoritative VST3 metadata, regardless of `verified`.
     #[serde(default)]
     pub vst3_metadata: Option<Vst3ScanMetadata>,
+    /// Factory declarations for this module, not a selected/loaded default class.
+    #[serde(default)]
+    pub vst3_catalog: Option<Vst3FactoryCatalog>,
     /// Actionable scan failure, distinct from a successfully loaded, unclassified plugin.
     #[serde(default)]
     pub scan_error: Option<String>,
@@ -89,7 +92,71 @@ pub struct Vst3ScanMetadata {
     pub has_midi_output: bool,
 }
 
+// Kept independent of the optional host crate so caches also decode in builds
+// without VST3 hosting. Class order and unknown optional getter values survive.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vst3FactoryCatalog {
+    pub factory: Vst3FactoryInfo,
+    pub classes: Vec<Vst3FactoryClass>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vst3FactoryInfo {
+    pub vendor: String,
+    pub url: String,
+    pub email: String,
+    pub flags: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Vst3FactoryClass {
+    pub class_id: String,
+    pub name: String,
+    pub category: String,
+    pub cardinality: i32,
+    pub vendor: Option<String>,
+    pub version: Option<String>,
+    pub sdk_version: Option<String>,
+    pub sub_categories: Option<Vec<String>>,
+    pub class_flags: Option<u32>,
+}
+
+impl Vst3FactoryCatalog {
+    fn valid(&self) -> bool {
+        let text = |value: &str| value.len() <= 64 * 1024;
+        self.classes.len() <= 4096
+            && text(&self.factory.vendor)
+            && text(&self.factory.url)
+            && text(&self.factory.email)
+            && self.classes.iter().all(|class| {
+                class.class_id.len() == 32
+                    && class.class_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && class.class_id.bytes().any(|byte| byte != b'0')
+                    && text(&class.name)
+                    && text(&class.category)
+                    && [&class.vendor, &class.version, &class.sdk_version]
+                        .into_iter()
+                        .all(|value| value.as_deref().is_none_or(text))
+                    && class.sub_categories.as_ref().is_none_or(|values| {
+                        values.len() <= 256 && values.iter().all(|value| text(value))
+                    })
+            })
+    }
+}
+
 impl PluginDescriptor {
+    pub fn is_catalog_only(&self) -> bool {
+        self.format == PluginFormat::Vst3
+            && !self.verified
+            && self.vst3_metadata.is_none()
+            && self.scan_error.is_none()
+            && self.category == "Unknown"
+            && !self.is_instrument
+            && self
+                .vst3_catalog
+                .as_ref()
+                .is_some_and(Vst3FactoryCatalog::valid)
+    }
     #[allow(dead_code)] // available to MIDI routing consumers
     pub fn has_midi_input(&self) -> bool {
         self.vst3_metadata
@@ -120,6 +187,7 @@ pub fn decode_cache(content: &str) -> Result<PluginCache, serde_json::Error> {
         plugin.format != PluginFormat::Vst3
             || plugin.vst3_metadata.is_some()
             || plugin.scan_error.is_some()
+            || plugin.is_catalog_only()
     });
     Ok(PluginCache {
         needs_rescan: previous_count != plugins.len(),
@@ -166,8 +234,8 @@ pub fn start_scan(paths: Vec<PathBuf>) -> PluginScan {
     if let Err(error) = std::thread::Builder::new()
         .name("plugin-scan".into())
         .spawn(move || {
-            let mut probe = installed_vst3_probe(worker_control.clone());
-            let outcome = scan_with_probe(&paths, worker_control.flag(), &mut probe);
+            let mut probe = installed_vst3_catalog_probe(worker_control.clone());
+            let outcome = scan_catalog_with_probe(&paths, worker_control.flag(), &mut probe);
             let _ = sender.send(outcome);
         })
     {
@@ -210,7 +278,9 @@ pub fn scan(paths: &[PathBuf]) -> Vec<PluginDescriptor> {
         .unwrap_or_default()
 }
 
-/// Checked synchronous discovery keeps stopped scans distinct from empty folders.
+/// Explicit loaded-default verification, retained for strict metadata consumers.
+/// Ordinary UI discovery uses `scan_catalog_checked`'s factory-only route.
+#[allow(dead_code)] // strict QA/qualification callers, not ordinary UI discovery
 pub fn scan_checked(paths: &[PathBuf]) -> Result<ScanReport, ScanStopped> {
     let control = ScanControl::new();
     match scan_with_probe(
@@ -223,10 +293,52 @@ pub fn scan_checked(paths: &[PathBuf]) -> Result<ScanReport, ScanStopped> {
     }
 }
 
+/// The same factory-only module catalog route used by the ordinary scan worker.
+#[allow(dead_code)] // synchronous caller for actual catalog QA and offline indexing
+pub fn scan_catalog_checked(paths: &[PathBuf]) -> Result<ScanReport, ScanStopped> {
+    let control = ScanControl::new();
+    match scan_catalog_with_probe(
+        paths,
+        control.flag(),
+        &mut installed_vst3_catalog_probe(control.clone()),
+    ) {
+        ScanOutcome::Completed(report) => Ok(report),
+        ScanOutcome::Stopped(reason) => Err(reason),
+    }
+}
+
 fn scan_with_probe(
     paths: &[PathBuf],
     cancelled: &AtomicBool,
     probe: &mut impl FnMut(&Path) -> Result<Vst3ProbeInfo, ProbeFailure>,
+) -> ScanOutcome {
+    scan_modules(paths, cancelled, &mut |path| {
+        probe(path).map(|info| {
+            let lifecycle = info.lifecycle.clone();
+            (vst3_descriptor(path, Ok(info)), lifecycle)
+        })
+    })
+}
+
+fn scan_catalog_with_probe(
+    paths: &[PathBuf],
+    cancelled: &AtomicBool,
+    probe: &mut impl FnMut(&Path) -> Result<Vst3CatalogProbeInfo, ProbeFailure>,
+) -> ScanOutcome {
+    // As before, a fully and healthily retired module may yield an actionable
+    // Unknown/error entry while the rest of the library scan continues. The
+    // lifecycle stops cancellation, Busy, Pending and unclean retirement instead.
+    scan_modules(paths, cancelled, &mut |path| {
+        probe(path).map(|info| (vst3_catalog_descriptor(path, info.catalog), info.lifecycle))
+    })
+}
+
+type ScannedVst3 = (PluginDescriptor, Option<scan_lifecycle::ProbeLifecycle>);
+
+fn scan_modules(
+    paths: &[PathBuf],
+    cancelled: &AtomicBool,
+    probe: &mut impl FnMut(&Path) -> Result<ScannedVst3, ProbeFailure>,
 ) -> ScanOutcome {
     let mut plugins = Vec::new();
     let mut probe_lifecycle = Vec::new();
@@ -234,16 +346,16 @@ fn scan_with_probe(
 
     fn add_probe(
         path: &Path,
-        result: Result<Vst3ProbeInfo, ProbeFailure>,
+        result: Result<ScannedVst3, ProbeFailure>,
         plugins: &mut Vec<PluginDescriptor>,
         receipts: &mut Vec<scan_lifecycle::ProbeLifecycle>,
     ) -> Result<(), ScanStopped> {
         match result {
-            Ok(info) => {
-                if let Some(receipt) = &info.lifecycle {
-                    receipts.push(receipt.clone());
+            Ok((descriptor, lifecycle)) => {
+                if let Some(receipt) = lifecycle {
+                    receipts.push(receipt);
                 }
-                plugins.push(vst3_descriptor(path, Ok(info)));
+                plugins.push(descriptor);
             }
             Err(mut failure) => {
                 if let Some(receipt) = failure.lifecycle.take() {
@@ -364,6 +476,36 @@ struct Vst3ProbeInfo {
     vendor: String,
     metadata: Vst3ScanMetadata,
     lifecycle: Option<scan_lifecycle::ProbeLifecycle>,
+}
+
+struct Vst3CatalogProbeInfo {
+    catalog: Vst3FactoryCatalog,
+    lifecycle: Option<scan_lifecycle::ProbeLifecycle>,
+}
+
+fn installed_vst3_catalog_probe(
+    control: Arc<ScanControl>,
+) -> impl FnMut(&Path) -> Result<Vst3CatalogProbeInfo, ProbeFailure> {
+    #[cfg(feature = "vst3")]
+    let helper = installed_vst3_helper_path();
+    move |path| {
+        #[cfg(all(feature = "vst3", any(windows, target_os = "linux")))]
+        {
+            let helper = helper.as_ref().map_err(|error| {
+                ProbeFailure::stop(ScanStopKind::HelperUnavailable, error.clone())
+            })?;
+            scan_lifecycle::probe_catalog(path, helper, std::time::Duration::from_secs(5), &control)
+        }
+        #[cfg(not(all(feature = "vst3", any(windows, target_os = "linux"))))]
+        {
+            let _ = (path, &control);
+            #[cfg(feature = "vst3")]
+            let _ = &helper;
+            Err(ProbeFailure::metadata(
+                "Factory catalog scanning requires VST3 hosting on Windows or Linux",
+            ))
+        }
+    }
 }
 
 fn installed_vst3_probe(
@@ -511,6 +653,19 @@ fn vst3_descriptor(path: &Path, result: Result<Vst3ProbeInfo, String>) -> Plugin
     descriptor
 }
 
+fn vst3_catalog_descriptor(path: &Path, catalog: Vst3FactoryCatalog) -> PluginDescriptor {
+    let mut descriptor = descriptor_from_path(path, PluginFormat::Vst3, false);
+    descriptor.category = "Unknown".into();
+    descriptor.is_instrument = false;
+    if !catalog.factory.vendor.trim().is_empty() {
+        descriptor.vendor.clone_from(&catalog.factory.vendor);
+    }
+    // The module label/ID/path are stable. No declaration is nominated as the
+    // runtime default, including the first audio declaration in a multi-class module.
+    descriptor.vst3_catalog = Some(catalog);
+    descriptor
+}
+
 fn hidden_or_arch(entry: &DirEntry) -> bool {
     let name = entry.file_name().to_string_lossy();
     entry.depth() > 0 && (name.starts_with('.') || name.eq_ignore_ascii_case("resources"))
@@ -536,6 +691,7 @@ fn descriptor_from_path(path: &Path, format: PluginFormat, verified: bool) -> Pl
         is_instrument: !is_effect,
         verified,
         vst3_metadata: None,
+        vst3_catalog: None,
         scan_error: None,
     }
 }
@@ -621,6 +777,7 @@ pub(crate) fn plugin_load_identity_from_instance(
             is_instrument: instance.role == PluginRole::Instrument,
             verified: instance.path.exists(),
             vst3_metadata: None,
+            vst3_catalog: None,
             scan_error: None,
         },
         class_uid: None,
@@ -788,10 +945,14 @@ fn prepare_runtime_spec(spec: &mut plugin_runtime::PluginLoadSpec) -> Result<(),
 }
 
 #[cfg(test)]
+#[path = "plugin_catalog_tests.rs"]
+mod catalog_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn metadata(category: &str, midi_in: bool, midi_out: bool) -> Vst3ProbeInfo {
+    pub(super) fn metadata(category: &str, midi_in: bool, midi_out: bool) -> Vst3ProbeInfo {
         Vst3ProbeInfo {
             name: "Actual plugin name".into(),
             vendor: "Actual vendor".into(),
@@ -807,7 +968,10 @@ mod tests {
 
     // Synthetic traversal evidence only. Real child/reap acceptance belongs to
     // scan_lifecycle's protocol fixtures; these rows never claim SDK execution.
-    fn synthetic_receipt(path: &Path, helper_pid: u32) -> scan_lifecycle::ProbeLifecycle {
+    pub(super) fn synthetic_receipt(
+        path: &Path,
+        helper_pid: u32,
+    ) -> scan_lifecycle::ProbeLifecycle {
         scan_lifecycle::ProbeLifecycle {
             path: path.to_path_buf(),
             helper_pid: Some(helper_pid),
@@ -823,10 +987,10 @@ mod tests {
         }
     }
 
-    struct TestDirectory(PathBuf);
+    pub(super) struct TestDirectory(pub(super) PathBuf);
 
     impl TestDirectory {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
                 "citrus-plugin-scan-{}-{}",
                 std::process::id(),

@@ -813,6 +813,7 @@ fn full_app_native_inspector_actions_fit_narrow_and_wide_panels() {
                     is_instrument: view == StudioView::ChannelRack,
                     verified: false,
                     vst3_metadata: None,
+                    vst3_catalog: None,
                     scan_error: None,
                 },
             )
@@ -2647,6 +2648,7 @@ fn plugin_scan_rescan_notice_and_failure_details_use_production_ui() {
         is_instrument: false,
         verified: false,
         vst3_metadata: None,
+        vst3_catalog: None,
         scan_error: Some("required helper is missing; reinstall Citrus Studio".into()),
     }];
     ui.settle();
@@ -2683,6 +2685,54 @@ fn plugin_scan_rescan_notice_and_failure_details_use_production_ui() {
     }
     assert!(!ui.app.plugin_cache_needs_rescan);
     assert!(ui.app.plugins.is_empty());
+}
+
+#[test]
+fn browser_catalog_requires_explicit_channel_or_mixer_choice_before_load() {
+    let mut ui = UiHarness::new();
+    let descriptor: PluginDescriptor = serde_json::from_value(serde_json::json!({
+        "id":"VST3:Catalog.vst3","name":"Catalog choice fixture","vendor":"Factory vendor",
+        "path":"/not-a-real-plugin/Catalog.vst3","format":"Vst3","category":"Unknown",
+        "is_instrument":false,"verified":false,"vst3_metadata":null,"scan_error":null,
+        "vst3_catalog":{"factory":{"vendor":"Factory vendor","url":"","email":"","flags":0},
+            "classes":[{"class_id":"00112233445566778899AABBCCDDEEFF","name":"Declared instrument",
+                "category":"Audio Module Class","cardinality":2147483647,"vendor":null,"version":null,
+                "sdk_version":null,"sub_categories":["Instrument"],"class_flags":null}]}
+    })).unwrap();
+    assert!(descriptor.is_catalog_only());
+    ui.app.plugins = vec![descriptor.clone()];
+    let before = serde_json::to_value(&ui.app.project).unwrap();
+    ui.app.load_browser_plugin(&descriptor);
+    assert!(ui.app.show_plugins);
+    assert!(ui.app.plugin_picker_target.is_none());
+    assert_eq!(ui.app.plugin_filter, descriptor.name);
+    ui.settle();
+    assert!(ui.button("CHOOSE").is_disabled());
+    let channel = ui.app.selected_channel;
+    let track = ui.app.selected_mixer;
+    assert!(
+        !ui.button(&format!("CHANNEL {:02} GENERATOR", channel + 1))
+            .is_disabled()
+    );
+    assert!(!ui.button(&format!("MIXER {track:02} INSERT")).is_disabled());
+    assert_eq!(serde_json::to_value(&ui.app.project).unwrap(), before);
+    ui.click(&format!("CHANNEL {:02} GENERATOR", channel + 1));
+    assert_eq!(
+        ui.app.plugin_picker_target,
+        Some(PluginPickerTarget::ChannelDevice { channel })
+    );
+    assert!(!ui.button("LOAD").is_disabled());
+    assert_eq!(serde_json::to_value(&ui.app.project).unwrap(), before);
+
+    ui.app.load_browser_plugin(&descriptor);
+    ui.settle();
+    ui.click(&format!("MIXER {track:02} INSERT"));
+    assert!(
+        matches!(ui.app.plugin_picker_target, Some(PluginPickerTarget::MixerSlot { track: actual, .. }) if actual == track)
+    );
+    assert!(!ui.button("LOAD").is_disabled());
+    assert_eq!(serde_json::to_value(&ui.app.project).unwrap(), before);
+    assert!(ui.app.plugins[0].is_catalog_only());
 }
 
 #[test]
@@ -3304,6 +3354,7 @@ fn config_capture_plugin(project: &mut Project, target: PluginPickerTarget, inde
             is_instrument: matches!(target, PluginPickerTarget::ChannelDevice { .. }),
             verified: false,
             vst3_metadata: None,
+            vst3_catalog: None,
             scan_error: None,
         },
     )

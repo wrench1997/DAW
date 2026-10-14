@@ -19,6 +19,9 @@ const SELECTOR: &str =
     "windows_kontakt_qa::runtime_qa::factory_qa::windows_kontakt_factory_metadata_and_reap";
 const OPT_IN: &str = "actual-kontakt-factory-only-metadata-and-reap-v1";
 static ADMITTED: AtomicBool = AtomicBool::new(false);
+const CATALOG_SELECTOR: &str =
+    "windows_kontakt_qa::runtime_qa::factory_qa::windows_kontakt_production_catalog_and_reap";
+const CATALOG_OPT_IN: &str = "actual-kontakt-production-catalog-and-reap-v1";
 
 fn cleanup_evidence(pid: Option<u32>, cleanup: &CleanupObservation) -> Value {
     let (reaped, exit_success, exit_code) = match cleanup.state {
@@ -261,6 +264,287 @@ fn windows_kontakt_factory_metadata_and_reap() {
     assert!(
         passed,
         "factory-only Kontakt experiment failed; preserve {}",
+        output.display()
+    );
+}
+
+fn catalog_scan_evidence(requested: &Path, outcome: &crate::plugins::ScanOutcome) -> (Value, bool) {
+    use crate::plugins::{PluginFormat, ScanOutcome};
+
+    let receipts = match outcome {
+        ScanOutcome::Completed(report) => &report.probe_lifecycle,
+        ScanOutcome::Stopped(stopped) => &stopped.probe_lifecycle,
+    };
+    let receipt = match receipts.as_slice() {
+        [receipt] if receipt.path == requested => Some(receipt),
+        _ => None,
+    };
+    let reaped = receipt
+        .is_some_and(|receipt| receipt.helper_pid.is_some_and(|pid| pid != 0) && receipt.reaped);
+    let healthy = reaped
+        && receipt
+            .is_some_and(|receipt| receipt.healthy_retirement() && receipt.exit_code == Some(0));
+    let descriptor = match outcome {
+        ScanOutcome::Completed(report) => match report.plugins.as_slice() {
+            [descriptor] if descriptor.path == requested => Some(descriptor),
+            _ => None,
+        },
+        ScanOutcome::Stopped(_) => None,
+    };
+    let catalog = descriptor.and_then(|descriptor| descriptor.vst3_catalog.as_ref());
+    let declaration_only = descriptor.is_some_and(|descriptor| {
+        descriptor.format == PluginFormat::Vst3
+            && !descriptor.verified
+            && descriptor.vst3_metadata.is_none()
+            && descriptor.category == "Unknown"
+            && !descriptor.is_instrument
+            && descriptor.scan_error.is_none()
+            && catalog.is_some()
+    });
+    let declared_class_found = catalog.is_some_and(|catalog| {
+        catalog.classes.iter().any(|class| {
+            class.class_id == "5653544E694B386B6F6E74616B742038"
+                && class.category == "Audio Module Class"
+        })
+    });
+    let passed = declaration_only
+        && declared_class_found
+        && healthy
+        && receipt.is_some_and(|receipt| receipt.load_failure.is_none());
+    (
+        json!({
+            "source":"production plugins::scan_catalog_checked; one fixed module catalog attempt",
+            "requested_path":requested,"outcome":outcome,
+            "exact_single_descriptor":descriptor.is_some(),"exact_single_lifecycle":receipt.is_some(),
+            "scan_helper_strict_reap_proven":reaped,"scan_helper_healthy_exit_proven":healthy,
+            "catalog_only_descriptor_invariants_hold":declaration_only,
+            "expected_declared_audio_class_found":declared_class_found,
+            "factory_catalog":catalog,"catalog_declarations_and_retirement_accepted":passed,
+            "runtime_default_class_or_capabilities_verified":false,
+            "OS_process_absence_used_as_reap_evidence":false,
+        }),
+        passed,
+    )
+}
+
+#[test]
+fn production_catalog_qa_requires_declarations_unknown_capabilities_and_original_retirement() {
+    use crate::plugins::{PluginDescriptor, ScanOutcome, ScanReport, ScanStopKind, ScanStopped};
+
+    let plugin = PathBuf::from("synthetic-catalog.vst3");
+    let descriptor: PluginDescriptor = serde_json::from_value(json!({
+        "id":"synthetic-one-module","name":"Synthetic catalog","vendor":"Factory vendor",
+        "path":plugin,"format":"Vst3","category":"Unknown","is_instrument":false,
+        "verified":false,"vst3_metadata":null,"scan_error":null,
+        "vst3_catalog":{
+            "factory":{"vendor":"Factory vendor","url":"","email":"","flags":0},
+            "classes":[{
+                "class_id":"5653544E694B386B6F6E74616B742038","name":"Declared audio class",
+                "category":"Audio Module Class","cardinality":2147483647,
+                "vendor":null,"version":null,"sdk_version":null,"sub_categories":null,"class_flags":null
+            },{
+                "class_id":"00000000000000000000000000000001","name":"Declared controller",
+                "category":"Component Controller Class","cardinality":1,
+                "vendor":"","version":"","sdk_version":"","sub_categories":[],"class_flags":0
+            }]
+        }
+    })).unwrap();
+    let completed = |plugins| {
+        ScanOutcome::Completed(ScanReport {
+            plugins,
+            probe_lifecycle: Vec::new(),
+        })
+    };
+    let (evidence, accepted) = catalog_scan_evidence(&plugin, &completed(vec![descriptor.clone()]));
+    assert!(
+        !accepted,
+        "declarations alone cannot prove actual helper retirement"
+    );
+    assert_eq!(evidence["catalog_only_descriptor_invariants_hold"], true);
+    assert_eq!(evidence["expected_declared_audio_class_found"], true);
+    assert_eq!(evidence["scan_helper_healthy_exit_proven"], false);
+    assert_eq!(
+        evidence["factory_catalog"]["classes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(evidence["factory_catalog"]["classes"][0]["vendor"].is_null());
+    assert_eq!(evidence["factory_catalog"]["classes"][1]["vendor"], "");
+    for case in 0..7 {
+        let mut changed = descriptor.clone();
+        match case {
+            0 => changed.verified = true,
+            1 => changed.category = "Instrument".into(),
+            2 => changed.is_instrument = true,
+            3 => changed.scan_error = Some("synthetic failure".into()),
+            4 => {
+                changed.vst3_metadata = Some(crate::plugins::Vst3ScanMetadata {
+                    class_uid: "5653544E694B386B6F6E74616B742038".into(),
+                    category: "Instrument".into(),
+                    has_midi_input: true,
+                    has_midi_output: false,
+                })
+            }
+            5 => changed.path = "different.vst3".into(),
+            _ => changed.vst3_catalog = None,
+        }
+        let (evidence, accepted) = catalog_scan_evidence(&plugin, &completed(vec![changed]));
+        assert!(!accepted);
+        assert_eq!(evidence["catalog_only_descriptor_invariants_hold"], false);
+    }
+    let (evidence, accepted) =
+        catalog_scan_evidence(&plugin, &completed(vec![descriptor.clone(), descriptor]));
+    assert!(!accepted);
+    assert_eq!(evidence["exact_single_descriptor"], false);
+    let stopped = ScanOutcome::Stopped(ScanStopped::new(
+        ScanStopKind::Cancelled,
+        "synthetic stopped catalog",
+    ));
+    let (evidence, accepted) = catalog_scan_evidence(&plugin, &stopped);
+    assert!(!accepted);
+    assert!(evidence["factory_catalog"].is_null());
+}
+
+fn retire_catalog_quarantine(output: &Path) -> (CleanupObservation, Option<String>) {
+    // The production scanner already disposed its owner using its original
+    // deadlines. If it transferred a Pending owner, only advance that same
+    // quarantine slot: never scan again or renew its natural-exit interval.
+    let mut cleanup = Probe::cleanup_abandoned(Instant::now() + Duration::from_millis(250));
+    let mut observation_error = None;
+    if !matches!(cleanup.state, CleanupState::Empty | CleanupState::Reaped(_)) {
+        observation_error = scan_new_json(
+            &output.join("catalog-cleanup-pending.json"),
+            &json!({
+                "cleanup":format!("{cleanup:?}"),"same_test_process_retains_quarantine":true,
+                "original_deadlines_renewed":false,"scan_request_replayed":false,
+            }),
+        )
+        .err();
+    }
+    while !matches!(cleanup.state, CleanupState::Empty | CleanupState::Reaped(_)) {
+        thread::sleep(Duration::from_millis(10));
+        cleanup = Probe::cleanup_abandoned(Instant::now() + Duration::from_millis(250));
+    }
+    (cleanup, observation_error)
+}
+
+#[test]
+#[ignore = "actual production Kontakt catalog scan; independent exact opt-in, private adjacent helper and outer binary pins required"]
+fn windows_kontakt_production_catalog_and_reap() {
+    assert_eq!(
+        std::env::var("CITRUS_KONTAKT_CATALOG_QA_OPT_IN").as_deref(),
+        Ok(CATALOG_OPT_IN)
+    );
+    assert_eq!(
+        std::env::args().skip(1).collect::<Vec<_>>(),
+        [
+            CATALOG_SELECTOR,
+            "--ignored",
+            "--exact",
+            "--test-threads=1",
+            "--nocapture"
+        ]
+    );
+    assert!(
+        !ADMITTED.swap(true, Ordering::AcqRel),
+        "one attempt per process"
+    );
+    assert!(std::env::var_os("CITRUS_VST3_HELPER_SHUTDOWN_MESSAGE_PASS").is_none());
+    let _reservation_test_lock = crate::plugins::helper_transport_test_lock();
+    let output = absolute_env("CITRUS_KONTAKT_CATALOG_QA_DIR");
+    fs::create_dir(&output).expect("catalog output must be new; preserve all previous files");
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let helper = executable
+        .parent()
+        .unwrap()
+        .join("vst3-host-helper.exe")
+        .canonicalize()
+        .unwrap();
+    let executable_sha = std::env::var("CITRUS_KONTAKT_CATALOG_QA_EXECUTABLE_SHA256").unwrap();
+    let helper_sha = std::env::var("CITRUS_KONTAKT_CATALOG_QA_HELPER_SHA256").unwrap();
+    for supplied in [&executable_sha, &helper_sha] {
+        assert!(supplied.len() == 64 && supplied.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+    let executable_before = scan_binary_snapshot(&executable, 256 * 1024 * 1024).unwrap();
+    let helper_before = scan_binary_snapshot(&helper, 64 * 1024 * 1024).unwrap();
+    let plugin = PathBuf::from(r"C:\Program Files\Common Files\VST3\Kontakt 8.vst3");
+    scan_new_json(
+        &output.join("catalog-preflight.json"),
+        &json!({
+            "schema":1,"selector":CATALOG_SELECTOR,"test_pid":std::process::id(),
+            "test_executable":executable,"helper_executable":helper,"plugin":plugin,
+            "supplied_executable_sha256":executable_sha,"supplied_helper_sha256":helper_sha,
+            "supplied_hashes_verified_in_this_test":false,"outer_byte_binding_required":true,
+            "production_entry":"plugins::scan_catalog_checked","factory_catalog_only":true,
+            "component_controller_view_state_MIDI_Process_device_requests":0,
+            "user_project_or_preset_accessed":false,
+        }),
+    )
+    .unwrap();
+    let started = Instant::now();
+    let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::plugins::scan_catalog_checked(std::slice::from_ref(&plugin))
+    }));
+    let scan_elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let (cleanup, cleanup_observation_error) = retire_catalog_quarantine(&output);
+    let (scan, declarations_and_retirement_accepted, error) = match attempted {
+        Ok(outcome) => {
+            let outcome = match outcome {
+                Ok(report) => crate::plugins::ScanOutcome::Completed(report),
+                Err(stopped) => crate::plugins::ScanOutcome::Stopped(stopped),
+            };
+            let (scan, accepted) = catalog_scan_evidence(&plugin, &outcome);
+            let error = match &outcome {
+                crate::plugins::ScanOutcome::Stopped(stopped) => Some(stopped.description()),
+                _ if !accepted => Some("catalog lacks one exact declaration-only entry, expected declaration or healthy original lifecycle".into()),
+                _ => None,
+            };
+            (scan, accepted, error)
+        }
+        Err(_) => (
+            Value::Null,
+            false,
+            Some("production catalog scan unwound; retained cleanup was observed afterward".into()),
+        ),
+    };
+    let unchanged = scan_binary_snapshot(&executable, 256 * 1024 * 1024)
+        .and_then(|actual| {
+            if actual == executable_before {
+                Ok(())
+            } else {
+                Err("test binary changed during catalog scan".into())
+            }
+        })
+        .and_then(|()| scan_binary_snapshot(&helper, 64 * 1024 * 1024))
+        .and_then(|actual| {
+            if actual == helper_before {
+                Ok(())
+            } else {
+                Err("helper binary changed during catalog scan".into())
+            }
+        });
+    // Later quarantine completion cannot turn a stopped scan or its original
+    // unhealthy/missing receipt into an accepted catalog publication.
+    let passed = declarations_and_retirement_accepted
+        && error.is_none()
+        && unchanged.is_ok()
+        && cleanup_observation_error.is_none();
+    scan_new_json(&output.join("catalog-result.json"), &json!({
+        "schema":1,"passed":passed,"actual_error":error,"scan":scan,
+        "actual_binary_bytes_unchanged":unchanged.is_ok(),"actual_binary_pin_error":unchanged.err(),
+        "retained_cleanup_observation":format!("{cleanup:?}"),
+        "retained_cleanup_observation_is_not_original_scan_healthy_reap_proof":true,
+        "cleanup_observation_error":cleanup_observation_error,
+        "single_production_scan_elapsed_ms":scan_elapsed_ms,"performance_acceptance":false,
+        "production_entry":"plugins::scan_catalog_checked","runtime_default_class_claimed":false,
+        "component_controller_view_state_MIDI_Process_device_requests":0,
+        "NOIRE_sound_state_restore_or_export_qualified":false,"user_project_or_preset_accessed":false,
+    })).unwrap();
+    assert!(
+        passed,
+        "production Kontakt catalog scan failed; preserve {}",
         output.display()
     );
 }

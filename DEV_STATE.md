@@ -5,14 +5,16 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
-Source73（`329fe23`）最新云端实测：quality 的独立 factory 回归 31 passed；quality/preview 均通过完整 root 套件，主程序 2258、helper 52、协议 13，共 2323 passed / 11 ignored。严格 Clippy 和构建通过；quality 的 helper 协议 smoke、无默认 feature 检查也通过。上轮两个时序夹具修复及新增受控回归均已执行通过，原产品期限、状态、历史和 ownership 断言保留；Rust 1.97.1 发布工具链不变。
+Source74（`f79fd3f`）最新云端 quality：独立 factory 回归 32 passed；完整 root 套件主程序 2258、helper 52、协议 13，共 2323 passed / 11 ignored。严格 Clippy、双 bin 构建、helper 协议 smoke、无默认 feature 检查和独立 fixture 构建通过。上轮两个时序夹具修复及新增受控回归已有 Source73 两套任务通过，原产品期限、状态、历史和 ownership 断言保留；Rust 1.97.1 发布工具链不变。
 quality 整体仍为 failure：最后的 native paint 前/后捕获失败，同进程按钮的 PrintWindow 诊断也返回 false；control/state/lifecycle/cleanup 独立通过。这不证明 Kontakt 界面故障，也不是 GUI 验收通过。
-preview 已完成静态 CRT release 构建，随后包内链接校验失败：`Broken package document link: DEV_STATE.md -> docs/WINDOWS_MELODY_WORKFLOW.md`；最终 ZIP smoke 和上传未执行。Source74 已将工作流文档补进必需清单，新增真实文档闭包、ZIP 复制/提取与缺文档拒绝回归；完整打包测试 175 passed，实际发行包仍待云端重建验证。
+Source73 preview 已完成静态 CRT release 构建，随后包内链接校验失败：`Broken package document link: DEV_STATE.md -> docs/WINDOWS_MELODY_WORKFLOW.md`；该轮最终 ZIP smoke 和上传未执行。Source74 已将工作流文档补进必需清单，新增真实文档闭包、ZIP 复制/提取与缺文档拒绝回归；完整打包测试 175 passed。Source74 preview 在本次新候选提交前仍运行，实际发行包尚未验收；新候选须以自己的云端结果为准。
 
 Source73 本机新默认 helper/QA 实际构建 exit0。协调窗口内的唯一 factory-only NI 测试 exit101：`setHostContext failed: 0x80004001`，声明 getter 尚未执行。helper 自然 exit0、实际 Reaped、没有 kill 或 shutdown/wait/pipe 错误；这是该失败路径的清理通过，不是元数据或普通扫描通过。无组件/控制器/view、音色状态、MIDI/DSP、声卡或作品请求。
-新修复保留 context offer 和卸载前生命周期，仅接受该 setter 的 SDK `kNotImplemented`，其他 setter 错误及必需 getter 失败仍拒绝；不能将它加入通用成功判定。依据是 [Steinberg 官方宿主实现](https://github.com/steinbergmedia/vst3_public_sdk/blob/master/source/vst/hosting/module.cpp)：提供 context，但不把 setter 返回值作为声明查询前提。此修复尚待编译、回归及再次实机确认。
+Source74 保留 context offer 和卸载前生命周期，仅接受该 setter 的 SDK `kNotImplemented`，其他 setter 错误及必需 getter 失败仍拒绝，通用成功判定未放宽。依据是 [Steinberg 官方宿主实现](https://github.com/steinbergmedia/vst3_public_sdk/blob/master/source/vst/hosting/module.cpp)：提供 context，但不把 setter 返回值作为声明查询前提。此修复已编译并通过上述云端回归。
 
-factory-only 尚未接入生产扫描，不改变 verified 索引或运行时默认类选择。Source69 的普通组件扫描仍在 ExitDll 未返回并被原期限强制回收；此次不创建组件的失败路径健康退出不能替代该问题。Source74 已刷新完整 vendor provenance，从原始 archive 实际重放 74 个源文件逐字节一致；新 Rust 回归及 NI 实测待执行。当前仅源码、Python 和云端工作，不占用本机桌面、声卡或 native 编译窗口。
+Source74 新默认 helper/QA 本机构建均 exit0。唯一 factory-only NI 测试 PID2400 实际 exit0、wrapper0：返回 Kontakt 8.4.1 的两个真实声明，包含预期 Audio Module Class CID `5653544E694B386B6F6E74616B742038`。helper PID20596 自然 exit0、实际 Reaped、no kill，shutdown/wait/pipe 无错；test 和两条 pipe 完成，NoExit 宿主实际 exit0、fresh heavy0 后已明确交还窗口。这次没有 CU、GPU、声卡、作品、组件/控制器/view、音色状态或 MIDI/DSP 请求；不能当作 NOIRE 恢复/发声/导出通过。
+
+Source75 的普通模块目录接线已写完，尚未编译/运行：每个 path 一个条目，目录声明与实际运行验证分开，默认 LOAD/工程恢复仍传 None class，不挑首个声明冒充默认类。严格转换/完整工程 QA 保留实际类元数据门。Source69 的组件扫描 ExitDll 问题仍未修复，不能用新目录路径的退出通过替代。Source74 vendor provenance 已从原始 archive 实际重放 74 个源文件逐字节一致；当前只做源码/云端，不占本机桌面或声卡。
 
 ## 当前支持边界
 
@@ -29,9 +31,14 @@ Master 音量/声像/静音自动化已接线；尾音须明确确认固定窗�
 
 ## 普通插件扫描的清理与失败恢复（本次提交）
 
-普通 Windows/Linux 构建的默认 class 扫描现已复用实际子进程/管道所有权与取消机制，保持原 `None` class、48k/Q128 配置和 5 秒响应窗口；一次加载，不自动重播请求。
-只有元数据成功且 helper 自然成功退出、实际 reap 和管道完成、没有清理错误时才标记 verified。已清理的单插件元数据失败保留 Unknown/unverified；取消、资源占用、清理未完成或异常退出则停止整次扫描，保留旧索引、rescan 标志和磁盘缓存原字节，错误在 toast 消失后仍可见。
-清理 Pending 保留原 owner；再次扫描只推进该 owner 的清理，实际 Reaped 前不创建新 helper。普通 Probe 和实验 strict client 共用类型及 transport，严格渲染的实验门、class 选择、状态检查及块大小未放开。
+Source75 普通 UI 的 `start_scan` 和同步 `scan_catalog_checked` 改走 factory 声明查询，不调用完整组件 LOAD，也不在失败后自动回退。与原路径共用遍历、Probe、一次请求、5 秒响应窗口、取消、管道及保留式清理，没有第二个 helper pool。
+成功条目保留原 ID/path，新增独立 catalog；`verified=false`、无实际 default-class 元数据、音频/MIDI/GUI 能力未知。两个目标 picker 均允许用户尝试加载，Browser 打开显式 Channel/Mixer 目标选择，不因未知分类误投 Mixer；工程保存 Unknown role，仍由原 `class_uid=None` 路径实际加载。
+目录进入索引仍要求 helper 自然成功退出、实际 reap、管道完成及清理无错。充分健康回收的单模块查询失败保留 Unknown/unverified 和持久 scan_error 后继续；取消、资源占用、清理未完成、强杀或异常退出则终止整次扫描，保留旧索引、rescan 标志及磁盘缓存。Pending 保留原 owner，再扫先推进同一清理，实际 Reaped 前不新建 helper。
+缓存加法接受合法 catalog，保留旧 VST2 和实际默认类元数据；仅有旧 verified 标记的条目仍要求重扫。原 `scan_checked` / `scan` 继续作为显式 loaded-default 验证，保持 None class、48k/Q128 及原严格消费者合同，不作为目录扫描 fallback。实验 strict 渲染的类选择、状态、预算和块大小未放开。
+
+已补目录/缓存、真实 mock-child 协议、目标选择、保存重开、默认 LOAD 不重试及严格准入拒绝回归，并添加独立本机 selector `windows_kontakt_production_catalog_and_reap`。当前仅 rustfmt/diff 检查通过，Rust 编译、用例和新生产路径 NI 实测尚未运行；Source74 底层 factory 通过不能替代这些证据。
+
+完整创作链仍缺新目录来源的实际运行身份桥接：Unknown 项目分类会被整曲 Review 先拒绝。后续应消费真正用户 LOAD 取得的 CID/version/分类与 MIDI 证据，绑定当前 generator 的 control/endpoint/instance，再沿用现有 stopped capture 和 strict clone；不能将目录升级为 verified、自动改工程 role，或放宽转换/完整工程 QA。此项尚未实现。
 
 Source57 实际通过 306 项针对性 Rust 测试：默认插件后端 187、扫描/App 5、默认 Probe 12、普通 transport 45、strict client 26、strict backend 31。默认/all-feature/no-feature 的 root `Clippy --all-targets -D warnings`、普通双 bin 构建、精确 `vst2,vst3` 配置检查及 root/vendor 格式检查通过。实际依赖清单验证 483 packages，root 仅 `vst2,vst3`，vendor 不启用实验 feature；这不是 release 预览包验收。
 Source58 仅修正测试辅助函数返回值及 Unix 夹具的分平台错误文字，生产行为不变；当前默认 Clippy 和 12 项 Probe 回归再次通过，原清理断言保留。SDK 的 `-D unused_must_use`、最终 root/vendor/独立夹具格式检查通过；该 SDK 检查保留既有样式警告，不宣称整个 vendor 零警告。完整 vendor 补丁实际重放 73 个源文件逐字节一致；正确 discover 入口实跑 170 项打包测试全部通过。

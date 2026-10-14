@@ -2,7 +2,7 @@
 
 use super::PluginDescriptor;
 #[cfg(all(feature = "vst3", any(windows, target_os = "linux")))]
-use super::Vst3ProbeInfo;
+use super::{Vst3CatalogProbeInfo, Vst3ProbeInfo};
 use serde::Serialize;
 #[cfg(all(feature = "vst3", any(windows, target_os = "linux")))]
 use std::path::Path;
@@ -195,9 +195,66 @@ pub(super) fn probe(
     timeout: std::time::Duration,
     control: &ScanControl,
 ) -> Result<Vst3ProbeInfo, ProbeFailure> {
+    match probe_request(path, helper, timeout, control, ScanRequest::LoadedDefault)? {
+        ScanReply::Loaded(info) => Ok(info),
+        ScanReply::Catalog(_) => unreachable!("closed loaded-default request/reply pair"),
+    }
+}
+
+#[cfg(all(feature = "vst3", any(windows, target_os = "linux")))]
+pub(super) fn probe_catalog(
+    path: &Path,
+    helper: &Path,
+    timeout: std::time::Duration,
+    control: &ScanControl,
+) -> Result<Vst3CatalogProbeInfo, ProbeFailure> {
+    match probe_request(path, helper, timeout, control, ScanRequest::FactoryCatalog)? {
+        ScanReply::Catalog(info) => Ok(info),
+        ScanReply::Loaded(_) => unreachable!("closed factory request/reply pair"),
+    }
+}
+
+#[cfg(all(feature = "vst3", any(windows, target_os = "linux")))]
+#[derive(Clone, Copy)]
+enum ScanRequest {
+    LoadedDefault,
+    FactoryCatalog,
+}
+
+#[cfg(all(feature = "vst3", any(windows, target_os = "linux")))]
+enum ScanReply {
+    Loaded(Vst3ProbeInfo),
+    Catalog(Vst3CatalogProbeInfo),
+}
+
+#[cfg(all(feature = "vst3", any(windows, target_os = "linux")))]
+fn probe_request(
+    path: &Path,
+    helper: &Path,
+    timeout: std::time::Duration,
+    control: &ScanControl,
+    request: ScanRequest,
+) -> Result<ScanReply, ProbeFailure> {
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
     use std::process::Command;
+
+    let mut command = Command::new(helper);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000); // Same hidden production helper policy.
+    probe_command(path, &mut command, timeout, control, request)
+}
+
+// Both closed request modes use this one owner, cancellation slot and retirement
+// state machine. Tests substitute a repository-owned protocol child, never a DLL.
+#[cfg(all(feature = "vst3", any(windows, target_os = "linux")))]
+fn probe_command(
+    path: &Path,
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+    control: &ScanControl,
+    request: ScanRequest,
+) -> Result<ScanReply, ProbeFailure> {
     use std::time::{Duration, Instant};
     use vst3_host::default_class_probe::{
         CleanupObservation, CleanupState, Failure, FailureKind, Probe,
@@ -259,10 +316,7 @@ pub(super) fn probe(
             "cancelled before helper spawn",
         ));
     }
-    let mut command = Command::new(helper);
-    #[cfg(windows)]
-    command.creation_flags(0x0800_0000); // Same hidden production helper policy.
-    let mut owner = match Probe::spawn(&mut command, Instant::now() + timeout) {
+    let mut owner = match Probe::spawn(command, Instant::now() + timeout) {
         Ok(owner) => owner,
         Err(mut failure) => {
             let kind = failure.failure.kind;
@@ -317,7 +371,56 @@ pub(super) fn probe(
     control.publish(owner.cancellation());
     // The original response window is sampled once after spawn, covers the
     // whole write/read/decode exchange, and is never extended or replayed.
-    let loaded = owner.load_default_class(&path.to_string_lossy(), Instant::now() + timeout);
+    let deadline = Instant::now() + timeout;
+    let factory_catalog = matches!(request, ScanRequest::FactoryCatalog);
+    let loaded =
+        match request {
+            ScanRequest::LoadedDefault => owner
+                .load_default_class(&path.to_string_lossy(), deadline)
+                .map(|info| {
+                    ScanReply::Loaded(Vst3ProbeInfo {
+                        name: info.name,
+                        vendor: info.vendor,
+                        metadata: super::Vst3ScanMetadata {
+                            class_uid: info.uid,
+                            category: info.category,
+                            has_midi_input: info.has_midi_input,
+                            has_midi_output: info.has_midi_output,
+                        },
+                        lifecycle: None,
+                    })
+                }),
+            ScanRequest::FactoryCatalog => owner
+                .probe_factory(&path.to_string_lossy(), deadline)
+                .map(|metadata| {
+                    ScanReply::Catalog(Vst3CatalogProbeInfo {
+                        catalog: super::Vst3FactoryCatalog {
+                            factory: super::Vst3FactoryInfo {
+                                vendor: metadata.factory.vendor,
+                                url: metadata.factory.url,
+                                email: metadata.factory.email,
+                                flags: metadata.factory.flags,
+                            },
+                            classes: metadata
+                                .classes
+                                .into_iter()
+                                .map(|class| super::Vst3FactoryClass {
+                                    class_id: class.class_id,
+                                    name: class.name,
+                                    category: class.category,
+                                    cardinality: class.cardinality,
+                                    vendor: class.vendor,
+                                    version: class.version,
+                                    sdk_version: class.sdk_version,
+                                    sub_categories: class.sub_categories,
+                                    class_flags: class.class_flags,
+                                })
+                                .collect(),
+                        },
+                        lifecycle: None,
+                    })
+                }),
+        };
     let cleanup = retire(&mut owner);
     let receipt = lifecycle(path, pid, loaded.as_ref().err().map(describe), cleanup);
     control.clear();
@@ -341,22 +444,28 @@ pub(super) fn probe(
         return Err(error);
     }
     match loaded {
+        // A real reap is necessary but does not excuse abnormal exit, kill or
+        // failed pipe cleanup, including when the metadata request also failed.
+        Err(ref failure) if factory_catalog && !receipt.healthy_retirement() => {
+            let mut error = ProbeFailure::stop(
+                ScanStopKind::UncleanRetirement,
+                format!("{}; helper did not retire cleanly", describe(failure)),
+            );
+            error.lifecycle = Some(Box::new(receipt));
+            Err(error)
+        }
         Err(failure) => {
             let mut error = ProbeFailure::metadata(describe(&failure));
             error.lifecycle = Some(Box::new(receipt));
             Err(error)
         }
-        Ok(info) if receipt.healthy_retirement() => Ok(Vst3ProbeInfo {
-            name: info.name,
-            vendor: info.vendor,
-            metadata: super::Vst3ScanMetadata {
-                class_uid: info.uid,
-                category: info.category,
-                has_midi_input: info.has_midi_input,
-                has_midi_output: info.has_midi_output,
-            },
-            lifecycle: Some(receipt),
-        }),
+        Ok(mut info) if receipt.healthy_retirement() => {
+            match &mut info {
+                ScanReply::Loaded(info) => info.lifecycle = Some(receipt),
+                ScanReply::Catalog(info) => info.lifecycle = Some(receipt),
+            }
+            Ok(info)
+        }
         Ok(_) => {
             let mut error = ProbeFailure::stop(
                 ScanStopKind::UncleanRetirement,
@@ -390,6 +499,10 @@ fn recover_abandoned() -> Result<(), ProbeFailure> {
         )),
     }
 }
+
+#[cfg(all(test, feature = "vst3", any(windows, target_os = "linux")))]
+#[path = "plugin_catalog_transport_tests.rs"]
+mod catalog_transport_tests;
 
 #[cfg(all(test, feature = "vst3", any(windows, target_os = "linux")))]
 mod tests {

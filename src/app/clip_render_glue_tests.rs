@@ -466,6 +466,7 @@ fn descriptor(project: &Project) -> PluginDescriptor {
             has_midi_input: true,
             has_midi_output: false,
         }),
+        vst3_catalog: None,
         scan_error: None,
     }
 }
@@ -640,6 +641,43 @@ fn fresh_source_opt_in_refuses_unattested_class_and_wrong_format_before_recordin
             .is_err()
     );
     assert!(app.fresh_bounce_sources.is_empty());
+}
+
+#[test]
+fn fresh_source_opt_in_refuses_factory_catalog_without_loaded_default_metadata() {
+    let mut app = bare_app();
+    app.project = source_project();
+    let mut descriptor = descriptor(&app.project);
+    let uid = descriptor.vst3_metadata.take().unwrap().class_uid;
+    descriptor.verified = false;
+    descriptor.is_instrument = false;
+    descriptor.category = "Unknown".into();
+    descriptor.vst3_catalog = Some(plugins::Vst3FactoryCatalog {
+        factory: plugins::Vst3FactoryInfo {
+            vendor: "Declared vendor".into(),
+            url: String::new(),
+            email: String::new(),
+            flags: 0,
+        },
+        classes: vec![plugins::Vst3FactoryClass {
+            class_id: uid,
+            name: "Expected UID declaration only".into(),
+            category: "Audio Module Class".into(),
+            cardinality: i32::MAX,
+            vendor: None,
+            version: None,
+            sdk_version: None,
+            sub_categories: Some(vec!["Instrument".into()]),
+            class_flags: None,
+        }],
+    });
+    assert!(descriptor.is_catalog_only());
+    assert!(
+        app.record_fresh_clip_source_for_new_load(42, &descriptor)
+            .is_err()
+    );
+    assert!(app.fresh_bounce_sources.is_empty());
+    assert!(app.pending_generator_chains.is_empty() && app.running_generator_chains.is_empty());
 }
 
 /// The only fixture that creates an extra restoration worker owns every location

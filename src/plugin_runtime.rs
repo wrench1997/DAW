@@ -8780,6 +8780,7 @@ mod tests {
             is_instrument: false,
             verified: false,
             vst3_metadata: None,
+            vst3_catalog: None,
             scan_error: None,
         })
     }

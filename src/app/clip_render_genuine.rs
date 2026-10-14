@@ -222,6 +222,7 @@ fn descriptor() -> PluginDescriptor {
             has_midi_input: true,
             has_midi_output: false,
         }),
+        vst3_catalog: None,
         scan_error: None,
     }
 }

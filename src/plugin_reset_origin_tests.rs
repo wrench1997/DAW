@@ -48,7 +48,9 @@ for line in sys.stdin:
     with log.open('a') as f: f.write(json.dumps(command)+'\n')
     kind=command if isinstance(command,str) else next(iter(command))
     selected=mode.read_text()
-    if kind=='LoadPlugin':
+    if kind=='LoadPlugin' and selected=='LoadPlugin':
+        response={{'Error':{{'message':'deliberate LoadPlugin refusal'}}}}
+    elif kind=='LoadPlugin':
         uid,version=json.loads(identity.read_text())
         response={{'PluginInfo':{{'vendor':'Citrus tests','name':'Reset probe','version':version,'category':'Instrument','uid':uid,'has_gui':False,'audio_inputs':0,'audio_outputs':1,'output_channels':2,'has_midi_input':True,'has_midi_output':False}}}}
     elif kind=='ResetOriginSupport':
@@ -103,6 +105,7 @@ for line in sys.stdin:
             is_instrument: true,
             verified: false,
             vst3_metadata: None,
+            vst3_catalog: None,
             scan_error: None,
         });
         spec.vst3_helper_path = Some(self.script.clone());
@@ -144,6 +147,59 @@ fn kind(value: &serde_json::Value) -> &str {
     value
         .as_str()
         .unwrap_or_else(|| value.as_object().unwrap().keys().next().unwrap())
+}
+
+#[test]
+fn ordinary_catalog_load_retains_null_default_class_and_never_retries_failure() {
+    for fail in [false, true] {
+        let helper = ResetHelper::new();
+        if fail {
+            helper.select("LoadPlugin");
+        }
+        let mut spec = helper.spec();
+        spec.descriptor.verified = false;
+        spec.descriptor.category = "Unknown".into();
+        spec.descriptor.is_instrument = false;
+        spec.descriptor.vst3_catalog = Some(crate::plugins::catalog_tests::catalog());
+        assert!(spec.descriptor.is_catalog_only());
+        assert!(spec.class_uid.is_none());
+        let result = Vst3Backend::load(spec, reset_config());
+        if fail {
+            assert!(
+                result
+                    .err()
+                    .unwrap()
+                    .contains("deliberate LoadPlugin refusal")
+            );
+        } else {
+            let backend = result.unwrap();
+            assert_eq!(backend.plugin.recovery_count(), 0);
+            drop(backend);
+        }
+        let commands = helper.commands();
+        let loads = commands
+            .iter()
+            .filter(|command| kind(command) == "LoadPlugin")
+            .collect::<Vec<_>>();
+        assert_eq!(loads.len(), 1);
+        assert!(loads[0]["LoadPlugin"]["class_id"].is_null());
+        assert!(
+            !commands
+                .iter()
+                .any(|command| kind(command) == "ProbeFactory")
+        );
+        if fail {
+            assert!(!commands.iter().any(|command| matches!(
+                kind(command),
+                "AudioBusLayout"
+                    | "LoadState"
+                    | "CreateView"
+                    | "ShowEditor"
+                    | "StartProcessing"
+                    | "Process"
+            )));
+        }
+    }
 }
 
 #[test]

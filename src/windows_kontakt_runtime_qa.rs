@@ -349,6 +349,7 @@ fn windows_kontakt_actual_worker_load_state_reset_and_retained_shutdown() {
         category: "Instrument".into(),
         is_instrument: true,
         verified: true,
+        vst3_catalog: None,
         scan_error: None,
         vst3_metadata: Some(Vst3ScanMetadata {
             class_uid: uid.into(),
@@ -849,6 +850,7 @@ fn windows_noire_actual_first_sequence_callback_cadence() {
         category: "Instrument".into(),
         is_instrument: true,
         verified: true,
+        vst3_catalog: None,
         scan_error: None,
         vst3_metadata: Some(Vst3ScanMetadata {
             class_uid: uid.into(),

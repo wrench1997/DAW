@@ -70,7 +70,7 @@ impl CheckedScan {
 
     pub(crate) fn evidence(&self) -> Value {
         json!({
-            "source":"production plugins::scan_checked; one ordinary default-class attempt",
+            "source":"explicit loaded-default verification via plugins::scan_checked; not ordinary factory catalog scanning",
             "requested_path":self.requested,
             "outcome":self.outcome,
             "scan_helper_strict_reap_proven":self.helper_reaped(),
@@ -169,6 +169,7 @@ mod tests {
                     category: "Instrument".into(),
                     is_instrument: true,
                     verified: true,
+                    vst3_catalog: None,
                     scan_error: None,
                     vst3_metadata: Some(Vst3ScanMetadata {
                         class_uid: UID.into(),
@@ -259,6 +260,39 @@ mod tests {
             evidence["metadata_available_before_expected_uid_admission"],
             false
         );
+        assert!(scan.admit(UID).is_err());
+    }
+
+    #[test]
+    fn factory_catalog_cannot_substitute_loaded_default_admission() {
+        let mut scan = synthetic();
+        let plugin = &mut report(&mut scan).plugins[0];
+        plugin.verified = false;
+        plugin.vst3_metadata = None;
+        plugin.category = "Unknown".into();
+        plugin.is_instrument = false;
+        plugin.vst3_catalog = Some(super::super::Vst3FactoryCatalog {
+            factory: super::super::Vst3FactoryInfo {
+                vendor: "Declared vendor".into(),
+                url: String::new(),
+                email: String::new(),
+                flags: 0,
+            },
+            classes: vec![super::super::Vst3FactoryClass {
+                class_id: UID.into(),
+                name: "Expected declared UID is not selected default".into(),
+                category: "Audio Module Class".into(),
+                cardinality: i32::MAX,
+                vendor: None,
+                version: None,
+                sdk_version: None,
+                sub_categories: Some(vec!["Instrument".into()]),
+                class_flags: None,
+            }],
+        });
+        assert!(plugin.is_catalog_only());
+        assert!(scan.helper_reaped() && scan.healthy_exit());
+        assert!(!scan.metadata_available());
         assert!(scan.admit(UID).is_err());
     }
 

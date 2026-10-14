@@ -18384,28 +18384,40 @@ impl CitrusApp {
         }
         if let Some(index) = load_index {
             let descriptor = self.plugins[index].clone();
-            if descriptor.is_instrument || descriptor.has_midi_output() {
-                let channel = self
-                    .selected_channel
-                    .min(self.project.channels.len().saturating_sub(1));
-                if channel < self.project.channels.len() {
-                    let _ = self.load_plugin_into_target(
-                        &descriptor,
-                        PluginPickerTarget::ChannelDevice { channel },
-                    );
-                } else {
-                    self.notify("The project has no channel for this instrument".into());
-                }
+            self.load_browser_plugin(&descriptor);
+        }
+    }
+
+    fn load_browser_plugin(&mut self, descriptor: &PluginDescriptor) {
+        if descriptor.is_catalog_only() {
+            // Declarations do not decide whether this module belongs in a
+            // generator or an insert. Reuse the explicit destination picker.
+            self.plugin_picker_target = None;
+            self.plugin_picker_show_all = false;
+            self.plugin_picker_fresh_bounce = false;
+            self.plugin_filter.clone_from(&descriptor.name);
+            self.show_plugins = true;
+        } else if descriptor.is_instrument || descriptor.has_midi_output() {
+            let channel = self
+                .selected_channel
+                .min(self.project.channels.len().saturating_sub(1));
+            if channel < self.project.channels.len() {
+                let _ = self.load_plugin_into_target(
+                    descriptor,
+                    PluginPickerTarget::ChannelDevice { channel },
+                );
             } else {
-                let track = self.selected_mixer;
-                if let Some(slot) = first_empty_mixer_slot(&self.project, track) {
-                    let _ = self.load_plugin_into_target(
-                        &descriptor,
-                        PluginPickerTarget::MixerSlot { track, slot },
-                    );
-                } else {
-                    self.notify(format!("Mixer {track:02} has no empty insert slots"));
-                }
+                self.notify("The project has no channel for this instrument".into());
+            }
+        } else {
+            let track = self.selected_mixer;
+            if let Some(slot) = first_empty_mixer_slot(&self.project, track) {
+                let _ = self.load_plugin_into_target(
+                    descriptor,
+                    PluginPickerTarget::MixerSlot { track, slot },
+                );
+            } else {
+                self.notify(format!("Mixer {track:02} has no empty insert slots"));
             }
         }
     }
@@ -26598,12 +26610,21 @@ impl CitrusApp {
                     );
                 } else {
                     ui.label(
-                        RichText::new(format!(
-                            "LOAD uses the first empty slot on mixer {selected_track:02}"
-                        ))
+                        RichText::new("Choose where to try a factory-listed plug-in")
                         .size(9.0)
                         .color(theme::MUTED),
                     );
+                    ui.horizontal(|ui| {
+                        let channel = self.selected_channel.min(self.project.channels.len().saturating_sub(1));
+                        if ui.add_enabled(channel < self.project.channels.len(), egui::Button::new(format!("CHANNEL {:02} GENERATOR", channel + 1))).clicked() {
+                            self.open_plugin_picker(PluginPickerTarget::ChannelDevice { channel });
+                        }
+                        let slot = first_empty_mixer_slot(&self.project, selected_track);
+                        if ui.add_enabled(slot.is_some(), egui::Button::new(format!("MIXER {selected_track:02} INSERT"))).clicked()
+                            && let Some(slot) = slot {
+                            self.open_plugin_picker(PluginPickerTarget::MixerSlot { track: selected_track, slot });
+                        }
+                    });
                 }
                 ui.add_space(7.0);
                 ui.horizontal(|ui| {
@@ -26642,10 +26663,13 @@ impl CitrusApp {
                                 let classification = ui.add_sized([86.0, 25.0], egui::Label::new(RichText::new(&plugin.category).size(9.0).color(theme::MUTED)));
                                 if let Some(error) = &plugin.scan_error {
                                     classification.on_hover_text(format!("VST3 metadata unavailable: {error}"));
+                                } else if plugin.is_catalog_only() {
+                                    classification.on_hover_text("Factory declarations only; choose a destination and try loading. Runtime audio, MIDI and editor support are not yet known.");
                                 }
                                 let location = plugin.path.parent().map(|p| p.display().to_string()).unwrap_or_default();
                                 ui.add_sized([ui.available_width() - 82.0, 25.0], egui::Label::new(RichText::new(location).size(8.0).color(theme::MUTED)).truncate());
-                                let load = ui.add_sized([68.0, 25.0], egui::Button::new(if classification_matches { "LOAD" } else { "LOAD*" }));
+                                let needs_target = plugin.is_catalog_only() && self.plugin_picker_target.is_none();
+                                let load = ui.add_enabled_ui(!needs_target, |ui| ui.add_sized([68.0, 25.0], egui::Button::new(if needs_target { "CHOOSE" } else if classification_matches { "LOAD" } else { "LOAD*" }))).inner;
                                 let load = if classification_matches {
                                     load
                                 } else {
@@ -29231,6 +29255,9 @@ fn plugin_descriptor_matches_target(
     descriptor: &PluginDescriptor,
     target: PluginPickerTarget,
 ) -> bool {
+    if descriptor.is_catalog_only() {
+        return true;
+    }
     match target {
         PluginPickerTarget::MixerSlot { .. } => {
             if descriptor.format == crate::plugins::PluginFormat::Vst3 {
@@ -30295,7 +30322,9 @@ fn commit_loaded_plugin(
             ScannedPluginFormat::Vst2 => ProjectPluginFormat::Vst2,
             ScannedPluginFormat::Vst3 => ProjectPluginFormat::Vst3,
         },
-        role: if descriptor.is_instrument {
+        role: if descriptor.is_catalog_only() {
+            PluginRole::Unknown
+        } else if descriptor.is_instrument {
             PluginRole::Instrument
         } else {
             PluginRole::Effect
@@ -30309,9 +30338,8 @@ fn commit_loaded_plugin(
         wet: 1.0,
         parameters: Default::default(),
         opaque_state: Vec::new(),
-        // The discovery host opened the binary successfully, but MIDI/audio
-        // graph routing is a later integration step. Keep project/UI state
-        // honest until that runtime owns the instance.
+        // Scanning may have queried declarations only. Keep project/UI state
+        // unloaded until the actual runtime owns and acknowledges the instance.
         runtime_status: PluginRuntimeStatus::Unloaded,
     });
     match target {
@@ -31524,6 +31552,7 @@ mod plugin_scan_result_tests {
                 has_midi_input: true,
                 has_midi_output: false,
             }),
+            vst3_catalog: None,
             scan_error: (!available).then(|| "fixture metadata unavailable".into()),
         }
     }
@@ -31618,6 +31647,35 @@ mod plugin_scan_result_tests {
                 Some(message)
             );
         }
+    }
+
+    #[test]
+    fn completed_catalog_scan_publishes_declarations_without_runtime_verification() {
+        let (_, mut app, cache) = fixture(true);
+        let mut plugin = indexed_plugin("new-catalog", false);
+        plugin.scan_error = None;
+        plugin.vst3_catalog = Some(plugins::Vst3FactoryCatalog {
+            factory: plugins::Vst3FactoryInfo {
+                vendor: "Factory vendor".into(),
+                url: String::new(),
+                email: String::new(),
+                flags: 0,
+            },
+            classes: Vec::new(),
+        });
+        assert!(plugin.is_catalog_only());
+        app.scan_receiver = Some(PluginScan::with_test_outcome(Some(ScanOutcome::Completed(
+            ScanReport {
+                plugins: vec![plugin],
+                probe_lifecycle: Vec::new(),
+            },
+        ))));
+        app.poll_plugin_scan();
+        assert!(app.plugins[0].is_catalog_only());
+        assert!(!app.plugin_cache_needs_rescan && app.plugin_scan_error.is_none());
+        let decoded =
+            plugins::decode_cache(&std::fs::read_to_string(&cache.path).unwrap()).unwrap();
+        assert!(!decoded.needs_rescan && decoded.plugins[0].is_catalog_only());
     }
 
     #[test]
@@ -35160,8 +35218,40 @@ mod playback_tests {
             is_instrument: false,
             verified: true,
             vst3_metadata: None,
+            vst3_catalog: None,
             scan_error: None,
         }
+    }
+
+    fn factory_catalog_descriptor() -> PluginDescriptor {
+        let mut descriptor = plugin_descriptor(
+            ScannedPluginFormat::Vst3,
+            "VST3:Declared.vst3",
+            "Declared module",
+            "Declared.vst3",
+        );
+        descriptor.verified = false;
+        descriptor.category = "Unknown".into();
+        descriptor.vst3_catalog = Some(plugins::Vst3FactoryCatalog {
+            factory: plugins::Vst3FactoryInfo {
+                vendor: "Factory vendor".into(),
+                url: String::new(),
+                email: String::new(),
+                flags: 0,
+            },
+            classes: vec![plugins::Vst3FactoryClass {
+                class_id: "00112233445566778899AABBCCDDEEFF".into(),
+                name: "Declared instrument".into(),
+                category: "Audio Module Class".into(),
+                cardinality: i32::MAX,
+                vendor: None,
+                version: None,
+                sdk_version: None,
+                sub_categories: Some(vec!["Instrument".into()]),
+                class_flags: None,
+            }],
+        });
+        descriptor
     }
 
     #[test]
@@ -36485,6 +36575,117 @@ mod playback_tests {
         effect.category = "Instrument".into();
         assert!(plugin_descriptor_matches_target(&effect, channel_target));
         assert!(!plugin_descriptor_matches_target(&effect, mixer_target));
+    }
+
+    #[test]
+    fn factory_catalog_is_visible_in_both_pickers_and_commits_unknown_role() {
+        let descriptor = factory_catalog_descriptor();
+        assert!(descriptor.is_catalog_only());
+        for target in [
+            PluginPickerTarget::ChannelDevice { channel: 0 },
+            PluginPickerTarget::MixerSlot { track: 1, slot: 0 },
+        ] {
+            let mut project = Project::default();
+            assert!(plugin_descriptor_matches_target(&descriptor, target));
+            assert!(validate_plugin_load(&project, &descriptor, target).is_ok());
+            let id = commit_loaded_plugin(&mut project, target, &descriptor).unwrap();
+            let instance = project
+                .plugin_instances
+                .iter()
+                .find(|value| value.id == id)
+                .unwrap();
+            assert_eq!(instance.role, PluginRole::Unknown);
+            assert_eq!(instance.uid, descriptor.id);
+            assert_eq!(instance.path, descriptor.path);
+            assert_eq!(instance.runtime_status, PluginRuntimeStatus::Unloaded);
+        }
+    }
+
+    #[test]
+    fn catalog_assignment_save_reopen_retains_default_identity_state_and_routing() {
+        let descriptor = factory_catalog_descriptor();
+        let mut project = Project::default();
+        let channel_id = project.channels[0].id;
+        let routing = project.channels[0].mixer_track;
+        let id = commit_loaded_plugin(
+            &mut project,
+            PluginPickerTarget::ChannelDevice { channel: 0 },
+            &descriptor,
+        )
+        .unwrap();
+        let instance = project
+            .plugin_instances
+            .iter_mut()
+            .find(|value| value.id == id)
+            .unwrap();
+        instance.opaque_state = vec![0, 255, 7, 91];
+        instance.parameters.insert(17, 0.25);
+        instance.wet = 0.75;
+        let before = plugins::plugin_load_spec_from_instance(instance);
+        assert!(before.class_uid.is_none());
+
+        let path = std::env::temp_dir().join(format!(
+            "citrus-catalog-roundtrip-{}-{}.citrus",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!path.exists());
+        project.save(&path).unwrap();
+        let restored = Project::load(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let instance = restored
+            .plugin_instances
+            .iter()
+            .find(|value| value.id == id)
+            .unwrap();
+        let after = plugins::plugin_load_spec_from_instance(instance);
+        assert_eq!(after.descriptor.path, before.descriptor.path);
+        assert_eq!(after.descriptor.id, before.descriptor.id);
+        assert!(after.class_uid.is_none());
+        assert_eq!(after.initial_state, before.initial_state);
+        assert_eq!(after.wet, before.wet);
+        assert_eq!(instance.parameters.get(&17), Some(&0.25));
+        assert_eq!(instance.role, PluginRole::Unknown);
+        let channel = restored
+            .channels
+            .iter()
+            .find(|value| value.id == channel_id)
+            .unwrap();
+        assert_eq!(channel.instrument_plugin_instance_id, Some(id));
+        assert_eq!(channel.mixer_track, routing);
+    }
+
+    #[test]
+    fn slot_ready_does_not_upgrade_catalog_declarations_or_infer_role() {
+        let descriptor = factory_catalog_descriptor();
+        let mut project = Project::default();
+        let id = commit_loaded_plugin(
+            &mut project,
+            PluginPickerTarget::ChannelDevice { channel: 0 },
+            &descriptor,
+        )
+        .unwrap();
+        let before = serde_json::to_value(&descriptor).unwrap();
+        apply_plugin_runtime_event(
+            &mut project,
+            &[id],
+            &RuntimeEvent::SlotReady {
+                slot: 0,
+                name: "Actual ready label".into(),
+                latency_samples: 0,
+                tail_samples: 0,
+            },
+        );
+        assert_eq!(
+            project.plugin_instances[0].runtime_status,
+            PluginRuntimeStatus::Loaded
+        );
+        assert_eq!(project.plugin_instances[0].role, PluginRole::Unknown);
+        assert_eq!(serde_json::to_value(&descriptor).unwrap(), before);
+        assert!(descriptor.is_catalog_only());
     }
 
     #[test]

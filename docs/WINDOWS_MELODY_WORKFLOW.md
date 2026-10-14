@@ -30,15 +30,44 @@ Project/session, Timeline, asset, parameter and save fences remain active during
 
 ## Ordinary scan reliability in this commit
 
-The default Windows/Linux scanner uses the retained ordinary default-class Probe,
-with original None class, 48k/Q128 settings and five-second exchange window.
-It attempts one load. Verified metadata additionally requires successful natural
-child exit, concrete reap, complete owned pipes and no cleanup error. A fully
-reaped metadata failure remains Unknown/unverified. Cancelled, busy, pending or
-unclean scans stop before publishing a partial index and preserve the previous
-index, rescan flag and exact cache bytes. The persistent UI message survives the
-toast. A rescan advances the same abandoned cleanup owner before another spawn;
-Pending and Busy cannot authorize a replacement child.
+Source75 connects ordinary UI `start_scan` and synchronous `scan_catalog_checked`
+to the retained factory-only request. They share the original walker, Probe,
+one-attempt seal, five-second exchange window, cancellation, owned pipes and
+cleanup/quarantine. No component LOAD or automatic loaded-default fallback is
+issued by catalog discovery.
+
+One module keeps one descriptor with the same ID/path, independent factory
+declarations, `verified=false`, no loaded-default metadata and unknown runtime
+capabilities. Catalog-only modules are visible in both target pickers; Browser
+offers explicit Channel/Mixer selection instead of guessing Effect from unknown
+classification. Project role remains Unknown and actual LOAD/save/reopen retains
+the original None-class behavior. Valid catalog caches are additive; old VST2 and
+actual metadata remain supported, while legacy verified-only entries still need
+rescan.
+
+Catalog publication requires successful natural child exit, concrete reap,
+complete owned pipes and no cleanup error. A fully healthy-reaped single-module
+metadata failure remains Unknown/unverified with its persistent scan_error and
+does not block other modules. Cancelled, busy, pending, killed or unclean scans
+stop before publishing a partial index and preserve the old index/rescan flag/
+exact cache bytes. The persistent UI message survives the toast. A rescan advances
+the same abandoned cleanup owner before another spawn; Pending and Busy cannot
+authorize a replacement child.
+
+Existing `scan_checked`/`scan` retain explicit loaded-default verification with
+None class,48k/Q128 settings and strict metadata consumers. They are not a catalog
+fallback. Strict clone gates/class selection/state/budgets remain unchanged.
+The new catalog/cache/mock-child/UI/default-load/save/reopen/refusal regressions
+and independent production-catalog native selector have passed source formatting
+and diff checks only. Compilation, Rust execution and the actual new production
+route are unrun; Source74's lower-level factory result is separate evidence.
+
+The first complete catalog-to-export flow also needs a live-load identity bridge:
+the current whole-song Review rejects persistent Unknown role. Use identity
+actually obtained by the user's default LOAD, tied to the current generator's
+control/endpoint/instance, without mutating Project role/history or upgrading the
+catalog cache. Current stopped capture and strict clone remain mandatory. That
+bridge is not implemented; catalog discovery alone does not qualify export.
 
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,
@@ -717,15 +746,48 @@ offers the context without propagating the setter result into declaration
 queries. Regression coverage must distinguish optional context from required
 factory/class getters, retain zero createInstance calls and verify reference/
 module release order. Source74 refreshed vendor provenance and actually replayed
-all74 source files byte-for-byte from the original archive. The new Rust repair
-still needs compilation/tests and a new bound actual NI attempt. It does not activate a
-production scanner or alter old runtime loading, default class, cache or budgets.
+all74 source files byte-for-byte from the original archive.
+
+The actual [Source74 quality run38650940387](https://github.com/wrench1997/DAW/actions/runs/38650940387)
+passed32 retained factory regressions,2258 app+52 helper+13 protocol tests
+(2323 passed/11 ignored), strict Clippy, both bins, protocol/harness smoke,
+no-default-feature and source-built fixtures. Only final native paint failed
+with the same target/same-process `PrintWindow=false`; the whole run remains
+failure, with control/state/lifecycle/cleanup passing separately. Preview
+run38650940397 was still running at the native diagnostic's admission.
+
+After a new explicit resource handoff, Source74's default helper/QA artifacts
+actually built exit0 (5.092s/15.074s) with source/profile/artifact bindings.
+Exactly one factory-only NI test PID2400 actually exited0, wrapper0, zero
+validation errors, diagnostic outer3.940s. The actual response declared Kontakt8
+version8.4.1, SDK VST3.7.12, Audio Module Class CID
+`5653544E694B386B6F6E74616B742038` with Instrument subcategory, plus its compatibility
+class. It did not choose or instantiate a runtime default class.
+
+Helper PID20596 naturally exited0, actual Reaped/no kill, with null shutdown,
+wait and pipe errors. Actual Shutdown consumption, dispatcher/slot clear/OLE
+completion and Windows run return were logged. Test and both pipe owners
+completed before ending the same NoExit session46347 with actual exit0; fresh
+heavy count0 at23:17:35Z preceded explicit handback. No CU/GPU/audio device,
+project read, component/controller/view, preset state, MIDI or Process request
+was made. This passes the factory-only declaration/retirement path, not ordinary
+component retirement, NOIRE restore/audio/export or performance acceptance.
+Preserve `source74-factory-native-run-01/`, its sibling raw logs/terminal,
+default-build receipts, `ci-f79fd3f-windows-quality-01.log` and actual run/jobs
+JSON outside Git; the frozen preparation and actual runner remain distinct.
+
+Source75 implements the module catalog contract described above. Source formatting
+and independent read-only review found no acceptance-blocking defect; compilation,
+Rust execution and the new production route's actual NI result remain unrun.
+Source74's success did not activate that connection or fix the older component
+ExitDll stall. Strict conversion/full-owner qualification still needs actual
+class/bus/MIDI evidence, and the live-load export identity bridge remains open.
 
 The existing GitHub Windows quality/preview workflows can run source checks away
 from the local desktop. A cloud coding environment still needs the repository and
 tool setup; this local chat has not moved. Keep licensed Kontakt/NOIRE, private
 projects/state/audio and iCON monitoring on this machine. The next local acceptance
-is normal helper retirement followed by one intact Pure save/cold-reopen/export
+is the actual production catalog path, followed by one intact Pure save/cold-reopen/export
 flow. Conversion state consistency/Undo and effects/general PDC remain open.
 
 Use private new directories and explicit opt-in ignored QA only after the coordinated desktop/build window is available. Preserve the original project and identify the exact test/helper/source inputs.

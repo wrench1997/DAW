@@ -44,6 +44,7 @@ fn spec() -> PluginLoadSpec {
         is_instrument: true,
         verified: false,
         vst3_metadata: None,
+        vst3_catalog: None,
         scan_error: None,
     });
     spec.class_uid = Some(UID.into());

@@ -265,7 +265,7 @@ mod tests {
 
     #[test]
     fn full_owner_scan_metadata_is_required_and_must_match_persisted_source() {
-        for case in 0..11 {
+        for case in 0..12 {
             let (mut app, source, mut scanned) = fixture();
             let before = FullHistoryImage::take(&app, 17).unwrap();
             match case {
@@ -279,7 +279,33 @@ mod tests {
                 7 => scanned.vst3_metadata.as_mut().unwrap().category = "Fx".into(),
                 8 => scanned.vst3_metadata.as_mut().unwrap().has_midi_input = false,
                 9 => scanned.vst3_metadata.as_mut().unwrap().category = "NotInstrument".into(),
-                _ => scanned.vst3_metadata.as_mut().unwrap().category = "Instrumental".into(),
+                10 => scanned.vst3_metadata.as_mut().unwrap().category = "Instrumental".into(),
+                _ => {
+                    let uid = scanned.vst3_metadata.take().unwrap().class_uid;
+                    scanned.verified = false;
+                    scanned.is_instrument = false;
+                    scanned.category = "Unknown".into();
+                    scanned.vst3_catalog = Some(plugins::Vst3FactoryCatalog {
+                        factory: plugins::Vst3FactoryInfo {
+                            vendor: "Declared vendor".into(),
+                            url: String::new(),
+                            email: String::new(),
+                            flags: 0,
+                        },
+                        classes: vec![plugins::Vst3FactoryClass {
+                            class_id: uid,
+                            name: "Expected UID declaration only".into(),
+                            category: "Audio Module Class".into(),
+                            cardinality: i32::MAX,
+                            vendor: None,
+                            version: None,
+                            sdk_version: None,
+                            sub_categories: Some(vec!["Instrument".into()]),
+                            class_flags: None,
+                        }],
+                    });
+                    assert!(scanned.is_catalog_only());
+                }
             }
             assert!(
                 register_and_enqueue_complete_source(

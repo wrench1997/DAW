@@ -433,6 +433,7 @@ for line in sys.stdin:
                 is_instrument: true,
                 verified: true,
                 vst3_metadata: None,
+                vst3_catalog: None,
                 scan_error: None,
             },
             class_uid: Some(UID.into()),
