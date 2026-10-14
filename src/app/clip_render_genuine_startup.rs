@@ -216,6 +216,7 @@ mod tests {
     fn record(kind: RecordKind) -> observe::Record {
         observe::Record {
             ordinal: 1,
+            monotonic_elapsed_ns: 0, // Synthetic oracle input, never native timing evidence.
             stage: Stage::InitialSource,
             instance: None,
             kind,

@@ -4,7 +4,7 @@
 //! claim that an SDK restoration took place. The runtime adapter has its own tests.
 //! No helper, device, native editor, or genuine plug-in is invoked here.
 use super::*;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use crate::app::clip_render_job::ClipRenderPhase;
 use crate::app::clip_render_job::tests::{FIXTURE_ADMISSION, FIXTURE_POISONED, Fixture};
 use crate::instrument_bounce::{BounceAudioBus, BouncePluginState};
@@ -16,7 +16,10 @@ use std::{
 
 // Read-only test identity and failure diagnostics for device-free qualification.
 // Borrow retained fields/publication only; never service an owner or reset time.
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 impl PendingClipRestoration {
     pub(in crate::app) fn genuine_test_candidate(&self) -> Option<&Project> {
         self.candidate.as_ref()
@@ -364,7 +367,7 @@ fn failed_restoration_stays_play_blocked_even_when_old_endpoint_and_timeline_are
     assert!(!fixture.app().playing);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_committed_failure_blocks_play_after_stop_and_further_polls() {
     let mut fixture = Fixture::new();
@@ -576,7 +579,7 @@ fn fresh_source_opt_in_is_explicit_scanned_and_limited_to_a_new_source_identity(
             .is_err()
     );
     if cfg!(all(
-        target_os = "linux",
+        any(target_os = "linux", windows),
         feature = "experimental-fresh-helper"
     )) {
         app.record_fresh_clip_source_for_new_load(42, &descriptor)
@@ -645,6 +648,7 @@ struct RestorationFixture {
     app: Option<Box<CitrusApp>>,
     callback: Option<audio::TestAudioCallback>,
     source: Option<TestCaptureSource>,
+    fresh_source: Option<TestCaptureSource>,
     untransferred: Option<PluginChain>,
     removed_restoration: Option<PendingClipRestoration>,
     admission: Option<std::sync::MutexGuard<'static, ()>>,
@@ -654,6 +658,7 @@ struct RetainedRestorationFailure {
     _app: Option<Box<CitrusApp>>,
     _callback: Option<audio::TestAudioCallback>,
     _source: Option<TestCaptureSource>,
+    _fresh_source: Option<TestCaptureSource>,
     _untransferred: Option<PluginChain>,
     _removed_restoration: Option<PendingClipRestoration>,
     _admission: Option<std::sync::MutexGuard<'static, ()>>,
@@ -712,6 +717,7 @@ impl RestorationFixture {
             app: Some(app),
             callback: Some(callback),
             source: None,
+            fresh_source: None,
             untransferred: None,
             removed_restoration: None,
             admission: Some(admission),
@@ -720,13 +726,19 @@ impl RestorationFixture {
             sample_rate: 48_000.0,
             max_block_frames,
         };
-        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
         let created = if held {
             TestCaptureSource::new_with_held_prepare(instance_id, source_state(), config)
         } else {
             TestCaptureSource::new(instance_id, source_state(), config)
         };
-        #[cfg(not(all(target_os = "linux", feature = "experimental-fresh-helper")))]
+        #[cfg(not(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        )))]
         let created = {
             assert!(!held, "held preparation requires the existing test profile");
             TestCaptureSource::new(instance_id, source_state(), config)
@@ -789,6 +801,9 @@ impl RestorationFixture {
         if let Some(source) = &self.source {
             source.release_gates();
         }
+        if let Some(source) = &self.fresh_source {
+            source.release_gates();
+        }
         self.callback = None;
         let mut worker_panicked = false;
         loop {
@@ -821,6 +836,9 @@ impl RestorationFixture {
             for guard in &mut app.retired_clip_restorations {
                 poll(guard);
             }
+            for guard in &mut app.retired_fresh_source_candidates {
+                poll(guard);
+            }
             for chain in app.pending_generator_chains.values_mut() {
                 poll(&mut chain.guard);
             }
@@ -844,6 +862,18 @@ impl RestorationFixture {
 
 impl Drop for RestorationFixture {
     fn drop(&mut self) {
+        if self.app.is_none() {
+            // Forced-close tests transferred guards to the production shutdown
+            // owner before taking the App. Releasing gates still permits join
+            // if a test assertion unwinds before its explicit release.
+            if let Some(source) = &self.source {
+                source.release_gates();
+            }
+            if let Some(source) = &self.fresh_source {
+                source.release_gates();
+            }
+            return;
+        }
         let was_panicking = std::thread::panicking();
         if let Some(source) = &self.source {
             source.release_gates();
@@ -857,6 +887,7 @@ impl Drop for RestorationFixture {
                 _app: self.app.take(),
                 _callback: self.callback.take(),
                 _source: self.source.take(),
+                _fresh_source: self.fresh_source.take(),
                 _untransferred: self.untransferred.take(),
                 _removed_restoration: self.removed_restoration.take(),
                 _admission: self.admission.take(),
@@ -882,6 +913,1136 @@ fn restoration_owner_ids(pending: &PendingClipRestoration) -> (usize, usize, usi
         chain.control.genuine_worker_id(),
         chain.guard.genuine_worker_id(),
     )
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+fn ordinary_source_before_fresh_candidate() -> RestorationFixture {
+    let mut fixture = RestorationFixture::new();
+    fixture.wait_for_actual_worker_snapshot();
+    let channel = fixture.app().project.channels[0].id;
+    let mut pending = fixture
+        .app_mut()
+        .pending_clip_restorations
+        .remove(&channel)
+        .unwrap();
+    let chain = pending.chain.take().unwrap();
+    fixture.untransferred = Some(chain);
+    fixture.app_mut().clip_restoration_playback_pending = false;
+    let candidate = fixture.app().project.clone();
+    let previous = snapshot_channel_generator(&candidate, channel);
+    let chain = fixture.untransferred.take().unwrap();
+    fixture
+        .app_mut()
+        .queue_channel_generator_candidate_prepared(channel, candidate, previous, Some(chain))
+        .unwrap();
+    fixture
+        .callback
+        .as_mut()
+        .unwrap()
+        .pump(fixture.app.as_ref().unwrap().audio.as_ref().unwrap(), 128);
+    fixture.app_mut().poll_generator_endpoint_events();
+    assert_eq!(
+        fixture.app().running_generator_chains[&channel].instance_id,
+        41
+    );
+    assert!(fixture.app().pending_generator_chains.is_empty());
+    fixture
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+fn prepare_explicit_fresh_candidate(fixture: &mut RestorationFixture, held: bool) -> Project {
+    let descriptor = descriptor(&fixture.app().project);
+    fixture
+        .app_mut()
+        .record_fresh_clip_source_for_new_load(42, &descriptor)
+        .unwrap();
+    // Test ownership capacity is prepared before spawning the actual worker.
+    fixture
+        .app_mut()
+        .retired_fresh_source_candidates
+        .try_reserve(2)
+        .unwrap();
+    let mut candidate = fixture.app().project.clone();
+    let mut instance = candidate.plugin_instances[0].clone();
+    instance.id = 42;
+    candidate.plugin_instances.push(instance);
+    candidate.channels[0].instrument_plugin_instance_id = Some(42);
+    let config = PluginPrepareConfig {
+        sample_rate: 48_000.0,
+        max_block_frames: MAX_MIXER_BLOCK_FRAMES,
+    };
+    let (chain, source) = if held {
+        TestCaptureSource::new_with_held_prepare(42, source_state(), config)
+    } else {
+        TestCaptureSource::new(42, source_state(), config)
+    }
+    .unwrap();
+    fixture.untransferred = Some(chain);
+    fixture.fresh_source = Some(source);
+    candidate
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+fn source_join_outcomes(
+    observer: &crate::genuine_app_observer::ObservationRun,
+    worker: usize,
+) -> Vec<crate::genuine_app_observer::WorkerJoinOutcome> {
+    use crate::genuine_app_observer::RecordKind;
+    observer.with_snapshot(|snapshot| {
+        assert!(snapshot.failure.is_none(), "{:?}", snapshot.failure);
+        for record in &snapshot.records {
+            if let RecordKind::Worker {
+                worker_id, stats, ..
+            } = &record.kind
+                && *worker_id == worker
+            {
+                assert_eq!(stats.detached_workers, 0, "actual fresh worker detached");
+            }
+        }
+        snapshot
+            .records
+            .iter()
+            .filter_map(|record| match &record.kind {
+                RecordKind::WorkerJoin { worker_id, outcome } if *worker_id == worker => {
+                    Some(*outcome)
+                }
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+fn drain_actual_fresh_candidate(
+    fixture: &mut RestorationFixture,
+    observer: &crate::genuine_app_observer::ObservationRun,
+    worker: usize,
+) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fixture.app().retired_fresh_source_candidates.is_empty() {
+        fixture.app_mut().poll_clip_restorations();
+        assert!(Instant::now() < deadline, "exact fresh worker did not join");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        source_join_outcomes(observer, worker),
+        [crate::genuine_app_observer::WorkerJoinOutcome::Joined]
+    );
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn actual_fresh_source_install_enqueue_rejection_retains_late_worker_until_join() {
+    let mut fixture = ordinary_source_before_fresh_candidate();
+    let channel = fixture.app().project.channels[0].id;
+    let old_worker = fixture.app().running_generator_chains[&channel]
+        .guard
+        .genuine_worker_id();
+    let old_endpoint = fixture.app().running_generator_chains[&channel].endpoint_id;
+    let candidate = prepare_explicit_fresh_candidate(&mut fixture, true);
+    let fresh_worker = fixture
+        .untransferred
+        .as_ref()
+        .unwrap()
+        .guard
+        .genuine_worker_id();
+    let before = project_and_history(fixture.app());
+    let callback_before = fixture.callback.as_ref().unwrap().genuine_snapshot();
+    fill_ordinary_ring_and_prove_stop_all_rejected(fixture.app_mut());
+    let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
+    let previous = snapshot_channel_generator(&fixture.app().project, channel);
+    let chain = fixture.untransferred.take().unwrap();
+    let error = fixture
+        .app_mut()
+        .queue_channel_generator_candidate_prepared(channel, candidate, previous, Some(chain))
+        .unwrap_err();
+    assert!(error.contains("installation queue is full"));
+    assert!(fixture.app().pending_generator_chains.is_empty());
+    assert_eq!(fixture.app().retired_fresh_source_candidates.len(), 1);
+    for _ in 0..3 {
+        fixture.app_mut().poll_clip_restorations();
+        assert_eq!(
+            fixture.app().retired_fresh_source_candidates[0].genuine_worker_id(),
+            fresh_worker
+        );
+        assert!(source_join_outcomes(&observer, fresh_worker).is_empty());
+        assert_eq!(project_and_history(fixture.app()), before);
+    }
+    assert!(!fixture.app().clip_restoration_failed);
+    assert!(!fixture.app().clip_restoration_playback_pending);
+    assert!(fixture.app().clip_restoration_resources_pending());
+    assert_eq!(
+        fixture.app().running_generator_chains[&channel]
+            .guard
+            .genuine_worker_id(),
+        old_worker
+    );
+    assert_eq!(
+        fixture.app().running_generator_chains[&channel].endpoint_id,
+        old_endpoint
+    );
+    let callback_after = fixture.callback.as_ref().unwrap().genuine_snapshot();
+    assert_eq!(callback_after.device_frame, callback_before.device_frame);
+    assert_eq!(callback_after.endpoints[0].endpoint_id, old_endpoint);
+    fixture.fresh_source.as_ref().unwrap().release_prepare();
+    drain_actual_fresh_candidate(&mut fixture, &observer, fresh_worker);
+    assert!(!fixture.app().clip_restoration_resources_pending());
+    assert_eq!(project_and_history(fixture.app()), before);
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn actual_fresh_source_callback_fault_install_refusal_keeps_old_source_and_joins_failed_worker() {
+    let mut fixture = ordinary_source_before_fresh_candidate();
+    let channel = fixture.app().project.channels[0].id;
+    let old_endpoint = fixture.app().running_generator_chains[&channel].endpoint_id;
+    let old_worker = fixture.app().running_generator_chains[&channel]
+        .guard
+        .genuine_worker_id();
+    let candidate = prepare_explicit_fresh_candidate(&mut fixture, false);
+    let fresh_worker = fixture
+        .untransferred
+        .as_ref()
+        .unwrap()
+        .guard
+        .genuine_worker_id();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fixture
+        .untransferred
+        .as_ref()
+        .unwrap()
+        .control
+        .plugin_endpoint_snapshot()
+        .is_none()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "fresh mock did not actually prepare"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
+    fixture
+        .fresh_source
+        .as_ref()
+        .unwrap()
+        .fail_capture_after_gate("actual fresh candidate backend fault".into());
+    let control = &fixture.untransferred.as_ref().unwrap().control;
+    let receiver = control
+        .request_instrument_bounce_state(42, control.stats().current_epoch, vec![17])
+        .unwrap();
+    loop {
+        match receiver.try_recv() {
+            Ok(Err(crate::instrument_bounce::BounceCaptureError::BackendFailed(_))) => break,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "actual fresh fault did not return"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            other => panic!("unexpected actual capture result: {other:?}"),
+        }
+    }
+    assert!(receiver.termination_acknowledged());
+    assert!(control.stats().faults > 0);
+    let before = project_and_history(fixture.app());
+    let previous = snapshot_channel_generator(&fixture.app().project, channel);
+    let chain = fixture.untransferred.take().unwrap();
+    fixture
+        .app_mut()
+        .queue_channel_generator_candidate_prepared(channel, candidate, previous, Some(chain))
+        .unwrap();
+    let fresh_endpoint = fixture.app().pending_generator_chains[&channel].endpoint_id;
+    fixture
+        .callback
+        .as_mut()
+        .unwrap()
+        .pump(fixture.app.as_ref().unwrap().audio.as_ref().unwrap(), 128);
+    fixture.app_mut().poll_generator_endpoint_events();
+    observer.with_snapshot(|snapshot| {
+        let refused = snapshot.records.iter().filter(|record| matches!(&record.kind,
+            crate::genuine_app_observer::RecordKind::AppGeneratorEndpointEvent(
+                GeneratorEndpointEvent::Installed { endpoint_id, plugin_instance_id: 42, success: false, .. }
+            ) if *endpoint_id == fresh_endpoint
+        )).count();
+        assert_eq!(refused, 1, "the production callback must emit the actual refusal");
+    });
+    assert!(fixture.app().pending_generator_chains.is_empty());
+    assert_eq!(fixture.app().retired_fresh_source_candidates.len(), 1);
+    assert_eq!(
+        fixture.app().retired_fresh_source_candidates[0].genuine_worker_id(),
+        fresh_worker
+    );
+    assert_eq!(project_and_history(fixture.app()), before);
+    assert_eq!(
+        fixture.app().running_generator_chains[&channel].endpoint_id,
+        old_endpoint
+    );
+    assert_eq!(
+        fixture.app().running_generator_chains[&channel]
+            .guard
+            .genuine_worker_id(),
+        old_worker
+    );
+    assert_eq!(
+        fixture
+            .callback
+            .as_ref()
+            .unwrap()
+            .genuine_snapshot()
+            .endpoints[0]
+            .endpoint_id,
+        old_endpoint
+    );
+    assert!(!fixture.app().clip_restoration_failed);
+    assert!(!fixture.app().clip_restoration_playback_pending);
+    drain_actual_fresh_candidate(&mut fixture, &observer, fresh_worker);
+    assert_eq!(project_and_history(fixture.app()), before);
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn actual_fresh_source_shutdown_panic_is_reported_as_panicked_join_without_restoration_lock() {
+    let mut fixture = ordinary_source_before_fresh_candidate();
+    let candidate = prepare_explicit_fresh_candidate(&mut fixture, true);
+    let channel = candidate.channels[0].id;
+    fixture.fresh_source.as_ref().unwrap().panic_on_shutdown();
+    let worker = fixture
+        .untransferred
+        .as_ref()
+        .unwrap()
+        .guard
+        .genuine_worker_id();
+    let before = project_and_history(fixture.app());
+    fill_ordinary_ring_and_prove_stop_all_rejected(fixture.app_mut());
+    let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
+    let chain = fixture.untransferred.take().unwrap();
+    assert!(
+        fixture
+            .app_mut()
+            .queue_channel_generator_candidate_prepared(channel, candidate, None, Some(chain))
+            .is_err()
+    );
+    fixture.app_mut().poll_clip_restorations();
+    assert_eq!(fixture.app().retired_fresh_source_candidates.len(), 1);
+    assert!(source_join_outcomes(&observer, worker).is_empty());
+    fixture.fresh_source.as_ref().unwrap().release_prepare();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fixture.app().retired_fresh_source_candidates.is_empty() {
+        fixture.app_mut().poll_clip_restorations();
+        assert!(
+            Instant::now() < deadline,
+            "panicking fresh worker was not actually joined"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        source_join_outcomes(&observer, worker),
+        [crate::genuine_app_observer::WorkerJoinOutcome::WorkerPanicked]
+    );
+    assert!(
+        fixture
+            .app()
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("shutdown panic")
+    );
+    assert!(!fixture.app().clip_restoration_failed);
+    assert!(!fixture.app().clip_restoration_playback_pending);
+    assert_eq!(project_and_history(fixture.app()), before);
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn actual_fresh_source_forced_app_drop_retains_late_worker_for_background_join_once() {
+    let mut fixture = RestorationFixture::with_preparation(MAX_MIXER_BLOCK_FRAMES, true, 42);
+    let channel = fixture.app().project.channels[0].id;
+    let mut pending = fixture
+        .app_mut()
+        .pending_clip_restorations
+        .remove(&channel)
+        .unwrap();
+    let PluginChain {
+        audio,
+        control,
+        mut guard,
+    } = pending.chain.take().unwrap();
+    fixture
+        .app_mut()
+        .retired_fresh_source_candidates
+        .try_reserve(1)
+        .unwrap();
+    guard.mark_fresh_retained_shutdown();
+    let descriptor = descriptor(&fixture.app().project);
+    fixture
+        .app_mut()
+        .record_fresh_clip_source_for_new_load(42, &descriptor)
+        .unwrap();
+    let worker = guard.genuine_worker_id();
+    let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
+    fixture.app_mut().retire_failed_clip_candidate(42, guard);
+    drop(audio);
+    assert_eq!(fixture.app().retired_fresh_source_candidates.len(), 1);
+    fixture.callback = None;
+    let app = fixture.app.take().unwrap();
+    drop(app);
+    for _ in 0..3 {
+        assert_eq!(control.stats().detached_workers, 0);
+        assert!(source_join_outcomes(&observer, worker).is_empty());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fixture.source.as_ref().unwrap().release_prepare();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while source_join_outcomes(&observer, worker).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "forced App close lost its exact late worker owner"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        source_join_outcomes(&observer, worker),
+        [crate::genuine_app_observer::WorkerJoinOutcome::Joined]
+    );
+    assert_eq!(control.stats().detached_workers, 0);
+    assert!(control.stats().stopped);
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+fn actually_installed_fresh_source() -> RestorationFixture {
+    let mut fixture = RestorationFixture::with_preparation(MAX_MIXER_BLOCK_FRAMES, false, 42);
+    let channel = fixture.app().project.channels[0].id;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fixture.app().pending_clip_restorations[&channel]
+        .chain
+        .as_ref()
+        .unwrap()
+        .control
+        .plugin_endpoint_snapshot()
+        .is_none()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "actual fresh worker did not prepare"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let descriptor = descriptor(&fixture.app().project);
+    fixture
+        .app_mut()
+        .record_fresh_clip_source_for_new_load(42, &descriptor)
+        .unwrap();
+    let mut candidate = fixture.app().project.clone();
+    candidate.channels[0].instrument_plugin_instance_id = Some(42);
+    candidate.plugin_instances[0].id = 42;
+    let previous = snapshot_channel_generator(&fixture.app().project, channel);
+    let mut pending = fixture
+        .app_mut()
+        .pending_clip_restorations
+        .remove(&channel)
+        .unwrap();
+    fixture.untransferred = pending.chain.take();
+    fixture.app_mut().clip_restoration_playback_pending = false;
+    let chain = fixture.untransferred.take().unwrap();
+    fixture
+        .app_mut()
+        .queue_channel_generator_candidate_prepared(channel, candidate, previous, Some(chain))
+        .unwrap();
+    // The production admission path reserved this running owner's eventual
+    // retirement capacity before transferring it to the actual callback.
+    assert!(fixture.app().retired_fresh_source_candidates.capacity() >= 1);
+    fixture
+        .callback
+        .as_mut()
+        .unwrap()
+        .pump(fixture.app.as_ref().unwrap().audio.as_ref().unwrap(), 128);
+    fixture.app_mut().poll_generator_endpoint_events();
+    assert!(fixture.app().pending_generator_chains.is_empty());
+    let running = &fixture.app().running_generator_chains[&channel];
+    assert_eq!(running.instance_id, 42);
+    assert_eq!(running.control.stats().detached_workers, 0);
+    assert_eq!(
+        fixture
+            .callback
+            .as_ref()
+            .unwrap()
+            .genuine_snapshot()
+            .endpoints[0]
+            .endpoint_id,
+        running.endpoint_id
+    );
+    fixture
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+fn pause_actual_running_fresh_capture(
+    fixture: &RestorationFixture,
+) -> crate::plugins::plugin_runtime::BounceStateReceiver {
+    let channel = fixture.app().project.channels[0].id;
+    let source = fixture.source.as_ref().unwrap();
+    let before = source.capture_count();
+    source.pause_capture();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let control = &fixture.app().running_generator_chains[&channel].control;
+        let receiver = control
+            .request_instrument_bounce_state(42, control.stats().current_epoch, vec![17])
+            .unwrap();
+        loop {
+            if source.capture_count() > before {
+                assert!(
+                    !receiver.termination_acknowledged(),
+                    "held actual capture cannot have a terminal ACK"
+                );
+                return receiver;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "actual running fresh worker never entered held capture"
+            );
+            if receiver.termination_acknowledged() {
+                match receiver.try_recv() {
+                    Ok(Err(crate::instrument_bounce::BounceCaptureError::Rejected(_))) => break,
+                    other => panic!("unexpected capture before its actual gate: {other:?}"),
+                }
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn actual_fresh_source_running_engine_loss_retains_late_worker_until_join_without_model_change() {
+    let mut fixture = actually_installed_fresh_source();
+    let channel = fixture.app().project.channels[0].id;
+    let worker = fixture.app().running_generator_chains[&channel]
+        .guard
+        .genuine_worker_id();
+    let before = project_and_history(fixture.app());
+    let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
+    let receiver = pause_actual_running_fresh_capture(&fixture);
+    // This is the existing engine-loss safe owner point: callback endpoint
+    // ownership has been destroyed before the retained source transfer.
+    fixture.callback = None;
+    drop(fixture.app_mut().audio.take());
+    fixture.app_mut().retain_recreated_sources_before_clear();
+    assert!(fixture.app().running_generator_chains.is_empty());
+    assert_eq!(fixture.app().retired_fresh_source_candidates.len(), 1);
+    for _ in 0..3 {
+        fixture.app_mut().poll_clip_restorations();
+        assert_eq!(
+            fixture.app().retired_fresh_source_candidates[0].genuine_worker_id(),
+            worker
+        );
+        assert!(source_join_outcomes(&observer, worker).is_empty());
+        assert!(!receiver.termination_acknowledged());
+        assert_eq!(project_and_history(fixture.app()), before);
+    }
+    assert!(!fixture.app().clip_restoration_failed);
+    assert!(!fixture.app().clip_restoration_playback_pending);
+    fixture.source.as_ref().unwrap().release_gates();
+    drain_actual_fresh_candidate(&mut fixture, &observer, worker);
+    assert!(receiver.termination_acknowledged());
+    assert_eq!(project_and_history(fixture.app()), before);
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn actual_fresh_source_running_forced_app_drop_retains_late_worker_for_join_once() {
+    let mut fixture = actually_installed_fresh_source();
+    let channel = fixture.app().project.channels[0].id;
+    let worker = fixture.app().running_generator_chains[&channel]
+        .guard
+        .genuine_worker_id();
+    let before = project_and_history(fixture.app());
+    let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
+    let receiver = pause_actual_running_fresh_capture(&fixture);
+    fixture.callback = None;
+    drop(fixture.app_mut().audio.take());
+    // The exact source is still running in the App at destruction. Only its
+    // production Drop handoff can move this JoinHandle to the shutdown owner.
+    assert_eq!(
+        fixture.app().running_generator_chains[&channel]
+            .guard
+            .genuine_worker_id(),
+        worker
+    );
+    assert!(fixture.app().retired_fresh_source_candidates.is_empty());
+    assert_eq!(project_and_history(fixture.app()), before);
+    let app = fixture.app.take().unwrap();
+    drop(app);
+    for _ in 0..3 {
+        assert!(source_join_outcomes(&observer, worker).is_empty());
+        assert!(!receiver.termination_acknowledged());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    fixture.source.as_ref().unwrap().release_gates();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while source_join_outcomes(&observer, worker).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "forced close lost the actual running fresh owner"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        source_join_outcomes(&observer, worker),
+        [crate::genuine_app_observer::WorkerJoinOutcome::Joined]
+    );
+    assert!(receiver.termination_acknowledged());
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+fn unpublished_qualified_fresh_worker() -> (RestorationFixture, Project) {
+    let mut fixture = RestorationFixture::with_preparation(MAX_MIXER_BLOCK_FRAMES, false, 42);
+    let channel = fixture.app().project.channels[0].id;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fixture.app().pending_clip_restorations[&channel]
+        .chain
+        .as_ref()
+        .unwrap()
+        .control
+        .plugin_endpoint_snapshot()
+        .is_none()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "actual unpublished fresh worker did not prepare"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let descriptor = descriptor(&fixture.app().project);
+    fixture
+        .app_mut()
+        .record_fresh_clip_source_for_new_load(42, &descriptor)
+        .unwrap();
+    fixture
+        .app_mut()
+        .retired_fresh_source_candidates
+        .try_reserve(1)
+        .unwrap();
+    let mut pending = fixture
+        .app_mut()
+        .pending_clip_restorations
+        .remove(&channel)
+        .unwrap();
+    fixture.untransferred = pending.chain.take();
+    fixture
+        .untransferred
+        .as_mut()
+        .unwrap()
+        .guard
+        .mark_fresh_retained_shutdown();
+    fixture.app_mut().clip_restoration_playback_pending = false;
+    let mut candidate = fixture.app().project.clone();
+    candidate.channels[0].instrument_plugin_instance_id = Some(42);
+    candidate.plugin_instances[0].id = 42;
+    (fixture, candidate)
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn actual_fresh_source_guard_drop_retains_late_worker_and_records_healthy_or_panicked_join_once() {
+    for worker_panics in [false, true] {
+        let mut fixture = RestorationFixture::with_preparation(MAX_MIXER_BLOCK_FRAMES, true, 42);
+        let channel = fixture.app().project.channels[0].id;
+        fixture
+            .app_mut()
+            .retired_fresh_source_candidates
+            .try_reserve(1)
+            .unwrap();
+        let mut pending = fixture
+            .app_mut()
+            .pending_clip_restorations
+            .remove(&channel)
+            .unwrap();
+        let PluginChain {
+            audio,
+            control,
+            mut guard,
+        } = pending.chain.take().unwrap();
+        guard.mark_fresh_retained_shutdown();
+        let worker = guard.genuine_worker_id();
+        if worker_panics {
+            fixture.source.as_ref().unwrap().panic_on_shutdown();
+        }
+        let before = project_and_history(fixture.app());
+        let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
+        drop(audio);
+        drop(guard);
+        for _ in 0..3 {
+            assert_eq!(control.stats().detached_workers, 0);
+            assert!(source_join_outcomes(&observer, worker).is_empty());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fixture.source.as_ref().unwrap().release_prepare();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while source_join_outcomes(&observer, worker).is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "fresh Guard Drop lost its exact held worker"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let expected = if worker_panics {
+            crate::genuine_app_observer::WorkerJoinOutcome::WorkerPanicked
+        } else {
+            crate::genuine_app_observer::WorkerJoinOutcome::Joined
+        };
+        assert_eq!(source_join_outcomes(&observer, worker), [expected]);
+        assert_eq!(control.stats().detached_workers, 0);
+        assert_eq!(project_and_history(fixture.app()), before);
+    }
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn actual_fresh_source_guard_drop_after_join_starts_no_owner_and_does_not_join_twice() {
+    let (mut fixture, _) = unpublished_qualified_fresh_worker();
+    let PluginChain {
+        audio,
+        control,
+        mut guard,
+    } = fixture.untransferred.take().unwrap();
+    let worker = guard.genuine_worker_id();
+    let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
+    drop(audio);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match guard.poll_shutdown_retained() {
+            RetainedShutdownPoll::Pending => {
+                assert!(
+                    Instant::now() < deadline,
+                    "actual fresh worker did not join"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            RetainedShutdownPoll::Joined => break,
+            RetainedShutdownPoll::WorkerPanicked => {
+                panic!("healthy mock joined with panic evidence")
+            }
+        }
+    }
+    assert_eq!(
+        source_join_outcomes(&observer, worker),
+        [crate::genuine_app_observer::WorkerJoinOutcome::Joined]
+    );
+    drop(guard);
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(
+        source_join_outcomes(&observer, worker),
+        [crate::genuine_app_observer::WorkerJoinOutcome::Joined]
+    );
+    observer.with_snapshot(|snapshot| {
+        assert!(
+            !snapshot.records.iter().any(|record| matches!(&record.kind,
+                crate::genuine_app_observer::RecordKind::Lifecycle(site)
+                    if site.starts_with("fresh guard retained shutdown owner")
+            )),
+            "a terminal guard must not start another shutdown owner"
+        );
+    });
+    assert_eq!(control.stats().detached_workers, 0);
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+fn switch_fresh_fixture_session(fixture: &mut RestorationFixture, open: bool) {
+    let previous = fixture.app().project_session;
+    if open {
+        let mut project = Project::blank();
+        project.name = "Validated mock Open destination".into();
+        // Exercise the real post-load Open commit entry; this test supplies a
+        // device-free Project and makes no file-reader or SDK claim.
+        assert!(
+            fixture
+                .app_mut()
+                .finish_open_project(project, PathBuf::from("/fixture-only/new-session.citrus"))
+        );
+    } else {
+        fixture.app_mut().commit_project_intent(ProjectIntent::New);
+    }
+    assert_ne!(fixture.app().project_session, previous);
+    assert!(fixture.app().fresh_bounce_sources.is_empty());
+    assert!(fixture.app().clip_render_restorations.is_empty());
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn actual_fresh_source_new_and_open_marker_clear_removal_retains_late_worker_until_join() {
+    for open in [false, true] {
+        let mut fixture = actually_installed_fresh_source();
+        let channel = fixture.app().project.channels[0].id;
+        let worker = fixture.app().running_generator_chains[&channel]
+            .guard
+            .genuine_worker_id();
+        let old_endpoint = fixture.app().running_generator_chains[&channel].endpoint_id;
+        let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
+        let receiver = pause_actual_running_fresh_capture(&fixture);
+        switch_fresh_fixture_session(&mut fixture, open);
+        let destination = project_and_history(fixture.app());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while fixture
+            .app()
+            .running_generator_chains
+            .contains_key(&channel)
+        {
+            fixture
+                .callback
+                .as_mut()
+                .unwrap()
+                .pump(fixture.app.as_ref().unwrap().audio.as_ref().unwrap(), 128);
+            fixture.app_mut().poll_generator_endpoint_events();
+            if fixture
+                .app()
+                .running_generator_chains
+                .contains_key(&channel)
+            {
+                fixture.app_mut().request_channel_generator_rebuild(channel);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "old fresh endpoint did not receive an actual removal"
+            );
+        }
+        observer.with_snapshot(|snapshot| {
+            assert_eq!(snapshot.records.iter().filter(|record| matches!(&record.kind,
+                crate::genuine_app_observer::RecordKind::AppGeneratorEndpointEvent(
+                    GeneratorEndpointEvent::Removed { endpoint_id: Some(id), plugin_instance_id: Some(42), .. }
+                ) if *id == old_endpoint
+            )).count(), 1);
+        });
+        assert_eq!(fixture.app().retired_fresh_source_candidates.len(), 1);
+        for _ in 0..3 {
+            fixture.app_mut().poll_clip_restorations();
+            assert_eq!(
+                fixture.app().retired_fresh_source_candidates[0].genuine_worker_id(),
+                worker
+            );
+            assert!(source_join_outcomes(&observer, worker).is_empty());
+            assert!(!receiver.termination_acknowledged());
+            assert_eq!(project_and_history(fixture.app()), destination);
+        }
+        fixture.source.as_ref().unwrap().release_gates();
+        drain_actual_fresh_candidate(&mut fixture, &observer, worker);
+        assert!(receiver.termination_acknowledged());
+        assert_eq!(project_and_history(fixture.app()), destination);
+        assert!(!fixture.app().clip_restoration_failed);
+        assert!(!fixture.app().clip_restoration_playback_pending);
+    }
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn actual_fresh_source_old_pending_marker_clear_installed_false_retains_exact_guard() {
+    let (mut fixture, candidate) = unpublished_qualified_fresh_worker();
+    let channel = candidate.channels[0].id;
+    let worker = fixture
+        .untransferred
+        .as_ref()
+        .unwrap()
+        .guard
+        .genuine_worker_id();
+    let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
+    fixture
+        .source
+        .as_ref()
+        .unwrap()
+        .fail_capture_after_gate("actual old-session candidate failure".into());
+    let control = &fixture.untransferred.as_ref().unwrap().control;
+    let receiver = control
+        .request_instrument_bounce_state(42, control.stats().current_epoch, vec![17])
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match receiver.try_recv() {
+            Ok(Err(crate::instrument_bounce::BounceCaptureError::BackendFailed(_))) => break,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "actual candidate fault did not terminate"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            other => panic!("unexpected actual candidate fault result: {other:?}"),
+        }
+    }
+    assert!(control.stats().faults > 0);
+    // A previously qualified prepared guard keeps its lifetime policy even
+    // when its intent registry has disappeared before this later admission.
+    fixture.app_mut().fresh_bounce_sources.clear();
+    fixture.app_mut().retired_fresh_source_candidates = Vec::new();
+    assert_eq!(fixture.app().retired_fresh_source_candidates.capacity(), 0);
+    let previous = snapshot_channel_generator(&fixture.app().project, channel);
+    let chain = fixture.untransferred.take().unwrap();
+    fixture
+        .app_mut()
+        .queue_channel_generator_candidate_prepared(channel, candidate, previous, Some(chain))
+        .unwrap();
+    assert!(fixture.app().retired_fresh_source_candidates.capacity() >= 1);
+    let endpoint = fixture.app().pending_generator_chains[&channel].endpoint_id;
+    switch_fresh_fixture_session(&mut fixture, false);
+    let destination = project_and_history(fixture.app());
+    fixture
+        .callback
+        .as_mut()
+        .unwrap()
+        .pump(fixture.app.as_ref().unwrap().audio.as_ref().unwrap(), 128);
+    fixture.app_mut().poll_generator_endpoint_events();
+    observer.with_snapshot(|snapshot| {
+        assert_eq!(snapshot.records.iter().filter(|record| matches!(&record.kind,
+            crate::genuine_app_observer::RecordKind::AppGeneratorEndpointEvent(
+                GeneratorEndpointEvent::Installed { endpoint_id, plugin_instance_id: 42, success: false, .. }
+            ) if *endpoint_id == endpoint
+        )).count(), 1);
+    });
+    assert!(fixture.app().pending_generator_chains.is_empty());
+    assert_eq!(
+        fixture.app().retired_fresh_source_candidates[0].genuine_worker_id(),
+        worker
+    );
+    assert_eq!(project_and_history(fixture.app()), destination);
+    drain_actual_fresh_candidate(&mut fixture, &observer, worker);
+    assert_eq!(project_and_history(fixture.app()), destination);
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn actual_fresh_source_old_pending_marker_clear_installed_success_then_drop_joins_late_worker() {
+    let (mut fixture, candidate) = unpublished_qualified_fresh_worker();
+    let channel = candidate.channels[0].id;
+    let worker = fixture
+        .untransferred
+        .as_ref()
+        .unwrap()
+        .guard
+        .genuine_worker_id();
+    let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
+    let source = fixture.source.as_ref().unwrap();
+    let before_capture = source.capture_count();
+    source.pause_capture();
+    let control = &fixture.untransferred.as_ref().unwrap().control;
+    let receiver = control
+        .request_instrument_bounce_state(42, control.stats().current_epoch, vec![17])
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while source.capture_count() == before_capture {
+        assert!(!receiver.termination_acknowledged());
+        assert!(
+            Instant::now() < deadline,
+            "actual unpublished source did not enter held capture"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let previous = snapshot_channel_generator(&fixture.app().project, channel);
+    let chain = fixture.untransferred.take().unwrap();
+    fixture
+        .app_mut()
+        .queue_channel_generator_candidate_prepared(channel, candidate, previous, Some(chain))
+        .unwrap();
+    switch_fresh_fixture_session(&mut fixture, false);
+    let destination = project_and_history(fixture.app());
+    fixture
+        .callback
+        .as_mut()
+        .unwrap()
+        .pump(fixture.app.as_ref().unwrap().audio.as_ref().unwrap(), 128);
+    fixture.app_mut().poll_generator_endpoint_events();
+    assert!(fixture.app().pending_generator_chains.is_empty());
+    assert_eq!(
+        fixture.app().running_generator_chains[&channel]
+            .guard
+            .genuine_worker_id(),
+        worker
+    );
+    assert!(
+        fixture.app().running_generator_chains[&channel]
+            .guard
+            .requires_retained_fresh_shutdown()
+    );
+    assert_eq!(project_and_history(fixture.app()), destination);
+    fixture.callback = None;
+    let app = fixture.app.take().unwrap();
+    drop(app);
+    assert!(source_join_outcomes(&observer, worker).is_empty());
+    assert!(!receiver.termination_acknowledged());
+    fixture.source.as_ref().unwrap().release_gates();
+    while source_join_outcomes(&observer, worker).is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "old-session running fresh guard was lost by Drop"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        source_join_outcomes(&observer, worker),
+        [crate::genuine_app_observer::WorkerJoinOutcome::Joined]
+    );
+    assert!(receiver.termination_acknowledged());
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn actual_fresh_source_instance_id_reuse_does_not_mark_new_ordinary_worker_for_retirement() {
+    let mut fixture = actually_installed_fresh_source();
+    let channel = fixture.app().project.channels[0].id;
+    switch_fresh_fixture_session(&mut fixture, false);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fixture
+        .app()
+        .running_generator_chains
+        .contains_key(&channel)
+    {
+        fixture
+            .callback
+            .as_mut()
+            .unwrap()
+            .pump(fixture.app.as_ref().unwrap().audio.as_ref().unwrap(), 128);
+        fixture.app_mut().poll_generator_endpoint_events();
+        fixture.app_mut().request_channel_generator_rebuild(channel);
+        assert!(
+            Instant::now() < deadline,
+            "old marked worker did not leave the callback"
+        );
+    }
+    while !fixture.app().retired_fresh_source_candidates.is_empty() {
+        fixture.app_mut().poll_clip_restorations();
+        assert!(Instant::now() < deadline, "old marked worker did not join");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let mut candidate = fixture.app().project.clone();
+    candidate.plugin_instances = source_project().plugin_instances;
+    candidate.plugin_instances[0].id = 42;
+    candidate.channels[0].instrument_plugin_instance_id = Some(42);
+    let previous = snapshot_channel_generator(&fixture.app().project, channel);
+    let (chain, source) = TestCaptureSource::new(
+        42,
+        source_state(),
+        PluginPrepareConfig {
+            sample_rate: 48_000.0,
+            max_block_frames: MAX_MIXER_BLOCK_FRAMES,
+        },
+    )
+    .unwrap();
+    fixture.untransferred = Some(chain);
+    fixture.fresh_source = Some(source);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fixture
+        .untransferred
+        .as_ref()
+        .unwrap()
+        .control
+        .plugin_endpoint_snapshot()
+        .is_none()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "ordinary reused-id worker did not prepare"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        !fixture
+            .untransferred
+            .as_ref()
+            .unwrap()
+            .guard
+            .requires_retained_fresh_shutdown()
+    );
+    let chain = fixture.untransferred.take().unwrap();
+    fixture
+        .app_mut()
+        .queue_channel_generator_candidate_prepared(channel, candidate, previous, Some(chain))
+        .unwrap();
+    fixture
+        .callback
+        .as_mut()
+        .unwrap()
+        .pump(fixture.app.as_ref().unwrap().audio.as_ref().unwrap(), 128);
+    fixture.app_mut().poll_generator_endpoint_events();
+    let ordinary_worker = fixture.app().running_generator_chains[&channel]
+        .guard
+        .genuine_worker_id();
+    assert!(
+        !fixture.app().running_generator_chains[&channel]
+            .guard
+            .requires_retained_fresh_shutdown()
+    );
+    let destination = project_and_history(fixture.app());
+    fixture.app_mut().retain_recreated_sources_before_clear();
+    assert_eq!(
+        fixture.app().running_generator_chains[&channel]
+            .guard
+            .genuine_worker_id(),
+        ordinary_worker
+    );
+    assert!(fixture.app().retired_fresh_source_candidates.is_empty());
+    assert_eq!(project_and_history(fixture.app()), destination);
+    // Fixture cleanup retained-joins this actual ordinary worker before App
+    // destruction. This negative classification test never detaches a worker.
 }
 
 fn assert_one_healthy_restoration_join(
@@ -1261,7 +2422,7 @@ static RESTORATION_FACTORY_CALLS: AtomicUsize = AtomicUsize::new(0);
 /// This seam tests the App controller only. The production expectation is built
 /// and its exact spec validated before this hook; actual vendor state/base/Start
 /// attestation is tested separately by the source-restoration protocol fixtures.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(in crate::app) fn authoritative_mock_restoration_factory(
     candidate: &Project,
     instance_id: u64,
@@ -1307,7 +2468,61 @@ pub(in crate::app) fn authoritative_mock_restoration_factory(
     Ok(chain)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
+fn restoration_diagnostic_text(text: &str) -> String {
+    let mut end = text.len().min(4096);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn restoration_admission_diagnostics(app: &CitrusApp) -> String {
+    // Read only bounded control metadata. A missing pending owner is not proof
+    // of any particular renderer/callback fault or of termination.
+    format!(
+        "phase={:?}, toast={:?}, fences(operation,clip,restoration,resources)={:?}, topology_settling={}, undo={}, redo={}, owners(clip_pending,clip_retired,fresh_retired,generator_pending,generator_removal,generator_route,generator_deferred,insert_pending,insert_removal,insert_deferred)={:?}, save_barrier={}, playing={}, pointer_preview={:?}, native_topology_error={:?}",
+        app.clip_render_job.as_ref().map(|job| job.phase()),
+        app.toast
+            .as_ref()
+            .map(|(message, _)| restoration_diagnostic_text(message)),
+        (
+            app.clip_operation_fence_active(),
+            app.clip_render_fence_active(),
+            app.clip_restoration_pending(),
+            app.clip_restoration_resources_pending(),
+        ),
+        app.plugin_topology_is_settling(),
+        app.undo_stack.len(),
+        app.redo_stack.len(),
+        (
+            app.pending_clip_restorations.len(),
+            app.retired_clip_restorations.len(),
+            app.retired_fresh_source_candidates.len(),
+            app.pending_generator_chains.len(),
+            app.pending_generator_removals.len(),
+            app.pending_generator_routes.len(),
+            app.deferred_generator_rebuilds.len(),
+            app.pending_insert_chains.len(),
+            app.pending_insert_removals.len(),
+            app.deferred_insert_rebuilds.len(),
+        ),
+        app.save_barrier.is_some(),
+        app.playing,
+        (
+            app.piano_note_properties.is_some(),
+            app.editor_pointer_gesture_active(),
+            app.piano_roll_gesture_before.is_some(),
+            app.playlist_gesture_before.is_some(),
+        ),
+        app.native_editor_topology_guard()
+            .err()
+            .map(|error| restoration_diagnostic_text(&error)),
+    )
+}
+
+#[cfg(any(target_os = "linux", windows))]
 fn wait_for_held_restoration_ready(fixture: &Fixture, channel: u32) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -1315,7 +2530,12 @@ fn wait_for_held_restoration_ready(fixture: &Fixture, channel: u32) {
             .app()
             .pending_clip_restorations
             .get(&channel)
-            .unwrap();
+            .unwrap_or_else(|| {
+                panic!(
+                    "Undo did not create the expected unpublished restoration owner for channel {channel}; {}",
+                    restoration_admission_diagnostics(fixture.app()),
+                )
+            });
         assert!(
             !pending.ready,
             "App must not consume Ready before the explicit poll"
@@ -1344,7 +2564,7 @@ fn wait_for_held_restoration_ready(fixture: &Fixture, channel: u32) {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn assert_ordinary_ring_full_before_handoff(fixture: &mut Fixture) {
     assert!(
         !fixture
@@ -1357,7 +2577,7 @@ fn assert_ordinary_ring_full_before_handoff(fixture: &mut Fixture) {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn assert_exclusive_compiled_source(app: &CitrusApp, expect_audio: bool) {
     let (_, timeline) = app
         .latest_compiled_timeline()
@@ -1403,13 +2623,17 @@ fn assert_exclusive_compiled_source(app: &CitrusApp, expect_audio: bool) {
     assert!(app.timeline_audio_matches_desired());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_ready_restoration_full_ring_retains_owner_until_same_owner_callback_install() {
     let mut fixture = converted_fixture_with_mock_restoration();
     let observer = crate::genuine_app_observer::ObservationRun::install().unwrap();
     assert!(fixture.original_source_joined());
     let channel = fixture.app().project.channels[0].id;
+    // The converted fixture may need another real tick to finish its admission
+    // fences. Establish this test's own bounded-ring pressure after those ticks
+    // with actual accepted/rejected commands, before issuing Undo.
+    fill_ordinary_ring_and_prove_stop_all_rejected(fixture.app_mut());
     fixture.app_mut().undo();
     wait_for_held_restoration_ready(&fixture, channel);
     assert_eq!(RESTORATION_FACTORY_CALLS.load(Ordering::Acquire), 1);
@@ -1596,7 +2820,7 @@ fn actual_ready_restoration_full_ring_retains_owner_until_same_owner_callback_in
     assert_one_healthy_restoration_join(&observer, owner.0);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_conversion_undo_ready_install_new_timeline_and_redo_preserve_authoritative_source() {
     let mut fixture = Fixture::new();
@@ -1828,7 +3052,7 @@ fn actual_conversion_undo_ready_install_new_timeline_and_redo_preserve_authorita
     assert_exclusive_compiled_source(fixture.app(), false);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn assert_redo_uses_retained_pcm_after_external_file_change(delete_file: bool) {
     let mut fixture = Fixture::new();
     RESTORATION_FACTORY_CALLS.store(0, Ordering::Release);
@@ -1893,13 +3117,13 @@ fn assert_redo_uses_retained_pcm_after_external_file_change(delete_file: bool) {
     // its exact already-verified allocation and exact current asset binding.
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_undo_redo_reuses_verified_arc_after_published_wav_is_modified() {
     assert_redo_uses_retained_pcm_after_external_file_change(false);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_undo_redo_reuses_verified_arc_after_published_wav_is_deleted() {
     assert_redo_uses_retained_pcm_after_external_file_change(true);
@@ -1976,7 +3200,7 @@ fn fill_ordinary_ring_and_prove_stop_all_rejected(app: &mut CitrusApp) -> u64 {
     audio.snapshot().command_queue_full
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn drive_restoration_and_assert_silent_gate(
     fixture: &mut Fixture,
     previous_generation: u64,
@@ -2044,7 +3268,7 @@ fn drive_restoration_and_assert_silent_gate(
     (app.timeline_desired_generation, snapshot.transport_epoch)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_undo_redo_new_timeline_clears_callback_residues_when_ordinary_stop_all_queue_is_full() {
     let mut fixture = Fixture::new();
@@ -2180,7 +3404,7 @@ fn actual_undo_redo_new_timeline_clears_callback_residues_when_ordinary_stop_all
     // history. Nonzero fixed-quantum FIFO reset has separate stamped-removal tests.
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn converted_fixture_with_mock_restoration() -> Fixture {
     let mut fixture = Fixture::new();
     RESTORATION_FACTORY_CALLS.store(0, Ordering::Release);
@@ -2192,12 +3416,14 @@ fn converted_fixture_with_mock_restoration() -> Fixture {
             .clip_render_job
             .as_ref()
             .is_some_and(|job| job.phase() == ClipRenderPhase::Complete)
+            && !fixture.app().clip_operation_fence_active()
+            && !fixture.app().plugin_topology_is_settling()
     });
     assert!(fixture.original_source_joined());
     fixture
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn assert_receipt_panic_keeps_admission_closed(fixture: &mut Fixture) {
     assert!(fixture.app().clip_restoration_failed);
     assert!(fixture.app().clip_restoration_playback_pending);
@@ -2263,7 +3489,7 @@ fn assert_receipt_panic_keeps_admission_closed(fixture: &mut Fixture) {
     assert!(fixture.app().project_lifecycle.is_idle());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_installed_receipt_panic_retains_exact_pending_owner_and_blocks_later_admission() {
     let mut fixture = converted_fixture_with_mock_restoration();
@@ -2334,7 +3560,7 @@ fn actual_installed_receipt_panic_retains_exact_pending_owner_and_blocks_later_a
     // Fixture owns this callback and exact pending guard through bounded cleanup.
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_removed_receipt_panic_retains_exact_running_owner_and_blocks_later_admission() {
     let mut fixture = converted_fixture_with_mock_restoration();
@@ -2411,7 +3637,7 @@ fn actual_removed_receipt_panic_retains_exact_running_owner_and_blocks_later_adm
     // Fixture's retained-join cleanup owns it even after the callback removed it.
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn recovery_refusal_fixture(restored: bool) -> Fixture {
     let mut fixture = converted_fixture_with_mock_restoration();
     let channel = fixture.app().project.channels[0].id;
@@ -2442,7 +3668,7 @@ fn recovery_refusal_fixture(restored: bool) -> Fixture {
     fixture
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn retained_recovery_source_guard(fixture: &Fixture, restored: bool) -> &PluginWorkerGuard {
     let channel = fixture.app().project.channels[0].id;
     if restored {
@@ -2456,7 +3682,7 @@ fn retained_recovery_source_guard(fixture: &Fixture, restored: bool) -> &PluginW
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn assert_recovery_refusal_preserves_source(
     fixture: &Fixture,
     restored: bool,
@@ -2488,7 +3714,7 @@ fn assert_recovery_refusal_preserves_source(
     assert!(!fixture.app().playing);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_direct_recovery_refusal_keeps_recovery_available_with_pending_or_bound_source() {
     for restored in [false, true] {
@@ -2515,7 +3741,7 @@ fn actual_direct_recovery_refusal_keeps_recovery_available_with_pending_or_bound
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_deferred_recovery_refusal_keeps_recovery_available_with_pending_or_bound_source() {
     for restored in [false, true] {
@@ -2545,7 +3771,7 @@ fn actual_deferred_recovery_refusal_keeps_recovery_available_with_pending_or_bou
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_open_and_new_refusals_do_not_report_success_or_replace_the_session() {
     let assert_refused =
@@ -2610,7 +3836,10 @@ fn actual_open_and_new_refusals_do_not_report_success_or_replace_the_session() {
 // Route-predicate matrices use one retained mock owner at a time. They compile
 // immutable model inputs for the real App classifier; none is a dispatched or
 // injected compiler result, callback receipt, successful install, or Ready event.
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 fn pending_route_fixture(held: bool, worker_instance: u64) -> RestorationFixture {
     let mut fixture =
         RestorationFixture::with_preparation(MAX_MIXER_BLOCK_FRAMES, held, worker_instance);
@@ -2622,20 +3851,29 @@ fn pending_route_fixture(held: bool, worker_instance: u64) -> RestorationFixture
     fixture
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 fn route_test_timeline(project: &Project) -> CompiledTimeline {
     let map = TempoMap::from_project(project, 48_000).unwrap();
     CompiledTimeline::from_project(project, &map, TimelineCompileOptions::default()).unwrap()
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 fn exact_route(timeline: &CompiledTimeline) -> GeneratorRouteRequirement {
     let requirements = timeline_generator_route_requirements(timeline).unwrap();
     assert_eq!(requirements.len(), 1);
     requirements[0]
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 fn assert_pending_route(fixture: &RestorationFixture, timeline: &CompiledTimeline, eligible: bool) {
     let app = fixture.app();
     let requirement = exact_route(timeline);
@@ -2664,7 +3902,10 @@ fn assert_pending_route(fixture: &RestorationFixture, timeline: &CompiledTimelin
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 fn refresh_pending_route_snapshot(fixture: &mut RestorationFixture) {
     let snapshot = clip_render::project_snapshot(&fixture.app().project).unwrap();
     let channel = fixture.app().project.channels[0].id;
@@ -2676,7 +3917,10 @@ fn refresh_pending_route_snapshot(fixture: &mut RestorationFixture) {
         .live_snapshot = snapshot;
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 #[test]
 fn restoration_pending_route_accepts_exact_unready_owner_without_mutation() {
     let mut fixture = pending_route_fixture(true, 41);
@@ -2775,7 +4019,10 @@ fn restoration_pending_route_accepts_exact_unready_owner_without_mutation() {
     assert_pending_route(&fixture, &timeline, true);
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 #[test]
 fn restoration_pending_route_rejects_channel_instance_mixer_and_session_mismatch() {
     let mut fixture = pending_route_fixture(false, 41);
@@ -2903,7 +4150,10 @@ fn restoration_pending_route_rejects_channel_instance_mixer_and_session_mismatch
     assert_pending_route(&fixture, &timeline, false);
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 #[test]
 fn restoration_pending_route_rejects_stale_live_revision_snapshot_and_candidate_binding() {
     let mut fixture = pending_route_fixture(false, 41);
@@ -2963,7 +4213,10 @@ fn restoration_pending_route_rejects_stale_live_revision_snapshot_and_candidate_
     assert_pending_route(&fixture, &timeline, false);
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 #[test]
 fn restoration_pending_route_rejects_missing_or_changed_binding_and_dry_configuration() {
     let mut fixture = pending_route_fixture(false, 41);
@@ -3048,7 +4301,10 @@ fn restoration_pending_route_rejects_missing_or_changed_binding_and_dry_configur
     assert_pending_route(&fixture, &timeline, true);
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 #[test]
 fn restoration_pending_route_rejects_expiry_terminal_failure_cancelled_and_missing_owner() {
     {
@@ -3157,7 +4413,10 @@ fn restoration_pending_route_rejects_expiry_terminal_failure_cancelled_and_missi
     assert_pending_route(&fixture, &timeline, true);
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 #[test]
 fn restoration_pending_route_rejects_observed_worker_fault_stop_and_published_identity_timing_drift()
  {
@@ -3341,7 +4600,10 @@ fn restoration_pending_route_rejects_observed_worker_fault_stop_and_published_id
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 #[test]
 fn restoration_pending_route_preserves_ordinary_pending_and_confirmed_route_results() {
     let mut fixture = pending_route_fixture(false, 41);

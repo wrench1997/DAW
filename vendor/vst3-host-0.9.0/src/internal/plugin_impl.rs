@@ -138,7 +138,9 @@ impl ProcessingSampleSize {
 }
 
 mod bus_activation;
-use bus_activation::{ActivationRecord, BusActivationState, BusBinding};
+use bus_activation::{
+    ActivationRecord, BusActivationState, BusBinding, HostBusActivationPreferences,
+};
 
 /// Legacy public-API implementation. The helper's `MainThreadPlugin` keeps this aggregate
 /// on its loading thread; legacy `Plugin` users retain their existing `Send` API.
@@ -171,6 +173,9 @@ struct ControlDomain {
     /// `start_processing` can tell a re-start (nothing to do) from a configuration change
     /// (which has to be applied while the component is inactive). `None` until the first setup.
     applied_setup: Option<AppliedSetup>,
+    /// Explicit host selections outlive transient SDK acknowledgment invalidation.
+    /// Only this lifecycle owner can reapply them, after exact topology preflight.
+    bus_activation_preferences: HostBusActivationPreferences,
     /// Current IPrefetchableSupport value, or `None` for pre-3.6 processors.
     prefetchable_support: Option<u32>,
     dirty_caches: DirtyCaches,
@@ -1579,6 +1584,7 @@ impl PluginImpl {
                     single_component,
                     is_active: false,
                     applied_setup: None,
+                    bus_activation_preferences: HostBusActivationPreferences::default(),
                     prefetchable_support,
                     dirty_caches: DirtyCaches::default(),
                     unit_cache: Mutex::new(None),
@@ -3375,31 +3381,21 @@ impl PluginInternal for PluginImpl {
                 )));
             }
 
+            // Validation-only rejection above made no SDK mutation. Once a
+            // valid target enters the operation, no earlier successful choice
+            // or acknowledgment may survive a failed/unknown replacement.
+            self.control
+                .bus_activation_preferences
+                .block(media, dir, bus_index);
+            self.runtime
+                .bus_activation
+                .clear_acknowledgment(media, dir, bus_index);
+
             let was_active = self.control.is_active;
             if was_active {
                 self.deactivate_on_control_thread()?;
             }
 
-            // A failed call is not proof the old state survived. Clear only its
-            // prior acknowledgment before entering SDK code; participation keeps
-            // its existing mutation/error behavior.
-            let acks = match (media_type, direction) {
-                (MediaType::Audio, BusDirection::Input) => {
-                    &mut self.runtime.bus_activation.audio_input_acks
-                }
-                (MediaType::Audio, BusDirection::Output) => {
-                    &mut self.runtime.bus_activation.audio_output_acks
-                }
-                (MediaType::Event, BusDirection::Input) => {
-                    &mut self.runtime.bus_activation.event_input_acks
-                }
-                (MediaType::Event, BusDirection::Output) => {
-                    &mut self.runtime.bus_activation.event_output_acks
-                }
-            };
-            if let Some(ack) = acks.get_mut(bus_index as usize) {
-                *ack = None;
-            }
             let mut info: BusInfo = std::mem::zeroed();
             let binding = if self
                 .control
@@ -3411,6 +3407,11 @@ impl PluginInternal for PluginImpl {
             } else {
                 None
             };
+            let binding = binding.ok_or_else(|| {
+                Error::InterfaceError(format!(
+                    "cannot bind explicit activation to a valid bus descriptor ({media}, {dir}, {bus_index})"
+                ))
+            })?;
             let result = self
                 .control
                 .component
@@ -3432,7 +3433,7 @@ impl PluginInternal for PluginImpl {
                     }
                 };
                 if let Some(ack) = acks.get_mut(bus_index as usize) {
-                    *ack = ActivationRecord::acknowledged(active, binding);
+                    *ack = ActivationRecord::acknowledged(active, Some(binding.clone()));
                 }
                 let states = match (media_type, direction) {
                     (MediaType::Audio, BusDirection::Input) => {
@@ -3466,6 +3467,9 @@ impl PluginInternal for PluginImpl {
             if was_active {
                 let reactivate = self.set_component_active(true);
                 if reactivate != kResultOk {
+                    self.runtime
+                        .bus_activation
+                        .clear_acknowledgment(media, dir, bus_index);
                     return Err(Error::Other(format!(
                         "Failed to reactivate after set_bus_active: {reactivate:#x}"
                     )));
@@ -3473,7 +3477,23 @@ impl PluginInternal for PluginImpl {
                 self.control.is_active = true;
             }
 
-            update_result?;
+            if let Err(error) = update_result {
+                self.runtime
+                    .bus_activation
+                    .clear_acknowledgment(media, dir, bus_index);
+                return Err(error);
+            }
+            if let Err(error) =
+                self.verify_activation_binding(media, dir, bus_index, count, &binding)
+            {
+                self.runtime
+                    .bus_activation
+                    .clear_acknowledgment(media, dir, bus_index);
+                return Err(error);
+            }
+            self.control
+                .bus_activation_preferences
+                .record(active, binding, count);
         }
         Ok(())
     }
@@ -3628,18 +3648,29 @@ impl PluginInternal for PluginImpl {
                 let view = ComPtr::<IPlugView>::from_raw(view_ptr)
                     .ok_or_else(|| Error::Other("Failed to wrap view".to_string()))?;
 
-                // Get view size
-                let mut view_rect = ViewRect {
-                    left: 0,
-                    top: 0,
-                    right: 400,
-                    bottom: 300,
-                };
+                // Some Windows views (including Kontakt 8) cannot report a size until
+                // their platform view is attached. The Windows helper creates a hidden
+                // bounded container, then validates the attached view's actual size or
+                // its resizeView request before showing it. Do not abort attachment on
+                // a pre-attachment getSize failure; never substitute a size for a live
+                // view whose authoritative post-attachment query fails.
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let mut view_rect = ViewRect {
+                        left: 0,
+                        top: 0,
+                        right: 400,
+                        bottom: 300,
+                    };
 
-                if view.getSize(&mut view_rect) != kResultOk {
-                    return Err(Error::Other("Failed to get view size".to_string()));
+                    let result = view.getSize(&mut view_rect);
+                    if result != kResultOk {
+                        return Err(Error::Other(format!(
+                            "Failed to get view size before attachment: {result:#x}"
+                        )));
+                    }
+                    view_rect_size(&view_rect)?;
                 }
-                view_rect_size(&view_rect)?;
 
                 // Hand the plugin an IPlugFrame (before attach, per the SDK) so it can
                 // request host-side resizes; requests land in `editor_resize`.
@@ -3955,6 +3986,10 @@ impl PluginInternal for PluginImpl {
             if was_processing {
                 let result = self.control.processor_lease().set_processing(0);
                 if result != kResultOk && result != kNotImplemented {
+                    if flags.io_changed() {
+                        self.runtime.bus_activation.invalidate_acknowledgments();
+                        self.invalidate_processing_setup();
+                    }
                     return Err(Error::Other(format!(
                         "failed to suspend processing for restartComponent: {result:#x}"
                     )));
@@ -3965,7 +4000,10 @@ impl PluginInternal for PluginImpl {
             if was_active {
                 let result = self.set_component_active(false);
                 if result != kResultOk {
-                    if was_processing {
+                    if flags.io_changed() {
+                        self.runtime.bus_activation.invalidate_acknowledgments();
+                        self.invalidate_processing_setup();
+                    } else if was_processing {
                         let resume = self.control.processor_lease().set_processing(1);
                         self.runtime.is_processing =
                             resume == kResultOk || resume == kNotImplemented;
@@ -3980,11 +4018,13 @@ impl PluginInternal for PluginImpl {
             let apply_result = if flags.io_changed() {
                 self.runtime.bus_activation.invalidate_acknowledgments();
                 self.invalidate_processing_setup();
-                match Self::activate_default_buses(&self.control.component) {
+                match self.refresh_restart_bus_activation() {
                     Ok(activation) => {
                         self.runtime.bus_activation = activation;
                         self.negotiate_default_bus_arrangements()
+                            .and_then(|()| self.validate_explicit_bus_selections())
                             .and_then(|()| self.setup_processing())
+                            .and_then(|()| self.validate_explicit_bus_selections())
                     }
                     Err(error) => Err(error),
                 }
@@ -3994,6 +4034,8 @@ impl PluginInternal for PluginImpl {
 
             // A failed I/O rebuild cannot be resumed with the previous process pointers.
             if apply_result.is_err() && flags.io_changed() {
+                self.runtime.bus_activation.invalidate_acknowledgments();
+                self.invalidate_processing_setup();
                 return apply_result.map(|()| flags);
             }
             let reactivate_result = if was_active { self.activate() } else { Ok(()) };
@@ -4012,9 +4054,23 @@ impl PluginInternal for PluginImpl {
                 Ok(())
             };
 
-            apply_result?;
-            reactivate_result?;
-            resume_result?;
+            let completion = apply_result.and(reactivate_result).and(resume_result);
+            if let Err(error) = completion {
+                if flags.io_changed() {
+                    self.runtime.bus_activation.invalidate_acknowledgments();
+                    self.invalidate_processing_setup();
+                    // A rejected resume leaves DSP stopped but the component active.
+                    // One cleanup attempt preserves actual SDK state and the primary error.
+                    if self.control.is_active && !self.runtime.is_processing {
+                        if let Err(cleanup) = self.deactivate_on_control_thread() {
+                            return Err(Error::Other(format!(
+                                "{error}; restartComponent I/O cleanup failed: {cleanup}"
+                            )));
+                        }
+                    }
+                }
+                return Err(error);
+            }
         }
 
         Ok(flags)
@@ -5029,6 +5085,164 @@ impl PluginImpl {
 
     unsafe fn activate_default_buses(component: &ComPtr<IComponent>) -> Result<BusActivationState> {
         Self::refresh_bus_activation(component, None)
+    }
+
+    unsafe fn verify_activation_binding(
+        &self,
+        media: i32,
+        direction: i32,
+        index: i32,
+        count: i32,
+        binding: &BusBinding,
+    ) -> Result<()> {
+        let observed_count = self.control.component.getBusCount(media, direction);
+        let mut info: BusInfo = std::mem::zeroed();
+        if observed_count != count
+            || self
+                .control
+                .component
+                .getBusInfo(media, direction, index, &mut info)
+                != kResultOk
+            || BusBinding::from_info(media, direction, index, &info).as_ref() != Some(binding)
+        {
+            return Err(Error::InterfaceError(format!(
+                "explicit bus descriptor/count changed during activation ({media}, {direction}, {index}; expected {count}, observed {observed_count})"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Snapshot all declared sides before applying any explicit restart policy.
+    /// Descriptor queries must succeed; a missing descriptor is never an index
+    /// binding or permission to fall back to default activation.
+    #[allow(clippy::unnecessary_cast)]
+    unsafe fn read_explicit_bus_bindings(&self) -> Result<[Vec<BusBinding>; 4]> {
+        let keys = [
+            (kAudio as i32, kInput as i32),
+            (kAudio as i32, kOutput as i32),
+            (kEvent as i32, kInput as i32),
+            (kEvent as i32, kOutput as i32),
+        ];
+        let mut sides = std::array::from_fn(|_| Vec::new());
+        for ((media, direction), side) in keys.into_iter().zip(&mut sides) {
+            let count = self.control.component.getBusCount(media, direction);
+            if !(0..=32).contains(&count) {
+                return Err(Error::InterfaceError(format!(
+                    "invalid bus count while revalidating explicit selection ({media}, {direction}): {count}"
+                )));
+            }
+            side.reserve(count as usize);
+            for index in 0..count {
+                let mut info: BusInfo = std::mem::zeroed();
+                let result = self
+                    .control
+                    .component
+                    .getBusInfo(media, direction, index, &mut info);
+                if result != kResultOk {
+                    return Err(Error::InterfaceError(format!(
+                        "getBusInfo failed while revalidating explicit selection ({media}, {direction}, {index}): {result:#x}"
+                    )));
+                }
+                side.push(BusBinding::from_info(media, direction, index, &info).ok_or_else(|| {
+                    Error::InterfaceError(format!(
+                        "invalid bus descriptor while revalidating explicit selection ({media}, {direction}, {index})"
+                    ))
+                })?);
+            }
+        }
+        self.reject_pending_topology()?;
+        Ok(sides)
+    }
+
+    unsafe fn validate_explicit_bus_selections(&self) -> Result<()> {
+        if self.control.bus_activation_preferences.is_empty() {
+            return Ok(());
+        }
+        let sides = self.read_explicit_bus_bindings()?;
+        self.control.bus_activation_preferences.validate(&sides)
+    }
+
+    /// Called only by the owner, after the processor and component are stopped.
+    /// Intent chooses participation; only new successful SDK calls produce ACKs.
+    #[allow(clippy::unnecessary_cast)]
+    unsafe fn refresh_restart_bus_activation(&mut self) -> Result<BusActivationState> {
+        if self.control.bus_activation_preferences.is_empty() {
+            return Self::activate_default_buses(&self.control.component);
+        }
+        if self.control.is_active || self.runtime.is_processing {
+            return Err(Error::Other(
+                "explicit bus choices require stopped processing and an inactive component".into(),
+            ));
+        }
+        let sides = self.read_explicit_bus_bindings()?;
+        self.control.bus_activation_preferences.validate(&sides)?;
+        let keys = [
+            (kAudio as i32, kInput as i32),
+            (kAudio as i32, kOutput as i32),
+            (kEvent as i32, kInput as i32),
+            (kEvent as i32, kOutput as i32),
+        ];
+        let mut activation = BusActivationState::default();
+        let targets = [
+            (
+                &mut activation.audio_inputs,
+                &mut activation.audio_input_acks,
+            ),
+            (
+                &mut activation.audio_outputs,
+                &mut activation.audio_output_acks,
+            ),
+            (
+                &mut activation.event_inputs,
+                &mut activation.event_input_acks,
+            ),
+            (
+                &mut activation.event_outputs,
+                &mut activation.event_output_acks,
+            ),
+        ];
+        for (((media, direction), side), (states, acknowledgments)) in
+            keys.into_iter().zip(sides).zip(targets)
+        {
+            let count = side.len() as i32;
+            for (index, binding) in side.into_iter().enumerate() {
+                let selected = self.control.bus_activation_preferences.active(&binding);
+                let active = selected.unwrap_or_else(|| binding.default_active());
+                let mut acknowledged = None;
+                if active || selected.is_some() {
+                    // Earlier SDK activations may synchronously change topology.
+                    // Never apply the next stored choice to a different current bus.
+                    self.verify_activation_binding(
+                        media,
+                        direction,
+                        index as i32,
+                        count,
+                        &binding,
+                    )?;
+                    self.reject_pending_topology()?;
+                    let result = self.control.component.activateBus(
+                        media,
+                        direction,
+                        index as i32,
+                        u8::from(active),
+                    );
+                    if result != kResultOk {
+                        self.control.bus_activation_preferences.block_existing(
+                            media,
+                            direction,
+                            index as i32,
+                        );
+                        return Err(Error::InterfaceError(format!(
+                            "activateBus rejected restart selection ({media}, {direction}, {index}): {result:#x}"
+                        )));
+                    }
+                    acknowledged = ActivationRecord::acknowledged(active, Some(binding));
+                }
+                states.push(active);
+                acknowledgments.push(acknowledged);
+            }
+        }
+        Ok(activation)
     }
 
     #[allow(clippy::unnecessary_cast)]

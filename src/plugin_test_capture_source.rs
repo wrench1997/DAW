@@ -76,7 +76,10 @@ impl TestCaptureSource {
 
     /// Explicit plugin-free seam: keep the real worker's preparation pending
     /// until released. No callback state, receipt or readiness is fabricated.
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn new_with_held_prepare(
         instance_id: u64,
         state: BouncePluginState,

@@ -1650,6 +1650,13 @@ impl IPlugViewTrait for TestPlugView {
         let Some(size) = size.as_mut() else {
             return kInvalidArgument;
         };
+        // Windows regression: Kontakt 8 cannot report geometry before its HWND
+        // representation is attached. A successful native helper Open must survive
+        // this real COM failure and then use the actual attached size/self-resize.
+        #[cfg(target_os = "windows")]
+        if !self.probe.attached.load(Ordering::Acquire) {
+            return kInternalError;
+        }
         let (width, height) = *self.size.lock().unwrap_or_else(|p| p.into_inner());
         size.left = 0;
         size.top = 0;

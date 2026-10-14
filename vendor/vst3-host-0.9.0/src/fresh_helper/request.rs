@@ -6,10 +6,10 @@
 //! the codec checks the original exchange budget before any payload traversal.
 
 use super::ErrorKind;
-use crate::audio::{AudioBusBuffer, AudioBusConfig};
+use crate::audio::{AudioBusBuffer, AudioBusConfig, BusDirection, MediaType};
 use crate::midi::MidiEvent;
 use crate::plugin::{ProcessMode, ProcessTransport, StateContext};
-use crate::process_isolation::HostCommand;
+use crate::process_isolation::{HostCommand, SelectedMetadataPolicy};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum StateContextView<'a> {
@@ -103,7 +103,16 @@ pub(crate) enum RequestView<'a> {
         sample_offset: i32,
     },
     CheckedAudioBusLayout,
+    StrictMetadataSnapshot {
+        policy: SelectedMetadataPolicy,
+    },
     EventBusLayout,
+    SetBusActive {
+        media_type: MediaType,
+        direction: BusDirection,
+        bus_index: i32,
+        active: bool,
+    },
 }
 
 impl RequestView<'_> {
@@ -186,7 +195,21 @@ impl<'a> TryFrom<&'a HostCommand> for RequestView<'a> {
                 sample_offset: *sample_offset,
             },
             HostCommand::CheckedAudioBusLayout => Self::CheckedAudioBusLayout,
+            HostCommand::StrictMetadataSnapshot(request) => Self::StrictMetadataSnapshot {
+                policy: request.policy,
+            },
             HostCommand::EventBusLayout => Self::EventBusLayout,
+            HostCommand::SetBusActive {
+                media_type,
+                direction,
+                bus_index,
+                active,
+            } => Self::SetBusActive {
+                media_type: *media_type,
+                direction: *direction,
+                bus_index: *bus_index,
+                active: *active,
+            },
             _ => return Err(ErrorKind::UnsupportedRequest),
         })
     }

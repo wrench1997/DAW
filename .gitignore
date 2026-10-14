@@ -10,3 +10,6 @@ rustup-init.exe
 
 
 /scripts/__pycache__/
+
+# Locally generated scores, recordings and listening receipts remain on disk.
+/compositions/

@@ -1,4 +1,6 @@
 //! Actual closed public client against cooperative, ledger-checking mock children.
+#[path = "selected_bus_tests.rs"]
+mod selected_bus_tests;
 use super::*;
 use crate::plugin::{CheckedAudioBusConfig, CheckedAudioBusLayout, EventBusConfig, EventBusLayout};
 use crate::strict_offline::{self, Client, FailureKind};

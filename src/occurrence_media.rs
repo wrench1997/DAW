@@ -873,6 +873,28 @@ struct ReadIdentity {
 }
 
 impl ReadIdentity {
+    fn from_file(file: &File) -> Result<Self, MediaProblem> {
+        #[cfg(windows)]
+        {
+            let snapshot = crate::export::native_file::inspect(file).map_err(|error| {
+                MediaProblem::new(
+                    MediaFailureKind::Identity,
+                    &format!("Unable to inspect occurrence file identity: {error}"),
+                )
+            })?;
+            Ok(Self {
+                published: snapshot.identity,
+                changed_seconds: snapshot.changed_seconds,
+                changed_nanoseconds: snapshot.changed_nanoseconds,
+            })
+        }
+        #[cfg(not(windows))]
+        {
+            Self::inspect(&file.metadata().map_err(MediaProblem::io)?)
+        }
+    }
+
+    #[cfg(not(windows))]
     fn inspect(metadata: &std::fs::Metadata) -> Result<Self, MediaProblem> {
         let published = PublishedFileIdentity::from_metadata(metadata).map_err(MediaProblem::io)?;
         #[cfg(target_os = "linux")]
@@ -889,7 +911,7 @@ impl ReadIdentity {
             let _ = published;
             Err(MediaProblem::new(
                 MediaFailureKind::Identity,
-                "Linux file identity is unavailable",
+                "Occurrence file identity is unavailable on this platform",
             ))
         }
     }
@@ -899,8 +921,13 @@ fn same_path_identity(path: &Path, expected: ReadIdentity) -> Result<(), MediaPr
     // symlink_metadata refuses a replacement symlink even if it points to the
     // original inode. Inode/stamps detect drift; they do not prevent a hostile
     // unrelated writer from racing or rewriting an already-open inode.
+    #[cfg(not(windows))]
     let actual =
         ReadIdentity::inspect(&std::fs::symlink_metadata(path).map_err(MediaProblem::io)?)?;
+    #[cfg(windows)]
+    let actual = ReadIdentity::from_file(
+        &crate::export::native_file::open_unfollowed(path).map_err(MediaProblem::io)?,
+    )?;
     if actual != expected {
         return Err(MediaProblem::new(
             MediaFailureKind::Identity,
@@ -1052,8 +1079,12 @@ fn verify_file(
             "Published occurrence extent or prewrite headroom is outside the lossless reload subset",
         ));
     }
+    #[cfg(not(windows))]
     let mut file = File::open(published.path()).map_err(MediaProblem::io)?;
-    let before = ReadIdentity::inspect(&file.metadata().map_err(MediaProblem::io)?)?;
+    #[cfg(windows)]
+    let mut file =
+        crate::export::native_file::open_unfollowed(published.path()).map_err(MediaProblem::io)?;
+    let before = ReadIdentity::from_file(&file)?;
     if before.published != published.identity() {
         return Err(MediaProblem::new(
             MediaFailureKind::Identity,
@@ -1144,7 +1175,7 @@ fn verify_file(
             std::fs::rename(alternate, published.path()).unwrap();
         }
     }
-    let after = ReadIdentity::inspect(&file.metadata().map_err(MediaProblem::io)?)?;
+    let after = ReadIdentity::from_file(&file)?;
     if after != before {
         return Err(MediaProblem::new(
             MediaFailureKind::Identity,
@@ -1220,7 +1251,7 @@ fn validate_header(bytes: &[u8], rate: u32, frames: usize) -> Result<(), MediaPr
     Ok(())
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests {
     use super::*;
     use std::{sync::atomic::AtomicU64, time::Duration};

@@ -191,6 +191,16 @@ impl std::ops::Deref for OwnedSource {
         self.0.as_ref().expect("fixture source retained")
     }
 }
+struct WholeDropObservation {
+    observer: crate::genuine_app_observer::ObservationRun,
+    worker: usize,
+}
+thread_local! {
+    // One run-owned observer under Fixture's existing serial admission. The
+    // actual source is registered before spawn; no status/ACK is manufactured.
+    static WHOLE_DROP_OBSERVATION: std::cell::RefCell<Option<WholeDropObservation>>
+        = const { std::cell::RefCell::new(None) };
+}
 struct RetainedFailedFixture {
     _app: OwnedApp,
     _source: OwnedSource,
@@ -198,6 +208,7 @@ struct RetainedFailedFixture {
     _directory: PathBuf,
     _verifier: Option<crate::occurrence_media::VerificationTestGuard>,
     _admission: Option<std::sync::MutexGuard<'static, ()>>,
+    _whole_drop_observation: Option<WholeDropObservation>,
 }
 thread_local! {
     // At most one failed fixture can occupy this emergency owner. It never
@@ -226,21 +237,31 @@ impl Fixture {
     pub(in crate::app) fn ctx(&self) -> egui::Context {
         self.ctx.clone()
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub(in crate::app) fn directory(&self) -> &Path {
         &self.directory
     }
     pub(in crate::app) fn callback(&self) -> &audio::TestAudioCallback {
         self.callback.as_ref().expect("fixture callback retained")
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub(in crate::app) fn callback_mut(&mut self) -> &mut audio::TestAudioCallback {
         self.callback.as_mut().expect("fixture callback retained")
     }
     pub(in crate::app) fn source_handle(&self) -> &TestCaptureSource {
         &self.source
     }
-    #[cfg(target_os = "linux")]
+    /// Test-only actual engine-loss boundary; the exact source is transferred
+    /// by the production retention hook before either real owner is dropped.
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(in crate::app) fn detach_callback_and_audio_for_whole_test(&mut self) {
+        self.callback = None;
+        self.app.audio = None;
+    }
+    #[cfg(any(target_os = "linux", windows))]
     pub(in crate::app) fn original_source_joined(&self) -> bool {
         self.app
             .clip_render_job
@@ -248,6 +269,23 @@ impl Fixture {
             .is_some_and(|job| job.source_joined && job.retired_source.is_none())
     }
     pub(in crate::app) fn new() -> Self {
+        Self::new_configured(0, false, false)
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(in crate::app) fn new_whole_tail_for_test(reported_tail: u32) -> Self {
+        Self::new_configured(reported_tail, true, false)
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(in crate::app) fn new_whole_drop_observer_for_test() -> Self {
+        Self::new_configured(0, false, true)
+    }
+    fn new_configured(reported_tail: u32, tight_note_off: bool, observe_whole_drop: bool) -> Self {
         let admission_deadline = Instant::now() + Duration::from_secs(10);
         let admission = loop {
             assert!(
@@ -266,11 +304,34 @@ impl Fixture {
                 }
             }
         };
+        let whole_drop_observer = observe_whole_drop.then(|| {
+            crate::genuine_app_observer::ObservationRun::install()
+                .expect("one serial Fixture owns the actual shutdown observations")
+        });
         let verifier_guard = crate::occurrence_media::verification_test_guard();
         let ctx = egui::Context::default();
         let cc = eframe::CreationContext::_new_kittest(ctx.clone());
         let mut app = CitrusApp::new_boxed_with_services(&cc, false);
         app.project = source_project();
+        if tight_note_off {
+            let channel_id = app.project.channels[0].id;
+            app.project.patterns[0].channel_steps = vec![[false; 16]];
+            app.project.patterns[0].notes = vec![PianoNote {
+                id: 99551,
+                channel_id: Some(channel_id),
+                group_id: None,
+                note: 60,
+                start: 0.0,
+                length: 1.0,
+                velocity: 1.0,
+                selected: false,
+                muted: false,
+            }];
+            app.project.clips[0].start = 3.0;
+            app.project.clips[0].length = 1.0;
+        }
+        let mut captured_state = source_state();
+        captured_state.metadata.tail_samples = reported_tail;
         app.saved_path = None;
         app.transport_mode = TransportMode::Song;
         app.selected_clip = Some(app.project.clips[0].id);
@@ -296,7 +357,7 @@ impl Fixture {
         let candidate_state = snapshot_channel_generator(&app.project, channel_id).unwrap();
         let (chain, source) = TestCaptureSource::new(
             instance_id,
-            source_state(),
+            captured_state.clone(),
             PluginPrepareConfig {
                 sample_rate: 48_000.0,
                 max_block_frames: MAX_MIXER_BLOCK_FRAMES,
@@ -308,6 +369,9 @@ impl Fixture {
             control,
             guard,
         } = chain;
+        let whole_drop_worker = whole_drop_observer
+            .as_ref()
+            .map(|_| control.genuine_worker_id());
         // Put the actual guard into the fixture-owned App before any assertion
         // or callback admission can fail. Running is established only by the
         // normal callback Installed receipt, never by a fabricated ready chain.
@@ -334,6 +398,19 @@ impl Fixture {
             admission_guard: Some(admission),
             cleanup_budget: Duration::from_secs(10),
         };
+        if let Some(observer) = whole_drop_observer {
+            WHOLE_DROP_OBSERVATION.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                assert!(
+                    slot.is_none(),
+                    "a prior forced Drop observer remains retained"
+                );
+                *slot = Some(WholeDropObservation {
+                    observer,
+                    worker: whole_drop_worker.unwrap(),
+                });
+            });
+        }
         let project_session = fixture.app.project_session;
         assert!(
             fixture
@@ -360,7 +437,7 @@ impl Fixture {
         });
         // The mock's normal SlotReady initialization has finished. Simulate
         // current unnotified vendor state while keeping the Project stale.
-        fixture.source.set_capture_state(source_state());
+        fixture.source.set_capture_state(captured_state);
         fixture.app.project.plugin_instances[0]
             .parameters
             .insert(17, 0.25);
@@ -372,6 +449,127 @@ impl Fixture {
         fixture.app.redo_stack.clear();
         fixture.app.dirty = false;
         fixture
+    }
+    /// Destroy the real App/callback while private capture is held, without
+    /// first running normal cancellation/drain or releasing the source gate.
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(in crate::app) fn force_drop_app_for_whole_test(&mut self) {
+        WHOLE_DROP_OBSERVATION.with(|slot| assert!(slot.borrow().is_some()));
+        assert!(self.app.whole_song_export_fence_active());
+        assert_eq!(self.app.running_generator_chains.len(), 1);
+        assert_eq!(
+            self.app
+                .running_generator_chains
+                .values()
+                .next()
+                .unwrap()
+                .control
+                .stats()
+                .detached_workers,
+            0
+        );
+        self.app.autosave_path = None;
+        self.app.suppress_drop_recovery = true;
+        self.callback = None;
+        drop(
+            self.app
+                .0
+                .take()
+                .expect("the original App owner is dropped exactly once"),
+        );
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(in crate::app) fn whole_drop_join_count_for_test(&self) -> usize {
+        WHOLE_DROP_OBSERVATION.with(|slot| {
+            let slot = slot.borrow();
+            let observed = slot
+                .as_ref()
+                .expect("the actual forced Drop run remains owned");
+            observed.observer.with_snapshot(|snapshot| {
+                snapshot
+                    .records
+                    .iter()
+                    .filter(|record| {
+                        matches!(record.kind,
+                    crate::genuine_app_observer::RecordKind::WorkerJoin {
+                        worker_id, outcome: crate::genuine_app_observer::WorkerJoinOutcome::Joined,
+                    } if worker_id == observed.worker)
+                    })
+                    .count()
+            })
+        })
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(in crate::app) fn whole_drop_resources_retained_for_test(&self) -> bool {
+        self.app.0.is_none()
+            && self.callback.is_none()
+            && self.source.0.is_some()
+            && self.verifier_guard.is_some()
+            && self.admission_guard.is_some()
+            && self.directory.exists()
+            && WHOLE_DROP_OBSERVATION.with(|slot| slot.borrow().is_some())
+    }
+    fn whole_drop_join_proven(&self) -> Result<bool, &'static str> {
+        WHOLE_DROP_OBSERVATION.with(|slot| {
+            let slot = slot.borrow();
+            let observed = slot
+                .as_ref()
+                .ok_or("forced Drop lost its actual observation owner")?;
+            observed.observer.with_snapshot(|snapshot| {
+                if snapshot.failure.is_some() {
+                    return Err("forced Drop observer evidence is incomplete");
+                }
+                let mut joined = 0;
+                for record in &snapshot.records {
+                    match &record.kind {
+                        crate::genuine_app_observer::RecordKind::WorkerJoin {
+                            worker_id,
+                            outcome,
+                        } if *worker_id == observed.worker => {
+                            if *outcome != crate::genuine_app_observer::WorkerJoinOutcome::Joined {
+                                return Err("forced Drop exact source worker joined with panic");
+                            }
+                            joined += 1;
+                        }
+                        crate::genuine_app_observer::RecordKind::Worker {
+                            worker_id,
+                            stats,
+                            ..
+                        } if *worker_id == observed.worker
+                            && (stats.detached_workers != 0 || stats.shutdown_timeouts != 0) =>
+                        {
+                            return Err("forced Drop exact worker was detached or timed out");
+                        }
+                        _ => {}
+                    }
+                }
+                if joined > 1 {
+                    return Err("forced Drop observed duplicate exact worker joins");
+                }
+                Ok(joined == 1)
+            })
+        })
+    }
+    pub(in crate::app) fn wait_whole_drop_join_for_test(
+        &self,
+        deadline: Instant,
+    ) -> Result<(), &'static str> {
+        while !self.whole_drop_join_proven()? {
+            if Instant::now() >= deadline {
+                return Err("forced Drop exact worker join is still unproven");
+            }
+            std::thread::yield_now();
+        }
+        Ok(())
     }
     pub(in crate::app) fn pump_callback_only(&mut self) {
         if let (Some(callback), Some(audio)) = (&mut self.callback, &self.app.audio) {
@@ -389,6 +587,7 @@ impl Fixture {
         self.app.poll_audio_asset_events();
         self.app.poll_timeline_audio_runtime(&self.ctx);
         self.app.drive_clip_render_job();
+        self.app.drive_whole_song_export();
         std::thread::sleep(Duration::from_millis(2));
     }
     pub(in crate::app) fn until(&mut self, condition: impl Fn(&Self) -> bool) {
@@ -512,6 +711,17 @@ impl Fixture {
     fn drain_retained(&mut self, deadline: Instant) -> Result<(), &'static str> {
         // Tests may exercise recovery policy, but fixture destruction must not
         // spawn/drop-save work or recreate diagnostic files after cleanup.
+        if self.app.0.is_none() {
+            if let Some(source) = self.source.0.as_ref() {
+                source.release_gates();
+            }
+            self.wait_whole_drop_join_for_test(deadline)?;
+            // The existing join tap follows ACK-gated coordinator termination
+            // and the exact finished-only guard join in the independent owner.
+            self.verifier_guard = None;
+            WHOLE_DROP_OBSERVATION.with(|slot| *slot.borrow_mut() = None);
+            return Ok(());
+        }
         self.app.autosave_path = None;
         if let Some(source) = self.source.0.as_ref() {
             source.release_gates();
@@ -525,6 +735,7 @@ impl Fixture {
             .clip_render_job
             .as_ref()
             .is_some_and(|job| job.owns_pending_resource())
+            || self.app.whole_song_export_fence_active()
         {
             if Instant::now() >= deadline {
                 return Err("App asynchronous owner did not terminate");
@@ -590,6 +801,7 @@ impl Fixture {
             std::thread::sleep(Duration::from_millis(1));
         }
         self.verifier_guard = None;
+        WHOLE_DROP_OBSERVATION.with(|slot| *slot.borrow_mut() = None);
         Ok(())
     }
 }
@@ -613,6 +825,8 @@ impl Drop for Fixture {
                 _directory: std::mem::take(&mut self.directory),
                 _verifier: self.verifier_guard.take(),
                 _admission: self.admission_guard.take(),
+                _whole_drop_observation: WHOLE_DROP_OBSERVATION
+                    .with(|slot| slot.borrow_mut().take()),
             };
             RETAINED_FAILED_FIXTURE.with(|slot| {
                 *slot.borrow_mut() = Some(std::mem::ManuallyDrop::new(retained));
@@ -631,7 +845,79 @@ impl Drop for Fixture {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+#[cfg(feature = "experimental-fresh-helper")]
+fn actual_app_review_opens_and_cancels_before_capture_or_publication() {
+    let mut fixture = Fixture::new();
+    let before = fixture.bytes();
+    let channel = fixture.app.project.channels[0].id;
+    let endpoint = fixture.app.running_generator_chains[&channel].endpoint_id;
+    assert!(fixture.app.clip_render_unavailable_reason().is_none());
+
+    // Exercise the public App entry, rather than the fixture's direct review
+    // constructor. A Review owns no render hook, capture or publication worker.
+    fixture.app.open_selected_clip_render_review();
+    let job = fixture.app.clip_render_job.as_ref().unwrap();
+    assert_eq!(job.phase, ClipRenderPhase::Review);
+    assert!(job.render_starter.is_none());
+    assert!(job.stopped.capture.is_none());
+    assert!(job.render.is_none());
+    assert!(job.verifier.is_none());
+    assert!(job.retained_path.is_none());
+    assert_eq!(fixture.source.capture_count(), 0);
+    assert_eq!(std::fs::read_dir(&fixture.directory).unwrap().count(), 0);
+
+    assert!(fixture.app.cancel_clip_render_job());
+    fixture.app.drive_clip_render_job();
+    let job = fixture.app.clip_render_job.as_ref().unwrap();
+    assert_eq!(job.phase, ClipRenderPhase::Cancelled);
+    assert_eq!(
+        fixture.app.running_generator_chains[&channel].endpoint_id,
+        endpoint
+    );
+    assert_eq!(fixture.source.capture_count(), 0);
+    assert_eq!(fixture.bytes(), before);
+    assert_eq!(std::fs::read_dir(&fixture.directory).unwrap().count(), 0);
+}
+
+#[cfg(any(target_os = "linux", windows))]
+#[test]
+fn actual_app_occurrence_plan_does_not_duplicate_persisted_native_state() {
+    let mut fixture = Fixture::new();
+    let before = fixture.bytes();
+    assert!(
+        !fixture.app.project.plugin_instances[0]
+            .opaque_state
+            .is_empty()
+    );
+    fixture.source.pause_capture();
+    fixture.begin();
+    fixture.until(|fixture| fixture.source.capture_count() == 1);
+    let job = fixture.app.clip_render_job.as_ref().unwrap();
+    assert_eq!(job.phase, ClipRenderPhase::Capturing);
+    let plan = InstrumentBouncePlan::prepare_occurrence(
+        &fixture.app.project,
+        Arc::clone(job.plan.as_ref().unwrap().request()),
+    )
+    .unwrap();
+    assert_eq!(plan.retained_project_state_bytes(), 0);
+    assert_eq!(fixture.bytes(), before);
+    assert!(fixture.app.cancel_clip_render_job());
+    fixture.source.release_gates();
+    fixture.until(|fixture| {
+        fixture
+            .app
+            .clip_render_job
+            .as_ref()
+            .unwrap()
+            .phase
+            .terminal()
+    });
+    assert_eq!(fixture.bytes(), before);
+}
+
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_controller_two_captures_writer_verifier_removal_join_and_timeline() {
     let mut fixture = Fixture::new();
@@ -685,7 +971,7 @@ fn actual_controller_two_captures_writer_verifier_removal_join_and_timeline() {
     assert!(fixture.app.timeline_audio_matches_desired());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_controller_cancel_after_file_commit_keeps_original_history_and_file() {
     let mut fixture = Fixture::new();
@@ -728,45 +1014,91 @@ fn actual_controller_cancel_after_file_commit_keeps_original_history_and_file() 
     assert_eq!(fixture.source.capture_count(), 1);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_controller_unnotified_opaque_and_base_drift_refuses_after_second_capture() {
-    let mut fixture = Fixture::new();
-    let before = fixture.bytes();
-    fixture.begin();
-    fixture.until(|fixture| {
-        fixture
-            .app
-            .clip_render_job
-            .as_ref()
-            .is_some_and(|job| job.phase == ClipRenderPhase::VerifyingMedia)
-    });
-    let mut changed = source_state();
-    changed.opaque_state.push(10);
-    changed.parameter_bases.insert(17, 0.625);
-    fixture.source.set_capture_state(changed);
-    fixture.until(|fixture| {
-        fixture
-            .app
-            .clip_render_job
-            .as_ref()
-            .is_some_and(|job| job.phase.terminal())
-    });
-    assert_eq!(fixture.source.capture_count(), 2);
-    assert_eq!(fixture.bytes(), before);
-    assert!(fixture.app.retained_clip_media.is_empty());
-    assert_eq!(fixture.app.retained_clip_pcm_bytes, 0);
-    let job = fixture.app.clip_render_job.as_ref().unwrap();
-    assert_eq!(job.phase, ClipRenderPhase::RetainedFile);
-    assert!(
-        job.failure
-            .as_deref()
-            .unwrap()
-            .contains("second actual source capture")
-    );
+    for changed_field in 0..3 {
+        let mut fixture = Fixture::new();
+        let before = fixture.bytes();
+        let channel_id = fixture.app.project.channels[0].id;
+        let worker_id = fixture.app.running_generator_chains[&channel_id]
+            .control
+            .genuine_worker_id();
+        let history_before = (
+            fixture.app.undo_stack.len(),
+            fixture.app.redo_stack.len(),
+            fixture.app.dirty,
+        );
+        fixture.begin();
+        fixture.until(|fixture| {
+            fixture
+                .app
+                .clip_render_job
+                .as_ref()
+                .is_some_and(|job| job.phase == ClipRenderPhase::VerifyingMedia)
+        });
+        let original = source_state();
+        let mut changed = original.clone();
+        if changed_field != 1 {
+            changed.opaque_state.push(10);
+        }
+        if changed_field != 0 {
+            changed.parameter_bases.insert(17, 0.625);
+        }
+        // Consecutive NOIRE captures can differ without a native dirty notification.
+        // Exercise opaque-only drift independently of generic-base drift.
+        assert_eq!(changed.metadata, original.metadata);
+        assert_eq!(changed.native_generation, original.native_generation);
+        assert_eq!(
+            changed.native_dirty_revision,
+            original.native_dirty_revision
+        );
+        if changed_field == 0 {
+            assert_eq!(changed.parameter_bases, original.parameter_bases);
+        } else if changed_field == 1 {
+            assert_eq!(changed.opaque_state, original.opaque_state);
+        }
+        fixture.source.set_capture_state(changed);
+        fixture.until(|fixture| {
+            fixture
+                .app
+                .clip_render_job
+                .as_ref()
+                .is_some_and(|job| job.phase.terminal())
+        });
+        assert_eq!(fixture.source.capture_count(), 2);
+        assert_eq!(fixture.bytes(), before);
+        assert_eq!(
+            (
+                fixture.app.undo_stack.len(),
+                fixture.app.redo_stack.len(),
+                fixture.app.dirty
+            ),
+            history_before
+        );
+        assert_eq!(fixture.app.running_generator_chains.len(), 1);
+        assert_eq!(
+            fixture.app.running_generator_chains[&channel_id]
+                .control
+                .genuine_worker_id(),
+            worker_id
+        );
+        assert!(fixture.app.retained_clip_media.is_empty());
+        assert_eq!(fixture.app.retained_clip_pcm_bytes, 0);
+        let job = fixture.app.clip_render_job.as_ref().unwrap();
+        assert_eq!(job.phase, ClipRenderPhase::RetainedFile);
+        assert!(job.retained_path.as_ref().unwrap().exists());
+        assert!(!job.removal_queued && !job.source_removed && !job.model_commit_started);
+        assert!(
+            job.failure
+                .as_deref()
+                .unwrap()
+                .contains("second actual source capture")
+        );
+    }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_controller_cancel_ready_to_commit_does_not_remove_source() {
     let mut fixture = Fixture::new();
@@ -797,7 +1129,7 @@ fn actual_controller_cancel_ready_to_commit_does_not_remove_source() {
     assert!(!fixture.app.clip_render_job.as_ref().unwrap().removal_queued);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_controller_edit_away_and_back_is_rejected_by_app_revision() {
     let mut fixture = Fixture::new();
@@ -832,7 +1164,7 @@ fn actual_controller_edit_away_and_back_is_rejected_by_app_revision() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_controller_cancellation_during_second_capture_retains_capture_owner() {
     let mut fixture = Fixture::new();
@@ -855,6 +1187,7 @@ fn actual_controller_cancellation_during_second_capture_retains_capture_owner() 
             .clip_render_job
             .as_ref()
             .unwrap()
+            .stopped
             .capture
             .is_some()
     );
@@ -880,7 +1213,7 @@ fn actual_controller_cancellation_during_second_capture_retains_capture_owner() 
     ));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_callback_stale_project_removal_refuses_without_model_swap() {
     let mut fixture = Fixture::new();
@@ -918,7 +1251,7 @@ fn actual_callback_stale_project_removal_refuses_without_model_swap() {
     assert_eq!(fixture.app.running_generator_chains.len(), 1);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_controller_committed_engine_failure_stays_paused_after_status_hidden() {
     let mut fixture = Fixture::new();
@@ -964,7 +1297,7 @@ fn actual_controller_committed_engine_failure_stays_paused_after_status_hidden()
     assert!(!fixture.app.cancel_clip_render_job());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_controller_duplicate_start_and_unknown_removal_keep_original_owner() {
     let mut fixture = Fixture::new();
@@ -1004,7 +1337,7 @@ fn actual_controller_duplicate_start_and_unknown_removal_keep_original_owner() {
     });
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_second_capture_backend_fault_keeps_precedence_over_app_cancel() {
     let mut fixture = Fixture::new();
@@ -1085,13 +1418,14 @@ fn actual_fault_projection(typed: bool) -> String {
         .clip_render_job
         .as_ref()
         .unwrap()
+        .stopped
         .binding
         .unwrap();
     let status = fixture.app.clip_render_status(binding);
     let job = fixture.app.clip_render_job.as_mut().unwrap();
     let identity = BounceSourceIdentity {
         project_session: binding.stamp.project_session,
-        project_fingerprint: project_snapshot_fingerprint(&job.review.snapshot),
+        project_fingerprint: project_snapshot_fingerprint(&job.stopped.snapshot),
         timeline_revision: binding.stamp.timeline_revision,
         epoch: binding.stamp.epoch,
         endpoint_id: binding.stamp.endpoint_id,
@@ -1104,7 +1438,7 @@ fn actual_fault_projection(typed: bool) -> String {
             Instant::now() < deadline,
             "actual capture projection did not terminate"
         );
-        let capture = job.capture.as_mut().unwrap();
+        let capture = job.stopped.capture.as_mut().unwrap();
         let result = if typed {
             match capture.poll_typed(identity, status, Instant::now()) {
                 Err(error) => {
@@ -1125,7 +1459,7 @@ fn actual_fault_projection(typed: bool) -> String {
             Ok(None) => std::thread::sleep(Duration::from_millis(1)),
             Ok(Some(_)) => panic!("in-flight backend fault cannot become success"),
             Err(message) => {
-                job.capture = None;
+                job.stopped.capture = None;
                 job.fail(message.clone());
                 job.finish_unchanged();
                 return message;
@@ -1142,7 +1476,7 @@ fn actual_legacy_string_capture_poll_is_display_projection_of_typed_fault() {
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn verifier_owner_mismatch_cannot_drain_actual_abandoned_controller_worker() {
     let mut fixture = Fixture::new();
@@ -1202,6 +1536,7 @@ fn actual_backend_fault_precedes_its_inactive_publication_without_app_cancel() {
                 .clip_render_job
                 .as_ref()
                 .unwrap()
+                .stopped
                 .capture
                 .as_ref()
                 .unwrap()
@@ -1265,7 +1600,7 @@ fn actual_admission_refuses_unpersisted_legacy_piano_notes() {
     assert_eq!(fixture.bytes(), before);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_verified_pcm_over_budget_retains_file_without_model_or_cache_insertion() {
     let mut fixture = Fixture::new(); // Owns the shared admission before override.
@@ -1294,7 +1629,10 @@ fn actual_verified_pcm_over_budget_retains_file_without_model_or_cache_insertion
 }
 
 #[test]
-#[cfg(not(all(target_os = "linux", feature = "experimental-fresh-helper")))]
+#[cfg(not(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+)))]
 fn actual_app_reports_unavailable_without_experimental_helper_feature() {
     let mut fixture = Fixture::new();
     let before = fixture.bytes();
@@ -1303,7 +1641,7 @@ fn actual_app_reports_unavailable_without_experimental_helper_feature() {
     let operation = fixture.app.next_clip_render_operation_id;
     assert_eq!(
         fixture.app.clip_render_unavailable_reason().as_deref(),
-        Some("Clip rendering requires Linux with experimental-fresh-helper enabled")
+        Some("Clip rendering requires Linux or Windows with experimental-fresh-helper enabled")
     );
     fixture.app.open_selected_clip_render_review();
     assert!(fixture.app.clip_render_job.is_none());
@@ -1332,7 +1670,7 @@ fn checked_tail_uses_zero_cutoff_for_tiny_positive_seconds() {
     assert!(checked_fixed_tail_frames(0.0, 0).is_err());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_removal_enqueue_does_not_publish_a_new_transport_mailbox_request() {
     let mut fixture = Fixture::new();
@@ -1395,7 +1733,7 @@ fn actual_removal_enqueue_does_not_publish_a_new_transport_mailbox_request() {
     });
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_coincident_timeline_readiness_cannot_clear_committed_playback_drift_failure() {
     let mut fixture = Fixture::new();
@@ -1448,7 +1786,7 @@ fn actual_coincident_timeline_readiness_cannot_clear_committed_playback_drift_fa
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_final_timeline_route_failure_is_sticky_after_commit_and_source_join() {
     let mut fixture = Fixture::new();
@@ -1538,7 +1876,7 @@ fn actual_final_timeline_route_failure_is_sticky_after_commit_and_source_join() 
     assert!(fixture.app.clip_render_blocks_playback());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_unissued_full_ring_removal_does_not_revive_after_recorded_failure() {
     let mut fixture = Fixture::new();

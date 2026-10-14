@@ -1,4 +1,4 @@
-//! Experimental Linux-only, owner-thread fresh-child transport foundation.
+//! Experimental owner-thread fresh-child transport foundation for Linux/Windows.
 //!
 //! This crate-private module has no production caller. It does not load a plugin by
 //! itself, retry a command, alter SIGPIPE disposition, or create an I/O thread.
@@ -6,6 +6,11 @@
 //! integration and simultaneous fresh candidate replacement need a later design.
 
 mod codec;
+mod lifecycle;
+#[cfg(target_os = "linux")]
+mod pump;
+#[cfg(target_os = "windows")]
+#[path = "pump_windows.rs"]
 mod pump;
 mod quarantine;
 mod request;
@@ -15,7 +20,9 @@ mod tests;
 
 use crate::process_isolation::{HostCommand, HostResponse};
 use std::marker::PhantomData;
-use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(target_os = "linux")]
+use std::process::{ChildStdin, ChildStdout};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -57,6 +64,28 @@ pub(crate) enum Delivery {
     MayHaveApplied,
 }
 
+/// Exact bounded catalog guard that first refused a response prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitSite {
+    /// First extra parameter entry after the accepted catalog-entry maximum.
+    ParameterCatalogEntries,
+    /// Decoded UTF-8 bytes in one parameter name or unit.
+    ParameterTextBytes,
+    /// Sum of decoded UTF-8 bytes in parameter names and units.
+    ParameterCatalogTextBytes,
+}
+
+/// Numeric refusal evidence, without payload text or any inferred total length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LimitEvidence {
+    /// Existing guard that rejected the checked prefix.
+    pub site: LimitSite,
+    /// Checked prefix at the first refusal, not the complete catalog/text size.
+    pub observed_at_least: usize,
+    /// Unchanged maximum enforced by that guard.
+    pub maximum: usize,
+}
+
 #[derive(Debug)]
 pub(crate) struct ExchangeFailure {
     pub(crate) cause: ErrorKind,
@@ -64,6 +93,8 @@ pub(crate) struct ExchangeFailure {
     /// A valid helper operation error is retained; it never proves rollback.
     pub(crate) reported: Option<Box<HostResponse>>,
     pub(crate) diagnostic_unavailable: Option<ErrorKind>,
+    pub(crate) limit_evidence: Option<LimitEvidence>,
+    pub(crate) metadata_getter: Option<crate::process_isolation::MetadataGetter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,6 +109,7 @@ pub(crate) enum ReplyShape {
     NativeDirtyRevision,
     Parameters,
     CheckedAudioBusLayout,
+    StrictMetadataSnapshot,
     EventBusLayout,
     Audio {
         channels: usize,
@@ -89,11 +121,24 @@ pub(crate) enum ReplyShape {
     },
 }
 
-/// One shared FD owns its identity until the final cancellation handle is dropped.
-/// A late cancel therefore cannot write to a recycled raw descriptor.
+#[cfg(target_os = "linux")]
+type WakeHandle = std::os::fd::OwnedFd;
+#[cfg(target_os = "windows")]
+type WakeHandle = std::os::windows::io::OwnedHandle;
+#[cfg(target_os = "linux")]
+type InputPipe = ChildStdin;
+#[cfg(target_os = "linux")]
+type OutputPipe = ChildStdout;
+#[cfg(target_os = "windows")]
+type InputPipe = pump::Pipe;
+#[cfg(target_os = "windows")]
+type OutputPipe = pump::Pipe;
+
+/// Shared ownership prevents a late cancellation from signaling a recycled
+/// descriptor or Windows event handle.
 struct Cancellation {
     cancelled: AtomicBool,
-    wake: std::os::fd::OwnedFd,
+    wake: WakeHandle,
     #[cfg(test)]
     skip_wake: AtomicBool,
 }
@@ -122,9 +167,25 @@ struct Budget {
     peak: usize,
     /// Only a fully validated known helper failure may use this bounded tail.
     diagnostic_copy: bool,
+    /// First actual catalog refusal in this exchange, retained after rollback.
+    limit_evidence: Option<LimitEvidence>,
 }
 
 impl Budget {
+    fn refuse_limit(
+        &mut self,
+        site: LimitSite,
+        observed_at_least: usize,
+        maximum: usize,
+    ) -> ErrorKind {
+        self.limit_evidence.get_or_insert(LimitEvidence {
+            site,
+            observed_at_least,
+            maximum,
+        });
+        ErrorKind::Limit
+    }
+
     fn check(&self) -> Result<(), ErrorKind> {
         if self.diagnostic_copy {
             return Ok(());
@@ -199,8 +260,8 @@ impl Budget {
 
 struct ChildOwner {
     child: Child,
-    stdin: Option<ChildStdin>,
-    stdout: Option<ChildStdout>,
+    stdin: Option<InputPipe>,
+    stdout: Option<OutputPipe>,
     /// A kill attempt is evidence, not proof of exit or reap.
     kill_requested: bool,
     /// First pipe-close grace, never renewed by repeated short cleanup budgets.
@@ -255,6 +316,8 @@ pub(crate) struct CleanupReport {
     pub(crate) shutdown_delivery: Option<Delivery>,
     pub(crate) kill_error: Option<i32>,
     pub(crate) wait_error: Option<i32>,
+    /// First pipe cancellation/completion error, retained through concrete reap.
+    pub(crate) pipe_error: Option<i32>,
     pub(crate) kill_requested: bool,
 }
 
@@ -266,6 +329,7 @@ impl CleanupReport {
             shutdown_delivery: None,
             kill_error: None,
             wait_error: None,
+            pipe_error: None,
             kill_requested: false,
         }
     }
@@ -288,7 +352,10 @@ impl FreshHelperSession {
             skip_wake: AtomicBool::new(false),
         });
         let permit = quarantine::reserve().map_err(failure)?;
+        #[cfg(target_os = "windows")]
+        let pipes = pump::prepare_pipes(command).map_err(failure)?;
         // This path owns every captured pipe. No stderr reader thread is needed.
+        #[cfg(target_os = "linux")]
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -296,6 +363,8 @@ impl FreshHelperSession {
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
+                #[cfg(target_os = "windows")]
+                command.stdin(Stdio::null()).stdout(Stdio::null());
                 drop(permit); // No Child was created; release the reservation.
                 return Err(failure(pump::io_error(error)));
             }
@@ -305,8 +374,14 @@ impl FreshHelperSession {
         let mut session = Self {
             owner: Some(ChildOwner {
                 child,
+                #[cfg(target_os = "linux")]
                 stdin: None,
+                #[cfg(target_os = "linux")]
                 stdout: None,
+                #[cfg(target_os = "windows")]
+                stdin: Some(pipes.0),
+                #[cfg(target_os = "windows")]
+                stdout: Some(pipes.1),
                 kill_requested: false,
                 graceful_until: None,
                 observed_exit: None,
@@ -319,14 +394,24 @@ impl FreshHelperSession {
             completed_cleanup: None,
             _owner_thread: PhantomData,
         };
+        #[cfg(target_os = "windows")]
+        // Command retains its configured child ends after spawn. Close those
+        // parent copies only after the real child has entered guarded ownership.
+        // Otherwise EOF/broken-pipe would never prove the child's own closure.
+        command.stdin(Stdio::null()).stdout(Stdio::null());
         let result = (|| {
             let owner = session.owner.as_mut().expect("new child owner");
-            owner.stdin = owner.child.stdin.take();
-            owner.stdout = owner.child.stdout.take();
-            let stdin = owner.stdin.as_ref().ok_or(ErrorKind::Spawn)?;
-            let stdout = owner.stdout.as_ref().ok_or(ErrorKind::Spawn)?;
-            pump::set_nonblocking(stdin)?;
-            pump::set_nonblocking(stdout)?;
+            #[cfg(target_os = "linux")]
+            {
+                owner.stdin = owner.child.stdin.take();
+                owner.stdout = owner.child.stdout.take();
+                let stdin = owner.stdin.as_ref().ok_or(ErrorKind::Spawn)?;
+                let stdout = owner.stdout.as_ref().ok_or(ErrorKind::Spawn)?;
+                pump::set_nonblocking(stdin)?;
+                pump::set_nonblocking(stdout)?;
+            }
+            #[cfg(target_os = "windows")]
+            pump::finish_setup(owner)?;
             if Instant::now() >= deadline {
                 return Err(ErrorKind::Deadline);
             }
@@ -390,6 +475,8 @@ impl FreshHelperSession {
                 delivery: Delivery::NotSent,
                 reported: None,
                 diagnostic_unavailable: None,
+                limit_evidence: None,
+                metadata_getter: None,
             });
         }
         // InFlight is installed before any fallible/allocating codec work. A Rust
@@ -402,6 +489,7 @@ impl FreshHelperSession {
             live: 0,
             peak: 0,
             diagnostic_copy: false,
+            limit_evidence: None,
         };
         let result = (|| {
             budget.check()?;
@@ -425,6 +513,19 @@ impl FreshHelperSession {
             Ok((reply, response.peer_closed || child_exited, child_exited))
         })();
         match result {
+            Ok((codec::DecodedReply::MetadataBundleRejected { getter, reason }, _, _)) => {
+                let cause = ErrorKind::MetadataRejected(reason);
+                self.state = State::Terminal;
+                self.terminal = Some(cause);
+                Err(ExchangeFailure {
+                    cause,
+                    delivery,
+                    reported: None,
+                    diagnostic_unavailable: None,
+                    limit_evidence: None,
+                    metadata_getter: Some(getter),
+                })
+            }
             Ok((codec::DecodedReply::MetadataRejected(reason), _, _)) => {
                 let cause = ErrorKind::MetadataRejected(reason);
                 self.state = State::Terminal;
@@ -434,6 +535,8 @@ impl FreshHelperSession {
                     delivery,
                     reported: None,
                     diagnostic_unavailable: None,
+                    limit_evidence: None,
+                    metadata_getter: None,
                 })
             }
             Ok((
@@ -441,6 +544,7 @@ impl FreshHelperSession {
                     crashed,
                     reported,
                     diagnostic_unavailable,
+                    metadata_getter,
                 },
                 _,
                 _,
@@ -457,6 +561,8 @@ impl FreshHelperSession {
                     delivery,
                     reported: reported.map(Box::new),
                     diagnostic_unavailable,
+                    limit_evidence: None,
+                    metadata_getter,
                 })
             }
             Ok((codec::DecodedReply::Response(reply), true, child_exited)) => {
@@ -472,6 +578,8 @@ impl FreshHelperSession {
                     delivery,
                     reported: Some(Box::new(reply)),
                     diagnostic_unavailable: None,
+                    limit_evidence: None,
+                    metadata_getter: None,
                 })
             }
             Ok((codec::DecodedReply::Response(reply), false, _)) => {
@@ -486,6 +594,8 @@ impl FreshHelperSession {
                     delivery,
                     reported: None,
                     diagnostic_unavailable: None,
+                    limit_evidence: budget.limit_evidence,
+                    metadata_getter: None,
                 })
             }
         }
@@ -503,6 +613,34 @@ impl FreshHelperSession {
         protocol_deadline: Instant,
         cleanup_deadline: Instant,
     ) -> CleanupReport {
+        self.dispose_inner(protocol_deadline, cleanup_deadline, None)
+    }
+
+    /// Strict disposable-clone policy only. A complete healthy Shutdown write
+    /// may use the requested natural-exit window, clamped after that write to
+    /// the original remaining cleanup time minus reserved kill/reap time.
+    /// Terminal, cancelled or failed Shutdown paths keep the ordinary 100 ms
+    /// policy. No call can renew the first recorded natural-exit deadline.
+    pub(crate) fn dispose_with_deadlines_and_natural_grace(
+        &mut self,
+        protocol_deadline: Instant,
+        cleanup_deadline: Instant,
+        preferred_grace: std::time::Duration,
+        reap_reserve: std::time::Duration,
+    ) -> CleanupReport {
+        self.dispose_inner(
+            protocol_deadline,
+            cleanup_deadline,
+            Some((preferred_grace, reap_reserve)),
+        )
+    }
+
+    fn dispose_inner(
+        &mut self,
+        protocol_deadline: Instant,
+        cleanup_deadline: Instant,
+        natural_grace: Option<(std::time::Duration, std::time::Duration)>,
+    ) -> CleanupReport {
         if let Some(report) = &self.completed_cleanup {
             return report.clone();
         }
@@ -513,6 +651,7 @@ impl FreshHelperSession {
             report.state = CleanupState::Empty;
             return report;
         };
+        let mut shutdown_completed = false;
         if healthy {
             let budget = Budget {
                 deadline: protocol_deadline.min(cleanup_deadline),
@@ -520,18 +659,30 @@ impl FreshHelperSession {
                 live: 0,
                 peak: 0,
                 diagnostic_copy: false,
+                limit_evidence: None,
             };
             let mut delivery = Delivery::NotSent;
-            let error = pump::write_request(owner, b"\"Shutdown\"\n", &budget, &mut delivery).err();
-            owner.cleanup_report.shutdown_error = error;
+            let shutdown = pump::write_request(owner, b"\"Shutdown\"\n", &budget, &mut delivery);
+            shutdown_completed = shutdown.is_ok();
+            owner.cleanup_report.shutdown_error = shutdown.err();
             owner.cleanup_report.shutdown_delivery = Some(delivery);
         }
         // No later cleanup attempt can send protocol or renew the first grace.
-        owner.stdin.take();
-        owner.stdout.take();
-        let graceful_until = *owner
-            .graceful_until
-            .get_or_insert_with(|| Instant::now() + std::time::Duration::from_millis(100));
+        pump::close_pipes(owner);
+        let allow_natural_grace =
+            shutdown_completed && !self.cancel.cancelled.load(Ordering::Acquire);
+        let graceful_until = *owner.graceful_until.get_or_insert_with(|| {
+            let now = Instant::now();
+            let grace = match (allow_natural_grace, natural_grace) {
+                (true, Some((preferred, reserve))) => preferred.min(
+                    cleanup_deadline
+                        .saturating_duration_since(now)
+                        .saturating_sub(reserve),
+                ),
+                _ => std::time::Duration::from_millis(100),
+            };
+            now + grace
+        });
         pump::reap(owner, cleanup_deadline, Some(graceful_until));
         self.finish_cleanup_observation()
     }
@@ -544,6 +695,7 @@ impl FreshHelperSession {
         }
         let owner = self.owner.as_mut().ok_or(ErrorKind::CleanupNotBegun)?;
         let until = owner.graceful_until.ok_or(ErrorKind::CleanupNotBegun)?;
+        #[cfg(target_os = "linux")]
         if owner.stdin.is_some() || owner.stdout.is_some() {
             return Err(ErrorKind::CleanupNotBegun);
         }

@@ -78,6 +78,9 @@ pub struct WavExportOptions {
     pub sample_rate: u32,
     pub sample_format: WavSampleFormat,
     pub level_policy: WavLevelPolicy,
+    /// A fixed release window after the exclusive arrangement end. No new
+    /// notes or automation events are admitted during this window.
+    pub tail_milliseconds: u32,
 }
 
 impl Default for WavExportOptions {
@@ -87,6 +90,7 @@ impl Default for WavExportOptions {
 }
 
 impl WavExportOptions {
+    pub const MAX_TAIL_MILLISECONDS: u32 = 30_000;
     pub const STANDARD_SAMPLE_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
 
     pub const fn legacy(sample_rate: u32) -> Self {
@@ -94,6 +98,7 @@ impl WavExportOptions {
             sample_rate,
             sample_format: WavSampleFormat::Pcm24,
             level_policy: WavLevelPolicy::AttenuatePeaks,
+            tail_milliseconds: 0,
         }
     }
 
@@ -103,7 +108,23 @@ impl WavExportOptions {
             "WAV export sample rate {} Hz is outside the supported range 8000..=192000 Hz",
             self.sample_rate
         );
+        ensure!(
+            self.tail_milliseconds <= Self::MAX_TAIL_MILLISECONDS,
+            "WAV export tail {} ms exceeds the supported limit {} ms",
+            self.tail_milliseconds,
+            Self::MAX_TAIL_MILLISECONDS
+        );
         Ok(())
+    }
+
+    pub fn tail_frames(self) -> Result<usize> {
+        self.validate()?;
+        let frames = u64::from(self.sample_rate)
+            .checked_mul(u64::from(self.tail_milliseconds))
+            .and_then(|frames| frames.checked_add(999))
+            .context("WAV export tail frame count overflow")?
+            / 1_000;
+        usize::try_from(frames).context("WAV export tail is too long for this platform")
     }
 
     pub fn gain_for_peak(self, peak: f32) -> Result<f32> {
@@ -127,14 +148,20 @@ impl WavExportOptions {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WavExportReport {
+    pub sample_rate: u32,
     pub frames: usize,
+    pub music_frames: usize,
+    pub tail_frames: usize,
+    /// Native source release remains at the fixed render boundary. This is
+    /// conservative source-state evidence, not an acoustic silence oracle.
+    pub tail_limit_reached: bool,
     pub sample_peak: f32,
     pub applied_gain: f32,
 }
 
 impl WavExportReport {
     pub fn level_summary(self) -> String {
-        if self.applied_gain == 1.0 {
+        let mut summary = if self.applied_gain == 1.0 {
             format!("Unity export gain; sample peak {:.6}", self.sample_peak)
         } else {
             format!(
@@ -142,7 +169,16 @@ impl WavExportReport {
                 20.0 * self.applied_gain.log10(),
                 self.sample_peak
             )
+        };
+        if self.tail_limit_reached {
+            summary.push_str("; source release remains at the configured tail limit; increase the tail to avoid truncation");
         }
+        format!(
+            "Duration {:.3} s (music {:.3} s + tail {:.3} s); {summary}",
+            self.frames as f64 / f64::from(self.sample_rate),
+            self.music_frames as f64 / f64::from(self.sample_rate),
+            self.tail_frames as f64 / f64::from(self.sample_rate)
+        )
     }
 }
 
@@ -161,6 +197,30 @@ mod tests {
         for peak in [f32::NAN, f32::INFINITY, -0.1] {
             assert!(options.gain_for_peak(peak).is_err());
         }
+    }
+
+    #[test]
+    fn fixed_tail_rounds_up_at_fractional_rates_and_rejects_out_of_range() {
+        let options = WavExportOptions {
+            sample_rate: 44_100,
+            tail_milliseconds: 1,
+            ..WavExportOptions::default()
+        };
+        assert_eq!(options.tail_frames().unwrap(), 45);
+        let options = WavExportOptions {
+            tail_milliseconds: 30_000,
+            ..options
+        };
+        assert_eq!(options.tail_frames().unwrap(), 1_323_000);
+        assert!(
+            WavExportOptions {
+                tail_milliseconds: 30_001,
+                ..options
+            }
+            .tail_frames()
+            .is_err()
+        );
+        assert_eq!(WavExportOptions::default().tail_frames().unwrap(), 0);
     }
 
     #[test]

@@ -5,7 +5,10 @@
 //! Private state and PCM stay in this run-owned value; Debug deliberately omits
 //! their bytes. The driver owns hashing/persistence outside all callback paths.
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 use crate::instrument_bounce::render::{BlockReply, DisposalObservation};
 use crate::{
     audio::{AudioAssetEvent, GeneratorEndpointEvent},
@@ -20,6 +23,7 @@ use crate::{
 use std::{
     cell::{Cell, RefCell},
     sync::{Arc, Mutex, Weak},
+    time::Instant,
 };
 
 pub(crate) const MAX_RECORDS: usize = 32_768;
@@ -31,7 +35,10 @@ pub(crate) const MAX_PRIVATE_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const MAX_STATE_BYTES: usize = 64 * 1024 * 1024;
 #[cfg(feature = "vst3")]
 pub(crate) const MAX_SOURCE_POSITIVE_ATTEMPTS: usize = 4096;
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 pub(crate) const MAX_CLONE_REPLIES: usize = 282;
 const MAX_TEXT: usize = 4096;
 const MAX_BUSES: usize = 32;
@@ -52,6 +59,7 @@ pub(crate) enum Stage {
     Undo,
     Redo,
     SecondPlayback,
+    WholeExport,
     Cleanup,
     Finished,
 }
@@ -337,6 +345,9 @@ pub(crate) enum RecordKind {
 )] // Manual genuine consumer is feature-gated.
 pub(crate) struct Record {
     pub ordinal: u64,
+    /// Nanoseconds on this installed run's monotonic clock. Worker/control
+    /// taps only; inactive observers never sample this clock.
+    pub monotonic_elapsed_ns: u64,
     pub stage: Stage,
     pub instance: Option<InstanceIdentity>,
     pub kind: RecordKind,
@@ -351,7 +362,13 @@ pub(crate) struct ObservationSnapshot {
     pub private_bytes: usize,
     pub source_positive_attempts: usize,
     pub clone_replies: usize,
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub clone_reply_cap: usize,
     pub timeline_events: usize,
+    started: Instant,
     stage: Stage,
     next_instance: u64,
     phases: [bool; 3],
@@ -371,7 +388,13 @@ impl ObservationSnapshot {
             private_bytes: 0,
             source_positive_attempts: 0,
             clone_replies: 0,
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            clone_reply_cap: MAX_CLONE_REPLIES,
             timeline_events: 0,
+            started: Instant::now(),
             stage: Stage::Preflight,
             next_instance: 1,
             phases: [false; 3],
@@ -382,6 +405,52 @@ impl ObservationSnapshot {
     }
     fn fail(&mut self, failure: &'static str) {
         self.failure.get_or_insert(failure);
+    }
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    fn set_qa_clone_reply_limit(&mut self, limit: usize) -> Result<(), &'static str> {
+        if !(1..=4096).contains(&limit) {
+            return Err("QA observer clone reply limit must be within 1..=4096");
+        }
+        self.clone_reply_cap = limit;
+        Ok(())
+    }
+
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    fn strict_pcm(
+        &mut self,
+        identity: Option<InstanceIdentity>,
+        frames: usize,
+        transport: PluginTransport,
+        reply: &BlockReply,
+    ) {
+        if self.clone_replies >= self.clone_reply_cap
+            || reply.channels.len() > 2
+            || reply.channels.iter().any(|channel| channel.len() > 128)
+        {
+            self.fail("observer strict PCM cap exceeded");
+            return;
+        }
+        self.clone_replies += 1;
+        let bytes = reply
+            .channels
+            .iter()
+            .map(|channel| channel.len() * std::mem::size_of::<f32>())
+            .sum();
+        self.push(identity, bytes, || RecordKind::StrictPcm {
+            frames,
+            transport,
+            channels: reply.channels.clone(),
+            transport_applied: reply.transport_applied,
+            output_events: reply.output_events,
+            output_events_lost: reply.output_events_lost,
+        });
     }
     fn timeline_event(
         &mut self,
@@ -424,22 +493,29 @@ impl ObservationSnapshot {
         self.private_bytes = total;
         self.records.push(Arc::new(Record {
             ordinal: self.records.len() as u64 + 1,
+            monotonic_elapsed_ns: self.elapsed_ns(),
             stage: self.stage,
             instance,
             kind: build(),
         }));
+    }
+    fn elapsed_ns(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
     fn bind_instance(
         &mut self,
         phase: InstancePhase,
         worker: Option<WorkerIdentity>,
     ) -> InstanceIdentity {
-        let (index, expected) = match phase {
-            InstancePhase::InitialSource => (0, Stage::InitialSource),
-            InstancePhase::StrictClone => (1, Stage::Conversion),
-            InstancePhase::UndoSource => (2, Stage::Undo),
+        let (index, expected_stage) = match phase {
+            InstancePhase::InitialSource => (0, self.stage == Stage::InitialSource),
+            InstancePhase::StrictClone => (
+                1,
+                matches!(self.stage, Stage::Conversion | Stage::WholeExport),
+            ),
+            InstancePhase::UndoSource => (2, self.stage == Stage::Undo),
         };
-        if self.stage != expected || self.phases[index] || self.next_instance != index as u64 + 1 {
+        if !expected_stage || self.phases[index] || self.next_instance != index as u64 + 1 {
             self.fail("observer unexpected instance phase, order or duplicate owner");
         }
         self.phases[index] = true;
@@ -515,16 +591,36 @@ pub(crate) struct ObservationRun {
 )] // Manual genuine consumer is feature-gated.
 impl ObservationRun {
     pub(crate) fn install() -> Result<Self, &'static str> {
+        Self::install_configured(|_| Ok(()))
+    }
+
+    /// Explicit test-driver storage budget for a longer genuine render. This
+    /// changes only copied observations; SDK/process and other collector caps
+    /// remain unchanged and overflow still rejects the qualification run.
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn install_with_clone_reply_limit(limit: usize) -> Result<Self, &'static str> {
+        if !(1..=4096).contains(&limit) {
+            return Err("QA observer clone reply limit must be within 1..=4096");
+        }
+        Self::install_configured(|state| state.set_qa_clone_reply_limit(limit))
+    }
+
+    fn install_configured(
+        configure: impl FnOnce(&mut ObservationSnapshot) -> Result<(), &'static str>,
+    ) -> Result<Self, &'static str> {
         let mut slot = ACTIVE
             .lock()
             .map_err(|_| "observer activation mutex poisoned")?;
         if slot.as_ref().and_then(Weak::upgrade).is_some() {
             return Err("an observation run is already active");
         }
-        let state = Arc::new(Mutex::new(ObservationSnapshot::new(
-            MAX_RECORDS,
-            MAX_PRIVATE_BYTES,
-        )?));
+        let mut snapshot = ObservationSnapshot::new(MAX_RECORDS, MAX_PRIVATE_BYTES)?;
+        configure(&mut snapshot)?;
+        let state = Arc::new(Mutex::new(snapshot));
         *slot = Some(Arc::downgrade(&state));
         Ok(Self { state })
     }
@@ -540,6 +636,10 @@ impl ObservationRun {
             state
         });
         inspect(&state)
+    }
+    /// Driver-side alignment with worker taps, outside any callback operation.
+    pub(crate) fn monotonic_elapsed_ns(&self) -> u64 {
+        self.with_snapshot(ObservationSnapshot::elapsed_ns)
     }
     /// Copy only a bounded batch of immutable record handles. No private
     /// opaque or PCM payload is copied. Hash/format/write after releasing this
@@ -693,7 +793,10 @@ impl InstanceObserver {
             });
         });
     }
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn strict_result<T>(
         &self,
         operation: Operation,
@@ -719,13 +822,19 @@ impl InstanceObserver {
             });
         });
     }
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn capture_identity(&self, source: BounceSourceIdentity) {
         self.with(|state, identity| {
             state.push(identity, 0, || RecordKind::StrictCaptureIdentity(source))
         });
     }
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn strict_state_load(&self, bytes: &[u8], result: &Result<(), BackendFailure>) {
         self.with(|state, identity| {
             let diagnostic_bytes = result.as_ref().err().map_or(0, |e| e.diagnostic().len());
@@ -744,7 +853,10 @@ impl InstanceObserver {
             });
         });
     }
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn strict_base_read(
         &self,
         site: &'static str,
@@ -801,7 +913,10 @@ impl InstanceObserver {
             });
         });
     }
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn audio_declaration(
         &self,
         inputs: &[crate::instrument_bounce::BounceAudioBus],
@@ -820,7 +935,10 @@ impl InstanceObserver {
             });
         });
     }
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn event_declaration(
         &self,
         inputs: impl ExactSizeIterator<Item = (u32, bool, Option<bool>)>,
@@ -881,37 +999,24 @@ impl InstanceObserver {
             });
         });
     }
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn pcm(&self, frames: usize, transport: PluginTransport, reply: &BlockReply) {
-        self.with(|state, identity| {
-            if state.clone_replies >= MAX_CLONE_REPLIES
-                || reply.channels.len() > 2
-                || reply.channels.iter().any(|c| c.len() > 128)
-            {
-                state.fail("observer strict PCM cap exceeded");
-                return;
-            }
-            state.clone_replies += 1;
-            let bytes = reply
-                .channels
-                .iter()
-                .map(|c| c.len() * std::mem::size_of::<f32>())
-                .sum();
-            state.push(identity, bytes, || RecordKind::StrictPcm {
-                frames,
-                transport,
-                channels: reply.channels.clone(),
-                transport_applied: reply.transport_applied,
-                output_events: reply.output_events,
-                output_events_lost: reply.output_events_lost,
-            });
-        });
+        self.with(|state, identity| state.strict_pcm(identity, frames, transport, reply));
     }
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn midi(&self, data: [u8; 3], offset: u16) {
         self.with(|state, identity| state.push(identity, 0, || RecordKind::Midi { data, offset }));
     }
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn disposal(&self, value: &DisposalObservation) {
         self.with(|state, identity| {
             if value.diagnostics.len() > 8
@@ -1264,6 +1369,28 @@ mod tests {
         InstanceObserver::default().with(|_, _| panic!("inactive observer must not record"));
     }
     #[test]
+    fn installed_records_share_a_monotonic_run_clock_and_immutable_timestamps() {
+        let mut state = ObservationSnapshot::new(2, 0).unwrap();
+        let before = state.elapsed_ns();
+        state.push(None, 0, || RecordKind::Lifecycle("first"));
+        state.push(None, 0, || RecordKind::Lifecycle("second"));
+        let after = state.elapsed_ns();
+        let first = &state.records[0];
+        let second = &state.records[1];
+        assert!(before <= first.monotonic_elapsed_ns);
+        assert!(first.monotonic_elapsed_ns <= second.monotonic_elapsed_ns);
+        assert!(second.monotonic_elapsed_ns <= after);
+        let retained = Arc::clone(first);
+        let first_timestamp = first.monotonic_elapsed_ns;
+        let run = ObservationRun {
+            state: Arc::new(Mutex::new(state)),
+        };
+        assert!(run.monotonic_elapsed_ns() >= after);
+        let finished = run.finish();
+        assert!(Arc::ptr_eq(&retained, &finished.records[0]));
+        assert_eq!(retained.monotonic_elapsed_ns, first_timestamp);
+    }
+    #[test]
     fn record_batches_copy_only_bounded_immutable_handles() {
         let mut state = ObservationSnapshot::new(MAX_RECORD_BATCH + 1, 3).unwrap();
         state.push(None, 3, || RecordKind::StateLoad {
@@ -1338,6 +1465,88 @@ mod tests {
         assert!(missing_source.failure.is_some());
     }
     #[test]
+    fn whole_source_clone_cleanup_keeps_exact_owner_and_record_order() {
+        let mut state = ObservationSnapshot::new(3, 0).unwrap();
+        state.stage(Stage::InitialSource).unwrap();
+        let source = state.bind_instance(InstancePhase::InitialSource, None);
+        assert_eq!(source.ordinal, 1);
+        state.push(Some(source), 0, || RecordKind::Lifecycle("source observed"));
+        state.stage(Stage::WholeExport).unwrap();
+        let clone = state.bind_instance(InstancePhase::StrictClone, None);
+        assert_eq!(clone.ordinal, 2);
+        assert_eq!(clone.phase, InstancePhase::StrictClone);
+        state.push(Some(clone), 0, || RecordKind::Lifecycle("clone observed"));
+        state.stage(Stage::Cleanup).unwrap();
+        state.push(None, 0, || RecordKind::Lifecycle("cleanup observed"));
+        assert_eq!(state.failure, None);
+        assert_eq!(state.phases, [true, true, false]);
+        assert_eq!(state.next_instance, 3);
+        assert_eq!(
+            state.records.iter().map(|r| r.stage).collect::<Vec<_>>(),
+            vec![Stage::InitialSource, Stage::WholeExport, Stage::Cleanup]
+        );
+        assert_eq!(state.records[0].instance, Some(source));
+        assert_eq!(state.records[1].instance, Some(clone));
+    }
+
+    #[test]
+    fn whole_clone_rejects_source_stop_missing_source_and_duplicate_owner_sticky() {
+        let rejected = Some("observer unexpected instance phase, order or duplicate owner");
+        let mut wrong_stage = ObservationSnapshot::new(0, 0).unwrap();
+        wrong_stage.stage(Stage::InitialSource).unwrap();
+        wrong_stage.bind_instance(InstancePhase::InitialSource, None);
+        wrong_stage.stage(Stage::SourceStop).unwrap();
+        wrong_stage.bind_instance(InstancePhase::StrictClone, None);
+        assert_eq!(wrong_stage.failure, rejected);
+        wrong_stage.stage(Stage::Cleanup).unwrap();
+        wrong_stage.fail("later failure");
+        assert_eq!(wrong_stage.failure, rejected);
+
+        let mut missing_source = ObservationSnapshot::new(0, 0).unwrap();
+        missing_source.stage(Stage::WholeExport).unwrap();
+        missing_source.bind_instance(InstancePhase::StrictClone, None);
+        assert_eq!(missing_source.failure, rejected);
+        missing_source.stage(Stage::Cleanup).unwrap();
+        missing_source.fail("later failure");
+        assert_eq!(missing_source.failure, rejected);
+
+        let mut duplicate = ObservationSnapshot::new(0, 0).unwrap();
+        duplicate.stage(Stage::InitialSource).unwrap();
+        duplicate.bind_instance(InstancePhase::InitialSource, None);
+        duplicate.stage(Stage::WholeExport).unwrap();
+        assert_eq!(
+            duplicate
+                .bind_instance(InstancePhase::StrictClone, None)
+                .ordinal,
+            2
+        );
+        assert_eq!(duplicate.failure, None);
+        duplicate.bind_instance(InstancePhase::StrictClone, None);
+        assert_eq!(duplicate.failure, rejected);
+        duplicate.stage(Stage::Cleanup).unwrap();
+        duplicate.fail("later failure");
+        assert_eq!(duplicate.failure, rejected);
+    }
+
+    #[test]
+    fn whole_cannot_regress_into_conversion_or_undo_and_failure_is_sticky() {
+        for earlier in [Stage::Conversion, Stage::Undo] {
+            let mut state = ObservationSnapshot::new(0, 0).unwrap();
+            state.stage(Stage::InitialSource).unwrap();
+            state.bind_instance(InstancePhase::InitialSource, None);
+            state.stage(Stage::WholeExport).unwrap();
+            state.bind_instance(InstancePhase::StrictClone, None);
+            assert_eq!(state.failure, None);
+            assert_eq!(state.stage(earlier), Err("observer phase regression"));
+            assert_eq!(state.stage, Stage::WholeExport);
+            assert_eq!(state.failure, Some("observer phase regression"));
+            state.stage(Stage::Cleanup).unwrap();
+            state.fail("later failure");
+            assert_eq!(state.failure, Some("observer phase regression"));
+        }
+    }
+
+    #[test]
     fn stage_regression_is_sticky_and_records_keep_actual_order() {
         let mut state = ObservationSnapshot::new(4, 0).unwrap();
         state.stage(Stage::Conversion).unwrap();
@@ -1352,5 +1561,78 @@ mod tests {
             vec![1, 2, 3]
         );
         assert!(state.records.iter().all(|r| r.stage == Stage::Conversion));
+    }
+
+    #[test]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    fn default_and_explicit_qa_pcm_limits_preserve_samples_and_fail_sticky_at_boundary() {
+        for limit in [MAX_CLONE_REPLIES, 2048] {
+            let mut state = ObservationSnapshot::new(MAX_RECORDS, MAX_PRIVATE_BYTES).unwrap();
+            if limit != MAX_CLONE_REPLIES {
+                state.set_qa_clone_reply_limit(limit).unwrap();
+            }
+            let reply = BlockReply {
+                channels: vec![vec![-0.375], vec![0.625]],
+                transport_applied: true,
+                output_events: 0,
+                output_events_lost: false,
+            };
+            let transport = PluginTransport::default();
+            for _ in 0..limit {
+                state.strict_pcm(None, 1, transport, &reply);
+            }
+            assert!(state.failure.is_none());
+            assert_eq!(state.clone_replies, limit);
+            assert_eq!(state.records.len(), limit);
+            assert_eq!(state.private_bytes, limit * 8);
+            match &state.records[limit - 1].kind {
+                RecordKind::StrictPcm {
+                    channels,
+                    transport_applied,
+                    ..
+                } => {
+                    assert_eq!(channels, &reply.channels);
+                    assert!(*transport_applied);
+                }
+                _ => panic!("last copied record must retain the real reply shape and samples"),
+            }
+            state.strict_pcm(None, 1, transport, &reply);
+            state.fail("later failure");
+            assert_eq!(state.failure, Some("observer strict PCM cap exceeded"));
+            assert_eq!(state.clone_replies, limit);
+            assert_eq!(state.records.len(), limit);
+            assert_eq!(state.private_bytes, limit * 8);
+        }
+    }
+
+    #[test]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    fn qa_pcm_limit_is_explicit_bounded_and_does_not_change_other_observer_caps() {
+        for invalid in [0, 4097, usize::MAX] {
+            assert!(ObservationRun::install_with_clone_reply_limit(invalid).is_err());
+        }
+        let run = ObservationRun::install_with_clone_reply_limit(2048).unwrap();
+        run.with_snapshot(|state| {
+            assert_eq!(state.clone_reply_cap, 2048);
+            assert_eq!(state.record_cap, MAX_RECORDS);
+            assert_eq!(state.byte_cap, MAX_PRIVATE_BYTES);
+        });
+        assert!(
+            ObservationRun::install_with_clone_reply_limit(4096).is_err(),
+            "an active run must retain sole observation ownership"
+        );
+        assert_eq!(run.finish().clone_reply_cap, 2048);
+        let ordinary = ObservationRun::install().unwrap();
+        assert_eq!(
+            ordinary.finish().clone_reply_cap,
+            MAX_CLONE_REPLIES,
+            "QA storage settings cannot leak into a later ordinary run"
+        );
     }
 }

@@ -16,7 +16,10 @@ use walkdir::{DirEntry, WalkDir};
 #[allow(dead_code)] // public control-plane surface is consumed incrementally by Mixer/UI code
 pub mod plugin_runtime;
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 #[path = "instrument_bounce_strict_backend.rs"]
 #[allow(dead_code)] // Explicit dormant renderer entry only; no App/UI activation.
 pub(crate) mod strict_backend;
@@ -516,7 +519,10 @@ impl NativePluginHost {
         max_block_frames: u32,
     ) -> Result<plugin_runtime::PluginChain, String> {
         prepare_runtime_spec(&mut spec)?;
-        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
         {
             plugin_runtime::PluginChain::spawn_fresh_bounce_source(
                 instance_id,
@@ -527,11 +533,14 @@ impl NativePluginHost {
                 },
             )
         }
-        #[cfg(not(all(target_os = "linux", feature = "experimental-fresh-helper")))]
+        #[cfg(not(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        )))]
         {
             let _ = (instance_id, spec, sample_rate, max_block_frames);
             Err(
-                "Experimental fresh-source loading requires Linux and experimental-fresh-helper"
+                "Experimental fresh-source loading requires Linux or Windows and experimental-fresh-helper"
                     .into(),
             )
         }

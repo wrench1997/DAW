@@ -576,6 +576,11 @@ fn handle(
                 Err(e) => err("CheckedAudioBusLayout", e),
             })
         }
+        // This legacy helper has no selected-factory owner or closed bundle
+        // implementation. Reject explicitly before touching the loaded plugin.
+        HostCommand::StrictMetadataSnapshot(_) => HostResponse::MetadataQueryRejected {
+            reason: vst3_host::MetadataQueryRejection::Unsupported,
+        },
         HostCommand::EventBusLayout => with(plugin, |p| match p.event_bus_layout() {
             Ok(layout) => HostResponse::EventBusLayout { layout },
             Err(vst3_host::Error::MetadataQueryRejected(reason)) => {
@@ -929,5 +934,33 @@ mod macos {
         if let Some(w) = window {
             w.close();
         }
+    }
+}
+
+#[cfg(test)]
+mod selected_bundle_legacy_tests {
+    use super::*;
+    use vst3_host::process_isolation::{SelectedMetadataPolicy, SelectedMetadataRequest};
+
+    #[test]
+    fn selected_bundle_legacy_helper_rejects_without_plugin_or_metadata() {
+        let plugin: SharedPlugin = Arc::new(Mutex::new(None));
+        let mut sample_rate = 44100.0;
+        let response = handle(
+            HostCommand::StrictMetadataSnapshot(SelectedMetadataRequest {
+                policy: SelectedMetadataPolicy::Kontakt841SelectedStereo,
+            }),
+            &plugin,
+            &mut sample_rate,
+            None,
+        );
+        assert!(matches!(
+            response,
+            HostResponse::MetadataQueryRejected {
+                reason: vst3_host::MetadataQueryRejection::Unsupported
+            }
+        ));
+        assert!(plugin.lock().unwrap().is_none());
+        assert_eq!(sample_rate, 44100.0);
     }
 }

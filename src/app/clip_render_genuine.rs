@@ -448,7 +448,11 @@ impl GenuineFixture {
                     | ClipRenderPhase::RecapturingSource
             )
         {
-            let stamp = job.binding.ok_or("conversion live binding absent")?.stamp;
+            let stamp = job
+                .stopped
+                .binding
+                .ok_or("conversion live binding absent")?
+                .stamp;
             let source = app
                 .running_generator_chains
                 .get(&stamp.channel_id)
@@ -533,7 +537,7 @@ impl GenuineFixture {
         let Some(job) = self.app().clip_render_job.as_ref() else {
             return Ok(());
         };
-        let Some(stop) = job.stop_preparation else {
+        let Some(stop) = job.stopped.stop_preparation else {
             return Ok(());
         };
         let identity = |target: BounceSourceCallbackIdentity| {
@@ -544,7 +548,7 @@ impl GenuineFixture {
                 "endpoint": target.endpoint_id, "instance": target.instance_id,
             })
         };
-        let observed = job.stop_settlement.map(|sample| {
+        let observed = job.stopped.stop_settlement.map(|sample| {
             json!({
                 "result": format!("{:?}", sample.settlement),
                 "coherent": sample.coherent, "requested_epoch": sample.requested_epoch,
@@ -575,7 +579,7 @@ impl GenuineFixture {
                     "committed_epoch": activation.committed_epoch,
                 })),
             },
-            "target": job.settlement_target.map(identity),
+            "target": job.stopped.settlement_target.map(identity),
             "last_admission_sample": observed,
             "failure": job.failure.as_deref().map(bounded_clip_timeline_text),
         });
@@ -1977,7 +1981,7 @@ impl GenuineFixture {
         job.review.tail_seconds = 0.25;
         job.review.tail_acknowledged = true;
         require(
-            checked_fixed_tail_frames(job.review.tail_seconds, job.review.initial.sample_rate)?
+            checked_fixed_tail_frames(job.review.tail_seconds, job.stopped.initial.sample_rate)?
                 == 12_000,
             "actual rounded review tail",
         )?;
@@ -2035,7 +2039,7 @@ impl GenuineFixture {
             ),
             "actual note identity differs",
         )?;
-        self.journal.emit("preclone_actual_request",json!({"start":request.start_frame(),"end":request.end_frame(),"rate":request.sample_rate(),"tail":request.tail_frames(),"events":format!("{events:?}"),"stamp":format!("{:?}",job.binding)}))?;
+        self.journal.emit("preclone_actual_request",json!({"start":request.start_frame(),"end":request.end_frame(),"rate":request.sample_rate(),"tail":request.tail_frames(),"events":format!("{events:?}"),"stamp":format!("{:?}",job.stopped.binding)}))?;
         self.hooks()?;
         self.permit("success_clone")?;
         self.until(2,45,"two actual captures through strict render, verifier, removal, join, media and Timeline",|f|f.app().clip_render_job.as_ref().is_some_and(|j|j.phase==ClipRenderPhase::Complete))?;
@@ -2081,10 +2085,10 @@ impl GenuineFixture {
         let expected_asset_operation = job.asset_operation;
         require(
             job.expected_timeline_generation
-                .is_some_and(|generation| generation > job.review.initial.stamp.timeline_revision)
+                .is_some_and(|generation| generation > job.stopped.initial.stamp.timeline_revision)
                 && self
                     .exact_paused()
-                    .is_some_and(|pair| pair.1 > job.review.initial.stamp.epoch),
+                    .is_some_and(|pair| pair.1 > job.stopped.initial.stamp.epoch),
             "conversion Timeline identity is not genuinely newer",
         )?;
         self.generated_path = Some(job.output_path()?);

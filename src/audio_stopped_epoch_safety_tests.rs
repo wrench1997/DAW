@@ -2,6 +2,9 @@
 // the production paused callback. Driver waits only observe workers; they never
 // supply another DSP block to manufacture settlement.
 use super::*;
+mod playback_startup_tests {
+    include!("audio_play_startup_tests.rs");
+}
 use crate::fixed_quantum::FrameEventKind;
 use crate::plugins::plugin_runtime::{
     BridgeStats, PluginTransport, RetainedShutdownPoll, SubmitStatus,
@@ -72,6 +75,9 @@ struct SafetyProbe {
     latency: AtomicU32,
     process_count: AtomicU32,
     nonzero_input: AtomicBool,
+    distinct_note_output: AtomicBool,
+    idle_output_quanta: AtomicU32,
+    note_output_quanta: AtomicU32,
 }
 
 impl SafetyProbe {
@@ -91,6 +97,7 @@ impl SafetyProbe {
 struct SafetyBackend {
     probe: Arc<SafetyProbe>,
     parameter: f32,
+    note_held: bool,
 }
 
 impl PluginBackend for SafetyBackend {
@@ -121,6 +128,18 @@ impl PluginBackend for SafetyBackend {
     }
     fn send_midi(&mut self, message: MidiMessage) -> Result<(), String> {
         self.probe.record(SafetyTrace::Midi(message.data));
+        match message.data {
+            [status, _, velocity] if status & 0xf0 == 0x90 && velocity != 0 => {
+                self.note_held = true;
+            }
+            [status, _, _] if status & 0xf0 == 0x80 || status & 0xf0 == 0x90 => {
+                self.note_held = false;
+            }
+            [status, 120 | 123, _] if status & 0xf0 == 0xb0 => {
+                self.note_held = false;
+            }
+            _ => {}
+        }
         Ok(())
     }
     fn process(
@@ -140,8 +159,19 @@ impl PluginBackend for SafetyBackend {
         }
         // Deliberately audible generator AND insert output. Silence is the
         // callback's discard contract, never an assumption about the backend.
-        left[..frames].fill(0.75);
-        right[..frames].fill(-0.75);
+        let output = if self.probe.distinct_note_output.load(Ordering::Acquire) {
+            if self.note_held {
+                self.probe.note_output_quanta.fetch_add(1, Ordering::Release);
+                0.25
+            } else {
+                self.probe.idle_output_quanta.fetch_add(1, Ordering::Release);
+                0.75
+            }
+        } else {
+            0.75
+        };
+        left[..frames].fill(output);
+        right[..frames].fill(-output);
         self.probe.process_count.fetch_add(1, Ordering::Release);
         self.probe.record(SafetyTrace::ProcessReturned(frames));
         Ok(())
@@ -204,6 +234,7 @@ impl SafetyWorker {
                 vec![BackendSlot::new(Box::new(SafetyBackend {
                     probe: backend_probe,
                     parameter: 0.0,
+                    note_held: false,
                 }))]
             },
             PluginPrepareConfig {
@@ -483,6 +514,18 @@ impl StoppedSafetyFixture {
             .endpoint
     }
     fn activate(&mut self, epoch: u64, playing: bool) {
+        self.activate_with_loop(epoch, playing, 0);
+    }
+    fn activate_with_loop(&mut self, epoch: u64, playing: bool, loop_end_frame: u64) {
+        self.activate_with_loop_at(epoch, playing, loop_end_frame, 0);
+    }
+    fn activate_with_loop_at(
+        &mut self,
+        epoch: u64,
+        playing: bool,
+        loop_end_frame: u64,
+        frame: u64,
+    ) {
         let topology = self.callback().dsp.plugin_topology_revision;
         let timing = self.engine.as_ref().unwrap().prepare_plugin_timing();
         let request_id = self
@@ -505,7 +548,7 @@ impl StoppedSafetyFixture {
                 &self.timeline,
                 SAFETY_REVISION,
                 epoch,
-                0,
+                frame,
                 TimelineChaseOptions::default(),
             )
             .unwrap();
@@ -518,14 +561,14 @@ impl StoppedSafetyFixture {
                     revision: SAFETY_REVISION,
                     target_epoch: epoch,
                     minimum_epoch: epoch,
-                    frame: 0,
-                    beat_q32: 0,
+                    frame,
+                    beat_q32: beat_to_q32(frame_as_beat_f64(frame)),
                     loop_start_frame: 0,
-                    loop_end_frame: 0,
+                    loop_end_frame,
                     loop_start_q32: 0,
-                    loop_end_q32: 0,
+                    loop_end_q32: beat_to_q32(frame_as_beat_f64(loop_end_frame)),
                     loop_token: self.loop_token,
-                    loop_enabled: false,
+                    loop_enabled: loop_end_frame != 0,
                     playing,
                     mixer_pan_release: TimelineMixerPanRelease::EMPTY,
                 },

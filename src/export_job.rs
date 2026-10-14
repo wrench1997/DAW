@@ -14,11 +14,21 @@ use std::{
     time::Instant,
 };
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 use std::sync::{Mutex, Weak};
-#[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    test,
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 pub(crate) use strict_cancel_tests::StrictCancelPause;
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 use vst3_host::strict_offline::CancelHandle;
 
 const RUNNING: u8 = 0;
@@ -38,9 +48,16 @@ pub(crate) struct ExportDeadlineExceeded;
 struct ControlState {
     state: AtomicU8,
     progress: AtomicU32,
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     strict_cancel: Mutex<Option<RegisteredStrictCancel>>,
-    #[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     strict_cancel_pause: Mutex<Option<Arc<strict_cancel_tests::CancelPauseState>>>,
     #[cfg(test)]
     cancel_at: AtomicU32,
@@ -54,7 +71,10 @@ pub struct ExportControl(Arc<ControlState>);
 /// Exactly one closed cancellation target, with no user callback or raw sender.
 /// The probe exists only in unit tests; production stores the helper's opaque
 /// cancellation-only authority.
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 #[derive(Clone)]
 enum StrictCancelWake {
     Helper(CancelHandle),
@@ -62,7 +82,10 @@ enum StrictCancelWake {
     Probe(Arc<strict_cancel_tests::CancelProbe>),
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 impl StrictCancelWake {
     fn cancel(&self) {
         match self {
@@ -80,7 +103,10 @@ impl StrictCancelWake {
     }
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 struct RegisteredStrictCancel {
     // Live guards retain this allocation, so its identity cannot be reused while
     // an old guard can still run. There is no wrapping integer generation.
@@ -91,14 +117,20 @@ struct RegisteredStrictCancel {
 /// Held by the strict backend through disposal. Replacing a registration is
 /// allowed, but dropping an old guard cannot clear the replacement. This weak
 /// owner reference also prevents a detached guard from retaining an export job.
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 #[must_use = "keep the registration alive until the strict helper is disposed"]
 pub(crate) struct StrictCancelRegistration {
     owner: Weak<ControlState>,
     generation: Arc<()>,
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 impl Drop for StrictCancelRegistration {
     fn drop(&mut self) {
         let Some(owner) = self.owner.upgrade() else {
@@ -161,7 +193,11 @@ impl ExportControl {
             Ok(_) | Err(CANCELLED) => true,
             Err(_) => false,
         };
-        #[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
+        #[cfg(all(
+            test,
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
         if accepted {
             let pause = {
                 self.0
@@ -174,7 +210,10 @@ impl ExportControl {
                 pause.after_publication();
             }
         }
-        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
         if accepted {
             let wake = {
                 let registered = self
@@ -197,7 +236,11 @@ impl ExportControl {
     /// canonical state publication and before taking the wake registration lock.
     /// Keep the returned guard inside the test's thread scope so unwinding
     /// releases the cancelling worker before the scope joins it.
-    #[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn pause_strict_cancel_before_wake(&self, deadline: Instant) -> StrictCancelPause {
         StrictCancelPause::arm(self, deadline)
     }
@@ -206,12 +249,18 @@ impl ExportControl {
     /// registration replaces an older target; each guard unregisters only its
     /// own generation. Cancellation racing before installation is observed by
     /// the post-install reread, while later cancellation sees the installed wake.
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn register_strict_cancel(&self, handle: CancelHandle) -> StrictCancelRegistration {
         self.register_strict_cancel_wake(StrictCancelWake::Helper(handle))
     }
 
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     fn register_strict_cancel_wake(&self, wake: StrictCancelWake) -> StrictCancelRegistration {
         let generation = Arc::new(());
         let previous = {
@@ -431,7 +480,11 @@ impl Drop for ExportJob {
     }
 }
 
-#[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    test,
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 mod strict_cancel_tests {
     use super::*;
     use std::{

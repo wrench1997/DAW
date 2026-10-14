@@ -424,6 +424,7 @@ pub struct TimelineTransportActivationSpec {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimelineTransportActivationRejectReason {
+    PlaybackPreparationRequired,
     Runtime(TimelineDiscontinuityActivationError),
     MissingAudioAsset { asset_id: u64 },
     ChannelBaseTable,

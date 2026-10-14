@@ -13,7 +13,7 @@ const FIXTURE_WORKER_BUDGET: Duration = Duration::from_secs(5);
 /// Drop can run. The worker also has its own finite wait if test coordination fails.
 struct RetainedFixture {
     guard: PluginWorkerGuard,
-    admin: Option<Receiver<AdminCommand>>,
+    admin: Option<Receiver<QueuedAdminCommand>>,
     release: Option<mpsc::Sender<()>>,
     cleanup_joined: Arc<AtomicBool>,
 }
@@ -23,6 +23,7 @@ impl RetainedFixture {
         let (admin_tx, admin_rx) = mpsc::sync_channel(1);
         let (release_tx, release_rx) = mpsc::channel();
         let metrics = Arc::new(BridgeMetrics::default());
+        let admin_tx = AdminCommandSender::new(admin_tx, &metrics);
         let join = thread::spawn(move || {
             let _ = release_rx.recv_timeout(FIXTURE_WORKER_BUDGET);
             assert!(!worker_panics, "retained source fixture worker panic");
@@ -33,6 +34,7 @@ impl RetainedFixture {
                 join: Some(join),
                 metrics,
                 retained_shutdown: RetainedShutdownState::NotRequested,
+                fresh_retained_shutdown: false,
             },
             admin: Some(admin_rx),
             release: Some(release_tx),
@@ -40,8 +42,15 @@ impl RetainedFixture {
         }
     }
 
-    fn receiver(&self) -> &Receiver<AdminCommand> {
+    fn receiver(&self) -> &Receiver<QueuedAdminCommand> {
         self.admin.as_ref().expect("fixture admin is connected")
+    }
+
+    fn receive_command(&self) -> Result<AdminCommand, TryRecvError> {
+        // This fixture simulates command completion at inspection; no backend runs.
+        self.receiver()
+            .try_recv()
+            .map(|mut queued| queued.take_command())
     }
 
     fn fill_admin(&self) {
@@ -134,11 +143,11 @@ fn retained_full_admin_queue_retries_without_replacing_or_detaching_worker() {
         ));
     }
     assert!(matches!(
-        fixture.receiver().try_recv(),
+        fixture.receive_command(),
         Ok(AdminCommand::SetSlotConfig { slot: 0, .. })
     ));
     assert!(matches!(
-        fixture.receiver().try_recv(),
+        fixture.receive_command(),
         Err(TryRecvError::Empty)
     ));
 
@@ -148,12 +157,12 @@ fn retained_full_admin_queue_retries_without_replacing_or_detaching_worker() {
         RetainedShutdownState::WaitingForJoin
     ));
     assert!(matches!(
-        fixture.receiver().try_recv(),
+        fixture.receive_command(),
         Ok(AdminCommand::Shutdown)
     ));
     fixture.finish_and_assert(RetainedShutdownPoll::Joined);
     assert!(matches!(
-        fixture.receiver().try_recv(),
+        fixture.receive_command(),
         Err(TryRecvError::Empty)
     ));
 }
@@ -164,19 +173,19 @@ fn retained_admitted_shutdown_is_never_replayed_when_queue_has_space() {
     let id = fixture.worker_id();
     fixture.assert_pending_same_worker(id);
     assert!(matches!(
-        fixture.receiver().try_recv(),
+        fixture.receive_command(),
         Ok(AdminCommand::Shutdown)
     ));
     for _ in 0..32 {
         fixture.assert_pending_same_worker(id);
         assert!(matches!(
-            fixture.receiver().try_recv(),
+            fixture.receive_command(),
             Err(TryRecvError::Empty)
         ));
     }
     fixture.finish_and_assert(RetainedShutdownPoll::Joined);
     assert!(matches!(
-        fixture.receiver().try_recv(),
+        fixture.receive_command(),
         Err(TryRecvError::Empty)
     ));
 }
@@ -206,11 +215,11 @@ fn retained_stalled_worker_keeps_guard_and_join_after_shutdown_admission() {
     }
     // The original command remains queued; observing admission is not observing teardown.
     assert!(matches!(
-        fixture.receiver().try_recv(),
+        fixture.receive_command(),
         Ok(AdminCommand::Shutdown)
     ));
     assert!(matches!(
-        fixture.receiver().try_recv(),
+        fixture.receive_command(),
         Err(TryRecvError::Empty)
     ));
     fixture.finish_and_assert(RetainedShutdownPoll::Joined);
@@ -222,7 +231,7 @@ fn retained_worker_panic_is_joined_and_cached_as_failure() {
     let id = fixture.worker_id();
     fixture.assert_pending_same_worker(id);
     assert!(matches!(
-        fixture.receiver().try_recv(),
+        fixture.receive_command(),
         Ok(AdminCommand::Shutdown)
     ));
     fixture.finish_and_assert(RetainedShutdownPoll::WorkerPanicked);
@@ -231,7 +240,7 @@ fn retained_worker_panic_is_joined_and_cached_as_failure() {
         RetainedShutdownState::WorkerPanicked
     ));
     assert!(matches!(
-        fixture.receiver().try_recv(),
+        fixture.receive_command(),
         Err(TryRecvError::Empty)
     ));
 }
@@ -242,11 +251,11 @@ fn retained_already_finished_worker_joins_even_when_shutdown_queue_is_full() {
     fixture.fill_admin();
     fixture.finish_and_assert(RetainedShutdownPoll::Joined);
     assert!(matches!(
-        fixture.receiver().try_recv(),
+        fixture.receive_command(),
         Ok(AdminCommand::SetSlotConfig { slot: 0, .. })
     ));
     assert!(matches!(
-        fixture.receiver().try_recv(),
+        fixture.receive_command(),
         Err(TryRecvError::Empty)
     ));
 }

@@ -1140,6 +1140,21 @@ impl PluginInternal for IsolatedPluginImpl {
         &mut self,
         command: crate::plugin::IsolatedEditorCommand,
     ) -> Result<crate::plugin::IsolatedEditorState> {
+        #[cfg(target_os = "windows")]
+        if matches!(
+            command,
+            crate::plugin::IsolatedEditorCommand::Open { .. }
+                | crate::plugin::IsolatedEditorCommand::Focus
+        ) {
+            if let Ok(process) = self.process.lock() {
+                if let Some(pid) = process.helper_pid() {
+                    // Only this already-owned child may take foreground on explicit
+                    // editor Open/Focus. Windows decides whether the calling host has
+                    // permission; denial never changes policy or prevents visibility.
+                    unsafe { winapi::um::winuser::AllowSetForegroundWindow(pid) };
+                }
+            }
+        }
         match self.send_command_once(HostCommand::Editor { command })? {
             HostResponse::EditorState { state } => {
                 validate_editor_state(&state)?;

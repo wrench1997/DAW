@@ -19,6 +19,13 @@ use cpal::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+#[path = "audio_callback_clock.rs"]
+mod callback_clock;
+pub use callback_clock::{
+    CallbackClockObserver, CallbackClockSnapshot, CallbackClockStampSnapshot,
+    CallbackClockTelemetry,
+};
+
 pub const AUDIO_PREFERENCES_VERSION: u32 = 1;
 pub const MAX_AUDIO_DEVICE_CAPABILITIES: usize = 512;
 pub const MAX_AUDIO_DEVICE_CATALOG_ENTRIES: usize = 512;
@@ -1483,6 +1490,7 @@ impl AudioStreamFaultKind {
 
 #[derive(Debug, Default)]
 pub struct CallbackTelemetry {
+    clock: CallbackClockTelemetry,
     callback_revision: AtomicU64,
     callback_count: AtomicU64,
     total_frames: AtomicU64,
@@ -1519,6 +1527,27 @@ pub struct AudioStreamTelemetrySnapshot {
 }
 
 impl CallbackTelemetry {
+    /// Reads the opt-in flag on the control thread before constructing a stream.
+    pub fn prepare_clock_observer(&self, sample_rate: u32) -> CallbackClockObserver {
+        CallbackClockObserver::from_environment(sample_rate, &self.clock)
+    }
+
+    /// The stream owns the only clock observer; error callbacks never write it.
+    pub fn observe_clock_callback(
+        &self,
+        observer: &mut CallbackClockObserver,
+        timestamp: cpal::OutputStreamTimestamp,
+        raw_frames: usize,
+    ) {
+        observer.observe(timestamp, raw_frames, &self.clock);
+    }
+
+    /// Bounded read of independent CPAL timestamp diagnostics. A failed
+    /// coherent read is explicitly inconclusive and never spins.
+    pub fn clock_snapshot(&self) -> CallbackClockSnapshot {
+        self.clock.snapshot()
+    }
+
     /// Observes the raw backend callback before the renderer's internal chunking.
     pub fn observe_callback(&self, interleaved_samples: usize, channels: usize) -> Option<u32> {
         let callback_revision = self.begin_callback_write();

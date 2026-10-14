@@ -66,13 +66,14 @@ impl Fixture {
                     .app
                     .clip_render_job
                     .as_ref()
-                    .is_some_and(|job| job.settlement_target.is_some())
+                    .is_some_and(|job| job.stopped.settlement_target.is_some())
         });
         self.assert_no_stop_capture();
         self.app
             .clip_render_job
             .as_ref()
             .unwrap()
+            .stopped
             .settlement_target
             .unwrap()
     }
@@ -81,7 +82,7 @@ impl Fixture {
         let job = self.app.clip_render_job.as_ref().unwrap();
         assert_eq!(job.phase, ClipRenderPhase::StoppingDraining);
         assert!(
-            job.capture.is_none(),
+            job.stopped.capture.is_none(),
             "no App capture command/receipt before settlement"
         );
         assert!(job.plan.is_none(), "no plan before settlement");
@@ -101,6 +102,259 @@ impl Fixture {
 }
 
 #[test]
+fn actual_shared_stop_actor_waits_for_notification_after_callback_snapshot_advances() {
+    let mut fixture = Fixture::new();
+    fixture.settle_initial_source();
+    let before = fixture.bytes();
+    fixture.source.pause_capture();
+    fixture.begin();
+    fixture.app.drive_clip_render_job();
+    let issued = fixture
+        .app
+        .clip_render_job
+        .as_ref()
+        .unwrap()
+        .stopped
+        .stop_preparation
+        .unwrap();
+    let deadline = Instant::now() + SETTLEMENT_WAIT;
+    loop {
+        fixture.app.poll_timeline_audio_runtime(&fixture.ctx);
+        if fixture
+            .app
+            .clip_render_job
+            .as_ref()
+            .unwrap()
+            .stopped
+            .stop_preparation
+            .unwrap()
+            .activation
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "actual activation did not queue; {}",
+            fixture.timeout_metadata()
+        );
+        // The preceding StopAll/chase must really run on the callback before
+        // the App can consume ChaseInstalled and queue activation. Stop polling
+        // notifications as soon as that activation is queued below.
+        fixture.pump_callback_only();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let activation = fixture
+        .app
+        .clip_render_job
+        .as_ref()
+        .unwrap()
+        .stopped
+        .stop_preparation
+        .unwrap()
+        .activation
+        .unwrap();
+    assert!(matches!(
+        fixture.app.timeline_audio_sync.phase,
+        TimelineAudioSyncPhase::AwaitingActivation {
+            generation,
+            seek_serial,
+            frame,
+            activation_request_id,
+            ..
+        } if generation == issued.generation && seek_serial == issued.seek_serial
+            && frame == issued.frame && activation_request_id == activation.request_id
+    ));
+    let old_epoch = fixture
+        .app
+        .clip_render_job
+        .as_ref()
+        .unwrap()
+        .stopped
+        .old_epoch
+        .unwrap();
+    let applied_epoch = loop {
+        assert!(
+            Instant::now() < deadline,
+            "actual callback did not apply activation; {}",
+            fixture.timeout_metadata()
+        );
+        // StopAll/chase can themselves advance the snapshot epoch. Pump the
+        // actual queued activation and require its callback-published active
+        // identity, while leaving TransportActivationApplied unconsumed.
+        fixture.pump_callback_only();
+        if let Some((generation, epoch)) = fixture
+            .app
+            .audio
+            .as_ref()
+            .unwrap()
+            .confirmed_timeline_identity()
+            && generation == issued.generation
+            && epoch != old_epoch
+            && timeline_epoch_has_reached(epoch, activation.minimum_epoch)
+        {
+            break epoch;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let callback_snapshot = fixture.app.audio.as_ref().unwrap().snapshot();
+    assert_eq!(callback_snapshot.transport_epoch, applied_epoch);
+    assert_eq!(callback_snapshot.timeline_frame, issued.frame);
+    assert!(!callback_snapshot.transport_playing);
+    // The callback really advanced, but its queued event has not been consumed
+    // by the production App notification path. A snapshot cannot fill the ACK.
+    for _ in 0..3 {
+        fixture.app.drive_clip_render_job();
+    }
+    let job = fixture.app.clip_render_job.as_ref().unwrap();
+    let preparation = job.stopped.stop_preparation.unwrap();
+    assert_eq!(
+        (preparation.generation, preparation.seek_serial),
+        (issued.generation, issued.seek_serial)
+    );
+    assert!(preparation.activation.unwrap().committed_epoch.is_none());
+    assert!(matches!(
+        fixture.app.timeline_audio_sync.phase,
+        TimelineAudioSyncPhase::AwaitingActivation { activation_request_id, .. }
+            if activation_request_id == activation.request_id
+    ));
+    assert!(job.stopped.binding.is_none());
+    assert!(!job.stopped.owns_pending_capture());
+    assert!(job.plan.is_none());
+    assert_eq!(fixture.source.capture_count(), 0);
+    assert_eq!(fixture.bytes(), before);
+    fixture.until(|fixture| fixture.source.capture_count() == 1);
+    let job = fixture.app.clip_render_job.as_ref().unwrap();
+    assert_eq!(
+        job.stopped
+            .stop_preparation
+            .unwrap()
+            .activation
+            .unwrap()
+            .committed_epoch,
+        Some(applied_epoch)
+    );
+    assert_eq!(
+        job.stopped.binding.unwrap().sample_rate,
+        job.stopped.initial.sample_rate
+    );
+    assert!(job.stopped.owns_pending_capture());
+}
+
+#[test]
+fn actual_shared_capture_actor_keeps_missing_binding_owner_until_private_worker_ack() {
+    let mut fixture = Fixture::new();
+    let before = fixture.bytes();
+    fixture.source.pause_capture();
+    fixture.begin();
+    fixture.until(|fixture| fixture.source.capture_count() == 1);
+    fixture
+        .app
+        .clip_render_job
+        .as_mut()
+        .unwrap()
+        .stopped
+        .binding = None;
+    fixture.app.drive_clip_render_job();
+    let job = fixture.app.clip_render_job.as_ref().unwrap();
+    assert_eq!(job.phase, ClipRenderPhase::Capturing);
+    assert!(job.stopped.owns_pending_capture());
+    assert!(job.stopped.capture.as_ref().unwrap().is_cancelling());
+    assert!(
+        !job.stopped
+            .capture
+            .as_ref()
+            .unwrap()
+            .termination_acknowledged()
+    );
+    assert!(fixture.app.clip_render_fence_active());
+    assert_eq!(fixture.bytes(), before);
+    fixture.source.release_gates();
+    fixture.until(|fixture| {
+        fixture
+            .app
+            .clip_render_job
+            .as_ref()
+            .unwrap()
+            .phase
+            .terminal()
+    });
+    let job = fixture.app.clip_render_job.as_ref().unwrap();
+    assert_eq!(job.phase, ClipRenderPhase::Refused);
+    assert!(!job.stopped.owns_pending_capture());
+    assert!(matches!(
+        job.failure_evidence.as_ref(),
+        Some(JobFailureEvidence::Capture(CapturePollError::Invalid(reason)))
+            if reason.contains("stopped source binding is missing")
+    ));
+    assert_eq!(fixture.source.capture_count(), 1);
+    assert_eq!(fixture.bytes(), before);
+    assert_eq!(std::fs::read_dir(&fixture.directory).unwrap().count(), 0);
+}
+
+#[test]
+fn actual_shared_capture_actor_engine_loss_retains_receipt_and_exact_source_until_join() {
+    let mut fixture = Fixture::new();
+    let before = fixture.bytes();
+    fixture.source.pause_capture();
+    fixture.begin();
+    fixture.until(|fixture| fixture.source.capture_count() == 1);
+    let stamp = fixture
+        .app
+        .clip_render_job
+        .as_ref()
+        .unwrap()
+        .stopped
+        .binding
+        .unwrap()
+        .stamp;
+    fixture.app.retain_clip_source_before_engine_loss();
+    assert!(fixture.app.running_generator_chains.is_empty());
+    fixture.callback = None;
+    fixture.app.audio = None;
+    for _ in 0..3 {
+        fixture.app.drive_clip_render_job();
+    }
+    let job = fixture.app.clip_render_job.as_ref().unwrap();
+    let retained = job.retired_source.as_ref().unwrap();
+    assert_eq!(
+        (
+            retained.project_session,
+            retained.endpoint_id,
+            retained.instance_id
+        ),
+        (stamp.project_session, stamp.endpoint_id, stamp.instance_id)
+    );
+    assert_eq!(job.phase, ClipRenderPhase::Capturing);
+    assert!(job.stopped.owns_pending_capture());
+    assert!(job.stopped.capture.as_ref().unwrap().is_cancelling());
+    assert!(
+        !job.stopped
+            .capture
+            .as_ref()
+            .unwrap()
+            .termination_acknowledged()
+    );
+    assert!(!job.source_joined);
+    assert!(job.owns_pending_resource());
+    assert!(fixture.app.clip_render_fence_active());
+    assert_eq!(fixture.bytes(), before);
+    fixture.source.release_gates();
+    fixture.settlement_control_until(|fixture| {
+        let job = fixture.app.clip_render_job.as_ref().unwrap();
+        job.phase.terminal() && job.source_joined && !job.owns_pending_resource()
+    });
+    let job = fixture.app.clip_render_job.as_ref().unwrap();
+    assert_eq!(job.phase, ClipRenderPhase::Refused);
+    assert!(job.retired_source.is_none());
+    assert!(!job.stopped.owns_pending_capture());
+    assert!(fixture.app.audio.is_none());
+    assert_eq!(fixture.source.capture_count(), 1);
+    assert_eq!(fixture.bytes(), before);
+    assert_eq!(std::fs::read_dir(&fixture.directory).unwrap().count(), 0);
+}
+
+#[test]
 fn actual_app_capture_waits_for_reset_and_input_terminal_without_another_callback() {
     let mut fixture = Fixture::new();
     // Drive the real mailbox independently of Timeline request allocation so
@@ -110,12 +364,19 @@ fn actual_app_capture_waits_for_reset_and_input_terminal_without_another_callbac
     }
     let before = fixture.bytes();
     let target = fixture.begin_with_held_preparatory_reset();
-    let started_at = fixture.app.clip_render_job.as_ref().unwrap().started_at;
+    let started_at = fixture
+        .app
+        .clip_render_job
+        .as_ref()
+        .unwrap()
+        .stopped
+        .started_at;
     let preparation = fixture
         .app
         .clip_render_job
         .as_ref()
         .unwrap()
+        .stopped
         .stop_preparation
         .unwrap();
     let activation = preparation.activation.unwrap();
@@ -152,14 +413,17 @@ fn actual_app_capture_waits_for_reset_and_input_terminal_without_another_callbac
     fixture.settlement_control_until(|fixture| fixture.source.capture_count() == 1);
     let job = fixture.app.clip_render_job.as_ref().unwrap();
     assert_eq!(job.phase, ClipRenderPhase::Capturing);
-    assert_eq!(job.started_at, started_at, "STOP_BUDGET origin is retained");
-    assert_eq!(job.settlement_target, Some(target));
-    assert_eq!(job.stop_preparation, Some(preparation));
-    let admitted = job.stop_settlement.unwrap();
+    assert_eq!(
+        job.stopped.started_at, started_at,
+        "STOP_BUDGET origin is retained"
+    );
+    assert_eq!(job.stopped.settlement_target, Some(target));
+    assert_eq!(job.stopped.stop_preparation, Some(preparation));
+    let admitted = job.stopped.stop_settlement.unwrap();
     assert_eq!(admitted.settlement, BounceSourceSettlement::Ready);
     assert_eq!(admitted.terminal, admitted.submitted);
     assert_eq!(admitted.consumed, admitted.submitted);
-    assert!(job.capture.is_some());
+    assert!(job.stopped.capture.is_some());
     assert!(job.plan.is_some());
     let callback_after = fixture.callback().genuine_snapshot();
     assert_eq!(callback_after.device_frame, callback_before.device_frame);
@@ -191,7 +455,13 @@ fn actual_app_cancel_or_expiry_during_held_reset_never_admits_capture_after_rele
         let before = fixture.bytes();
         fixture.begin_with_held_preparatory_reset();
         if expire {
-            fixture.app.clip_render_job.as_mut().unwrap().started_at = Instant::now() - STOP_BUDGET;
+            fixture
+                .app
+                .clip_render_job
+                .as_mut()
+                .unwrap()
+                .stopped
+                .started_at = Instant::now() - STOP_BUDGET;
         } else {
             assert!(fixture.app.cancel_clip_render_job());
         }
@@ -211,6 +481,7 @@ fn actual_app_cancel_or_expiry_during_held_reset_never_admits_capture_after_rele
                 .clip_render_job
                 .as_ref()
                 .unwrap()
+                .stopped
                 .capture
                 .is_none()
         );
@@ -237,6 +508,7 @@ fn actual_app_intervening_seek_cannot_become_the_first_preparatory_target() {
         .clip_render_job
         .as_ref()
         .unwrap()
+        .stopped
         .stop_preparation
         .unwrap();
     assert!(issued.activation.is_none());
@@ -248,8 +520,8 @@ fn actual_app_intervening_seek_cannot_become_the_first_preparatory_target() {
     fixture.settlement_control_poll();
     let job = fixture.app.clip_render_job.as_ref().unwrap();
     assert_eq!(job.phase, ClipRenderPhase::Refused);
-    assert!(job.settlement_target.is_none());
-    assert!(job.capture.is_none());
+    assert!(job.stopped.settlement_target.is_none());
+    assert!(job.stopped.capture.is_none());
     assert_eq!(fixture.source.capture_count(), 0);
     assert_eq!(fixture.bytes(), before);
 }
@@ -306,11 +578,11 @@ fn actual_app_frozen_stop_rejects_request_seek_generation_session_and_endpoint_s
         let job = fixture.app.clip_render_job.as_ref().unwrap();
         assert_eq!(job.phase, ClipRenderPhase::Refused, "mutation {mutation}");
         assert_eq!(
-            job.settlement_target,
+            job.stopped.settlement_target,
             Some(target),
             "target is never rebound"
         );
-        assert!(job.capture.is_none());
+        assert!(job.stopped.capture.is_none());
         assert_eq!(fixture.source.capture_count(), 0);
         assert_eq!(fixture.bytes(), before);
         fixture.source.release_gates();
@@ -348,6 +620,7 @@ fn actual_app_stopped_safety_process_fault_is_terminal_without_capture_retry() {
             .clip_render_job
             .as_ref()
             .unwrap()
+            .stopped
             .capture
             .is_none()
     );
@@ -366,6 +639,7 @@ fn actual_app_legacy_request_supersession_before_chase_does_not_rebind() {
         .clip_render_job
         .as_ref()
         .unwrap()
+        .stopped
         .stop_transport_request
         .unwrap();
     fixture.app.audio.as_ref().unwrap().set_playing(false);
@@ -376,9 +650,9 @@ fn actual_app_legacy_request_supersession_before_chase_does_not_rebind() {
     fixture.app.drive_clip_render_job();
     let job = fixture.app.clip_render_job.as_ref().unwrap();
     assert_eq!(job.phase, ClipRenderPhase::Refused);
-    assert!(job.old_epoch.is_none());
-    assert!(job.stop_preparation.is_none());
-    assert!(job.capture.is_none());
+    assert!(job.stopped.old_epoch.is_none());
+    assert!(job.stopped.stop_preparation.is_none());
+    assert!(job.stopped.capture.is_none());
     assert_eq!(fixture.source.capture_count(), 0);
     assert_eq!(fixture.bytes(), before);
 }

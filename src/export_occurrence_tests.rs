@@ -10,7 +10,7 @@ fn directory(name: &str) -> PathBuf {
     directory
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn publish(
     path: &Path,
     fixture: WavWriteFixture,
@@ -29,7 +29,7 @@ fn publish(
     )
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 #[test]
 fn owned_float32_unsupported_platform_refuses_before_any_file_side_effect() {
     let dir = directory("unsupported");
@@ -70,7 +70,7 @@ fn owned_float32_unsupported_platform_refuses_before_any_file_side_effect() {
     std::fs::remove_dir(dir).unwrap();
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn owned_float32_success_is_real_no_clobber_and_matches_ordinary_bytes() {
     let dir = directory("success");
@@ -82,7 +82,7 @@ fn owned_float32_success_is_real_no_clobber_and_matches_ordinary_bytes() {
     assert_eq!(published.prewrite_peak(), 0.5);
     assert_eq!(
         published.identity(),
-        PublishedFileIdentity::from_metadata(&std::fs::metadata(&path).unwrap()).unwrap()
+        PublishedFileIdentity::from_file(&File::open(&path).unwrap()).unwrap()
     );
     let legacy = dir.join("ordinary.wav");
     write_stereo_float32_checked(
@@ -104,7 +104,7 @@ fn owned_float32_success_is_real_no_clobber_and_matches_ordinary_bytes() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn owned_float32_collision_never_replaces_an_existing_destination() {
     let dir = directory("collision");
@@ -123,7 +123,40 @@ fn owned_float32_collision_never_replaces_an_existing_destination() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(windows)]
+#[test]
+fn windows_owned_float32_uses_long_unicode_path_and_keeps_file_id() {
+    let dir = directory("windows-unicode");
+    let mut parent = dir.clone();
+    for _ in 0..6 {
+        parent.push("NOIRE_旋律_abcdefghijklmnopqrstuvwxyz0123456789");
+    }
+    std::fs::create_dir_all(&parent).unwrap();
+    let path = parent.join("钢琴片段.wav");
+    assert!(path.as_os_str().len() > 260);
+    let publication = publish(&path, WavWriteFixture::default()).unwrap();
+    assert_eq!(
+        publication.identity(),
+        PublishedFileIdentity::from_file(&File::open(&path).unwrap()).unwrap()
+    );
+    assert_eq!(
+        std::fs::read_dir(&parent).unwrap().count(),
+        1,
+        "same-volume move must consume the private stage"
+    );
+    let collision = publish(&path, WavWriteFixture::default()).unwrap_err();
+    assert_eq!(
+        collision.primary.io_kind,
+        Some(std::io::ErrorKind::AlreadyExists)
+    );
+    assert_eq!(
+        publication.identity(),
+        PublishedFileIdentity::from_file(&File::open(&path).unwrap()).unwrap()
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn owned_float32_prelink_faults_and_panics_have_no_destination() {
     for operation in [
@@ -168,7 +201,7 @@ fn owned_float32_prelink_faults_and_panics_have_no_destination() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn owned_float32_postlink_fault_and_panic_always_retain_destination() {
     for panic in [false, true] {
@@ -297,7 +330,7 @@ fn owned_float32_sync_error_and_panic_retain_only_linked_destination() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn owned_float32_prelink_abort_failure_retains_only_owned_stage() {
     for panic in [false, true] {
@@ -322,7 +355,7 @@ fn owned_float32_prelink_abort_failure_retains_only_owned_stage() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn owned_float32_cancel_or_deadline_before_cas_cannot_publish() {
     for expiry in [false, true] {
@@ -353,7 +386,7 @@ fn owned_float32_cancel_or_deadline_before_cas_cannot_publish() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn immutable_file_cancellation_stays_closed_after_cas_with_or_without_a_link() {
     for fail_link in [false, true] {

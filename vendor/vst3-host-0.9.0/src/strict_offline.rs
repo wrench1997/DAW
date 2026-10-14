@@ -1,4 +1,4 @@
-//! Disabled-by-default Linux client for a single disposable offline generator.
+//! Disabled-by-default Linux/Windows client for one disposable offline generator.
 //!
 //! This closed development API has no App caller. One process-wide reservation
 //! admits at most one strict child, including abandoned or pending-cleanup owners.
@@ -13,6 +13,7 @@
 //! Audio bits are preserved, including nonfinite values; renderer policy must
 //! validate all returned samples before publishing anything.
 
+use crate::audio::{BusDirection, MediaType};
 use crate::discovery::ClassCompatibility;
 use crate::fresh_helper::{self, FreshHelperSession, ReplyShape, RequestView, StateContextView};
 use crate::midi::MidiEvent;
@@ -23,6 +24,20 @@ use crate::process_isolation::HostResponse;
 use crate::{MetadataQueryRejection, Parameter};
 use std::process::{Command, ExitStatus};
 use std::time::Instant;
+
+pub use crate::fresh_helper::{LimitEvidence, LimitSite};
+pub use crate::process_isolation::{
+    MetadataGetter, SelectedMetadataAdmission, SelectedMetadataPolicy, StrictMetadataSnapshot,
+};
+
+/// A pure admission outcome does not impersonate a failed SDK exchange.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectedMetadataOutcome {
+    /// Four complete fresh getter results.
+    Complete(StrictMetadataSnapshot),
+    /// Original early admission failed; later getters were not called.
+    Rejected(SelectedMetadataAdmission),
+}
 
 /// Whether request bytes could have reached the helper. No value proves rollback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +71,7 @@ pub enum FailureKind {
     Cancelled,
     /// A checked allocation failed.
     Allocation,
-    /// OS error, preserving errno.
+    /// OS error, preserving errno on Linux or GetLastError on Windows.
     Io(i32),
     /// The response pipe closed unexpectedly.
     Eof,
@@ -84,6 +99,65 @@ pub enum FailureKind {
     CleanupNotBegun,
 }
 
+/// Fixed context of the exchange that returned a failure. This is an attempted
+/// wire request, not proof of delivery; `Failure::delivery` remains authoritative.
+/// No plugin path, state, parameter value, title or caller borrow is retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestContext {
+    /// Closed request discriminator; this always points to a fixed static label.
+    pub operation: &'static str,
+    /// SetBusActive's media type, and None for every other request.
+    pub media_type: Option<MediaType>,
+    /// SetBusActive's direction, and None for every other request.
+    pub direction: Option<BusDirection>,
+    /// SetBusActive's bus index, and None for every other request.
+    pub bus_index: Option<i32>,
+}
+impl RequestContext {
+    fn from_request(request: RequestView<'_>) -> Self {
+        let operation = match request {
+            RequestView::LoadPlugin { .. } => "LoadPlugin",
+            RequestView::LoadState { .. } => "LoadState",
+            RequestView::SaveState => "SaveState",
+            RequestView::Process { .. } => "Process",
+            RequestView::ProcessBuses { .. } => "ProcessBuses",
+            RequestView::GetParameter { .. } => "GetParameter",
+            RequestView::LatencySamples => "LatencySamples",
+            RequestView::TailSamples => "TailSamples",
+            RequestView::SetProcessMode { .. } => "SetProcessMode",
+            RequestView::ResetOriginSupport => "ResetOriginSupport",
+            RequestView::StartProcessing => "StartProcessing",
+            RequestView::StopProcessing => "StopProcessing",
+            RequestView::NativeDirtyRevision => "NativeDirtyRevision",
+            RequestView::GetAllParameters => "GetAllParameters",
+            RequestView::SetParameter { .. } => "SetParameter",
+            RequestView::SendMidiAt { .. } => "SendMidiAt",
+            RequestView::CheckedAudioBusLayout => "CheckedAudioBusLayout",
+            RequestView::StrictMetadataSnapshot { .. } => "StrictMetadataSnapshot",
+            RequestView::EventBusLayout => "EventBusLayout",
+            RequestView::SetBusActive {
+                media_type,
+                direction,
+                bus_index,
+                ..
+            } => {
+                return Self {
+                    operation: "SetBusActive",
+                    media_type: Some(media_type),
+                    direction: Some(direction),
+                    bus_index: Some(bus_index),
+                }
+            }
+        };
+        Self {
+            operation,
+            media_type: None,
+            direction: None,
+            bus_index: None,
+        }
+    }
+}
+
 /// Bounded failure evidence; no command, caller borrow, pipe or owner can escape.
 #[derive(Debug)]
 pub struct Failure {
@@ -95,6 +169,14 @@ pub struct Failure {
     pub diagnostic: Option<String>,
     /// Diagnostic-copy failure, without erasing the known helper failure.
     pub diagnostic_unavailable: Option<FailureKind>,
+    /// The failing exchange's fixed request context, independent of helper text.
+    /// Local rejection, spawn and cleanup failures have None, so an earlier
+    /// successful query can never be misrepresented as the failed exchange.
+    pub request_context: Option<RequestContext>,
+    /// Validated actual getter within a bundle, never inferred from transport faults.
+    pub metadata_getter: Option<MetadataGetter>,
+    /// First checked catalog limit prefix, without assuming the complete size.
+    pub limit_evidence: Option<LimitEvidence>,
 }
 
 impl From<fresh_helper::ErrorKind> for FailureKind {
@@ -141,12 +223,15 @@ impl From<fresh_helper::ExchangeFailure> for Failure {
             kind: value.cause.into(),
             delivery: value.delivery.into(),
             diagnostic: value.reported.and_then(|reply| match *reply {
-                HostResponse::Error { message } | HostResponse::Crashed { message } => {
-                    Some(message)
-                }
+                HostResponse::Error { message }
+                | HostResponse::Crashed { message }
+                | HostResponse::StrictMetadataFailed { message, .. } => Some(message),
                 _ => None, // Partial/error audio can never become successful output.
             }),
             diagnostic_unavailable: value.diagnostic_unavailable.map(Into::into),
+            request_context: None,
+            metadata_getter: value.metadata_getter,
+            limit_evidence: value.limit_evidence,
         }
     }
 }
@@ -156,6 +241,9 @@ fn unsent(kind: fresh_helper::ErrorKind) -> Failure {
         delivery: Delivery::NotSent,
         diagnostic: None,
         diagnostic_unavailable: None,
+        request_context: None,
+        metadata_getter: None,
+        limit_evidence: None,
     }
 }
 
@@ -199,10 +287,12 @@ pub struct CleanupObservation {
     pub state: CleanupState,
     /// First Shutdown failure with original delivery; cancellation remains typed.
     pub shutdown_failure: Option<Failure>,
-    /// First failed kill errno, retained even if a later kill succeeds.
+    /// First failed kill OS error, retained even if a later kill succeeds.
     pub kill_error: Option<i32>,
-    /// First failed wait/poll errno, retained even after eventual reap.
+    /// First failed wait OS error, retained even after eventual reap.
     pub wait_error: Option<i32>,
+    /// First pipe cancellation/completion OS error, retained after eventual reap.
+    pub pipe_error: Option<i32>,
     /// Whether a force-kill request succeeded; this is not proof of reap.
     pub kill_requested: bool,
 }
@@ -223,9 +313,13 @@ impl From<fresh_helper::CleanupReport> for CleanupObservation {
                     .into(),
                 diagnostic: None,
                 diagnostic_unavailable: None,
+                request_context: None,
+                metadata_getter: None,
+                limit_evidence: None,
             }),
             kill_error: value.kill_error,
             wait_error: value.wait_error,
+            pipe_error: value.pipe_error,
             kill_requested: value.kill_requested,
         }
     }
@@ -305,6 +399,11 @@ pub fn captured_base_matches(raw: f64, captured: f32) -> bool {
 #[must_use = "complete checked disposal; Drop is not evidence of reap"]
 pub struct Client {
     session: FreshHelperSession,
+    // Once explicit selection starts, no default participation may substitute
+    // for its completed owner ACKs. This bounded retained layout is not in-flight
+    // codec payload, and is never returned as a substitute for a fresh query.
+    audio_selection_required: bool,
+    selected_audio_layout: Option<CheckedAudioBusLayout>,
 }
 impl Client {
     /// Spawn exactly once, retaining any post-spawn failure owner. Required stdin
@@ -312,12 +411,20 @@ impl Client {
     /// Other executable/argument/environment policy belongs to the future caller.
     pub fn spawn(command: &mut Command, deadline: Instant) -> Result<Self, SpawnFailure> {
         FreshHelperSession::spawn(command, deadline)
-            .map(|session| Self { session })
+            .map(|session| Self {
+                session,
+                audio_selection_required: false,
+                selected_audio_layout: None,
+            })
             .map_err(|failure| SpawnFailure {
                 failure: unsent(failure.cause),
-                cleanup: failure
-                    .cleanup
-                    .map(|session| Box::new(Self { session: *session })),
+                cleanup: failure.cleanup.map(|session| {
+                    Box::new(Self {
+                        session: *session,
+                        audio_selection_required: false,
+                        selected_audio_layout: None,
+                    })
+                }),
             })
     }
     /// Obtain cancellation-only authority before the first load exchange.
@@ -330,9 +437,14 @@ impl Client {
         shape: ReplyShape,
         deadline: Instant,
     ) -> Result<HostResponse, Failure> {
+        let context = RequestContext::from_request(request);
         self.session
             .exchange_view(request, shape, deadline)
-            .map_err(Into::into)
+            .map_err(|error| {
+                let mut failure = Failure::from(error);
+                failure.request_context = Some(context);
+                failure
+            })
     }
     fn success(&mut self, request: RequestView<'_>, deadline: Instant) -> Result<(), Failure> {
         match self.exchange(request, ReplyShape::Success, deadline)? {
@@ -340,12 +452,29 @@ impl Client {
             _ => unreachable!("strict codec enforces expected success"),
         }
     }
+    fn reject(&mut self, kind: fresh_helper::ErrorKind, deadline: Instant) -> Failure {
+        self.session.reject_request(kind, deadline).into()
+    }
+    fn verify_selected_audio_layout(&mut self, deadline: Instant) -> Result<(), Failure> {
+        if !self.audio_selection_required {
+            return Ok(());
+        }
+        if self.selected_audio_layout.is_none() {
+            return Err(self.reject(fresh_helper::ErrorKind::Shape, deadline));
+        }
+        let observed = self.checked_audio_layout(deadline)?;
+        if self.selected_audio_layout.as_ref() != Some(&observed) {
+            return Err(self.reject(fresh_helper::ErrorKind::Shape, deadline));
+        }
+        Ok(())
+    }
     /// Load the chosen class with configured maximum2048; never retry or recover.
     pub fn load_plugin(
         &mut self,
         spec: LoadSpec<'_>,
         deadline: Instant,
     ) -> Result<LoadedPlugin, Failure> {
+        self.selected_audio_layout = None;
         if spec.path.is_empty()
             || spec.class_id.len() != 32
             || !spec.class_id.bytes().all(|b| b.is_ascii_hexdigit())
@@ -426,6 +555,7 @@ impl Client {
     }
     /// Borrow opaque project state synchronously without an eager payload copy.
     pub fn load_state(&mut self, data: &[u8], deadline: Instant) -> Result<(), Failure> {
+        self.selected_audio_layout = None;
         self.success(
             RequestView::LoadState {
                 data,
@@ -436,11 +566,14 @@ impl Client {
     }
     /// Start prepared processing through the helper's existing owner path.
     pub fn start_processing(&mut self, deadline: Instant) -> Result<(), Failure> {
-        self.success(RequestView::StartProcessing, deadline)
+        self.verify_selected_audio_layout(deadline)?;
+        self.success(RequestView::StartProcessing, deadline)?;
+        self.verify_selected_audio_layout(deadline)
     }
     /// Stop a healthy clone. A sealed/cancelled session cannot send this request.
     pub fn stop_processing(&mut self, deadline: Instant) -> Result<(), Failure> {
-        self.success(RequestView::StopProcessing, deadline)
+        self.success(RequestView::StopProcessing, deadline)?;
+        self.verify_selected_audio_layout(deadline)
     }
     /// Read dirty revision evidence; this alone is not an enforced edit fence.
     pub fn native_dirty_revision(&mut self, deadline: Instant) -> Result<u64, Failure> {
@@ -498,6 +631,121 @@ impl Client {
             HostResponse::CheckedAudioBusLayout { layout } => Ok(layout),
             _ => unreachable!("strict checked audio shape"),
         }
+    }
+    /// Read four fresh getters for an explicitly selected stereo clone.
+    /// This client requires completed audio selection; factory identity is
+    /// enforced by the StrictBackend dispatch and the helper's loaded owner.
+    /// Generic backend dispatch retains its four independent exchanges.
+    pub fn selected_metadata_snapshot(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<SelectedMetadataOutcome, Failure> {
+        if !self.audio_selection_required || self.selected_audio_layout.is_none() {
+            return Err(self.reject(fresh_helper::ErrorKind::InvalidRequest, deadline));
+        }
+        match self.exchange(
+            RequestView::StrictMetadataSnapshot {
+                policy: SelectedMetadataPolicy::Kontakt841SelectedStereo,
+            },
+            ReplyShape::StrictMetadataSnapshot,
+            deadline,
+        )? {
+            HostResponse::StrictMetadataSnapshot { snapshot } => {
+                Ok(SelectedMetadataOutcome::Complete(snapshot))
+            }
+            HostResponse::StrictMetadataAdmissionRejected { stage } => {
+                Ok(SelectedMetadataOutcome::Rejected(stage))
+            }
+            _ => unreachable!("strict selected metadata shape"),
+        }
+    }
+    /// Select output bus zero as the sole stereo output of a stopped clone.
+    ///
+    /// `expected` must be the complete fresh clone layout, retaining all bus
+    /// indices. Inputs are limited to none or one main mono/stereo silent input.
+    /// Every audio bus is explicitly acknowledged by the SDK owner: input zero
+    /// participates when present; output zero participates and all other outputs
+    /// are disabled. Event outputs are neither discarded nor disabled here.
+    ///
+    /// The existing owner binds each ACK to its complete SDK descriptor and
+    /// prepared storage. Missing ACKs, topology drift, or any failed setter seal
+    /// this disposable session; callers must dispose it and publish no audio.
+    /// Selected start/stop and every Q128 process also re-query the layout before
+    /// accepting a result. This API does not prove source/clone state equivalence.
+    pub fn select_main_stereo_output(
+        &mut self,
+        expected: &CheckedAudioBusLayout,
+        deadline: Instant,
+    ) -> Result<CheckedAudioBusLayout, Failure> {
+        self.audio_selection_required = true;
+        self.selected_audio_layout = None;
+        let supported_inputs = expected.inputs.is_empty()
+            || (expected.inputs.len() == 1
+                && expected.inputs[0].is_main
+                && matches!(expected.inputs[0].channel_count, 1 | 2));
+        let supported_outputs = !expected.outputs.is_empty()
+            && expected.outputs.len() <= 32
+            && expected.outputs[0].is_main
+            && expected.outputs[0].channel_count == 2
+            && expected.outputs.iter().all(|bus| bus.channel_count > 0)
+            && expected
+                .outputs
+                .iter()
+                .try_fold(0usize, |total, bus| total.checked_add(bus.channel_count))
+                .is_some_and(|total| total <= 64);
+        if !supported_inputs || !supported_outputs {
+            return Err(self.reject(fresh_helper::ErrorKind::Shape, deadline));
+        }
+        if self.reset_origin_support(deadline)?.processing {
+            return Err(self.reject(fresh_helper::ErrorKind::InvalidRequest, deadline));
+        }
+        if self.checked_audio_layout(deadline)? != *expected {
+            return Err(self.reject(fresh_helper::ErrorKind::Shape, deadline));
+        }
+        for index in 0..expected.inputs.len() {
+            self.success(
+                RequestView::SetBusActive {
+                    media_type: MediaType::Audio,
+                    direction: BusDirection::Input,
+                    bus_index: index as i32,
+                    active: true,
+                },
+                deadline,
+            )?;
+        }
+        for index in 0..expected.outputs.len() {
+            self.success(
+                RequestView::SetBusActive {
+                    media_type: MediaType::Audio,
+                    direction: BusDirection::Output,
+                    bus_index: index as i32,
+                    active: index == 0,
+                },
+                deadline,
+            )?;
+        }
+        let selected = self.checked_audio_layout(deadline)?;
+        let side_matches = |before: &[crate::plugin::CheckedAudioBusConfig],
+                            after: &[crate::plugin::CheckedAudioBusConfig],
+                            input: bool| {
+            before.len() == after.len()
+                && before
+                    .iter()
+                    .zip(after)
+                    .enumerate()
+                    .all(|(index, (old, new))| {
+                        old.channel_count == new.channel_count
+                            && old.is_main == new.is_main
+                            && new.active == Some(input || index == 0)
+                    })
+        };
+        if !side_matches(&expected.inputs, &selected.inputs, true)
+            || !side_matches(&expected.outputs, &selected.outputs, false)
+        {
+            return Err(self.reject(fresh_helper::ErrorKind::Shape, deadline));
+        }
+        self.selected_audio_layout = Some(selected.clone());
+        Ok(selected)
     }
     /// Read actual event buses on the helper owner thread.
     pub fn event_layout(&mut self, deadline: Instant) -> Result<EventBusLayout, Failure> {
@@ -581,14 +829,24 @@ impl Client {
                 .reject_request(fresh_helper::ErrorKind::Shape, deadline)
                 .into());
         }
-        match self.exchange(
+        self.verify_selected_audio_layout(deadline)?;
+        if let Some(layout) = &self.selected_audio_layout {
+            let selected_inputs = layout.inputs.first().map_or(0, |bus| bus.channel_count);
+            if input_channels != selected_inputs || output_channels != 2 {
+                return Err(self.reject(fresh_helper::ErrorKind::Shape, deadline));
+            }
+        }
+        let reply = self.exchange(
             RequestView::silent_generator(input_channels, transport),
             ReplyShape::Audio {
                 channels: output_channels,
                 frames: 128,
             },
             deadline,
-        )? {
+        )?;
+        // Do not let a block escape if Process changed descriptors or activation.
+        self.verify_selected_audio_layout(deadline)?;
+        match reply {
             HostResponse::AudioOutput {
                 outputs,
                 output_events,
@@ -605,14 +863,22 @@ impl Client {
     }
     /// Seal admission, optionally send one healthy Shutdown before the earlier
     /// protocol/cleanup deadline, close pipes, then observe/kill/reap within the
-    /// independent cleanup deadline. Prior terminal exchanges send no protocol.
+    /// independent cleanup deadline. A successful healthy Shutdown write gets
+    /// up to three seconds for natural exit, leaving one second of the original
+    /// cleanup budget for kill/reap. This never extends either absolute deadline.
+    /// Prior terminal/cancelled/failed Shutdown paths retain the 100 ms policy.
     pub fn dispose(
         &mut self,
         protocol_deadline: Instant,
         cleanup_deadline: Instant,
     ) -> CleanupObservation {
         self.session
-            .dispose_with_deadlines(protocol_deadline, cleanup_deadline)
+            .dispose_with_deadlines_and_natural_grace(
+                protocol_deadline,
+                cleanup_deadline,
+                std::time::Duration::from_secs(3),
+                std::time::Duration::from_secs(1),
+            )
             .into()
     }
     /// After disposal began, perform one nonwaiting observation/eligible kill.

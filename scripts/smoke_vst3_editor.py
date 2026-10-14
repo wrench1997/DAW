@@ -194,9 +194,17 @@ class Session:
         self.events = queue.Queue(maxsize=16)
         self.diagnostics = FixtureDiagnostics()
         self.stopped = threading.Event()
+        startupinfo = None
+        if os.name == "nt":
+            # Exercise the actual native editor when its helper inherits a hidden
+            # startup window. Open must still publish a visible container.
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
         self.process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, text=True, encoding="utf-8",
                                         errors="replace", bufsize=1,
+                                        startupinfo=startupinfo,
                                         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         self.readers = [
             threading.Thread(target=_stdout_reader,
@@ -742,6 +750,48 @@ def assert_state_roundtrip(session, desktop, fixture, handles):
     require(session.save_state() == captured, "Fixture component/controller state changed after round-trip")
 
 
+def assert_modal_ipc(session, desktop, hwnd):
+    handles = verified_fixture_button(session, desktop, hwnd)
+    panel = handles[1]
+    button = desktop.user.GetDlgItem(panel, 4102)
+    require(button and desktop.pid(button) == session.process.pid
+            and desktop.user.GetParent(button) == panel
+            and desktop.class_name(button).lower() == "button"
+            and desktop.text(button) == "Open modal IPC regression", "Missing native modal probe")
+    response_payload(session.request("StartProcessing"), "Success")
+    desktop.post(button, 0x00F5)
+    def find_dialog():
+        matches = [w for w in desktop.windows(session.process.pid)
+                   if desktop.class_name(w) == "#32770"
+                   and desktop.text(w) == "Citrus fixture modal IPC regression"]
+        require(len(matches) <= 1, "Multiple native modal probes")
+        return matches[0] if matches else None
+    dialog = desktop.wait(find_dialog, session.deadline, "fixture modal dialog")
+    try:
+        # Exceed the old 5-second helper deadline with actual round trips while
+        # the view's window callback remains inside a native modal message loop.
+        until = time.monotonic() + 5.2
+        while time.monotonic() < until:
+            require(session.editor("Query")["open"], "Modal dialog detached the view")
+            require(session.parameter(1000) == 1.0, "Modal probe lost actual attachment")
+            audio = response_payload(session.request({"Process": {"inputs": [], "frames": 16}}), "AudioOutput")
+            require(len(audio.get("outputs", [])) == 2, "Modal DSP lost stereo output")
+            for channel in audio["outputs"]:
+                raw = base64.b64decode(channel, validate=True)
+                require(len(raw) == 16 * 4 and all(math.isfinite(v[0]) for v in struct.iter_unpack("<f", raw)),
+                        "Modal DSP returned invalid PCM")
+            require(session.process.poll() is None, "Modal probe killed the helper")
+            time.sleep(0.05)
+        error_response(session.request({"Editor": {"command": "Close"}}), "modal dialog")
+        require(session.editor("Query")["open"], "Rejected nested close destroyed the view")
+    finally:
+        if desktop.user.IsWindow(dialog) and desktop.pid(dialog) == session.process.pid:
+            desktop.post(dialog, 0x0010)  # Dismiss the fixture's own message box.
+    desktop.wait(lambda: not desktop.user.IsWindow(dialog), session.deadline, "modal probe close")
+    response_payload(session.request("StopProcessing"), "Success")
+    require(session.editor("Query")["open"], "Modal close lost the native editor")
+
+
 def exercise_lifecycle(command, fixture, no_editor, desktop, timeout=60.0, report=print):
     """Real acceptance with failed paint retained and independent evidence completed."""
     stages = AcceptanceStages(report)
@@ -749,7 +799,7 @@ def exercise_lifecycle(command, fixture, no_editor, desktop, timeout=60.0, repor
         "protocol stdout isolation (Rust/Win32/CRT)", "native attach/resize/DPI",
         "native paint before edit", "native control interaction/gesture/dirty feedback",
         "native paint after edit", "native repaint change", "repeat focus and owner rejection",
-        "native stopped-edit state round-trip", "native lifecycle cleanup", "helper session completion",
+        "native modal IPC", "native stopped-edit state round-trip", "native lifecycle cleanup", "helper session completion",
         "process cleanup Shutdown", "process cleanup EOF", "process cleanup crash",
     )
     try:
@@ -769,6 +819,8 @@ def exercise_lifecycle(command, fixture, no_editor, desktop, timeout=60.0, repor
                     session.assert_stdout_rerouted()
                 with stages.stage('native attach/resize/DPI'):
                     state, hwnd = assert_handshake(session, desktop)
+                with stages.stage('native modal IPC'):
+                    assert_modal_ipc(session, desktop, hwnd)
                 with stages.stage('native control interaction/gesture/dirty feedback'):
                     handles = assert_interaction(session, desktop, hwnd, stages)
                 with stages.stage('repeat focus and owner rejection'):

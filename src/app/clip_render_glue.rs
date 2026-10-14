@@ -143,12 +143,12 @@ impl CitrusApp {
         descriptor: &PluginDescriptor,
     ) -> Result<(), String> {
         if !cfg!(all(
-            target_os = "linux",
+            any(target_os = "linux", windows),
             feature = "experimental-fresh-helper"
         )) || descriptor.format != ScannedPluginFormat::Vst3
         {
             return Err(
-                "Experimental dry-bounce preparation requires this Linux VST3 build".into(),
+                "Experimental dry-bounce preparation requires a Linux or Windows VST3 build with experimental-fresh-helper enabled".into(),
             );
         }
         if instance_id == 0
@@ -196,7 +196,7 @@ impl CitrusApp {
         let button = if let Some(reason) = reason {
             button.on_hover_text(reason)
         } else {
-            button.on_hover_text("Experimental Linux dry render. Keeps muted MIDI and disables its sole-use generator in one undoable conversion.")
+            button.on_hover_text("Experimental dry render. Keeps muted MIDI and disables its sole-use generator in one undoable conversion. This is a dry selected-clip render, not a whole-song mix export.")
         };
         if button.clicked() {
             self.open_selected_clip_render_review();
@@ -212,10 +212,16 @@ impl CitrusApp {
                 self.clip_render_job
                     .as_ref()
                     .and_then(|job| job.owns_source(source).then_some(channel))
+                    .or_else(|| {
+                        self.whole_song_export_job
+                            .as_ref()
+                            .and_then(|job| job.owns_source(source).then_some(channel))
+                    })
             });
         if let Some(channel) = channel
             && let Some(source) = self.running_generator_chains.remove(&channel)
             && let Err(source) = self.retain_clip_render_source_on_engine_loss(source)
+            && let Err(source) = self.retain_whole_song_source_on_engine_loss(source)
         {
             self.running_generator_chains.insert(channel, source);
         }
@@ -292,6 +298,7 @@ impl CitrusApp {
     pub(super) fn clip_restoration_resources_pending(&self) -> bool {
         !self.pending_clip_restorations.is_empty()
             || !self.retired_clip_restorations.is_empty()
+            || !self.retired_fresh_source_candidates.is_empty()
             || self.pending_generator_removals.values().any(|removal| {
                 removal
                     .plugin_instance_id
@@ -484,7 +491,12 @@ impl CitrusApp {
                     config,
                     &self.clip_render_restorations[&instance_id].metadata,
                 )
-                .map(|chain| (chain, Some(timing)));
+                .map(|mut chain| {
+                    if fresh {
+                        chain.guard.mark_fresh_retained_shutdown();
+                    }
+                    (chain, Some(timing))
+                });
             }
             return self
                 .plugin_host
@@ -563,6 +575,7 @@ impl CitrusApp {
         }
     }
     pub(super) fn poll_clip_restorations(&mut self) {
+        self.poll_failed_fresh_source_candidates();
         if self.clip_session_retirement_pending() {
             return;
         }
@@ -919,6 +932,8 @@ impl CitrusApp {
         {
             self.retired_clip_restorations.push(source.guard);
             self.clip_restoration_playback_pending = true;
+        } else if source.guard.requires_retained_fresh_shutdown() {
+            self.retired_fresh_source_candidates.push(source.guard);
         } else {
             drop(source.guard);
         }
@@ -936,37 +951,141 @@ impl CitrusApp {
             if let Some(audio) = &self.audio {
                 audio.set_playing(false);
             }
+        } else if guard.requires_retained_fresh_shutdown() {
+            // First-load failure has no restoration binding and never replaced
+            // the old callback endpoint. Retain only this unpublished worker;
+            // do not turn an unrelated old source into a failed restoration.
+            self.retired_fresh_source_candidates.push(guard);
         } else {
             drop(guard);
         }
     }
-    pub(super) fn retain_pending_recreated_sources_before_clear(&mut self) {
-        let channels = self
-            .pending_generator_chains
-            .iter()
-            .filter_map(|(&channel, source)| {
-                self.clip_render_restorations
-                    .contains_key(&source.instance_id)
+    pub(super) fn poll_failed_fresh_source_candidates(&mut self) {
+        let mut shutdown_panicked = false;
+        self.retired_fresh_source_candidates.retain_mut(|guard| {
+            match guard.poll_shutdown_retained() {
+                RetainedShutdownPoll::Pending => true,
+                RetainedShutdownPoll::Joined => false,
+                RetainedShutdownPoll::WorkerPanicked => {
+                    shutdown_panicked = true;
+                    false
+                }
+            }
+        });
+        if shutdown_panicked {
+            self.notify("Retired fresh-source worker joined with a shutdown panic".into());
+        }
+    }
+    pub(super) fn handoff_failed_fresh_sources_for_shutdown(&mut self) {
+        // The forced-close caller has first attempted AudioEngine teardown.
+        // This handoff retains workers; it does not certify callback destruction.
+        // Running fresh sources and queued candidates with an unconsumed
+        // receipt own real workers and join through the same retirement owner.
+        // Admission reserved capacity for both running and queued owners.
+        // Find/remove one at a time: forced teardown needs no new channel Vec.
+        while let Some(channel) =
+            self.running_generator_chains
+                .iter()
+                .find_map(|(&channel, source)| {
+                    (source.guard.requires_retained_fresh_shutdown()
+                        && !self
+                            .clip_render_restorations
+                            .contains_key(&source.instance_id))
                     .then_some(channel)
-            })
-            .collect::<Vec<_>>();
-        for channel in channels {
+                })
+        {
+            let source = self
+                .running_generator_chains
+                .remove(&channel)
+                .expect("listed fresh source");
+            self.retired_fresh_source_candidates.push(source.guard);
+        }
+        while let Some(channel) =
+            self.pending_generator_chains
+                .iter()
+                .find_map(|(&channel, source)| {
+                    (source.guard.requires_retained_fresh_shutdown()
+                        && !self
+                            .clip_render_restorations
+                            .contains_key(&source.instance_id))
+                    .then_some(channel)
+                })
+        {
+            let source = self
+                .pending_generator_chains
+                .remove(&channel)
+                .expect("listed fresh candidate");
+            self.retire_failed_clip_candidate(source.instance_id, source.guard);
+        }
+        self.poll_failed_fresh_source_candidates();
+        if self.retired_fresh_source_candidates.is_empty() {
+            return;
+        }
+        // Forced App destruction has no later UI poll. Follow the existing
+        // whole-export shutdown owner: keep the original JoinHandles alive on
+        // a control thread until finished-only retained shutdown actually joins.
+        let slot = Arc::new(std::sync::Mutex::new(Some(std::mem::take(
+            &mut self.retired_fresh_source_candidates,
+        ))));
+        let worker_slot = Arc::clone(&slot);
+        let spawn = std::thread::Builder::new()
+            .name("failed-fresh-source-shutdown-owner".into())
+            .spawn(move || {
+                let Some(mut guards) = worker_slot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                else {
+                    return;
+                };
+                loop {
+                    guards.retain_mut(|guard| {
+                        matches!(
+                            guard.poll_shutdown_retained(),
+                            RetainedShutdownPoll::Pending
+                        )
+                    });
+                    if guards.is_empty() {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            });
+        if spawn.is_err() {
+            // Thread creation failure retains the exact unjoined owners;
+            // destruction of the closure must not run legacy guard Drop.
+            let _ = Box::leak(Box::new(slot));
+        }
+    }
+    pub(super) fn retain_pending_recreated_sources_before_clear(&mut self) {
+        while let Some(channel) =
+            self.pending_generator_chains
+                .iter()
+                .find_map(|(&channel, source)| {
+                    (self
+                        .clip_render_restorations
+                        .contains_key(&source.instance_id)
+                        || source.guard.requires_retained_fresh_shutdown())
+                    .then_some(channel)
+                })
+        {
             if let Some(source) = self.pending_generator_chains.remove(&channel) {
                 self.retire_failed_clip_candidate(source.instance_id, source.guard);
             }
         }
     }
     pub(super) fn retain_recreated_sources_before_clear(&mut self) {
-        let channels = self
-            .running_generator_chains
-            .iter()
-            .filter_map(|(&channel, source)| {
-                self.clip_render_restorations
-                    .contains_key(&source.instance_id)
+        while let Some(channel) =
+            self.running_generator_chains
+                .iter()
+                .find_map(|(&channel, source)| {
+                    (self
+                        .clip_render_restorations
+                        .contains_key(&source.instance_id)
+                        || source.guard.requires_retained_fresh_shutdown())
                     .then_some(channel)
-            })
-            .collect::<Vec<_>>();
-        for channel in channels {
+                })
+        {
             if let Some(source) = self.running_generator_chains.remove(&channel) {
                 self.retire_clip_bound_generator(source);
             }

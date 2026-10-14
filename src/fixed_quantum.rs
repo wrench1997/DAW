@@ -467,6 +467,23 @@ pub(crate) struct GenuineFixedQuantumSnapshot {
 }
 
 impl FixedQuantumAdapter<AudioThreadEndpoint> {
+    pub(crate) fn fence_stopped_playback_output(&mut self, epoch: u64) {
+        self.endpoint.fence_stopped_playback_output(epoch);
+        self.scratch.output_left.fill(0.0);
+        self.scratch.output_right.fill(0.0);
+        self.scratch.midi_len = 0;
+        self.scratch.midi_fault_count = 0;
+        self.scratch.midi_callback.len = 0;
+        // Preserve FIFO positions, next sequence, accumulation and PDC phase.
+    }
+
+    pub(crate) fn stopped_playback_settled(&self, epoch: u64) -> bool {
+        self.epoch == epoch
+            && self.scratch.input_fill == 0
+            && self.scratch.pending_event_count == 0
+            && self.endpoint.stopped_playback_settled(epoch)
+    }
+
     pub(crate) fn invalidate_bounce_source_settlement(&self) {
         self.endpoint.invalidate_bounce_source_settlement();
     }

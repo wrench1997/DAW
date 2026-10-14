@@ -15,6 +15,25 @@
 
 ## Bounded upstream code changes
 
+### Windows Kontakt editor compatibility (local verification, 2026-10-11)
+
+Windows `PluginImpl::open_editor` defers the authoritative `IPlugView::getSize`
+until after attachment: Kontakt 8.4.1 rejects that query before `attached`.
+The production helper still validates actual geometry/resize requests before
+publishing a visible window, and detaches on failure. Non-Windows paths retain
+their pre-attachment geometry validation. The native fixture reproduces the
+pre-attachment failure through its real COM view.
+
+On explicit isolated Open/Focus, the Windows host grants foreground permission
+only to its existing child helper PID. Denial preserves visible-window behavior;
+no OS policy, input queue attachment or global foreground permission is changed.
+The production helper's real visibility checks, normal taskbar entry, deferred
+background recovery save and main-thread modal IPC dispatcher live in the root
+application, not the upstream sample helper. Native lifecycle/modal DSP fixtures
+passed locally; genuine Kontakt Library display passed, while NOIRE loading and
+sound/state acceptance remain pending. PrintWindow capture is still a failed
+independent acceptance check. Full receipts: `docs/WINDOWS_MELODY_WORKFLOW.md`.
+
 ### Dormant instrument-bounce event-bus query (unvalidated source checkpoint)
 
 Adds `Plugin::event_bus_layout`, its main-thread facade and an unsupported-default
@@ -468,3 +487,181 @@ The disabled closed strict client adds count-only Q128 silent generator inputs
 without arbitrary external input authority or a per-call input Vec. New codec,
 client, activation and actual f32/f64 COM fixtures are unexecuted at this freeze.
 See docs/DRY_GENERATOR_TOPOLOGY.md for source/capture admission and remaining gates.
+
+## Windows strict fresh-helper transport (2026-10-11)
+
+The opt-in strict client now has a Windows transport implementation. Private
+byte-mode named pipes have overlapped host ends and synchronous inherited child
+ends; manual-reset events provide I/O and cancellation wakeups. There is no
+blocking pipe worker or transfer of owning COM objects. Fixed operation buffers
+and OVERLAPPED storage remain pinned in the owner until completion, including
+completed cancellation. Child exit, pipe completion and first cleanup failures
+are separate observations; pending pipe I/O retains the global reservation and
+quarantine even after a concrete process exit. Linux and Windows use the same
+retained-child lifecycle kernel. The existing bounded codec and closed API stay
+unchanged apart from additive pipe-cleanup diagnostics.
+
+Native MSVC mock/codec regression passed 106 tests against the archived candidate
+in target/melody-stability-20261011/windows-strict-source-02. This qualifies the
+transport tests only, not any real instrument, Windows App bounce or whole-song
+export. Linux-only signal/descriptor fixtures remain explicitly Linux-only.
+Two SysEx test assignments use inferred integer casts for the Windows SDK field
+binding; the represented enum value and runtime event processing are unchanged.
+
+## Explicit output selection across I/O rebuilds (2026-10-11)
+
+Host bus preferences are separate from SDK activation acknowledgments. Successful
+explicit selection retains the complete observed bus descriptor and media-side
+count. An I/O restart still invalidates acknowledgments; while stopped, the owner
+checks every retained binding before replaying actual SDK activation calls and
+rebuilding storage. A drift, SDK refusal or storage failure does not resume DSP
+or silently fall back to default buses. A failed valid explicit request blocks
+default fallback until a complete new explicit request succeeds. Invalid indices
+rejected before the SDK do not destroy an existing preference.
+
+Plugins without explicit preferences retain their default activation behavior.
+Generic LoadState retains its established by-index participation behavior; its
+new acknowledgments do not replace a previously bound explicit preference. A
+later I/O rebuild rejects a changed descriptor or side count. The full declared
+audio/event bus list and roles remain intact, including inactive output buses.
+
+Ten new actual COM-owner regressions cover 32 declared main stereo outputs
+with only the first output active, event participation, restart acknowledgments,
+count/descriptor drift, failed selection and non-resumption. All ten passed on
+native Windows MSVC (2.97 s; vendor-kontakt-explicit-output-final.log). The added
+lifecycle fault matrix first failed with `case 0: stale processing storage`
+(vendor-kontakt-io-failure-before.log). I/O suspend/deactivate failures now clear
+all ACKs and prepared storage without automatic resume; reactivation/resume
+failures do the same, with one component deactivation cleanup after rejected
+resume. Rejected cleanup preserves the SDK-confirmed active flag and both error
+causes. The latency-only legacy resume policy is unchanged and has a regression.
+An actual rejected stop still leaves the processing flag true: storage removal
+prevents another SDK process, but does not pretend the component stopped or that
+facade Start can recover it. This vendor change alone does not
+qualify the root playback integration, NOIRE sound/state, physical monitoring,
+strict instrument bounce or whole-song offline export.
+
+An older topology regression expected successful activateBus to make the whole
+explicit setter succeed even when that SDK call changed the bus role. It still
+checks unknown/non-resurrected ACKs; the setter now also rejects that incomplete
+transaction with the full descriptor/count error. The first broader domain run
+retained its one expectation failure (116 passed, 1 failed). The corrected test
+asserts the actual rejection and original non-resurrection checks rather than
+relaxing bus verification.
+The corrected complete owner-domain subset passed all 117 tests in 4.96 s
+(vendor-kontakt-domain-regressions-corrected.log). The full vendor suite and
+platforms other than this native Windows MSVC run were not rerun.
+
+### 2026-10-14 strict failed-request context (source12, validation pending)
+
+The disposable strict client attaches a fixed `RequestContext` only to a real
+failed exchange. It contains the closed operation label and, for `SetBusActive`,
+media type, direction and bus index. Helper Error/Crashed text, typed failure,
+delivery and diagnostic-copy evidence are preserved separately. Local rejection,
+spawn and cleanup do not inherit a preceding successful request's context.
+No plugin path, state, title or parameter value is retained. Protocol caps,
+codec checks, catalog admission, cancellation, terminality and reap are unchanged.
+This diagnostic addition follows actual NOIRE run03's unlocalized Prepare Limit;
+it does not identify the limit or establish sound/export success. Root protocol
+and regression checks are pending; Windows run04 has not started.
+### 2026-10-14 source13 numeric limit evidence and source15 natural exit policy
+
+Source12's root strict backend and scoped vendor regressions passed; actual run04
+located the failed request at GetAllParameters. Source13 preserves typed, fixed
+numeric evidence for the existing catalog-entry, field-text and aggregate-text
+guards. Actual run05 observed the first excess catalog entry (at least 4097,
+maximum 4096), not a complete parameter count. Caps and codec admission remain
+unchanged. Source14 avoids this unused query only for a validated exact empty
+requested/captured generic set; nonempty sets still require a complete catalog,
+all IDs validated before any setter, then all replay and readback.
+
+Run06 reached 1661 actual Process replies but refused publication after a forced
+clone exit. The session previously allowed only 100ms after Shutdown even when
+the renderer had a longer independent cleanup budget. Source15 keeps that
+ordinary foundation policy and adds a private strict-only healthy Shutdown
+natural-exit window: at most 3s, limited by the original remaining cleanup budget
+minus 1s for kill/reap. A sticky cancellation or failed/terminal Shutdown retains
+100ms. No protocol deadline or first stored grace can be renewed; successful
+kill is still not a concrete reap or admission release. Actual-child regressions
+are written; their Cargo execution and a new NOIRE run remain pending. This
+policy does not itself prove why Kontakt teardown exceeded 100ms, plugin sound,
+complete release or whole-song export.
+
+### 2026-10-14 actual natural-exit regression and NOIRE receipts
+
+The strict root backend group passes all 28 tests, including a real child delayed
+350ms after complete Shutdown, natural exit0, concrete reap and subsequent WAV
+publication. Four focused vendored child-policy tests also pass. Their first run
+failed only because Python translated fixture marker LF to CRLF on Windows;
+three marker writers now use explicit `newline=''`. Original failure logs remain
+preserved; no production exit deadline or process predicate was changed by that
+test-only repair. Source15 and source19 actual NOIRE runs07/08 each reached1661
+PCM replies and natural clone exit0/reap before producer WAV publication. Both
+still fail the application's independent source recapture byte protection;
+conversion/Undo, complete NI settings and whole-song sound are not qualified.
+Source22 strict all-target ordinary and all-feature Clippy passed; the complete
+root cohort is executing. The four preexisting scoped-worker dependency warnings
+remain visible and are not root lint suppressions. Evidence is retained under
+`target/backend-reliability-20261014`; the reviewable patch and packaging pins
+must be regenerated against the verified original archive before distribution.
+
+
+### 2026-10-14 source32 selected Kontakt metadata bundle (applied; tests UNRUN)
+
+The selected Kontakt 8.4.1 strict clone now uses one closed
+StrictMetadataSnapshot exchange for its outer four metadata getters. For the
+reviewed zero-input/32-stereo-output and 1-in/1-out event declaration shape this
+changes the counted outer requests from 11 IPC to 5 IPC per positive Q128 block,
+plus actual MIDI requests. It retains the same 149 counted host SDK methods,
+the checked audio/event/latency/tail getter order, fresh full bus declarations
+and activation evidence. Selected Process still performs its existing actual
+audio-layout checks before and after processing. Generic backend dispatch keeps
+its original four separate metadata exchanges. There is no cached snapshot,
+reduced SDK getter frequency, topology fallback, or native speed claim.
+
+The actual helper independently admits only loaded Instrument factory UID
+5653544E694B386B6F6E74616B742038 at version 8.4.1; StrictBackend also binds its
+selected dispatch to captured identity. The low-level Client method requires
+completed explicit audio selection but does not itself prove factory identity.
+The existing main known-active event-input gate precedes latency and tail calls.
+The legacy vendored sample helper explicitly returns finite Unsupported without
+fabricating metadata. The production helper owns the real getter implementation;
+its directory module follows the existing editor module layout so it is not
+offered as an independent top-level Cargo binary.
+
+State bytes, parameter bases, MIDI, transport, render sample treatment and the
+existing latency/tail policies remain intact. Original protocol/payload/catalog/
+observer caps, absolute render deadlines and stored cleanup grace are unchanged.
+Only a fully validated complete failure reply carries a finite actual inner
+getter; malformed, duplicate, missing, wrong-type, cancelled or expired replies
+cannot inherit a partially read getter or a preceding successful request.
+The real failed wire context remains the bundle operation. Actual first getter
+failure and bounded diagnostic-copy evidence stay separate. Pure admission
+refusal carries no qualified partial snapshot and permits no retry/default.
+
+An already delivered held getter may finish after cancellation or the original
+deadline, including subsequent getters in that bundle. The terminal host must
+refuse its complete late result and send no later Process/MIDI or publication.
+Actual child completion/reap remains required; successful kill, EOF, a cancelled
+pipe or a cleanup attempt is not a fabricated reap or renewed deadline.
+
+Twenty-two Rust regression functions are authored: seven production-helper owner/
+closed-request tests, one legacy rejection test, six codec tests, five real mock-
+pipe tests and three strict-backend renderer/worker tests. Late getter cases
+include cancellation and original deadline; codec and actual pipe fixtures cover
+a 59-case malformed failure-field matrix. All 22 are UNRUN for this applied
+source32. Isolated formatting of the 14 applied paths passed, but current
+compilation, Clippy, Rust/package tests and actual NI/native/UI performance were
+not run. Earlier NOIRE receipts do not qualify this new bundle implementation.
+
+The full reviewable vendor patch was regenerated from the verified original
+archive to every one of the 69 actual source files outside vendor/target,
+excluding only these two provenance files as patch inputs. The archive has
+41 original files; 41 paths differ and
+28 are additions. LICENSE and .cargo_vcs_info.json
+remain byte-identical upstream; package/version/license and original archive
+remain unchanged. Patch SHA-256 is 5699f33c0817fa58b0e729437293dfcf2e3c6e388bd7561452bcd79e52f385e0.
+A real private git applycheck and apply reproduced all 69 files exactly.
+This is byte replay/source provenance evidence, not runtime or package acceptance.
+The complete source ledger and root dirty preimage backups are retained in
+target/backend-reliability-20261014/source32-vendor-provenance-01.

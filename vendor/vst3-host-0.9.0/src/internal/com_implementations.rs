@@ -4807,7 +4807,7 @@ mod host_event_list_tests {
         raw.r#type = Event_::EventTypes_::kDataEvent as u16;
         raw.__field0.data = DataEvent {
             size: source.len() as u32,
-            r#type: DataEvent_::DataTypes_::kMidiSysEx,
+            r#type: DataEvent_::DataTypes_::kMidiSysEx as _,
             bytes: source_ptr,
         };
 
@@ -4838,7 +4838,7 @@ mod host_event_list_tests {
         raw.r#type = Event_::EventTypes_::kDataEvent as u16;
         raw.__field0.data = DataEvent {
             size: 1,
-            r#type: DataEvent_::DataTypes_::kMidiSysEx,
+            r#type: DataEvent_::DataTypes_::kMidiSysEx as _,
             bytes: ptr::null(),
         };
         assert_eq!(unsafe { list.addEvent(&mut raw) }, kResultFalse);

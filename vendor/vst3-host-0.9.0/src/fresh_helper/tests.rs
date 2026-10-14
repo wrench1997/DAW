@@ -32,7 +32,14 @@ fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(3)
 }
 fn python(script: &str) -> Command {
-    let mut command = Command::new("python3");
+    let executable = std::env::var_os("CITRUS_STRICT_TEST_PYTHON").unwrap_or_else(|| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
+        }
+    });
+    let mut command = Command::new(executable);
     command.args(["-u", "-c", script]);
     command
 }
@@ -93,6 +100,7 @@ fn new_budget(deadline: Instant) -> Budget {
         live: 0,
         peak: 0,
         diagnostic_copy: false,
+        limit_evidence: None,
     }
 }
 
@@ -496,6 +504,7 @@ fn zero_write_never_claims_delivery_and_interrupted_operations_retry() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn unsupported_sigpipe_and_epipe_are_confined_to_disposable_hosts() {
     let _serial = serial();
     for mode in ["sigpipe-default", "epipe"] {
@@ -550,6 +559,7 @@ fn unsupported_sigpipe_and_epipe_are_confined_to_disposable_hosts() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn disposable_signal_host() {
     let Ok(mode) = std::env::var("CITRUS_STRICT_DISPOSABLE_SIGNAL_TEST") else {
         return;
@@ -732,6 +742,253 @@ fn repeated_short_cleanup_does_not_renew_first_grace() {
     assert!(final_report.kill_requested);
 }
 
+struct NaturalExitMarker(std::path::PathBuf);
+impl NaturalExitMarker {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "strict-natural-exit-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        // Claim the private file before any guard may delete it or a child may append.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        Self(path)
+    }
+    fn path_json(&self) -> String {
+        serde_json::to_string(self.0.to_str().unwrap()).unwrap()
+    }
+    fn text(&self) -> String {
+        std::fs::read_to_string(&self.0).unwrap()
+    }
+    fn wait_for(&self, expected: &str) {
+        let end = deadline();
+        while !self.text().contains(expected) {
+            assert!(
+                Instant::now() < end,
+                "actual child did not produce teardown marker"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+impl Drop for NaturalExitMarker {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+fn shutdown_child(marker: &NaturalExitMarker, ending: &str) -> FreshHelperSession {
+    spawn(&format!(
+        "import json,sys,time\nassert json.loads(sys.stdin.readline())=='LatencySamples'\nprint('{{\"LatencySamples\":{{\"samples\":7}}}}',flush=True)\nassert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''\nwith open({},'a',newline='') as out: out.write('shutdown_received\\n')\n{ending}\n",
+        marker.path_json(),
+    ))
+}
+
+#[test]
+fn strict_natural_exit_window_reaps_delayed_actual_child_without_force() {
+    let _serial = serial();
+    let marker = NaturalExitMarker::new();
+    let mut session = shutdown_child(
+        &marker,
+        &format!(
+            "time.sleep(.35)\nwith open({},'a',newline='') as out: out.write('natural_exit_ready\\n')",
+            marker.path_json(),
+        ),
+    );
+    assert!(scalar(&mut session).is_ok());
+    let report = session.dispose_with_deadlines_and_natural_grace(
+        deadline(),
+        Instant::now() + Duration::from_secs(5),
+        Duration::from_secs(3),
+        Duration::from_secs(1),
+    );
+    assert!(
+        matches!(report.state, CleanupState::Reaped(status) if status.success()),
+        "{report:?}"
+    );
+    assert!(!report.kill_requested);
+    assert_eq!(report.shutdown_error, None);
+    assert_eq!(report.shutdown_delivery, Some(Delivery::MayHaveApplied));
+    assert_eq!(marker.text(), "shutdown_received\nnatural_exit_ready\n");
+}
+
+#[test]
+fn strict_natural_exit_short_budget_grants_zero_grace_and_kill_still_requires_reap() {
+    let _serial = serial();
+    let marker = NaturalExitMarker::new();
+    let mut session = shutdown_child(&marker, "time.sleep(30)");
+    assert!(scalar(&mut session).is_ok());
+    let pid = session.owner.as_ref().unwrap().child.id();
+    let before = Instant::now();
+    let cleanup_deadline = before + Duration::from_millis(500);
+    pump::test_hooks::arm(pump::test_hooks::Fault::Wait);
+    let report = session.dispose_with_deadlines_and_natural_grace(
+        deadline(),
+        cleanup_deadline,
+        Duration::from_secs(3),
+        Duration::from_secs(1),
+    );
+    assert!(matches!(report.state, CleanupState::Pending));
+    let after = Instant::now();
+    let grace = session.owner.as_ref().unwrap().graceful_until.unwrap();
+    assert!(
+        before <= grace && grace <= after,
+        "less than the reap reserve grants no natural window"
+    );
+    assert!(grace < cleanup_deadline);
+    assert_eq!(report.shutdown_error, None);
+    marker.wait_for("shutdown_received");
+    let killed = session.continue_cleanup().unwrap();
+    assert!(killed.kill_requested);
+    assert!(
+        matches!(killed.state, CleanupState::Pending),
+        "kill is not the reap boundary"
+    );
+    assert_eq!(session.owner.as_ref().unwrap().child.id(), pid);
+    let end = deadline();
+    let reaped = loop {
+        let report = session.continue_cleanup().unwrap();
+        if matches!(report.state, CleanupState::Reaped(_)) {
+            break report;
+        }
+        assert!(Instant::now() < end, "actual killed child not reaped");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(reaped.kill_requested);
+    assert_eq!(reaped.wait_error, Some(libc::EIO));
+    assert_eq!(marker.text(), "shutdown_received\n");
+}
+
+#[test]
+fn strict_natural_exit_repeat_disposal_and_continuation_do_not_renew_or_rewrite_protocol() {
+    let _serial = serial();
+    let marker = NaturalExitMarker::new();
+    let mut session = shutdown_child(&marker, "time.sleep(30)");
+    assert!(scalar(&mut session).is_ok());
+    let pid = session.owner.as_ref().unwrap().child.id();
+    pump::test_hooks::arm(pump::test_hooks::Fault::Wait);
+    let first = session.dispose_with_deadlines_and_natural_grace(
+        deadline(),
+        Instant::now() + Duration::from_secs(5),
+        Duration::from_secs(3),
+        Duration::from_secs(1),
+    );
+    assert!(matches!(first.state, CleanupState::Pending));
+    let grace = session.owner.as_ref().unwrap().graceful_until;
+    marker.wait_for("shutdown_received");
+    pump::test_hooks::arm(pump::test_hooks::Fault::Wait);
+    let repeated = session.dispose_with_deadlines_and_natural_grace(
+        deadline(),
+        Instant::now() + Duration::from_secs(20),
+        Duration::from_secs(19),
+        Duration::ZERO,
+    );
+    assert!(matches!(repeated.state, CleanupState::Pending));
+    assert_eq!(session.owner.as_ref().unwrap().graceful_until, grace);
+    assert_eq!(session.owner.as_ref().unwrap().child.id(), pid);
+    assert_eq!(repeated.shutdown_error, first.shutdown_error);
+    assert_eq!(repeated.shutdown_delivery, first.shutdown_delivery);
+    pump::test_hooks::arm(pump::test_hooks::Fault::Wait);
+    assert!(matches!(
+        session.continue_cleanup().unwrap().state,
+        CleanupState::Pending
+    ));
+    assert_eq!(session.owner.as_ref().unwrap().graceful_until, grace);
+    assert_eq!(marker.text(), "shutdown_received\n");
+    // Only position the test clock after proving the unchanged first deadline.
+    // The actual same child must still be killed and concretely reaped.
+    session.owner.as_mut().unwrap().graceful_until = Some(Instant::now());
+    let report = session.dispose_with_deadlines_and_natural_grace(
+        deadline(),
+        deadline(),
+        Duration::from_secs(3),
+        Duration::from_secs(1),
+    );
+    assert!(matches!(report.state, CleanupState::Reaped(_)));
+    assert!(report.kill_requested);
+    assert_eq!(marker.text(), "shutdown_received\n");
+}
+
+#[test]
+fn strict_natural_exit_terminal_cancelled_or_failed_shutdown_keep_fast_policy_and_no_followup() {
+    let _serial = serial();
+    for mode in ["terminal", "cancelled", "expired"] {
+        let marker = NaturalExitMarker::new();
+        let response = if mode == "terminal" {
+            "{\"Error\":{\"message\":\"known refusal\"}}"
+        } else {
+            "{\"LatencySamples\":{\"samples\":7}}"
+        };
+        let mut session = spawn(&format!(
+            "import json,sys,time\nassert json.loads(sys.stdin.readline())=='LatencySamples'\nprint({response:?},flush=True)\nassert sys.stdin.read()==''\nwith open({},'a',newline='') as out: out.write('eof_without_followup\\n')\ntime.sleep(30)\n",
+            marker.path_json(),
+        ));
+        if mode == "terminal" {
+            assert_eq!(
+                failure_kind(scalar(&mut session)).cause,
+                ErrorKind::OperationRejected
+            );
+        } else {
+            assert!(scalar(&mut session).is_ok());
+        }
+        if mode == "cancelled" {
+            session.cancellation().cancel();
+        }
+        let before = Instant::now();
+        pump::test_hooks::arm(pump::test_hooks::Fault::Wait);
+        let first = session.dispose_with_deadlines_and_natural_grace(
+            if mode == "expired" {
+                before
+            } else {
+                deadline()
+            },
+            Instant::now() + Duration::from_secs(5),
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+        );
+        let after = Instant::now();
+        assert!(matches!(first.state, CleanupState::Pending));
+        let grace = session.owner.as_ref().unwrap().graceful_until.unwrap();
+        assert!(
+            before + Duration::from_millis(100) <= grace
+                && grace <= after + Duration::from_millis(100)
+        );
+        assert_eq!(
+            first.shutdown_error,
+            match mode {
+                "cancelled" => Some(ErrorKind::Cancelled),
+                "expired" => Some(ErrorKind::Deadline),
+                _ => None,
+            }
+        );
+        assert_eq!(
+            first.shutdown_delivery,
+            if mode == "terminal" {
+                None
+            } else {
+                Some(Delivery::NotSent)
+            }
+        );
+        marker.wait_for("eof_without_followup");
+        session.owner.as_mut().unwrap().graceful_until = Some(Instant::now());
+        let report = session.dispose_with_deadlines_and_natural_grace(
+            deadline(),
+            deadline(),
+            Duration::from_secs(3),
+            Duration::from_secs(1),
+        );
+        assert!(matches!(report.state, CleanupState::Reaped(_)));
+        assert!(report.kill_requested);
+        assert_eq!(report.shutdown_error, first.shutdown_error);
+        assert_eq!(report.shutdown_delivery, first.shutdown_delivery);
+        assert_eq!(marker.text(), "eof_without_followup\n");
+    }
+}
+
 #[test]
 fn cancellation_handle_has_only_independent_send_sync_authority() {
     fn assert_send_sync<T: Send + Sync>() {}
@@ -753,6 +1010,7 @@ fn cancellation_handle_has_only_independent_send_sync_authority() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 fn direct_child_exit_is_detected_while_a_separate_writer_holds_stdout_open() {
     let _serial = serial();
     use std::os::fd::{FromRawFd, OwnedFd};
@@ -949,3 +1207,552 @@ fn pending_cleanup_evidence_travels_with_abandoned_owner() {
 
 #[path = "client_tests.rs"]
 mod client_tests;
+
+#[test]
+fn late_cancel_after_reap_cannot_cancel_the_next_child() {
+    let _serial = serial();
+    let script = "import sys,json\nassert json.loads(sys.stdin.readline())=='LatencySamples'\nprint('{\"LatencySamples\":{\"samples\":19}}',flush=True)\nassert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''\n";
+    let mut first = spawn(script);
+    let late_cancel = first.cancellation();
+    assert!(scalar(&mut first).is_ok());
+    finish(&mut first);
+    drop(first);
+    let mut next = spawn(script);
+    late_cancel.cancel();
+    assert!(matches!(
+        scalar(&mut next),
+        Ok(HostResponse::LatencySamples { samples: 19 })
+    ));
+    finish(&mut next);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_exit_is_detected_while_an_independent_writer_remains_open() {
+    let _serial = serial();
+    use std::io::Write;
+    let permit = quarantine::reserve().unwrap();
+    let cancel = Arc::new(Cancellation {
+        cancelled: AtomicBool::new(false),
+        wake: pump::new_wake().unwrap(),
+        skip_wake: AtomicBool::new(false),
+    });
+    let mut command =
+        python("import sys\nassert sys.stdin.readline() == '\"LatencySamples\"\\n'\n");
+    let (stdin, stdout, mut held_writer) =
+        pump::prepare_with_retained_writer(&mut command).unwrap();
+    let child = command.spawn().unwrap();
+    let mut session = FreshHelperSession {
+        owner: Some(ChildOwner {
+            child,
+            stdin: Some(stdin),
+            stdout: Some(stdout),
+            kill_requested: false,
+            graceful_until: None,
+            observed_exit: None,
+            cleanup_report: CleanupReport::pending(),
+        }),
+        permit: Some(permit),
+        cancel,
+        state: State::Ready,
+        terminal: None,
+        completed_cleanup: None,
+        _owner_thread: PhantomData,
+    };
+    command.stdin(Stdio::null()).stdout(Stdio::null());
+    let start = Instant::now();
+    let failure = failure_kind(scalar(&mut session));
+    assert_eq!(failure.cause, ErrorKind::ChildExited);
+    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert!(session
+        .owner
+        .as_ref()
+        .unwrap()
+        .observed_exit
+        .unwrap()
+        .success());
+    held_writer
+        .write_all(b"{\"LatencySamples\":{\"samples\":17}}\n")
+        .unwrap();
+    let later = failure_kind(scalar(&mut session));
+    assert_eq!(later.cause, ErrorKind::ChildExited);
+    assert_eq!(later.delivery, Delivery::NotSent);
+    drop(held_writer);
+    finish(&mut session);
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_pending_io_retains_resources_and_reservation_after_child_exit() {
+    let _serial = serial();
+    let mut session = spawn("import sys\nassert sys.stdin.readline()=='\"LatencySamples\"\\n'\nassert sys.stdin.read()==''\n");
+    let cancellation = session.cancellation();
+    let failure = std::thread::scope(|scope| {
+        let wake = scope.spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            cancellation.cancel();
+        });
+        let failure = failure_kind(scalar(&mut session));
+        wake.join().unwrap();
+        failure
+    });
+    assert_eq!(failure.cause, ErrorKind::Cancelled);
+    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
+    assert!(pump::has_pending_io(session.owner.as_ref().unwrap()));
+    pump::test_hooks::hold_pipe_completion(true);
+    let report = session.dispose_with_deadlines(Instant::now(), Instant::now());
+    assert!(matches!(report.state, CleanupState::Pending));
+    let end = deadline();
+    loop {
+        let owner = session.owner.as_mut().unwrap();
+        if pump::observe_child(owner).unwrap() {
+            break;
+        }
+        assert!(Instant::now() < end, "child exit watchdog");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // Actual child exit cannot release a still-unconfirmed kernel operation.
+    let report = session.continue_cleanup().unwrap();
+    assert!(matches!(report.state, CleanupState::Pending));
+    assert!(pump::has_pending_io(session.owner.as_ref().unwrap()));
+    assert!(matches!(
+        FreshHelperSession::spawn(
+            &mut python("raise AssertionError('must not spawn')"),
+            deadline()
+        ),
+        Err(SpawnFailure {
+            cause: ErrorKind::Busy,
+            cleanup: None
+        })
+    ));
+    pump::test_hooks::hold_pipe_completion(false);
+    let report = session.continue_cleanup().unwrap();
+    assert!(matches!(report.state, CleanupState::Reaped(status) if status.success()));
+    assert!(!report.kill_requested);
+    assert_eq!(report.pipe_error, None);
+    assert!(matches!(
+        session.continue_cleanup().unwrap().state,
+        CleanupState::Reaped(_)
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_selected_bus_ack_timeout_and_cancel_seal_and_reap_pending_io() {
+    let _serial = serial();
+    let command = HostCommand::SetBusActive {
+        media_type: crate::audio::MediaType::Audio,
+        direction: crate::audio::BusDirection::Output,
+        bus_index: 31,
+        active: false,
+    };
+    for cancelled in [false, true] {
+        let mut session = spawn("import json,sys,time\nassert json.loads(sys.stdin.readline())=={'SetBusActive':{'media_type':'Audio','direction':'Output','bus_index':31,'active':False}}\ntime.sleep(10)\n");
+        let cancellation = session.cancellation();
+        let failure = std::thread::scope(|scope| {
+            if cancelled {
+                scope.spawn(move || {
+                    std::thread::sleep(Duration::from_millis(50));
+                    cancellation.cancel();
+                });
+            }
+            failure_kind(session.exchange(
+                &command,
+                ReplyShape::Success,
+                if cancelled {
+                    deadline()
+                } else {
+                    Instant::now() + Duration::from_millis(80)
+                },
+            ))
+        });
+        assert_eq!(
+            failure.cause,
+            if cancelled {
+                ErrorKind::Cancelled
+            } else {
+                ErrorKind::Deadline
+            }
+        );
+        assert_eq!(failure.delivery, Delivery::MayHaveApplied);
+        let repeated = failure_kind(session.exchange(&command, ReplyShape::Success, deadline()));
+        assert_eq!(repeated.cause, failure.cause);
+        assert_eq!(repeated.delivery, Delivery::NotSent);
+        let report = session.dispose_with_deadlines(Instant::now(), deadline());
+        assert!(
+            matches!(report.state, CleanupState::Reaped(_)),
+            "{report:?}"
+        );
+        assert_eq!(report.pipe_error, None);
+        assert_eq!(report.wait_error, None);
+        assert!(matches!(
+            session.continue_cleanup().unwrap().state,
+            CleanupState::Reaped(_)
+        ));
+    }
+}
+
+#[test]
+fn selected_bundle_wire_actual_replies_are_fresh_and_admission_is_not_sdk_fault() {
+    let _serial = serial();
+    let mut session = spawn(
+        r#"import json,sys
+for i in range(2):
+    command=json.loads(sys.stdin.readline())
+    assert command == {'StrictMetadataSnapshot': {'policy': 'Kontakt841SelectedStereo'}},command
+    if i == 0:
+        print(json.dumps({'StrictMetadataSnapshot': {'snapshot': {'audio': {'inputs': [], 'outputs': []}, 'events': {'inputs': [], 'outputs': []}, 'latency_samples': 7, 'tail_samples': 4294967295}}}),flush=True)
+    else:
+        print(json.dumps({'StrictMetadataAdmissionRejected': {'stage': 'EventInput'}}),flush=True)
+assert json.loads(sys.stdin.readline()) == 'Shutdown'
+"#,
+    );
+    let command =
+        HostCommand::StrictMetadataSnapshot(crate::process_isolation::SelectedMetadataRequest {
+            policy: crate::process_isolation::SelectedMetadataPolicy::Kontakt841SelectedStereo,
+        });
+    assert!(
+        matches!(session.exchange(&command, ReplyShape::StrictMetadataSnapshot, deadline()), Ok(HostResponse::StrictMetadataSnapshot { snapshot }) if snapshot.latency_samples == 7 && snapshot.tail_samples == u32::MAX)
+    );
+    assert!(matches!(
+        session.exchange(&command, ReplyShape::StrictMetadataSnapshot, deadline()),
+        Ok(HostResponse::StrictMetadataAdmissionRejected {
+            stage: crate::process_isolation::SelectedMetadataAdmission::EventInput
+        })
+    ));
+    assert_eq!(session.state, State::Ready);
+    finish(&mut session);
+}
+
+#[test]
+fn selected_bundle_wire_actual_getter_failure_is_terminal_and_copy_independent() {
+    let _serial = serial();
+    let mut session = spawn(
+        r#"import json,sys
+assert json.loads(sys.stdin.readline()) == {'StrictMetadataSnapshot': {'policy': 'Kontakt841SelectedStereo'}}
+print(json.dumps({'StrictMetadataFailed': {'getter': 'LatencySamples', 'message': 'LatencySamples: actual failure'}}),flush=True)
+assert sys.stdin.read() == ''
+"#,
+    );
+    let command =
+        HostCommand::StrictMetadataSnapshot(crate::process_isolation::SelectedMetadataRequest {
+            policy: crate::process_isolation::SelectedMetadataPolicy::Kontakt841SelectedStereo,
+        });
+    let failure =
+        failure_kind(session.exchange(&command, ReplyShape::StrictMetadataSnapshot, deadline()));
+    assert_eq!(failure.cause, ErrorKind::OperationRejected);
+    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
+    assert_eq!(
+        failure.metadata_getter,
+        Some(crate::process_isolation::MetadataGetter::LatencySamples)
+    );
+    let failure = crate::strict_offline::Failure::from(failure);
+    assert_eq!(
+        failure.metadata_getter,
+        Some(crate::process_isolation::MetadataGetter::LatencySamples)
+    );
+    assert_eq!(
+        failure.diagnostic.as_deref(),
+        Some("LatencySamples: actual failure")
+    );
+    let repeated =
+        failure_kind(session.exchange(&command, ReplyShape::StrictMetadataSnapshot, deadline()));
+    assert_eq!(repeated.cause, ErrorKind::OperationRejected);
+    assert_eq!(repeated.delivery, Delivery::NotSent);
+    assert_eq!(repeated.metadata_getter, None);
+    finish_forced(&mut session);
+}
+
+#[test]
+fn selected_bundle_wire_missing_reply_deadline_has_no_invented_inner_getter() {
+    let _serial = serial();
+    let mut session = spawn(
+        r#"import json,sys
+assert json.loads(sys.stdin.readline()) == {'StrictMetadataSnapshot': {'policy': 'Kontakt841SelectedStereo'}}
+assert sys.stdin.read() == ''
+"#,
+    );
+    let command =
+        HostCommand::StrictMetadataSnapshot(crate::process_isolation::SelectedMetadataRequest {
+            policy: crate::process_isolation::SelectedMetadataPolicy::Kontakt841SelectedStereo,
+        });
+    let failure = failure_kind(session.exchange(
+        &command,
+        ReplyShape::StrictMetadataSnapshot,
+        Instant::now() + Duration::from_millis(300),
+    ));
+    assert_eq!(failure.cause, ErrorKind::Deadline);
+    assert_eq!(failure.delivery, Delivery::MayHaveApplied);
+    assert_eq!(failure.metadata_getter, None);
+    finish_forced(&mut session);
+}
+
+// Construct raw JSON rather than serde maps so duplicate and escaped keys
+// reach the actual closed parser without being coalesced by a fixture.
+fn selected_bundle_invalid_failure_schema_matrix() -> Vec<String> {
+    fn object(variant: &str, fields: &[(&str, &str)]) -> String {
+        let body = fields
+            .iter()
+            .map(|(key, value)| format!(r#""{key}":{value}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"{variant}":{{{body}}}}}"#)
+    }
+    let mut wires = Vec::new();
+    for (variant, key, escaped, value, sibling) in [
+        (
+            "StrictMetadataFailed",
+            "getter",
+            r"\u0067etter",
+            r#""TailSamples""#,
+            Some(("message", r#""actual failure""#)),
+        ),
+        (
+            "StrictMetadataFailed",
+            "message",
+            r"\u006dessage",
+            r#""actual failure""#,
+            Some(("getter", r#""TailSamples""#)),
+        ),
+        (
+            "StrictMetadataRejected",
+            "getter",
+            r"\u0067etter",
+            r#""EventBusLayout""#,
+            Some(("reason", r#""Unsupported""#)),
+        ),
+        (
+            "StrictMetadataRejected",
+            "reason",
+            r"\u0072eason",
+            r#""Unsupported""#,
+            Some(("getter", r#""EventBusLayout""#)),
+        ),
+        (
+            "StrictMetadataAdmissionRejected",
+            "stage",
+            r"\u0073tage",
+            r#""EventInput""#,
+            None,
+        ),
+    ] {
+        let prefix: Vec<_> = sibling.into_iter().collect();
+        wires.push(object(variant, &prefix)); // required field missing
+        for (first, second) in [
+            (key, key),
+            (key, escaped),
+            (escaped, key),
+            (escaped, escaped),
+        ] {
+            let mut fields = prefix.clone();
+            fields.extend([(first, value), (second, value)]);
+            wires.push(object(variant, &fields));
+        }
+        for wrong in ["null", "0", "true", "{}", "[]"] {
+            let mut fields = prefix.clone();
+            fields.push((key, wrong));
+            wires.push(object(variant, &fields));
+        }
+        let mut fields = prefix;
+        fields.extend([(key, value), ("unexpected", "0")]);
+        wires.push(object(variant, &fields));
+    }
+    wires.extend([
+        r#"{"StrictMetadataFailed":{"getter":"unknown","message":"actual failure"}}"#.to_owned(),
+        r#"{"StrictMetadataRejected":{"getter":"unknown","reason":"Unsupported"}}"#.to_owned(),
+        r#"{"StrictMetadataRejected":{"getter":"EventBusLayout","reason":"unknown"}}"#.to_owned(),
+        r#"{"StrictMetadataAdmissionRejected":{"stage":"unknown"}}"#.to_owned(),
+    ]);
+    assert_eq!(wires.len(), 59);
+    wires
+}
+
+#[test]
+fn selected_bundle_wire_malformed_failure_field_matrix_has_no_inner_attribution_and_reaps() {
+    let _serial = serial();
+    let command =
+        HostCommand::StrictMetadataSnapshot(crate::process_isolation::SelectedMetadataRequest {
+            policy: crate::process_isolation::SelectedMetadataPolicy::Kontakt841SelectedStereo,
+        });
+    for wire in selected_bundle_invalid_failure_schema_matrix() {
+        let literal = serde_json::to_string(&wire).unwrap();
+        let script = format!(
+            "import json,sys\nassert json.loads(sys.stdin.readline()) == {{'StrictMetadataSnapshot': {{'policy': 'Kontakt841SelectedStereo'}}}}\nprint({literal},flush=True)\nassert sys.stdin.read() == ''\n"
+        );
+        let mut session = spawn(&script);
+        let failure = failure_kind(session.exchange(
+            &command,
+            ReplyShape::StrictMetadataSnapshot,
+            deadline(),
+        ));
+        assert_eq!(failure.cause, ErrorKind::MalformedReply, "{wire}");
+        assert_eq!(failure.delivery, Delivery::MayHaveApplied, "{wire}");
+        assert_eq!(failure.metadata_getter, None, "{wire}");
+        assert!(failure.reported.is_none(), "{wire}");
+        assert_eq!(session.state, State::Terminal);
+        let repeated = failure_kind(session.exchange(
+            &command,
+            ReplyShape::StrictMetadataSnapshot,
+            deadline(),
+        ));
+        assert_eq!(repeated.cause, ErrorKind::MalformedReply);
+        assert_eq!(repeated.delivery, Delivery::NotSent);
+        assert_eq!(repeated.metadata_getter, None);
+        finish(&mut session);
+        assert_eq!(session.state, State::Reaped);
+    }
+}
+
+#[test]
+fn selected_bundle_wire_held_getter_writes_complete_snapshot_after_cancel_or_original_deadline() {
+    let _serial = serial();
+    static NEXT_LATE_BUNDLE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    const SCRIPT: &str = r#"import json,os,pathlib,sys,time
+root = pathlib.Path(sys.argv[1])
+sentinel = b'unchanged destination'
+assert (root / 'render.wav').read_bytes() == sentinel
+assert json.loads(sys.stdin.readline()) == {'StrictMetadataSnapshot': {'policy': 'Kontakt841SelectedStereo'}}
+getters = []
+def audio_layout():
+    getters.append('CheckedAudioBusLayout')
+    return {'inputs': [], 'outputs': [{'channel_count': 2, 'is_main': True, 'active': True}]}
+def event_layout():
+    getters.append('EventBusLayout')
+    return {'inputs': [{'channel_count': 16, 'is_main': True, 'active': True}], 'outputs': []}
+def latency_samples():
+    getters.append('LatencySamples')
+    (root / 'held').write_text(json.dumps(getters))
+    while not (root / 'release').exists():
+        time.sleep(.001)
+    # The Rust host releases only after the actual failed exchange returned.
+    return 0
+def tail_samples():
+    getters.append('TailSamples')
+    return 4294967295
+snapshot = {'StrictMetadataSnapshot': {'snapshot': {
+    'audio': audio_layout(), 'events': event_layout(),
+    'latency_samples': latency_samples(), 'tail_samples': tail_samples()}}}
+print(json.dumps(snapshot, separators=(',', ':')), flush=True)
+(root / 'late-written.tmp').write_text(json.dumps({'getters': getters, 'snapshot': snapshot}))
+os.replace(root / 'late-written.tmp', root / 'late-written')
+# The sealed session must never send Process, MIDI, retry or Shutdown.
+assert sys.stdin.read() == ''
+assert (root / 'render.wav').read_bytes() == sentinel
+"#;
+    for cancelled in [true, false] {
+        let ident = NEXT_LATE_BUNDLE.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("citrus-late-bundle-{}-{ident}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("render.wav"), b"unchanged destination").unwrap();
+        let mut command = python(SCRIPT);
+        command.arg(&root);
+        let mut session = FreshHelperSession::spawn(&mut command, deadline())
+            .unwrap_or_else(|failure| panic!("late bundle mock spawn: {:?}", failure.cause));
+        let cancel = session.cancellation();
+        let exchange_deadline = Instant::now()
+            + if cancelled {
+                Duration::from_secs(3)
+            } else {
+                Duration::from_secs(2)
+            };
+        let request = HostCommand::StrictMetadataSnapshot(
+            crate::process_isolation::SelectedMetadataRequest {
+                policy: crate::process_isolation::SelectedMetadataPolicy::Kontakt841SelectedStereo,
+            },
+        );
+        let failure = std::thread::scope(|scope| {
+            let root = &root;
+            let observed = scope.spawn(move || {
+                let bound = Instant::now() + Duration::from_secs(3);
+                while !root.join("held").exists() {
+                    assert!(
+                        Instant::now() < bound,
+                        "child never reached actual held getter"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                if cancelled {
+                    cancel.cancel();
+                }
+            });
+            let result = failure_kind(session.exchange(
+                &request,
+                ReplyShape::StrictMetadataSnapshot,
+                exchange_deadline,
+            ));
+            observed.join().unwrap();
+            result
+        });
+        assert!(root.join("held").exists());
+        assert_eq!(
+            failure.cause,
+            if cancelled {
+                ErrorKind::Cancelled
+            } else {
+                ErrorKind::Deadline
+            }
+        );
+        assert_eq!(failure.delivery, Delivery::MayHaveApplied);
+        assert_eq!(failure.metadata_getter, None);
+        assert!(failure.reported.is_none());
+        assert_eq!(session.state, State::Terminal);
+        if !cancelled {
+            assert!(Instant::now() >= exchange_deadline);
+        }
+        // Release after the actual failed exchange, without extending its
+        // original deadline or asking the terminal host to read the late reply.
+        std::fs::write(root.join("release"), b"after actual failed exchange").unwrap();
+        let bound = Instant::now() + Duration::from_secs(3);
+        while !root.join("late-written").exists() {
+            assert!(
+                Instant::now() < bound,
+                "complete late snapshot was not actually written"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let evidence: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("late-written")).unwrap()).unwrap();
+        assert_eq!(
+            evidence["getters"],
+            serde_json::json!([
+                "CheckedAudioBusLayout",
+                "EventBusLayout",
+                "LatencySamples",
+                "TailSamples"
+            ])
+        );
+        let snapshot = &evidence["snapshot"]["StrictMetadataSnapshot"]["snapshot"];
+        assert!(snapshot["audio"].is_object() && snapshot["events"].is_object());
+        assert_eq!(snapshot["latency_samples"], 0);
+        assert_eq!(snapshot["tail_samples"], u32::MAX);
+        let process = HostCommand::Process {
+            inputs: Vec::new(),
+            frames: 128,
+            transport: None,
+        };
+        let refused = failure_kind(session.exchange(
+            &process,
+            ReplyShape::Audio {
+                channels: 2,
+                frames: 128,
+            },
+            deadline(),
+        ));
+        assert_eq!(refused.cause, failure.cause);
+        assert_eq!(refused.delivery, Delivery::NotSent);
+        assert_eq!(refused.metadata_getter, None);
+        assert_eq!(
+            std::fs::read(root.join("render.wav")).unwrap(),
+            b"unchanged destination"
+        );
+        finish(&mut session);
+        assert_eq!(session.state, State::Reaped);
+        // Only after the actual child completion may its scratch files go.
+        for name in ["render.wav", "held", "release", "late-written"] {
+            std::fs::remove_file(root.join(name)).unwrap();
+        }
+        std::fs::remove_dir(&root).unwrap();
+    }
+}

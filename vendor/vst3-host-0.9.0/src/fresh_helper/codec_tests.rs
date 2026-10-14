@@ -1,8 +1,9 @@
 //! Plugin-free source fixtures. These tests must not be compiled or executed
 //! before the source archive, independent review and explicit execution gate.
-use super::super::{budget_test_hooks, pump, Cancellation, MAX_PAYLOAD};
+use super::super::{budget_test_hooks, pump, Cancellation, LimitEvidence, LimitSite, MAX_PAYLOAD};
 use super::*;
 use crate::audio::AudioBusConfig;
+use crate::audio::{BusDirection, MediaType};
 use crate::internal::native_edit_transport::tests::allocation_free;
 use crate::midi::MidiChannel;
 use crate::plugin::StateContext;
@@ -21,6 +22,7 @@ fn new_budget() -> Budget {
         live: 0,
         peak: 0,
         diagnostic_copy: false,
+        limit_evidence: None,
     }
 }
 
@@ -29,6 +31,9 @@ fn new_budget() -> Budget {
 fn decode(bytes: &[u8], shape: &ReplyShape, budget: &mut Budget) -> Result<HostResponse> {
     match super::decode(bytes, shape, budget)? {
         DecodedReply::Response(response) => Ok(response),
+        DecodedReply::MetadataBundleRejected { getter, reason } => {
+            Ok(HostResponse::StrictMetadataRejected { getter, reason })
+        }
         DecodedReply::MetadataRejected(reason) => {
             Ok(HostResponse::MetadataQueryRejected { reason })
         }
@@ -981,9 +986,10 @@ fn text_and_class_id_limits_are_decoded_byte_limits_with_unicode_validation() {
 fn plugin_counts_are_rejected_rather_than_clamped() {
     let original = String::from_utf8(wire(&info(Vec::new()))).unwrap();
     for (from, to) in [
-        ("\"audio_inputs\":8", "\"audio_inputs\":9"),
+        ("\"audio_inputs\":8", "\"audio_inputs\":33"),
         ("\"audio_outputs\":8", "\"audio_outputs\":-1"),
-        ("\"output_channels\":32", "\"output_channels\":33"),
+        ("\"audio_outputs\":8", "\"audio_outputs\":33"),
+        ("\"output_channels\":32", "\"output_channels\":65"),
     ] {
         error(
             original.replace(from, to).as_bytes(),
@@ -1003,6 +1009,107 @@ fn plugin_counts_are_rejected_rather_than_clamped() {
         &ReplyShape::PluginInfo,
         ErrorKind::MalformedReply,
     );
+}
+
+#[test]
+fn declared_32_stereo_outputs_do_not_expand_audio_exchange_limits() {
+    let mut declared = info(Vec::new());
+    if let HostResponse::PluginInfo {
+        audio_inputs,
+        audio_outputs,
+        output_channels,
+        ..
+    } = &mut declared
+    {
+        *audio_inputs = 32;
+        *audio_outputs = 32;
+        *output_channels = 64;
+    }
+    let decoded = decode(&wire(&declared), &ReplyShape::PluginInfo, &mut new_budget()).unwrap();
+    assert_eq!(wire(&decoded), wire(&declared));
+    let command = HostCommand::Process {
+        inputs: Vec::new(),
+        frames: 128,
+        transport: None,
+    };
+    assert_eq!(
+        encode(
+            &command,
+            &ReplyShape::Audio {
+                channels: 64,
+                frames: 128
+            },
+            &mut new_budget()
+        )
+        .unwrap_err(),
+        ErrorKind::Limit,
+    );
+    assert_eq!(
+        encode(
+            &HostCommand::ProcessBuses {
+                inputs: Vec::new(),
+                outputs: vec![
+                    AudioBusConfig {
+                        channel_count: 2,
+                        active: false
+                    };
+                    32
+                ],
+                frames: 128,
+                transport: None,
+            },
+            &ReplyShape::Buses {
+                buses: vec![(false, 2); 32],
+                frames: 128
+            },
+            &mut new_budget(),
+        )
+        .unwrap_err(),
+        ErrorKind::Limit,
+    );
+}
+
+#[test]
+fn selected_audio_bus_request_preserves_wire_and_rejects_event_or_invalid_index() {
+    for direction in [BusDirection::Input, BusDirection::Output] {
+        for bus_index in [0, 31] {
+            for active in [false, true] {
+                assert_command(
+                    &HostCommand::SetBusActive {
+                        media_type: MediaType::Audio,
+                        direction,
+                        bus_index,
+                        active,
+                    },
+                    &ReplyShape::Success,
+                );
+            }
+        }
+    }
+    for (media_type, bus_index) in [
+        (MediaType::Audio, -1),
+        (MediaType::Audio, 32),
+        (MediaType::Audio, i32::MAX),
+        (MediaType::Event, 0),
+    ] {
+        let mut budget = new_budget();
+        budget.reserve(17).unwrap();
+        assert_eq!(
+            encode(
+                &HostCommand::SetBusActive {
+                    media_type,
+                    direction: BusDirection::Output,
+                    bus_index,
+                    active: false,
+                },
+                &ReplyShape::Success,
+                &mut budget,
+            )
+            .unwrap_err(),
+            ErrorKind::InvalidRequest
+        );
+        assert_eq!(budget.live, 17);
+    }
 }
 
 #[test]
@@ -1458,6 +1565,7 @@ fn complete_failure_preflight_latches_category_before_diagnostic_copy() {
             crashed: actual_crashed,
             reported: Some(reported),
             diagnostic_unavailable: None,
+            metadata_getter: None,
         } = reply
         else {
             panic!("failure category and diagnostic must survive")
@@ -1507,7 +1615,8 @@ fn known_failure_survives_diagnostic_allocation_and_budget_failure() {
             DecodedReply::KnownFailure {
                 crashed: false,
                 reported: None,
-                diagnostic_unavailable: Some(ErrorKind::Allocation)
+                diagnostic_unavailable: Some(ErrorKind::Allocation),
+                metadata_getter: None,
             }
         ));
         assert_eq!(budget.live, 0);
@@ -1522,7 +1631,8 @@ fn known_failure_survives_diagnostic_allocation_and_budget_failure() {
             DecodedReply::KnownFailure {
                 crashed: false,
                 reported: None,
-                diagnostic_unavailable: Some(ErrorKind::Limit)
+                diagnostic_unavailable: Some(ErrorKind::Limit),
+                metadata_getter: None,
             }
         ));
         assert_eq!(budget.live, MAX_PAYLOAD);
@@ -2046,6 +2156,7 @@ fn catalog_preserves_every_field_and_charges_actual_payload_capacities() {
             .unwrap()
             .is_none()
     );
+    assert_eq!(budget.limit_evidence, None);
     assert_eq!((budget.live, budget.peak), (0, 0));
     let decoded = decode(&bytes, &ReplyShape::Parameters, &mut budget).unwrap();
     assert_eq!(wire(&decoded), bytes);
@@ -2082,6 +2193,7 @@ fn catalog_exact_entry_limit_and_plus_one_and_duplicate_ids_are_preflight_only()
             .unwrap()
             .is_none()
     );
+    assert_eq!(budget.limit_evidence, None);
     let decoded = decode(&bytes, &ReplyShape::Parameters, &mut new_budget()).unwrap();
     assert!(
         matches!(decoded, HostResponse::Parameters { params } if params.len() == MAX_PARAMETERS)
@@ -2096,6 +2208,14 @@ fn catalog_exact_entry_limit_and_plus_one_and_duplicate_ids_are_preflight_only()
         ErrorKind::Limit
     );
     assert_eq!(budget.peak, 0);
+    assert_eq!(
+        budget.limit_evidence,
+        Some(LimitEvidence {
+            site: LimitSite::ParameterCatalogEntries,
+            observed_at_least: MAX_PARAMETERS + 1,
+            maximum: MAX_PARAMETERS,
+        })
+    );
     params.pop();
     // A nonadjacent duplicate near the end is caught before any earlier titles
     // or descriptors are materialized. No partial catalog escapes to setters.
@@ -2107,6 +2227,10 @@ fn catalog_exact_entry_limit_and_plus_one_and_duplicate_ids_are_preflight_only()
         ErrorKind::MalformedReply
     );
     assert_eq!((budget.live, budget.peak), (0, 0));
+    assert_eq!(
+        budget.limit_evidence, None,
+        "duplicate IDs do not fabricate a count limit"
+    );
 }
 
 #[test]
@@ -2117,7 +2241,9 @@ fn catalog_utf8_text_exact_limits_and_aggregate_boundary() {
     let bytes = wire(&HostResponse::Parameters {
         params: vec![parameter.clone()],
     });
-    assert!(decode(&bytes, &ReplyShape::Parameters, &mut new_budget()).is_ok());
+    let mut exact_budget = new_budget();
+    assert!(decode(&bytes, &ReplyShape::Parameters, &mut exact_budget).is_ok());
+    assert_eq!(exact_budget.limit_evidence, None);
     for field in ["name", "unit"] {
         let mut invalid = parameter.clone();
         if field == "name" {
@@ -2134,6 +2260,14 @@ fn catalog_utf8_text_exact_limits_and_aggregate_boundary() {
             ErrorKind::Limit
         );
         assert_eq!(budget.peak, 0);
+        assert_eq!(
+            budget.limit_evidence,
+            Some(LimitEvidence {
+                site: LimitSite::ParameterTextBytes,
+                observed_at_least: MAX_PARAMETER_TEXT + 1,
+                maximum: MAX_PARAMETER_TEXT,
+            })
+        );
     }
     let params: Vec<_> = (0..MAX_PARAMETERS)
         .map(|id| {
@@ -2176,6 +2310,14 @@ fn catalog_utf8_text_exact_limits_and_aggregate_boundary() {
         ErrorKind::Limit
     );
     assert_eq!(fresh.peak, 0);
+    assert_eq!(
+        fresh.limit_evidence,
+        Some(LimitEvidence {
+            site: LimitSite::ParameterCatalogTextBytes,
+            observed_at_least: MAX_CATALOG_TEXT + 1,
+            maximum: MAX_CATALOG_TEXT,
+        })
+    );
 }
 
 #[test]
@@ -2641,6 +2783,7 @@ fn ordinary_error_and_crash_remain_distinct_from_metadata_refusal() {
                 crashed: actual,
                 reported: Some(reported),
                 diagnostic_unavailable: None,
+                metadata_getter: None,
             } = reply
             else {
                 panic!("ordinary known failure")
@@ -2949,4 +3092,379 @@ fn silent_generator_preserves_every_codec_checkpoint_and_payload_accounting() {
         ErrorKind::Allocation,
     );
     assert_eq!(budget.live, 0);
+}
+
+#[test]
+fn selected_bundle_codec_complete_fields_nullable_activation_and_u32_bounds() {
+    use crate::process_isolation::{SelectedMetadataPolicy, StrictMetadataSnapshot};
+    assert_command(
+        &HostCommand::StrictMetadataSnapshot(crate::process_isolation::SelectedMetadataRequest {
+            policy: SelectedMetadataPolicy::Kontakt841SelectedStereo,
+        }),
+        &ReplyShape::StrictMetadataSnapshot,
+    );
+    let source = HostResponse::StrictMetadataSnapshot {
+        snapshot: StrictMetadataSnapshot {
+            audio: CheckedAudioBusLayout {
+                inputs: vec![
+                    CheckedAudioBusConfig {
+                        channel_count: 256,
+                        is_main: false,
+                        active: None
+                    };
+                    32
+                ],
+                outputs: vec![
+                    CheckedAudioBusConfig {
+                        channel_count: 2,
+                        is_main: true,
+                        active: Some(false)
+                    };
+                    32
+                ],
+            },
+            events: EventBusLayout {
+                inputs: vec![
+                    EventBusConfig {
+                        channel_count: 16,
+                        is_main: true,
+                        active: Some(true)
+                    };
+                    32
+                ],
+                outputs: vec![
+                    EventBusConfig {
+                        channel_count: 1,
+                        is_main: false,
+                        active: None
+                    };
+                    32
+                ],
+            },
+            latency_samples: 0,
+            tail_samples: u32::MAX,
+        },
+    };
+    let bytes = wire(&source);
+    assert!(bytes.len() < 8192);
+    assert_eq!(
+        wire(
+            &decode(
+                &bytes,
+                &ReplyShape::StrictMetadataSnapshot,
+                &mut new_budget()
+            )
+            .unwrap()
+        ),
+        bytes
+    );
+}
+
+#[test]
+fn selected_bundle_codec_closed_schema_limits_and_wrong_reply() {
+    let valid = br#"{"StrictMetadataSnapshot":{"snapshot":{"audio":{"inputs":[],"outputs":[]},"events":{"inputs":[],"outputs":[]},"latency_samples":0,"tail_samples":4294967295}}}"#;
+    assert!(decode(
+        valid,
+        &ReplyShape::StrictMetadataSnapshot,
+        &mut new_budget()
+    )
+    .is_ok());
+    for (find, replacement) in [
+        ("\"tail_samples\":4294967295", "\"tail_samples\":4294967296"),
+        ("\"latency_samples\":0,", ""),
+        (
+            "\"latency_samples\":0",
+            "\"latency_samples\":0,\"latency_samples\":1",
+        ),
+        (
+            "\"latency_samples\":0",
+            "\"latency_samples\":0,\"cached\":true",
+        ),
+        (
+            "\"inputs\":[]",
+            "\"inputs\":[{\"channel_count\":0,\"is_main\":true,\"active\":true}]",
+        ),
+    ] {
+        let changed = String::from_utf8(valid.to_vec())
+            .unwrap()
+            .replacen(find, replacement, 1);
+        assert!(
+            decode(
+                changed.as_bytes(),
+                &ReplyShape::StrictMetadataSnapshot,
+                &mut new_budget()
+            )
+            .is_err(),
+            "{changed}"
+        );
+    }
+    error(
+        br#"{"StrictMetadataAdmissionRejected":{"stage":"unknown"}}"#,
+        &ReplyShape::StrictMetadataSnapshot,
+        ErrorKind::MalformedReply,
+    );
+    error(
+        br#"{"StrictMetadataRejected":{"getter":"TailSamples","reason":"unknown"}}"#,
+        &ReplyShape::StrictMetadataSnapshot,
+        ErrorKind::MalformedReply,
+    );
+    error(
+        br#"{"StrictMetadataFailed":{"getter":"unknown","message":"e"}}"#,
+        &ReplyShape::StrictMetadataSnapshot,
+        ErrorKind::MalformedReply,
+    );
+    error(
+        br#"{"StrictMetadataFailed":{"getter":"TailSamples","message":"e","extra":0}}"#,
+        &ReplyShape::StrictMetadataSnapshot,
+        ErrorKind::MalformedReply,
+    );
+    error(
+        br#"{"LatencySamples":{"samples":0}}"#,
+        &ReplyShape::StrictMetadataSnapshot,
+        ErrorKind::WrongReply,
+    );
+    error(valid, &ReplyShape::EventBusLayout, ErrorKind::WrongReply);
+    let buses = vec![
+        CheckedAudioBusConfig {
+            channel_count: 2,
+            is_main: true,
+            active: Some(true)
+        };
+        33
+    ];
+    let source = HostResponse::StrictMetadataSnapshot {
+        snapshot: crate::process_isolation::StrictMetadataSnapshot {
+            audio: CheckedAudioBusLayout {
+                inputs: Vec::new(),
+                outputs: buses,
+            },
+            events: EventBusLayout {
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+            },
+            latency_samples: 0,
+            tail_samples: 0,
+        },
+    };
+    error(
+        &wire(&source),
+        &ReplyShape::StrictMetadataSnapshot,
+        ErrorKind::Limit,
+    );
+}
+
+#[test]
+fn selected_bundle_codec_known_failure_keeps_actual_getter_when_copy_fails() {
+    for getter in [
+        MetadataGetter::CheckedAudioBusLayout,
+        MetadataGetter::EventBusLayout,
+        MetadataGetter::LatencySamples,
+        MetadataGetter::TailSamples,
+    ] {
+        let source = HostResponse::StrictMetadataFailed {
+            getter,
+            message: "actual failure".into(),
+        };
+        let bytes = wire(&source);
+        let mut budget = new_budget();
+        let marker =
+            allocation_free(|| preflight(&bytes, &ReplyShape::StrictMetadataSnapshot, &mut budget))
+                .unwrap()
+                .unwrap();
+        budget.cancel.cancelled.store(true, Ordering::Release);
+        let _hook = budget_test_hooks::fail_next_allocation();
+        assert!(
+            matches!(marker.materialize(&mut budget), DecodedReply::KnownFailure { crashed: false, reported: None, diagnostic_unavailable: Some(ErrorKind::Allocation), metadata_getter: Some(actual) } if actual == getter)
+        );
+    }
+}
+
+#[test]
+fn selected_bundle_codec_snapshot_stop_fences_cover_both_passes() {
+    let bytes = wire(&HostResponse::StrictMetadataSnapshot {
+        snapshot: crate::process_isolation::StrictMetadataSnapshot {
+            audio: CheckedAudioBusLayout {
+                inputs: Vec::new(),
+                outputs: vec![
+                    CheckedAudioBusConfig {
+                        channel_count: 2,
+                        is_main: true,
+                        active: Some(true)
+                    };
+                    32
+                ],
+            },
+            events: EventBusLayout {
+                inputs: vec![EventBusConfig {
+                    channel_count: 16,
+                    is_main: true,
+                    active: Some(true),
+                }],
+                outputs: Vec::new(),
+            },
+            latency_samples: 0,
+            tail_samples: u32::MAX,
+        },
+    });
+    let checks = {
+        let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
+        decode(
+            &bytes,
+            &ReplyShape::StrictMetadataSnapshot,
+            &mut new_budget(),
+        )
+        .unwrap();
+        budget_test_hooks::checks()
+    };
+    for at in [2, checks / 2, checks] {
+        let _hook = budget_test_hooks::cancel_at_check(at);
+        assert_eq!(
+            decode(
+                &bytes,
+                &ReplyShape::StrictMetadataSnapshot,
+                &mut new_budget()
+            )
+            .unwrap_err(),
+            ErrorKind::Cancelled
+        );
+    }
+    let _hook = budget_test_hooks::fail_next_allocation();
+    assert_eq!(
+        decode(
+            &bytes,
+            &ReplyShape::StrictMetadataSnapshot,
+            &mut new_budget()
+        )
+        .unwrap_err(),
+        ErrorKind::Allocation
+    );
+}
+
+// Construct raw JSON rather than serde maps so duplicate and escaped keys
+// reach the actual closed parser without being coalesced by a fixture.
+fn selected_bundle_invalid_failure_schema_matrix() -> Vec<String> {
+    fn object(variant: &str, fields: &[(&str, &str)]) -> String {
+        let body = fields
+            .iter()
+            .map(|(key, value)| format!(r#""{key}":{value}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(r#"{{"{variant}":{{{body}}}}}"#)
+    }
+    let mut wires = Vec::new();
+    for (variant, key, escaped, value, sibling) in [
+        (
+            "StrictMetadataFailed",
+            "getter",
+            r"\u0067etter",
+            r#""TailSamples""#,
+            Some(("message", r#""actual failure""#)),
+        ),
+        (
+            "StrictMetadataFailed",
+            "message",
+            r"\u006dessage",
+            r#""actual failure""#,
+            Some(("getter", r#""TailSamples""#)),
+        ),
+        (
+            "StrictMetadataRejected",
+            "getter",
+            r"\u0067etter",
+            r#""EventBusLayout""#,
+            Some(("reason", r#""Unsupported""#)),
+        ),
+        (
+            "StrictMetadataRejected",
+            "reason",
+            r"\u0072eason",
+            r#""Unsupported""#,
+            Some(("getter", r#""EventBusLayout""#)),
+        ),
+        (
+            "StrictMetadataAdmissionRejected",
+            "stage",
+            r"\u0073tage",
+            r#""EventInput""#,
+            None,
+        ),
+    ] {
+        let prefix: Vec<_> = sibling.into_iter().collect();
+        wires.push(object(variant, &prefix)); // required field missing
+        for (first, second) in [
+            (key, key),
+            (key, escaped),
+            (escaped, key),
+            (escaped, escaped),
+        ] {
+            let mut fields = prefix.clone();
+            fields.extend([(first, value), (second, value)]);
+            wires.push(object(variant, &fields));
+        }
+        for wrong in ["null", "0", "true", "{}", "[]"] {
+            let mut fields = prefix.clone();
+            fields.push((key, wrong));
+            wires.push(object(variant, &fields));
+        }
+        let mut fields = prefix;
+        fields.extend([(key, value), ("unexpected", "0")]);
+        wires.push(object(variant, &fields));
+    }
+    wires.extend([
+        r#"{"StrictMetadataFailed":{"getter":"unknown","message":"actual failure"}}"#.to_owned(),
+        r#"{"StrictMetadataRejected":{"getter":"unknown","reason":"Unsupported"}}"#.to_owned(),
+        r#"{"StrictMetadataRejected":{"getter":"EventBusLayout","reason":"unknown"}}"#.to_owned(),
+        r#"{"StrictMetadataAdmissionRejected":{"stage":"unknown"}}"#.to_owned(),
+    ]);
+    assert_eq!(wires.len(), 59);
+    wires
+}
+
+#[test]
+fn selected_bundle_codec_failure_field_matrix_has_no_validated_inner_attribution() {
+    for wire in selected_bundle_invalid_failure_schema_matrix() {
+        let mut budget = new_budget();
+        budget.reserve(17).unwrap();
+        // A partially parsed getter is never a KnownOperationFailure marker.
+        assert!(
+            matches!(
+                preflight(
+                    wire.as_bytes(),
+                    &ReplyShape::StrictMetadataSnapshot,
+                    &mut budget
+                ),
+                Err(ErrorKind::MalformedReply)
+            ),
+            "{wire}"
+        );
+        assert_eq!(budget.live, 17);
+        match super::decode(
+            wire.as_bytes(),
+            &ReplyShape::StrictMetadataSnapshot,
+            &mut budget,
+        ) {
+            Err(cause) => assert_eq!(cause, ErrorKind::MalformedReply, "{wire}"),
+            Ok(_) => panic!("malformed failure produced response or attribution: {wire}"),
+        }
+        assert_eq!(budget.live, 17);
+    }
+}
+
+#[test]
+fn selected_bundle_codec_unique_escaped_failure_fields_remain_valid() {
+    for wire in [
+        r#"{"StrictMetadataFailed":{"\u0067etter":"Tail\u0053amples","\u006dessage":"actual failure"}}"#,
+        r#"{"StrictMetadataRejected":{"\u0067etter":"EventBusLayout","\u0072eason":"Unsupported"}}"#,
+        r#"{"StrictMetadataAdmissionRejected":{"\u0073tage":"EventInput"}}"#,
+    ] {
+        assert!(
+            decode(
+                wire.as_bytes(),
+                &ReplyShape::StrictMetadataSnapshot,
+                &mut new_budget()
+            )
+            .is_ok(),
+            "{wire}"
+        );
+    }
 }

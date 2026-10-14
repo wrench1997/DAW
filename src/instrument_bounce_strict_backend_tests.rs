@@ -27,10 +27,11 @@ use crate::{
     },
 };
 use serde_json::{Value, json};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
         Mutex, MutexGuard,
@@ -38,6 +39,7 @@ use std::{
     },
     thread,
 };
+use vst3_host::strict_offline as strict;
 use vst3_host::{MetadataQueryRejection, strict_offline::FailureKind as StrictKind};
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -57,11 +59,41 @@ const MOCK: &str = r#"#!/usr/bin/env python3
 import atexit, base64, json, os, pathlib, select, struct, sys, time
 root = pathlib.Path(__file__).parent
 cfg = json.loads((root / 'config.json').read_text())
+if cfg['fault'] == 'delay_start':
+    # A real child may be cancelled before Python reaches any startup ledger.
+    # This test never creates the dedicated release marker: even a long parent
+    # scheduling pause cannot let Python advance into the ledger. Cancellation
+    # remains immediate and the unchanged EOF cleanup grace reaps this child.
+    while not (root / 'preledger-release').exists():
+        time.sleep(.01)
 ledger = open(root / 'ledger.jsonl', 'a', buffering=1)
 counts = {}
 processed = 0
 sets = []
 reads = []
+audio_activation = {}
+
+if os.name == 'nt':
+    import ctypes, msvcrt
+    from ctypes import wintypes
+    peek_pipe = ctypes.WinDLL('kernel32', use_last_error=True).PeekNamedPipe
+    peek_pipe.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD,
+                          ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(wintypes.DWORD),
+                          ctypes.POINTER(wintypes.DWORD)]
+    peek_pipe.restype = wintypes.BOOL
+
+def stdin_ready():
+    if os.name != 'nt':
+        return bool(select.select([sys.stdin], [], [], .01)[0])
+    available = wintypes.DWORD()
+    if not peek_pipe(msvcrt.get_osfhandle(0), None, 0, None, ctypes.byref(available), None):
+        error = ctypes.get_last_error()
+        if error in (109, 232):
+            return True
+        raise OSError(error, 'PeekNamedPipe failed in mock stdin readiness')
+    if not available.value:
+        time.sleep(.01)
+    return bool(available.value)
 def log(kind, **fields):
     ledger.write(json.dumps(dict(pid=os.getpid(), kind=kind, **fields)) + '\n')
 def unchanged():
@@ -81,8 +113,7 @@ def eof():
 def wait_block(stage):
     log('blocked', stage=stage)
     while not (root / 'release').exists():
-        ready, _, _ = select.select([sys.stdin], [], [], .01)
-        if ready:
+        if stdin_ready():
             extra = os.read(0, 4096)
             if not extra:
                 eof()
@@ -90,103 +121,35 @@ def wait_block(stage):
             log('unexpected_after_block', data=extra.decode('utf-8', 'replace'))
             raise AssertionError('protocol continued after blocked terminal exchange')
     return True
+def wait_bundle_getter_until_terminal_eof(stage):
+    # Unlike the ordinary blocking fault, EOF is a witness of actual host
+    # terminal cleanup, not permission to discard the delivered getter.
+    log('blocked', stage=stage)
+    while True:
+        if stdin_ready():
+            extra = os.read(0, 4096)
+            assert not extra, 'protocol continued while bundle getter was held'
+            log('late_getter_terminal_eof', stage=stage)
+            return
+        if (root / 'release').exists():
+            # Unwind cleanup can release this fixture before a test assertion.
+            log('late_getter_guard_release', stage=stage)
+            return
+
 def parameter(ident):
     return dict(id=ident, name='base '+str(ident), value=.5, min=0., max=1.,
                 default=.25, unit='', step_count=0, can_automate=True,
                 is_read_only=False, is_bypass=False, flags=0)
-while True:
-    line = sys.stdin.buffer.readline()
-    if not line:
-        eof()
-        break
-    command = json.loads(line)
-    name = command if isinstance(command, str) else next(iter(command))
-    args = {} if isinstance(command, str) else command[name]
-    counts[name] = counts.get(name, 0) + 1
-    stage = name + ':' + str(counts[name])
-    log('command', stage=stage, command=command, destination_unchanged=unchanged())
-    assert unchanged(), 'destination published before child exit'
-    if name == 'Shutdown':
-        assert cfg['stage'] != stage, 'Shutdown is write-only, not a reply stage'
-        assert sys.stdin.buffer.read() == b'', 'protocol after Shutdown'
-        eof()
-        if cfg['fault'] == 'nonzero_exit':
-            sys.exit(17)
-        break
-    selected = cfg['stage'] == stage
-    fault = cfg['fault'] if selected else ''
-    if fault == 'death':
-        log('injected_death', stage=stage)
-        os._exit(17)
-    if fault == 'block' and not wait_block(stage):
-        break
-    if fault in ('error', 'wrong', 'malformed'):
-        log('injected_fault', stage=stage, fault=fault)
-        if fault == 'error':
-            reply({'Error': {'message': 'known mock failure '+stage}})
-        elif fault == 'wrong':
-            reply({'PluginInfo': {}} if name != 'LoadPlugin' else {'Success': {'message': 'wrong'}})
-        else:
-            print('{malformed', flush=True)
-        continue
-    success = {'Success': {'message': 'ok'}}
-    if name == 'LoadPlugin':
-        assert args == dict(path=str(root / 'mock-only.vst3'), sample_rate=8000.,
-                           block_size=2048, tempo=120., time_sig_numerator=4,
-                           time_sig_denominator=4, class_id=cfg['uid']), args
-        info = dict(vendor='Mock', name='Mock only', version='1.3.4',
-                    category='Instrument|Synth', uid=cfg['uid'], has_gui=False,
-                    audio_inputs=0, audio_outputs=1, output_channels=cfg['channels'],
-                    has_midi_input=True, has_midi_output=False, compatibility=[])
-        if fault == 'identity': info['uid'] = '0'*32
-        if fault == 'version': info['version'] = 'wrong'
-        if fault == 'category': info['category'] = 'Fx'
-        if fault == 'name': info['name'] = 'different'
-        response = {'PluginInfo': info}
-    elif name == 'SetProcessMode':
-        assert args == {'mode': 'Offline'}, args
-        response = success
-    elif name == 'ResetOriginSupport':
-        support = dict(contract_version=1, max_block_frames=2048, processing=False)
-        if fault == 'support_version': support['contract_version'] = 2
-        if fault == 'support_maximum': support['max_block_frames'] = 128
-        if fault == 'support_processing': support['processing'] = True
-        response = {'ResetOriginSupport': {'support': support}}
-    elif name == 'LoadState':
-        assert args['context'] == 'Project', args
-        assert base64.b64decode(args['data'], validate=True) == bytes([1, 2, 3]), args
-        response = success
-    elif name in ('StartProcessing', 'StopProcessing'):
-        response = success
-    elif name == 'NativeDirtyRevision':
-        response = {'NativeDirtyRevision': {'revision': 77}}
-    elif name == 'GetAllParameters':
-        params = [parameter(17), parameter(23)]
-        if fault == 'catalog_missing': params.pop()
-        if fault == 'catalog_readonly': params[1]['is_read_only'] = True
-        if fault == 'catalog_duplicate': params.append(parameter(17))
-        response = {'Parameters': {'params': params}}
-    elif name == 'SetParameter':
-        assert [args['id'], args['value']] == cfg['bases'][len(sets)], args
-        assert not reads, 'setter after readback'
-        sets.append(args['id'])
-        response = success
-    elif name == 'GetParameter':
-        assert sets == [17, 23], sets
-        assert args['id'] == [17, 23][len(reads)], args
-        reads.append(args['id'])
-        # Deliberately different raw f64 that projects to the same captured f32.
-        value = .1 if args['id'] == 17 else .75
-        if fault == 'base_mismatch': value = .100001
-        if fault == 'base_negative': value = -.001
-        if fault == 'base_above_one': value = 1.001
-        if fault == 'base_nan': value = 'NaN'
-        if fault == 'base_inf': value = 'inf'
-        response = {'ParameterValue': {'value': value}}
-    elif name == 'CheckedAudioBusLayout':
+getter_counts = {}
+def metadata_reply(name, fault, stage):
+    if name == 'CheckedAudioBusLayout':
         layout = dict(inputs=[dict(bus) for bus in cfg.get('inputs', [])],
                       outputs=[dict(channel_count=cfg['channels'], is_main=True, active=True)] +
                               [dict(bus) for bus in cfg.get('extra_outputs', [])])
+        if cfg.get('selected_stereo', False):
+            for direction, buses in [('Input', layout['inputs']), ('Output', layout['outputs'])]:
+                for index, bus in enumerate(buses):
+                    bus['active'] = audio_activation.get((direction, index), True)
         if fault == 'audio_aux': layout['outputs'][0]['is_main'] = False
         if fault == 'audio_unknown': layout['outputs'][0]['active'] = None
         if fault == 'audio_inactive': layout['outputs'][0]['active'] = False
@@ -213,7 +176,8 @@ while True:
         log('audio_topology', stage=stage, layout=layout)
         response = {'CheckedAudioBusLayout': {'layout': layout}}
     elif name == 'EventBusLayout':
-        layout = dict(inputs=[dict(channel_count=16, is_main=True, active=True)], outputs=[])
+        layout = dict(inputs=[dict(channel_count=16, is_main=True, active=True)],
+                      outputs=[dict(channel_count=16, is_main=True, active=True)] if cfg.get('selected_stereo', False) else [])
         if fault == 'event_aux': layout['inputs'][0]['is_main'] = False
         if fault == 'event_unknown': layout['inputs'][0]['active'] = None
         if fault == 'event_output': layout['outputs'] = [dict(channel_count=1, is_main=True, active=True)]
@@ -222,13 +186,172 @@ while True:
         response = {'LatencySamples': {'samples': cfg['latency'] + (1 if fault == 'latency_drift' else 0)}}
     elif name == 'TailSamples':
         response = {'TailSamples': {'samples': 0 if fault == 'tail_drift' else 4294967295}}
+    return response
+while True:
+    line = sys.stdin.buffer.readline()
+    if not line:
+        eof()
+        break
+    command = json.loads(line)
+    name = command if isinstance(command, str) else next(iter(command))
+    args = {} if isinstance(command, str) else command[name]
+    counts[name] = counts.get(name, 0) + 1
+    stage = name + ':' + str(counts[name])
+    log('command', stage=stage, command=command, destination_unchanged=unchanged())
+    assert unchanged(), 'destination published before child exit'
+    if name == 'Shutdown':
+        assert cfg['stage'] != stage, 'Shutdown is write-only, not a reply stage'
+        assert sys.stdin.buffer.read() == b'', 'protocol after Shutdown'
+        eof()
+        if cfg['fault'] == 'delay_exit':
+            log('shutdown_received_before_natural_delay', stage=stage)
+            # A genuine child teardown taking longer than the old 100 ms grace.
+            time.sleep(.35)
+            log('natural_exit_ready', stage=stage)
+        if cfg['fault'] == 'nonzero_exit':
+            sys.exit(17)
+        break
+    selected = cfg['stage'] == stage
+    fault = cfg['fault'] if selected else ''
+    if fault == 'death':
+        log('injected_death', stage=stage)
+        os._exit(17)
+    if fault == 'block' and not wait_block(stage):
+        break
+    if fault in ('error', 'wrong', 'malformed', 'limit'):
+        log('injected_fault', stage=stage, fault=fault)
+        if fault == 'error':
+            reply({'Error': {'message': 'known mock failure '+stage}})
+        elif fault == 'wrong':
+            reply({'PluginInfo': {}} if name != 'LoadPlugin' else {'Success': {'message': 'wrong'}})
+        elif fault == 'malformed':
+            print('{malformed', flush=True)
+        else:
+            # Exceed the existing text cap, without changing any transport budget.
+            reply({'Error': {'message': 'x' * (64 * 1024 + 1)}})
+        continue
+    success = {'Success': {'message': 'ok'}}
+    if name == 'LoadPlugin':
+        assert args == dict(path=str(root / 'mock-only.vst3'), sample_rate=8000.,
+                           block_size=2048, tempo=120., time_sig_numerator=4,
+                           time_sig_denominator=4, class_id=cfg['uid']), args
+        info = dict(vendor='Mock', name='Mock only', version=cfg.get('version', '1.3.4'),
+                    category='Instrument|Synth', uid=cfg['uid'], has_gui=False,
+                    audio_inputs=0, audio_outputs=1+len(cfg.get('extra_outputs', [])), output_channels=cfg['channels'],
+                    has_midi_input=True, has_midi_output=cfg.get('selected_stereo', False), compatibility=[])
+        if fault == 'identity': info['uid'] = '0'*32
+        if fault == 'version': info['version'] = 'wrong'
+        if fault == 'category': info['category'] = 'Fx'
+        if fault == 'name': info['name'] = 'different'
+        response = {'PluginInfo': info}
+    elif name == 'SetProcessMode':
+        assert args == {'mode': 'Offline'}, args
+        response = success
+    elif name == 'ResetOriginSupport':
+        support = dict(contract_version=1, max_block_frames=2048, processing=False)
+        if fault == 'support_version': support['contract_version'] = 2
+        if fault == 'support_maximum': support['max_block_frames'] = 128
+        if fault == 'support_processing': support['processing'] = True
+        response = {'ResetOriginSupport': {'support': support}}
+    elif name == 'LoadState':
+        assert args['context'] == 'Project', args
+        assert base64.b64decode(args['data'], validate=True) == bytes([1, 2, 3]), args
+        audio_activation.clear()
+        response = success
+    elif name == 'SetBusActive':
+        assert args['media_type'] == 'Audio', 'event outputs must not be disabled'
+        assert args['direction'] in ('Input', 'Output')
+        maximum = len(cfg.get('inputs', [])) if args['direction'] == 'Input' else 1+len(cfg.get('extra_outputs', []))
+        assert 0 <= args['bus_index'] < maximum
+        if fault != 'ack_without_participation':
+            audio_activation[(args['direction'], args['bus_index'])] = args['active']
+        log('audio_ack', direction=args['direction'], index=args['bus_index'], active=args['active'])
+        response = success
+    elif name in ('StartProcessing', 'StopProcessing'):
+        response = success
+    elif name == 'NativeDirtyRevision':
+        response = {'NativeDirtyRevision': {'revision': 77}}
+    elif name == 'GetAllParameters':
+        params = [parameter(17), parameter(23)]
+        if fault == 'catalog_missing': params.pop()
+        if fault == 'catalog_readonly': params[1]['is_read_only'] = True
+        if fault == 'catalog_duplicate': params.append(parameter(17))
+        if fault == 'catalog_limit': params = [parameter(index) for index in range(4097)]
+        if fault == 'catalog_max': params = [parameter(index) for index in range(4096)]
+        if fault == 'catalog_name_limit': params[0]['name'] = 'x' * 1025
+        if fault == 'catalog_unit_limit': params[0]['unit'] = 'x' * 1025
+        response = {'Parameters': {'params': params}}
+    elif name == 'SetParameter':
+        assert [args['id'], args['value']] == cfg['bases'][len(sets)], args
+        assert not reads, 'setter after readback'
+        sets.append(args['id'])
+        response = success
+    elif name == 'GetParameter':
+        assert sets == [base[0] for base in cfg['bases']], sets
+        assert args['id'] == cfg['bases'][len(reads)][0], args
+        reads.append(args['id'])
+        # Deliberately different raw f64 that projects to the same captured f32.
+        value = .1 if args['id'] == 17 else .75
+        if fault == 'base_mismatch': value = .100001
+        if fault == 'base_negative': value = -.001
+        if fault == 'base_above_one': value = 1.001
+        if fault == 'base_nan': value = 'NaN'
+        if fault == 'base_inf': value = 'inf'
+        response = {'ParameterValue': {'value': value}}
+    elif name in ('CheckedAudioBusLayout', 'EventBusLayout', 'LatencySamples', 'TailSamples'):
+        getter_counts[name] = getter_counts.get(name, 0) + 1
+        log('metadata_getter', getter=name, stage=name+':'+str(getter_counts[name]), wire_stage=stage)
+        response = metadata_reply(name, fault, stage)
+    elif name == 'StrictMetadataSnapshot':
+        assert args == {'policy': 'Kontakt841SelectedStereo'}, args
+        if cfg['uid'] != '5653544E694B386B6F6E74616B742038' or cfg.get('version') != '8.4.1':
+            response = {'StrictMetadataAdmissionRejected': {'stage': 'FactoryIdentity'}}
+        else:
+            snapshot = {}
+            response = None
+            for getter, field in [('CheckedAudioBusLayout', 'audio'), ('EventBusLayout', 'events'), ('LatencySamples', 'latency_samples'), ('TailSamples', 'tail_samples')]:
+                getter_counts[getter] = getter_counts.get(getter, 0) + 1
+                inner_stage = getter+':'+str(getter_counts[getter])
+                log('metadata_getter', getter=getter, stage=inner_stage, wire_stage=stage)
+                inner_fault = cfg['fault'] if cfg['stage'] == inner_stage else ''
+                if inner_fault == 'death': os._exit(17)
+                if inner_fault == 'late_after_eof':
+                    wait_bundle_getter_until_terminal_eof(inner_stage)
+                    log('late_getter_completed', stage=inner_stage)
+                if inner_fault == 'block' and not wait_block(inner_stage):
+                    response = None
+                    break
+                if inner_fault == 'error':
+                    response = {'StrictMetadataFailed': {'getter': getter, 'message': 'known mock failure '+inner_stage}}
+                    break
+                if inner_fault == 'limit':
+                    response = {'StrictMetadataFailed': {'getter': getter, 'message': 'x' * (64 * 1024 + 1)}}
+                    break
+                if inner_fault == 'malformed':
+                    print('{malformed', flush=True)
+                    response = None
+                    break
+                if inner_fault == 'wrong':
+                    response = {'PluginInfo': {}}
+                    break
+                value = metadata_reply(getter, inner_fault, inner_stage)[getter]
+                snapshot[field] = value['layout'] if getter in ('CheckedAudioBusLayout', 'EventBusLayout') else value['samples']
+                if getter == 'EventBusLayout':
+                    inputs = snapshot['events']['inputs']
+                    if len(inputs) != 1 or not inputs[0]['is_main'] or inputs[0]['active'] is not True or not 1 <= inputs[0]['channel_count'] <= 16:
+                        response = {'StrictMetadataAdmissionRejected': {'stage': 'EventInput'}}
+                        break
+            else:
+                response = {'StrictMetadataSnapshot': {'snapshot': snapshot}}
+            if response is None:
+                break
     elif name == 'SendMidiAt':
         assert 0 <= args['sample_offset'] < 128, args
         event = args['event']
         assert len(event) == 1 and next(iter(event)) in ('NoteOn', 'NoteOff'), event
         response = success
     elif name == 'Process':
-        assert reads == [17, 23], reads
+        assert reads == [base[0] for base in cfg['bases']], reads
         assert args['frames'] == 128, args
         input_channels = sum(bus['channel_count'] for bus in cfg.get('inputs', []) if bus['active'])
         assert len(args['inputs']) == input_channels, args
@@ -254,6 +377,28 @@ while True:
         raise AssertionError('forbidden command '+name)
     if fault.startswith('metadata_'):
         response = {'MetadataQueryRejected': {'reason': fault[len('metadata_'):]}}
+    if cfg['fault'] == 'late_after_eof' and name == 'StrictMetadataSnapshot':
+        assert 'StrictMetadataSnapshot' in response, response
+        # Complete all four fields after the real host stopped. Cleanup may
+        # already have closed stdout; record the complete wire and attempted
+        # write independently, never call that a delivered or accepted reply.
+        encoded = json.dumps(response, separators=(',', ':'))
+        log('late_complete_snapshot', stage=stage, snapshot=response,
+            encoded_bytes=len(encoded.encode('utf-8')))
+        try:
+            print(encoded, flush=True)
+        except OSError as error:
+            # Windows may report EINVAL rather than BrokenPipeError when the
+            # real host closes this pipe. Preserve the actual write outcome;
+            # the error alone is not evidence that a reply was delivered.
+            log('late_snapshot_write_failed', stage=stage,
+                error_type=type(error).__name__, errno=error.errno,
+                winerror=getattr(error, 'winerror', None),
+                message=str(error))
+            sys.stdout = open(os.devnull, 'w')
+        else:
+            log('late_snapshot_written', stage=stage)
+        break
     reply(response)
     log('reply', stage=stage)
     if cfg['fault'] == 'block_stdin' and stage == 'ResetOriginSupport:1':
@@ -276,6 +421,8 @@ struct Mock {
     input: Option<(usize, bool, bool)>,
     // Extra outputs retain their declared role while remaining known inactive.
     extra_outputs: Vec<(usize, bool)>,
+    selected_stereo: bool,
+    empty_bases: bool,
 }
 impl Mock {
     fn new(fault: &str, stage: &str) -> Self {
@@ -288,6 +435,7 @@ impl Mock {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
+        #[cfg(target_os = "linux")]
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
         let this = Self {
             root,
@@ -296,6 +444,8 @@ impl Mock {
             blocked_stdin: fault == "block_stdin",
             input: None,
             extra_outputs: Vec::new(),
+            selected_stereo: false,
+            empty_bases: false,
         };
         this.write(
             "config.json",
@@ -307,6 +457,7 @@ impl Mock {
             .as_slice(),
         );
         this.write("helper.py", MOCK.as_bytes());
+        #[cfg(target_os = "linux")]
         fs::set_permissions(
             this.root.join("helper.py"),
             fs::Permissions::from_mode(0o700),
@@ -336,13 +487,31 @@ impl Mock {
         self
     }
     fn write(&self, name: &str, bytes: &[u8]) {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(self.root.join(name))
-            .unwrap();
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(target_os = "linux")]
+        options.mode(0o600);
+        let mut file = options.open(self.root.join(name)).unwrap();
         file.write_all(bytes).unwrap();
+    }
+    fn with_selected_stereo(mut self) -> Self {
+        self = self.with_topology(None, vec![(2, true); 31]);
+        self.selected_stereo = true;
+        let path = self.root.join("config.json");
+        let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        config["uid"] = json!("5653544E694B386B6F6E74616B742038");
+        config["version"] = json!("8.4.1");
+        config["selected_stereo"] = json!(true);
+        fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+        self
+    }
+    fn with_empty_bases(mut self) -> Self {
+        self.empty_bases = true;
+        let path = self.root.join("config.json");
+        let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        config["bases"] = json!([]);
+        fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+        self
     }
     fn output(&self) -> PathBuf {
         self.root.join("render.wav")
@@ -386,10 +555,13 @@ impl Mock {
             pids.iter().all(|pid| *pid == pids[0]),
             "candidate replayed or replaced"
         );
+        #[cfg(target_os = "linux")]
         assert!(
             !Path::new(&format!("/proc/{}", pids[0])).exists(),
             "child not reaped"
         );
+        #[cfg(windows)]
+        assert_windows_pid_exited(pids[0]);
         assert!(
             ledger
                 .iter()
@@ -397,6 +569,24 @@ impl Mock {
                 .all(|v| v)
         );
         assert!(!ledger.iter().any(|v| v["kind"] == "unexpected_after_block"));
+    }
+    fn assert_pre_dispatch_cancel_reaped(&self) {
+        let audit = self.audit();
+        let disposal = audit
+            .iter()
+            .rev()
+            .find(|entry| entry["kind"] == "disposal")
+            .expect("pre-dispatch cancellation must have an owner disposal observation");
+        assert!(
+            concrete_child_reap_evidence(disposal),
+            "one spawned OS child must be concretely reaped: {disposal:?}"
+        );
+        // CancelAfterSpawn has no startup handshake: Python may not yet have
+        // opened its ledger when the same owned child is killed and reaped.
+        // When startup did run, retain the independent PID exit check as well.
+        if !self.ledger().is_empty() {
+            self.assert_reaped();
+        }
     }
     fn assert_terminal_at(&self, stage: &str) {
         let commands = self.commands();
@@ -420,7 +610,23 @@ impl Mock {
             usize::from(stopped)
         );
         if stopped {
-            assert_eq!(commands[commands.len() - 2], "StopProcessing:1");
+            if self.selected_stereo {
+                let layouts = commands
+                    .iter()
+                    .filter(|stage| stage.starts_with("CheckedAudioBusLayout:"))
+                    .count();
+                assert_eq!(
+                    commands[commands.len() - 3..],
+                    [
+                        "StopProcessing:1".to_owned(),
+                        format!("CheckedAudioBusLayout:{layouts}"),
+                        "Shutdown:1".to_owned(),
+                    ],
+                    "selected cleanup must verify its complete layout after Stop, before Shutdown"
+                );
+            } else {
+                assert_eq!(commands[commands.len() - 2], "StopProcessing:1");
+            }
         }
         assert!(self.ledger().iter().any(|v| v["kind"] == "exit"));
         self.assert_reaped();
@@ -445,7 +651,11 @@ impl Mock {
             enabled: true,
             bypass: false,
             wet: 1.0,
-            parameters: [(17, 0.25), (23, 0.5)].into(),
+            parameters: if self.empty_bases {
+                Default::default()
+            } else {
+                [(17, 0.25), (23, 0.5)].into()
+            },
             opaque_state: vec![9, 9],
             runtime_status: PluginRuntimeStatus::Loaded,
             midi_ports: Default::default(),
@@ -474,8 +684,18 @@ impl Mock {
         };
         let state = BouncePluginState {
             metadata: BouncePluginMetadata {
-                class_uid: UID.into(),
-                version: "1.3.4".into(),
+                class_uid: if self.selected_stereo {
+                    "5653544E694B386B6F6E74616B742038"
+                } else {
+                    UID
+                }
+                .into(),
+                version: if self.selected_stereo {
+                    "8.4.1"
+                } else {
+                    "1.3.4"
+                }
+                .into(),
                 name: "Mock only".into(),
                 category: "Instrument|Synth".into(),
                 input_buses: self
@@ -491,7 +711,11 @@ impl Mock {
                     }))
                     .collect(),
                 event_input_buses: vec![(16, true, Some(true))],
-                event_output_buses: vec![],
+                event_output_buses: if self.selected_stereo {
+                    vec![(16, true, Some(true))]
+                } else {
+                    vec![]
+                },
                 latency_samples: self.latency,
                 tail_samples: u32::MAX,
             },
@@ -500,7 +724,11 @@ impl Mock {
             } else {
                 vec![1, 2, 3]
             },
-            parameter_bases: [(17, 0.1), (23, 0.75)].into(),
+            parameter_bases: if self.empty_bases {
+                Default::default()
+            } else {
+                [(17, 0.1), (23, 0.75)].into()
+            },
             native_generation: 2,
             native_dirty_revision: 9,
         };
@@ -536,13 +764,55 @@ fn read_lines(path: &Path) -> Vec<Value> {
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect()
 }
+
+fn concrete_child_reap_evidence(disposal: &Value) -> bool {
+    disposal["kind"] == "disposal"
+        && disposal["terminated"] == true
+        && disposal["destination_unchanged"] == true
+        && disposal["client_spawn_successes"].as_u64() == Some(1)
+        && disposal["child_reaped"] == true
+        && disposal["child_reap_status"]
+            .as_str()
+            .is_some_and(|status| !status.is_empty())
+}
+
+#[cfg(windows)]
+fn assert_windows_pid_exited(pid: u64) {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use winapi::um::{
+        processthreadsapi::OpenProcess,
+        synchapi::WaitForSingleObject,
+        winbase::WAIT_OBJECT_0,
+        winnt::{PROCESS_QUERY_LIMITED_INFORMATION, SYNCHRONIZE},
+    };
+    let process = unsafe {
+        OpenProcess(
+            SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            0,
+            u32::try_from(pid).unwrap(),
+        )
+    };
+    if process.is_null() {
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(87),
+            "PID absence must be authoritative, not an access error"
+        );
+        return;
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(process.cast()) };
+    assert_eq!(
+        unsafe { WaitForSingleObject(process.as_raw_handle().cast(), 0) },
+        WAIT_OBJECT_0,
+        "actual Windows child is still alive after reported disposal"
+    );
+}
 fn audit(root: &Path, value: Value) {
-    let mut file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(0o600)
-        .open(root.join("audit.jsonl"))
-        .unwrap();
+    let mut options = OpenOptions::new();
+    options.append(true).create(true);
+    #[cfg(target_os = "linux")]
+    options.mode(0o600);
+    let mut file = options.open(root.join("audit.jsonl")).unwrap();
     writeln!(file, "{value}").unwrap();
 }
 fn wait_until(mut predicate: impl FnMut() -> bool) {
@@ -592,6 +862,8 @@ impl Audited {
             }
             _ => StrictBackend::new(),
         };
+        #[cfg(windows)]
+        let backend = backend.with_python_mock();
         Self {
             backend,
             root,
@@ -649,10 +921,14 @@ impl RenderBackend for Audited {
             }
         }
         let observation = self.backend.dispose(deadline);
+        let (client_spawn_successes, child_reap_status) = self.backend.test_child_completion();
         audit(
             &self.root,
             json!({ "kind": "disposal", "terminated": observation.terminated,
             "destination_unchanged": fs::read(self.root.join("render.wav")).unwrap() == SENTINEL,
+            "client_spawn_successes": client_spawn_successes,
+            "child_reaped": child_reap_status.is_some(),
+            "child_reap_status": child_reap_status.map(|status| status.to_string()),
             "error": observation.error.as_ref().map(|e| format!("{:?}", e.kind)),
             "diagnostics": observation.diagnostics }),
         );
@@ -734,6 +1010,220 @@ fn failed(outcome: RenderOutcome) -> RenderFailure {
 fn normal_job(mock: &Mock) -> Job<'_> {
     Job::start(mock, Hook::None, Duration::from_secs(20))
 }
+fn selected_source_project_snapshot(project: &Project) -> Value {
+    serde_json::to_value(project).unwrap()
+}
+
+#[test]
+fn strict_clone_selected_stereo_reselects_after_state_and_preserves_complete_declared_midi_output()
+{
+    let _serial = serial();
+    let mock = Mock::new("", "").with_selected_stereo();
+    let (project, capture) = mock.capture();
+    let project_before = selected_source_project_snapshot(&project);
+    let metadata = capture.metadata().clone();
+    let state = capture.state.opaque_state.clone();
+    let bases = capture.state.parameter_bases.clone();
+    let RenderOutcome::Complete(report) = normal_job(&mock).finish() else {
+        panic!("selected stereo mock failed");
+    };
+    assert_eq!(report.frames, 128);
+    assert_eq!(metadata.output_buses.len(), 32);
+    assert_eq!(metadata.event_output_buses, [(16, true, Some(true))]);
+    let ledger = mock.ledger();
+    let acknowledgments: Vec<_> = ledger
+        .iter()
+        .filter(|entry| entry["kind"] == "audio_ack")
+        .collect();
+    assert_eq!(acknowledgments.len(), 32);
+    for (index, ack) in acknowledgments.iter().enumerate() {
+        assert_eq!(ack["direction"], "Output");
+        assert_eq!(ack["index"], index);
+        assert_eq!(ack["active"], index == 0);
+    }
+    let commands = mock.commands();
+    let load = commands
+        .iter()
+        .position(|stage| stage == "LoadState:1")
+        .unwrap();
+    let first_ack = commands
+        .iter()
+        .position(|stage| stage == "SetBusActive:1")
+        .unwrap();
+    let last_ack = commands
+        .iter()
+        .position(|stage| stage == "SetBusActive:32")
+        .unwrap();
+    let start = commands
+        .iter()
+        .position(|stage| stage == "StartProcessing:1")
+        .unwrap();
+    assert!(load < first_ack && last_ack < start);
+    let mut expected: Vec<String> = [
+        "LoadPlugin:1",
+        "SetProcessMode:1",
+        "ResetOriginSupport:1",
+        "LoadState:1",
+        "CheckedAudioBusLayout:1",
+        "ResetOriginSupport:2",
+        "CheckedAudioBusLayout:2",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    expected.extend((1..=32).map(|index| format!("SetBusActive:{index}")));
+    expected.extend(
+        [
+            "CheckedAudioBusLayout:3",
+            "CheckedAudioBusLayout:4",
+            "StartProcessing:1",
+            "CheckedAudioBusLayout:5",
+            "NativeDirtyRevision:1",
+            "GetAllParameters:1",
+            "SetParameter:1",
+            "SetParameter:2",
+            "GetParameter:1",
+            "GetParameter:2",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    let mut next_layout = 6;
+    for metadata in 1..=5 {
+        expected.push(format!("StrictMetadataSnapshot:{metadata}"));
+        if metadata == 2 || metadata == 4 {
+            let process = if metadata == 2 { 1 } else { 2 };
+            expected.extend([
+                format!("SendMidiAt:{process}"),
+                format!("CheckedAudioBusLayout:{next_layout}"),
+                format!("Process:{process}"),
+                format!("CheckedAudioBusLayout:{}", next_layout + 1),
+            ]);
+            next_layout += 2;
+        }
+    }
+    expected.extend([
+        "StopProcessing:1".to_owned(),
+        format!("CheckedAudioBusLayout:{next_layout}"),
+        "Shutdown:1".to_owned(),
+    ]);
+    assert_eq!(
+        commands, expected,
+        "selected clone must retain complete layout checks around Start, each Q128 Process, and after Stop before Shutdown"
+    );
+    assert!(
+        ledger
+            .iter()
+            .filter(|entry| entry["kind"] == "command")
+            .all(|entry| {
+                entry["command"]
+                    .get("SetBusActive")
+                    .is_none_or(|args| args["media_type"] == "Audio")
+            }),
+        "declared MIDI output must survive without being disabled"
+    );
+    let wav = crate::wav::read_wav(mock.output()).unwrap();
+    assert_eq!(wav.frame_count(), 128);
+    assert!(
+        wav.samples
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .all(|frame| *frame == [0.25, -0.5])
+    );
+    assert_eq!(capture.state.opaque_state, state);
+    assert_eq!(capture.state.parameter_bases, bases);
+    assert_eq!(selected_source_project_snapshot(&project), project_before);
+    mock.assert_cooperative(true);
+}
+
+#[test]
+fn strict_selected_stereo_owner_ack_unknown_or_complete_descriptor_drift_cannot_publish() {
+    let _serial = serial();
+    for (fault, stage) in [
+        ("error", "SetBusActive:9"),
+        ("ack_without_participation", "SetBusActive:9"),
+        ("audio_aux_unknown", "CheckedAudioBusLayout:3"),
+        ("audio_aux_drift", "CheckedAudioBusLayout:3"),
+        ("event_unknown", "EventBusLayout:1"),
+    ] {
+        let mock = Mock::new(fault, stage).with_selected_stereo();
+        let (project, capture) = mock.capture();
+        let original = selected_source_project_snapshot(&project);
+        let state = capture.state.opaque_state.clone();
+        let failure = failed(normal_job(&mock).finish());
+        assert!(matches!(
+            failure.kind,
+            FailureKind::Backend | FailureKind::Invalid
+        ));
+        if fault == "ack_without_participation" {
+            assert_typed(&failure, StrictKind::Shape, BackendDelivery::NotSent);
+            let backend = failure.backend.as_ref().unwrap();
+            assert_eq!(
+                backend.strict_stage,
+                Some("prepare.select_main_stereo_output")
+            );
+            assert_eq!(
+                backend.last_wire_request, None,
+                "successful final layout query is not a failed wire request"
+            );
+            mock.assert_terminal_at("CheckedAudioBusLayout:3");
+        }
+        assert!(
+            !mock
+                .commands()
+                .iter()
+                .any(|command| command.starts_with("Process:"))
+        );
+        mock.assert_unchanged();
+        mock.assert_reaped();
+        assert_eq!(selected_source_project_snapshot(&project), original);
+        assert_eq!(capture.state.opaque_state, state);
+    }
+}
+
+#[test]
+fn strict_selected_declared_midi_output_actual_events_or_loss_reject_every_discarded_kept_and_padding_block()
+ {
+    let _serial = serial();
+    for process in 1..=4 {
+        for fault in ["output_event", "output_loss"] {
+            let stage = format!("Process:{process}");
+            let mock = Mock::with_shape(fault, &stage, 2, 257).with_selected_stereo();
+            let failure = failed(normal_job(&mock).finish());
+            assert!(matches!(
+                failure.kind,
+                FailureKind::Backend | FailureKind::Invalid
+            ));
+            assert_eq!(
+                mock.commands()
+                    .iter()
+                    .filter(|command| command.starts_with("Process:"))
+                    .count(),
+                process
+            );
+            mock.assert_unchanged();
+            mock.assert_reaped();
+        }
+    }
+}
+
+#[test]
+fn strict_selected_stereo_cancel_during_sdk_ack_reaps_without_source_or_destination_changes() {
+    let _serial = serial();
+    let mock = Mock::new("block", "SetBusActive:9").with_selected_stereo();
+    let (project, capture) = mock.capture();
+    let original = selected_source_project_snapshot(&project);
+    let state = capture.state.opaque_state.clone();
+    let job = normal_job(&mock);
+    mock.wait_stage("blocked", "SetBusActive:9");
+    assert!(job.control.export.clone().cancel());
+    let failure = failed(job.finish());
+    assert_eq!(failure.kind, FailureKind::Cancelled);
+    mock.assert_terminal_at("SetBusActive:9");
+    assert_eq!(selected_source_project_snapshot(&project), original);
+    assert_eq!(capture.state.opaque_state, state);
+}
 fn assert_typed(failure: &RenderFailure, kind: StrictKind, delivery: BackendDelivery) {
     let backend = failure
         .backend
@@ -749,6 +1239,60 @@ fn assert_typed(failure: &RenderFailure, kind: StrictKind, delivery: BackendDeli
             _ => FailureKind::Backend,
         }
     );
+}
+
+fn assert_exchange_context(
+    failure: &RenderFailure,
+    owner_stage: &'static str,
+    operation: &'static str,
+) {
+    let backend = failure
+        .backend
+        .as_ref()
+        .expect("typed strict backend evidence");
+    assert_eq!(backend.strict_stage, Some(owner_stage), "{failure:?}");
+    assert_eq!(
+        backend.last_wire_request,
+        Some(vst3_host::strict_offline::RequestContext {
+            operation,
+            media_type: None,
+            direction: None,
+            bus_index: None,
+        }),
+        "{failure:?}"
+    );
+}
+
+fn ordinary_owner_stage(stage: &str) -> (&'static str, &'static str) {
+    match stage.split_once(':').unwrap() {
+        ("LoadPlugin", _) => ("prepare.load_plugin", "LoadPlugin"),
+        ("SetProcessMode", _) => ("prepare.set_offline", "SetProcessMode"),
+        ("ResetOriginSupport", _) => ("prepare.reset_origin_support", "ResetOriginSupport"),
+        ("LoadState", _) => ("prepare.load_state", "LoadState"),
+        ("StartProcessing", _) => ("prepare.start_processing", "StartProcessing"),
+        ("NativeDirtyRevision", _) => ("prepare.native_dirty_revision", "NativeDirtyRevision"),
+        ("GetAllParameters", _) => ("prepare.parameters", "GetAllParameters"),
+        ("SetParameter", _) => ("prepare.set_parameter", "SetParameter"),
+        ("GetParameter", _) => ("prepare.parameter_readback", "GetParameter"),
+        ("CheckedAudioBusLayout", "1") => (
+            "prepare.final_metadata.checked_audio_layout",
+            "CheckedAudioBusLayout",
+        ),
+        ("EventBusLayout", "1") => ("prepare.final_metadata.event_layout", "EventBusLayout"),
+        ("LatencySamples", "1") => ("prepare.final_metadata.latency_samples", "LatencySamples"),
+        ("TailSamples", "1") => ("prepare.final_metadata.tail_samples", "TailSamples"),
+        ("CheckedAudioBusLayout", _) => (
+            "render.metadata.checked_audio_layout",
+            "CheckedAudioBusLayout",
+        ),
+        ("EventBusLayout", _) => ("render.metadata.event_layout", "EventBusLayout"),
+        ("LatencySamples", _) => ("render.metadata.latency_samples", "LatencySamples"),
+        ("TailSamples", _) => ("render.metadata.tail_samples", "TailSamples"),
+        ("SendMidiAt", _) => ("render.send_midi", "SendMidiAt"),
+        ("Process", _) => ("render.process", "Process"),
+        ("StopProcessing", _) => ("dispose.stop_processing", "StopProcessing"),
+        other => panic!("missing fixed owner-stage oracle: {other:?}"),
+    }
 }
 
 #[test]
@@ -872,7 +1416,7 @@ fn strict_clone_every_reply_stage_error_wrong_malformed_or_death_seals_without_r
         "StopProcessing:1",
     ];
     for stage in stages {
-        for fault in ["error", "wrong", "malformed", "death"] {
+        for fault in ["error", "wrong", "malformed", "death", "limit"] {
             let mock = Mock::new(fault, stage);
             let failure = failed(normal_job(&mock).finish());
             match fault {
@@ -894,6 +1438,14 @@ fn strict_clone_every_reply_stage_error_wrong_malformed_or_death_seals_without_r
                     StrictKind::MalformedReply,
                     BackendDelivery::MayHaveApplied,
                 ),
+                "limit" => {
+                    assert_typed(&failure, StrictKind::Limit, BackendDelivery::MayHaveApplied);
+                    assert_eq!(
+                        failure.backend.as_ref().unwrap().limit_evidence,
+                        None,
+                        "generic Error message cap is not a catalog guard"
+                    );
+                }
                 "death" => {
                     let backend = failure.backend.as_ref().unwrap();
                     assert!(
@@ -907,8 +1459,462 @@ fn strict_clone_every_reply_stage_error_wrong_malformed_or_death_seals_without_r
                 }
                 _ => unreachable!(),
             }
+            let (owner_stage, operation) = ordinary_owner_stage(stage);
+            assert_exchange_context(&failure, owner_stage, operation);
             mock.assert_terminal_at(stage);
         }
+    }
+}
+
+#[test]
+fn strict_clone_parameter_catalog_limit_retains_actual_request_and_seals_without_setter() {
+    let _serial = serial();
+    let mock = Mock::new("catalog_limit", "GetAllParameters:1");
+    assert_eq!(mock.capture().1.state.parameter_bases.len(), 2);
+    let failure = failed(normal_job(&mock).finish());
+    assert_typed(&failure, StrictKind::Limit, BackendDelivery::MayHaveApplied);
+    assert_exchange_context(&failure, "prepare.parameters", "GetAllParameters");
+    assert_eq!(
+        failure.backend.as_ref().unwrap().limit_evidence,
+        Some(vst3_host::strict_offline::LimitEvidence {
+            site: vst3_host::strict_offline::LimitSite::ParameterCatalogEntries,
+            observed_at_least: 4097,
+            maximum: 4096,
+        })
+    );
+    mock.assert_terminal_at("GetAllParameters:1");
+}
+
+#[test]
+fn strict_clone_nonempty_catalog_boundary_replays_bases_after_full_catalog_and_text_limits_reap() {
+    let _serial = serial();
+    let exact = Mock::new("catalog_max", "GetAllParameters:1");
+    let (_, captured) = exact.capture();
+    assert_eq!(
+        captured
+            .state
+            .parameter_bases
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        [17, 23]
+    );
+    assert!(matches!(
+        normal_job(&exact).finish(),
+        RenderOutcome::Complete(_)
+    ));
+    let commands = exact.commands();
+    let catalog = commands
+        .iter()
+        .position(|stage| stage == "GetAllParameters:1")
+        .unwrap();
+    let first_setter = commands
+        .iter()
+        .position(|stage| stage == "SetParameter:1")
+        .unwrap();
+    let final_setter = commands
+        .iter()
+        .position(|stage| stage == "SetParameter:2")
+        .unwrap();
+    let first_readback = commands
+        .iter()
+        .position(|stage| stage == "GetParameter:1")
+        .unwrap();
+    assert!(catalog < first_setter && first_setter < final_setter && final_setter < first_readback);
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|stage| stage.starts_with("SetParameter:"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|stage| stage.starts_with("GetParameter:"))
+            .count(),
+        2
+    );
+    exact.assert_cooperative(true);
+    for fault in ["catalog_name_limit", "catalog_unit_limit"] {
+        let mock = Mock::new(fault, "GetAllParameters:1");
+        assert_eq!(mock.capture().1.state.parameter_bases.len(), 2);
+        let failure = failed(normal_job(&mock).finish());
+        assert_typed(&failure, StrictKind::Limit, BackendDelivery::MayHaveApplied);
+        assert_exchange_context(&failure, "prepare.parameters", "GetAllParameters");
+        assert_eq!(
+            failure.backend.as_ref().unwrap().limit_evidence,
+            Some(vst3_host::strict_offline::LimitEvidence {
+                site: vst3_host::strict_offline::LimitSite::ParameterTextBytes,
+                observed_at_least: 1025,
+                maximum: 1024,
+            })
+        );
+        mock.assert_terminal_at("GetAllParameters:1");
+    }
+}
+
+#[test]
+fn strict_clone_exact_empty_base_set_loads_state_and_renders_without_unused_catalog_or_override_requests()
+ {
+    let _serial = serial();
+    for selected in [false, true] {
+        for fault in ["catalog_limit", "error"] {
+            let mock = Mock::new(fault, "GetAllParameters:1");
+            let mock = if selected {
+                mock.with_selected_stereo()
+            } else {
+                mock
+            };
+            let mock = mock.with_empty_bases();
+            let (project, capture) = mock.capture();
+            let project_before = selected_source_project_snapshot(&project);
+            let state_before = capture.state.clone();
+            assert!(project.plugin_instances[0].parameters.is_empty());
+            assert!(capture.state.parameter_bases.is_empty());
+            let (_, requested_ids) = capture.strict_load_inputs();
+            assert!(requested_ids.is_empty());
+            capture
+                .state
+                .validate(requested_ids, capture.plan().sample_rate())
+                .unwrap();
+            let RenderOutcome::Complete(report) = normal_job(&mock).finish() else {
+                panic!("exact empty requested base set must not depend on an unused catalog");
+            };
+            let commands = mock.commands();
+            assert!(commands.contains(&"LoadState:1".to_owned()));
+            assert!(commands.contains(&"StartProcessing:1".to_owned()));
+            assert!(commands.contains(&"NativeDirtyRevision:1".to_owned()));
+            assert!(commands.contains(&if selected {
+                "StrictMetadataSnapshot:1".to_owned()
+            } else {
+                "EventBusLayout:1".to_owned()
+            }));
+            for getter in ["EventBusLayout", "LatencySamples", "TailSamples"] {
+                assert_eq!(
+                    commands.contains(&format!("{getter}:1")),
+                    !selected,
+                    "selected metadata travels in the complete bundle; ordinary metadata remains separate"
+                );
+            }
+            assert!(commands.contains(&"Process:1".to_owned()));
+            assert!(commands.contains(&"StopProcessing:1".to_owned()));
+            assert!(
+                !commands
+                    .iter()
+                    .any(|stage| stage.starts_with("GetAllParameters:")
+                        || stage.starts_with("SetParameter:")
+                        || stage.starts_with("GetParameter:"))
+            );
+            let ledger = mock.ledger();
+            if selected {
+                let snapshots: Vec<_> = commands
+                    .iter()
+                    .filter(|stage| stage.starts_with("StrictMetadataSnapshot:"))
+                    .collect();
+                // Preparation and pre/post metadata for both actual Q128
+                // blocks still invoke all four SDK getters in their order.
+                assert_eq!(
+                    snapshots,
+                    (1..=5)
+                        .map(|index| format!("StrictMetadataSnapshot:{index}"))
+                        .collect::<Vec<_>>()
+                        .iter()
+                        .collect::<Vec<_>>()
+                );
+                for stage in snapshots {
+                    let getters: Vec<_> = ledger
+                        .iter()
+                        .filter(|row| {
+                            row["kind"] == "metadata_getter"
+                                && row["wire_stage"].as_str() == Some(stage.as_str())
+                        })
+                        .map(|row| row["getter"].as_str().unwrap())
+                        .collect();
+                    assert_eq!(
+                        getters,
+                        [
+                            "CheckedAudioBusLayout",
+                            "EventBusLayout",
+                            "LatencySamples",
+                            "TailSamples"
+                        ]
+                    );
+                }
+            }
+            let loads: Vec<_> = ledger
+                .iter()
+                .filter_map(|entry| entry["command"].get("LoadState"))
+                .collect();
+            assert_eq!(loads.len(), 1);
+            assert_eq!(loads[0], &json!({"data": "AQID", "context": "Project"}));
+            assert_eq!(
+                ledger
+                    .iter()
+                    .filter(|entry| entry["kind"] == "audio_ack")
+                    .count(),
+                if selected { 32 } else { 0 }
+            );
+            assert_eq!(report.identity, capture.identity());
+            assert_eq!(report.native_latency, mock.latency);
+            assert_eq!(report.frames, 128);
+            let wav = crate::wav::read_wav(mock.output()).unwrap();
+            assert_eq!(wav.frame_count(), 128);
+            assert!(
+                wav.samples
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .all(|frame| *frame == [0.25, -0.5])
+            );
+            mock.assert_cooperative(true);
+            assert!(mock.audit().iter().any(concrete_child_reap_evidence));
+            assert_eq!(capture.state, state_before);
+            assert_eq!(selected_source_project_snapshot(&project), project_before);
+        }
+    }
+}
+
+#[test]
+fn strict_clone_healthy_delayed_natural_exit_reaps_successfully_before_wav_publication() {
+    let _serial = serial();
+    let mock = Mock::new("delay_exit", "")
+        .with_selected_stereo()
+        .with_empty_bases();
+    let (project, capture) = mock.capture();
+    let source_before = selected_source_project_snapshot(&project);
+    let state_before = capture.state.clone();
+    let RenderOutcome::Complete(report) = normal_job(&mock).finish() else {
+        panic!("healthy clone must be allowed its bounded natural teardown before forced kill");
+    };
+    assert_eq!(report.frames, 128);
+    let ledger = mock.ledger();
+    assert!(
+        ledger
+            .iter()
+            .any(|entry| entry["kind"] == "shutdown_received_before_natural_delay")
+    );
+    assert!(
+        ledger
+            .iter()
+            .any(|entry| entry["kind"] == "natural_exit_ready")
+    );
+    mock.assert_cooperative(true);
+    assert!(
+        mock.audit()
+            .iter()
+            .any(|entry| concrete_child_reap_evidence(entry)
+                && entry["error"].is_null()
+                && entry["diagnostics"].as_array().is_some_and(Vec::is_empty))
+    );
+    assert_eq!(
+        mock.commands()
+            .iter()
+            .filter(|stage| stage.starts_with("Shutdown:"))
+            .count(),
+        1
+    );
+    let wav = crate::wav::read_wav(mock.output()).unwrap();
+    assert_eq!(wav.frame_count(), 128);
+    assert!(
+        wav.samples
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .all(|frame| *frame == [0.25, -0.5])
+    );
+    assert_eq!(capture.state, state_before);
+    assert_eq!(selected_source_project_snapshot(&project), source_before);
+}
+
+#[test]
+fn strict_clone_empty_opaque_state_or_inexact_requested_base_set_rejects_before_spawn() {
+    let _serial = serial();
+    for defect in [
+        "empty_opaque",
+        "missing_requested",
+        "partial_requested",
+        "unexpected_base",
+    ] {
+        let mock = Mock::new("", "");
+        let mock = if matches!(defect, "missing_requested" | "partial_requested") {
+            mock
+        } else {
+            mock.with_empty_bases()
+        };
+        let (project, mut capture) = mock.capture();
+        match defect {
+            "empty_opaque" => capture.state.opaque_state.clear(),
+            "missing_requested" => capture.state.parameter_bases.clear(),
+            "partial_requested" => {
+                capture.state.parameter_bases.remove(&23);
+            }
+            "unexpected_base" => {
+                capture.state.parameter_bases.insert(17, 0.1);
+            }
+            _ => unreachable!(),
+        }
+        let project_before = selected_source_project_snapshot(&project);
+        let state_before = capture.state.clone();
+        let mut owner = DirectOwner::new();
+        let failure = owner
+            .backend
+            .prepare(&capture, &control(Duration::from_secs(20)))
+            .unwrap_err();
+        assert_eq!(failure.kind, BackendFailureKind::Backend);
+        assert_eq!(failure.strict_kind, None);
+        let (spawns, reap) = owner.backend.test_child_completion();
+        assert_eq!(spawns, 0);
+        assert!(reap.is_none());
+        assert!(
+            owner
+                .dispose(Instant::now() + Duration::from_secs(5))
+                .terminated
+        );
+        assert!(mock.ledger().is_empty());
+        mock.assert_unchanged();
+        assert_eq!(capture.state, state_before);
+        assert_eq!(selected_source_project_snapshot(&project), project_before);
+    }
+}
+
+#[test]
+fn strict_selected_preparation_limit_names_implicit_exchange_and_sdk_bus_index() {
+    let _serial = serial();
+    for (stage, owner_stage, operation) in [
+        (
+            "CheckedAudioBusLayout:1",
+            "prepare.post_state_audio_layout",
+            "CheckedAudioBusLayout",
+        ),
+        (
+            "ResetOriginSupport:2",
+            "prepare.select_main_stereo_output",
+            "ResetOriginSupport",
+        ),
+        (
+            "CheckedAudioBusLayout:2",
+            "prepare.select_main_stereo_output",
+            "CheckedAudioBusLayout",
+        ),
+        (
+            "CheckedAudioBusLayout:3",
+            "prepare.select_main_stereo_output",
+            "CheckedAudioBusLayout",
+        ),
+        (
+            "CheckedAudioBusLayout:4",
+            "prepare.start_processing",
+            "CheckedAudioBusLayout",
+        ),
+        (
+            "StartProcessing:1",
+            "prepare.start_processing",
+            "StartProcessing",
+        ),
+        (
+            "CheckedAudioBusLayout:5",
+            "prepare.start_processing",
+            "CheckedAudioBusLayout",
+        ),
+        (
+            "CheckedAudioBusLayout:6",
+            "prepare.final_metadata.bundle",
+            "StrictMetadataSnapshot",
+        ),
+        (
+            "EventBusLayout:1",
+            "prepare.final_metadata.bundle",
+            "StrictMetadataSnapshot",
+        ),
+        (
+            "LatencySamples:1",
+            "prepare.final_metadata.bundle",
+            "StrictMetadataSnapshot",
+        ),
+        (
+            "TailSamples:1",
+            "prepare.final_metadata.bundle",
+            "StrictMetadataSnapshot",
+        ),
+    ] {
+        let mock = Mock::new("limit", stage).with_selected_stereo();
+        let failure = failed(normal_job(&mock).finish());
+        assert_typed(&failure, StrictKind::Limit, BackendDelivery::MayHaveApplied);
+        assert_exchange_context(&failure, owner_stage, operation);
+        mock.assert_terminal_at(if operation == "StrictMetadataSnapshot" {
+            "StrictMetadataSnapshot:1"
+        } else {
+            stage
+        });
+        assert_eq!(
+            failure.backend.as_ref().unwrap().strict_metadata_getter,
+            None
+        );
+    }
+    let mock = Mock::new("limit", "SetBusActive:9").with_selected_stereo();
+    let failure = failed(normal_job(&mock).finish());
+    assert_typed(&failure, StrictKind::Limit, BackendDelivery::MayHaveApplied);
+    let backend = failure.backend.as_ref().unwrap();
+    assert_eq!(
+        backend.strict_stage,
+        Some("prepare.select_main_stereo_output")
+    );
+    assert_eq!(
+        backend.last_wire_request,
+        Some(vst3_host::strict_offline::RequestContext {
+            operation: "SetBusActive",
+            media_type: Some(vst3_host::audio::MediaType::Audio),
+            direction: Some(vst3_host::audio::BusDirection::Output),
+            bus_index: Some(8),
+        })
+    );
+    mock.assert_terminal_at("SetBusActive:9");
+}
+
+#[test]
+fn strict_failure_context_preserves_utf8_diagnostic_and_all_typed_evidence() {
+    use vst3_host::strict_offline as strict;
+    let diagnostic = "界".repeat(4000);
+    let request = strict::RequestContext {
+        operation: "GetAllParameters",
+        media_type: None,
+        direction: None,
+        bus_index: None,
+    };
+    for kind in [
+        StrictKind::Limit,
+        StrictKind::Cancelled,
+        StrictKind::Deadline,
+    ] {
+        let failure = BackendFailure::from(strict::Failure {
+            kind,
+            delivery: strict::Delivery::MayHaveApplied,
+            diagnostic: Some(diagnostic.clone()),
+            diagnostic_unavailable: Some(StrictKind::Allocation),
+            request_context: Some(request),
+            metadata_getter: None,
+            limit_evidence: (kind == StrictKind::Limit).then_some(strict::LimitEvidence {
+                site: strict::LimitSite::ParameterTextBytes,
+                observed_at_least: 1025,
+                maximum: 1024,
+            }),
+        });
+        let original = failure.clone();
+        let contextual = failure.with_strict_context("prepare.parameters");
+        assert_eq!(contextual.kind, original.kind);
+        assert_eq!(contextual.delivery, original.delivery);
+        assert_eq!(contextual.strict_kind, original.strict_kind);
+        assert_eq!(
+            contextual.strict_diagnostic_unavailable,
+            original.strict_diagnostic_unavailable
+        );
+        assert_eq!(contextual.diagnostic(), original.diagnostic());
+        assert_eq!(contextual.to_string(), original.to_string());
+        assert_eq!(contextual.diagnostic(), "界".repeat(2048 / 3));
+        assert_eq!(contextual.last_wire_request, Some(request));
+        assert_eq!(contextual.limit_evidence, original.limit_evidence);
+        assert_eq!(contextual.strict_stage, Some("prepare.parameters"));
     }
 }
 
@@ -936,6 +1942,8 @@ fn strict_clone_semantic_preparation_rejections_keep_healthy_cleanup_and_all_bas
         let failure = failed(normal_job(&mock).finish());
         assert_eq!(failure.kind, FailureKind::Backend, "{fault}: {failure:?}");
         assert_eq!(failure.backend.as_ref().unwrap().strict_kind, None);
+        assert_eq!(failure.backend.as_ref().unwrap().strict_stage, None);
+        assert_eq!(failure.backend.as_ref().unwrap().last_wire_request, None);
         assert!(failure.cleanup.is_empty(), "{fault}: {failure:?}");
         assert!(!mock.commands().iter().any(|s| s.starts_with("Process:")));
         if no_setter {
@@ -1257,7 +2265,11 @@ fn strict_clone_cancellation_boundary_matrix_preserves_typed_cleanup_and_final_f
             _ => unreachable!(),
         }
         mock.assert_unchanged();
-        mock.assert_reaped();
+        if matches!(hook, Hook::CancelAfterSpawn) {
+            mock.assert_pre_dispatch_cancel_reaped();
+        } else {
+            mock.assert_reaped();
+        }
     }
     let mock = Mock::new("error", "Process:1");
     let failure =
@@ -1269,6 +2281,63 @@ fn strict_clone_cancellation_boundary_matrix_preserves_typed_cleanup_and_final_f
     );
     assert_eq!(failure.primary, "known mock failure Process:1");
     mock.assert_terminal_at("Process:1");
+}
+
+#[test]
+fn strict_clone_pre_dispatch_reap_evidence_rejects_no_spawn_pending_and_kill_only() {
+    // Synthetic audit records qualify the evidence gate. The next test
+    // separately exercises an actual OS child with deliberately delayed startup.
+    let complete = json!({
+        "kind": "disposal", "terminated": true, "destination_unchanged": true,
+        "client_spawn_successes": 1, "child_reaped": true,
+        "child_reap_status": "synthetic completed status",
+    });
+    assert!(concrete_child_reap_evidence(&complete));
+    let mut no_spawn = complete.clone();
+    no_spawn["client_spawn_successes"] = json!(0);
+    let mut pending = complete.clone();
+    pending["terminated"] = json!(false);
+    pending["child_reaped"] = json!(false);
+    pending["child_reap_status"] = Value::Null;
+    let mut kill_only = complete.clone();
+    kill_only["child_reaped"] = json!(false);
+    kill_only["child_reap_status"] = Value::Null;
+    kill_only["diagnostics"] = json!(["Strict clone required forced termination"]);
+    let mut missing_status = complete.clone();
+    missing_status["child_reap_status"] = Value::Null;
+    let mut replayed = complete.clone();
+    replayed["client_spawn_successes"] = json!(2);
+    for incomplete in [no_spawn, pending, kill_only, missing_status, replayed] {
+        assert!(
+            !concrete_child_reap_evidence(&incomplete),
+            "incomplete or replaced OS child evidence must be rejected: {incomplete:?}"
+        );
+    }
+}
+
+#[test]
+fn strict_clone_cancel_before_mock_startup_reaps_real_child_without_dispatch_or_ledger() {
+    let _serial = serial();
+    let mock = Mock::new("delay_start", "");
+    // The generic Job guard releases protocol blocks with `release`, never the
+    // dedicated preledger marker. This case must be reaped before startup logs.
+    let failure =
+        failed(Job::start(&mock, Hook::CancelAfterSpawn, Duration::from_secs(20)).finish());
+    assert_typed(&failure, StrictKind::Cancelled, BackendDelivery::NotSent);
+    assert!(!mock.root.join("ledger.jsonl").exists());
+    assert!(mock.commands().is_empty());
+    mock.assert_unchanged();
+    mock.assert_pre_dispatch_cancel_reaped();
+    assert!(
+        mock.audit().iter().any(|entry| {
+            entry["diagnostics"].as_array().is_some_and(|diagnostics| {
+                diagnostics.iter().any(|message| {
+                    message.as_str() == Some("Strict clone required forced termination")
+                })
+            })
+        }),
+        "delayed startup must prove actual force-kill followed by concrete reap"
+    );
 }
 
 #[test]
@@ -1356,8 +2425,11 @@ struct DirectOwner {
 }
 impl DirectOwner {
     fn new() -> Self {
+        let backend = StrictBackend::new();
+        #[cfg(windows)]
+        let backend = backend.with_python_mock();
         Self {
-            backend: StrictBackend::new(),
+            backend,
             cleanup_deadline: None,
             terminated: false,
         }
@@ -1720,5 +2792,182 @@ fn strict_clone_full_dry_topology_drift_refuses_before_and_after_each_process() 
                 mock.assert_cooperative(true);
             }
         }
+    }
+}
+
+#[test]
+fn strict_selected_bundle_actual_getter_failures_keep_wire_and_inner_identity() {
+    let _serial = serial();
+    for (stage, getter, label) in [
+        (
+            "CheckedAudioBusLayout:6",
+            strict::MetadataGetter::CheckedAudioBusLayout,
+            "prepare.final_metadata.checked_audio_layout",
+        ),
+        (
+            "EventBusLayout:1",
+            strict::MetadataGetter::EventBusLayout,
+            "prepare.final_metadata.event_layout",
+        ),
+        (
+            "LatencySamples:1",
+            strict::MetadataGetter::LatencySamples,
+            "prepare.final_metadata.latency_samples",
+        ),
+        (
+            "TailSamples:1",
+            strict::MetadataGetter::TailSamples,
+            "prepare.final_metadata.tail_samples",
+        ),
+    ] {
+        let mock = Mock::new("error", stage).with_selected_stereo();
+        let (project, capture) = mock.capture();
+        let original = selected_source_project_snapshot(&project);
+        let state = capture.state.clone();
+        let failure = failed(normal_job(&mock).finish());
+        assert_typed(
+            &failure,
+            StrictKind::OperationRejected,
+            BackendDelivery::MayHaveApplied,
+        );
+        assert_exchange_context(&failure, label, "StrictMetadataSnapshot");
+        assert_eq!(
+            failure.backend.as_ref().unwrap().strict_metadata_getter,
+            Some(getter)
+        );
+        mock.assert_terminal_at("StrictMetadataSnapshot:1");
+        assert!(
+            !mock
+                .commands()
+                .iter()
+                .any(|row| row.starts_with("Process:"))
+        );
+        assert_eq!(selected_source_project_snapshot(&project), original);
+        assert_eq!(capture.state, state);
+    }
+}
+
+#[test]
+fn strict_selected_bundle_actual_event_admission_calls_no_latency_or_tail() {
+    let _serial = serial();
+    let mock = Mock::new("event_unknown", "EventBusLayout:1").with_selected_stereo();
+    let (project, capture) = mock.capture();
+    let original = selected_source_project_snapshot(&project);
+    let state = capture.state.clone();
+    let failure = failed(normal_job(&mock).finish());
+    assert_eq!(failure.kind, FailureKind::Backend);
+    assert!(failure.primary.contains("known-active main event input"));
+    let ledger = mock.ledger();
+    assert!(ledger.iter().any(|row| row["kind"] == "metadata_getter"
+        && row["getter"] == "EventBusLayout"
+        && row["wire_stage"] == "StrictMetadataSnapshot:1"));
+    assert!(!ledger.iter().any(|row| row["kind"] == "metadata_getter"
+        && (row["getter"] == "LatencySamples" || row["getter"] == "TailSamples")));
+    assert!(
+        !mock
+            .commands()
+            .iter()
+            .any(|row| row.starts_with("Process:"))
+    );
+    mock.assert_unchanged();
+    mock.assert_reaped();
+    assert_eq!(selected_source_project_snapshot(&project), original);
+    assert_eq!(capture.state, state);
+}
+
+#[test]
+fn strict_selected_bundle_actual_held_getter_completes_after_cancel_or_deadline_without_publish() {
+    let _serial = serial();
+    for cancel in [true, false] {
+        let mock = Mock::new("late_after_eof", "LatencySamples:1").with_selected_stereo();
+        let (project, capture) = mock.capture();
+        let original = selected_source_project_snapshot(&project);
+        let state = capture.state.clone();
+        let job = Job::start(
+            &mock,
+            Hook::None,
+            if cancel {
+                Duration::from_secs(20)
+            } else {
+                Duration::from_secs(2)
+            },
+        );
+        mock.wait_stage("blocked", "LatencySamples:1");
+        assert!(job.admission.is_busy());
+        if cancel {
+            assert!(job.control.export.clone().cancel());
+        }
+        let failure = failed(job.finish());
+        if !cancel {
+            assert!(Instant::now() >= job.control.deadline);
+        }
+        assert_typed(
+            &failure,
+            if cancel {
+                StrictKind::Cancelled
+            } else {
+                StrictKind::Deadline
+            },
+            BackendDelivery::MayHaveApplied,
+        );
+        assert_exchange_context(
+            &failure,
+            "prepare.final_metadata.bundle",
+            "StrictMetadataSnapshot",
+        );
+        assert_eq!(
+            failure.backend.as_ref().unwrap().strict_metadata_getter,
+            None
+        );
+        let ledger = mock.ledger();
+        let eof = ledger
+            .iter()
+            .position(|row| row["kind"] == "late_getter_terminal_eof")
+            .unwrap();
+        let held_done = ledger
+            .iter()
+            .position(|row| row["kind"] == "late_getter_completed")
+            .unwrap();
+        let tail = ledger
+            .iter()
+            .position(|row| row["kind"] == "metadata_getter" && row["getter"] == "TailSamples")
+            .unwrap();
+        let complete = ledger
+            .iter()
+            .position(|row| row["kind"] == "late_complete_snapshot")
+            .unwrap();
+        assert!(eof < held_done && held_done < tail && tail < complete);
+        let snapshot = &ledger[complete]["snapshot"]["StrictMetadataSnapshot"]["snapshot"];
+        assert!(snapshot["audio"].is_object() && snapshot["events"].is_object());
+        assert_eq!(snapshot["latency_samples"], mock.latency);
+        assert_eq!(snapshot["tail_samples"], u32::MAX);
+        let write_outcomes: Vec<_> = ledger
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                row["kind"] == "late_snapshot_write_failed"
+                    || row["kind"] == "late_snapshot_written"
+            })
+            .collect();
+        assert_eq!(write_outcomes.len(), 1);
+        let (write_position, write_outcome) = write_outcomes[0];
+        assert_eq!(write_outcome["stage"], "StrictMetadataSnapshot:1");
+        if write_outcome["kind"] == "late_snapshot_write_failed" {
+            assert!(!write_outcome["error_type"].as_str().unwrap().is_empty());
+            assert!(write_outcome["errno"].as_i64().is_some());
+            assert!(!write_outcome["message"].as_str().unwrap().is_empty());
+        }
+        let exited = ledger.iter().position(|row| row["kind"] == "exit").unwrap();
+        assert!(complete < write_position && write_position < exited);
+        assert!(mock.audit().iter().any(concrete_child_reap_evidence));
+        assert!(
+            !mock
+                .commands()
+                .iter()
+                .any(|row| row.starts_with("Process:") || row.starts_with("SendMidiAt:"))
+        );
+        mock.assert_terminal_at("StrictMetadataSnapshot:1");
+        assert_eq!(selected_source_project_snapshot(&project), original);
+        assert_eq!(capture.state, state);
     }
 }

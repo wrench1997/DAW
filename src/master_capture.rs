@@ -10,6 +10,8 @@
 //! clock into a capture-relative sequence. Forward jumps and bounded-ring overflows therefore
 //! leave explicit holes rather than shortening the recording. The collector fills every hole
 //! with silence and marks the resulting metadata discontinuous and invalid.
+//! A real plug-in processing fault also invalidates the session, even if the renderer stops
+//! submitting frames and there is no later frame from which to detect the missing suffix.
 
 use std::{
     fs::{File, OpenOptions},
@@ -18,7 +20,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -26,6 +28,8 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
+
+use crate::plugin_timing::{PluginProcessingFault, PluginProcessingFaultReason};
 
 pub const MASTER_CAPTURE_CHANNELS: u16 = 2;
 pub const MASTER_CAPTURE_BITS_PER_SAMPLE: u16 = 24;
@@ -86,6 +90,15 @@ pub struct CaptureBlockReport {
     pub limit_reached: bool,
 }
 
+/// First real renderer fault reported during a capture session. It remains sticky after retry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MasterCaptureProcessingFault {
+    /// Output-device frame at which the callback first reported the fault, not an inferred
+    /// sample position in the plug-in's delayed output.
+    pub first_device_frame: u64,
+    pub fault: PluginProcessingFault,
+}
+
 /// Cheap, lock-free session progress suitable for status UI.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MasterCaptureStatus {
@@ -102,6 +115,7 @@ pub struct MasterCaptureStatus {
     pub writer_errors: u64,
     pub first_device_frame: Option<u64>,
     pub last_device_frame: Option<u64>,
+    pub processing_fault: Option<MasterCaptureProcessingFault>,
     pub limit_reached: bool,
     pub discontinuous: bool,
     pub invalid: bool,
@@ -128,11 +142,12 @@ pub struct MasterCaptureMetadata {
     pub duration: Duration,
     pub first_device_frame: Option<u64>,
     pub last_device_frame: Option<u64>,
+    pub processing_fault: Option<MasterCaptureProcessingFault>,
     pub limit_reached: bool,
     /// True when the captured device timeline contained a source jump, ring overflow, or
     /// out-of-order frame.
     pub discontinuous: bool,
-    /// True when the file must not be treated as a clean bounce.
+    /// True when the file must not be treated as a complete, valid recording.
     pub invalid: bool,
 }
 
@@ -157,6 +172,94 @@ struct CaptureStats {
     last_device_frame: AtomicU64,
     has_device_frame: AtomicBool,
     limit_reached: AtomicBool,
+    processing_fault: CaptureProcessingFaultStats,
+}
+
+/// A single endpoint writer publishes immutable evidence once. Readers never need to retry or
+/// wait: an acquire of `ready` either sees no fault yet or all of the completed relaxed stores.
+#[derive(Default)]
+struct CaptureProcessingFaultStats {
+    ready: AtomicBool,
+    first_device_frame: AtomicU64,
+    endpoint_id: AtomicU64,
+    epoch: AtomicU64,
+    expected_sequence: AtomicU64,
+    raw_callback_frames: AtomicU32,
+    callback_budget_frames: AtomicU32,
+    lookahead_quanta: AtomicU32,
+    timing_revision: AtomicU64,
+    reason: AtomicU32,
+}
+
+impl CaptureProcessingFaultStats {
+    fn mark(&self, evidence: MasterCaptureProcessingFault) -> bool {
+        // Only MasterCaptureEndpoint::mark_processing_fault calls this method, with exclusive
+        // endpoint ownership. Once published, none of these fields are written again.
+        if self.ready.load(Ordering::Relaxed) {
+            return false;
+        }
+        let fault = evidence.fault;
+        self.first_device_frame
+            .store(evidence.first_device_frame, Ordering::Relaxed);
+        self.endpoint_id.store(fault.endpoint_id, Ordering::Relaxed);
+        self.epoch.store(fault.epoch, Ordering::Relaxed);
+        self.expected_sequence
+            .store(fault.expected_sequence, Ordering::Relaxed);
+        self.raw_callback_frames
+            .store(fault.raw_callback_frames, Ordering::Relaxed);
+        self.callback_budget_frames
+            .store(fault.callback_budget_frames, Ordering::Relaxed);
+        self.lookahead_quanta
+            .store(fault.lookahead_quanta, Ordering::Relaxed);
+        self.timing_revision
+            .store(fault.timing_revision, Ordering::Relaxed);
+        // Keep encoding exhaustive so adding a fault reason requires updating its capture
+        // representation rather than silently mislabelling durable evidence.
+        let reason = match fault.reason {
+            PluginProcessingFaultReason::CallbackBudgetExceeded => 1,
+            PluginProcessingFaultReason::UnsupportedCallback => 2,
+            PluginProcessingFaultReason::DeadlineMiss => 3,
+            PluginProcessingFaultReason::InputLoss => 4,
+            PluginProcessingFaultReason::OutputLoss => 5,
+            PluginProcessingFaultReason::LatencyDrift => 6,
+            PluginProcessingFaultReason::EventLoss => 7,
+            PluginProcessingFaultReason::EndpointChanged => 8,
+            PluginProcessingFaultReason::WorkerFault => 9,
+        };
+        self.reason.store(reason, Ordering::Relaxed);
+        self.ready.store(true, Ordering::Release);
+        true
+    }
+
+    fn snapshot(&self) -> Option<MasterCaptureProcessingFault> {
+        if !self.ready.load(Ordering::Acquire) {
+            return None;
+        }
+        let reason = match self.reason.load(Ordering::Relaxed) {
+            2 => PluginProcessingFaultReason::UnsupportedCallback,
+            3 => PluginProcessingFaultReason::DeadlineMiss,
+            4 => PluginProcessingFaultReason::InputLoss,
+            5 => PluginProcessingFaultReason::OutputLoss,
+            6 => PluginProcessingFaultReason::LatencyDrift,
+            7 => PluginProcessingFaultReason::EventLoss,
+            8 => PluginProcessingFaultReason::EndpointChanged,
+            9 => PluginProcessingFaultReason::WorkerFault,
+            _ => PluginProcessingFaultReason::CallbackBudgetExceeded,
+        };
+        Some(MasterCaptureProcessingFault {
+            first_device_frame: self.first_device_frame.load(Ordering::Relaxed),
+            fault: PluginProcessingFault {
+                endpoint_id: self.endpoint_id.load(Ordering::Relaxed),
+                epoch: self.epoch.load(Ordering::Relaxed),
+                expected_sequence: self.expected_sequence.load(Ordering::Relaxed),
+                raw_callback_frames: self.raw_callback_frames.load(Ordering::Relaxed),
+                callback_budget_frames: self.callback_budget_frames.load(Ordering::Relaxed),
+                lookahead_quanta: self.lookahead_quanta.load(Ordering::Relaxed),
+                timing_revision: self.timing_revision.load(Ordering::Relaxed),
+                reason,
+            },
+        })
+    }
 }
 
 impl CaptureStats {
@@ -173,6 +276,7 @@ impl CaptureStats {
         let writer_errors = self.writer_errors.load(Ordering::Relaxed);
         let inserted_silence_frames = self.inserted_silence_frames.load(Ordering::Relaxed);
         let has_device_frame = self.has_device_frame.load(Ordering::Acquire);
+        let processing_fault = self.processing_fault.snapshot();
         let discontinuous = overflow_frames != 0
             || source_gap_frames != 0
             || out_of_order_frames != 0
@@ -193,12 +297,14 @@ impl CaptureStats {
                 .then(|| self.first_device_frame.load(Ordering::Relaxed)),
             last_device_frame: has_device_frame
                 .then(|| self.last_device_frame.load(Ordering::Relaxed)),
+            processing_fault,
             limit_reached,
             discontinuous,
             invalid: discontinuous
                 || non_finite_samples != 0
                 || limit_reached
-                || writer_errors != 0,
+                || writer_errors != 0
+                || processing_fault.is_some(),
         }
     }
 }
@@ -230,6 +336,25 @@ impl MasterCaptureEndpoint {
 
     pub fn maximum_frames(&self) -> u64 {
         self.maximum_frames
+    }
+
+    /// Mark a real plug-in processing fault before the renderer stops submitting master frames.
+    ///
+    /// Callback-safe: fixed atomic stores only, with no allocation, locks, waits, or I/O. Returns
+    /// true only for the first fault in this session. Later faults, retries and frame submissions
+    /// cannot replace or clear its evidence. This does not insert silence or infer a fault from
+    /// quiet samples; normal finalization preserves any captured prefix and reports it invalid.
+    pub fn mark_processing_fault(
+        &mut self,
+        first_device_frame: u64,
+        fault: PluginProcessingFault,
+    ) -> bool {
+        self.stats
+            .processing_fault
+            .mark(MasterCaptureProcessingFault {
+                first_device_frame,
+                fault,
+            })
     }
 
     /// Submit one rendered stereo frame at its absolute output-device frame number.
@@ -719,6 +844,16 @@ fn run_collector_with_drain_observer(
                     next_timeline_frame = timeline_frames;
                 }
                 if next_timeline_frame == 0 {
+                    if let Some(evidence) = stats.processing_fault.snapshot() {
+                        bail!(
+                            "Master capture contains no audio frames after plug-in processing fault {:?} (endpoint {}, epoch {}, expected sequence {}, first device frame {})",
+                            evidence.fault.reason,
+                            evidence.fault.endpoint_id,
+                            evidence.fault.epoch,
+                            evidence.fault.expected_sequence,
+                            evidence.first_device_frame
+                        );
+                    }
                     bail!("Master capture contains no audio frames");
                 }
                 if next_timeline_frame != timeline_frames {
@@ -747,6 +882,7 @@ fn run_collector_with_drain_observer(
                     duration: duration_for_frames(timeline_frames, status.sample_rate),
                     first_device_frame: status.first_device_frame,
                     last_device_frame: status.last_device_frame,
+                    processing_fault: status.processing_fault,
                     limit_reached: status.limit_reached,
                     discontinuous: status.discontinuous,
                     invalid: status.invalid,
@@ -1202,6 +1338,194 @@ mod tests {
 
     fn read_u32(bytes: &[u8], offset: usize) -> u32 {
         u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+    }
+
+    fn processing_fault_fixture(reason: PluginProcessingFaultReason) -> PluginProcessingFault {
+        PluginProcessingFault {
+            endpoint_id: 37,
+            epoch: 4,
+            expected_sequence: 1398,
+            raw_callback_frames: 2048,
+            callback_budget_frames: 2048,
+            lookahead_quanta: 18,
+            timing_revision: 9,
+            reason,
+        }
+    }
+
+    #[test]
+    fn master_capture_processing_fault_without_later_push_invalidates_finalized_prefix() {
+        let directory = TestDirectory::new("fault-prefix");
+        let target = directory.target("partial.wav");
+        let mut session =
+            MasterCaptureSession::start_to_path_with_options(&target, 48_000, small_options(32))
+                .unwrap();
+        let report = session
+            .endpoint_mut()
+            .push_block(10_000, &[[0.5, -0.5], [0.25, -0.25]]);
+        assert_eq!(report.captured_frames, 2);
+        let fault = processing_fault_fixture(PluginProcessingFaultReason::DeadlineMiss);
+        assert!(session.endpoint_mut().mark_processing_fault(10_002, fault));
+        let evidence = Some(MasterCaptureProcessingFault {
+            first_device_frame: 10_002,
+            fault,
+        });
+
+        // The renderer submits nothing after failure: there is no later push to expose a gap.
+        let status = session.status();
+        assert_eq!(status.timeline_frames, 2);
+        assert_eq!(status.accepted_frames, 2);
+        assert_eq!(status.source_gap_frames, 0);
+        assert_eq!(status.overflow_frames, 0);
+        assert_eq!(status.processing_fault, evidence);
+        assert!(!status.discontinuous);
+        assert!(status.invalid);
+
+        let metadata = session.stop_blocking().unwrap();
+        assert_eq!(metadata.frames, 2);
+        assert_eq!(metadata.captured_frames, 2);
+        assert_eq!(metadata.inserted_silence_frames, 0);
+        assert_eq!(metadata.processing_fault, evidence);
+        assert!(!metadata.discontinuous);
+        assert!(!metadata.is_valid());
+        let bytes = std::fs::read(target).unwrap();
+        assert_eq!(read_u32(&bytes, 40), 12);
+        assert_eq!(bytes.len(), PCM_WAV_HEADER_BYTES as usize + 12);
+        assert!(
+            bytes[PCM_WAV_HEADER_BYTES as usize..]
+                .iter()
+                .any(|&byte| byte != 0)
+        );
+        assert!(directory.part_files().is_empty());
+    }
+
+    #[test]
+    fn master_capture_processing_fault_repeated_notification_preserves_first_evidence() {
+        let directory = TestDirectory::new("fault-sticky");
+        let target = directory.target("sticky.wav");
+        let mut session =
+            MasterCaptureSession::start_to_path_with_options(&target, 48_000, small_options(32))
+                .unwrap();
+        let first_fault = processing_fault_fixture(PluginProcessingFaultReason::DeadlineMiss);
+        // A real fault can be reported before the first master frame, including device frame 0.
+        assert!(session.endpoint_mut().mark_processing_fault(0, first_fault));
+        let evidence = Some(MasterCaptureProcessingFault {
+            first_device_frame: 0,
+            fault: first_fault,
+        });
+        assert_eq!(session.status().first_device_frame, None);
+        assert_eq!(session.status().processing_fault, evidence);
+        assert!(session.status().invalid);
+
+        let later_fault = PluginProcessingFault {
+            endpoint_id: 99,
+            epoch: 5,
+            expected_sequence: 2398,
+            raw_callback_frames: 256,
+            callback_budget_frames: 512,
+            lookahead_quanta: 6,
+            timing_revision: 19,
+            reason: PluginProcessingFaultReason::WorkerFault,
+        };
+        assert!(
+            !session
+                .endpoint_mut()
+                .mark_processing_fault(100, later_fault)
+        );
+        // Resuming frame submission after a retry cannot turn this same recording valid again.
+        session.endpoint_mut().push_block(100, &[[0.0; 2]; 2]);
+        assert_eq!(session.endpoint_mut().status().processing_fault, evidence);
+        assert_eq!(session.status().processing_fault, evidence);
+        assert!(session.status().invalid);
+        let metadata = session.stop_blocking().unwrap();
+        assert_eq!(metadata.processing_fault, evidence);
+        assert_eq!(metadata.frames, 2);
+        assert!(!metadata.is_valid());
+    }
+
+    #[test]
+    fn master_capture_processing_fault_without_audio_reports_evidence_and_publishes_no_file() {
+        let directory = TestDirectory::new("fault-no-frames");
+        let target = directory.target("no-frames.wav");
+        let mut session =
+            MasterCaptureSession::start_to_path_with_options(&target, 48_000, small_options(32))
+                .unwrap();
+        let fault = processing_fault_fixture(PluginProcessingFaultReason::DeadlineMiss);
+        assert!(session.endpoint_mut().mark_processing_fault(77, fault));
+        assert!(session.status().invalid);
+        let error = session.stop_blocking().unwrap_err().to_string();
+        assert!(error.contains("contains no audio frames"));
+        assert!(error.contains("DeadlineMiss"));
+        assert!(error.contains("endpoint 37"));
+        assert!(error.contains("epoch 4"));
+        assert!(error.contains("expected sequence 1398"));
+        assert!(error.contains("first device frame 77"));
+        assert!(!target.exists());
+        assert!(directory.part_files().is_empty());
+    }
+
+    #[test]
+    fn master_capture_processing_fault_marker_and_all_reasons_are_realtime_safe() {
+        for reason in [
+            PluginProcessingFaultReason::CallbackBudgetExceeded,
+            PluginProcessingFaultReason::UnsupportedCallback,
+            PluginProcessingFaultReason::DeadlineMiss,
+            PluginProcessingFaultReason::InputLoss,
+            PluginProcessingFaultReason::OutputLoss,
+            PluginProcessingFaultReason::LatencyDrift,
+            PluginProcessingFaultReason::EventLoss,
+            PluginProcessingFaultReason::EndpointChanged,
+            PluginProcessingFaultReason::WorkerFault,
+        ] {
+            let (mut endpoint, _consumer, stats, _shutdown) = capture_fixture(8, 32);
+            let fault = processing_fault_fixture(reason);
+            let (first, repeated, endpoint_status, shared_status) =
+                crate::realtime_test_alloc::assert_no_alloc_or_drop(|| {
+                    let first = endpoint.mark_processing_fault(u64::MAX, fault);
+                    let repeated = endpoint.mark_processing_fault(0, fault);
+                    (
+                        first,
+                        repeated,
+                        endpoint.status(),
+                        stats.snapshot(48_000, 32),
+                    )
+                });
+            assert!(first);
+            assert!(!repeated);
+            let evidence = Some(MasterCaptureProcessingFault {
+                first_device_frame: u64::MAX,
+                fault,
+            });
+            assert_eq!(endpoint_status.processing_fault, evidence);
+            assert_eq!(shared_status.processing_fault, evidence);
+            assert!(endpoint_status.invalid);
+            assert!(shared_status.invalid);
+        }
+    }
+
+    #[test]
+    fn master_capture_silence_remains_valid_without_processing_fault() {
+        let directory = TestDirectory::new("silent-clean");
+        let target = directory.target("silence.wav");
+        let mut session =
+            MasterCaptureSession::start_to_path_with_options(&target, 48_000, small_options(32))
+                .unwrap();
+        let report = session.endpoint_mut().push_block(100, &[[0.0; 2]; 4]);
+        assert_eq!(report.captured_frames, 4);
+        let status = session.status();
+        assert_eq!(status.processing_fault, None);
+        assert!(!status.invalid);
+        let metadata = session.stop_blocking().unwrap();
+        assert_eq!(metadata.frames, 4);
+        assert_eq!(metadata.processing_fault, None);
+        assert!(metadata.is_valid());
+        let bytes = std::fs::read(target).unwrap();
+        assert_eq!(read_u32(&bytes, 40), 24);
+        assert!(
+            bytes[PCM_WAV_HEADER_BYTES as usize..]
+                .iter()
+                .all(|&byte| byte == 0)
+        );
     }
 
     #[test]

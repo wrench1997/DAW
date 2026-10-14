@@ -2,6 +2,20 @@
 #[path = "audio_genuine_observation.rs"]
 pub(crate) mod genuine_observation;
 
+#[path = "audio_audition.rs"]
+mod audition;
+#[path = "audio_master_automation.rs"]
+mod master_automation;
+pub use audition::{AuditionDestination, AuditionStatus, AuditionToken};
+use audition::{
+    AuditionMonitorTail, AuditionReceipts, MAX_OWNED_AUDITIONS, OwnedAudition,
+    audition_owns_generator_pitch,
+};
+use master_automation::{
+    MasterAutomationIdentity, MasterAutomationMatrix, MasterAutomationStage,
+    MasterOutputAutomation, MasterVolumeAutomation,
+};
+
 use crate::plugin_timing::{
     PluginProcessingFault, PluginProcessingFaultReason, PluginProcessingHealth,
     PluginProcessingSnapshot, PluginProcessingTelemetry, PreparedPluginTimingPlan,
@@ -26,8 +40,8 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
 use crate::audio_device::{
     AudioBufferSizeRequest, AudioDeviceDirection, AudioDeviceProfile, AudioEffectiveBufferSize,
-    AudioEffectiveStreamConfig, AudioStreamTelemetrySnapshot, CallbackTelemetry,
-    resolve_audio_device,
+    AudioEffectiveStreamConfig, AudioStreamTelemetrySnapshot, CallbackClockSnapshot,
+    CallbackTelemetry, resolve_audio_device,
 };
 use crate::audio_meter::{
     MeterFrame, MeterIdentity, MeterPublisher, MeterReader, MeterReadings, TrackPeak, meter_channel,
@@ -153,6 +167,107 @@ pub const MAX_REGISTERED_AUDIO_ASSETS: usize = TIMELINE_CALLBACK_MAX_AUDIO_ASSET
 /// Maximum number of concurrently playing audio clips.
 pub const MAX_AUDIO_CLIP_VOICES: usize = 128;
 
+/// A stopped callback's exact preparation identity. It is a one-shot admission
+/// witness, not permission to reset another epoch or to bypass DSP deadlines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedPlaybackToken {
+    pub engine_session: u64,
+    pub project_session: u64,
+    pub timeline_revision: u64,
+    pub epoch: u64,
+    pub transport_request: u64,
+    pub timing_revision: u64,
+    pub topology_revision: u64,
+    pub pdc_revision: u64,
+    pub timeline_frame: u64,
+}
+
+impl PreparedPlaybackToken {
+    fn words(self) -> [u64; 9] {
+        [
+            self.engine_session,
+            self.project_session,
+            self.timeline_revision,
+            self.epoch,
+            self.transport_request,
+            self.timing_revision,
+            self.topology_revision,
+            self.pdc_revision,
+            self.timeline_frame,
+        ]
+    }
+
+    fn from_words(words: [u64; 9]) -> Option<Self> {
+        (words[0] != 0 && words[3] != 0).then_some(Self {
+            engine_session: words[0],
+            project_session: words[1],
+            timeline_revision: words[2],
+            epoch: words[3],
+            transport_request: words[4],
+            timing_revision: words[5],
+            topology_revision: words[6],
+            pdc_revision: words[7],
+            timeline_frame: words[8],
+        })
+    }
+}
+
+#[derive(Debug)]
+struct PreparedPlaybackPublication {
+    sequence: AtomicU64,
+    fields: [AtomicU64; 9],
+}
+
+impl Default for PreparedPlaybackPublication {
+    fn default() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            fields: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+impl PreparedPlaybackPublication {
+    fn store_relaxed(&self, token: Option<PreparedPlaybackToken>) {
+        for (field, word) in self
+            .fields
+            .iter()
+            .zip(token.map_or([0; 9], PreparedPlaybackToken::words))
+        {
+            field.store(word, Ordering::Relaxed);
+        }
+    }
+
+    fn load_relaxed(&self) -> Option<PreparedPlaybackToken> {
+        PreparedPlaybackToken::from_words(std::array::from_fn(|i| {
+            self.fields[i].load(Ordering::Relaxed)
+        }))
+    }
+
+    /// Single callback writer; readers collide closed after a bounded number of attempts.
+    fn publish(&self, token: Option<PreparedPlaybackToken>) {
+        self.sequence.fetch_add(1, Ordering::Acquire);
+        fence(Ordering::Release);
+        self.store_relaxed(token);
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
+    fn read(&self) -> Option<PreparedPlaybackToken> {
+        for _ in 0..TRANSPORT_MAILBOX_READ_ATTEMPTS {
+            let before = self.sequence.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                continue;
+            }
+            let token = self.load_relaxed();
+            fence(Ordering::Acquire);
+            if self.sequence.load(Ordering::Relaxed) == before {
+                return token;
+            }
+        }
+        None
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TransportRequest {
     request_id: u64,
@@ -165,10 +280,12 @@ struct TransportRequest {
     loop_end_q32: u64,
     loop_start_frame: u64,
     loop_end_frame: u64,
+    prepared_playback: Option<PreparedPlaybackToken>,
 }
 
 enum TransportMutation {
     SetPlaying(bool),
+    StartPrepared(PreparedPlaybackToken),
     Discontinuity {
         target_beat_q32: u64,
         target_timeline_frame: u64,
@@ -189,6 +306,7 @@ enum TransportMutation {
 #[derive(Debug, Default)]
 struct TransportMailbox {
     sequence: AtomicU64,
+    accepted_prepared_request: AtomicU64,
     request_id: AtomicU64,
     discontinuity_id: AtomicU64,
     target_beat_q32: AtomicU64,
@@ -199,6 +317,7 @@ struct TransportMailbox {
     loop_end_q32: AtomicU64,
     loop_start_frame: AtomicU64,
     loop_end_frame: AtomicU64,
+    prepared_playback: PreparedPlaybackPublication,
 }
 
 impl TransportMailbox {
@@ -223,6 +342,19 @@ impl TransportMailbox {
         fence(Ordering::Release);
 
         let mut request = self.load_relaxed();
+        if request.prepared_playback.is_some()
+            && self.accepted_prepared_request.load(Ordering::Acquire) != request.request_id
+            && matches!(
+                mutation,
+                TransportMutation::SetLoop { .. }
+                    | TransportMutation::Discontinuity { playing: None, .. }
+            )
+        {
+            // These mutations preserve established playback, but must never
+            // strip the settlement guard from an unaccepted Play intent.
+            request.playing = false;
+        }
+        request.prepared_playback = None;
         // An atomic Timeline activation may deliberately move callback state
         // without rewriting this legacy/latest-state mailbox. Therefore every
         // explicit control-thread mutation must receive a fresh request id,
@@ -231,6 +363,10 @@ impl TransportMailbox {
         match mutation {
             TransportMutation::SetPlaying(playing) => {
                 request.playing = playing;
+            }
+            TransportMutation::StartPrepared(token) => {
+                request.playing = true;
+                request.prepared_playback = Some(token);
             }
             TransportMutation::Discontinuity {
                 target_beat_q32,
@@ -303,6 +439,7 @@ impl TransportMailbox {
             loop_end_q32: self.loop_end_q32.load(Ordering::Relaxed),
             loop_start_frame: self.loop_start_frame.load(Ordering::Relaxed),
             loop_end_frame: self.loop_end_frame.load(Ordering::Relaxed),
+            prepared_playback: self.prepared_playback.load_relaxed(),
         }
     }
 
@@ -325,6 +462,8 @@ impl TransportMailbox {
             .store(request.loop_start_frame, Ordering::Relaxed);
         self.loop_end_frame
             .store(request.loop_end_frame, Ordering::Relaxed);
+        self.prepared_playback
+            .store_relaxed(request.prepared_playback);
     }
 }
 
@@ -531,6 +670,11 @@ pub enum AudioCommand {
         velocity: f32,
         mixer_track: usize,
     },
+    BeginAudition {
+        token: AuditionToken,
+        velocity: f32,
+    },
+    EndAudition(AuditionToken),
     StopAll,
     SetMaster(f32),
     SetMasterPan(f32),
@@ -902,6 +1046,12 @@ impl fmt::Debug for AudioCommand {
                 .field("velocity", velocity)
                 .field("mixer_track", mixer_track)
                 .finish(),
+            Self::BeginAudition { token, velocity } => formatter
+                .debug_struct("BeginAudition")
+                .field("token", token)
+                .field("velocity", velocity)
+                .finish(),
+            Self::EndAudition(token) => formatter.debug_tuple("EndAudition").field(token).finish(),
             Self::StopAll => formatter.write_str("StopAll"),
             Self::SetMaster(value) => formatter.debug_tuple("SetMaster").field(value).finish(),
             Self::SetMasterPan(value) => {
@@ -1072,7 +1222,9 @@ impl fmt::Debug for AudioCommand {
 
 #[derive(Debug)]
 pub struct AudioStatus {
+    audition_receipts: Arc<AuditionReceipts>,
     plugin_processing: PluginProcessingTelemetry,
+    prepared_playback: PreparedPlaybackPublication,
     plugin_topology_revision: AtomicU64,
     pub playing: AtomicBool,
     pub recording: AtomicBool,
@@ -1086,6 +1238,7 @@ pub struct AudioStatus {
     pub beat_q32: AtomicU64,
     pub transport_epoch: AtomicU64,
     pub transport_loop_count: AtomicU64,
+    pub transport_loop_restart_pending: AtomicBool,
     pub applied_transport_request: AtomicU64,
     pub plugin_epoch_resets: AtomicU64,
     pub plugin_epoch_reset_failures: AtomicU64,
@@ -1116,7 +1269,9 @@ pub struct AudioStatus {
 impl Default for AudioStatus {
     fn default() -> Self {
         Self {
+            audition_receipts: Arc::new(AuditionReceipts::default()),
             plugin_processing: PluginProcessingTelemetry::default(),
+            prepared_playback: PreparedPlaybackPublication::default(),
             plugin_topology_revision: AtomicU64::new(0),
             playing: AtomicBool::new(false),
             recording: AtomicBool::new(false),
@@ -1129,6 +1284,7 @@ impl Default for AudioStatus {
             beat_q32: AtomicU64::new(0),
             transport_epoch: AtomicU64::new(1),
             transport_loop_count: AtomicU64::new(0),
+            transport_loop_restart_pending: AtomicBool::new(false),
             applied_transport_request: AtomicU64::new(0),
             plugin_epoch_resets: AtomicU64::new(0),
             plugin_epoch_reset_failures: AtomicU64::new(0),
@@ -1165,6 +1321,7 @@ struct TransportStatusFields {
     beat_q32: u64,
     epoch: u64,
     loop_count: u64,
+    loop_restart_pending: bool,
     applied_request: u64,
     playing: bool,
 }
@@ -1193,6 +1350,7 @@ impl AudioStatus {
                 beat_q32: self.beat_q32.load(Ordering::Relaxed),
                 epoch: self.transport_epoch.load(Ordering::Relaxed),
                 loop_count: self.transport_loop_count.load(Ordering::Relaxed),
+                loop_restart_pending: self.transport_loop_restart_pending.load(Ordering::Relaxed),
                 applied_request: self.applied_transport_request.load(Ordering::Relaxed),
                 playing: self.playing.load(Ordering::Relaxed),
             };
@@ -1261,6 +1419,9 @@ pub struct AudioSnapshot {
     pub beat_position: f64,
     pub transport_epoch: u64,
     pub transport_loop_count: u64,
+    /// Music is parked at the exact loop start while the new epoch's finite
+    /// safety/reset work settles. Device callbacks and capture continue.
+    pub transport_loop_restart_pending: bool,
     pub applied_transport_request: u64,
     pub transport_playing: bool,
     pub plugin_epoch_resets: u64,
@@ -1318,6 +1479,7 @@ impl DeviceStreamLifecycle {
 }
 
 pub struct AudioEngine {
+    next_audition_id: u64,
     engine_session: u64,
     project_session: Arc<AtomicU64>,
     stream: Option<Stream>,
@@ -1496,6 +1658,7 @@ impl AudioEngine {
         })?;
 
         Ok(Self {
+            next_audition_id: 1,
             engine_session,
             project_session,
             stream: Some(stream),
@@ -1587,6 +1750,12 @@ impl AudioEngine {
     /// stream faults.
     pub fn stream_telemetry(&self) -> AudioStreamTelemetrySnapshot {
         self.callback_telemetry.snapshot()
+    }
+
+    /// Opt-in raw CPAL callback/playback timestamps; this never certifies a
+    /// driver or changes the plugin deadline policy.
+    pub fn callback_clock_snapshot(&self) -> CallbackClockSnapshot {
+        self.callback_telemetry.clock_snapshot()
     }
 
     pub fn plugin_timing_profile(&self) -> u32 {
@@ -2497,6 +2666,36 @@ impl AudioEngine {
             .publish(TransportMutation::SetPlaying(playing));
     }
 
+    pub(crate) fn prepared_playback_token(&self) -> Option<PreparedPlaybackToken> {
+        self.status.prepared_playback.read()
+    }
+
+    pub(crate) fn plugin_topology_revision(&self) -> u64 {
+        self.status.plugin_topology_revision.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn requested_plugin_timing_revision(&self) -> u64 {
+        self.status
+            .plugin_processing
+            .requested_revision
+            .load(Ordering::Acquire)
+    }
+
+    /// Control-thread admission only. The callback rechecks this same identity
+    /// and the independent worker settlement before consuming the request.
+    pub(crate) fn start_prepared_playback(&self, token: PreparedPlaybackToken) -> Option<u64> {
+        if token.engine_session != self.engine_session
+            || token.project_session != self.project_session()
+            || self.transport_request_id() != token.transport_request
+        {
+            return None;
+        }
+        Some(
+            self.transport_mailbox
+                .publish(TransportMutation::StartPrepared(token)),
+        )
+    }
+
     /// Requests a transport stop that cannot be crowded out by `AudioCommand`.
     /// The callback clears voices and applies the request at its next mixer chunk.
     pub fn stop_transport(&self) -> u64 {
@@ -2622,6 +2821,7 @@ impl AudioEngine {
             beat_position: q32_to_beat(transport.beat_q32),
             transport_epoch: transport.epoch,
             transport_loop_count: transport.loop_count,
+            transport_loop_restart_pending: transport.loop_restart_pending,
             applied_transport_request: transport.applied_request,
             transport_playing: transport.playing,
             plugin_epoch_resets: self.status.plugin_epoch_resets.load(Ordering::Relaxed),
@@ -2906,6 +3106,30 @@ struct RealtimeTransport {
     beat_q32: u64,
     epoch: u64,
     loop_count: u64,
+    pending_loop_restart: Option<PendingLoopRestart>,
+    /// A canceled restart must never become ordinary Play through the legacy
+    /// mailbox's previously accepted, cached `true` value.
+    loop_restart_requires_prepared_playback: bool,
+    /// Canceling musical intent does not permit new live/parameter quanta to
+    /// overtake the already requested loop reset and finite safety terminal.
+    loop_restart_safety_only: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LoopRestartIdentity {
+    request_id: u64,
+    discontinuity_id: u64,
+    loop_start_q32: u64,
+    loop_end_q32: u64,
+    loop_start_frame: u64,
+    loop_end_frame: u64,
+    loop_token: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingLoopRestart {
+    prepared: PreparedPlaybackToken,
+    identity: LoopRestartIdentity,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2924,6 +3148,9 @@ impl Default for RealtimeTransport {
             beat_q32: 0,
             epoch: 1,
             loop_count: 0,
+            pending_loop_restart: None,
+            loop_restart_requires_prepared_playback: false,
+            loop_restart_safety_only: false,
         }
     }
 }
@@ -2942,6 +3169,17 @@ impl RealtimeTransport {
             return;
         }
 
+        if self.loop_restart_requires_prepared_playback && spec.playing {
+            self.pending_loop_restart = None;
+            self.request.playing = false;
+            dsp.reject_timeline_transport_activation(
+                ticket,
+                TimelineTransportActivationRejectReason::PlaybackPreparationRequired,
+            );
+            self.publish(status);
+            return;
+        }
+
         if dsp.plugin_timing_activation.is_none_or(|plan| {
             plan.revision
                 != status
@@ -2956,6 +3194,9 @@ impl RealtimeTransport {
             return;
         }
         let committed = dsp.commit_timeline_transport_activation(status, ticket, actual_epoch);
+        self.pending_loop_restart = None;
+        self.loop_restart_requires_prepared_playback = false;
+        self.loop_restart_safety_only = false;
         self.beat_q32 = spec.beat_q32;
         self.timeline_frame = spec.frame;
         self.epoch = actual_epoch;
@@ -2963,6 +3204,7 @@ impl RealtimeTransport {
         self.request.target_beat_q32 = spec.beat_q32;
         self.request.target_timeline_frame = spec.frame;
         self.request.playing = spec.playing;
+        self.request.prepared_playback = None;
         self.request.loop_enabled =
             spec.loop_enabled && spec.loop_end_frame > spec.loop_start_frame;
         self.request.loop_start_q32 = spec.loop_start_q32;
@@ -2981,11 +3223,35 @@ impl RealtimeTransport {
         status: &AudioStatus,
         dsp: &mut DspState,
     ) {
-        let Some(request) = mailbox.try_load() else {
+        let Some(mut request) = mailbox.try_load() else {
             return;
         };
         if request.request_id == self.request.request_id {
             return;
+        }
+
+        self.pending_loop_restart = None;
+        if self.loop_restart_requires_prepared_playback && request.prepared_playback.is_none() {
+            // A fresh non-prepared mutation cancels the loop wait. Its cached
+            // playing value is not evidence that this new epoch may render.
+            request.playing = false;
+        }
+
+        if let Some(token) = request.prepared_playback {
+            if self.request.playing || dsp.prepared_playback_identity(self) != Some(token) {
+                // Superseded identities consume the stale request stopped.
+                request.playing = false;
+                request.prepared_playback = None;
+            } else if !dsp.stopped_playback_workers_settled() {
+                // Admin/metadata work can begin after the UI's observation.
+                // Keep this exact request pending without waiting; newer
+                // Pause/Stop mailbox mutations cancel it immediately.
+                return;
+            } else {
+                dsp.fence_stopped_playback_output(token.epoch);
+                self.loop_restart_requires_prepared_playback = false;
+                self.loop_restart_safety_only = false;
+            }
         }
 
         let timeline_owned = dsp.timeline_transport_owned();
@@ -3020,6 +3286,15 @@ impl RealtimeTransport {
             self.request.playing = request.playing;
         } else {
             self.request = request;
+        }
+        if request.prepared_playback.is_some() && request.playing {
+            // A rejected or deferred guard is deliberately not acknowledged
+            // as accepted: its mailbox cache still contains guarded `true`.
+            // Publish acceptance before the coherent transport receipt so a
+            // control reader of that receipt cannot race ahead of this ack.
+            mailbox
+                .accepted_prepared_request
+                .store(request.request_id, Ordering::Release);
         }
         self.publish(status);
     }
@@ -3065,6 +3340,16 @@ impl RealtimeTransport {
         self.timeline_frame = self.request.loop_start_frame;
         self.epoch = next_nonzero_id(self.epoch);
         self.loop_count = self.loop_count.wrapping_add(1);
+        let needs_preparation = dsp.timeline_transport_owned()
+            && (dsp.insert_endpoints.iter().any(Option::is_some)
+                || dsp.generator_endpoints.iter().any(Option::is_some));
+        self.pending_loop_restart = None;
+        if needs_preparation {
+            self.request.playing = false;
+            self.request.prepared_playback = None;
+            self.loop_restart_requires_prepared_playback = true;
+            self.loop_restart_safety_only = true;
+        }
         dsp.apply_transport_discontinuity(
             status,
             self.epoch,
@@ -3073,6 +3358,69 @@ impl RealtimeTransport {
             TransportDiscontinuity::Loop,
             self.request.playing,
         );
+        if needs_preparation
+            && let (Some(prepared), Some(identity)) = (
+                dsp.prepared_playback_identity(self),
+                self.loop_restart_identity(dsp),
+            )
+        {
+            self.pending_loop_restart = Some(PendingLoopRestart { prepared, identity });
+        }
+    }
+
+    fn loop_restart_identity(&self, dsp: &DspState) -> Option<LoopRestartIdentity> {
+        if !self.request.loop_enabled
+            || self.request.loop_end_frame <= self.request.loop_start_frame
+        {
+            return None;
+        }
+        Some(LoopRestartIdentity {
+            request_id: self.request.request_id,
+            discontinuity_id: self.applied_discontinuity_id,
+            loop_start_q32: self.request.loop_start_q32,
+            loop_end_q32: self.request.loop_end_q32,
+            loop_start_frame: self.request.loop_start_frame,
+            loop_end_frame: self.request.loop_end_frame,
+            loop_token: dsp.timeline_runtime.as_ref()?.installed_loop_token()?,
+        })
+    }
+
+    fn poll_loop_restart(&mut self, status: &AudioStatus, dsp: &mut DspState) {
+        let workers_settled = (self.loop_restart_safety_only
+            || self.pending_loop_restart.is_some())
+            && dsp.transport_epoch == self.epoch
+            && dsp.stopped_playback_workers_settled();
+        let safety_output_fenced = workers_settled && self.loop_restart_safety_only;
+        if safety_output_fenced {
+            // This also covers canceled intent or a missing preparation
+            // identity. Discard the finite safety result before allowing the
+            // paused MIDI monitor to consume this epoch's output sequence.
+            dsp.fence_stopped_playback_output(self.epoch);
+            self.loop_restart_safety_only = false;
+        }
+        let Some(pending) = self.pending_loop_restart else {
+            return;
+        };
+        if self.loop_restart_identity(dsp) != Some(pending.identity)
+            || dsp.prepared_playback_identity(self) != Some(pending.prepared)
+        {
+            self.pending_loop_restart = None;
+            self.request.playing = false;
+            self.publish(status);
+            return;
+        }
+        if !workers_settled {
+            return;
+        }
+        // No second reset: safety sequence 1 belongs to this exact epoch, and
+        // music starts with sequence 2 under the unchanged musical deadline.
+        if !safety_output_fenced {
+            dsp.fence_stopped_playback_output(pending.prepared.epoch);
+        }
+        self.pending_loop_restart = None;
+        self.loop_restart_requires_prepared_playback = false;
+        self.request.playing = true;
+        self.publish(status);
     }
 
     fn publish(&self, status: &AudioStatus) {
@@ -3094,6 +3442,9 @@ impl RealtimeTransport {
         status
             .transport_loop_count
             .store(self.loop_count, Ordering::Relaxed);
+        status
+            .transport_loop_restart_pending
+            .store(self.pending_loop_restart.is_some(), Ordering::Relaxed);
         status
             .applied_transport_request
             .store(self.request.request_id, Ordering::Relaxed);
@@ -3138,6 +3489,7 @@ fn render_transport_chunk(
     let mut rendered = 0;
     while rendered < frames {
         transport.apply_latest_request(mailbox, status, dsp);
+        transport.poll_loop_restart(status, dsp);
         // Also clear while paused, awaiting Timeline activation, or monitoring live MIDI,
         // when the normal source renderer may not run at all.
         dsp.clear_disabled_metronome(status);
@@ -3157,6 +3509,9 @@ fn render_transport_chunk(
         let capture_device_frame = transport.device_frame;
         if dsp.plugin_fault.is_some() || dsp.plugin_processing_suspended() {
             dsp.bounce_source_callback_healthy = false;
+            if dsp.plugin_fault.is_some() {
+                dsp.cancel_faulted_owned_auditions();
+            }
             dsp.master_block[..segment_frames].fill([0.0; 2]);
             consume(rendered, &dsp.master_block[..segment_frames]);
             #[cfg(test)]
@@ -3173,6 +3528,7 @@ fn render_transport_chunk(
             );
             transport.device_frame = transport.device_frame.saturating_add(segment_frames as u64);
             if dsp.plugin_fault.is_some() {
+                transport.pending_loop_restart = None;
                 transport.request.playing = false;
                 transport.request.loop_enabled = false;
             }
@@ -3181,13 +3537,19 @@ fn render_transport_chunk(
             rendered += segment_frames;
             continue;
         }
-        let timeline_ready = dsp.prepare_timeline_render(
-            transport.epoch,
-            transport.timeline_frame,
-            transport.beat_q32,
-            segment_frames,
-            transport.request.playing,
-        );
+        let loop_restart_waiting =
+            transport.pending_loop_restart.is_some() || transport.loop_restart_safety_only;
+        if !loop_restart_waiting {
+            dsp.service_owned_auditions();
+        }
+        let timeline_ready = !loop_restart_waiting
+            && dsp.prepare_timeline_render(
+                transport.epoch,
+                transport.timeline_frame,
+                transport.beat_q32,
+                segment_frames,
+                transport.request.playing,
+            );
         #[cfg(test)]
         let genuine_segment = genuine_segment.map(|mut record| {
             record.timeline_render_active = dsp.timeline_plan_render_active;
@@ -3216,24 +3578,39 @@ fn render_transport_chunk(
             transport.request.playing,
             timeline_ready,
         );
-        let midi_monitor_endpoint = if transport.request.playing && !timeline_ready {
-            None
-        } else {
-            dsp.service_midi_input(
-                capture_device_frame,
-                transport.timeline_frame,
-                segment_frames,
-                transport.epoch,
-            )
-        };
+        let midi_monitor_endpoint =
+            if loop_restart_waiting || (transport.request.playing && !timeline_ready) {
+                None
+            } else {
+                dsp.service_midi_input(
+                    capture_device_frame,
+                    transport.timeline_frame,
+                    segment_frames,
+                    transport.epoch,
+                )
+            };
         dsp.meter_graph_rendered = false;
         if let Some(publisher) = dsp.meter_publisher.as_mut() {
             publisher.begin_block();
         }
-        if !transport.request.playing
-            && let Some(monitor) = midi_monitor_endpoint
+        if loop_restart_waiting {
+            // Only the finite safety quantum may be submitted while reset is
+            // pending. Live monitoring or parameter Qs would reopen the old
+            // musical deadline path and consume the parked epoch's cursor.
+            dsp.master_block[..segment_frames].fill([0.0; 2]);
+            dsp.service_paused_epoch_safety(segment_frames, 0, 0);
+        } else if !transport.request.playing
+            && (midi_monitor_endpoint.is_some() || dsp.has_paused_owned_auditions())
         {
-            let progress = dsp.render_paused_midi_monitor(status, segment_frames, monitor);
+            let progress = if dsp.has_paused_owned_auditions() {
+                dsp.render_paused_owned_auditions(status, segment_frames, midi_monitor_endpoint)
+            } else {
+                dsp.render_paused_midi_monitor(
+                    status,
+                    segment_frames,
+                    midi_monitor_endpoint.unwrap(),
+                )
+            };
             // A late monitor failure must fence every remaining stopped owner this segment.
             dsp.observe_plugin_processing_health();
             // The monitor graph was already advanced audibly. Generic edits on every unrelated
@@ -3251,7 +3628,9 @@ fn render_transport_chunk(
                 progress.generator_mask | safety_generator_mask | epoch_progress.generator_mask,
                 progress.insert_mask | epoch_progress.insert_mask,
             );
-        } else if timeline_ready {
+        } else if timeline_ready
+            && (transport.request.playing || !dsp.owned_audition_paused_isolation)
+        {
             dsp.render_block(status, segment_frames);
             dsp.observe_midi_safety_progress(u64::MAX, segment_frames);
         } else {
@@ -3273,6 +3652,7 @@ fn render_transport_chunk(
             dsp.master_block[..segment_frames].fill([0.0; 2]);
             transport.request.playing = false;
             transport.request.loop_enabled = false;
+            transport.pending_loop_restart = None;
         }
         dsp.publish_plugin_epoch_status(status);
         dsp.capture_rendered_master(capture_device_frame, segment_frames);
@@ -3346,6 +3726,7 @@ where
 {
     let channels = config.channels as usize;
     let sample_rate = config.sample_rate as f32;
+    let mut callback_clock = callback_telemetry.prepare_clock_observer(config.sample_rate);
     let error_status = status.clone();
     let error_telemetry = Arc::clone(&callback_telemetry);
     let mut dsp = DspState::try_new_with_endpoint_io(
@@ -3358,6 +3739,7 @@ where
         realtime_timeline_runtime,
     )?;
     dsp.engine_session = engine_session;
+    dsp.audition_receipts = Arc::clone(&status.audition_receipts);
     dsp.project_session = project_session;
     dsp.removal_transport_mailbox = Some(Arc::clone(&transport_mailbox));
     dsp.meter_publisher = Some(meter_publisher);
@@ -3370,9 +3752,17 @@ where
 
     Ok(device.build_output_stream(
         *config,
-        move |output: &mut [T], _| {
+        move |output: &mut [T], info| {
             dsp.begin_bounce_source_callback();
+            status.prepared_playback.publish(None);
             observe_backend_output_callback(&callback_telemetry, output.len(), channels);
+            if callback_clock.is_enabled() {
+                callback_telemetry.observe_clock_callback(
+                    &mut callback_clock,
+                    info.timestamp(),
+                    output.len() / channels,
+                );
+            }
             dsp.set_device_frame(transport.device_frame);
             dsp.callback_transport_request_id = transport.request.request_id;
             dsp.set_callback_transport_boundary(
@@ -3403,6 +3793,7 @@ where
             transport.apply_latest_request(&transport_mailbox, &status, &mut dsp);
             if !dsp.admit_plugin_callback(device_callback_frames) {
                 output.fill(T::from_sample(0.0));
+                transport.pending_loop_restart = None;
                 transport.request.playing = false;
                 transport.request.loop_enabled = false;
                 transport.device_frame = transport
@@ -3446,6 +3837,11 @@ where
                     },
                 );
             }
+            dsp.finish_playback_preparation_callback(
+                &status,
+                &transport,
+                commands.slots() != 0 || !output.len().is_multiple_of(channels),
+            );
             dsp.finish_bounce_source_callback(
                 &transport,
                 commands.slots() != 0 || !output.len().is_multiple_of(channels),
@@ -3476,16 +3872,16 @@ pub(crate) struct TestAudioCallback {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TestRestorationResidues {
     // Preserve portable fixture snapshots; these fields are asserted only by
-    // the Linux publication-dependent restoration coverage.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    // the Linux/Windows publication-dependent restoration coverage.
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     pub(crate) raw_track_delays: usize,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     pub(crate) generator_pdc: bool,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     pub(crate) active_graph_routes: usize,
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", windows)))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TestRestorationResetCoverage {
     pub(crate) extant: TestRestorationResidues,
@@ -3495,27 +3891,27 @@ pub(crate) struct TestRestorationResetCoverage {
 #[cfg(test)]
 struct TestRestorationResetArm {
     // Preserve portable fixture snapshots; these fields are asserted only by
-    // the Linux publication-dependent restoration coverage.
+    // the Linux/Windows publication-dependent restoration coverage.
     channel_id: u32,
     target_generation: Option<u64>,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     engine_session: u64,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     project_session: u64,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     initial: TestRestorationHistories,
 }
 
 #[cfg(test)]
 struct TestRestorationResetObservation {
     // Preserve portable fixture snapshots; these fields are asserted only by
-    // the Linux publication-dependent restoration coverage.
+    // the Linux/Windows publication-dependent restoration coverage.
     arm: TestRestorationResetArm,
     revision: u64,
     epoch: u64,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     before: TestRestorationHistories,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     after_epoch: TestRestorationHistories,
     after_commit: Option<TestRestorationHistories>,
 }
@@ -3526,12 +3922,12 @@ type TestRestorationDelayHistory = (u64, [f32; 2]);
 #[cfg(test)]
 struct TestRestorationHistories {
     // Preserve portable fixture snapshots; these fields are asserted only by
-    // the Linux publication-dependent restoration coverage.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    // the Linux/Windows publication-dependent restoration coverage.
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     engine_session: u64,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     project_session: u64,
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     transport_epoch: u64,
     active_voices: usize,
     active_audio_voices: usize,
@@ -3558,7 +3954,7 @@ impl TestRestorationHistories {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     fn assert_cleared(&self) {
         assert_eq!(self.active_voices, 0);
         assert_eq!(self.active_audio_voices, 0);
@@ -3573,7 +3969,7 @@ impl TestRestorationHistories {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     fn assert_reset_from(&self, before: &Self) {
         assert_eq!(self.engine_session, before.engine_session);
         assert_eq!(self.project_session, before.project_session);
@@ -3647,6 +4043,7 @@ impl TestAudioCallback {
             .unwrap(),
         );
         dsp.engine_session = engine.engine_session;
+        dsp.audition_receipts = Arc::clone(&engine.status.audition_receipts);
         dsp.project_session = Arc::clone(&engine.project_session);
         dsp.removal_transport_mailbox = Some(Arc::clone(&engine.transport_mailbox));
         let (retired_midi, retired) = RingBuffer::new(16);
@@ -3681,6 +4078,7 @@ impl TestAudioCallback {
         assert_eq!(engine.engine_session, self.dsp.engine_session);
         assert!(frames > 0 && frames <= MAX_MIXER_BLOCK_FRAMES);
         self.dsp.begin_bounce_source_callback();
+        engine.status.prepared_playback.publish(None);
         self.dsp.genuine_begin_pump();
         self.last_output_frames = frames;
         self.last_output[..frames].fill([0.0; 2]);
@@ -3719,6 +4117,7 @@ impl TestAudioCallback {
             .dsp
             .genuine_segment_start(status, &self.transport, frames, 0);
         if !self.dsp.admit_plugin_callback(frames) {
+            self.transport.pending_loop_restart = None;
             self.transport.request.playing = false;
             self.transport.request.loop_enabled = false;
             self.dsp.genuine_finish_segment(
@@ -3748,6 +4147,11 @@ impl TestAudioCallback {
                 last_output[offset..offset + output.len()].copy_from_slice(output);
             },
         );
+        self.dsp.finish_playback_preparation_callback(
+            status,
+            &self.transport,
+            self.commands.slots() != 0,
+        );
         self.dsp
             .finish_bounce_source_callback(&self.transport, self.commands.slots() != 0);
     }
@@ -3759,7 +4163,7 @@ impl TestAudioCallback {
     /// Poison now for queued/full-ring evidence and arm a separate, one-shot reset-contract
     /// observation. The latter injects again at the exact real activation boundary: it does not
     /// claim that this first poison survives arbitrary intervening callback advancement.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub(crate) fn poison_restoration_residues(
         &mut self,
         channel_id: u32,
@@ -3781,7 +4185,7 @@ impl TestAudioCallback {
 
     /// Bind the observation only after App allocates its exact restoration gate generation.
     /// Intermediate activations cannot consume the arm; repeated same-generation calls are safe.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub(crate) fn target_restoration_reset_generation(&mut self, generation: u64) {
         assert_ne!(generation, 0);
         if let Some(arm) = self.dsp.test_restoration_reset_arm.as_mut() {
@@ -3798,7 +4202,7 @@ impl TestAudioCallback {
 
     /// Consume immutable snapshots taken inside the exact activation, before any render.
     /// No post-render draining, tap changes, or test-side reset can manufacture this evidence.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub(crate) fn assert_restoration_residues_cleared(
         &mut self,
         channel_id: u32,
@@ -3909,6 +4313,7 @@ struct Voice {
     mixer_track: usize,
     timeline_note_id: Option<u64>,
     timeline_channel_id: Option<u32>,
+    audition_token_id: Option<u64>,
 }
 
 #[derive(Default)]
@@ -4048,6 +4453,10 @@ impl TimelineRenderPlan {
 }
 
 impl TimelineAudioSink for TimelineRenderPlan {
+    fn wants_automation_curve_values(&self) -> bool {
+        true
+    }
+
     fn note_on(&mut self, note: ChasedNote, sample_offset: u32) {
         self.push(sample_offset, TimelinePlannedEventKind::NoteOn(note));
     }
@@ -4227,6 +4636,24 @@ impl TimelineAutomationValueMatrix {
         self.values
             .get(slot * MAX_MIXER_BLOCK_FRAMES + frame)
             .copied()
+    }
+}
+
+impl MasterAutomationMatrix for TimelineAutomationValueMatrix {
+    fn frames(&self) -> usize {
+        self.frames
+    }
+
+    fn target_at(&self, slot: u16) -> Option<CompiledAutomationTarget> {
+        self.target_at(slot)
+    }
+
+    fn values_for_slot(
+        &self,
+        slot: u16,
+        expected_target: CompiledAutomationTarget,
+    ) -> Option<&[f32]> {
+        self.values_for_slot(slot, expected_target)
     }
 }
 
@@ -4553,7 +4980,7 @@ impl TimelinePluginAutomationBindings {
                         return false;
                     }
                     PluginRouteDestination::MixerInsert { track, slot } => {
-                        // Master automation needs the distinct R+prefix time domain. Keep it
+                        // Master-insert parameter automation needs its R+prefix time domain. Keep it
                         // explicitly pending until that path receives its own validated contract.
                         if track == 0 || usize::from(track) >= TRACK_COUNT {
                             continue;
@@ -6370,6 +6797,14 @@ impl MixerGraphEndpointIdentityTable {
 }
 
 struct DspState {
+    owned_auditions: [Option<OwnedAudition>; MAX_OWNED_AUDITIONS],
+    /// Once an owned keyboard monitor has frozen stopped sources, retiring its
+    /// last lease cannot reopen Legacy full-graph rendering and revive them.
+    owned_audition_paused_isolation: bool,
+    audition_receipts: Arc<AuditionReceipts>,
+    audition_monitor_tails: [Option<AuditionMonitorTail>; MAX_GENERATOR_ENDPOINTS],
+    native_audition_tracks: u32,
+    native_audition_quiet_frames: [u64; TRACK_COUNT],
     #[cfg(test)]
     test_genuine_observation: Option<Box<genuine_observation::GenuineObservationBuffer>>,
     #[cfg(test)]
@@ -6471,6 +6906,9 @@ struct DspState {
     timeline_activation_plan: Box<TimelineRenderPlan>,
     timeline_automation_values: TimelineAutomationValueMatrix,
     timeline_automation_staged_values: TimelineAutomationValueMatrix,
+    timeline_master_volume: MasterVolumeAutomation,
+    timeline_master_pan: MasterOutputAutomation,
+    timeline_master_mute: MasterOutputAutomation,
     timeline_plan_has_chase: bool,
     timeline_plan_render_active: bool,
     timeline_render_start_frame: u64,
@@ -6620,6 +7058,12 @@ impl DspState {
             #[cfg(test)]
             test_restoration_reset_observation: None,
             engine_session: 0,
+            owned_auditions: [None; MAX_OWNED_AUDITIONS],
+            owned_audition_paused_isolation: false,
+            audition_receipts: Arc::new(AuditionReceipts::default()),
+            audition_monitor_tails: [None; MAX_GENERATOR_ENDPOINTS],
+            native_audition_tracks: 0,
+            native_audition_quiet_frames: [0; TRACK_COUNT],
             project_session: Arc::new(AtomicU64::new(0)),
             removal_transport_mailbox: None,
             callback_transport_request_id: 0,
@@ -6719,6 +7163,18 @@ impl DspState {
             timeline_activation_plan: Box::new(TimelineRenderPlan::new()),
             timeline_automation_values: TimelineAutomationValueMatrix::new(),
             timeline_automation_staged_values: TimelineAutomationValueMatrix::new(),
+            timeline_master_volume: MasterVolumeAutomation::new(
+                pdc_maximum_delay_samples,
+                MAX_MIXER_BLOCK_FRAMES,
+            )?,
+            timeline_master_pan: MasterOutputAutomation::new_pan(
+                pdc_maximum_delay_samples,
+                MAX_MIXER_BLOCK_FRAMES,
+            )?,
+            timeline_master_mute: MasterOutputAutomation::new_mute(
+                pdc_maximum_delay_samples,
+                MAX_MIXER_BLOCK_FRAMES,
+            )?,
             timeline_plan_has_chase: false,
             timeline_plan_render_active: false,
             timeline_render_start_frame: 0,
@@ -6833,6 +7289,101 @@ impl DspState {
         }
     }
 
+    fn finish_playback_preparation_callback(
+        &self,
+        status: &AudioStatus,
+        transport: &RealtimeTransport,
+        command_transition_pending: bool,
+    ) {
+        let prepared = (!command_transition_pending && self.stopped_playback_workers_settled())
+            .then(|| self.prepared_playback_identity(transport))
+            .flatten();
+        status.prepared_playback.publish(prepared);
+    }
+
+    fn prepared_playback_identity(
+        &self,
+        transport: &RealtimeTransport,
+    ) -> Option<PreparedPlaybackToken> {
+        let runtime = self.timeline_runtime.as_ref()?;
+        let revision = runtime.active_revision()?;
+        if transport.request.playing
+            || !self.bounce_source_callback_healthy
+            || self.plugin_fault.is_some()
+            || self.plugin_processing_suspended()
+            || runtime.is_shutdown()
+            || runtime.pending_commands() != 0
+            || runtime.pending_transport_activation().is_some()
+            || runtime.stats().ownership_needs_resync
+            || runtime.active_epoch() != Some(transport.epoch)
+            || self.transport_epoch != transport.epoch
+            || !self.mixer_graph_binding_is_exact()
+        {
+            return None;
+        }
+        Some(PreparedPlaybackToken {
+            engine_session: self.engine_session,
+            project_session: self.project_session.load(Ordering::Acquire),
+            timeline_revision: revision,
+            epoch: transport.epoch,
+            transport_request: transport.request.request_id,
+            timing_revision: self.plugin_timing.revision,
+            topology_revision: self.plugin_topology_revision,
+            pdc_revision: self.pdc_plan_revision,
+            timeline_frame: transport.timeline_frame,
+        })
+    }
+
+    fn stopped_playback_workers_settled(&self) -> bool {
+        self.parameter_edit_callback_admission
+            .load(Ordering::Acquire)
+            == 0
+            && self
+                .paused_midi_safety
+                .iter()
+                .enumerate()
+                .all(|(index, safety)| {
+                    safety.is_none_or(|safety| {
+                        self.exact_midi_generator_index(safety.stamp) != Some(index)
+                    })
+                })
+            && self
+                .insert_endpoints
+                .iter()
+                .flatten()
+                .map(|slot| &slot.endpoint)
+                .chain(
+                    self.generator_endpoints
+                        .iter()
+                        .flatten()
+                        .map(|slot| &slot.endpoint),
+                )
+                .all(|endpoint| {
+                    endpoint.epoch() == self.transport_epoch
+                        && endpoint.bounce_source_callback_input_empty()
+                        && endpoint
+                            .adapter
+                            .stopped_playback_settled(self.transport_epoch)
+                })
+    }
+
+    fn fence_stopped_playback_output(&mut self, epoch: u64) {
+        for endpoint in self
+            .insert_endpoints
+            .iter_mut()
+            .flatten()
+            .map(|slot| &mut slot.endpoint)
+            .chain(
+                self.generator_endpoints
+                    .iter_mut()
+                    .flatten()
+                    .map(|slot| &mut slot.endpoint),
+            )
+        {
+            endpoint.adapter.fence_stopped_playback_output(epoch);
+        }
+    }
+
     /// Services the bounded ownership/lifecycle mailbox and invalidates any
     /// callback-owned render state whose active timeline identity changed.
     fn apply_pending_timeline_commands(&mut self) -> usize {
@@ -6857,7 +7408,61 @@ impl DspState {
         applied
     }
 
+    fn timeline_master_identity(&self) -> Option<MasterAutomationIdentity> {
+        Some(MasterAutomationIdentity {
+            revision: self.timeline_channel_revision?,
+            epoch: self.timeline_channel_epoch?,
+            pdc_revision: self.pdc_plan_revision,
+        })
+    }
+
+    fn timeline_master_applied_count(&self) -> u64 {
+        self.timeline_master_identity().map_or(0, |identity| {
+            self.timeline_master_volume
+                .applied_count(identity)
+                .saturating_add(self.timeline_master_pan.applied_count(identity))
+                .saturating_add(self.timeline_master_mute.applied_count(identity))
+        })
+    }
+
+    fn master_gain_for_frame(&self, frame_index: usize) -> f32 {
+        self.timeline_master_identity()
+            .map_or(self.master, |identity| {
+                self.timeline_master_volume.value(
+                    identity,
+                    self.timeline_render_start_frame,
+                    frame_index,
+                    self.master,
+                )
+            })
+    }
+
+    fn master_pan_for_frame(&self, frame_index: usize) -> f32 {
+        self.timeline_master_identity()
+            .map_or(self.master_pan, |identity| {
+                self.timeline_master_pan.value(
+                    identity,
+                    self.timeline_render_start_frame,
+                    frame_index,
+                    self.master_pan,
+                )
+            })
+    }
+
+    fn master_muted_for_frame(&self, frame_index: usize) -> bool {
+        let manual = if self.track_muted[0] { 1.0 } else { 0.0 };
+        self.timeline_master_identity().map_or(manual, |identity| {
+            self.timeline_master_mute.value(
+                identity,
+                self.timeline_render_start_frame,
+                frame_index,
+                manual,
+            )
+        }) >= 0.5
+    }
+
     fn clear_timeline_render_binding(&mut self) {
+        self.cancel_all_owned_auditions();
         self.invalidate_bounce_source_settlements();
         self.block_plugin_midi_until_epoch();
         for slot in self.generator_endpoints.iter_mut().flatten() {
@@ -6883,6 +7488,9 @@ impl DspState {
         self.timeline_generator_routes.clear();
         self.timeline_plugin_automation_bindings.clear();
         self.timeline_activation_plugin_automation_bindings.clear();
+        self.timeline_master_volume.clear();
+        self.timeline_master_pan.clear();
+        self.timeline_master_mute.clear();
         self.timeline_channel_revision = None;
         self.timeline_channel_epoch = None;
         self.timeline_plan.clear();
@@ -6914,6 +7522,10 @@ impl DspState {
     }
 
     fn pause_timeline(&mut self) {
+        self.timeline_master_volume.invalidate_prepared_block();
+        self.timeline_master_pan.invalidate_prepared_block();
+        self.timeline_master_mute.invalidate_prepared_block();
+        self.cancel_all_owned_auditions();
         if self
             .timeline_runtime
             .as_ref()
@@ -6977,6 +7589,11 @@ impl DspState {
         frames: usize,
         playing: bool,
     ) -> bool {
+        // A previous block cannot authorize this callback, including paused or
+        // temporarily unbound callbacks which never consume control history.
+        self.timeline_master_volume.invalidate_prepared_block();
+        self.timeline_master_pan.invalidate_prepared_block();
+        self.timeline_master_mute.invalidate_prepared_block();
         self.timeline_transport_beat_q32 = beat_q32;
         let Some(revision) = self
             .timeline_runtime
@@ -7050,11 +7667,15 @@ impl DspState {
                 timeline_plan,
                 timeline_automation_values,
                 timeline_automation_staged_values,
+                timeline_master_volume,
+                timeline_master_pan,
+                timeline_master_mute,
                 timeline_channel_bases,
                 insert_endpoints,
                 generator_endpoints,
                 timeline_generator_notes,
                 timeline_generator_staged_notes,
+                owned_auditions,
                 timeline_generator_routes,
                 timeline_plugin_automation_bindings,
                 timeline_plugin_control_histories,
@@ -7141,6 +7762,37 @@ impl DspState {
                 block.abort();
                 break 'transaction false;
             }
+            let master_identity = MasterAutomationIdentity {
+                revision,
+                epoch: active_epoch,
+                pdc_revision: *pdc_plan_revision,
+            };
+            if timeline_master_volume
+                .validate_matrix(
+                    master_identity,
+                    start_frame,
+                    timeline_automation_staged_values,
+                )
+                .is_err()
+                || timeline_master_pan
+                    .validate_matrix(
+                        master_identity,
+                        start_frame,
+                        timeline_automation_staged_values,
+                    )
+                    .is_err()
+                || timeline_master_mute
+                    .validate_matrix(
+                        master_identity,
+                        start_frame,
+                        timeline_automation_staged_values,
+                    )
+                    .is_err()
+            {
+                timeline_automation.abort_block();
+                block.abort();
+                break 'transaction false;
+            }
             if !Self::prepare_timeline_endpoint_batch(
                 timeline_plan.as_mut(),
                 Some(timeline_automation_staged_values),
@@ -7148,6 +7800,7 @@ impl DspState {
                 insert_endpoints,
                 timeline_generator_notes,
                 timeline_generator_staged_notes,
+                owned_auditions,
                 timeline_generator_routes,
                 timeline_plugin_automation_bindings,
                 timeline_plugin_control_histories,
@@ -7187,6 +7840,30 @@ impl DspState {
                 timeline_automation_values,
                 timeline_automation_staged_values,
             );
+            timeline_master_volume
+                .prepare_block(
+                    master_identity,
+                    start_frame,
+                    true,
+                    timeline_automation_values,
+                )
+                .expect("preflighted master matrix commits after the timeline transaction");
+            timeline_master_pan
+                .prepare_block(
+                    master_identity,
+                    start_frame,
+                    true,
+                    timeline_automation_values,
+                )
+                .expect("preflighted master matrix commits after the timeline transaction");
+            timeline_master_mute
+                .prepare_block(
+                    master_identity,
+                    start_frame,
+                    true,
+                    timeline_automation_values,
+                )
+                .expect("preflighted master matrix commits after the timeline transaction");
             Self::commit_timeline_endpoint_batch(
                 timeline_endpoint_batch.as_ref(),
                 generator_endpoints,
@@ -7226,7 +7903,8 @@ impl DspState {
                 .saturating_add(
                     self.timeline_plugin_automation_bindings
                         .applied_automation_target_count(),
-                ),
+                )
+                .saturating_add(self.timeline_master_applied_count()),
         );
         self.timeline_automation_pending = unsupported_target_count;
         self.timeline_automation_unsupported = self.timeline_automation_unsupported.saturating_add(
@@ -7243,6 +7921,7 @@ impl DspState {
         insert_endpoints: &mut [Option<InsertEndpointSlot>; TRACK_COUNT],
         generator_notes: &[Option<TimelineGeneratorNote>; MAX_ACTIVE_NOTES],
         staged_generator_notes: &mut [Option<TimelineGeneratorNote>; MAX_ACTIVE_NOTES],
+        owned_auditions: &[Option<OwnedAudition>; MAX_OWNED_AUDITIONS],
         routes: &TimelineGeneratorRouteTable,
         automation_bindings: &TimelinePluginAutomationBindings,
         control_histories: &mut [Q128ControlHistory],
@@ -7426,7 +8105,13 @@ impl DspState {
                     let velocity = ((velocity * 127.0).round() as u8).max(1);
                     let midi =
                         FrameEvent::midi(event.sample_offset, None, [0x90, note.note, velocity]);
-                    if batch
+                    if !audition_owns_generator_pitch(
+                        owned_auditions,
+                        route.channel_id,
+                        route.endpoint_id,
+                        route.plugin_instance_id,
+                        note.note,
+                    ) && batch
                         .push_event(handle, EndpointEventClass::Timeline, midi)
                         .is_err()
                     {
@@ -7458,7 +8143,15 @@ impl DspState {
                             && active.endpoint_id == binding.endpoint_id
                             && active.plugin_instance_id == binding.plugin_instance_id
                     });
-                    if last_pitch {
+                    if last_pitch
+                        && !audition_owns_generator_pitch(
+                            owned_auditions,
+                            binding.channel_id,
+                            binding.endpoint_id,
+                            binding.plugin_instance_id,
+                            binding.note,
+                        )
+                    {
                         let key = TimelineEndpointKey::new(
                             binding.channel_id,
                             binding.endpoint_id,
@@ -7790,6 +8483,27 @@ impl DspState {
         epoch: u64,
         _event_overflows: &mut u64,
     ) -> bool {
+        Self::stage_timeline_generator_plan_with_auditions(
+            plan,
+            generator_endpoints,
+            generator_notes,
+            &[None; MAX_OWNED_AUDITIONS],
+            routes,
+            revision,
+            epoch,
+        )
+    }
+
+    #[cfg(test)]
+    fn stage_timeline_generator_plan_with_auditions(
+        plan: &mut TimelineRenderPlan,
+        generator_endpoints: &mut [Option<GeneratorEndpointSlot>; MAX_GENERATOR_ENDPOINTS],
+        generator_notes: &mut [Option<TimelineGeneratorNote>; MAX_ACTIVE_NOTES],
+        owned_auditions: &[Option<OwnedAudition>; MAX_OWNED_AUDITIONS],
+        routes: &TimelineGeneratorRouteTable,
+        revision: u64,
+        epoch: u64,
+    ) -> bool {
         let mut bindings = TimelinePluginAutomationBindings::new();
         bindings.revision = Some(revision);
         bindings.epoch = Some(epoch);
@@ -7811,6 +8525,7 @@ impl DspState {
             &mut insert_endpoints,
             generator_notes,
             &mut staged_notes,
+            owned_auditions,
             routes,
             &bindings,
             &mut control_histories,
@@ -7917,6 +8632,7 @@ impl DspState {
                 mixer_track,
             } => {
                 let frequency = 440.0 * 2.0_f32.powf((note as f32 - 69.0) / 12.0);
+                self.next_voice = self.next_non_audition_voice();
                 self.voices[self.next_voice] = Voice {
                     phase: 0.0,
                     phase_step: frequency / self.sample_rate,
@@ -7926,9 +8642,14 @@ impl DspState {
                     mixer_track: mixer_track.min(TRACK_COUNT - 1),
                     timeline_note_id: None,
                     timeline_channel_id: None,
+                    audition_token_id: None,
                 };
                 self.next_voice = (self.next_voice + 1) % MAX_VOICES;
             }
+            AudioCommand::BeginAudition { token, velocity } => {
+                self.begin_owned_audition(token, velocity);
+            }
+            AudioCommand::EndAudition(token) => self.end_owned_audition(token),
             AudioCommand::StopAll => {
                 self.stage_all_notes_off();
                 self.reset_voice_and_pdc_state(0);
@@ -8095,6 +8816,26 @@ impl DspState {
                         .map(|slot| FrameEvent::midi(offset, slot, data))
                 });
                 if let Some(index) = self.find_generator_slot(channel_id) {
+                    // Legacy timed previews cannot release a pitch still held by
+                    // an exact callback-owned keyboard audition. New UI previews
+                    // use owned tokens; this also covers previously queued Offs.
+                    let protected_off =
+                        matches!(data[0] & 0xf0, 0x80) || (data[0] & 0xf0 == 0x90 && data[2] == 0);
+                    if protected_off
+                        && self.generator_endpoints[index]
+                            .as_ref()
+                            .is_some_and(|endpoint| {
+                                audition_owns_generator_pitch(
+                                    &self.owned_auditions,
+                                    channel_id,
+                                    endpoint.endpoint_id,
+                                    endpoint.plugin_instance_id,
+                                    data[1],
+                                )
+                            })
+                    {
+                        return;
+                    }
                     let endpoint = self.generator_endpoints[index]
                         .as_mut()
                         .expect("located generator endpoint must remain installed");
@@ -8494,6 +9235,9 @@ impl DspState {
             timeline_activation_plugin_automation_bindings,
             timeline_plugin_control_histories,
             mixer_graph_activation_plan,
+            timeline_master_volume,
+            timeline_master_pan,
+            timeline_master_mute,
             mixer_graph_activation_identity,
             graph_pdc_activation_plan,
             graph_pdc_activation_revision,
@@ -8753,6 +9497,32 @@ impl DspState {
             timeline_automation.abort_staged_reset();
             return Err(TimelineTransportActivationRejectReason::GraphPdcPlan);
         }
+        for control in [
+            timeline_master_volume,
+            timeline_master_pan,
+            timeline_master_mute,
+        ] {
+            control
+                .stage(
+                    MasterAutomationStage {
+                        identity: MasterAutomationIdentity {
+                            revision: spec.revision,
+                            epoch: actual_epoch,
+                            pdc_revision: next_graph_pdc_revision,
+                        },
+                        source_frame: chase.frame,
+                        output_delay_samples: graph_pdc_activation_plan
+                            .as_ref()
+                            .as_ref()
+                            .expect("preflighted graph PDC remains staged")
+                            .master_output_latency_samples(),
+                    },
+                    timeline.automation_bases(),
+                    timeline.driven_automation_targets(),
+                    timeline_activation_plan.automation_chase_values(),
+                )
+                .map_err(|_| TimelineTransportActivationRejectReason::GraphPdcPlan)?;
+        }
         Ok(())
     }
 
@@ -8767,6 +9537,9 @@ impl DspState {
         self.timeline_executor.abort_staged_reset();
         self.timeline_automation.abort_staged_reset();
         self.timeline_activation_plan.clear();
+        self.timeline_master_volume.abort();
+        self.timeline_master_pan.abort();
+        self.timeline_master_mute.abort();
         self.timeline_activation_plugin_automation_bindings.clear();
         *self.mixer_graph_activation_plan = FixedMixerGraphLayout::default();
         self.mixer_graph_activation_identity = None;
@@ -8845,6 +9618,15 @@ impl DspState {
 
         self.timeline_executor.commit_staged_reset();
         self.timeline_automation.commit_staged_reset();
+        self.timeline_master_volume
+            .commit()
+            .expect("master automation activation was preflighted before the epoch reset");
+        self.timeline_master_pan
+            .commit()
+            .expect("master automation activation was preflighted before the epoch reset");
+        self.timeline_master_mute
+            .commit()
+            .expect("master automation activation was preflighted before the epoch reset");
         std::mem::swap(&mut self.timeline_plan, &mut self.timeline_activation_plan);
         std::mem::swap(
             &mut self.timeline_channel_bases,
@@ -8970,13 +9752,16 @@ impl DspState {
             .map_or(0, |timeline| {
                 timeline.driven_automation_targets().len() as u64
             });
+        self.timeline_channel_revision = Some(spec.revision);
+        self.timeline_channel_epoch = Some(actual_epoch);
         self.timeline_automation_pending = driven_target_count.saturating_sub(
             self.timeline_channel_bases
                 .applied_automation_target_count()
                 .saturating_add(
                     self.timeline_plugin_automation_bindings
                         .applied_automation_target_count(),
-                ),
+                )
+                .saturating_add(self.timeline_master_applied_count()),
         );
         self.timeline_automation_unsupported = self
             .timeline_automation_unsupported
@@ -8984,8 +9769,6 @@ impl DspState {
         // Chased generator MIDI remains in the staged render plan. The first
         // rendered block batches it with Q128 parameter chase values and only
         // publishes both after the runtime/automation block commits.
-        self.timeline_channel_revision = Some(spec.revision);
-        self.timeline_channel_epoch = Some(actual_epoch);
         self.timeline_plan_has_chase = true;
         self.timeline_plan_render_active = false;
         self.timeline_transport_beat_q32 = spec.beat_q32;
@@ -9025,6 +9808,12 @@ impl DspState {
         discontinuity: TransportDiscontinuity,
         playing: bool,
     ) {
+        // Route-free legacy activation predates the atomic graph path. Publish
+        // its initial zero-latency PDC generation before binding controls, so
+        // the first renderer cannot change their identity from zero to one.
+        if self.pdc_plan_revision == 0 && !self.mixer_graph_was_activated {
+            self.refresh_pdc_plan(status, 0);
+        }
         self.apply_transport_epoch(status, epoch, beat_q32, playing);
         self.timeline_plan.clear();
         self.timeline_plan_has_chase = false;
@@ -9152,6 +9941,12 @@ impl DspState {
                 timeline_plan,
                 timeline_activation_plugin_automation_bindings,
                 timeline_plugin_control_histories,
+                timeline_master_volume,
+                timeline_master_pan,
+                timeline_master_mute,
+                pdc_plan,
+                graph_pdc_plan,
+                pdc_plan_revision,
                 ..
             } = self;
             let runtime = timeline_runtime
@@ -9160,6 +9955,24 @@ impl DspState {
             let revision = runtime
                 .active_revision()
                 .expect("activated timeline retains its revision");
+            let mut master_targets = [CompiledAutomationTarget::MasterVolume; 3];
+            let mut master_count = 0;
+            for target in [
+                CompiledAutomationTarget::MasterVolume,
+                CompiledAutomationTarget::MasterPan,
+                CompiledAutomationTarget::MixerMute { track: 0 },
+            ] {
+                if runtime.active_timeline().is_some_and(|timeline| {
+                    timeline
+                        .driven_automation_targets()
+                        .binary_search(&target)
+                        .is_ok()
+                }) {
+                    master_targets[master_count] = target;
+                    master_count += 1;
+                }
+            }
+            let driven_master_targets = &master_targets[..master_count];
             match runtime.chase_for_block(revision, epoch, frame) {
                 Ok(Some(state)) => {
                     let executor_staged = timeline_executor
@@ -9179,20 +9992,101 @@ impl DspState {
                             timeline_plugin_control_histories,
                             timeline_activation_plugin_automation_bindings,
                             timeline_plan.as_ref(),
-                        );
+                        )
+                        && timeline_master_volume
+                            .stage(
+                                MasterAutomationStage {
+                                    identity: MasterAutomationIdentity {
+                                        revision,
+                                        epoch,
+                                        pdc_revision: *pdc_plan_revision,
+                                    },
+                                    source_frame: state.frame,
+                                    output_delay_samples: graph_pdc_plan
+                                        .as_ref()
+                                        .as_ref()
+                                        .map_or_else(
+                                            || pdc_plan.output_latency_samples(),
+                                            GraphPdcPlan::master_output_latency_samples,
+                                        ),
+                                },
+                                &state.automation_bases,
+                                driven_master_targets,
+                                timeline_plan.automation_chase_values(),
+                            )
+                            .is_ok()
+                        && timeline_master_pan
+                            .stage(
+                                MasterAutomationStage {
+                                    identity: MasterAutomationIdentity {
+                                        revision,
+                                        epoch,
+                                        pdc_revision: *pdc_plan_revision,
+                                    },
+                                    source_frame: state.frame,
+                                    output_delay_samples: graph_pdc_plan
+                                        .as_ref()
+                                        .as_ref()
+                                        .map_or_else(
+                                            || pdc_plan.output_latency_samples(),
+                                            GraphPdcPlan::master_output_latency_samples,
+                                        ),
+                                },
+                                &state.automation_bases,
+                                driven_master_targets,
+                                timeline_plan.automation_chase_values(),
+                            )
+                            .is_ok()
+                        && timeline_master_mute
+                            .stage(
+                                MasterAutomationStage {
+                                    identity: MasterAutomationIdentity {
+                                        revision,
+                                        epoch,
+                                        pdc_revision: *pdc_plan_revision,
+                                    },
+                                    source_frame: state.frame,
+                                    output_delay_samples: graph_pdc_plan
+                                        .as_ref()
+                                        .as_ref()
+                                        .map_or_else(
+                                            || pdc_plan.output_latency_samples(),
+                                            GraphPdcPlan::master_output_latency_samples,
+                                        ),
+                                },
+                                &state.automation_bases,
+                                driven_master_targets,
+                                timeline_plan.automation_chase_values(),
+                            )
+                            .is_ok();
                     if !reset_staged {
                         timeline_executor.abort_staged_reset();
                         timeline_automation.abort_staged_reset();
+                        timeline_master_volume.abort();
+                        timeline_master_pan.abort();
+                        timeline_master_mute.abort();
                         false
                     } else {
                         timeline_executor.commit_staged_reset();
                         timeline_automation.commit_staged_reset();
+                        timeline_master_volume
+                            .commit()
+                            .expect("preflighted legacy master activation commits infallibly");
+                        timeline_master_pan
+                            .commit()
+                            .expect("preflighted legacy master activation commits infallibly");
+                        timeline_master_mute
+                            .commit()
+                            .expect("preflighted legacy master activation commits infallibly");
                         true
                     }
                 }
                 Ok(None) | Err(_) => {
                     timeline_executor.abort_staged_reset();
                     timeline_automation.abort_staged_reset();
+                    timeline_master_volume.abort();
+                    timeline_master_pan.abort();
+                    timeline_master_mute.abort();
                     false
                 }
             }
@@ -9230,22 +10124,23 @@ impl DspState {
             .map_or(0, |timeline| {
                 timeline.driven_automation_targets().len() as u64
             });
+        self.timeline_channel_revision = self
+            .timeline_runtime
+            .as_ref()
+            .and_then(RealtimeTimelineRuntime::active_revision);
+        self.timeline_channel_epoch = Some(epoch);
         self.timeline_automation_pending = driven_target_count.saturating_sub(
             self.timeline_channel_bases
                 .applied_automation_target_count()
                 .saturating_add(
                     self.timeline_plugin_automation_bindings
                         .applied_automation_target_count(),
-                ),
+                )
+                .saturating_add(self.timeline_master_applied_count()),
         );
         self.timeline_automation_unsupported = self
             .timeline_automation_unsupported
             .saturating_add(self.timeline_automation_pending);
-        self.timeline_channel_revision = self
-            .timeline_runtime
-            .as_ref()
-            .and_then(RealtimeTimelineRuntime::active_revision);
-        self.timeline_channel_epoch = Some(epoch);
         if self.mixer_graph_was_activated {
             let Some(identity) = self.mixer_graph_identity.as_mut() else {
                 self.poison_active_timeline_cursor(epoch, frame);
@@ -9309,6 +10204,9 @@ impl DspState {
         self.timeline_plan_has_chase = false;
         self.timeline_plan_render_active = false;
         self.timeline_automation_pending = 0;
+        self.timeline_master_volume.clear();
+        self.timeline_master_pan.clear();
+        self.timeline_master_mute.clear();
         self.timeline_channel_bases.clear();
         self.timeline_generator_routes.clear();
         self.timeline_plugin_automation_bindings.clear();
@@ -9327,6 +10225,9 @@ impl DspState {
         playing: bool,
     ) {
         debug_assert_ne!(epoch, 0);
+        self.timeline_master_volume.clear_active();
+        self.timeline_master_pan.clear_active();
+        self.timeline_master_mute.clear_active();
         if self.transport_epoch != epoch {
             self.plugin_recovered_epoch = None;
         }
@@ -9459,6 +10360,7 @@ impl DspState {
             mixer_track,
             timeline_note_id: Some(1),
             timeline_channel_id: Some(channel_id),
+            audition_token_id: None,
         };
         self.audio_voices[0].active = true;
         TestRestorationResidues {
@@ -9507,6 +10409,7 @@ impl DspState {
     }
 
     fn reset_voice_and_pdc_state(&mut self, beat_q32: u64) {
+        self.cancel_all_owned_auditions();
         for voice in &mut self.voices {
             voice.active = false;
             voice.timeline_note_id = None;
@@ -9702,6 +10605,19 @@ impl DspState {
             return;
         };
         let changed = next_plan != self.pdc_plan;
+        if (self.timeline_master_volume.matrix_slot().is_some()
+            || self.timeline_master_pan.matrix_slot().is_some()
+            || self.timeline_master_mute.matrix_slot().is_some())
+            && (changed || latency_identity_changed)
+        {
+            // A running fader history belongs to the current output delay.
+            // Retiming it needs an explicit chase rather than a UI fallback.
+            if let Some(runtime) = self.timeline_runtime.as_mut() {
+                runtime.require_resync();
+            }
+            self.fail_timeline_block();
+            return;
+        }
         let raw_crossfade_frames = if self.pdc_plan_revision == 0 {
             0
         } else {
@@ -9785,6 +10701,9 @@ impl DspState {
                 mixer_graph_endpoint_identities,
                 mixer_graph_activation_endpoint_identities,
                 timeline_plugin_automation_bindings,
+                timeline_master_volume,
+                timeline_master_pan,
+                timeline_master_mute,
                 ..
             } = self;
             let Some(runtime) = timeline_runtime.as_ref() else {
@@ -9830,7 +10749,12 @@ impl DspState {
             // Retiming an already-running Q128 parameter history requires a new
             // transport chase. Preserve the old graph transaction and fail
             // closed instead of mixing control and audio time domains.
-            if identity_changed || timeline_plugin_automation_bindings.iter().next().is_some() {
+            if identity_changed
+                || timeline_plugin_automation_bindings.iter().next().is_some()
+                || timeline_master_volume.matrix_slot().is_some()
+                || timeline_master_pan.matrix_slot().is_some()
+                || timeline_master_mute.matrix_slot().is_some()
+            {
                 mixer_graph_activation_endpoint_identities.clear();
                 return false;
             }
@@ -10403,6 +11327,10 @@ impl DspState {
     }
 
     fn retire_generator_endpoint(&mut self, slot: GeneratorEndpointSlot) {
+        // A retired physical instrument cannot receive an old audition End
+        // through its replacement. Independent worker cleanup retires its MIDI
+        // ownership even when no further audio callback services that endpoint.
+        slot.endpoint.adapter.block_midi_until_epoch();
         if slot.endpoint.has_admitted_live_edit_marker() {
             self.admitted_live_edit_endpoint_count =
                 self.admitted_live_edit_endpoint_count.saturating_sub(1);
@@ -10836,6 +11764,7 @@ impl DspState {
     }
 
     fn clear_timeline_generator_bindings(&mut self, endpoint_id: u64, plugin_instance_id: u64) {
+        self.cancel_endpoint_auditions(endpoint_id, plugin_instance_id);
         for binding in self.timeline_generator_notes.iter_mut() {
             if binding.is_some_and(|binding| {
                 binding.endpoint_id == endpoint_id
@@ -11577,10 +12506,15 @@ impl DspState {
         self.device_frame = device_frame;
     }
 
-    fn install_master_capture(&mut self, capture_id: u64, endpoint: MasterCaptureEndpoint) {
+    fn install_master_capture(&mut self, capture_id: u64, mut endpoint: MasterCaptureEndpoint) {
         let success =
             capture_id != 0 && endpoint.session_id() == capture_id && self.master_capture.is_none();
         let returned_endpoint = if success {
+            // A newly attached tap must also retain a fault that predates its installation.
+            // The faulted callback skips future tap submissions, so gaps alone cannot see it.
+            if let Some(fault) = self.plugin_fault {
+                endpoint.mark_processing_fault(self.device_frame, fault);
+            }
             self.master_capture = Some(MasterCaptureSlot {
                 capture_id,
                 endpoint,
@@ -11902,6 +12836,7 @@ impl DspState {
 
     fn start_timeline_native_note(&mut self, note: ChasedNote) {
         let frequency = 440.0 * 2.0_f32.powf((note.note as f32 - 69.0) / 12.0);
+        self.next_voice = self.next_non_audition_voice();
         self.voices[self.next_voice] = Voice {
             phase: 0.0,
             phase_step: frequency / self.sample_rate,
@@ -11911,6 +12846,7 @@ impl DspState {
             mixer_track: usize::from(note.mixer_track).min(TRACK_COUNT - 1),
             timeline_note_id: Some(note.note_id),
             timeline_channel_id: Some(note.channel_id),
+            audition_token_id: None,
         };
         self.next_voice = (self.next_voice + 1) % MAX_VOICES;
     }
@@ -12029,12 +12965,16 @@ impl DspState {
     }
 
     fn render_synth_frame(&mut self, frame_index: usize) {
+        self.render_synth_frame_filtered(frame_index, false);
+    }
+
+    fn render_synth_frame_filtered(&mut self, frame_index: usize, audition_only: bool) {
         let channel_bases = &self.timeline_channel_bases;
         let automation_values = self
             .timeline_plan_render_active
             .then_some(&self.timeline_automation_values);
         for voice in &mut self.voices {
-            if !voice.active {
+            if !voice.active || (audition_only && voice.audition_token_id.is_none()) {
                 continue;
             }
             let fundamental = (voice.phase * TAU).sin();
@@ -12105,6 +13045,7 @@ impl DspState {
             voice.envelope *= voice.decay;
             if voice.envelope < 0.0001 {
                 voice.active = false;
+                voice.audition_token_id = None;
             }
         }
     }
@@ -12252,7 +13193,7 @@ impl DspState {
         if self.plugin_fault.is_some() {
             return;
         }
-        self.plugin_fault = Some(PluginProcessingFault {
+        let fault = PluginProcessingFault {
             endpoint_id,
             epoch: self.transport_epoch,
             expected_sequence,
@@ -12261,7 +13202,13 @@ impl DspState {
             lookahead_quanta: self.plugin_timing.lookahead_quanta,
             timing_revision: self.plugin_timing.revision,
             reason,
-        });
+        };
+        self.plugin_fault = Some(fault);
+        if let Some(capture) = self.master_capture.as_mut() {
+            capture
+                .endpoint
+                .mark_processing_fault(self.device_frame, fault);
+        }
         self.plugin_fault_count = self.plugin_fault_count.saturating_add(1);
         // Independent atomic cleanup cannot be displaced by a full command/event queue and is
         // serviced off-thread even if no more audio is submitted.
@@ -13068,6 +14015,16 @@ impl DspState {
 
         let mut downstream = [false; TRACK_COUNT];
         downstream[mixer_track] = true;
+        self.finish_paused_monitor_graph(status, frames, downstream, progress)
+    }
+
+    fn finish_paused_monitor_graph(
+        &mut self,
+        status: &AudioStatus,
+        frames: usize,
+        mut downstream: [bool; TRACK_COUNT],
+        mut progress: PausedEndpointProgress,
+    ) -> PausedEndpointProgress {
         for source_runtime_slot in self
             .mixer_graph_plan
             .topological_runtime_slots()
@@ -13908,6 +14865,11 @@ impl DspState {
     }
 
     fn render_mixer_graph_block(&mut self, status: &AudioStatus, frames: usize) {
+        if !self.timeline_plan_render_active {
+            self.timeline_master_volume.invalidate_prepared_block();
+            self.timeline_master_pan.invalidate_prepared_block();
+            self.timeline_master_mute.invalidate_prepared_block();
+        }
         self.meter_graph_rendered = false;
         self.publish_plugin_epoch_status(status);
         if !self.mixer_graph_binding_is_exact() {
@@ -13965,7 +14927,8 @@ impl DspState {
             .copy_from_slice(self.mixer_graph_plan.topological_runtime_slots());
         for runtime_slot in topological_runtime_slots[..node_count].iter().copied() {
             let slot = usize::from(runtime_slot);
-            let source_audible = !self.track_muted[slot] && audible_nodes[slot];
+            let is_master = runtime_slot == MIXER_MASTER_RUNTIME_SLOT;
+            let source_audible = audible_nodes[slot] && (is_master || !self.track_muted[slot]);
             if !self.process_mixer_graph_routes(
                 runtime_slot,
                 MixerRouteTap::PreEffects,
@@ -14002,11 +14965,26 @@ impl DspState {
             }
             let start = slot * MAX_MIXER_BLOCK_FRAMES;
             for frame_index in 0..frames {
+                let muted = if is_master {
+                    !audible_nodes[slot] || self.master_muted_for_frame(frame_index)
+                } else {
+                    muted
+                };
                 if muted {
                     self.track_block[start + frame_index] = [0.0; 2];
                     continue;
                 }
                 let [left, right] = self.track_block[start + frame_index];
+                let gain = if runtime_slot == MIXER_MASTER_RUNTIME_SLOT {
+                    self.master_gain_for_frame(frame_index)
+                } else {
+                    gain
+                };
+                let pan = if runtime_slot == MIXER_MASTER_RUNTIME_SLOT {
+                    self.master_pan_for_frame(frame_index)
+                } else {
+                    pan
+                };
                 let processed = [
                     left * gain * if pan > 0.0 { 1.0 - pan } else { 1.0 },
                     right * gain * if pan < 0.0 { 1.0 + pan } else { 1.0 },
@@ -14085,6 +15063,11 @@ impl DspState {
         if self.mixer_graph_was_activated {
             self.render_mixer_graph_block(status, frames);
             return;
+        }
+        if !self.timeline_plan_render_active {
+            self.timeline_master_volume.invalidate_prepared_block();
+            self.timeline_master_pan.invalidate_prepared_block();
+            self.timeline_master_mute.invalidate_prepared_block();
         }
         self.publish_plugin_epoch_status(status);
         self.refresh_pdc_plan(status, frames);
@@ -14187,24 +15170,25 @@ impl DspState {
         }
 
         for frame_index in 0..frames {
-            if self.track_muted[0] {
+            if self.master_muted_for_frame(frame_index) {
                 self.master_block[frame_index] = [0.0; 2];
                 continue;
             }
             let [left, right] = self.master_block[frame_index];
-            let left_pan = if self.master_pan > 0.0 {
-                1.0 - self.master_pan
+            let master_pan = self.master_pan_for_frame(frame_index);
+            let left_pan = if master_pan > 0.0 {
+                1.0 - master_pan
             } else {
                 1.0
             };
-            let right_pan = if self.master_pan < 0.0 {
-                1.0 + self.master_pan
+            let right_pan = if master_pan < 0.0 {
+                1.0 + master_pan
             } else {
                 1.0
             };
             self.master_block[frame_index] = [
-                (left * self.master * left_pan).tanh(),
-                (right * self.master * right_pan).tanh(),
+                (left * self.master_gain_for_frame(frame_index) * left_pan).tanh(),
+                (right * self.master_gain_for_frame(frame_index) * right_pan).tanh(),
             ];
         }
         self.publish_plugin_epoch_status(status);
@@ -14373,6 +15357,14 @@ fn finite_clamp(value: f32, minimum: f32, maximum: f32, fallback: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    mod master_automation_tests {
+        use super::*;
+        include!("audio_master_automation_tests.rs");
+    }
+    mod audition_tests {
+        use super::*;
+        include!("audio_audition_tests.rs");
+    }
     mod capture_settlement_tests {
         use super::*;
         include!("audio_capture_settlement_tests.rs");
@@ -15964,6 +16956,7 @@ mod tests {
             mixer_track,
             timeline_note_id: Some(1),
             timeline_channel_id: Some(channel_id),
+            audition_token_id: None,
         };
     }
 
@@ -16721,6 +17714,7 @@ mod tests {
             mixer_track: 4,
             timeline_note_id: None,
             timeline_channel_id: None,
+            audition_token_id: None,
         };
         let (mut retired_assets, _reclaimed_assets) = test_reclaimer();
         register_test_asset(&mut dsp, &mut retired_assets, 901, &[0.2; 512], 48_000, 1);
@@ -17288,6 +18282,7 @@ mod tests {
         let (_parameter_edit_event_tx, parameter_edit_callback_events) = RingBuffer::new(4);
         let (_capture_event_tx, master_capture_events) = RingBuffer::new(4);
         AudioEngine {
+            next_audition_id: 1,
             engine_session: allocate_audio_engine_session().unwrap(),
             project_session: Arc::new(AtomicU64::new(0)),
             stream: None,
@@ -18679,7 +19674,7 @@ mod tests {
         assert_eq!(dsp.timeline_plan.automation_chase_len, base_count);
         assert_eq!(dsp.timeline_automation.epoch(), 2);
         assert_eq!(dsp.timeline_automation.next_frame(), 0);
-        assert_eq!(dsp.timeline_automation_pending, 3);
+        assert_eq!(dsp.timeline_automation_pending, 0);
         assert!(dsp.prepare_timeline_render(2, 0, 0, 8, true));
 
         // Chase values remain typed reset input. Only packet transitions enter
@@ -18700,8 +19695,8 @@ mod tests {
         );
         assert_eq!(dsp.timeline_automation.next_frame(), 8);
         assert_eq!(dsp.timeline_runtime.as_ref().unwrap().next_frame(), Some(8));
-        assert_eq!(dsp.timeline_automation_pending, 3);
-        assert_eq!(dsp.timeline_automation_unsupported, 3 + 3 * 8);
+        assert_eq!(dsp.timeline_automation_pending, 0);
+        assert_eq!(dsp.timeline_automation_unsupported, 0);
 
         let value = |target, frame| {
             dsp.timeline_automation_values
@@ -20894,6 +21889,7 @@ mod tests {
             &mut insert_endpoints,
             &notes,
             &mut staged_notes,
+            &[None; MAX_OWNED_AUDITIONS],
             &routes,
             &bindings,
             &mut control_histories,
@@ -21168,6 +22164,7 @@ mod tests {
             &mut insert_endpoints,
             &notes,
             &mut staged_notes,
+            &[None; MAX_OWNED_AUDITIONS],
             &generator_routes,
             &bindings,
             &mut control_histories,
@@ -24726,6 +25723,109 @@ mod tests {
     }
 
     #[test]
+    fn master_capture_processing_fault_survives_skipped_callbacks_and_retry() {
+        let target = master_capture_test_path("processing-fault-callback");
+        let session = MasterCaptureSession::start_to_path(&target, 48_000).unwrap();
+        let (endpoint, control) = session.into_parts();
+        let capture_id = control.session_id();
+        let (mut engine, mut callback) = TestAudioCallback::new();
+        assert!(engine.install_master_capture(capture_id, endpoint));
+        callback.pump(&engine, 128);
+        assert!(matches!(
+            engine.next_master_capture_event().unwrap(),
+            MasterCaptureEndpointEvent::Installed { success: true, .. }
+        ));
+        let prefix = control.status();
+        assert_eq!(prefix.timeline_frames, 128);
+        assert!(
+            !prefix.invalid,
+            "silence without a processing fault is valid"
+        );
+
+        callback.dsp.latch_plugin_processing_fault(
+            77,
+            1398,
+            PluginProcessingFaultReason::DeadlineMiss,
+        );
+        let first = control.status().processing_fault.unwrap();
+        assert_eq!(first.first_device_frame, 128);
+        assert_eq!(first.fault.endpoint_id, 77);
+        assert_eq!(first.fault.expected_sequence, 1398);
+        for _ in 0..3 {
+            callback.pump(&engine, 128);
+        }
+        assert_eq!(callback.transport.device_frame, 512);
+        let skipped = control.status();
+        assert_eq!(skipped.timeline_frames, prefix.timeline_frames);
+        assert_eq!(skipped.processing_fault, Some(first));
+        assert!(skipped.invalid);
+        assert_eq!(skipped.source_gap_frames, 0);
+        assert_eq!(skipped.overflow_frames, 0);
+
+        // Even clearing the engine fault for a retry cannot make this take clean.
+        callback.dsp.plugin_fault = None;
+        assert!(engine.stop_master_capture(capture_id));
+        callback.pump(&engine, 128);
+        let endpoint = match engine.next_master_capture_event().unwrap() {
+            MasterCaptureEndpointEvent::Stopped {
+                end_device_frame: 512,
+                returned_endpoint: Some(endpoint),
+                ..
+            } => endpoint,
+            event => panic!("unexpected event: {event:?}"),
+        };
+        let metadata = control.stop_blocking(endpoint).unwrap();
+        assert_eq!(metadata.frames, 128);
+        assert_eq!(metadata.processing_fault, Some(first));
+        assert!(!metadata.is_valid());
+        std::fs::remove_file(target).unwrap();
+    }
+
+    #[test]
+    fn master_capture_processing_fault_before_install_cannot_create_clean_take() {
+        let target = master_capture_test_path("processing-fault-before-install");
+        let session = MasterCaptureSession::start_to_path(&target, 48_000).unwrap();
+        let (endpoint, control) = session.into_parts();
+        let capture_id = control.session_id();
+        let (mut engine, mut callback) = TestAudioCallback::new();
+        callback
+            .dsp
+            .latch_plugin_processing_fault(88, 7, PluginProcessingFaultReason::WorkerFault);
+        assert!(engine.install_master_capture(capture_id, endpoint));
+        callback.pump(&engine, 128);
+        assert!(matches!(
+            engine.next_master_capture_event().unwrap(),
+            MasterCaptureEndpointEvent::Installed { success: true, .. }
+        ));
+        let status = control.status();
+        assert_eq!(status.timeline_frames, 0);
+        assert!(status.invalid);
+        let evidence = status.processing_fault.unwrap();
+        assert_eq!(evidence.first_device_frame, 0);
+        assert_eq!(
+            evidence.fault.reason,
+            PluginProcessingFaultReason::WorkerFault
+        );
+
+        assert!(engine.stop_master_capture(capture_id));
+        callback.pump(&engine, 128);
+        let endpoint = match engine.next_master_capture_event().unwrap() {
+            MasterCaptureEndpointEvent::Stopped {
+                returned_endpoint: Some(endpoint),
+                ..
+            } => endpoint,
+            event => panic!("unexpected event: {event:?}"),
+        };
+        let error = control.stop_blocking(endpoint).unwrap_err().to_string();
+        assert!(error.contains("no audio frames"));
+        assert!(error.contains("WorkerFault"));
+        assert!(
+            !target.exists(),
+            "an empty failed take must not be published"
+        );
+    }
+
+    #[test]
     fn master_capture_install_tap_and_stop_are_callback_confirmed_at_exact_frames() {
         let target = master_capture_test_path("lifecycle");
         let session = MasterCaptureSession::start_to_path(&target, 48_000).unwrap();
@@ -25067,6 +26167,7 @@ mod tests {
         let (master_capture_event_tx, master_capture_events) = RingBuffer::new(4);
         let (timeline_runtime, realtime_timeline_runtime) = create_timeline_runtime();
         let mut engine = AudioEngine {
+            next_audition_id: 1,
             engine_session: allocate_audio_engine_session().unwrap(),
             project_session: Arc::new(AtomicU64::new(0)),
             stream: None,
@@ -25152,6 +26253,9 @@ mod tests {
     }
     mod stopped_epoch_safety_tests {
         include!("audio_stopped_epoch_safety_tests.rs");
+        mod loop_restart_tests {
+            include!("audio_loop_restart_tests.rs");
+        }
     }
     mod stamped_generator_removal_tests {
         include!("audio_stamped_removal_tests.rs");

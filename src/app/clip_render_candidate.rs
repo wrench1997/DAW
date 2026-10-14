@@ -781,7 +781,7 @@ pub(in crate::app) fn test_commit_verified_occurrence(
     Ok(committed.published_path)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", windows)))]
 mod tests {
     use super::*;
 

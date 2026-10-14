@@ -45,6 +45,12 @@ pub struct TimelineAutomationBlockEndpoint {
 
 /// Callback operations emitted in exact packet order.
 pub trait TimelineAudioSink {
+    /// Sample-matrix sinks retain finite curve values and apply a mute threshold
+    /// only after interpolation. The default preserves legacy boolean writes.
+    fn wants_automation_curve_values(&self) -> bool {
+        false
+    }
+
     fn note_on(&mut self, note: ChasedNote, sample_offset: u32);
     fn note_off(&mut self, note: ChasedNote, sample_offset: u32);
     fn audio_start(&mut self, clip: ChasedAudioClip, sample_offset: u32);
@@ -984,7 +990,7 @@ impl ExecutorState {
             }
             None => (base.value, AutomationRampShape::Hold),
         };
-        normalize_automation_value(base.target, value).map(|value| (value, shape))
+        validate_automation_curve_value(base.target, value).map(|value| (value, shape))
     }
 
     fn resolved_value(
@@ -1006,6 +1012,8 @@ impl ExecutorState {
         let base_index = self.require_base_index(target)?;
         let (after_value, after_shape) =
             self.resolved_value_and_shape_by_base_index(base_index, frame)?;
+        let before_value = automation_sink_value(sink, target, before_value);
+        let after_value = automation_sink_value(sink, target, after_value);
         sink.automation_transition(TimelineAutomationTransition {
             target,
             before_value,
@@ -1028,6 +1036,7 @@ impl ExecutorState {
                 continue;
             };
             let (value, shape) = self.resolved_value_and_shape_by_base_index(base_index, frame)?;
+            let value = automation_sink_value(sink, base.target, value);
             sink.automation_chase_value(TimelineAutomationChaseValue {
                 target: base.target,
                 value,
@@ -1047,6 +1056,7 @@ impl ExecutorState {
                 continue;
             };
             let value = self.resolved_value_by_base_index(base_index, frame)?;
+            let value = automation_sink_value(sink, base.target, value);
             sink.automation_block_endpoint(TimelineAutomationBlockEndpoint {
                 target: base.target,
                 value,
@@ -1108,7 +1118,7 @@ fn validate_audio_clip(clip: ChasedAudioClip) -> Result<(), TimelineExecutorErro
     Ok(())
 }
 
-fn normalize_automation_value(
+fn validate_automation_curve_value(
     target: CompiledAutomationTarget,
     value: f32,
 ) -> Result<f32, TimelineExecutorError> {
@@ -1119,9 +1129,27 @@ fn normalize_automation_value(
         target,
         CompiledAutomationTarget::MixerMute { .. } | CompiledAutomationTarget::ChannelMute { .. }
     ) {
-        Ok(if value >= 0.5 { 1.0 } else { 0.0 })
+        Ok(value.clamp(0.0, 1.0))
     } else {
         Ok(value)
+    }
+}
+
+fn automation_sink_value<S: TimelineAudioSink + ?Sized>(
+    sink: &S,
+    target: CompiledAutomationTarget,
+    value: f32,
+) -> f32 {
+    if !sink.wants_automation_curve_values()
+        && matches!(
+            target,
+            CompiledAutomationTarget::MixerMute { .. }
+                | CompiledAutomationTarget::ChannelMute { .. }
+        )
+    {
+        if value >= 0.5 { 1.0 } else { 0.0 }
+    } else {
+        value
     }
 }
 
@@ -1163,9 +1191,14 @@ mod tests {
     #[derive(Default)]
     struct MockSink {
         output: Vec<Output>,
+        curve_values: bool,
     }
 
     impl TimelineAudioSink for MockSink {
+        fn wants_automation_curve_values(&self) -> bool {
+            self.curve_values
+        }
+
         fn note_on(&mut self, note: ChasedNote, sample_offset: u32) {
             self.output
                 .push(Output::NoteOn(note.note_id, sample_offset));
@@ -1754,6 +1787,72 @@ mod tests {
             sink.output,
             vec![transition(target, 0.0, 1.0, AutomationRampShape::Hold, 1)]
         );
+    }
+
+    #[test]
+    fn mute_curve_sink_keeps_raw_chase_transition_and_endpoint_values() {
+        for target in [
+            CompiledAutomationTarget::MixerMute { track: 0 },
+            CompiledAutomationTarget::ChannelMute { channel_id: 7 },
+        ] {
+            for curve_values in [false, true] {
+                let mut state = chase(100, vec![base(target, 0.37)]);
+                state.automation_layers.push(ChasedAutomationLayer {
+                    automation_id: 1,
+                    placement_id: None,
+                    precedence: 0,
+                    target,
+                    current_value: 0.25,
+                    end_value: 0.75,
+                    end_frame: 200,
+                    shape: AutomationRampShape::Linear,
+                    source_curve: AutomationCurve::Linear,
+                });
+                let mut executor = TimelineExecutor::new();
+                let mut sink = MockSink {
+                    curve_values,
+                    ..MockSink::default()
+                };
+                executor.reset_from_chase(4, &state, &mut sink).unwrap();
+                executor.finish_block(100, 32, &mut sink).unwrap();
+                let events = [event(
+                    4,
+                    TimelineEventKind::AutomationRamp(ramp(
+                        target,
+                        1,
+                        None,
+                        0,
+                        0.3,
+                        0.9,
+                        200,
+                        AutomationRampShape::Linear,
+                    )),
+                )];
+                executor
+                    .process_event_slice(4, 132, 32, &events, &mut sink)
+                    .unwrap();
+                executor.finish_block(132, 32, &mut sink).unwrap();
+                let expected = if curve_values {
+                    vec![
+                        chased(target, 0.25, AutomationRampShape::Linear),
+                        endpoint(target, 0.41),
+                        transition(target, 0.43, 0.3, AutomationRampShape::Linear, 4),
+                        endpoint(target, 0.5625),
+                    ]
+                } else {
+                    vec![
+                        chased(target, 0.0, AutomationRampShape::Linear),
+                        endpoint(target, 0.0),
+                        transition(target, 0.0, 0.0, AutomationRampShape::Linear, 4),
+                        endpoint(target, 1.0),
+                    ]
+                };
+                assert_eq!(
+                    sink.output, expected,
+                    "target={target:?}, curve_values={curve_values}"
+                );
+            }
+        }
     }
 
     #[test]

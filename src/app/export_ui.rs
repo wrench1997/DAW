@@ -18,6 +18,8 @@ struct ExportDraft {
     device_rate: u32,
     options: WavExportOptions,
     step: ExportStep,
+    whole_song: bool,
+    fixed_tail_confirmed: bool,
 }
 
 /// Pending review belongs to a project session; only successfully started
@@ -35,6 +37,25 @@ impl ExportDialog {
     }
 
     pub(super) fn open(&mut self, project_session: u64, device_rate: u32, running: bool) {
+        self.open_inner(project_session, device_rate, running, false);
+    }
+
+    pub(super) fn open_whole_song(
+        &mut self,
+        project_session: u64,
+        device_rate: u32,
+        running: bool,
+    ) {
+        self.open_inner(project_session, device_rate, running, true);
+    }
+
+    fn open_inner(
+        &mut self,
+        project_session: u64,
+        device_rate: u32,
+        running: bool,
+        whole_song: bool,
+    ) {
         self.reconcile_session(project_session);
         if running || self.is_open() {
             return;
@@ -51,6 +72,8 @@ impl ExportDialog {
                 .last_used
                 .unwrap_or_else(|| WavExportOptions::legacy(device_rate)),
             step: ExportStep::Settings,
+            whole_song,
+            fixed_tail_confirmed: false,
         });
     }
 
@@ -81,6 +104,7 @@ impl ExportDialog {
             && draft.step == ExportStep::Review
         {
             draft.step = ExportStep::Settings;
+            draft.fixed_tail_confirmed = false;
         }
     }
 
@@ -91,11 +115,37 @@ impl ExportDialog {
     ) -> Option<WavExportOptions> {
         self.reconcile_session(project_session);
         let draft = self.draft.as_mut()?;
-        if running || draft.step != ExportStep::Review || draft.options.validate().is_err() {
+        if running
+            || draft.step != ExportStep::Review
+            || draft.options.validate().is_err()
+            || draft.whole_song && !draft.fixed_tail_confirmed
+        {
             return None;
         }
         draft.step = ExportStep::ChoosingDestination;
         Some(draft.options)
+    }
+
+    pub(super) fn confirmed_whole_fixed_tail(&self) -> bool {
+        self.draft.is_some_and(|draft| {
+            draft.whole_song
+                && draft.fixed_tail_confirmed
+                && matches!(
+                    draft.step,
+                    ExportStep::Review | ExportStep::ChoosingDestination
+                )
+        })
+    }
+
+    #[cfg(test)]
+    pub(in crate::app) fn test_set_options(&mut self, options: WavExportOptions) {
+        let draft = self
+            .draft
+            .as_mut()
+            .expect("actual export settings must be open");
+        assert_eq!(draft.step, ExportStep::Settings);
+        draft.options = options;
+        draft.fixed_tail_confirmed = false;
     }
 
     pub(super) fn finish_destination(&mut self, started: bool) {
@@ -125,8 +175,25 @@ fn dialog_button(ui: &mut egui::Ui, label: &'static str) -> bool {
 
 #[cfg(test)]
 fn remember_test_rect(response: &egui::Response, label: &'static str) {
+    let observation = format!(
+        "rect={:?}, interact={:?}, enabled={}, layer={:?}, pass={}, discard={}",
+        response.rect,
+        response.interact_rect,
+        response.enabled(),
+        response.layer_id,
+        response.ctx.current_pass_index(),
+        response.ctx.will_discard(),
+    );
     response.ctx.data_mut(|data| {
-        data.insert_temp(egui::Id::new(("export-test-button", label)), response.rect)
+        data.insert_temp(egui::Id::new(("export-test-button", label)), response.rect);
+        data.insert_temp(
+            egui::Id::new(("export-test-interact", label)),
+            response.interact_rect,
+        );
+        data.insert_temp(
+            egui::Id::new(("export-test-widget-observation", label)),
+            observation,
+        );
     });
 }
 
@@ -137,7 +204,7 @@ fn settings_body(
     error: Option<&str>,
 ) {
     ui.label(format!("Project: {project_name}"));
-    ui.label("Full arrangement • Stereo • Offline project snapshot");
+    ui.label("Full arrangement • Stereo • Immutable offline snapshot");
     ui.separator();
     if draft.step == ExportStep::Settings {
         ui.label("Sample rate");
@@ -179,6 +246,14 @@ fn settings_body(
             remember_test_rect(&response, policy.label());
             let _ = response;
         }
+        ui.horizontal(|ui| {
+            ui.label("Release tail (ms)");
+            ui.add(
+                egui::DragValue::new(&mut draft.options.tail_milliseconds)
+                    .range(0..=WavExportOptions::MAX_TAIL_MILLISECONDS)
+                    .speed(100),
+            );
+        });
         if dialog_button(ui, "Reset to legacy / device-rate defaults") {
             draft.options = WavExportOptions::legacy(draft.device_rate);
         }
@@ -189,6 +264,10 @@ fn settings_body(
             draft.options.sample_format.label()
         ));
         ui.label(draft.options.level_policy.label());
+        ui.label(format!(
+            "Release tail: {} ms after the arrangement",
+            draft.options.tail_milliseconds
+        ));
     }
     match draft.options.level_policy {
         WavLevelPolicy::AttenuatePeaks => {
@@ -204,12 +283,43 @@ fn settings_body(
         ui.label("Integer PCM is rounded to the selected bit depth. No dither is applied.");
     }
     ui.separator();
-    ui.label("Offline limits: active VST instruments/effects, sidechains and non-Tempo automation are rejected. Use Realtime Master Capture for the live result.");
+    if draft.whole_song {
+        ui.label(whole_fixed_window_review_text(draft.options));
+        ui.label("Master Volume/Pan/Mute automation is rendered. The selected fixed tail holds the final master controls and starts no new notes. This export does not measure acoustic silence.");
+        ui.label("Offline limits: the experimental single VST master path requires one Instrument at the current sample rate, no mixer insert slots, no other music/audio source, and only Master Volume/Pan/Mute automation. Other plug-in projects remain unavailable; use Realtime Master Capture for their live result.");
+        if draft.step == ExportStep::Review {
+            let response = ui.checkbox(
+                &mut draft.fixed_tail_confirmed,
+                "I accept this fixed window, including possible truncation",
+            );
+            #[cfg(test)]
+            remember_test_rect(&response, "Confirm fixed VST tail window");
+            let _ = response;
+        }
+    } else {
+        ui.label("Tempo, Master Volume, Master Pan and Master Mute automation are rendered. The fixed release tail drains existing native voices and holds the last master controls; it does not start new notes.");
+        ui.label("Offline limits: active VST instruments/effects, sidechains and other automation are rejected. Disabled or bypassed instrument channels are silent. Use Realtime Master Capture for the live result.");
+    }
     ui.label("Source WAVs use linear resampling when needed. Standard RIFF size limits apply; no MP3, RF64 or compressed export.");
     ui.label("Settings are remembered only for this app run. The next native Save dialog chooses the destination and confirms replacement of an existing file.");
     if let Some(error) = error {
         ui.colored_label(egui::Color32::LIGHT_RED, error);
     }
+}
+
+pub(super) fn whole_fixed_window_review_text(options: WavExportOptions) -> String {
+    let end = if options.tail_milliseconds == 0 {
+        "With 0 ms, the file ends at the song end.".to_owned()
+    } else {
+        format!(
+            "The file ends {} ms after the song end.",
+            options.tail_milliseconds
+        )
+    };
+    format!(
+        "Fixed VST render window: {} ms of tail. {end} Unknown or longer reported plug-in tails may be truncated. A finite tail selection does not guarantee the entire release is captured.",
+        options.tail_milliseconds
+    )
 }
 
 /// Returns true only for the final review action. The caller then opens the
@@ -232,30 +342,74 @@ pub(super) fn settings_window(
     let mut destination = false;
     let response = egui::Modal::new(egui::Id::new("wav-export-settings")).show(ctx, |ui| {
         ui.set_width(500.0);
+        // Area starts from its previous measured height. Give the scroll body
+        // a viewport budget before laying it out, including room for the
+        // heading and footer, so the footer cannot grow the modal each pass.
+        // Only set the maximum: shorter native reviews still shrink to fit.
+        let body_height = (ctx.content_rect().height() - 180.0).max(120.0);
+        let chrome_height = ui.text_style_height(&egui::TextStyle::Heading)
+            + ui.spacing().interact_size.y
+            + 3.0 * ui.spacing().item_spacing.y
+            + 6.0;
+        ui.set_max_height(body_height + chrome_height);
         ui.heading(if draft.step == ExportStep::Settings {
             "WAV export settings"
         } else {
             "Review WAV export"
         });
-        egui::ScrollArea::vertical()
+        let scroll = egui::ScrollArea::vertical()
             .id_salt("wav-export-review-scroll")
-            .max_height((ctx.content_rect().height() - 180.0).max(120.0))
+            .max_height(body_height)
             .show(ui, |ui| {
                 settings_body(ui, draft, project_name, error);
             });
+        #[cfg(test)]
+        {
+            let observation = format!(
+                "content={:?}, inner={:?}, offset={:?}, outer_min={:?}, outer_max={:?}, clip={:?}, pass={}",
+                scroll.content_size,
+                scroll.inner_rect,
+                scroll.state.offset,
+                ui.min_rect(),
+                ui.max_rect(),
+                ui.clip_rect(),
+                ctx.current_pass_index(),
+            );
+            ctx.data_mut(|data| {
+                data.insert_temp(egui::Id::new("export-test-scroll-observation"), observation);
+            });
+        }
+        let _ = scroll;
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if draft.step == ExportStep::Settings {
                 review = dialog_button(ui, "Review…");
             } else if draft.step == ExportStep::Review {
                 back = dialog_button(ui, "Back");
-                ui.add_enabled_ui(!running, |ui| {
-                    destination = dialog_button(ui, "Choose destination and export…");
-                });
+                ui.add_enabled_ui(
+                    !running && (!draft.whole_song || draft.fixed_tail_confirmed),
+                    |ui| {
+                        destination = dialog_button(ui, "Choose destination and export…");
+                    },
+                );
             }
             close = dialog_button(ui, "Close");
         });
     });
+    #[cfg(test)]
+    {
+        remember_test_rect(&response.response, "Export modal");
+        let observation = format!(
+            "modal={:?}, interact={:?}, top={}, pass={}",
+            response.response.rect,
+            response.response.interact_rect,
+            response.is_top_modal,
+            ctx.current_pass_index(),
+        );
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new("export-test-modal-observation"), observation);
+        });
+    }
     if close || response.should_close() {
         dialog.close();
         return false;
@@ -331,7 +485,7 @@ pub(super) fn error_window(ctx: &egui::Context, error: &mut Option<String>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::app) mod tests {
     use super::*;
     use crate::export_job::ExportOutcome;
 
@@ -363,27 +517,95 @@ mod tests {
         assert!(error.is_some());
         release.send(()).unwrap();
     }
-    fn frame(ctx: &egui::Context, dialog: &mut ExportDialog, events: Vec<egui::Event>) -> bool {
+    pub(in crate::app) fn frame(
+        ctx: &egui::Context,
+        dialog: &mut ExportDialog,
+        events: Vec<egui::Event>,
+    ) -> bool {
+        frame_at(
+            ctx,
+            dialog,
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1100.0, 900.0)),
+            events,
+        )
+    }
+
+    fn frame_at(
+        ctx: &egui::Context,
+        dialog: &mut ExportDialog,
+        viewport: egui::Rect,
+        events: Vec<egui::Event>,
+    ) -> bool {
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(1100.0, 900.0),
-            )),
+            screen_rect: Some(viewport),
             events,
             ..Default::default()
         };
         let mut destination = false;
         let _ = ctx.run_ui(input, |ui| {
-            destination = settings_window(ui.ctx(), dialog, 1, "Export review test", false, None);
+            let session = dialog.draft.map_or(1, |draft| draft.project_session);
+            destination =
+                settings_window(ui.ctx(), dialog, session, "Export review test", false, None);
         });
         destination
     }
 
-    fn click(ctx: &egui::Context, dialog: &mut ExportDialog, label: &'static str) -> bool {
-        frame(ctx, dialog, Vec::new());
-        let rect = ctx
-            .data(|data| data.get_temp::<egui::Rect>(egui::Id::new(("export-test-button", label))))
-            .expect("button must be rendered");
+    pub(in crate::app) fn click(
+        ctx: &egui::Context,
+        dialog: &mut ExportDialog,
+        label: &'static str,
+    ) -> bool {
+        // A new App context has pending fonts/zoom, and a new modal first
+        // performs an invisible Area sizing pass. Observe fresh geometry on
+        // consecutive real frames before sending a pointer to that widget.
+        let id = egui::Id::new(("export-test-button", label));
+        let observation_id = egui::Id::new(("export-test-widget-observation", label));
+        let mut previous = None;
+        let mut settled = None;
+        let mut observations = Vec::new();
+        for attempt in 0..8 {
+            ctx.data_mut(|data| {
+                data.remove::<egui::Rect>(id);
+                data.remove::<String>(observation_id);
+                data.remove::<String>(egui::Id::new("export-test-scroll-observation"));
+                data.remove::<String>(egui::Id::new("export-test-modal-observation"));
+            });
+            let pass_before = ctx.cumulative_pass_nr();
+            frame(ctx, dialog, Vec::new());
+            let (raw, widget, scroll, modal) = ctx.data(|data| {
+                (
+                    data.get_temp::<egui::Rect>(id),
+                    data.get_temp::<String>(observation_id),
+                    data.get_temp::<String>(egui::Id::new("export-test-scroll-observation")),
+                    data.get_temp::<String>(egui::Id::new("export-test-modal-observation")),
+                )
+            });
+            let current = raw.filter(|rect| rect.is_finite() && rect.is_positive());
+            let coordinates = raw.map(|rect| [rect.min.x, rect.min.y, rect.max.x, rect.max.y]);
+            observations.push(format!(
+                "frame={attempt}, passes={}..{}, time={}, viewport={:?}, zoom={}, ppp={}, raw={raw:?}, coordinates={coordinates:?}, valid={current:?}, widget={widget:?}, scroll={scroll:?}, modal={modal:?}",
+                pass_before,
+                ctx.cumulative_pass_nr(),
+                ctx.input(|input| input.time),
+                ctx.content_rect(),
+                ctx.zoom_factor(),
+                ctx.pixels_per_point(),
+            ));
+            if current.is_some() && current == previous {
+                settled = current;
+                break;
+            }
+            previous = current;
+        }
+        let rect = settled.unwrap_or_else(|| {
+            panic!(
+                "export widget {label:?} did not render stable geometry; draft={:?}, viewport={:?}, zoom={}\n{}",
+                dialog.draft,
+                ctx.content_rect(),
+                ctx.zoom_factor(),
+                observations.join("\n"),
+            )
+        });
         let pos = rect.center();
         let pointer = |pressed| egui::Event::PointerButton {
             pos,
@@ -401,6 +623,158 @@ mod tests {
             dialog,
             vec![egui::Event::PointerMoved(pos), pointer(false)],
         )
+    }
+
+    #[test]
+    fn whole_modal_geometry_settles_by_the_second_visible_frame_and_native_stays_compact() {
+        for styled in [false, true] {
+            let mut modal_heights = Vec::new();
+            for whole in [false, true] {
+                let ctx = egui::Context::default();
+                if styled {
+                    crate::theme::install(&ctx);
+                }
+                let mut dialog = ExportDialog::default();
+                if whole {
+                    dialog.open_whole_song(1, 48_000, false);
+                } else {
+                    dialog.open(1, 48_000, false);
+                }
+                let mut buttons = Vec::new();
+                let mut modals = Vec::new();
+                for _ in 0..3 {
+                    let id = egui::Id::new(("export-test-button", "Review…"));
+                    ctx.data_mut(|data| data.remove::<egui::Rect>(id));
+                    frame(&ctx, &mut dialog, Vec::new());
+                    buttons.push(ctx.data(|data| data.get_temp::<egui::Rect>(id)).unwrap());
+                    modals.push(
+                        ctx.data(|data| {
+                            data.get_temp::<egui::Rect>(egui::Id::new((
+                                "export-test-button",
+                                "Export modal",
+                            )))
+                        })
+                        .unwrap(),
+                    );
+                }
+                assert_eq!(buttons[1], buttons[2], "styled={styled}, whole={whole}");
+                assert_eq!(modals[1], modals[2], "styled={styled}, whole={whole}");
+                assert!(ctx.content_rect().contains_rect(buttons[2]));
+                assert!(ctx.content_rect().contains_rect(modals[2]));
+                modal_heights.push(modals[2].height());
+            }
+            assert!(
+                modal_heights[0] < modal_heights[1],
+                "styled={styled}: {modal_heights:?}"
+            );
+            assert!(
+                modal_heights[0] < 720.0,
+                "native dialog filled the viewport budget"
+            );
+        }
+    }
+
+    #[test]
+    fn whole_review_checkbox_and_footer_stay_visible_and_use_real_events_in_small_viewport() {
+        for styled in [false, true] {
+            let ctx = egui::Context::default();
+            if styled {
+                crate::theme::install(&ctx);
+            }
+            let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1080.0, 680.0));
+            let mut dialog = ExportDialog::default();
+            dialog.open_whole_song(1, 48_000, false);
+            let widget_rect = |label| {
+                ctx.data(|data| {
+                    data.get_temp::<egui::Rect>(egui::Id::new(("export-test-button", label)))
+                })
+                .expect("actual widget must have been rendered")
+            };
+            let click_current = |dialog: &mut ExportDialog, label| {
+                let rect = widget_rect(label);
+                assert!(viewport.contains_rect(rect), "{label}: {rect:?}");
+                let pos = rect.center();
+                let pointer = |pressed| egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                frame_at(
+                    &ctx,
+                    dialog,
+                    viewport,
+                    vec![egui::Event::PointerMoved(pos), pointer(true)],
+                );
+                frame_at(
+                    &ctx,
+                    dialog,
+                    viewport,
+                    vec![egui::Event::PointerMoved(pos), pointer(false)],
+                )
+            };
+            for _ in 0..3 {
+                frame_at(&ctx, &mut dialog, viewport, Vec::new());
+            }
+            assert!(!click_current(&mut dialog, "Review…"));
+            assert_eq!(dialog.draft.unwrap().step, ExportStep::Review);
+            let mut checkboxes = Vec::new();
+            for _ in 0..3 {
+                frame_at(&ctx, &mut dialog, viewport, Vec::new());
+                checkboxes.push(widget_rect("Confirm fixed VST tail window"));
+            }
+            assert_eq!(checkboxes[1], checkboxes[2], "styled={styled}");
+            for label in [
+                "Confirm fixed VST tail window",
+                "Choose destination and export…",
+                "Close",
+            ] {
+                let rect = widget_rect(label);
+                assert!(viewport.contains_rect(rect), "{label}: {rect:?}");
+                let interact = ctx
+                    .data(|data| {
+                        data.get_temp::<egui::Rect>(egui::Id::new(("export-test-interact", label)))
+                    })
+                    .unwrap();
+                assert!(
+                    interact.contains_rect(rect),
+                    "{label} is clipped: {interact:?} vs {rect:?}"
+                );
+            }
+            assert!(!click_current(
+                &mut dialog,
+                "Choose destination and export…"
+            ));
+            assert!(dialog.begin_destination(1, false).is_none());
+            assert!(!dialog.confirmed_whole_fixed_tail());
+            assert!(!click_current(&mut dialog, "Confirm fixed VST tail window"));
+            assert!(dialog.confirmed_whole_fixed_tail());
+            assert!(click_current(&mut dialog, "Choose destination and export…"));
+            assert_eq!(
+                dialog.begin_destination(1, false),
+                Some(WavExportOptions::legacy(48_000))
+            );
+        }
+    }
+
+    #[test]
+    fn cold_app_theme_review_uses_real_checkbox_before_destination_admission() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut dialog = ExportDialog::default();
+        dialog.open_whole_song(73, 48_000, false);
+        assert!(!click(&ctx, &mut dialog, "Review…"));
+        assert_eq!(dialog.draft.unwrap().step, ExportStep::Review);
+        assert!(!dialog.confirmed_whole_fixed_tail());
+        assert!(!click(&ctx, &mut dialog, "Choose destination and export…"));
+        assert!(dialog.begin_destination(73, false).is_none());
+        assert!(!click(&ctx, &mut dialog, "Confirm fixed VST tail window"));
+        assert!(dialog.confirmed_whole_fixed_tail());
+        assert!(click(&ctx, &mut dialog, "Choose destination and export…"));
+        assert_eq!(
+            dialog.begin_destination(73, false),
+            Some(WavExportOptions::legacy(48_000))
+        );
     }
 
     #[test]
@@ -461,6 +835,31 @@ mod tests {
         dialog.finish_destination(true);
         assert!(!dialog.is_open());
         assert!(dialog.begin_destination(1, false).is_none());
+    }
+
+    #[test]
+    fn whole_fixed_window_requires_actual_checkbox_and_back_invalidates_previous_consent() {
+        let ctx = egui::Context::default();
+        let mut dialog = ExportDialog::default();
+        dialog.open_whole_song(1, 48_000, false);
+        assert!(!click(&ctx, &mut dialog, "Review…"));
+        assert!(!click(&ctx, &mut dialog, "Choose destination and export…"));
+        assert!(dialog.begin_destination(1, false).is_none());
+        assert!(!dialog.confirmed_whole_fixed_tail());
+        assert!(!click(&ctx, &mut dialog, "Confirm fixed VST tail window"));
+        assert!(dialog.confirmed_whole_fixed_tail());
+        assert!(!click(&ctx, &mut dialog, "Back"));
+        assert!(!dialog.confirmed_whole_fixed_tail());
+        let mut options = WavExportOptions::legacy(48_000);
+        options.tail_milliseconds = 3_000;
+        dialog.test_set_options(options);
+        assert!(!click(&ctx, &mut dialog, "Review…"));
+        assert!(!click(&ctx, &mut dialog, "Choose destination and export…"));
+        assert!(dialog.begin_destination(1, false).is_none());
+        assert!(!click(&ctx, &mut dialog, "Confirm fixed VST tail window"));
+        assert!(click(&ctx, &mut dialog, "Choose destination and export…"));
+        assert_eq!(dialog.begin_destination(1, false), Some(options));
+        assert!(dialog.confirmed_whole_fixed_tail());
     }
 
     #[test]

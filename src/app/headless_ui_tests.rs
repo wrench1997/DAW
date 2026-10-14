@@ -2603,10 +2603,28 @@ fn compact_rack_retains_accessible_controls_and_scrolls_at_minimum_width() {
 }
 
 include!("piano_keyboard_tests.rs");
+#[path = "editor_navigation_tests.rs"]
+mod editor_navigation_tests;
+#[path = "keyboard_audition_ui_tests.rs"]
+mod keyboard_audition_ui_tests;
+#[path = "master_pan_audition_ui_tests.rs"]
+mod master_pan_audition_ui_tests;
 #[path = "piano_expression_tests.rs"]
 mod piano_expression_tests;
+#[path = "piano_keyboard_playback_tests.rs"]
+mod piano_keyboard_playback_tests;
+#[path = "piano_keyboard_ui_tests.rs"]
+mod piano_keyboard_ui_tests;
 #[path = "piano_mouse_tests.rs"]
 mod piano_mouse_tests;
+#[path = "play_startup_ui_tests.rs"]
+mod play_startup_ui_tests;
+#[path = "project_save_name_tests.rs"]
+mod project_save_name_tests;
+#[path = "startup_state_history_tests.rs"]
+mod startup_state_history_tests;
+#[path = "toast_ui_tests.rs"]
+mod toast_ui_tests;
 
 #[path = "piano_range_tests.rs"]
 mod piano_range_tests;
@@ -3301,6 +3319,341 @@ fn wait_config_condition(mut predicate: impl FnMut() -> bool) {
         );
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+// A real device-free callback admits the fake plug-in's endpoint and timeline.
+// This never supplies a presentation-only native snapshot or calls an OS editor.
+// Drop the callback before the App so callback-owned endpoints return first.
+struct NativeEditorFaultFixture {
+    callback: crate::audio::TestAudioCallback,
+    ui: UiHarness,
+    instance_id: u64,
+}
+
+impl NativeEditorFaultFixture {
+    fn new() -> Self {
+        let mut ui = UiHarness::new();
+        ui.app.project = Project::blank();
+        let instance_id = config_capture_plugin(
+            &mut ui.app.project,
+            PluginPickerTarget::MixerSlot { track: 1, slot: 0 },
+            0,
+        );
+        ui.app.project.plugin_instances[0].opaque_state = 0.2f32.to_le_bytes().to_vec();
+        ui.app.project.plugin_instances[0].parameters.insert(0, 0.2);
+        let (mut audio, callback) = AudioEngine::test_engine_with_callback();
+        assert!(audio.set_project_session(ui.app.project_session));
+        ui.app.audio = Some(audio);
+        let chain = spawn_config_candidate_fixture(&ui.app.project, &[instance_id], false, false);
+        let candidate = ui.app.project.clone();
+        ui.app
+            .queue_mixer_track_candidate_prepared(1, candidate, None, Some(chain))
+            .unwrap();
+        ui.app.request_immediate_timeline_compile();
+        let mut fixture = Self {
+            callback,
+            ui,
+            instance_id,
+        };
+        fixture.until(|fixture| {
+            fixture
+                .ui
+                .app
+                .native_editor_timeline_ready(fixture.instance_id)
+                && fixture
+                    .ui
+                    .app
+                    .native_editor_snapshot(fixture.instance_id)
+                    .is_some_and(|snapshot| {
+                        snapshot.state.supported
+                            && snapshot.state.has_editor
+                            && snapshot.pending_request.is_none()
+                    })
+                && fixture.ui.app.project.plugin_instances[0].runtime_status
+                    == PluginRuntimeStatus::Loaded
+        });
+        fixture.ui.app.history_snapshot = fixture.ui.app.project.clone();
+        fixture.ui.app.history_fingerprint = project_fingerprint(&fixture.ui.app.project);
+        fixture.ui.app.project_fingerprint = fixture.ui.app.history_fingerprint;
+        fixture.ui.app.undo_stack.clear();
+        fixture.ui.app.redo_stack.clear();
+        fixture.ui.app.dirty = false;
+        fixture
+    }
+
+    fn until(&mut self, condition: impl Fn(&Self) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !condition(self) && Instant::now() < deadline {
+            self.callback.pump(self.ui.app.audio.as_ref().unwrap(), 128);
+            self.ui.run(Vec::new());
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            condition(self),
+            "native fake-worker App condition failed: phase={:?}, processing={}, retry={:?}, toast={:?}",
+            self.ui.app.timeline_audio_sync.phase,
+            self.ui.app.plugin_processing_status_label(),
+            self.ui.app.plugin_processing_retry_pending,
+            self.ui.app.toast,
+        );
+    }
+
+    fn editor_action(&mut self, close: bool) {
+        // The fake backend ignores this owner. No HWND is opened, focused, or
+        // otherwise used; the App's normal supported-desktop gate stays intact.
+        self.ui.app.native_editor_owner = Some((1, std::process::id()));
+        self.ui.app.apply_plugin_slot_action(if close {
+            PluginSlotAction::CloseNativeEditor {
+                instance_id: self.instance_id,
+            }
+        } else {
+            PluginSlotAction::OpenNativeEditor {
+                instance_id: self.instance_id,
+            }
+        });
+    }
+
+    fn editor_settled(&self, open: bool) -> bool {
+        self.ui
+            .app
+            .native_editor_snapshot(self.instance_id)
+            .is_some_and(|snapshot| {
+                snapshot.pending_request.is_none() && snapshot.state.open == open
+            })
+    }
+}
+
+#[test]
+fn full_app_native_editor_fault_refusal_covers_latch_and_unpolled_snapshot_without_mutating_project()
+ {
+    let mut fixture = NativeEditorFaultFixture::new();
+    for (health, latched) in [
+        (PluginProcessingHealth::Faulted, false),
+        (PluginProcessingHealth::Recovered, true),
+    ] {
+        // Deliberately do not poll UI health here: the request must also catch
+        // the actual callback snapshot before the retry latch has been set.
+        fixture.ui.app.plugin_processing_retry_required = latched;
+        fixture
+            .ui
+            .app
+            .audio
+            .as_ref()
+            .unwrap()
+            .set_plugin_processing_test_snapshot(plugin_processing_fixture(health, 1));
+        assert!(
+            fixture
+                .ui
+                .app
+                .native_editor_timeline_ready(fixture.instance_id)
+        );
+        let before = serde_json::to_value(&fixture.ui.app.project).unwrap();
+        let request_id = fixture.ui.app.next_plugin_parameter_request_id;
+        let generation = fixture.ui.app.timeline_desired_generation;
+        let seek = fixture.ui.app.timeline_audio_sync.desired_seek;
+        let history = (
+            fixture.ui.app.undo_stack.len(),
+            fixture.ui.app.redo_stack.len(),
+            fixture.ui.app.history_fingerprint,
+        );
+        fixture.editor_action(false);
+        assert!(fixture.editor_settled(false));
+        assert_eq!(fixture.ui.app.next_plugin_parameter_request_id, request_id);
+        assert_eq!(
+            serde_json::to_value(&fixture.ui.app.project).unwrap(),
+            before
+        );
+        assert!(!fixture.ui.app.dirty);
+        assert_eq!(fixture.ui.app.timeline_desired_generation, generation);
+        assert_eq!(fixture.ui.app.timeline_audio_sync.desired_seek, seek);
+        assert_eq!(
+            (
+                fixture.ui.app.undo_stack.len(),
+                fixture.ui.app.redo_stack.len(),
+                fixture.ui.app.history_fingerprint,
+            ),
+            history
+        );
+        let toast = &fixture.ui.app.toast.as_ref().unwrap().0;
+        assert!(toast.contains("F10"));
+        assert!(toast.contains("RETRY AUDIO PROCESSING"));
+        assert!(toast.contains("click EDITOR again"));
+        assert!(!fixture.ui.app.playing);
+        assert!(fixture.ui.app.plugin_processing_retry_pending.is_none());
+    }
+
+    // A healthy request still obeys the real callback timeline fence.
+    fixture.ui.app.plugin_processing_retry_required = false;
+    fixture.ui.app.timeline_audio_sync.phase = TimelineAudioSyncPhase::Unavailable;
+    let request_id = fixture.ui.app.next_plugin_parameter_request_id;
+    fixture.editor_action(false);
+    assert!(fixture.editor_settled(false));
+    assert_eq!(fixture.ui.app.next_plugin_parameter_request_id, request_id);
+    assert!(
+        fixture
+            .ui
+            .app
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("callback timeline to release parameter automation")
+    );
+}
+
+#[test]
+fn full_app_native_editor_fault_keeps_close_available_and_explicit_retry_restores_worker_open() {
+    let mut fixture = NativeEditorFaultFixture::new();
+    fixture.editor_action(false);
+    fixture.until(|fixture| fixture.editor_settled(true));
+    fixture
+        .ui
+        .app
+        .audio
+        .as_ref()
+        .unwrap()
+        .set_plugin_processing_test_snapshot(plugin_processing_fixture(
+            PluginProcessingHealth::Faulted,
+            1,
+        ));
+    fixture.ui.run(Vec::new());
+    assert!(fixture.ui.app.plugin_processing_retry_required);
+    assert_eq!(
+        fixture.ui.app.project.plugin_instances[0].runtime_status,
+        PluginRuntimeStatus::Loaded,
+        "callback faults must not masquerade as failed plug-in loading"
+    );
+    let request_id = fixture.ui.app.next_plugin_parameter_request_id;
+    fixture.editor_action(true);
+    assert_eq!(
+        fixture.ui.app.next_plugin_parameter_request_id,
+        request_id + 1
+    );
+    fixture.until(|fixture| fixture.editor_settled(false));
+    assert!(fixture.ui.app.plugin_processing_retry_required);
+    assert!(!fixture.ui.app.playing);
+
+    // Exercise the existing F10/Retry controls. A recovered presentation alone
+    // cannot satisfy this wait: the actual callback must confirm the new plan.
+    let generation = fixture.ui.app.timeline_desired_generation;
+    fixture.ui.key(egui::Key::F10, egui::Modifiers::NONE);
+    fixture.ui.click("RETRY AUDIO PROCESSING");
+    assert!(!fixture.ui.app.plugin_processing_retry_required);
+    assert!(fixture.ui.app.plugin_processing_retry_pending.is_some());
+    assert!(fixture.ui.app.timeline_desired_generation > generation);
+    fixture.until(|fixture| {
+        fixture.ui.app.plugin_processing_retry_pending.is_none()
+            && fixture
+                .ui
+                .app
+                .native_editor_timeline_ready(fixture.instance_id)
+    });
+    assert!(fixture.editor_settled(false));
+    assert!(!fixture.ui.app.playing);
+    assert!(!fixture.ui.app.native_editor_processing_faulted());
+    let request_id = fixture.ui.app.next_plugin_parameter_request_id;
+    fixture.editor_action(false);
+    assert_eq!(
+        fixture.ui.app.next_plugin_parameter_request_id,
+        request_id + 1
+    );
+    fixture.until(|fixture| fixture.editor_settled(true));
+    assert!(!fixture.ui.app.playing);
+}
+
+#[test]
+fn recovery_save_keeps_native_editor_open_until_final_state_is_consumed() {
+    use plugins::plugin_runtime::{BackendSlot, PluginChain, PluginPrepareConfig};
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    let mut ui = UiHarness::new();
+    let id = config_capture_plugin(
+        &mut ui.app.project,
+        PluginPickerTarget::MixerSlot { track: 1, slot: 0 },
+        0,
+    );
+    let value = Arc::new(AtomicU32::new(0.2_f32.to_bits()));
+    let dirty = Arc::new(AtomicU64::new(0));
+    let backend_value = value.clone();
+    let backend_dirty = dirty.clone();
+    let PluginChain {
+        audio: _endpoint,
+        control,
+        guard,
+    } = PluginChain::spawn_identified_with_backend_factory(
+        &[id],
+        move || {
+            vec![BackendSlot::new(Box::new(ConfigCaptureBackend {
+                value: backend_value,
+                dirty: backend_dirty,
+                open: false,
+                note_on: false,
+                fail_metadata: false,
+            }))]
+        },
+        PluginPrepareConfig {
+            sample_rate: 48_000.0,
+            max_block_frames: 128,
+        },
+    )
+    .unwrap();
+    ui.app.running_insert_chains.insert(
+        1,
+        RunningInsertChain {
+            project_session: ui.app.project_session,
+            endpoint_id: 77,
+            instance_ids: vec![id],
+            control,
+            guard,
+        },
+    );
+    // The save barrier itself does not publish a file; no test uses the user's
+    // recovery path or needs to wait thirty real seconds for the timer.
+    ui.app.autosave_path = Some(PathBuf::from("synthetic-native-recovery.citrus"));
+    let control = &ui.app.running_insert_chains[&1].control;
+    assert!(control.request_native_editor(0, 100, NativeEditorCommand::Open { owner: None }, &[0]));
+    wait_config_condition(|| {
+        control
+            .native_editor_snapshot(0)
+            .is_some_and(|s| s.pending_request.is_none() && s.state.open)
+    });
+    value.store(0.73_f32.to_bits(), Ordering::SeqCst);
+    dirty.store(1, Ordering::SeqCst);
+    ui.app.autosave();
+    assert!(
+        ui.app.save_barrier.is_none(),
+        "background save must not detach a live view"
+    );
+    assert!(
+        ui.app.running_insert_chains[&1]
+            .control
+            .native_editor_snapshot(0)
+            .unwrap()
+            .state
+            .open
+    );
+
+    let control = &ui.app.running_insert_chains[&1].control;
+    assert!(control.request_native_editor(0, 200, NativeEditorCommand::Close, &[0]));
+    wait_config_condition(|| {
+        control.native_editor_snapshot(0).is_some_and(|s| {
+            s.pending_request.is_none() && !s.state.open && s.captured_state.is_some()
+        })
+    });
+    ui.app.autosave();
+    assert!(
+        ui.app.save_barrier.is_none(),
+        "unconsumed final capture must remain fenced"
+    );
+    ui.app.poll_native_editor_snapshots();
+    assert_eq!(
+        ui.app.project.plugin_instances[0].opaque_state,
+        0.73_f32.to_le_bytes()
+    );
+    ui.app.autosave();
+    assert!(
+        ui.app.save_barrier.is_some(),
+        "recovery save resumes after final capture"
+    );
 }
 
 #[test]
@@ -4409,6 +4762,45 @@ fn automation_point_position(ui: &UiHarness, index: usize) -> Pos2 {
     )
 }
 
+fn automation_blank_position(ui: &UiHarness) -> Pos2 {
+    let left = automation_point_position(ui, 1);
+    let middle = automation_point_position(ui, 2);
+    // These fixture values are -0.5 and 0.0 in the native -1..1 range.
+    // Choose a blank value inside the actual displayed curve, above its tension handle,
+    // rather than assuming a fixed track height in pixels.
+    let curve_height = (left.y - middle.y) * 4.0;
+    Pos2::new((left.x + middle.x) / 2.0, middle.y - curve_height * 0.4)
+}
+
+#[test]
+fn automation_point_curve_remains_ordered_at_compact_track_heights() {
+    let mut ui = automation_point_ui();
+    let before = project_fingerprint(&ui.app.project);
+    for height in [18.0, 28.0, 44.0, 62.0] {
+        let axis = &mut ui.app.playlist_viewport.y;
+        let _ = axis.zoom_at_pixel(0.0, height / axis.pixels_per_unit());
+        ui.settle();
+        let low = automation_point_position(&ui, 1);
+        let middle = automation_point_position(&ui, 2);
+        let high = automation_point_position(&ui, 3);
+        assert!(
+            low.y > middle.y && middle.y > high.y,
+            "automation curve must not invert or collapse at track height {height}: {low:?} / {middle:?} / {high:?}"
+        );
+        let clip = ui
+            .ctx
+            .read_response(Id::new(("playlist-clip", ui.app.project.clips[0].id)))
+            .unwrap()
+            .rect;
+        assert!(
+            high.y >= clip.top() && low.y <= clip.bottom(),
+            "curve values must stay inside the track body at height {height}: {low:?} / {middle:?} / {high:?} / {clip:?}"
+        );
+        assert_eq!(project_fingerprint(&ui.app.project), before);
+        assert!(ui.app.undo_stack.is_empty());
+    }
+}
+
 fn automation_secondary_click(ui: &mut UiHarness, pos: Pos2) {
     for pressed in [true, false] {
         ui.run(vec![
@@ -4466,13 +4858,8 @@ fn automation_point_menu_cancel_copy_paste_delete_atomic_history() {
 #[test]
 fn automation_point_blank_insert_and_drag_modifiers_and_cancel() {
     let mut ui = automation_point_ui();
-    let middle = automation_point_position(&ui, 2);
-    let left = automation_point_position(&ui, 1);
-    // Keep the same time but click above the new midpoint tension handle.
-    automation_secondary_click(
-        &mut ui,
-        Pos2::new((middle.x + left.x) / 2.0, middle.y - 10.0),
-    );
+    let blank = automation_blank_position(&ui);
+    automation_secondary_click(&mut ui, blank);
     assert_eq!(ui.app.project.automation_lanes[0].lane.points().len(), 4);
     assert_eq!(ui.app.project.clips.len(), 1);
     assert_eq!(ui.app.undo_stack.len(), 1);
@@ -4613,12 +5000,8 @@ fn automation_point_source_offset_snaps_to_playlist_grid() {
     let _ = ui.app.playlist_viewport.x.reveal(8.0, 12.0, 0.0);
     ui.app.sync_history_observer();
     ui.settle();
-    let left = automation_point_position(&ui, 1);
-    let middle = automation_point_position(&ui, 2);
-    automation_secondary_click(
-        &mut ui,
-        Pos2::new((left.x + middle.x) / 2.0, middle.y - 10.0),
-    );
+    let blank = automation_blank_position(&ui);
+    automation_secondary_click(&mut ui, blank);
     let point = ui.app.project.automation_lanes[0].lane.points()[1];
     assert!(
         (point.position - 1.125).abs() < 0.00001,
@@ -4630,9 +5013,7 @@ fn automation_point_source_offset_snaps_to_playlist_grid() {
 #[test]
 fn automation_point_double_click_is_retained_and_unselected_right_click_is_safe() {
     let mut ui = automation_point_ui();
-    let left = automation_point_position(&ui, 1);
-    let middle = automation_point_position(&ui, 2);
-    let pos = Pos2::new((left.x + middle.x) / 2.0, middle.y - 10.0);
+    let pos = automation_blank_position(&ui);
     for pressed in [true, false, true, false] {
         ui.run(vec![
             egui::Event::PointerMoved(pos),

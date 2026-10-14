@@ -9,6 +9,7 @@
 #![allow(clippy::unnecessary_cast)] // SDK enum representations vary by platform.
 
 use super::{kAudio, kEvent, kInput, kOutput, BusInfo, BusTypes_};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct BusBinding {
@@ -55,6 +56,93 @@ impl BusBinding {
             flags: info.flags,
         })
     }
+
+    pub(super) fn default_active(&self) -> bool {
+        self.flags & super::BusInfo_::BusFlags_::kDefaultActive as u32 != 0
+    }
+}
+
+/// Owner intent is not an SDK acknowledgment. It survives acknowledgment
+/// invalidation, but can only be reapplied to the exact observed descriptor and
+/// side length. A failed valid request leaves a blocked entry, not a preference
+/// for falling back to a default-active bus on the next restart.
+#[derive(Default, Debug)]
+pub(super) struct HostBusActivationPreferences {
+    selections: BTreeMap<(i32, i32, i32), Option<ExplicitBusSelection>>,
+}
+
+#[derive(Debug)]
+struct ExplicitBusSelection {
+    active: bool,
+    binding: BusBinding,
+    side_count: i32,
+}
+
+impl HostBusActivationPreferences {
+    pub(super) fn is_empty(&self) -> bool {
+        self.selections.is_empty()
+    }
+
+    pub(super) fn block(&mut self, media: i32, direction: i32, index: i32) {
+        self.selections.insert((media, direction, index), None);
+    }
+
+    pub(super) fn block_existing(&mut self, media: i32, direction: i32, index: i32) {
+        if let Some(selection) = self.selections.get_mut(&(media, direction, index)) {
+            *selection = None;
+        }
+    }
+
+    /// Called only after the entire explicit SetBusActive operation succeeds,
+    /// including prepared storage rebuilding and any required reactivation.
+    pub(super) fn record(&mut self, active: bool, binding: BusBinding, side_count: i32) {
+        self.selections.insert(
+            (binding.media, binding.direction, binding.index),
+            Some(ExplicitBusSelection {
+                active,
+                binding,
+                side_count,
+            }),
+        );
+    }
+
+    pub(super) fn active(&self, binding: &BusBinding) -> Option<bool> {
+        self.selections
+            .get(&(binding.media, binding.direction, binding.index))
+            .and_then(Option::as_ref)
+            .map(|selection| selection.active)
+    }
+
+    /// Validate every stored selection before any restart-time activateBus call.
+    /// Nothing here manufactures an acknowledgment or substitutes an index for
+    /// a changed descriptor. Blocked requests require a new explicit success.
+    pub(super) fn validate(&self, sides: &[Vec<BusBinding>; 4]) -> super::Result<()> {
+        for (&(media, direction, index), selection) in &self.selections {
+            let selection = selection.as_ref().ok_or_else(|| {
+                super::Error::Other(format!(
+                    "explicit bus selection is blocked after a failed request ({media}, {direction}, {index}); select it successfully before rebuilding I/O"
+                ))
+            })?;
+            let side = if media == kAudio as i32 && direction == kInput as i32 {
+                &sides[0]
+            } else if media == kAudio as i32 && direction == kOutput as i32 {
+                &sides[1]
+            } else if media == kEvent as i32 && direction == kInput as i32 {
+                &sides[2]
+            } else {
+                &sides[3]
+            };
+            if side.len() != selection.side_count as usize
+                || side.get(index as usize) != Some(&selection.binding)
+            {
+                return Err(super::Error::Other(format!(
+                    "explicit bus selection no longer matches its descriptor/side count ({media}, {direction}, {index}; expected {}, observed {})",
+                    selection.side_count, side.len()
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +178,21 @@ pub(super) struct BusActivationState {
 }
 
 impl BusActivationState {
+    pub(super) fn clear_acknowledgment(&mut self, media: i32, direction: i32, index: i32) {
+        let acks = if media == kAudio as i32 && direction == kInput as i32 {
+            &mut self.audio_input_acks
+        } else if media == kAudio as i32 && direction == kOutput as i32 {
+            &mut self.audio_output_acks
+        } else if media == kEvent as i32 && direction == kInput as i32 {
+            &mut self.event_input_acks
+        } else {
+            &mut self.event_output_acks
+        };
+        if let Some(ack) = acks.get_mut(index as usize) {
+            *ack = None;
+        }
+    }
+
     pub(super) fn invalidate_acknowledgments(&mut self) {
         self.audio_input_acks.fill(None);
         self.audio_output_acks.fill(None);

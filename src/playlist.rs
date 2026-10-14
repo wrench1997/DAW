@@ -12,6 +12,7 @@ pub struct PlaylistGestureSnapshot {
     pub clips: Vec<Clip>,
     pub automation_lanes: Vec<ProjectAutomation>,
     audio_clip_mixer_destinations: Vec<AudioClipMixerDestination>,
+    song_length_beats: f32,
 }
 
 impl PlaylistGestureSnapshot {
@@ -20,6 +21,7 @@ impl PlaylistGestureSnapshot {
             clips: project.clips.clone(),
             automation_lanes: project.automation_lanes.clone(),
             audio_clip_mixer_destinations: project.audio_clip_mixer_destinations.clone(),
+            song_length_beats: project.song_length_beats,
         }
     }
 
@@ -27,6 +29,7 @@ impl PlaylistGestureSnapshot {
         project.clips = self.clips;
         project.automation_lanes = self.automation_lanes;
         project.audio_clip_mixer_destinations = self.audio_clip_mixer_destinations;
+        project.song_length_beats = self.song_length_beats;
         project
     }
 }

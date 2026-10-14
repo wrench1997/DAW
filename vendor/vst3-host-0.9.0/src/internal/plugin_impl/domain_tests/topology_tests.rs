@@ -113,7 +113,18 @@ fn failed_activation_and_descriptor_change_during_success_never_reuse_old_ack() 
             0,
             true,
         );
-        assert_eq!(result.is_ok(), descriptor_changes);
+        // Explicit host intent commits only after the complete binding is
+        // rechecked. An SDK success on a bus whose role changed is an error for
+        // this transaction, as well as invalid activation evidence.
+        let error = result.unwrap_err().to_string();
+        if descriptor_changes {
+            assert!(
+                error.contains("descriptor/count changed during activation"),
+                "{error}"
+            );
+        } else {
+            assert!(error.contains("activateBus failed"), "{error}");
+        }
         assert_eq!(
             plugin.checked_audio_bus_layout().unwrap().outputs[0].active,
             None

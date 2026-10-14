@@ -4,6 +4,9 @@
 #![allow(non_snake_case)]
 #![allow(clippy::unnecessary_cast)] // SDK enum types vary across platforms.
 
+#[path = "domain_tests/explicit_bus_preferences.rs"]
+mod explicit_bus_preferences;
+
 use super::*;
 use std::{
     ffi::c_void,
@@ -157,7 +160,11 @@ struct MockState {
     event_bus_info_error: AtomicBool,
     event_names_reversed: AtomicBool,
     audio_names_reversed: AtomicBool,
+    audio_name_tail: AtomicI32,
+    audio_flags_override: AtomicI32,
     fail_activation: AtomicBool,
+    activation_result: AtomicI32,
+    activation_fail_index: AtomicI32,
     fail_arrangement: AtomicBool,
     activation_callback: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     activation_calls: Mutex<Vec<(i32, i32, i32, bool)>>,
@@ -176,6 +183,9 @@ struct MockState {
     fail_setup: AtomicBool,
     fail_process: AtomicBool,
     fail_deactivate: AtomicBool,
+    fail_reactivate: AtomicBool,
+    fail_processing_start: AtomicBool,
+    fail_processing_stop: AtomicBool,
     contexts: Mutex<Vec<usize>>,
     processed_layouts: Mutex<Vec<Vec<i32>>>,
     processed_parameters: Mutex<Vec<Vec<(u32, i32, f64)>>>,
@@ -205,7 +215,11 @@ impl Default for MockState {
             event_bus_info_error: AtomicBool::new(false),
             event_names_reversed: AtomicBool::new(false),
             audio_names_reversed: AtomicBool::new(false),
+            audio_name_tail: AtomicI32::new(0),
+            audio_flags_override: AtomicI32::new(-1),
             fail_activation: AtomicBool::new(false),
+            activation_result: AtomicI32::new(kResultOk),
+            activation_fail_index: AtomicI32::new(-1),
             fail_arrangement: AtomicBool::new(false),
             activation_callback: Mutex::new(None),
             activation_calls: Mutex::new(Vec::new()),
@@ -224,6 +238,9 @@ impl Default for MockState {
             fail_setup: AtomicBool::new(false),
             fail_process: AtomicBool::new(false),
             fail_deactivate: AtomicBool::new(false),
+            fail_reactivate: AtomicBool::new(false),
+            fail_processing_start: AtomicBool::new(false),
+            fail_processing_stop: AtomicBool::new(false),
             contexts: Mutex::new(Vec::new()),
             processed_layouts: Mutex::new(Vec::new()),
             processed_parameters: Mutex::new(Vec::new()),
@@ -387,6 +404,11 @@ impl<const S: bool, const C: bool> IComponentTrait for MockPlugin<S, C> {
         } else {
             (index + 1) as _
         };
+        bus.name[127] = self.state.audio_name_tail.load(Ordering::Relaxed) as _;
+        let flags = self.state.audio_flags_override.load(Ordering::Relaxed);
+        if flags >= 0 {
+            bus.flags = flags as u32;
+        }
         *info = bus;
         kResultOk
     }
@@ -413,10 +435,14 @@ impl<const S: bool, const C: bool> IComponentTrait for MockPlugin<S, C> {
         if let Some(callback) = self.state.activation_callback.lock().unwrap().as_ref() {
             callback();
         }
-        if self.state.fail_activation.load(Ordering::Relaxed) {
+        if self.state.fail_activation.load(Ordering::Relaxed)
+            || (media == kAudio as i32
+                && direction == kOutput as i32
+                && index == self.state.activation_fail_index.load(Ordering::Relaxed))
+        {
             kResultFalse
         } else {
-            kResultOk
+            self.state.activation_result.load(Ordering::Relaxed)
         }
     }
     unsafe fn setActive(&self, state: TBool) -> tresult {
@@ -425,7 +451,9 @@ impl<const S: bool, const C: bool> IComponentTrait for MockPlugin<S, C> {
         } else {
             "setActive(true)"
         });
-        if state == 0 && self.state.fail_deactivate.load(Ordering::Relaxed) {
+        if (state == 0 && self.state.fail_deactivate.load(Ordering::Relaxed))
+            || (state != 0 && self.state.fail_reactivate.load(Ordering::Relaxed))
+        {
             kResultFalse
         } else {
             kResultOk
@@ -526,6 +554,11 @@ impl<const S: bool, const C: bool> IAudioProcessorTrait for MockPlugin<S, C> {
         } else {
             "setProcessing(true)"
         });
+        if (state != 0 && self.state.fail_processing_start.load(Ordering::Relaxed))
+            || (state == 0 && self.state.fail_processing_stop.load(Ordering::Relaxed))
+        {
+            return kResultFalse;
+        }
         kResultOk
     }
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
@@ -1068,6 +1101,7 @@ fn plugin_fixture(trace: &Trace, state: &Arc<MockState>) -> PluginImpl {
             single_component: true,
             is_active: false,
             applied_setup: None,
+            bus_activation_preferences: HostBusActivationPreferences::default(),
             prefetchable_support: None,
             dirty_caches: DirtyCaches::default(),
             unit_cache: Mutex::new(None),

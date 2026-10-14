@@ -135,7 +135,8 @@ pub struct TimelineCompileOptions {
     pub channel_step_notes: Vec<ChannelStepNote>,
     /// Gate used for boolean Channel Rack steps.
     pub step_gate_beats: f64,
-    /// Repeat period for legacy Piano Roll data.
+    /// Minimum repeat period for Piano Roll data; longer scores derive a
+    /// complete musical cycle from their note extent.
     pub legacy_piano_period_beats: f64,
     /// Maximum number of mixer routes accepted from the project.
     pub max_mixer_tracks: usize,
@@ -1126,6 +1127,43 @@ struct AutomationPlacement {
     source_offset: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AutomationBoundary {
+    frame: u64,
+    /// Retain the authored source position across frame quantization. Inverting
+    /// the tempo map can land just before a Hold point and select its old value.
+    source_beat: f64,
+    /// The first source boundary snapped to this frame terminates the preceding
+    /// span; later collapsed changes must not alter its continuous left limit.
+    left_source_beat: f64,
+    right_value: Option<f64>,
+    left_value: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AutomationSourceBoundary {
+    source_beat: f64,
+    right_value: Option<f64>,
+    left_value: Option<f64>,
+}
+
+impl AutomationSourceBoundary {
+    fn authored(
+        lane: &crate::automation::AutomationLane,
+        source_beat: f64,
+        right_beat: f64,
+        left_beat: f64,
+    ) -> Self {
+        Self {
+            source_beat,
+            // Repeated points retain their original wrapped lane coordinates.
+            // Reconstructing those with rem_euclid can also land before a Hold.
+            right_value: lane.evaluate_unlooped(right_beat),
+            left_value: lane.evaluate_unlooped(left_beat),
+        }
+    }
+}
+
 impl AutomationPlacement {
     fn source_beat(self, project_beat: f64) -> f64 {
         self.source_offset + project_beat - self.start
@@ -1960,25 +1998,8 @@ impl<'a> Compiler<'a> {
         if note_count == 0 {
             return Ok(());
         }
-        let minimum_period = self.options.legacy_piano_period_beats;
-        let content_end = self.project.patterns[pattern_index]
-            .notes
-            .iter()
-            .filter_map(|note| {
-                let end = f64::from(note.start) + f64::from(note.length.max(0.0));
-                (note.start.is_finite() && note.length.is_finite() && end.is_finite() && end > 0.0)
-                    .then_some(end)
-            })
-            .fold(0.0_f64, f64::max);
-        // Legacy projects did not persist a Piano Roll length. Preserve the
-        // historical period as a minimum, but let a resized/extended score
-        // grow to the next complete four-beat bar so visible notes are also
-        // compiled when the containing Pattern Clip is long enough.
-        let period = if content_end > minimum_period {
-            (content_end / 4.0).ceil() * 4.0
-        } else {
-            minimum_period
-        };
+        let period = self.project.patterns[pattern_index]
+            .piano_period_beats(self.options.legacy_piano_period_beats);
         let source_phase = f64::from(clip.source_offset).rem_euclid(period);
         let first_repetition_start = clip_start - source_phase;
         let repetitions = ((clip_end - first_repetition_start) / period)
@@ -2398,8 +2419,8 @@ impl<'a> Compiler<'a> {
                 let boundaries =
                     self.automation_boundaries(automation_id, automation_index, placement)?;
                 for boundary_pair in boundaries.windows(2) {
-                    let mut frame = boundary_pair[0];
-                    let boundary_end = boundary_pair[1];
+                    let mut frame = boundary_pair[0].frame;
+                    let boundary_end = boundary_pair[1].frame;
                     while frame < boundary_end {
                         let end_frame =
                             boundary_end.min(frame.saturating_add(u64::from(
@@ -2411,18 +2432,24 @@ impl<'a> Compiler<'a> {
                                 maximum: self.options.max_automation_segments_per_lane,
                             });
                         }
-                        let start_beat = self
-                            .tempo_map
-                            .frame_to_beat(frame)
-                            .map_err(|_| TimelineCompileError::TempoMapFrameConversion { frame })?;
-                        let end_beat = self.tempo_map.frame_to_beat(end_frame).map_err(|_| {
-                            TimelineCompileError::TempoMapFrameConversion { frame: end_frame }
-                        })?;
-                        let start_source_beat = placement.source_beat(start_beat);
-                        let Some(start_value) = self.project.automation_lanes[automation_index]
-                            .lane
-                            .evaluate(start_source_beat)
-                        else {
+                        let start_source_beat = if frame == boundary_pair[0].frame {
+                            boundary_pair[0].source_beat
+                        } else {
+                            let beat = self.tempo_map.frame_to_beat(frame).map_err(|_| {
+                                TimelineCompileError::TempoMapFrameConversion { frame }
+                            })?;
+                            placement.source_beat(beat)
+                        };
+                        let exact_start = if frame == boundary_pair[0].frame {
+                            boundary_pair[0].right_value
+                        } else {
+                            None
+                        };
+                        let Some(start_value) = exact_start.or_else(|| {
+                            self.project.automation_lanes[automation_index]
+                                .lane
+                                .evaluate(start_source_beat)
+                        }) else {
                             frame = end_frame;
                             continue;
                         };
@@ -2430,12 +2457,25 @@ impl<'a> Compiler<'a> {
                         // therefore the mathematical left limit. This matters at
                         // Hold points and loop wraps, where exact `end_beat` is the
                         // first value of the following discontinuous span.
-                        let end_source_beat =
-                            previous_f64(placement.source_beat(end_beat)).max(start_source_beat);
-                        let Some(end_value) = self.project.automation_lanes[automation_index]
-                            .lane
-                            .evaluate(end_source_beat)
-                        else {
+                        let end_source_beat = if end_frame == boundary_end {
+                            boundary_pair[1].left_source_beat
+                        } else {
+                            let beat = self.tempo_map.frame_to_beat(end_frame).map_err(|_| {
+                                TimelineCompileError::TempoMapFrameConversion { frame: end_frame }
+                            })?;
+                            placement.source_beat(beat)
+                        };
+                        let end_source_beat = previous_f64(end_source_beat).max(start_source_beat);
+                        let exact_end = if end_frame == boundary_end {
+                            boundary_pair[1].left_value
+                        } else {
+                            None
+                        };
+                        let Some(end_value) = exact_end.or_else(|| {
+                            self.project.automation_lanes[automation_index]
+                                .lane
+                                .evaluate(end_source_beat)
+                        }) else {
                             frame = end_frame;
                             continue;
                         };
@@ -2652,10 +2692,21 @@ impl<'a> Compiler<'a> {
         automation_id: u64,
         automation_index: usize,
         placement: AutomationPlacement,
-    ) -> Result<Vec<u64>, TimelineCompileError> {
+    ) -> Result<Vec<AutomationBoundary>, TimelineCompileError> {
         let source_start = placement.source_offset;
         let source_end = source_start + placement.end - placement.start;
-        let mut source_beats = vec![source_start, source_end];
+        let mut source_beats = vec![
+            AutomationSourceBoundary {
+                source_beat: source_start,
+                right_value: None,
+                left_value: None,
+            },
+            AutomationSourceBoundary {
+                source_beat: source_end,
+                right_value: None,
+                left_value: None,
+            },
+        ];
         let limit = self
             .options
             .max_automation_segments_per_lane
@@ -2675,9 +2726,14 @@ impl<'a> Compiler<'a> {
                 if point.position >= loop_region.start {
                     continue;
                 }
-                push_bounded_beat(
+                push_bounded_automation_boundary(
                     &mut source_beats,
-                    point.position,
+                    AutomationSourceBoundary::authored(
+                        &self.project.automation_lanes[automation_index].lane,
+                        point.position,
+                        point.position,
+                        previous_f64(point.position),
+                    ),
                     source_start,
                     source_end,
                     limit,
@@ -2696,12 +2752,38 @@ impl<'a> Compiler<'a> {
                 loop {
                     let cycle_start = loop_region.start + cycle as f64 * loop_region.length();
                     if cycle_start >= source_end {
+                        if cycle_start == source_end {
+                            // The end is exclusive, but the preceding span still
+                            // needs this wrap's canonical left limit.
+                            push_bounded_automation_boundary(
+                                &mut source_beats,
+                                AutomationSourceBoundary::authored(
+                                    &self.project.automation_lanes[automation_index].lane,
+                                    cycle_start,
+                                    loop_region.start,
+                                    previous_f64(loop_region.end),
+                                ),
+                                source_start,
+                                source_end,
+                                limit,
+                                automation_id,
+                            )?;
+                        }
                         break;
                     }
                     self.charge_work(1)?;
-                    push_bounded_beat(
+                    push_bounded_automation_boundary(
                         &mut source_beats,
-                        cycle_start,
+                        AutomationSourceBoundary::authored(
+                            &self.project.automation_lanes[automation_index].lane,
+                            cycle_start,
+                            loop_region.start,
+                            previous_f64(if cycle == 0 {
+                                loop_region.start
+                            } else {
+                                loop_region.end
+                            }),
+                        ),
                         source_start,
                         source_end,
                         limit,
@@ -2714,10 +2796,19 @@ impl<'a> Compiler<'a> {
                         if !(loop_region.start..loop_region.end).contains(&point.position) {
                             continue;
                         }
-                        let repeated = cycle_start + point.position - loop_region.start;
-                        push_bounded_beat(
+                        let repeated = if point.position == loop_region.start {
+                            cycle_start
+                        } else {
+                            cycle_start + point.position - loop_region.start
+                        };
+                        push_bounded_automation_boundary(
                             &mut source_beats,
-                            repeated,
+                            AutomationSourceBoundary::authored(
+                                &self.project.automation_lanes[automation_index].lane,
+                                repeated,
+                                point.position,
+                                previous_f64(point.position),
+                            ),
                             source_start,
                             source_end,
                             limit,
@@ -2737,9 +2828,14 @@ impl<'a> Compiler<'a> {
                 let point = self.project.automation_lanes[automation_index]
                     .lane
                     .points()[point_index];
-                push_bounded_beat(
+                push_bounded_automation_boundary(
                     &mut source_beats,
-                    point.position,
+                    AutomationSourceBoundary::authored(
+                        &self.project.automation_lanes[automation_index].lane,
+                        point.position,
+                        point.position,
+                        previous_f64(point.position),
+                    ),
                     source_start,
                     source_end,
                     limit,
@@ -2747,25 +2843,45 @@ impl<'a> Compiler<'a> {
                 )?;
             }
         }
-        source_beats.sort_by(f64::total_cmp);
-        source_beats.dedup_by(|left, right| *left == *right);
-        let mut frames = Vec::with_capacity(source_beats.len());
-        for source_beat in source_beats {
+        source_beats.sort_by(|left, right| left.source_beat.total_cmp(&right.source_beat));
+        source_beats.dedup_by(|later, earlier| {
+            if later.source_beat != earlier.source_beat {
+                return false;
+            }
+            earlier.right_value = later.right_value.or(earlier.right_value);
+            earlier.left_value = earlier.left_value.or(later.left_value);
+            true
+        });
+        let mut boundaries: Vec<AutomationBoundary> = Vec::with_capacity(source_beats.len());
+        for source in source_beats {
+            let source_beat = source.source_beat;
             let project_beat = placement.project_beat(source_beat);
             if let Some(frame) =
                 self.frame_at(project_beat, TimelineEntity::Automation(automation_id))
             {
-                if frames.last().copied() == Some(frame) {
+                if let Some(boundary) = boundaries.last_mut()
+                    && boundary.frame == frame
+                {
+                    // Sorted authored points that quantize to one frame take
+                    // effect together; the last point owns the following span.
+                    boundary.source_beat = source_beat;
+                    boundary.right_value = source.right_value;
                     self.report(
                         TimelineEntity::Automation(automation_id),
                         TimelineDiagnosticKind::AutomationRangeCollapsed,
                     );
                 } else {
-                    frames.push(frame);
+                    boundaries.push(AutomationBoundary {
+                        frame,
+                        source_beat,
+                        left_source_beat: source_beat,
+                        right_value: source.right_value,
+                        left_value: source.left_value,
+                    });
                 }
             }
         }
-        Ok(frames)
+        Ok(boundaries)
     }
 
     fn clip_range(&mut self, clip: &ClipView) -> Option<(f64, f64)> {
@@ -3067,15 +3183,23 @@ fn maximum_same_frame_burst(pending: &[PendingEvent]) -> usize {
     maximum
 }
 
-fn push_bounded_beat(
-    beats: &mut Vec<f64>,
-    beat: f64,
+fn push_bounded_automation_boundary(
+    beats: &mut Vec<AutomationSourceBoundary>,
+    boundary: AutomationSourceBoundary,
     range_start: f64,
     range_end: f64,
     limit: usize,
     automation_id: u64,
 ) -> Result<(), TimelineCompileError> {
-    if !(range_start..range_end).contains(&beat) {
+    if boundary.source_beat == range_end {
+        // Refine the seeded endpoint without adding an active boundary, a
+        // segment, or a work/segment-budget charge at the exclusive end.
+        if let Some(end) = beats.iter_mut().find(|beat| beat.source_beat == range_end) {
+            end.left_value = end.left_value.or(boundary.left_value);
+        }
+        return Ok(());
+    }
+    if !(range_start..range_end).contains(&boundary.source_beat) {
         return Ok(());
     }
     if beats.len() >= limit {
@@ -3084,7 +3208,7 @@ fn push_bounded_beat(
             maximum: limit.saturating_sub(1),
         });
     }
-    beats.push(beat);
+    beats.push(boundary);
     Ok(())
 }
 
@@ -3195,6 +3319,326 @@ mod tests {
             id,
             name: format!("Automation {id}"),
             lane,
+        }
+    }
+
+    #[test]
+    fn automation_boundary_quantization_keeps_first_left_and_last_right_values() {
+        for curve in [AutomationCurve::Hold, AutomationCurve::Linear] {
+            let mut project = empty_project(0.1);
+            let mut lane = AutomationLane::new(AutomationTarget::MasterVolume);
+            lane.set_curve(curve);
+            lane.replace_points([
+                AutomationPoint::new(0.0, 0.0),
+                AutomationPoint::new(64.0 / 24_000.0, 0.25),
+                AutomationPoint::new(64.125 / 24_000.0, 0.75),
+                AutomationPoint::new(128.0 / 24_000.0, 1.0),
+            ]);
+            project.automation_lanes.push(ProjectAutomation {
+                id: 9901,
+                name: "Collapsed boundaries".into(),
+                lane,
+            });
+            let map = TempoMap::from_project(&project, 48_000).unwrap();
+            let timeline =
+                CompiledTimeline::from_project(&project, &map, TimelineCompileOptions::default())
+                    .unwrap();
+            let ramps: Vec<_> = timeline
+                .events()
+                .iter()
+                .filter_map(|event| match event.kind {
+                    TimelineEventKind::AutomationRamp(ramp) => Some((event.frame, ramp)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(ramps[0].0, 0);
+            assert_eq!(ramps[0].1.end_frame, 64);
+            assert_eq!(ramps[0].1.start_value, 0.0);
+            assert_eq!(
+                ramps[0].1.end_value,
+                if curve == AutomationCurve::Hold {
+                    0.0
+                } else {
+                    0.25
+                }
+            );
+            assert_eq!(ramps[1].0, 64);
+            assert_eq!(ramps[1].1.start_value, 0.75);
+            assert!(
+                timeline
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.kind
+                        == TimelineDiagnosticKind::AutomationRangeCollapsed)
+            );
+            let before = timeline
+                .chase_discontinuity(64, TimelineChaseOptions::default())
+                .unwrap();
+            assert_eq!(
+                before.automation_layers[0].current_value,
+                if curve == AutomationCurve::Hold {
+                    0.0
+                } else {
+                    0.25
+                }
+            );
+            let after = timeline
+                .chase_discontinuity(65, TimelineChaseOptions::default())
+                .unwrap();
+            assert!(after.automation_layers[0].current_value >= 0.75);
+        }
+    }
+
+    #[test]
+    fn automation_boundary_quantization_preserves_placed_source_point_and_exclusive_end() {
+        let mut project = empty_project(0.1);
+        let mut lane = AutomationLane::new(AutomationTarget::MixerMute {
+            track: crate::mixer_graph::MASTER_MIXER_TRACK_ID,
+        });
+        lane.replace_points([
+            AutomationPoint::new(0.0, 0.499),
+            AutomationPoint::new(192.0 / 24_000.0, 0.5),
+            AutomationPoint::new(256.0 / 24_000.0, 0.501),
+        ]);
+        project.automation_lanes.push(ProjectAutomation {
+            id: 9902,
+            name: "Placed threshold".into(),
+            lane,
+        });
+        let mut clip = pattern_clip(9902, 64.0 / 24_000.0, 256.0 / 24_000.0, 0);
+        clip.kind = ClipKind::Automation;
+        clip.automation_id = Some(9902);
+        clip.source_offset = 128.0 / 24_000.0;
+        let map = TempoMap::from_project(&project, 48_000).unwrap();
+        let start_frame = map.beat_to_frame(f64::from(clip.start)).unwrap();
+        let point_frame = map
+            .beat_to_frame(f64::from(clip.start) + 192.0 / 24_000.0 - f64::from(clip.source_offset))
+            .unwrap();
+        let end_frame = map
+            .beat_to_frame(f64::from(clip.start) + f64::from(clip.length))
+            .unwrap();
+        project.clips.push(clip);
+        let timeline =
+            CompiledTimeline::from_project(&project, &map, TimelineCompileOptions::default())
+                .unwrap();
+        let ramp_at = |frame| {
+            timeline
+                .events()
+                .iter()
+                .find_map(|event| match event.kind {
+                    TimelineEventKind::AutomationRamp(ramp) if event.frame == frame => Some(ramp),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        assert_eq!(ramp_at(start_frame).start_value, 0.499_f32);
+        assert_eq!(ramp_at(point_frame).start_value, 0.5);
+        for (frame, value) in [
+            (point_frame - 1, 0.499_f32),
+            (point_frame, 0.499_f32),
+            (point_frame + 1, 0.5_f32),
+        ] {
+            let chase = timeline
+                .chase_discontinuity(frame, TimelineChaseOptions::default())
+                .unwrap();
+            assert_eq!(chase.automation_layers[0].current_value, value);
+        }
+        assert!(
+            timeline
+                .events()
+                .iter()
+                .any(|event| event.frame == end_frame
+                    && matches!(
+                        event.kind,
+                        TimelineEventKind::AutomationEnd {
+                            automation_id: 9902,
+                            ..
+                        }
+                    ))
+        );
+        assert_eq!(
+            timeline
+                .chase_discontinuity(end_frame, TimelineChaseOptions::default())
+                .unwrap()
+                .automation_layers
+                .len(),
+            1
+        );
+        assert!(
+            timeline
+                .chase_discontinuity(end_frame + 1, TimelineChaseOptions::default())
+                .unwrap()
+                .automation_layers
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn automation_boundary_quantization_preserves_non_dyadic_loop_points_and_wrap_limits() {
+        let mut project = empty_project(1.4);
+        let mut lane = AutomationLane::new(AutomationTarget::MixerMute {
+            track: crate::mixer_graph::MASTER_MIXER_TRACK_ID,
+        });
+        lane.replace_points([
+            AutomationPoint::new(0.0, 0.499),
+            AutomationPoint::new(0.108, 0.5),
+            AutomationPoint::new(0.2, 0.501),
+            AutomationPoint::new(0.3, 0.0),
+        ]);
+        let region = AutomationLoop::new(0.1, 0.3).unwrap();
+        lane.set_loop_region(Some(region)).unwrap();
+        project.automation_lanes.push(ProjectAutomation {
+            id: 9903,
+            name: "Loop threshold".into(),
+            lane,
+        });
+        let map = TempoMap::from_project(&project, 48_000).unwrap();
+        let timeline =
+            CompiledTimeline::from_project(&project, &map, TimelineCompileOptions::default())
+                .unwrap();
+        let ramps: Vec<_> = timeline
+            .events()
+            .iter()
+            .filter_map(|event| match event.kind {
+                TimelineEventKind::AutomationRamp(ramp) => Some((event.frame, ramp)),
+                _ => None,
+            })
+            .collect();
+        for cycle in 0..=5 {
+            let cycle_start = region.start + cycle as f64 * region.length();
+            let point_frame = map
+                .beat_to_frame(cycle_start + 0.108 - region.start)
+                .unwrap();
+            let ramp = ramps
+                .iter()
+                .find(|(frame, _)| *frame == point_frame)
+                .unwrap()
+                .1;
+            assert_eq!(ramp.start_value, 0.5, "loop point cycle {cycle}");
+            assert_eq!(ramp.end_value, 0.5, "loop left limit cycle {cycle}");
+            let chase = timeline
+                .chase_discontinuity(point_frame + 1, TimelineChaseOptions::default())
+                .unwrap();
+            assert_eq!(chase.automation_layers[0].current_value, 0.5);
+            if cycle != 0 {
+                let wrap_frame = map.beat_to_frame(cycle_start).unwrap();
+                let before = ramps
+                    .iter()
+                    .find(|(_, ramp)| ramp.end_frame == wrap_frame)
+                    .unwrap()
+                    .1;
+                let after = ramps
+                    .iter()
+                    .find(|(frame, _)| *frame == wrap_frame)
+                    .unwrap()
+                    .1;
+                assert_eq!(before.end_value, 0.501_f32);
+                assert_eq!(after.start_value, 0.499_f32);
+            }
+        }
+    }
+
+    #[test]
+    fn automation_boundary_quantization_keeps_exact_loop_endpoint_left_limit_and_seek() {
+        let region = AutomationLoop::new(0.01, 0.03125).unwrap();
+        // This subtraction/modulo really loses the left-side ULP. The old
+        // endpoint fallback therefore evaluated the loop start's zero value.
+        assert_eq!(region.wrap(previous_f64(region.end)), region.start);
+        for placed in [false, true] {
+            for looped in [false, true] {
+                let mut project = empty_project(if placed { 0.0625 } else { 0.03125 });
+                let mut lane = AutomationLane::new(AutomationTarget::MasterVolume);
+                lane.replace_points([
+                    AutomationPoint::new(0.0, 0.2),
+                    AutomationPoint::new(region.start, 0.0),
+                    AutomationPoint::new(region.end, 1.0),
+                ]);
+                if looped {
+                    lane.set_loop_region(Some(region)).unwrap();
+                }
+                project.automation_lanes.push(ProjectAutomation {
+                    id: 9904,
+                    name: "Exact endpoint".into(),
+                    lane,
+                });
+                if placed {
+                    let mut clip = pattern_clip(9904, 0.0, 0.03125, 0);
+                    clip.kind = ClipKind::Automation;
+                    clip.automation_id = Some(9904);
+                    project.clips.push(clip);
+                }
+                let map = TempoMap::from_project(&project, 48_000).unwrap();
+                let end_frame = map.beat_to_frame(region.end).unwrap();
+                let start_frame = map.beat_to_frame(region.start).unwrap();
+                let timeline = CompiledTimeline::from_project(
+                    &project,
+                    &map,
+                    TimelineCompileOptions {
+                        // The exclusive endpoint must refine the existing seed,
+                        // without consuming another expansion-budget entry.
+                        max_automation_segments_per_lane: 4,
+                        ..TimelineCompileOptions::default()
+                    },
+                )
+                .unwrap();
+                let last = timeline
+                    .events()
+                    .iter()
+                    .find_map(|event| match event.kind {
+                        TimelineEventKind::AutomationRamp(ramp) if ramp.end_frame == end_frame => {
+                            Some(ramp)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(last.start_value, 0.0);
+                assert_eq!(last.end_value, 1.0, "placed={placed}, looped={looped}");
+                let before = timeline
+                    .chase_discontinuity(end_frame - 1, TimelineChaseOptions::default())
+                    .unwrap();
+                let expected = ((end_frame - start_frame - 1) as f64
+                    / (end_frame - start_frame) as f64) as f32;
+                assert_eq!(before.automation_layers[0].current_value, expected);
+                let at_end = timeline
+                    .chase_discontinuity(end_frame, TimelineChaseOptions::default())
+                    .unwrap();
+                assert_eq!(at_end.automation_layers[0].current_value, 1.0);
+                assert!(
+                    timeline
+                        .events()
+                        .iter()
+                        .any(|event| event.frame == end_frame
+                            && matches!(
+                                event.kind,
+                                TimelineEventKind::AutomationEnd {
+                                    automation_id: 9904,
+                                    ..
+                                }
+                            ))
+                );
+                assert!(
+                    !timeline
+                        .events()
+                        .iter()
+                        .any(|event| event.frame == end_frame
+                            && matches!(event.kind, TimelineEventKind::AutomationRamp(_)))
+                );
+                if placed {
+                    let after = timeline
+                        .chase_discontinuity(end_frame + 1, TimelineChaseOptions::default())
+                        .unwrap();
+                    assert!(after.automation_layers.is_empty());
+                    assert_eq!(
+                        after
+                            .automation_bases
+                            .iter()
+                            .find(|base| base.target == CompiledAutomationTarget::MasterVolume)
+                            .unwrap()
+                            .value,
+                        1.0
+                    );
+                }
+            }
         }
     }
 
@@ -3795,6 +4239,80 @@ mod tests {
             .max()
             .unwrap();
         assert_eq!(final_off, map.beat_to_frame(2.1).unwrap());
+    }
+
+    #[test]
+    fn piano_period_overflow_compiles_whole_four_bar_cycles_inside_fixed_clip_edges() {
+        for (overflow_start, period) in [(16.0_f32, 32.0_f32), (32.0, 48.0)] {
+            let clip_length = period + 1.0;
+            let map = TempoMap::new(120.0, None, f64::from(clip_length), 48_000).unwrap();
+            let mut project = empty_project(clip_length);
+            project.channels.push(channel(1, false, false, 1));
+            let mut score = pattern(1, vec![[false; 16]]);
+            score.notes = vec![
+                PianoNote {
+                    id: 77,
+                    channel_id: Some(1),
+                    group_id: None,
+                    note: 60,
+                    start: 0.0,
+                    length: 2.0,
+                    velocity: 0.8,
+                    selected: false,
+                    muted: false,
+                },
+                PianoNote {
+                    id: 78,
+                    channel_id: Some(1),
+                    group_id: None,
+                    note: 64,
+                    start: overflow_start,
+                    length: 1.0 / 64.0,
+                    velocity: 0.8,
+                    selected: false,
+                    muted: false,
+                },
+            ];
+            project.patterns.push(score);
+            project.clips.push(pattern_clip(1, 0.0, clip_length, 1));
+
+            let timeline =
+                CompiledTimeline::from_project(&project, &map, TimelineCompileOptions::default())
+                    .unwrap();
+            assert_eq!(
+                note_on_frames(&timeline),
+                vec![
+                    0,
+                    map.beat_to_frame(f64::from(overflow_start)).unwrap(),
+                    map.beat_to_frame(f64::from(period)).unwrap(),
+                ],
+                "an overflowing score must finish its full four-bar block before repeating"
+            );
+            let repetitions = timeline
+                .events()
+                .iter()
+                .filter_map(|event| match event.kind {
+                    TimelineEventKind::NoteOn {
+                        source: NoteSourceDescriptor::LegacyPiano { repetition, .. },
+                        ..
+                    } => Some(repetition),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(repetitions, vec![0, 0, 1]);
+            let final_off = timeline
+                .events()
+                .iter()
+                .filter(|event| matches!(event.kind, TimelineEventKind::NoteOff { .. }))
+                .map(|event| event.frame)
+                .max()
+                .unwrap();
+            assert_eq!(
+                final_off,
+                map.beat_to_frame(f64::from(clip_length)).unwrap()
+            );
+            assert_eq!(project.clips[0].length, clip_length);
+        }
     }
 
     #[test]

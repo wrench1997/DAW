@@ -288,15 +288,17 @@ fn bounce_capture_failure_republishes_inactive_identity_when_fault_event_is_lost
     assert!(rx.pop().is_err());
 }
 
-fn control(capacity: usize) -> (PluginChainControl, Receiver<AdminCommand>) {
+fn control(capacity: usize) -> (PluginChainControl, Receiver<QueuedAdminCommand>) {
     let (admin, rx) = mpsc::sync_channel(capacity);
+    let metrics = Arc::new(BridgeMetrics::default());
+    let admin = AdminCommandSender::new(admin, &metrics);
     let (_, events) = RingBuffer::new(4);
     let (_, receipts) = RingBuffer::new(4);
     (
         PluginChainControl {
             admin,
             events,
-            metrics: Arc::new(BridgeMetrics::default()),
+            metrics,
             manifest: PluginEndpointManifest::identified(&[41]).unwrap(),
             parameter_edit_receipts: receipts,
             parameter_edit_admission: Arc::new(AtomicU32::new(0)),
@@ -321,8 +323,8 @@ fn bounce_receiver_drop_keeps_admission_until_queued_worker_lease_terminates() {
             .unwrap()
             .contains("already pending")
     );
-    let AdminCommand::CaptureInstrumentBounce { lease, reply, .. } = commands.try_recv().unwrap()
-    else {
+    let mut queued = commands.try_recv().unwrap();
+    let AdminCommand::CaptureInstrumentBounce { lease, reply, .. } = queued.take_command() else {
         panic!("wrong command")
     };
     assert!(fence.cancelled.load(Ordering::Acquire));
@@ -375,7 +377,10 @@ fn bounce_admission_releases_on_queue_rejection_and_old_receiver_cannot_release_
             .contains("queue is full or disconnected")
     );
     assert!(!control.metrics.bounce_capture_busy.load(Ordering::Acquire));
-    assert!(matches!(commands.try_recv(), Ok(AdminCommand::Shutdown)));
+    assert!(matches!(
+        commands.try_recv().map(|mut queued| queued.take_command()),
+        Ok(AdminCommand::Shutdown)
+    ));
     let first = control
         .request_instrument_bounce_state(41, 7, vec![17])
         .unwrap();
@@ -407,7 +412,8 @@ fn bounce_observed_termination_ack_guarantees_admission_is_already_released() {
     let first = control
         .request_instrument_bounce_state(41, 7, vec![17])
         .unwrap();
-    let AdminCommand::CaptureInstrumentBounce { lease, .. } = commands.try_recv().unwrap() else {
+    let mut queued = commands.try_recv().unwrap();
+    let AdminCommand::CaptureInstrumentBounce { lease, .. } = queued.take_command() else {
         panic!("wrong command")
     };
     let reached = Arc::new(std::sync::Barrier::new(2));
@@ -442,8 +448,8 @@ fn bounce_expired_queued_request_has_no_backend_calls_and_panic_unwinds_lease() 
     let receipt = control
         .request_instrument_bounce_state_until(41, 7, vec![17], Instant::now())
         .unwrap();
-    let AdminCommand::CaptureInstrumentBounce { lease, reply, .. } = commands.try_recv().unwrap()
-    else {
+    let mut queued = commands.try_recv().unwrap();
+    let AdminCommand::CaptureInstrumentBounce { lease, reply, .. } = queued.take_command() else {
         panic!("wrong command")
     };
     let captures = Arc::new(AtomicU64::new(0));
@@ -597,8 +603,8 @@ fn bounce_coordinator_captures_current_bases_without_changing_project() {
     let now = Instant::now();
     let mut capture = InstrumentBounceCapture::begin(plan, stamp, status(), &control, now).unwrap();
     assert!(capture.poll(stamp, status(), now).unwrap().is_none());
-    let AdminCommand::CaptureInstrumentBounce { reply, lease, .. } = commands.try_recv().unwrap()
-    else {
+    let mut queued = commands.try_recv().unwrap();
+    let AdminCommand::CaptureInstrumentBounce { reply, lease, .. } = queued.take_command() else {
         panic!("wrong command")
     };
     reply
@@ -636,8 +642,8 @@ fn bounce_coordinator_retains_cancel_timeout_stale_and_disconnect_until_worker_a
         let now = Instant::now();
         let mut capture =
             InstrumentBounceCapture::begin(plan, stamp, status(), &control, now).unwrap();
-        let AdminCommand::CaptureInstrumentBounce { reply, lease, .. } =
-            commands.try_recv().unwrap()
+        let mut queued = commands.try_recv().unwrap();
+        let AdminCommand::CaptureInstrumentBounce { reply, lease, .. } = queued.take_command()
         else {
             panic!("wrong command")
         };
@@ -705,8 +711,8 @@ fn bounce_coordinator_cancel_does_not_replace_a_real_worker_failure() {
     let (control, commands) = control(1);
     let now = Instant::now();
     let mut capture = InstrumentBounceCapture::begin(plan, stamp, status(), &control, now).unwrap();
-    let AdminCommand::CaptureInstrumentBounce { reply, lease, .. } = commands.try_recv().unwrap()
-    else {
+    let mut queued = commands.try_recv().unwrap();
+    let AdminCommand::CaptureInstrumentBounce { reply, lease, .. } = queued.take_command() else {
         panic!("wrong command")
     };
     capture.cancel();
@@ -771,6 +777,40 @@ fn bounce_eligibility_does_not_silently_remove_unsupported_project_features() {
         assert!(
             InstrumentBouncePlan::prepare(&project, project.channels[0].id, 48_000, 0).is_err(),
             "case {case}"
+        );
+    }
+}
+
+#[test]
+fn selected_stereo_metadata_requires_exact_kontakt_identity_complete_activation_and_preserved_event_output()
+ {
+    let mut metadata = state().metadata;
+    metadata.class_uid = "5653544E694B386B6F6E74616B742038".into();
+    metadata.version = "8.4.1".into();
+    metadata.output_buses = (0..32)
+        .map(|index| BounceAudioBus::new(2, true, Some(index == 0)))
+        .collect();
+    metadata.event_output_buses = vec![(16, true, Some(true))];
+    let original = metadata.clone();
+    metadata.validate(48_000).unwrap();
+    assert_eq!(metadata, original);
+    for invalid in 0..8 {
+        let mut changed = original.clone();
+        match invalid {
+            0 => changed.version = "8.4.2".into(),
+            1 => changed.class_uid = "00000000000000000000000000000000".into(),
+            2 => changed.output_buses[31].active = None,
+            3 => changed.output_buses[31].active = Some(true),
+            4 => changed.output_buses[0].channel_count = 1,
+            5 => changed
+                .output_buses
+                .push(BounceAudioBus::new(1, true, Some(false))),
+            6 => changed.output_buses[31].channel_count = 3,
+            _ => changed.event_output_buses[0].2 = None,
+        }
+        assert!(
+            changed.validate(48_000).is_err(),
+            "invalid selected bus case {invalid}"
         );
     }
 }
@@ -896,6 +936,547 @@ fn bounce_audio_supported_role_channel_and_order_drift_still_changes_full_receip
             "supported drift {case} changes the full receipt"
         );
     }
+}
+
+fn master_song_lane(
+    id: u64,
+    target: crate::automation::AutomationTarget,
+    start: f64,
+    end: f64,
+) -> crate::model::ProjectAutomation {
+    let mut lane = crate::automation::AutomationLane::new(target);
+    lane.replace_points([
+        crate::automation::AutomationPoint::new(0.0, start),
+        crate::automation::AutomationPoint::new(32.0, end),
+    ]);
+    crate::model::ProjectAutomation {
+        id,
+        name: format!("Master song lane {id}"),
+        lane,
+    }
+}
+
+fn master_song_project() -> crate::model::Project {
+    use crate::automation::AutomationTarget;
+    let mut project = project();
+    project.tempo = 120.0;
+    project.swing = 0.5;
+    project.song_length_beats = 32.0;
+    project.piano_notes.clear();
+    for channel in &mut project.channels {
+        channel.steps = [false; 16];
+    }
+    let template = project.clips[0].clone();
+    project.patterns.clear();
+    project.clips.clear();
+    for index in 0..5 {
+        let id = index as u32 + 1;
+        let mut steps = vec![[false; 16]; project.channels.len()];
+        steps[0][1] = true;
+        steps[0][9] = true;
+        project.patterns.push(crate::model::Pattern {
+            id,
+            name: format!("Song pattern {id}"),
+            length_steps: 16,
+            channel_steps: steps,
+            notes: vec![crate::model::PianoNote {
+                id: 100 + u64::from(id),
+                channel_id: Some(project.channels[0].id),
+                group_id: None,
+                note: 60 + index as u8,
+                start: 1.0,
+                length: 0.5,
+                velocity: 0.8,
+                selected: false,
+                muted: false,
+            }],
+        });
+        let mut clip = template.clone();
+        clip.id = id;
+        clip.start = index as f32 * 4.0;
+        clip.length = 4.0;
+        clip.kind = crate::model::ClipKind::Pattern;
+        clip.pattern_id = id;
+        clip.source_offset = if index == 1 { 0.5 } else { 0.0 };
+        clip.gain = 0.5 + index as f32 * 0.1;
+        clip.muted = false;
+        project.clips.push(clip);
+    }
+    let mut repeated = project.clips[0].clone();
+    repeated.id = 6;
+    repeated.start = 20.0;
+    repeated.length = 8.0;
+    project.clips.push(repeated);
+    let mut muted = project.clips[1].clone();
+    muted.id = 7;
+    muted.start = 28.0;
+    muted.muted = true;
+    project.clips.push(muted);
+    project.active_pattern = 4;
+    project.automation_lanes = vec![
+        master_song_lane(81, AutomationTarget::MasterVolume, 1.0, 0.0),
+        master_song_lane(82, AutomationTarget::MasterPan, -0.4, 0.4),
+        master_song_lane(
+            83,
+            AutomationTarget::MixerMute {
+                track: crate::mixer_graph::MASTER_MIXER_TRACK_ID,
+            },
+            0.0,
+            1.0,
+        ),
+    ];
+    project
+}
+
+fn master_song_timeline(project: &crate::model::Project) -> crate::timeline::CompiledTimeline {
+    let tempo_map = crate::tempo_map::TempoMap::from_project(project, 48_000).unwrap();
+    crate::timeline::CompiledTimeline::from_project(
+        project,
+        &tempo_map,
+        crate::timeline::TimelineCompileOptions::default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn master_song_prepare_retains_five_patterns_master_fade_and_exact_original_fingerprint() {
+    use crate::timeline::{CompiledAutomationTarget, NoteSourceDescriptor, TimelineEventKind};
+    use std::hash::{Hash, Hasher};
+    let project = master_song_project();
+    let original = serde_json::to_vec(&project).unwrap();
+    let expected = master_song_timeline(&project);
+    assert!(expected.diagnostics().is_empty());
+    let plan =
+        InstrumentBouncePlan::prepare_master_song(&project, project.channels[0].id, 48_000, 7)
+            .unwrap();
+    assert!(plan.is_master_song());
+    assert!(plan.occurrence_request().is_none());
+    assert_eq!(plan.timeline(), &expected);
+    assert_eq!(
+        plan.timeline().channel_bases().len(),
+        project.channels.len()
+    );
+    assert_eq!(plan.timeline().plugin_transport_tempo(), 120.0);
+    let mut hasher = std::hash::DefaultHasher::new();
+    original.hash(&mut hasher);
+    assert_eq!(plan.project_fingerprint(), hasher.finish());
+    assert_eq!(serde_json::to_vec(&project).unwrap(), original);
+    let patterns = plan
+        .timeline()
+        .events()
+        .iter()
+        .filter_map(|event| match event.kind {
+            TimelineEventKind::NoteOn { source, .. } => match source {
+                NoteSourceDescriptor::ChannelStep { pattern_id, .. }
+                | NoteSourceDescriptor::LegacyPiano { pattern_id, .. } => Some(pattern_id),
+            },
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(patterns, std::collections::BTreeSet::from([1, 2, 3, 4, 5]));
+    assert!(plan.timeline().stats().muted_clips_skipped > 0);
+    assert_eq!(
+        plan.timeline().driven_automation_targets(),
+        &[
+            CompiledAutomationTarget::MasterVolume,
+            CompiledAutomationTarget::MasterPan,
+            CompiledAutomationTarget::MixerMute { track: 0 },
+        ]
+    );
+    for variant in 0..3 {
+        let mut changed = project.clone();
+        match variant {
+            0 => changed.swing = 0.0,
+            1 => changed.clips[1].source_offset = 0.0,
+            _ => changed.clips[6].muted = false,
+        }
+        assert_ne!(
+            master_song_timeline(&changed).events(),
+            plan.timeline().events()
+        );
+    }
+}
+
+#[test]
+fn master_song_prepare_refuses_legacy_piano_sources_absent_from_timeline_and_fingerprint() {
+    let original = master_song_project();
+    let mut legacy = original.clone();
+    legacy
+        .piano_notes
+        .push(original.patterns[0].notes[0].clone());
+    assert_eq!(
+        master_song_timeline(&legacy),
+        master_song_timeline(&original)
+    );
+    assert_eq!(
+        serde_json::to_vec(&legacy).unwrap(),
+        serde_json::to_vec(&original).unwrap()
+    );
+    let reason = InstrumentBouncePlan::prepare_master_song(&legacy, 1, 48_000, 0)
+        .err()
+        .expect("unresolved legacy Piano Roll source must not be omitted");
+    assert!(reason.contains("unresolved legacy Piano Roll sources"));
+    assert_eq!(legacy.piano_notes.len(), 1);
+}
+
+#[test]
+fn master_song_prepare_preserves_static_mix_and_accepts_stable_master_aliases() {
+    use crate::{automation::AutomationTarget, mixer_graph::MASTER_MIXER_TRACK_ID};
+    let mut project = master_song_project();
+    project.channels[0].muted = true;
+    project.channels[0].volume = 0.42;
+    project.channels[0].pan = -0.25;
+    project.channels[0].mixer_track = 3;
+    project.mixer_tracks[3].volume = 0.63;
+    project.mixer_tracks[3].pan = 0.2;
+    project.mixer_tracks.swap(0, 9);
+    project.automation_lanes[0] = master_song_lane(
+        81,
+        AutomationTarget::MixerVolume {
+            track: MASTER_MIXER_TRACK_ID,
+        },
+        1.0,
+        0.0,
+    );
+    project.automation_lanes[1] = master_song_lane(
+        82,
+        AutomationTarget::MixerPan {
+            track: MASTER_MIXER_TRACK_ID,
+        },
+        -0.4,
+        0.4,
+    );
+    let mut disabled_tempo = master_song_lane(84, AutomationTarget::Tempo, 120.0, 180.0);
+    disabled_tempo.lane.set_enabled(false);
+    project.automation_lanes.push(disabled_tempo);
+    project
+        .automation_lanes
+        .push(crate::model::ProjectAutomation {
+            id: 85,
+            name: "Empty source control".into(),
+            lane: crate::automation::AutomationLane::new(AutomationTarget::ChannelVolume {
+                channel: project.channels[0].id,
+            }),
+        });
+    let plan =
+        InstrumentBouncePlan::prepare_master_song(&project, project.channels[0].id, 48_000, 0)
+            .unwrap();
+    assert_eq!(plan.timeline(), &master_song_timeline(&project));
+    let source = plan
+        .timeline()
+        .channel_bases()
+        .iter()
+        .find(|base| base.channel_id == 1)
+        .unwrap();
+    assert!(source.muted);
+    assert_eq!(source.volume, 0.42);
+    assert_eq!(source.pan, -0.25);
+    assert_eq!(source.mixer_track, 3);
+    assert_eq!(
+        plan.timeline()
+            .mixer_graph()
+            .runtime_slot_for_id(MASTER_MIXER_TRACK_ID),
+        Some(0),
+    );
+}
+
+#[test]
+fn master_song_prepare_refuses_every_active_source_mixer_plugin_and_transport_control() {
+    use crate::automation::AutomationTarget;
+    let targets = [
+        AutomationTarget::Tempo,
+        AutomationTarget::Swing,
+        AutomationTarget::ChannelVolume { channel: 1 },
+        AutomationTarget::ChannelPan { channel: 1 },
+        AutomationTarget::ChannelMute { channel: 1 },
+        AutomationTarget::MixerVolume { track: 1 },
+        AutomationTarget::MixerPan { track: 1 },
+        AutomationTarget::MixerMute { track: 1 },
+        AutomationTarget::PluginParameter {
+            instance: 41,
+            parameter: 17,
+        },
+        AutomationTarget::MixerVolume { track: 0 },
+    ];
+    for target in targets {
+        let mut project = master_song_project();
+        project
+            .automation_lanes
+            .push(master_song_lane(84, target.clone(), 0.0, 1.0));
+        let original = serde_json::to_vec(&project).unwrap();
+        let reason = InstrumentBouncePlan::prepare_master_song(&project, 1, 48_000, 0)
+            .err()
+            .expect("unsupported automation must fail");
+        // A runtime slot is not a persistent mixer identity. Model validation
+        // rejects this dangling reference before the automation policy runs.
+        let expected = if target == (AutomationTarget::MixerVolume { track: 0 }) {
+            "automation 84 references missing mixer track 0"
+        } else {
+            "active automation"
+        };
+        assert!(reason.contains(expected), "target {target:?}: {reason}");
+        assert_eq!(serde_json::to_vec(&project).unwrap(), original);
+    }
+    for tempo in [f32::NAN, f32::INFINITY, 19.0, 400.1] {
+        let mut project = master_song_project();
+        project.tempo = tempo;
+        let reason = InstrumentBouncePlan::prepare_master_song(&project, 1, 48_000, 0)
+            .err()
+            .expect("strict transport tempo must fail");
+        assert!(reason.contains("finite fixed tempo"));
+    }
+}
+
+#[test]
+fn master_song_prepare_refuses_other_music_and_audio_even_when_static_mix_would_silence_it() {
+    for source in 0..3 {
+        let mut project = master_song_project();
+        match source {
+            0 => project.patterns[0].channel_steps[1][0] = true,
+            1 => {
+                let mut note = project.patterns[0].notes[0].clone();
+                note.id = 500;
+                note.channel_id = Some(project.channels[1].id);
+                project.patterns[0].notes.push(note);
+            }
+            _ => {
+                let mut audio = project.clips[0].clone();
+                audio.id = 80;
+                audio.kind = crate::model::ClipKind::Audio;
+                audio.audio_asset_id = Some(70);
+                audio.audio_source_offset_frame = Some(0);
+                audio.length = 1.0;
+                project.clips.push(audio);
+                project.audio_assets.push(crate::model::AudioAsset {
+                    id: 70,
+                    name: "Metadata-only audio source".into(),
+                    path: "never-opened.wav".into(),
+                    sample_rate: 48_000,
+                    channels: 2,
+                    bits_per_sample: 32,
+                    frames: 48_000,
+                    waveform_peaks: vec![],
+                });
+                project.audio_clip_mixer_destinations.push(
+                    crate::model::AudioClipMixerDestination {
+                        clip_id: 80,
+                        mixer_track_id: crate::mixer_graph::MASTER_MIXER_TRACK_ID,
+                    },
+                );
+                project.mixer_tracks[0].muted = true;
+            }
+        }
+        project.channels[1].muted = true;
+        project.channels[0].solo = true;
+        assert!(master_song_timeline(&project).diagnostics().is_empty());
+        let reason = InstrumentBouncePlan::prepare_master_song(&project, 1, 48_000, 0)
+            .err()
+            .expect("another source must not be omitted");
+        assert!(
+            reason.contains(if source == 2 {
+                "audio sources"
+            } else {
+                "musical channel source"
+            }),
+            "source {source}: {reason}"
+        );
+    }
+}
+
+#[test]
+fn master_song_prepare_refuses_active_generators_effects_and_ambiguous_source_bindings() {
+    for case in 0..6 {
+        let mut project = master_song_project();
+        let mut other = project.plugin_instances[0].clone();
+        other.id = 42;
+        match case {
+            0 => {
+                other.wet = 0.0;
+                project.plugin_instances.push(other);
+                project.channels[1].instrument_plugin_instance_id = Some(42);
+            }
+            1 => {
+                other.role = crate::model::PluginRole::Effect;
+                project.plugin_instances.push(other);
+                project
+                    .mixer_insert_slots
+                    .push(crate::model::MixerInsertSlotRef {
+                        track: 1,
+                        slot: 0,
+                        plugin_instance_id: 42,
+                    });
+            }
+            2 => project.channels[1].instrument_plugin_instance_id = Some(41),
+            3 => project
+                .plugin_instances
+                .push(project.plugin_instances[0].clone()),
+            4 => project.plugin_instances[0].midi_ports.output = Some(1),
+            _ => project.clips[0].pattern_id = u32::MAX,
+        }
+        let reason = InstrumentBouncePlan::prepare_master_song(&project, 1, 48_000, 0)
+            .err()
+            .expect("unsupported or ambiguous route must fail");
+        let expected = match case {
+            0 => "active generator",
+            1 => "active mixer effects",
+            // These malformed identities are rejected by the existing model
+            // guard before Timeline compilation; no source may be omitted.
+            2 => "plug-in 41 is placed more than once",
+            3 => "plug-in identity 41 is duplicated",
+            4 => "MIDI-port routing",
+            _ => "Timeline diagnostics",
+        };
+        assert!(reason.contains(expected), "case {case}: {reason}");
+    }
+}
+
+#[test]
+fn master_song_prepare_retains_inactive_plugin_routes_without_promoting_them_to_sources() {
+    for bypass in [false, true] {
+        let mut project = master_song_project();
+        let mut other = project.plugin_instances[0].clone();
+        other.id = 42;
+        other.enabled = bypass;
+        other.bypass = bypass;
+        project.plugin_instances.push(other);
+        project.channels[1].instrument_plugin_instance_id = Some(42);
+        let mut effect = project.plugin_instances[0].clone();
+        effect.id = 43;
+        effect.enabled = bypass;
+        effect.bypass = bypass;
+        effect.role = crate::model::PluginRole::Effect;
+        project.plugin_instances.push(effect);
+        project
+            .mixer_insert_slots
+            .push(crate::model::MixerInsertSlotRef {
+                track: 1,
+                slot: 0,
+                plugin_instance_id: 43,
+            });
+        let plan = InstrumentBouncePlan::prepare_master_song(&project, 1, 48_000, 0).unwrap();
+        assert_eq!(plan.timeline(), &master_song_timeline(&project));
+        assert_eq!(plan.timeline().plugin_routes().len(), 3);
+    }
+}
+
+#[test]
+fn master_song_prepare_refuses_active_sidechains_and_aliases_without_stable_master() {
+    use crate::{automation::AutomationTarget, mixer_graph::MASTER_MIXER_TRACK_ID};
+    for case in 0..2 {
+        let mut project = master_song_project();
+        if case == 0 {
+            project.mixer_routes[0].destination =
+                crate::mixer_graph::MixerRouteDestination::PluginSidechain {
+                    mixer_track_id: MASTER_MIXER_TRACK_ID,
+                    slot: 0,
+                    input_bus: 1,
+                };
+        } else {
+            project.mixer_tracks[0].id = 900;
+            project.automation_lanes[0] = master_song_lane(
+                81,
+                AutomationTarget::MixerVolume {
+                    track: MASTER_MIXER_TRACK_ID,
+                },
+                1.0,
+                0.0,
+            );
+        }
+        assert!(InstrumentBouncePlan::prepare_master_song(&project, 1, 48_000, 0).is_err());
+    }
+}
+
+fn master_song_occurrence_request(
+    project: &crate::model::Project,
+) -> Arc<crate::occurrence_request::OccurrenceRenderRequest> {
+    use crate::{
+        occurrence_request::{FixedTailAcknowledgment, OccurrenceRenderRequest, OccurrenceStamp},
+        timeline::{NoteSourceDescriptor, TimelineEventKind},
+    };
+    let timeline = master_song_timeline(project);
+    let local_events = timeline
+        .events()
+        .iter()
+        .copied()
+        .filter(|event| {
+            let source = match event.kind {
+                TimelineEventKind::NoteOn { source, .. }
+                | TimelineEventKind::NoteOff { source, .. } => source,
+                _ => return false,
+            };
+            match source {
+                NoteSourceDescriptor::ChannelStep { clip_id, .. }
+                | NoteSourceDescriptor::LegacyPiano { clip_id, .. } => {
+                    clip_id == project.clips[0].id
+                }
+            }
+        })
+        .collect::<Vec<_>>();
+    let snapshot: Arc<[u8]> = serde_json::to_vec(project).unwrap().into();
+    let stamp = OccurrenceStamp {
+        project_session: 2,
+        project_revision: 3,
+        timeline_revision: 4,
+        epoch: 7,
+        engine_session: 5,
+        endpoint_id: 19,
+        channel_id: 1,
+        instance_id: 41,
+        mixer_track_id: project.channels[0].mixer_track,
+        native_generation: 2,
+        app_native_dirty_revision: 1,
+        native_capture_serial: 0,
+        parameter_capture_serial: 0,
+        native_control_request: 10,
+        parameter_control_request: 11,
+    };
+    let consent = Arc::new(FixedTailAcknowledgment::review(snapshot, stamp, 1, 48_000, 0).unwrap());
+    let end = crate::tempo_map::TempoMap::from_project(project, 48_000)
+        .unwrap()
+        .beat_to_frame(4.0)
+        .unwrap();
+    OccurrenceRenderRequest::new(
+        consent,
+        1,
+        1,
+        41,
+        0,
+        end,
+        timeline.duration_frames(),
+        120.0,
+        local_events.into(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn master_song_admission_leaves_legacy_and_occurrence_automation_rejection_unchanged() {
+    let mut project = master_song_project();
+    let request = master_song_occurrence_request(&project);
+    for reason in [
+        InstrumentBouncePlan::prepare(&project, 1, 48_000, 0)
+            .err()
+            .unwrap(),
+        InstrumentBouncePlan::prepare_occurrence(&project, request)
+            .err()
+            .unwrap(),
+    ] {
+        assert!(reason.contains("does not support active automation"));
+    }
+    project.automation_lanes.clear();
+    assert!(
+        !InstrumentBouncePlan::prepare(&project, 1, 48_000, 0)
+            .unwrap()
+            .is_master_song()
+    );
+    assert!(
+        !InstrumentBouncePlan::prepare_occurrence(
+            &project,
+            master_song_occurrence_request(&project)
+        )
+        .unwrap()
+        .is_master_song()
+    );
 }
 
 #[cfg(target_os = "linux")]

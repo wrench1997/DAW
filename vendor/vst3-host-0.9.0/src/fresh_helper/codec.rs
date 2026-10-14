@@ -11,8 +11,8 @@
 //! and restore their starting live charge; peak observations remain.
 
 use super::request::{FlatInputView, RequestView, StateContextView};
-use super::{Budget, ErrorKind, ReplyShape, MAX_LINE};
-use crate::audio::AudioBusBuffer;
+use super::{Budget, ErrorKind, LimitSite, ReplyShape, MAX_LINE};
+use crate::audio::{AudioBusBuffer, BusDirection, MediaType};
 use crate::discovery::ClassCompatibility;
 use crate::midi::MidiEvent;
 use crate::parameters::Parameter;
@@ -20,7 +20,10 @@ use crate::plugin::{
     CheckedAudioBusConfig, CheckedAudioBusLayout, EventBusConfig, EventBusLayout, ProcessMode,
     ProcessTransport, ResetOriginSupport,
 };
-use crate::process_isolation::{HostCommand, HostResponse};
+use crate::process_isolation::{
+    HostCommand, HostResponse, MetadataGetter, SelectedMetadataAdmission, SelectedMetadataPolicy,
+    StrictMetadataSnapshot,
+};
 use crate::MetadataQueryRejection;
 use std::fmt::Write as _;
 
@@ -36,6 +39,11 @@ const MAX_PARAMETERS: usize = 4096;
 const MAX_PARAMETER_TEXT: usize = 1024;
 const MAX_CATALOG_TEXT: usize = 8 * 1024 * 1024;
 const MAX_LAYOUT_BUSES: usize = 32;
+// Declaration metadata is distinct from exchanged audio storage. In particular,
+// Kontakt declares 32 stereo outputs while the selected generator processes only
+// its first stereo output. Do not expand MAX_BUSES/MAX_CHANNELS audio budgets.
+const MAX_DECLARED_BUSES: usize = 32;
+const MAX_DECLARED_OUTPUT_CHANNELS: usize = 64;
 // Canonical helper scalar spellings fit in 24 bytes. This explicitly bounded
 // strict subset does not admit arbitrarily padded decimal/exponent spellings.
 const MAX_NUMBER: usize = 128;
@@ -140,9 +148,24 @@ fn check_request(command: &RequestView<'_>, shape: &ReplyShape) -> Result<()> {
         | (RequestView::NativeDirtyRevision, ReplyShape::NativeDirtyRevision)
         | (RequestView::GetAllParameters, ReplyShape::Parameters)
         | (RequestView::CheckedAudioBusLayout, ReplyShape::CheckedAudioBusLayout)
-        | (RequestView::EventBusLayout, ReplyShape::EventBusLayout) => {}
+        | (RequestView::EventBusLayout, ReplyShape::EventBusLayout)
+        | (RequestView::StrictMetadataSnapshot { .. }, ReplyShape::StrictMetadataSnapshot) => {}
         (RequestView::SetProcessMode { mode }, ReplyShape::Success) => {
             if *mode != ProcessMode::Offline {
+                return Err(ErrorKind::InvalidRequest);
+            }
+        }
+        (
+            RequestView::SetBusActive {
+                media_type,
+                bus_index,
+                ..
+            },
+            ReplyShape::Success,
+        ) => {
+            if *media_type != MediaType::Audio
+                || !(0..MAX_DECLARED_BUSES as i32).contains(bus_index)
+            {
                 return Err(ErrorKind::InvalidRequest);
             }
         }
@@ -395,7 +418,30 @@ impl Writer<'_> {
             RequestView::NativeDirtyRevision => self.put(b"\"NativeDirtyRevision\"")?,
             RequestView::GetAllParameters => self.put(b"\"GetAllParameters\"")?,
             RequestView::CheckedAudioBusLayout => self.put(b"\"CheckedAudioBusLayout\"")?,
+            RequestView::StrictMetadataSnapshot {
+                policy: SelectedMetadataPolicy::Kontakt841SelectedStereo,
+            } => {
+                self.put(b"{\"StrictMetadataSnapshot\":{\"policy\":\"Kontakt841SelectedStereo\"}}")?
+            }
             RequestView::EventBusLayout => self.put(b"\"EventBusLayout\"")?,
+            RequestView::SetBusActive {
+                media_type: MediaType::Audio,
+                direction,
+                bus_index,
+                active,
+            } => {
+                self.put(b"{\"SetBusActive\":{\"media_type\":\"Audio\",\"direction\":")?;
+                self.text(match direction {
+                    BusDirection::Input => "Input",
+                    BusDirection::Output => "Output",
+                })?;
+                self.put(b",\"bus_index\":")?;
+                self.number(bus_index)?;
+                self.put(b",\"active\":")?;
+                self.boolean(*active)?;
+                self.put(b"}}")?;
+            }
+            RequestView::SetBusActive { .. } => return Err(ErrorKind::InvalidRequest),
             RequestView::SetProcessMode {
                 mode: ProcessMode::Offline,
             } => {
@@ -823,13 +869,25 @@ impl<'a> Parser<'a, '_> {
         Ok(true)
     }
     fn token(&mut self, maximum: usize) -> Result<Token<'a>> {
+        self.token_with_limit_site(maximum, None)
+    }
+    fn token_with_limit_site(
+        &mut self,
+        maximum: usize,
+        site: Option<LimitSite>,
+    ) -> Result<Token<'a>> {
         self.take(b'"')?;
         let start = self.position;
         let mut decoded = 0usize;
         while self.bytes.get(self.position) != Some(&b'"') {
             let (_, count, consumed) = string_unit(self.bytes, self.position)?;
             decoded = decoded.checked_add(count).ok_or(ErrorKind::Limit)?;
-            limit(decoded, maximum)?;
+            if decoded > maximum {
+                return Err(match site {
+                    Some(site) => self.budget.refuse_limit(site, decoded, maximum),
+                    None => ErrorKind::Limit,
+                });
+            }
             self.position += consumed;
             self.checkpoint()?;
         }
@@ -994,9 +1052,16 @@ impl<'a> Parser<'a, '_> {
         Ok(value)
     }
     fn catalog_text(&mut self, total: &mut usize) -> Result<String> {
-        let token = self.token(MAX_PARAMETER_TEXT)?;
+        let token =
+            self.token_with_limit_site(MAX_PARAMETER_TEXT, Some(LimitSite::ParameterTextBytes))?;
         *total = total.checked_add(token.decoded).ok_or(ErrorKind::Limit)?;
-        limit(*total, MAX_CATALOG_TEXT)?;
+        if *total > MAX_CATALOG_TEXT {
+            return Err(self.budget.refuse_limit(
+                LimitSite::ParameterCatalogTextBytes,
+                *total,
+                MAX_CATALOG_TEXT,
+            ));
+        }
         if self.materialize {
             owned_text(token, self.budget)
         } else {
@@ -1080,7 +1145,11 @@ impl<'a> Parser<'a, '_> {
         let mut ids = [0u32; MAX_PARAMETERS];
         while self.next(&mut first, b']')? {
             if count == MAX_PARAMETERS {
-                return Err(ErrorKind::Limit);
+                return Err(self.budget.refuse_limit(
+                    LimitSite::ParameterCatalogEntries,
+                    count + 1,
+                    MAX_PARAMETERS,
+                ));
             }
             self.budget.check()?;
             let parameter = self.parameter(&mut text_total)?;
@@ -1206,6 +1275,152 @@ impl<'a> Parser<'a, '_> {
         }
         required(seen, 7)?;
         Ok(support)
+    }
+    fn metadata_name(&mut self) -> Result<Key> {
+        let token = self.token(64)?;
+        let mut name = Key {
+            bytes: [0; 64],
+            len: 0,
+        };
+        let mut cursor = TokenBytes::new(token);
+        while let Some(byte) = cursor.next(self.budget)? {
+            name.bytes[name.len] = byte;
+            name.len += 1;
+        }
+        Ok(name)
+    }
+    fn metadata_getter(&mut self) -> Result<MetadataGetter> {
+        let name = self.metadata_name()?;
+        if name.is(b"CheckedAudioBusLayout") {
+            Ok(MetadataGetter::CheckedAudioBusLayout)
+        } else if name.is(b"EventBusLayout") {
+            Ok(MetadataGetter::EventBusLayout)
+        } else if name.is(b"LatencySamples") {
+            Ok(MetadataGetter::LatencySamples)
+        } else if name.is(b"TailSamples") {
+            Ok(MetadataGetter::TailSamples)
+        } else {
+            Err(ErrorKind::MalformedReply)
+        }
+    }
+    fn metadata_admission(&mut self) -> Result<SelectedMetadataAdmission> {
+        let name = self.metadata_name()?;
+        if name.is(b"FactoryIdentity") {
+            Ok(SelectedMetadataAdmission::FactoryIdentity)
+        } else if name.is(b"EventInput") {
+            Ok(SelectedMetadataAdmission::EventInput)
+        } else {
+            Err(ErrorKind::MalformedReply)
+        }
+    }
+    fn metadata_snapshot(&mut self) -> Result<StrictMetadataSnapshot> {
+        self.open(b'{')?;
+        let mut first = true;
+        let mut seen = 0;
+        let mut audio = CheckedAudioBusLayout {
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        let mut events = EventBusLayout {
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        let (mut latency_samples, mut tail_samples) = (0, 0);
+        while self.next(&mut first, b'}')? {
+            let key = self.key()?;
+            if key.is(b"audio") {
+                unique(&mut seen, 1)?;
+                let (inputs, outputs) = self.layout(256, |channel_count, is_main, active| {
+                    CheckedAudioBusConfig {
+                        channel_count,
+                        is_main,
+                        active,
+                    }
+                })?;
+                audio = CheckedAudioBusLayout { inputs, outputs };
+            } else if key.is(b"events") {
+                unique(&mut seen, 2)?;
+                let (inputs, outputs) =
+                    self.layout(16, |channel_count, is_main, active| EventBusConfig {
+                        channel_count: channel_count as u32,
+                        is_main,
+                        active,
+                    })?;
+                events = EventBusLayout { inputs, outputs };
+            } else if key.is(b"latency_samples") {
+                unique(&mut seen, 4)?;
+                latency_samples = self.u32()?;
+            } else if key.is(b"tail_samples") {
+                unique(&mut seen, 8)?;
+                tail_samples = self.u32()?;
+            } else {
+                return Err(ErrorKind::MalformedReply);
+            }
+        }
+        required(seen, 15)?;
+        Ok(StrictMetadataSnapshot {
+            audio,
+            events,
+            latency_samples,
+            tail_samples,
+        })
+    }
+    fn metadata_response(&mut self, variant: &Key) -> Result<HostResponse> {
+        self.open(b'{')?;
+        let mut first = true;
+        let mut seen = 0;
+        let (mut snapshot, mut getter, mut admission, mut reason) = (None, None, None, None);
+        let mut message = String::new();
+        while self.next(&mut first, b'}')? {
+            let key = self.key()?;
+            if variant.is(b"StrictMetadataSnapshot") && key.is(b"snapshot") {
+                unique(&mut seen, 1)?;
+                snapshot = Some(self.metadata_snapshot()?);
+            } else if variant.is(b"StrictMetadataAdmissionRejected") && key.is(b"stage") {
+                unique(&mut seen, 1)?;
+                admission = Some(self.metadata_admission()?);
+            } else if (variant.is(b"StrictMetadataRejected") || variant.is(b"StrictMetadataFailed"))
+                && key.is(b"getter")
+            {
+                unique(&mut seen, 1)?;
+                getter = Some(self.metadata_getter()?);
+            } else if variant.is(b"StrictMetadataRejected") && key.is(b"reason") {
+                unique(&mut seen, 2)?;
+                reason = Some(self.metadata_rejection()?);
+            } else if variant.is(b"StrictMetadataFailed") && key.is(b"message") {
+                unique(&mut seen, 2)?;
+                let token = self.token(MAX_TEXT)?;
+                self.failure_message = Some(token);
+                if self.materialize {
+                    message = owned_text(token, self.budget)?;
+                }
+            } else {
+                return Err(ErrorKind::MalformedReply);
+            }
+        }
+        if variant.is(b"StrictMetadataSnapshot") {
+            required(seen, 1)?;
+            Ok(HostResponse::StrictMetadataSnapshot {
+                snapshot: snapshot.ok_or(ErrorKind::MalformedReply)?,
+            })
+        } else if variant.is(b"StrictMetadataAdmissionRejected") {
+            required(seen, 1)?;
+            Ok(HostResponse::StrictMetadataAdmissionRejected {
+                stage: admission.ok_or(ErrorKind::MalformedReply)?,
+            })
+        } else if variant.is(b"StrictMetadataRejected") {
+            required(seen, 3)?;
+            Ok(HostResponse::StrictMetadataRejected {
+                getter: getter.ok_or(ErrorKind::MalformedReply)?,
+                reason: reason.ok_or(ErrorKind::MalformedReply)?,
+            })
+        } else {
+            required(seen, 3)?;
+            Ok(HostResponse::StrictMetadataFailed {
+                getter: getter.ok_or(ErrorKind::MalformedReply)?,
+                message,
+            })
+        }
     }
     fn metadata_rejection(&mut self) -> Result<MetadataQueryRejection> {
         let token = self.token(32)?;
@@ -1427,13 +1642,13 @@ impl<'a> Parser<'a, '_> {
                 has_gui = self.boolean()?;
             } else if key.is(b"audio_inputs") {
                 unique(&mut seen, 64)?;
-                audio_inputs = self.count(MAX_BUSES)?;
+                audio_inputs = self.count(MAX_DECLARED_BUSES)?;
             } else if key.is(b"audio_outputs") {
                 unique(&mut seen, 128)?;
-                audio_outputs = self.count(MAX_BUSES)?;
+                audio_outputs = self.count(MAX_DECLARED_BUSES)?;
             } else if key.is(b"output_channels") {
                 unique(&mut seen, 256)?;
-                output_channels = self.count(MAX_CHANNELS)?;
+                output_channels = self.count(MAX_DECLARED_OUTPUT_CHANNELS)?;
             } else if key.is(b"has_midi_input") {
                 unique(&mut seen, 512)?;
                 has_midi_input = self.boolean()?;
@@ -1472,7 +1687,16 @@ impl<'a> Parser<'a, '_> {
             return Err(ErrorKind::MalformedReply);
         }
         let variant = self.key()?;
-        let reply = if variant.is(b"PluginInfo") {
+        let reply = if variant.is(b"StrictMetadataSnapshot")
+            || variant.is(b"StrictMetadataAdmissionRejected")
+            || variant.is(b"StrictMetadataRejected")
+            || variant.is(b"StrictMetadataFailed")
+        {
+            if *shape != ReplyShape::StrictMetadataSnapshot {
+                return Err(ErrorKind::WrongReply);
+            }
+            self.metadata_response(&variant)?
+        } else if variant.is(b"PluginInfo") {
             if *shape != ReplyShape::PluginInfo {
                 return Err(ErrorKind::WrongReply);
             }
@@ -1741,10 +1965,15 @@ pub(super) enum DecodedReply {
     /// Fully validated known admission refusal. It terminates this candidate
     /// without reclassifying the original finite reason as a crash or fault.
     MetadataRejected(MetadataQueryRejection),
+    MetadataBundleRejected {
+        getter: MetadataGetter,
+        reason: MetadataQueryRejection,
+    },
     KnownFailure {
         crashed: bool,
         reported: Option<HostResponse>,
         diagnostic_unavailable: Option<ErrorKind>,
+        metadata_getter: Option<MetadataGetter>,
     },
 }
 
@@ -1775,14 +2004,29 @@ fn owned_text(token: Token<'_>, budget: &mut Budget) -> Result<String> {
 // bounded diagnostic token or finite typed metadata reason, never an
 // instruction to reparse the full line.
 enum KnownOperationFailure<'a> {
-    Message { crashed: bool, message: Token<'a> },
+    Message {
+        crashed: bool,
+        message: Token<'a>,
+        metadata_getter: Option<MetadataGetter>,
+    },
     MetadataRejected(MetadataQueryRejection),
+    MetadataBundleRejected {
+        getter: MetadataGetter,
+        reason: MetadataQueryRejection,
+    },
 }
 impl KnownOperationFailure<'_> {
     fn materialize(self, budget: &mut Budget) -> DecodedReply {
-        let (crashed, message) = match self {
+        let (crashed, message, metadata_getter) = match self {
             Self::MetadataRejected(reason) => return DecodedReply::MetadataRejected(reason),
-            Self::Message { crashed, message } => (crashed, message),
+            Self::MetadataBundleRejected { getter, reason } => {
+                return DecodedReply::MetadataBundleRejected { getter, reason }
+            }
+            Self::Message {
+                crashed,
+                message,
+                metadata_getter,
+            } => (crashed, message, metadata_getter),
         };
         let starting_live = budget.live;
         let mut diagnostic = Budget {
@@ -1791,6 +2035,7 @@ impl KnownOperationFailure<'_> {
             live: starting_live,
             peak: budget.peak,
             diagnostic_copy: true,
+            limit_evidence: None,
         };
         // This failure-only tail copies <=64 KiB decoded text (<=6 input bytes
         // per decoded byte). The original normal budget is never relaxed.
@@ -1799,7 +2044,9 @@ impl KnownOperationFailure<'_> {
         match result {
             Ok(message) => {
                 budget.live = diagnostic.live;
-                let reported = if crashed {
+                let reported = if let Some(getter) = metadata_getter {
+                    HostResponse::StrictMetadataFailed { getter, message }
+                } else if crashed {
                     HostResponse::Crashed { message }
                 } else {
                     HostResponse::Error { message }
@@ -1808,6 +2055,7 @@ impl KnownOperationFailure<'_> {
                     crashed,
                     reported: Some(reported),
                     diagnostic_unavailable: None,
+                    metadata_getter,
                 }
             }
             Err(error) => {
@@ -1818,6 +2066,7 @@ impl KnownOperationFailure<'_> {
                     crashed,
                     reported: None,
                     diagnostic_unavailable: Some(error),
+                    metadata_getter,
                 }
             }
         }
@@ -1843,9 +2092,16 @@ fn preflight<'a>(
     };
     let validated = parser.response(shape)?;
     parser.budget.check()?;
-    let crashed = match validated {
-        HostResponse::Error { .. } => false,
-        HostResponse::Crashed { .. } => true,
+    let (crashed, metadata_getter) = match validated {
+        HostResponse::Error { .. } => (false, None),
+        HostResponse::Crashed { .. } => (true, None),
+        HostResponse::StrictMetadataFailed { getter, .. } => (false, Some(getter)),
+        HostResponse::StrictMetadataRejected { getter, reason } => {
+            return Ok(Some(KnownOperationFailure::MetadataBundleRejected {
+                getter,
+                reason,
+            }))
+        }
         HostResponse::MetadataQueryRejected { reason } => {
             return Ok(Some(KnownOperationFailure::MetadataRejected(reason)));
         }
@@ -1854,6 +2110,7 @@ fn preflight<'a>(
     Ok(Some(KnownOperationFailure::Message {
         crashed,
         message: parser.failure_message.ok_or(ErrorKind::MalformedReply)?,
+        metadata_getter,
     }))
 }
 

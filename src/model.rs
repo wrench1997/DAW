@@ -354,6 +354,35 @@ pub struct Pattern {
     pub notes: Vec<PianoNote>,
 }
 
+impl Pattern {
+    /// Derived Piano Roll cycle, independent of the Channel Rack step count.
+    /// Preserve the caller's existing minimum until note content outgrows it.
+    /// Short scores grow by a four-beat bar; scores beyond four bars grow by
+    /// four-bar blocks, so a note in bar five finishes an eight-bar cycle.
+    #[must_use]
+    pub fn piano_period_beats(&self, minimum_beats: f64) -> f64 {
+        let minimum = if minimum_beats.is_finite() && minimum_beats > 0.0 {
+            minimum_beats
+        } else {
+            4.0
+        };
+        let content_end = self
+            .notes
+            .iter()
+            .filter_map(|note| {
+                let end = f64::from(note.start) + f64::from(note.length.max(0.0));
+                (note.start.is_finite() && note.length.is_finite() && end.is_finite() && end > 0.0)
+                    .then_some(end)
+            })
+            .fold(0.0_f64, f64::max);
+        if content_end <= minimum {
+            return minimum;
+        }
+        let block_beats = if content_end <= 16.0 { 4.0 } else { 16.0 };
+        ((content_end / block_beats).ceil() * block_beats).max(minimum)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectAutomation {
     pub id: u64,
@@ -2693,6 +2722,93 @@ mod tests {
                     .iter()
                     .any(|asset| asset.id == asset_id)))
         );
+    }
+
+    #[test]
+    fn piano_period_grows_in_four_bar_blocks_after_bar_four() {
+        let mut pattern = Project::blank().active_pattern().clone();
+        pattern.notes.push(PianoNote {
+            id: 1,
+            channel_id: Some(1),
+            group_id: None,
+            note: 60,
+            start: 0.0,
+            length: 1.0,
+            velocity: 0.8,
+            selected: false,
+            muted: false,
+        });
+        for (content_end, expected) in [
+            (4.0, 4.0),
+            (4.0 + 1.0 / 64.0, 8.0),
+            (12.0, 12.0),
+            (16.0, 16.0),
+            (16.0 + 1.0 / 64.0, 32.0),
+            (32.0, 32.0),
+            (32.0 + 1.0 / 64.0, 48.0),
+        ] {
+            pattern.notes[0].start = content_end - 1.0;
+            assert_eq!(pattern.piano_period_beats(4.0), expected);
+            assert_eq!(pattern.length_steps, 16);
+        }
+    }
+
+    #[test]
+    fn piano_period_preserves_caller_minimum_and_ignores_non_finite_note_extents() {
+        let mut pattern = Project::blank().active_pattern().clone();
+        pattern.notes.push(PianoNote {
+            id: 1,
+            channel_id: Some(1),
+            group_id: None,
+            note: 60,
+            start: 0.0,
+            length: 0.5,
+            velocity: 0.8,
+            selected: false,
+            muted: false,
+        });
+        assert_eq!(pattern.piano_period_beats(1.0), 1.0);
+        assert_eq!(pattern.piano_period_beats(16.0), 16.0);
+        assert_eq!(pattern.piano_period_beats(21.0), 21.0);
+        pattern.notes[0].start = 1.0;
+        assert_eq!(pattern.piano_period_beats(1.0), 4.0);
+        pattern.notes[0].start = 21.0;
+        assert_eq!(pattern.piano_period_beats(21.0), 32.0);
+        pattern.notes[0].start = f32::NAN;
+        assert_eq!(pattern.piano_period_beats(1.0), 1.0);
+        pattern.notes[0].start = 16.0;
+        pattern.notes[0].length = f32::INFINITY;
+        assert_eq!(pattern.piano_period_beats(16.0), 16.0);
+    }
+
+    #[test]
+    fn piano_period_save_reopen_preserves_notes_steps_and_existing_clip_length() {
+        let directory = TestDirectory::new("piano-four-bar-cycle-round-trip");
+        let target = directory.path().join("session.citrus");
+        let mut project = Project::default();
+        project.patterns[0].notes = vec![PianoNote {
+            id: 900,
+            channel_id: Some(project.channels[0].id),
+            group_id: None,
+            note: 60,
+            start: 16.0,
+            length: 1.0 / 64.0,
+            velocity: 0.8,
+            selected: false,
+            muted: false,
+        }];
+        project.clips[0].length = 16.0;
+        let original_steps = project.patterns[0].channel_steps.clone();
+        assert_eq!(project.patterns[0].piano_period_beats(16.0), 32.0);
+        project.save(&target).unwrap();
+
+        let restored = Project::load(&target).unwrap();
+        assert_eq!(restored.patterns[0].piano_period_beats(16.0), 32.0);
+        assert_eq!(restored.patterns[0].notes[0].start, 16.0);
+        assert_eq!(restored.patterns[0].notes[0].length, 1.0 / 64.0);
+        assert_eq!(restored.patterns[0].channel_steps, original_steps);
+        assert_eq!(restored.patterns[0].length_steps, 16);
+        assert_eq!(restored.clips[0].length, 16.0);
     }
 
     #[test]

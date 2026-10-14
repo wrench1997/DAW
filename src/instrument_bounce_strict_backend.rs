@@ -1,4 +1,4 @@
-//! Disabled Linux adapter for one renderer-owned disposable VST3 clone.
+//! Opt-in Linux/Windows adapter for one renderer-owned disposable VST3 clone.
 //!
 //! No source endpoint is retained and no App/UI entry selects this backend.
 //! Construction is empty; spawn, every exchange, cleanup and final destruction
@@ -18,7 +18,6 @@ use crate::{
             BackendFailure, BackendFailureKind, BlockReply, DisposalObservation, RenderBackend,
             RenderControl,
         },
-        validate_bounce_audio_topology,
     },
     plugins::plugin_runtime::{PluginLoadSpec, PluginTransport},
 };
@@ -44,6 +43,12 @@ pub(crate) struct StrictBackend {
     observation: InstanceObserver,
     #[cfg(test)]
     test_action: Option<TestAction>,
+    #[cfg(test)]
+    successful_client_spawns: usize,
+    #[cfg(test)]
+    concrete_child_reap: Option<std::process::ExitStatus>,
+    #[cfg(all(test, windows))]
+    python_mock: bool,
     client: Option<Client>,
     registration: Option<StrictCancelRegistration>,
     control: Option<RenderControl>,
@@ -71,6 +76,12 @@ impl StrictBackend {
             observation: InstanceObserver::new(InstancePhase::StrictClone),
             #[cfg(test)]
             test_action: None,
+            #[cfg(test)]
+            successful_client_spawns: 0,
+            #[cfg(test)]
+            concrete_child_reap: None,
+            #[cfg(all(test, windows))]
+            python_mock: false,
             client: None,
             registration: None,
             control: None,
@@ -92,13 +103,28 @@ impl StrictBackend {
     }
     #[cfg(test)]
     pub(crate) fn genuine_hooks_inactive(&self) -> bool {
+        #[cfg(windows)]
+        if self.python_mock {
+            return false;
+        }
         self.test_action.is_none()
+    }
+    #[cfg(all(test, windows))]
+    pub(crate) fn with_python_mock(mut self) -> Self {
+        self.python_mock = true;
+        self
     }
     #[cfg(test)]
     pub(crate) fn with_test_action(action: TestAction) -> Self {
         let mut backend = Self::new();
         backend.test_action = Some(action);
         backend
+    }
+    /// The reap status comes only from the retained Client's concrete OS wait,
+    /// never from a kill request, mock startup log, or empty-owner disposal.
+    #[cfg(test)]
+    pub(crate) fn test_child_completion(&self) -> (usize, Option<std::process::ExitStatus>) {
+        (self.successful_client_spawns, self.concrete_child_reap)
     }
     #[cfg(test)]
     fn test_stage(&mut self, stage: TestAction) {
@@ -148,8 +174,9 @@ impl StrictBackend {
             client.cancellation().cancel();
         }
     }
-    fn exchange<T>(
+    fn exchange_at<T>(
         &mut self,
+        stage: &'static str,
         call: impl FnOnce(&mut Client, Instant) -> Result<T, strict_offline::Failure>,
     ) -> Result<T, BackendFailure> {
         if self.terminal_exchange || self.disposal_begun || self.terminated {
@@ -171,7 +198,7 @@ impl StrictBackend {
             // Every failed closed-client exchange seals its candidate. Preserve
             // that first observed kind/delivery rather than issuing Stop later.
             self.terminal_exchange = true;
-            BackendFailure::from(error)
+            BackendFailure::from(error).with_strict_context(stage)
         })
     }
     fn ready(&self) -> Result<(), BackendFailure> {
@@ -185,8 +212,155 @@ impl StrictBackend {
         }
         Ok(())
     }
-    fn read_metadata(&mut self) -> Result<BouncePluginMetadata, BackendFailure> {
-        let audio = self.exchange(Client::checked_audio_layout)?;
+    fn read_selected_metadata(
+        &mut self,
+        preparing: bool,
+    ) -> Result<BouncePluginMetadata, BackendFailure> {
+        use strict_offline::{MetadataGetter, SelectedMetadataAdmission, SelectedMetadataOutcome};
+        let bundle_stage = if preparing {
+            "prepare.final_metadata.bundle"
+        } else {
+            "render.metadata.bundle"
+        };
+        let outcome = self
+            .exchange_at(bundle_stage, Client::selected_metadata_snapshot)
+            .map_err(|mut failure| {
+                failure.strict_stage = Some(match (preparing, failure.strict_metadata_getter) {
+                    (true, Some(MetadataGetter::CheckedAudioBusLayout)) => {
+                        "prepare.final_metadata.checked_audio_layout"
+                    }
+                    (true, Some(MetadataGetter::EventBusLayout)) => {
+                        "prepare.final_metadata.event_layout"
+                    }
+                    (true, Some(MetadataGetter::LatencySamples)) => {
+                        "prepare.final_metadata.latency_samples"
+                    }
+                    (true, Some(MetadataGetter::TailSamples)) => {
+                        "prepare.final_metadata.tail_samples"
+                    }
+                    (false, Some(MetadataGetter::CheckedAudioBusLayout)) => {
+                        "render.metadata.checked_audio_layout"
+                    }
+                    (false, Some(MetadataGetter::EventBusLayout)) => "render.metadata.event_layout",
+                    (false, Some(MetadataGetter::LatencySamples)) => {
+                        "render.metadata.latency_samples"
+                    }
+                    (false, Some(MetadataGetter::TailSamples)) => "render.metadata.tail_samples",
+                    (_, None) => bundle_stage,
+                });
+                failure
+            })?;
+        let snapshot = match outcome {
+            SelectedMetadataOutcome::Complete(snapshot) => snapshot,
+            SelectedMetadataOutcome::Rejected(SelectedMetadataAdmission::FactoryIdentity) => {
+                return Err(Self::admission(
+                    "Strict selected metadata requires the actual reviewed Kontakt 8.4.1 factory",
+                ));
+            }
+            SelectedMetadataOutcome::Rejected(SelectedMetadataAdmission::EventInput) => {
+                return Err(Self::admission(
+                    "Strict clone requires one known-active main event input and no event output",
+                ));
+            }
+        };
+        // The helper preserves the early input guard; independently recheck it
+        // on the host before accepting any complete metadata value.
+        if !snapshot.events.admits_selected_bounce_input() {
+            return Err(Self::admission(
+                "Strict clone requires one known-active main event input and no event output",
+            ));
+        }
+        let input_buses: Vec<_> = snapshot
+            .audio
+            .inputs
+            .iter()
+            .map(|bus| BounceAudioBus::new(bus.channel_count, bus.is_main, bus.active))
+            .collect();
+        let output_buses: Vec<_> = snapshot
+            .audio
+            .outputs
+            .iter()
+            .map(|bus| BounceAudioBus::new(bus.channel_count, bus.is_main, bus.active))
+            .collect();
+        #[cfg(test)]
+        {
+            self.observation
+                .audio_declaration(&input_buses, &output_buses);
+            self.observation.event_declaration(
+                snapshot
+                    .events
+                    .inputs
+                    .iter()
+                    .map(|bus| (bus.channel_count, bus.is_main, bus.active)),
+                snapshot
+                    .events
+                    .outputs
+                    .iter()
+                    .map(|bus| (bus.channel_count, bus.is_main, bus.active)),
+            );
+        }
+        let info = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| Self::admission("Strict clone has no verified factory identity"))?;
+        let metadata = BouncePluginMetadata {
+            class_uid: info.uid.clone(),
+            version: info.version.clone(),
+            name: info.name.clone(),
+            category: info.category.clone(),
+            input_buses,
+            output_buses,
+            event_input_buses: snapshot
+                .events
+                .inputs
+                .iter()
+                .map(|bus| (bus.channel_count, bus.is_main, bus.active))
+                .collect(),
+            event_output_buses: snapshot
+                .events
+                .outputs
+                .iter()
+                .map(|bus| (bus.channel_count, bus.is_main, bus.active))
+                .collect(),
+            latency_samples: snapshot.latency_samples,
+            tail_samples: snapshot.tail_samples,
+        };
+        #[cfg(test)]
+        self.observation
+            .metadata("StrictBackend assembled actual metadata", Ok(&metadata));
+        metadata
+            .validate(self.sample_rate)
+            .map_err(Self::admission)?;
+        Ok(metadata)
+    }
+    fn read_metadata(&mut self, preparing: bool) -> Result<BouncePluginMetadata, BackendFailure> {
+        let info = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| Self::admission("Strict clone has no verified factory identity"))?;
+        if crate::instrument_bounce::kontakt_selected_stereo_bounce_eligible(
+            &info.uid,
+            &info.version,
+            &info.category,
+        ) {
+            return self.read_selected_metadata(preparing);
+        }
+        let [audio_stage, event_stage, latency_stage, tail_stage] = if preparing {
+            [
+                "prepare.final_metadata.checked_audio_layout",
+                "prepare.final_metadata.event_layout",
+                "prepare.final_metadata.latency_samples",
+                "prepare.final_metadata.tail_samples",
+            ]
+        } else {
+            [
+                "render.metadata.checked_audio_layout",
+                "render.metadata.event_layout",
+                "render.metadata.latency_samples",
+                "render.metadata.tail_samples",
+            ]
+        };
+        let audio = self.exchange_at(audio_stage, Client::checked_audio_layout)?;
         let input_buses: Vec<_> = audio
             .inputs
             .iter()
@@ -200,8 +374,20 @@ impl StrictBackend {
         #[cfg(test)]
         self.observation
             .audio_declaration(&input_buses, &output_buses);
-        validate_bounce_audio_topology(&input_buses, &output_buses).map_err(Self::admission)?;
-        let events = self.exchange(Client::event_layout)?;
+        let info = self
+            .loaded
+            .as_ref()
+            .ok_or_else(|| Self::admission("Strict clone has no verified factory identity"))?;
+        let selected = crate::instrument_bounce::kontakt_selected_stereo_bounce_eligible(
+            &info.uid,
+            &info.version,
+            &info.category,
+        );
+        if !selected {
+            crate::instrument_bounce::validate_bounce_audio_topology(&input_buses, &output_buses)
+                .map_err(Self::admission)?;
+        }
+        let events = self.exchange_at(event_stage, Client::event_layout)?;
         #[cfg(test)]
         self.observation.event_declaration(
             events
@@ -214,7 +400,7 @@ impl StrictBackend {
                 .map(|bus| (bus.channel_count, bus.is_main, bus.active)),
         );
         if events.inputs.len() != 1
-            || !events.outputs.is_empty()
+            || (!selected && !events.outputs.is_empty())
             || !events.inputs[0].is_main
             || events.inputs[0].active != Some(true)
             || !(1..=16).contains(&events.inputs[0].channel_count)
@@ -223,8 +409,8 @@ impl StrictBackend {
                 "Strict clone requires one known-active main event input and no event output",
             ));
         }
-        let latency_samples = self.exchange(Client::latency_samples)?;
-        let tail_samples = self.exchange(Client::tail_samples)?;
+        let latency_samples = self.exchange_at(latency_stage, Client::latency_samples)?;
+        let tail_samples = self.exchange_at(tail_stage, Client::tail_samples)?;
         let info = self
             .loaded
             .as_ref()
@@ -236,8 +422,16 @@ impl StrictBackend {
             category: info.category.clone(),
             input_buses,
             output_buses,
-            event_input_buses: vec![(events.inputs[0].channel_count, true, Some(true))],
-            event_output_buses: Vec::new(),
+            event_input_buses: events
+                .inputs
+                .iter()
+                .map(|bus| (bus.channel_count, bus.is_main, bus.active))
+                .collect(),
+            event_output_buses: events
+                .outputs
+                .iter()
+                .map(|bus| (bus.channel_count, bus.is_main, bus.active))
+                .collect(),
             latency_samples,
             tail_samples,
         };
@@ -285,6 +479,14 @@ impl StrictBackend {
                 self.cleanup_error = Some(Self::admission("Strict clone cleanup had a wait error"));
             }
         }
+        if let Some(code) = observation.pipe_error {
+            self.record_diagnostic(format!(
+                "Strict clone pipe cleanup failed with OS error {code}"
+            ));
+            if self.cleanup_error.is_none() {
+                self.cleanup_error = Some(Self::admission("Strict clone cleanup had a pipe error"));
+            }
+        }
         if observation.kill_requested {
             self.record_diagnostic("Strict clone required forced termination");
             if self.cleanup_error.is_none() {
@@ -294,6 +496,10 @@ impl StrictBackend {
         }
         match observation.state {
             CleanupState::Reaped(status) => {
+                #[cfg(test)]
+                {
+                    self.concrete_child_reap = Some(status);
+                }
                 #[cfg(test)]
                 self.observation.lifecycle(if status.success() {
                     "strict Client Reaped success"
@@ -393,13 +599,31 @@ impl RenderBackend for StrictBackend {
             let tempo = capture.plan().timeline().plugin_transport_tempo();
             Self::checkpoint(control)?;
             let mut command = Command::new(helper);
+            #[cfg(all(test, windows))]
+            if self.python_mock {
+                // The actual direct child is Python, never a cmd/shebang wrapper.
+                // This test-only override cannot be selected in a shipped App.
+                command = Command::new(
+                    std::env::var_os("CITRUS_STRICT_TEST_PYTHON")
+                        .unwrap_or_else(|| "python".into()),
+                );
+                command.arg("-u").arg(helper);
+            }
             match Client::spawn(&mut command, control.deadline) {
-                Ok(client) => self.client = Some(client),
+                Ok(client) => {
+                    #[cfg(test)]
+                    {
+                        self.successful_client_spawns += 1;
+                    }
+                    self.client = Some(client);
+                }
                 Err(failure) => {
                     // Retain a post-spawn setup-failed owner BEFORE any error conversion.
                     self.client = failure.cleanup.map(|client| *client);
                     self.terminal_exchange = true;
-                    return Err(failure.failure.into());
+                    return Err(
+                        BackendFailure::from(failure.failure).with_strict_context("prepare.spawn")
+                    );
                 }
             }
             #[cfg(test)]
@@ -413,7 +637,7 @@ impl RenderBackend for StrictBackend {
             // Registration rereads sticky cancellation; the client budget rejects
             // before LoadPlugin if cancellation/spawn consumed the original budget.
             let sample_rate = f64::from(self.sample_rate);
-            let loaded = self.exchange(|client, deadline| {
+            let loaded = self.exchange_at("prepare.load_plugin", |client, deadline| {
                 client.load_plugin(
                     strict_offline::LoadSpec {
                         path,
@@ -434,8 +658,9 @@ impl RenderBackend for StrictBackend {
                     "Fresh clone factory class/version differs from captured identity",
                 ));
             }
-            self.exchange(Client::set_offline)?;
-            let support = self.exchange(Client::reset_origin_support)?;
+            self.exchange_at("prepare.set_offline", Client::set_offline)?;
+            let support =
+                self.exchange_at("prepare.reset_origin_support", Client::reset_origin_support)?;
             if support.contract_version != 1
                 || support.max_block_frames as usize != BOUNCE_PREPARED_MAXIMUM
                 || support.processing
@@ -444,32 +669,89 @@ impl RenderBackend for StrictBackend {
                     "Fresh clone reset contract/configured maximum/inactive status differs",
                 ));
             }
-            let state_loaded = self.exchange(|client, deadline| {
+            let state_loaded = self.exchange_at("prepare.load_state", |client, deadline| {
                 client.load_state(&capture.state.opaque_state, deadline)
             });
             #[cfg(test)]
             observation.strict_state_load(&capture.state.opaque_state, &state_loaded);
             state_loaded?;
-            self.exchange(Client::start_processing)?;
-            self.started = true;
-            self.prepared_dirty_revision = Some(self.exchange(Client::native_dirty_revision)?);
-            let catalog = self.exchange(Client::parameters)?;
-            // Validate the entire captured base set before the first mutation.
-            for id in capture.state.parameter_bases.keys() {
-                if !catalog
-                    .iter()
-                    .any(|parameter| parameter.id == *id && !parameter.is_read_only)
+            if capture.metadata().uses_selected_stereo_bounce() {
+                let declared = self.exchange_at(
+                    "prepare.post_state_audio_layout",
+                    Client::checked_audio_layout,
+                )?;
+                let descriptors_match =
+                    |clone: &[vst3_host::plugin::CheckedAudioBusConfig],
+                     source: &[BounceAudioBus]| {
+                        clone.len() == source.len()
+                            && clone.iter().zip(source).all(|(clone, source)| {
+                                clone.channel_count == source.channel_count
+                                    && clone.is_main == source.is_main
+                            })
+                    };
+                if !descriptors_match(&declared.inputs, &capture.metadata().input_buses)
+                    || !descriptors_match(&declared.outputs, &capture.metadata().output_buses)
                 {
-                    return Err(Self::admission(format!(
-                        "Captured base {id} is absent or read-only"
-                    )));
+                    return Err(Self::admission(
+                        "Fresh selected clone complete descriptors differ from captured source",
+                    ));
+                }
+                let selected = self
+                    .exchange_at("prepare.select_main_stereo_output", |client, deadline| {
+                        client.select_main_stereo_output(&declared, deadline)
+                    })?;
+                let participation_matches =
+                    |clone: &[vst3_host::plugin::CheckedAudioBusConfig],
+                     source: &[BounceAudioBus]| {
+                        clone.len() == source.len()
+                            && clone.iter().zip(source).all(|(clone, source)| {
+                                clone.channel_count == source.channel_count
+                                    && clone.is_main == source.is_main
+                                    && clone.active == source.active
+                            })
+                    };
+                if !participation_matches(&selected.inputs, &capture.metadata().input_buses)
+                    || !participation_matches(&selected.outputs, &capture.metadata().output_buses)
+                {
+                    return Err(Self::admission(
+                        "Fresh selected clone acknowledged participation differs from captured source",
+                    ));
+                }
+            }
+            self.exchange_at("prepare.start_processing", Client::start_processing)?;
+            self.started = true;
+            self.prepared_dirty_revision = Some(self.exchange_at(
+                "prepare.native_dirty_revision",
+                Client::native_dirty_revision,
+            )?);
+            // state.validate already proved that this is exactly the requested
+            // generic base set. An empty set needs no unused controller catalog;
+            // opaque state and all identity/topology/dirty/metadata checks remain.
+            // This does not attest every parameter internal to the instrument.
+            if !capture.state.parameter_bases.is_empty() {
+                let catalog = self.exchange_at("prepare.parameters", Client::parameters)?;
+                // Validate the entire captured base set before the first mutation.
+                for id in capture.state.parameter_bases.keys() {
+                    if !catalog
+                        .iter()
+                        .any(|parameter| parameter.id == *id && !parameter.is_read_only)
+                    {
+                        return Err(Self::admission(format!(
+                            "Captured base {id} is absent or read-only"
+                        )));
+                    }
                 }
             }
             for (&id, &value) in &capture.state.parameter_bases {
-                self.exchange(|client, deadline| client.set_parameter(id, value, deadline))?;
+                self.exchange_at("prepare.set_parameter", |client, deadline| {
+                    client.set_parameter(id, value, deadline)
+                })?;
             }
             for (&id, &captured) in &capture.state.parameter_bases {
-                let readback = self.exchange(|client, deadline| client.parameter(id, deadline));
+                let readback = self
+                    .exchange_at("prepare.parameter_readback", |client, deadline| {
+                        client.parameter(id, deadline)
+                    });
                 #[cfg(test)]
                 observation.strict_base_read("StrictBackend prepare readback", id, &readback);
                 let raw = readback?;
@@ -480,7 +762,7 @@ impl RenderBackend for StrictBackend {
                     )));
                 }
             }
-            let metadata = self.read_metadata()?;
+            let metadata = self.read_metadata(true)?;
             if &metadata != capture.metadata() {
                 return Err(Self::admission(
                     "Fresh strict clone metadata differs from authoritative capture",
@@ -514,7 +796,7 @@ impl RenderBackend for StrictBackend {
         );
         let result = (|| {
             self.ready()?;
-            self.read_metadata()
+            self.read_metadata(false)
         })();
         #[cfg(test)]
         {
@@ -560,7 +842,9 @@ impl RenderBackend for StrictBackend {
                     ));
                 }
             };
-            self.exchange(|client, deadline| client.send_note(event, i32::from(offset), deadline))
+            self.exchange_at("render.send_midi", |client, deadline| {
+                client.send_note(event, i32::from(offset), deadline)
+            })
         })();
         #[cfg(test)]
         observation.strict_result(Operation::StrictMidi, None, None, &result);
@@ -598,7 +882,7 @@ impl RenderBackend for StrictBackend {
                 time_sig_numerator: transport.time_sig_numerator,
                 time_sig_denominator: transport.time_sig_denominator,
             };
-            let audio = self.exchange(|client, deadline| {
+            let audio = self.exchange_at("render.process", |client, deadline| {
                 client.process_silent_generator(input_channels, channels, transport, deadline)
             })?;
             Ok(BlockReply {
@@ -659,7 +943,10 @@ impl RenderBackend for StrictBackend {
                             }
                             Err(error) => {
                                 self.terminal_exchange = true;
-                                self.record_cleanup_error(error.into());
+                                self.record_cleanup_error(
+                                    BackendFailure::from(error)
+                                        .with_strict_context("dispose.stop_processing"),
+                                );
                             }
                         }
                     }

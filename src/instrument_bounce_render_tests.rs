@@ -1682,6 +1682,8 @@ fn strict_failure_conversion_preserves_every_exact_category_and_metadata_refusal
                     delivery,
                     diagnostic,
                     diagnostic_unavailable: Some(strict::FailureKind::Allocation),
+                    request_context: None,
+                    limit_evidence: None,
                 });
                 let ctl = control();
                 let rendered = ctl
@@ -1805,6 +1807,8 @@ fn preceding_render_fault_keeps_first_exact_strict_cleanup_error_across_later_ob
                 delivery,
                 diagnostic: Some("interrupted strict cleanup".into()),
                 diagnostic_unavailable: None,
+                request_context: None,
+                limit_evidence: None,
             });
             let mut pending =
                 CleanupStep::new("PendingStrictCleanup", false, Some(cleanup.clone()));

@@ -1,4 +1,4 @@
-use super::{Budget, ChildOwner, CleanupState, Delivery, ErrorKind, MAX_LINE};
+use super::{Budget, ChildOwner, Delivery, ErrorKind, MAX_LINE};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::time::Instant;
@@ -355,181 +355,23 @@ pub(super) fn read_reply(
     }
 }
 
-/// Preserve the direct-child status even if a descendant keeps its pipe open.
-pub(super) fn observe_child(owner: &mut ChildOwner) -> Result<bool, ErrorKind> {
-    if owner.observed_exit.is_some() {
-        return Ok(true);
-    }
-    match owner.child.try_wait() {
-        Ok(Some(status)) => {
-            owner.observed_exit = Some(status);
-            Ok(true)
-        }
-        Ok(None) => Ok(false),
-        Err(error) => Err(io_error(error)),
-    }
-}
+pub(super) use super::lifecycle::{observe_child, reap, reap_once};
 
-/// Returns whether observation may continue. All evidence is kept on the same
-/// child even if a subsequent Rust test hook unwinds or Drop quarantines it.
-fn cleanup_observation(
-    owner: &mut ChildOwner,
-    graceful_until: Option<Instant>,
-    kill_deadline: Option<Instant>,
-) -> bool {
-    owner.cleanup_report.kill_requested = owner.kill_requested;
-    if let Some(status) = owner.observed_exit {
-        owner.cleanup_report.state = CleanupState::Reaped(status);
-        return false;
-    }
-    #[cfg(test)]
-    if test_hooks::take(test_hooks::Fault::ReapPanic) {
-        panic!("Rust cleanup observation hook");
-    }
-    #[cfg(test)]
-    if test_hooks::take(test_hooks::Fault::Wait) {
-        owner.cleanup_report.wait_error.get_or_insert(libc::EIO);
-        return false;
-    }
-    match owner.child.try_wait() {
-        Ok(Some(status)) => {
-            owner.observed_exit = Some(status);
-            owner.cleanup_report.state = CleanupState::Reaped(status);
-            return false;
-        }
-        Ok(None) => {}
-        Err(error) => {
-            owner
-                .cleanup_report
-                .wait_error
-                .get_or_insert(error.raw_os_error().unwrap_or(libc::EIO));
-            return false;
-        }
-    }
-    if !owner.kill_requested
-        && kill_deadline.is_none_or(|limit| Instant::now() < limit)
-        && graceful_until.is_none_or(|until| Instant::now() >= until)
-    {
-        #[cfg(test)]
-        if test_hooks::take(test_hooks::Fault::Kill) {
-            owner.cleanup_report.kill_error.get_or_insert(libc::EPERM);
-            return false;
-        }
-        match owner.child.kill() {
-            Ok(()) => {
-                owner.kill_requested = true;
-                owner.cleanup_report.kill_requested = true;
-            }
-            Err(error) => {
-                owner
-                    .cleanup_report
-                    .kill_error
-                    .get_or_insert(error.raw_os_error().unwrap_or(libc::EIO));
-                return false;
-            }
-        }
-    }
+pub(super) fn close_pipes(owner: &mut ChildOwner) -> bool {
+    owner.stdin.take();
+    owner.stdout.take();
     true
 }
 
-/// One observation and at most one eligible kill. A kill is never a reap result.
-pub(super) fn reap_once(owner: &mut ChildOwner, graceful_until: Option<Instant>) {
-    cleanup_observation(owner, graceful_until, None);
-}
-
-pub(super) fn reap(owner: &mut ChildOwner, deadline: Instant, graceful_until: Option<Instant>) {
-    loop {
-        if !cleanup_observation(owner, graceful_until, Some(deadline)) || Instant::now() >= deadline
-        {
-            return;
-        }
-        // Original deadline only; no background reaper or blocking Child::wait.
-        #[cfg(test)]
-        if owner.kill_requested && test_hooks::take(test_hooks::Fault::PollAfterKill) {
-            owner.cleanup_report.wait_error.get_or_insert(libc::EIO);
-            return;
-        }
-        let millis = timeout(deadline).min(1);
-        // SAFETY: zero pollfds allows a null pointer and merely waits.
-        let result = unsafe { libc::poll(std::ptr::null_mut(), 0, millis) };
-        if result < 0 && !interrupted() {
-            owner.cleanup_report.wait_error.get_or_insert(
-                io::Error::last_os_error()
-                    .raw_os_error()
-                    .unwrap_or(libc::EIO),
-            );
-            return;
-        }
+pub(super) fn wait_cleanup(_owner: &ChildOwner, deadline: Instant) -> Result<(), ErrorKind> {
+    let millis = timeout(deadline).min(1);
+    // SAFETY: zero pollfds allows null and only waits under the original deadline.
+    if unsafe { libc::poll(std::ptr::null_mut(), 0, millis) } < 0 && !interrupted() {
+        return Err(last_error());
     }
+    Ok(())
 }
 
 #[cfg(test)]
-pub(super) mod test_hooks {
-    use std::cell::Cell;
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum Fault {
-        Setup,
-        ProbeInterrupted,
-        WriteZero,
-        WriteZeroAfterPrefix,
-        WriteShortThenZero,
-        ExpireBlockedWrite,
-        WriteInterrupted,
-        ReapPanic,
-        Wait,
-        Kill,
-        PollAfterKill,
-        ReadWaitForHup,
-    }
-    thread_local! { static NEXT: Cell<Option<Fault>> = const { Cell::new(None) }; }
-    pub(crate) fn arm(fault: Fault) {
-        NEXT.with(|next| {
-            assert!(next.get().is_none());
-            next.set(Some(fault));
-        });
-    }
-    pub(crate) fn take(fault: Fault) -> bool {
-        NEXT.with(|next| {
-            if next.get() == Some(fault) {
-                next.set(None);
-                true
-            } else {
-                false
-            }
-        })
-    }
-    thread_local! {
-        static WAKE_LEFT: Cell<usize> = const { Cell::new(0) };
-        static WAKE_COUNT: Cell<usize> = const { Cell::new(0) };
-        static BLOCKED_WRITE: Cell<bool> = const { Cell::new(false) };
-    }
-    pub(crate) fn record_blocked_write() {
-        BLOCKED_WRITE.with(|b| b.set(true));
-    }
-    pub(crate) fn blocked_write_observed() -> bool {
-        BLOCKED_WRITE.with(Cell::get)
-    }
-    pub(crate) fn arm_wake_interrupts(count: usize) {
-        WAKE_LEFT.with(|v| v.set(count));
-        WAKE_COUNT.with(|v| v.set(0));
-    }
-    pub(crate) fn wake_attempts() -> usize {
-        WAKE_COUNT.with(Cell::get)
-    }
-    pub(crate) fn interrupted_wake() -> bool {
-        WAKE_COUNT.with(|v| v.set(v.get() + 1));
-        WAKE_LEFT.with(|v| {
-            if v.get() > 0 {
-                v.set(v.get() - 1);
-                true
-            } else {
-                false
-            }
-        })
-    }
-    pub(crate) fn clear() {
-        NEXT.with(|next| next.set(None));
-        WAKE_LEFT.with(|v| v.set(0));
-        BLOCKED_WRITE.with(|b| b.set(false));
-    }
-}
+#[path = "pump_test_hooks.rs"]
+pub(super) mod test_hooks;

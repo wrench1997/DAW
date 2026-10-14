@@ -916,6 +916,7 @@ fn retained_app_worker_is_authoritative_before_backend_observer_arrives() {
         ] {
             let record = Arc::new(observe::Record {
                 ordinal: 0,
+                monotonic_elapsed_ns: 0, // Synthetic identity input, never native timing evidence.
                 stage: Stage::InitialSource,
                 instance: Some(observe::InstanceIdentity {
                     ordinal: 0,

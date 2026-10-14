@@ -247,6 +247,7 @@ pub(super) use native::run;
 mod native {
     use super::*;
     use crate::{SharedPlugin, err, handle, respond};
+    use std::cell::RefCell;
     use std::mem::zeroed;
     use std::ptr::{null, null_mut};
     use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
@@ -258,11 +259,156 @@ mod native {
     };
     use winapi::um::errhandlingapi::GetLastError;
     use winapi::um::libloaderapi::GetModuleHandleW;
-    use winapi::um::processthreadsapi::GetCurrentThreadId;
     use winapi::um::winuser::*;
 
     const WAKE_MESSAGE: UINT = WM_APP + 31;
     const MAINTENANCE_MS: u32 = 16;
+    // This window has no cross-process Win32 owner. Give it a normal taskbar /
+    // Alt+Tab entry so an OS-denied foreground request cannot hide the editor.
+    const EDITOR_EX_STYLE: u32 = WS_EX_APPWINDOW;
+
+    thread_local! {
+        static COMMAND_DISPATCHER: RefCell<Option<CommandDispatcher>> = const { RefCell::new(None) };
+        static NATIVE_DISPATCH_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    struct CommandDispatcher {
+        editor: Editor,
+        protocol: ProtocolChannel,
+        sample_rate: f64,
+        receiver: Receiver<Input>,
+        running: bool,
+    }
+
+    impl CommandDispatcher {
+        fn drain(&mut self, nested: bool) -> bool {
+            let mut activity = false;
+            for _ in 0..COMMAND_BATCH {
+                let input = match self.receiver.try_recv() {
+                    Ok(input) => input,
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.running = false;
+                        break;
+                    }
+                };
+                activity = true;
+                if nested
+                    && let Input::Command(command) = &input
+                    && (requires_editor_detach(command)
+                        || matches!(
+                            **command,
+                            HostCommand::Editor {
+                                command: IsolatedEditorCommand::Open { .. }
+                                    | IsolatedEditorCommand::Close
+                            } | HostCommand::CreateGui
+                                | HostCommand::CloseGui
+                        ))
+                {
+                    // A native file/dialog callback still owns the attached view.
+                    // Never destroy or replace it from a nested Windows message pump.
+                    respond(
+                        &mut self.protocol,
+                        &HostResponse::Error {
+                            message:
+                                "Close the plug-in modal dialog before changing editor or state"
+                                    .into(),
+                        },
+                    );
+                    continue;
+                }
+                self.running = handle_input(
+                    input,
+                    &mut self.editor,
+                    &mut self.protocol,
+                    &mut self.sample_rate,
+                );
+                if !self.running {
+                    break;
+                }
+            }
+            activity
+        }
+    }
+
+    // PostThreadMessage is ignored by native modal loops. A real message-only
+    // window lets their DispatchMessage service bounded IPC on the same COM owner.
+    // No plugin or COM pointer moves to the stdin reader, and a busy dispatcher
+    // cannot be reentered while it already holds mutable plugin/host state.
+    struct CommandWindow(HWND);
+
+    impl CommandWindow {
+        fn new() -> Result<Self, String> {
+            unsafe {
+                let name = wide("CitrusVst3CommandDispatcherV1");
+                let instance = GetModuleHandleW(null());
+                let class = WNDCLASSW {
+                    lpfnWndProc: Some(command_window_proc),
+                    hInstance: instance,
+                    lpszClassName: name.as_ptr(),
+                    ..zeroed()
+                };
+                if RegisterClassW(&class) == 0 {
+                    return Err(win_error("Register command window"));
+                }
+                let hwnd = CreateWindowExW(
+                    0,
+                    name.as_ptr(),
+                    name.as_ptr(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    HWND_MESSAGE,
+                    null_mut(),
+                    instance,
+                    null_mut(),
+                );
+                if hwnd.is_null() {
+                    return Err(win_error("Create command window"));
+                }
+                Ok(Self(hwnd))
+            }
+        }
+    }
+
+    impl Drop for CommandWindow {
+        fn drop(&mut self) {
+            unsafe {
+                DestroyWindow(self.0);
+            }
+        }
+    }
+
+    unsafe extern "system" fn command_window_proc(
+        hwnd: HWND,
+        message: UINT,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if message == WAKE_MESSAGE {
+            // RefCell's fallible borrow fences nested dispatch from inside an SDK
+            // call; the outer loop drains any remaining command after it returns.
+            if std::panic::catch_unwind(|| {
+                COMMAND_DISPATCHER.with(|cell| {
+                    if let Ok(mut state) = cell.try_borrow_mut()
+                        && let Some(dispatcher) = state.as_mut()
+                    {
+                        dispatcher.drain(NATIVE_DISPATCH_ACTIVE.with(Cell::get));
+                    }
+                })
+            })
+            .is_err()
+            {
+                // A Rust panic cannot unwind through a Win32 callback, nor can a
+                // partially executed command receive a fabricated successful reply.
+                std::process::abort();
+            }
+            return 0;
+        }
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
 
     #[link(name = "ole32")]
     unsafe extern "system" {
@@ -553,11 +699,11 @@ mod native {
                     right: size.width,
                     bottom: size.height,
                 };
-                if AdjustWindowRectExForDpi(&mut rect, style, 0, WS_EX_TOOLWINDOW, dpi) == 0 {
+                if AdjustWindowRectExForDpi(&mut rect, style, 0, EDITOR_EX_STYLE, dpi) == 0 {
                     return Err(win_error("AdjustWindowRectExForDpi"));
                 }
                 let hwnd = CreateWindowExW(
-                    WS_EX_TOOLWINDOW,
+                    EDITOR_EX_STYLE,
                     name.as_ptr(),
                     title.as_ptr(),
                     style,
@@ -605,7 +751,7 @@ mod native {
                     right: size.width,
                     bottom: size.height,
                 };
-                if AdjustWindowRectExForDpi(&mut frame, self.style, 0, WS_EX_TOOLWINDOW, self.dpi)
+                if AdjustWindowRectExForDpi(&mut frame, self.style, 0, EDITOR_EX_STYLE, self.dpi)
                     == 0
                 {
                     return Err(win_error("AdjustWindowRectExForDpi"));
@@ -644,7 +790,7 @@ mod native {
             Ok(())
         }
 
-        fn focus(&self) {
+        fn focus(&self) -> Result<(), String> {
             // Windows may refuse foreground activation under its focus-stealing rules.
             // We make a best-effort request and never attach input queues or bypass that.
             unsafe {
@@ -656,10 +802,31 @@ mod native {
                         SW_SHOW
                     },
                 );
+                // The first ShowWindow can obey an inherited STARTUPINFO SW_HIDE
+                // instead of SW_SHOW. Explicit user Open/Focus must make the real
+                // container visible even when its helper was launched hidden.
+                if IsWindowVisible(self.hwnd) == 0 {
+                    if SetWindowPos(
+                        self.hwnd,
+                        null_mut(),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER,
+                    ) == 0
+                    {
+                        return Err(win_error("Show native editor"));
+                    }
+                    if IsWindowVisible(self.hwnd) == 0 {
+                        return Err("Native editor container is still hidden".into());
+                    }
+                }
                 SetForegroundWindow(self.hwnd);
                 let child = GetWindow(self.hwnd, GW_CHILD);
                 SetFocus(if child.is_null() { self.hwnd } else { child });
             }
+            Ok(())
         }
 
         fn destroy(&mut self) -> Result<(), String> {
@@ -731,8 +898,7 @@ mod native {
                 if !same_owner(window.owner.as_ref(), owner.as_ref()) {
                     return Err("Editor is already open with a different logical owner".into());
                 }
-                window.focus();
-                return Ok(());
+                return window.focus();
             }
             if let Some(error) = &self.registration_error {
                 return Err(error.clone());
@@ -779,9 +945,12 @@ mod native {
             })();
             match result {
                 Ok(size) => {
+                    if let Err(error) = window.focus() {
+                        let _ = plugin.close_editor();
+                        return Err(error);
+                    }
                     self.lifecycle.opened(size);
                     window.signals.size.set(None);
-                    window.focus();
                     self.window = Some(window);
                     Ok(())
                 }
@@ -828,10 +997,7 @@ mod native {
                 IsolatedEditorCommand::Query => Ok(()),
                 IsolatedEditorCommand::Open { owner } => self.open(owner),
                 IsolatedEditorCommand::Focus => match &self.window {
-                    Some(window) => {
-                        window.focus();
-                        Ok(())
-                    }
+                    Some(window) => window.focus(),
                     None => Err("Plugin editor is not open".into()),
                 },
                 IsolatedEditorCommand::Close => self.close(),
@@ -931,7 +1097,7 @@ mod native {
                             &mut frame,
                             window.style,
                             0,
-                            WS_EX_TOOLWINDOW,
+                            EDITOR_EX_STYLE,
                             window.dpi,
                         ) == 0
                         {
@@ -1004,17 +1170,17 @@ mod native {
         }
     }
 
-    fn queue_input(tx: &SyncSender<Input>, main_thread: u32, input: Input) -> bool {
+    fn queue_input(tx: &SyncSender<Input>, command_window: usize, input: Input) -> bool {
         if tx.send(input).is_err() {
             return false;
         }
-        // SAFETY: main thread initialized its message queue before this reader starts.
-        // Posting only wakes the pump; all protocol and plugin work stays on main.
-        unsafe { PostThreadMessageW(main_thread, WAKE_MESSAGE, 0, 0) };
+        // SAFETY: only the already-created helper-owned message window is copied.
+        // Its procedure and all protocol/plugin work stay on the main thread.
+        unsafe { PostMessageW(command_window as HWND, WAKE_MESSAGE, 0, 0) };
         true
     }
 
-    fn read_stdin(tx: SyncSender<Input>, main_thread: u32) {
+    fn read_stdin(tx: SyncSender<Input>, command_window: usize) {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
         loop {
@@ -1031,18 +1197,18 @@ mod native {
                 Err(error) => {
                     let _ = queue_input(
                         &tx,
-                        main_thread,
+                        command_window,
                         Input::Invalid(format!("Failed to read stdin: {error}")),
                     );
                     break;
                 }
             };
             let shutdown = matches!(&input, Input::Command(command) if matches!(**command, HostCommand::Shutdown));
-            if !queue_input(&tx, main_thread, input) || shutdown {
+            if !queue_input(&tx, command_window, input) || shutdown {
                 return;
             }
         }
-        let _ = queue_input(&tx, main_thread, Input::Eof);
+        let _ = queue_input(&tx, command_window, Input::Eof);
     }
 
     fn handle_input(
@@ -1124,24 +1290,39 @@ mod native {
                 return;
             }
         };
-        let mut editor = Editor::new(plugin.clone());
-        // Create the queue before the reader can PostThreadMessage. There is no dummy
-        // HWND: the only editor handle is a real window created when Open succeeds.
-        let main_thread = unsafe {
-            let mut message = zeroed();
-            PeekMessageW(&mut message, null_mut(), 0, 0, PM_NOREMOVE);
-            GetCurrentThreadId()
+        let command_window = match CommandWindow::new() {
+            Ok(window) => window,
+            Err(message) => {
+                respond(&mut protocol, &HostResponse::Error { message });
+                return;
+            }
         };
         let (tx, rx): (SyncSender<Input>, Receiver<Input>) =
             mpsc::sync_channel(COMMAND_QUEUE_CAPACITY);
+        COMMAND_DISPATCHER.with(|cell| {
+            *cell.borrow_mut() = Some(CommandDispatcher {
+                editor: Editor::new(plugin.clone()),
+                protocol,
+                sample_rate: 44_100.0,
+                receiver: rx,
+                running: true,
+            })
+        });
+        let wake_window = command_window.0 as usize;
         let reader = std::thread::Builder::new()
             .name("vst3-helper-stdin".into())
-            .spawn(move || read_stdin(tx, main_thread));
+            .spawn(move || read_stdin(tx, wake_window));
         if let Err(error) = reader {
-            respond(&mut protocol, &err("Failed to start stdin reader", error));
+            COMMAND_DISPATCHER.with(|cell| {
+                if let Some(mut dispatcher) = cell.borrow_mut().take() {
+                    respond(
+                        &mut dispatcher.protocol,
+                        &err("Failed to start stdin reader", error),
+                    );
+                }
+            });
             return;
         }
-        let mut sample_rate = 44_100.0;
         let mut running = true;
         while running {
             let mut activity = false;
@@ -1160,30 +1341,25 @@ mod native {
                 }
                 unsafe {
                     TranslateMessage(&message);
+                    NATIVE_DISPATCH_ACTIVE
+                        .with(|active| active.set(message.hwnd != command_window.0));
                     DispatchMessageW(&message);
+                    NATIVE_DISPATCH_ACTIVE.with(|active| active.set(false));
                 }
             }
-            editor.service();
             if !running {
                 break;
             }
-            for _ in 0..COMMAND_BATCH {
-                match rx.try_recv() {
-                    Ok(input) => {
-                        activity = true;
-                        running = handle_input(input, &mut editor, &mut protocol, &mut sample_rate);
-                        editor.service();
-                        if !running {
-                            break;
-                        }
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        running = false;
-                        break;
-                    }
+            COMMAND_DISPATCHER.with(|cell| {
+                let mut state = cell.borrow_mut();
+                let dispatcher = state.as_mut().expect("main-thread dispatcher exists");
+                if dispatcher.running {
+                    dispatcher.editor.service();
+                    activity |= dispatcher.drain(false);
+                    dispatcher.editor.service();
                 }
-            }
+                running = dispatcher.running;
+            });
             if running && !activity {
                 // The reader's wake closes the queue-check/wait race. The timeout
                 // additionally services plugin resize requests and logical owner loss.
@@ -1198,9 +1374,13 @@ mod native {
                 }
             }
         }
-        if let Err(error) = editor.close() {
-            eprintln!("Editor shutdown: {error}");
-        }
+        COMMAND_DISPATCHER.with(|cell| {
+            if let Some(mut dispatcher) = cell.borrow_mut().take()
+                && let Err(error) = dispatcher.editor.close()
+            {
+                eprintln!("Editor shutdown: {error}");
+            }
+        });
         // Plugin destruction, including DSP shutdown, also stays on this main thread.
         if let Ok(mut guard) = plugin.lock() {
             *guard = None;

@@ -9,15 +9,21 @@ use super::clip_render::{
     },
 };
 use super::clip_render_cache::PreparedRetainedClipMedia;
+use super::stopped_bounce_capture::{LiveBinding, StoppedBounceCapture};
+#[cfg(test)]
+use super::stopped_bounce_capture::{STOP_BUDGET, project_snapshot_fingerprint};
 use super::*;
 #[cfg(test)]
-use crate::plugins::plugin_runtime::BounceSourceSettlementObservation;
+use crate::instrument_bounce::{BounceSourceIdentity, BounceSourceStatus};
+#[cfg(test)]
+use crate::plugins::plugin_runtime::{
+    BounceSourceCallbackIdentity, BounceSourceSettlement, BounceSourceSettlementObservation,
+};
 use crate::{
     audio::{GeneratorRemovalRejectReason, GeneratorRemovalStamp},
     export_job::ExportControl,
     instrument_bounce::{
-        BounceSourceIdentity, BounceSourceStatus, CapturePollError, CapturedInstrumentBounce,
-        InstrumentBounceCapture, InstrumentBouncePlan,
+        CapturePollError, CapturedInstrumentBounce, InstrumentBouncePlan,
         occurrence::OccurrenceCaptureAttestation,
         render::{
             OccurrenceRenderOutcome, OccurrenceRenderReceipt, RenderAdmission, RenderControl,
@@ -29,11 +35,8 @@ use crate::{
         VerificationOutcome, VerificationReceipt, VerificationStartFailure,
         VerifiedOccurrenceMedia,
     },
-    occurrence_request::{FixedTailAcknowledgment, OccurrenceStamp},
-    plugins::plugin_runtime::{
-        BounceSourceCallbackIdentity, BounceSourceSettlement, PluginEndpointSnapshot,
-        RetainedShutdownPoll,
-    },
+    occurrence_request::FixedTailAcknowledgment,
+    plugins::plugin_runtime::RetainedShutdownPoll,
 };
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -41,7 +44,6 @@ const APP_OPEN: u8 = 0;
 const APP_CANCELLED: u8 = 1;
 const APP_COMMIT_ACCEPTED: u8 = 2;
 const RENDER_BUDGET: Duration = Duration::from_secs(300);
-const STOP_BUDGET: Duration = Duration::from_secs(35);
 
 fn bounded_clip_timeline_text(text: &str) -> String {
     let mut chars = text.chars();
@@ -146,46 +148,7 @@ impl ClipRenderPhase {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct LiveBinding {
-    stamp: OccurrenceStamp,
-    control_revision: u64,
-    endpoint: PluginEndpointSnapshot,
-    sample_rate: u32,
-    asset_generation: u64,
-}
-impl LiveBinding {
-    /// Review explicitly authorizes one preparatory stopped chase, never a
-    /// change to source, model, control requests, device, or native authority.
-    fn same_except_epoch(self, mut other: Self) -> bool {
-        other.stamp.epoch = self.stamp.epoch;
-        self == other
-    }
-}
-
-/// Provenance for this job's one preparatory chase. The mailbox request and
-/// Timeline activation request are separate identity domains. Only the actual
-/// successful production queue/confirmation boundaries may fill activation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct StopActivation {
-    request_id: u64,
-    minimum_epoch: u64,
-    committed_epoch: Option<u64>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct StopPreparation {
-    generation: u64,
-    seek_serial: u64,
-    frame: u64,
-    transport_request: u64,
-    activation: Option<StopActivation>,
-    superseded: bool,
-}
-
 struct Review {
-    snapshot: Arc<[u8]>,
-    initial: LiveBinding,
     clip_id: u32,
     clip_name: String,
     pattern_name: String,
@@ -224,17 +187,8 @@ pub(super) struct ClipRenderJob {
     export: ExportControl,
     render_admission: RenderAdmission,
     verification_admission: VerificationAdmission,
-    started_at: Instant,
-    old_epoch: Option<u64>,
-    stop_transport_request: Option<u64>,
-    stop_preparation: Option<StopPreparation>,
-    settlement_target: Option<BounceSourceCallbackIdentity>,
-    // Last actual gate result, retained only for bounded read-only diagnostics.
-    #[cfg(test)]
-    stop_settlement: Option<BounceSourceSettlementObservation>,
-    binding: Option<LiveBinding>,
+    stopped: StoppedBounceCapture,
     plan: Option<OccurrencePlan>,
-    capture: Option<InstrumentBounceCapture>,
     attestation: Option<OccurrenceCaptureAttestation>,
     render: Option<OccurrenceRenderReceipt>,
     verifier: Option<VerificationReceipt>,
@@ -283,23 +237,15 @@ impl ClipRenderJob {
         minimum_epoch: u64,
         frame: u64,
     ) {
-        if self.phase != ClipRenderPhase::StoppingDraining {
-            return;
+        if self.phase == ClipRenderPhase::StoppingDraining {
+            self.stopped.observe_stop_activation_queued(
+                request_id,
+                generation,
+                seek_serial,
+                minimum_epoch,
+                frame,
+            );
         }
-        let Some(stop) = &mut self.stop_preparation else {
-            return;
-        };
-        if (generation, seek_serial, frame) != (stop.generation, stop.seek_serial, stop.frame)
-            || stop.activation.is_some()
-        {
-            stop.superseded = true;
-            return;
-        }
-        stop.activation = Some(StopActivation {
-            request_id,
-            minimum_epoch,
-            committed_epoch: None,
-        });
     }
 
     pub(super) fn observe_stop_activation_confirmed(
@@ -309,28 +255,14 @@ impl ClipRenderJob {
         epoch: u64,
         frame: u64,
     ) {
-        if self.phase != ClipRenderPhase::StoppingDraining {
-            return;
+        if self.phase == ClipRenderPhase::StoppingDraining {
+            self.stopped
+                .observe_stop_activation_confirmed(request_id, generation, epoch, frame);
         }
-        let Some(stop) = &mut self.stop_preparation else {
-            return;
-        };
-        let Some(activation) = &mut stop.activation else {
-            stop.superseded = true;
-            return;
-        };
-        if (request_id, generation, frame) != (activation.request_id, stop.generation, stop.frame)
-            || !timeline_epoch_has_reached(epoch, activation.minimum_epoch)
-            || activation.committed_epoch.is_some()
-        {
-            stop.superseded = true;
-            return;
-        }
-        activation.committed_epoch = Some(epoch);
     }
 
     pub(super) fn owns_source(&self, source: &RunningGeneratorChain) -> bool {
-        let stamp = self.binding.unwrap_or(self.review.initial).stamp;
+        let stamp = self.stopped.binding.unwrap_or(self.stopped.initial).stamp;
         (self.pending() || self.owns_pending_resource())
             && source.project_session == stamp.project_session
             && source.endpoint_id == stamp.endpoint_id
@@ -360,7 +292,7 @@ impl ClipRenderJob {
         }
         self.phase.label()
     }
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, any(target_os = "linux", windows)))]
     pub(super) fn phase(&self) -> ClipRenderPhase {
         self.phase
     }
@@ -368,7 +300,7 @@ impl ClipRenderJob {
         !self.phase.terminal()
     }
     fn owns_pending_resource(&self) -> bool {
-        self.capture.is_some()
+        self.stopped.owns_pending_capture()
             || self.render.is_some()
             || self.render_admission.is_busy()
             || self.verifier.is_some()
@@ -386,9 +318,7 @@ impl ClipRenderJob {
         }
         // False here means file publication began. It does NOT reject App cancel.
         self.export.cancel();
-        if let Some(capture) = &mut self.capture {
-            capture.cancel();
-        }
+        self.stopped.cancel_capture();
         if let Some(render) = &self.render {
             render.cancel();
         }
@@ -403,9 +333,7 @@ impl ClipRenderJob {
         }
         if !self.operation.accepted() {
             self.export.cancel();
-            if let Some(capture) = &mut self.capture {
-                capture.cancel();
-            }
+            self.stopped.cancel_capture();
             if let Some(render) = &self.render {
                 render.cancel();
             }
@@ -463,7 +391,7 @@ impl ClipRenderJob {
         // no pre-existence observation is treated as ownership or overwrite consent.
         Ok(directory.join(format!(
             "clip-{}-session-{}-render-{}.wav",
-            self.review.clip_id, self.review.initial.stamp.project_session, self.operation_id
+            self.review.clip_id, self.stopped.initial.stamp.project_session, self.operation_id
         )))
     }
 }
@@ -497,7 +425,7 @@ impl CitrusApp {
         let Some(job) = self.clip_render_job.as_mut() else {
             return Err(source);
         };
-        let expected = job.binding.unwrap_or(job.review.initial).stamp;
+        let expected = job.stopped.binding.unwrap_or(job.stopped.initial).stamp;
         if source.project_session != expected.project_session
             || source.endpoint_id != expected.endpoint_id
             || source.instance_id != expected.instance_id
@@ -508,7 +436,7 @@ impl CitrusApp {
         job.retired_source = Some(source);
         job.fail("Audio/session loss retained the exact source worker; cleanup and any pending removal acknowledgment must finish before another source can start");
         if !job.removal_queued
-            && job.capture.is_none()
+            && job.stopped.capture.is_none()
             && job.render.is_none()
             && job.verifier.is_none()
         {
@@ -517,6 +445,9 @@ impl CitrusApp {
         Ok(())
     }
     pub(super) fn clip_render_blocks_playback(&self) -> bool {
+        if self.whole_song_export_blocks_playback() {
+            return true;
+        }
         self.clip_render_job.as_ref().is_some_and(|job| {
             job.pending()
                 || job.owns_pending_resource()
@@ -558,6 +489,9 @@ impl CitrusApp {
         }
     }
     pub(super) fn clip_render_fence_active(&self) -> bool {
+        if self.whole_song_export_fence_active() {
+            return true;
+        }
         self.clip_render_job
             .as_ref()
             .is_some_and(|job| job.pending() || job.owns_pending_resource())
@@ -573,6 +507,9 @@ impl CitrusApp {
             .map(ClipRenderJob::label)
     }
     pub(super) fn clip_render_allows_timeline_dispatch(&self) -> bool {
+        if !self.whole_song_export_allows_timeline_dispatch() {
+            return false;
+        }
         self.clip_render_job.as_ref().is_none_or(|job| {
             !(job.commit.is_some() && job.retained_media.is_some())
                 && matches!(
@@ -589,6 +526,9 @@ impl CitrusApp {
         })
     }
     pub(super) fn clip_render_allows_asset_dispatch(&self) -> bool {
+        if !self.whole_song_export_allows_asset_dispatch() {
+            return false;
+        }
         !self.clip_render_fence_active()
             || self.clip_render_job.as_ref().is_some_and(|job| {
                 job.phase == ClipRenderPhase::CommittedPlaybackPending
@@ -596,17 +536,21 @@ impl CitrusApp {
             })
     }
     pub(super) fn cancel_clip_render_job(&mut self) -> bool {
-        self.clip_render_job
+        let whole = self.cancel_whole_song_export();
+        let clip = self
+            .clip_render_job
             .as_mut()
-            .is_some_and(ClipRenderJob::cancel)
+            .is_some_and(ClipRenderJob::cancel);
+        whole || clip
     }
     pub(super) fn clip_render_unavailable_reason(&self) -> Option<String> {
         if !cfg!(all(
-            target_os = "linux",
+            any(target_os = "linux", windows),
             feature = "experimental-fresh-helper"
         )) {
             return Some(
-                "Clip rendering requires Linux with experimental-fresh-helper enabled".into(),
+                "Clip rendering requires Linux or Windows with experimental-fresh-helper enabled"
+                    .into(),
             );
         }
         if let Some(reason) = self.clip_render_busy_reason() {
@@ -722,165 +666,25 @@ impl CitrusApp {
         channel.ok_or_else(|| "The selected Pattern has no musical Channel".into())
     }
     fn clip_render_observe(&self, channel_id: u32) -> Result<LiveBinding, String> {
-        // Legacy notes are skipped by persistence and therefore require a live
-        // check as well as review admission; snapshot equality cannot see them.
-        if !self.project.piano_notes.is_empty() {
-            return Err(
-                "Resolve legacy Piano Roll notes before rendering a Playlist occurrence".into(),
-            );
-        }
-        if self.clip_render_control_revision == 0 || self.clip_render_model_revision == 0 {
-            return Err("App mutation identities are exhausted; open a new session".into());
-        }
-        let audio = self.audio.as_ref().ok_or("Audio is unavailable")?;
-        if audio.project_session() != self.project_session
-            || self.plugin_topology_is_settling()
-            || !self.audio_restart_state.allows_realtime_session_actions()
-            || self.plugin_processing_blocks_playback()
-        {
-            return Err("Wait for a healthy, stable audio/source session".into());
-        }
-        let channel = self
-            .project
-            .channels
-            .iter()
-            .find(|channel| channel.id == channel_id)
-            .ok_or("The source Channel disappeared")?;
-        let instance_id = channel
-            .instrument_plugin_instance_id
-            .ok_or("The Channel has no VST3 generator")?;
-        let instance = self
-            .project
-            .plugin_instances
-            .iter()
-            .find(|instance| instance.id == instance_id)
-            .ok_or("The source instance disappeared")?;
-        let running = self
-            .running_generator_chains
-            .get(&channel_id)
-            .ok_or("Wait for a callback-confirmed running generator")?;
-        if running.project_session != self.project_session
-            || running.instance_id != instance_id
-            || self.project.mixer_runtime_slot(channel.mixer_track) != Some(running.mixer_track)
-            || instance.runtime_status != PluginRuntimeStatus::Loaded
-        {
-            return Err(
-                "The running generator does not match the Project assignment/route or SlotReady"
-                    .into(),
-            );
-        }
-        let endpoint = running
-            .control
-            .plugin_endpoint_snapshot()
-            .ok_or("The source has no coherent active endpoint metadata")?;
-        let stats = running.control.stats();
-        if endpoint.slot_count() != 1
-            || endpoint.manifest().instance_ids[0] != Some(instance_id)
-            || endpoint.active_mask() != 1
-            || stats.faults != 0
-            || stats.stopped
-        {
-            return Err("The source endpoint is inactive, faulted, stopped, or ambiguous".into());
-        }
-        let native = running
-            .control
-            .native_editor_snapshot(0)
-            .ok_or("The actual source native observation is unavailable")?;
-        if native.state.open
-            || native.pending_request.is_some()
-            || native.capture_in_progress
-            || native.error.is_some()
-        {
-            return Err("Close the native editor and finish its pending capture first".into());
-        }
-        let (timeline_revision, epoch) = audio
-            .confirmed_timeline_identity()
-            .ok_or("The exact Timeline has not been acknowledged")?;
-        if !self.timeline_audio_matches_desired()
-            || self.timeline_audio_source.as_ref().is_none_or(|source| {
-                source.fingerprint != self.clip_timeline_fingerprint(self.timeline_sample_rate())
-            })
-        {
-            return Err("Wait for the exact current Project Timeline acknowledgment".into());
-        }
-        let stamp = OccurrenceStamp {
-            project_session: self.project_session,
-            project_revision: self.clip_render_model_revision,
-            timeline_revision,
-            epoch,
-            engine_session: audio.engine_session(),
-            endpoint_id: running.endpoint_id,
-            channel_id,
-            instance_id,
-            mixer_track_id: channel.mixer_track,
-            native_generation: native.state.generation,
-            app_native_dirty_revision: native.dirty_revision,
-            native_capture_serial: native.capture_serial,
-            parameter_capture_serial: native.parameter_capture_serial,
-            native_control_request: native.completed_request,
-            parameter_control_request: self.next_plugin_parameter_request_id,
-        };
-        stamp.validate()?;
-        Ok(LiveBinding {
-            stamp,
-            control_revision: self.clip_render_control_revision,
-            endpoint,
-            sample_rate: audio.snapshot().sample_rate,
-            asset_generation: self.audio_asset_generation,
-        })
+        self.stopped_bounce_observe(channel_id)
     }
+
+    #[cfg(test)]
     fn clip_render_status(&self, binding: LiveBinding) -> BounceSourceStatus {
-        let audio = self.audio.as_ref();
-        let status = audio.map(AudioEngine::snapshot);
-        BounceSourceStatus {
-            confirmed_stopped: !self.playing
-                && status.as_ref().is_some_and(|snapshot| {
-                    !snapshot.transport_playing && snapshot.transport_epoch == binding.stamp.epoch
-                }),
-            exact_timeline: audio.is_some_and(|audio| {
-                audio.engine_session() == binding.stamp.engine_session
-                    && audio.project_session() == binding.stamp.project_session
-                    && audio.confirmed_timeline_identity()
-                        == Some((binding.stamp.timeline_revision, binding.stamp.epoch))
-            }) && self.timeline_audio_matches_desired(),
-            source_ready: self
-                .clip_render_observe(binding.stamp.channel_id)
-                .is_ok_and(|current| current == binding),
-            parameter_edits_pending: self.plugin_parameter_edits.reserved_len() != 0
-                || !self.plugin_parameter_edit_draft_desired.is_empty()
-                || self
-                    .running_generator_chains
-                    .get(&binding.stamp.channel_id)
-                    .is_some_and(|source| source.control.outstanding_parameter_edits() != 0),
-            native_editor_open_or_pending: self
-                .native_editor_snapshot(binding.stamp.instance_id)
-                .is_none_or(|native| {
-                    native.state.open
-                        || native.pending_request.is_some()
-                        || native.capture_in_progress
-                }),
-            session_transition: self.plugin_topology_is_settling()
-                || !self.audio_restart_state.allows_realtime_session_actions(),
-            live_midi_or_recording: !self.midi_input.state.is_disconnected()
-                || !self.midi_recording.is_idle()
-                || self.recording
-                || self.input_recorder.is_some()
-                || self.pending_recording.is_some()
-                || self.master_capture.is_some()
-                || self.pending_master_capture.is_some()
-                || !self.pending_generator_note_offs.is_empty(),
-        }
+        self.stopped_bounce_status(binding)
     }
+
     pub(super) fn open_selected_clip_render_review(&mut self) {
         if self.clip_render_blocks_playback() {
             return;
         }
         if !cfg!(all(
-            target_os = "linux",
+            any(target_os = "linux", windows),
             feature = "experimental-fresh-helper"
         )) {
             self.notify(
-                "Clip rendering requires Linux with experimental-fresh-helper enabled".into(),
+                "Clip rendering requires Linux or Windows with experimental-fresh-helper enabled"
+                    .into(),
             );
             return;
         }
@@ -960,8 +764,6 @@ impl CitrusApp {
             failure_pause_requested: false,
             phase: ClipRenderPhase::Review,
             review: Review {
-                snapshot,
-                initial,
                 clip_id,
                 clip_name: clip.name.clone(),
                 pattern_name: pattern.name.clone(),
@@ -977,16 +779,8 @@ impl CitrusApp {
             export: ExportControl::default(),
             render_admission: RenderAdmission::default(),
             verification_admission: VerificationAdmission::default(),
-            started_at: Instant::now(),
-            old_epoch: None,
-            stop_transport_request: None,
-            stop_preparation: None,
-            settlement_target: None,
-            #[cfg(test)]
-            stop_settlement: None,
-            binding: None,
+            stopped: StoppedBounceCapture::new(snapshot, initial, Instant::now()),
             plan: None,
-            capture: None,
             attestation: None,
             render: None,
             verifier: None,
@@ -1021,27 +815,10 @@ impl CitrusApp {
         if !job.review.tail_acknowledged {
             return Err("Acknowledge the exact fixed-tail/cutoff choice first".into());
         }
-        checked_fixed_tail_frames(job.review.tail_seconds, job.review.initial.sample_rate)?;
+        checked_fixed_tail_frames(job.review.tail_seconds, job.stopped.initial.sample_rate)?;
         job.output_path()?;
-        let current = self.clip_render_observe(job.review.initial.stamp.channel_id)?;
-        if current != job.review.initial
-            || !clip_render::project_matches_snapshot(&self.project, &job.review.snapshot)
-                .map_err(|error| error.to_string())?
-        {
-            return Err(
-                "The reviewed source or Project changed; review the conversion again".into(),
-            );
-        }
-        self.clip_render_admission()?;
-        self.playing = false;
-        self.transport_clock_playing = false;
-        if let Some(audio) = &self.audio {
-            audio.set_playing(false);
-            // Bind the actual false request at issuance, before the first job
-            // drive can observe an unrelated later legacy mailbox request.
-            job.stop_transport_request = Some(audio.transport_request_id());
-        }
-        job.started_at = Instant::now();
+        job.stopped
+            .begin_stop(self, |app| app.clip_render_admission().map(|_| ()))?;
         job.phase = ClipRenderPhase::StoppingDraining;
         Ok(())
     }
@@ -1066,7 +843,7 @@ impl CitrusApp {
                     ui.label(format!("Clip: {} · Pattern: {}", job.review.clip_name, job.review.pattern_name));
                     ui.label(format!("Instrument: {}", job.review.instrument_name));
                     ui.label(format!("Song beats {:.6}–{:.6} · {} Hz", job.review.start_beat,
-                        job.review.start_beat + job.review.length_beats, job.review.initial.sample_rate));
+                        job.review.start_beat + job.review.length_beats, job.stopped.initial.sample_rate));
                     ui.label("This stops playback and requests a stopped Timeline chase before capture.");
                     ui.label("Render a fresh dry instrument snapshot at this Clip's song position. Live voice/LFO history and random phase are not reproduced.");
                     ui.label(format!("Channel gain {:.6} transfers to the Audio Clip; MIDI Clip gain remains in velocity. No normalization.", job.review.channel_gain));
@@ -1082,15 +859,15 @@ impl CitrusApp {
                     });
                     ui.label("Use an existing permanent directory. The rendered file is retained after Undo or a cancelled insertion.");
                     if let Ok(path) = job.output_path() { ui.label(format!("Create-new destination: {}", path.display())); }
-                    let previous_frames = checked_fixed_tail_frames(job.review.tail_seconds, job.review.initial.sample_rate).ok();
+                    let previous_frames = checked_fixed_tail_frames(job.review.tail_seconds, job.stopped.initial.sample_rate).ok();
                     let tail = ui.add(egui::DragValue::new(&mut job.review.tail_seconds).range(0.0..=30.0)
                         .speed(0.1).suffix(" s fixed tail"));
-                    let reviewed_frames = checked_fixed_tail_frames(job.review.tail_seconds, job.review.initial.sample_rate);
+                    let reviewed_frames = checked_fixed_tail_frames(job.review.tail_seconds, job.stopped.initial.sample_rate);
                     if tail.changed() || previous_frames != reviewed_frames.as_ref().ok().copied() { job.review.tail_acknowledged = false; }
                     match reviewed_frames {
                         Ok(frames) => {
                             ui.label(format!("Effective fixed tail: {} frames ({:.6} s)", frames,
-                                f64::from(frames) / f64::from(job.review.initial.sample_rate)));
+                                f64::from(frames) / f64::from(job.stopped.initial.sample_rate)));
                             let acknowledgment = if frames == 0 {
                                 "I acknowledge that audio is cut exactly at the Clip end (zero tail)"
                             } else { "I acknowledge this fixed tail may truncate the instrument, and it must fit the song" };
@@ -1164,37 +941,12 @@ impl CitrusApp {
     }
 
     fn clip_render_live_recheck(&self, job: &ClipRenderJob) -> Result<LiveBinding, String> {
-        let expected = job.binding.ok_or("The stopped source binding is missing")?;
-        let current = self.clip_render_observe(expected.stamp.channel_id)?;
-        if current != expected
-            || !clip_render::project_matches_snapshot(&self.project, &job.review.snapshot)
-                .map_err(|error| error.to_string())?
-        {
-            return Err(
-                "The exact source, native observation, control stamps, or Project changed".into(),
-            );
-        }
-        let status = self.clip_render_status(current);
-        if !status.confirmed_stopped
-            || !status.exact_timeline
-            || !status.source_ready
-            || status.parameter_edits_pending
-            || status.native_editor_open_or_pending
-            || status.session_transition
-            || status.live_midi_or_recording
-        {
-            return Err(
-                "The source is no longer quiescent at its exact stopped Timeline epoch".into(),
-            );
-        }
-        Ok(current)
+        job.stopped.live_recheck(self)
     }
 
-    fn begin_clip_render_capture(
-        &self,
-        job: &ClipRenderJob,
-    ) -> Result<InstrumentBounceCapture, String> {
-        let binding = self.clip_render_live_recheck(job)?;
+    fn begin_clip_render_capture(&self, job: &mut ClipRenderJob) -> Result<(), String> {
+        // Preserve the original recheck before preparing the occurrence plan.
+        self.clip_render_live_recheck(job)?;
         let request = Arc::clone(
             job.plan
                 .as_ref()
@@ -1202,26 +954,7 @@ impl CitrusApp {
                 .request(),
         );
         let plan = InstrumentBouncePlan::prepare_occurrence(&self.project, request)?;
-        let identity = BounceSourceIdentity {
-            project_session: binding.stamp.project_session,
-            project_fingerprint: plan.project_fingerprint(),
-            timeline_revision: binding.stamp.timeline_revision,
-            epoch: binding.stamp.epoch,
-            endpoint_id: binding.stamp.endpoint_id,
-            channel_id: binding.stamp.channel_id,
-            instance_id: binding.stamp.instance_id,
-        };
-        let running = self
-            .running_generator_chains
-            .get(&binding.stamp.channel_id)
-            .ok_or("The source disappeared")?;
-        InstrumentBounceCapture::begin(
-            plan,
-            identity,
-            self.clip_render_status(binding),
-            &running.control,
-            Instant::now(),
-        )
+        job.stopped.begin_capture(self, plan)
     }
 
     fn pause_failed_clip_render(&mut self, job: &mut ClipRenderJob) {
@@ -1248,7 +981,7 @@ impl CitrusApp {
         // The preparatory false request was published exactly once. Repeating
         // it here would create a new mailbox request immediately before stamped
         // removal and invalidate the callback's exact transport admission.
-        if job.binding.is_some()
+        if job.stopped.binding.is_some()
             && (self.playing
                 || self.transport_clock_playing
                 || self
@@ -1259,7 +992,7 @@ impl CitrusApp {
             job.fail("Playback changed after the exact stopped conversion admission");
             self.pause_failed_clip_render(job);
         }
-        if job.binding.is_some()
+        if job.stopped.binding.is_some()
             && !job.operation.accepted()
             && !job.aborted()
             && let Err(reason) = self.clip_render_live_recheck(job)
@@ -1267,9 +1000,7 @@ impl CitrusApp {
             job.fail(reason);
         }
         if job.operation.cancelled() {
-            if let Some(capture) = &mut job.capture {
-                capture.cancel();
-            }
+            job.stopped.cancel_capture();
             if let Some(render) = &job.render {
                 render.cancel();
             }
@@ -1292,211 +1023,25 @@ impl CitrusApp {
         }
     }
 
-    /// Check authoritative intent even before callback/worker acknowledgment.
-    /// Worker lag must wait; a different App/source/request must never be adopted.
-    fn clip_render_stop_intent_current(&self, job: &ClipRenderJob) -> Result<(), String> {
-        let stop = job
-            .stop_preparation
-            .ok_or("The preparatory stop intent is missing")?;
-        let initial = job.review.initial;
-        let stamp = initial.stamp;
-        let audio = self
-            .audio
-            .as_ref()
-            .ok_or("Audio disappeared while stopping")?;
-        let source = self
-            .running_generator_chains
-            .get(&stamp.channel_id)
-            .ok_or("The preparatory source disappeared")?;
-        if stop.superseded
-            || self.playing
-            || self.transport_clock_playing
-            || self.project_session != stamp.project_session
-            || audio.project_session() != stamp.project_session
-            || audio.engine_session() != stamp.engine_session
-            || audio.transport_request_id() != stop.transport_request
-            || self.clip_render_model_revision != stamp.project_revision
-            || self.clip_render_control_revision != initial.control_revision
-            || self.next_plugin_parameter_request_id != stamp.parameter_control_request
-            || self.audio_asset_generation != initial.asset_generation
-            || self.timeline_desired_generation != stop.generation
-            || self.timeline_audio_sync.source_generation != Some(stop.generation)
-            || self
-                .timeline_audio_source
-                .as_ref()
-                .is_none_or(|source| source.generation != stop.generation)
-            || self.timeline_audio_sync.desired_seek.serial != stop.seek_serial
-            || self.timeline_audio_sync.desired_seek.frame != stop.frame
-            || source.project_session != stamp.project_session
-            || source.endpoint_id != stamp.endpoint_id
-            || source.instance_id != stamp.instance_id
-            || matches!(
-                self.timeline_audio_sync.phase,
-                TimelineAudioSyncPhase::Unavailable
-                    | TimelineAudioSyncPhase::Faulted
-                    | TimelineAudioSyncPhase::FaultClearReady { .. }
-                    | TimelineAudioSyncPhase::FaultClearQueued { .. }
-            )
-            || self.plugin_processing_blocks_playback()
-            || !self.audio_restart_state.allows_realtime_session_actions()
-        {
-            return Err(
-                "The exact preparatory stop intent, request, source, or session changed".into(),
-            );
-        }
-        let stats = source.control.stats();
-        if stats.faults != 0 || stats.stopped {
-            return Err("The preparatory source faulted or stopped".into());
-        }
-        if !clip_render::project_matches_snapshot(&self.project, &job.review.snapshot)
-            .map_err(|error| error.to_string())?
-        {
-            return Err("The Project changed during the preparatory stop".into());
-        }
-        if let Some(epoch) = stop
-            .activation
-            .and_then(|activation| activation.committed_epoch)
-            && (!matches!(self.timeline_audio_sync.phase,
-                TimelineAudioSyncPhase::Active { generation, epoch: active_epoch }
-                    if generation == stop.generation && active_epoch == epoch)
-                || audio.confirmed_timeline_identity() != Some((stop.generation, epoch)))
-        {
-            return Err("The acknowledged preparatory Timeline was superseded".into());
-        }
-        Ok(())
-    }
-
     fn drive_clip_render_stop(&mut self, job: &mut ClipRenderJob) {
         if job.aborted() {
             job.finish_unchanged();
             return;
         }
-        if job.started_at.elapsed() >= STOP_BUDGET {
-            job.fail(
-                "Timed out waiting for parameter/preview drain and a settled stopped Timeline",
-            );
-            job.finish_unchanged();
-            return;
-        }
-        if self.plugin_parameter_edits.reserved_len() != 0
-            || !self.plugin_parameter_edit_draft_desired.is_empty()
-        {
-            job.fail("Parameter work appeared after the bound review");
-            job.finish_unchanged();
-            return;
-        }
-        if job.old_epoch.is_none() {
-            let Some(audio) = self.audio.as_mut() else {
-                job.fail("Audio became unavailable before stopping");
-                job.finish_unchanged();
-                return;
-            };
-            if Some(audio.transport_request_id()) != job.stop_transport_request {
-                job.fail("The preparatory stopped transport request was superseded");
+        let ready = match job.stopped.poll_stop(self) {
+            Ok(None) => return,
+            Ok(Some(ready)) => ready,
+            Err(reason) => {
+                job.fail(reason);
                 job.finish_unchanged();
                 return;
             }
-            let old_epoch = audio.snapshot().transport_epoch;
-            if !audio.command(AudioCommand::StopAll) {
-                return;
-            }
-            self.pending_generator_note_offs.clear();
-            job.old_epoch = Some(old_epoch);
-            if !self.request_timeline_resume_chase() {
-                job.fail("No exact stopped Timeline chase is available");
-                job.finish_unchanged();
-                return;
-            }
-            // request_timeline_resume_chase only issues desired_seek. Pin it
-            // now, before any queue/confirmation poll can observe another chase.
-            let intent = self.timeline_audio_sync.desired_seek;
-            job.stop_preparation = Some(StopPreparation {
-                generation: self
-                    .timeline_audio_source
-                    .as_ref()
-                    .expect("issued source")
-                    .generation,
-                seek_serial: intent.serial,
-                frame: intent.frame,
-                transport_request: job.stop_transport_request.expect("issued stopped request"),
-                activation: None,
-                superseded: false,
-            });
-            return;
-        }
-        if let Err(reason) = self.clip_render_stop_intent_current(job) {
-            job.fail(reason);
-            job.finish_unchanged();
-            return;
-        }
-        let stop = job.stop_preparation.expect("checked preparatory intent");
-        let Some(epoch) = stop
-            .activation
-            .and_then(|activation| activation.committed_epoch)
-        else {
-            return;
         };
-        let audio = self.audio.as_ref().expect("checked audio");
-        let snapshot = audio.snapshot();
-        if job.settlement_target.is_some() && snapshot.timeline_frame != stop.frame {
-            job.fail("The frozen preparatory Timeline frame changed");
-            job.finish_unchanged();
-            return;
-        }
-        if snapshot.transport_playing
-            || snapshot.timeline_frame != stop.frame
-            || Some(snapshot.transport_epoch) == job.old_epoch
-            || !self.timeline_audio_matches_desired()
-        {
-            return;
-        }
+        let current = ready.binding();
         let prepare = (|| {
-            if job.settlement_target.is_none() {
-                let current = self.clip_render_observe(job.review.initial.stamp.channel_id)?;
-                if !job.review.initial.same_except_epoch(current)
-                    || current.stamp.timeline_revision != stop.generation
-                    || current.stamp.epoch != epoch
-                {
-                    return Err("The source changed during the preparatory stop".to_owned());
-                }
-                job.binding = Some(current);
-                job.settlement_target = Some(BounceSourceCallbackIdentity {
-                    engine_session: current.stamp.engine_session,
-                    project_session: current.stamp.project_session,
-                    timeline_generation: stop.generation,
-                    epoch,
-                    transport_request: stop.transport_request,
-                    channel_id: current.stamp.channel_id,
-                    endpoint_id: current.stamp.endpoint_id,
-                    instance_id: current.stamp.instance_id,
-                });
-            }
-            let current = self.clip_render_live_recheck(job)?;
-            self.clip_render_stop_intent_current(job)?;
-            let target = job.settlement_target.expect("frozen settlement target");
-            let observation = self
-                .running_generator_chains
-                .get(&current.stamp.channel_id)
-                .ok_or("The source disappeared before settlement")?
-                .control
-                .observe_bounce_source_settlement(target);
-            #[cfg(test)]
-            {
-                job.stop_settlement = Some(observation);
-            }
-            match observation.settlement {
-                BounceSourceSettlement::Waiting => return Ok(false),
-                BounceSourceSettlement::Invalid => {
-                    return Err("The exact stopped source settlement became invalid".to_owned());
-                }
-                BounceSourceSettlement::Ready => {}
-            }
-            // No plan, command or capture lease exists before the real joined
-            // boundary. Recheck immutable App/transport authority around admission.
-            self.clip_render_stop_intent_current(job)?;
             let frames = checked_fixed_tail_frames(job.review.tail_seconds, current.sample_rate)?;
             let consent = Arc::new(FixedTailAcknowledgment::review(
-                Arc::clone(&job.review.snapshot),
+                Arc::clone(ready.snapshot()),
                 current.stamp,
                 job.review.clip_id,
                 current.sample_rate,
@@ -1513,20 +1058,18 @@ impl CitrusApp {
                 )
                 .map_err(|error| error.to_string())?,
             );
-            self.clip_render_stop_intent_current(job)?;
-            job.capture = Some(self.begin_clip_render_capture(job)?);
-            Ok::<bool, String>(true)
+            job.stopped.stop_intent_current(self)?;
+            self.begin_clip_render_capture(job)?;
+            Ok::<(), String>(())
         })();
         match prepare {
-            Ok(true) => {
+            Ok(()) => {
                 job.phase = ClipRenderPhase::Capturing;
-                if let Err(reason) = self.clip_render_stop_intent_current(job) {
-                    // A raced admission is never retried. Its original owner
-                    // remains retained until the ordinary capture termination.
+                if let Err(reason) = job.stopped.stop_intent_current(self) {
+                    // The original private owner remains until actual termination.
                     job.fail(reason);
                 }
             }
-            Ok(false) => {}
             Err(reason) => {
                 job.fail(reason);
                 job.finish_unchanged();
@@ -1535,27 +1078,10 @@ impl CitrusApp {
     }
 
     fn drive_clip_render_capture(&mut self, job: &mut ClipRenderJob) {
-        let binding = job.binding.expect("capture requires binding");
-        let identity = BounceSourceIdentity {
-            project_session: binding.stamp.project_session,
-            project_fingerprint: project_snapshot_fingerprint(&job.review.snapshot),
-            timeline_revision: binding.stamp.timeline_revision,
-            epoch: binding.stamp.epoch,
-            endpoint_id: binding.stamp.endpoint_id,
-            channel_id: binding.stamp.channel_id,
-            instance_id: binding.stamp.instance_id,
-        };
-        let status = self.clip_render_status(binding);
-        let Some(capture) = job.capture.as_mut() else {
-            job.fail("Capture ownership was lost");
-            job.finish_unchanged();
-            return;
-        };
-        let result = capture.poll_typed(identity, status, Instant::now());
+        let result = job.stopped.poll_capture(self);
         let captured = match result {
             Ok(None) => return,
             Err(reason) => {
-                job.capture = None;
                 if matches!(
                     reason,
                     CapturePollError::Backend(_) | CapturePollError::Invalid(_)
@@ -1579,7 +1105,6 @@ impl CitrusApp {
             },
             &captured,
         );
-        job.capture = None;
         if job.aborted() {
             drop(captured);
             job.finish_unchanged();
@@ -1772,8 +1297,7 @@ impl CitrusApp {
                     return;
                 }
                 match self.begin_clip_render_capture(job) {
-                    Ok(capture) => {
-                        job.capture = Some(capture);
+                    Ok(()) => {
                         job.phase = ClipRenderPhase::RecapturingSource;
                     }
                     Err(reason) => {
@@ -1914,7 +1438,7 @@ impl CitrusApp {
                 drop(failure.pcm);
                 failure.message
             })?;
-        if Some(prepared.stamp()) != job.binding.map(|binding| binding.stamp) {
+        if Some(prepared.stamp()) != job.stopped.binding.map(|binding| binding.stamp) {
             return Err("Compact verified PCM differs from the exact stopped job binding".into());
         }
         // Small path copies are fallibly reserved before removal. All three
@@ -2153,7 +1677,7 @@ impl CitrusApp {
             self.cached_audio_assets
                 .insert(cache.project_asset_id, cache);
         }
-        let binding = job.binding.expect("committed binding");
+        let binding = job.stopped.binding.expect("committed binding");
         if job.failure.is_some()
             || self.audio.as_ref().is_none_or(|audio| {
                 audio.engine_session() != binding.stamp.engine_session
@@ -2222,7 +1746,7 @@ impl CitrusApp {
             job.phase = ClipRenderPhase::CommittedPlaybackFailedPaused;
             return;
         }
-        let binding = job.binding.expect("committed source binding");
+        let binding = job.stopped.binding.expect("committed source binding");
         let operation = job.asset_operation.expect("preissued media registration");
         if self.project_session != binding.stamp.project_session
             || Some(self.clip_render_model_revision) != job.committed_model_revision
@@ -2316,12 +1840,6 @@ impl CitrusApp {
     }
 }
 
-fn project_snapshot_fingerprint(snapshot: &[u8]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    snapshot.hash(&mut hasher);
-    hasher.finish()
-}
-
 fn start_occurrence_renderer(
     job: &mut ClipRenderJob,
     capture: CapturedInstrumentBounce,
@@ -2332,7 +1850,14 @@ fn start_occurrence_renderer(
     if let Some(starter) = job.render_starter.take() {
         return starter(&job.render_admission, capture, path, control);
     }
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    // Windows uses the actual overlapped named-pipe helper and native file-ID
+    // publication implementation. Both platforms keep the same capture,
+    // disposal, verification and history admission; neither uses live capture
+    // as a substitute for this isolated offline renderer.
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     {
         job.render_admission.start_occurrence(
             capture,
@@ -2341,7 +1866,10 @@ fn start_occurrence_renderer(
             crate::plugins::strict_backend::StrictBackend::new,
         )
     }
-    #[cfg(not(all(target_os = "linux", feature = "experimental-fresh-helper")))]
+    #[cfg(not(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    )))]
     {
         let _ = (job, capture, path, control);
         Err("Strict occurrence rendering is unavailable on this build".into())
@@ -2355,3 +1883,7 @@ pub(in crate::app) mod tests;
 #[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
 #[path = "clip_render_genuine.rs"]
 mod genuine;
+
+#[cfg(all(test, windows, feature = "experimental-fresh-helper"))]
+#[path = "windows_noire_bounce_qa.rs"]
+mod windows_noire_bounce_qa;

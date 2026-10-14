@@ -21,13 +21,13 @@ def digest(data):
 
 
 def read_json(name):
-    return json.loads((ROOT / name).read_text())
+    return json.loads((ROOT / name).read_text(encoding="utf-8"))
 
 
 def verify_inventory():
     inventory = ROOT / "CONTENTS-SHA256.txt"
     expected = {}
-    for line in inventory.read_text().splitlines(keepends=True):
+    for line in inventory.read_text(encoding="utf-8").splitlines(keepends=True):
         match = re.fullmatch(r"([0-9a-f]{64})  ([^\r\n]+)\n", line)
         require(match is not None, "Malformed inventory line")
         sha, name = match.groups()
@@ -141,7 +141,8 @@ def verify_measurements():
             overload["published_faults_after_restart"] == 0 and overload["sink_peak_after_restart"] > .01,
             "Deliberate overload/restart evidence changed")
     require("test result: ok. 5 passed; 0 failed; 0 ignored" in
-            (ROOT / "receipts/native-tests-final.log").read_text(), "Final five-test result missing")
+            (ROOT / "receipts/native-tests-final.log").read_text(encoding="utf-8"),
+            "Final five-test result missing")
 
 
 def verify_source(repo=None, ref=None):

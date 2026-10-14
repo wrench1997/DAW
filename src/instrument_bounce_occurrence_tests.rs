@@ -97,7 +97,7 @@ fn capture_actual(
     request: Arc<OccurrenceRenderRequest>,
     state: BouncePluginState,
     control: &PluginChainControl,
-    commands: &Receiver<AdminCommand>,
+    commands: &Receiver<QueuedAdminCommand>,
     calls: Arc<AtomicU64>,
 ) -> CapturedInstrumentBounce {
     let plan = InstrumentBouncePlan::prepare_occurrence(project, request).unwrap();
@@ -107,13 +107,14 @@ fn capture_actual(
     let mut coordinator =
         InstrumentBounceCapture::begin(plan, identity, status(), control, now).unwrap();
     assert!(coordinator.poll(identity, status(), now).unwrap().is_none());
+    let mut queued = commands.try_recv().unwrap();
     let AdminCommand::CaptureInstrumentBounce {
         expected_epoch,
         parameter_ids,
         parameter_admission,
         lease,
         reply,
-    } = commands.try_recv().unwrap()
+    } = queued.take_command()
     else {
         panic!("not the dedicated capture request")
     };
@@ -351,6 +352,56 @@ fn occurrence_actual_capture_renderer_file_and_authoritative_history_join() {
         assert_eq!(published, files.path());
         assert!(published.exists());
     }
+}
+
+#[test]
+fn occurrence_selected_actual_capture_renderer_preserves_all_declarations_through_history_join() {
+    let _serial = crate::occurrence_media::verification_test_guard();
+    let files = Files::new();
+    let (mut project, request, mut state) = fixture(129, 129, 1);
+    state.metadata.class_uid = "5653544E694B386B6F6E74616B742038".into();
+    state.metadata.version = "8.4.1".into();
+    state.metadata.output_buses = (0..32)
+        .map(|index| BounceAudioBus::new(2, index % 3 == 0, Some(index == 0)))
+        .collect();
+    state.metadata.event_output_buses = vec![(16, true, Some(true))];
+    state.metadata.validate(8000).unwrap();
+    let metadata = state.metadata.clone();
+    let before = serde_json::to_vec(&project).unwrap();
+    let (control, commands) = control(2);
+    let calls = Arc::new(AtomicU64::new(0));
+    let first = capture_actual(
+        &project,
+        Arc::clone(&request),
+        state.clone(),
+        &control,
+        &commands,
+        Arc::clone(&calls),
+    );
+    let attestation = first.retain_occurrence_attestation().unwrap();
+    assert_eq!(attestation.provenance().metadata(), &metadata);
+    let (media, _, _) = render(first, &files);
+    assert_eq!(media.provenance().metadata(), &metadata);
+    let second = capture_actual(
+        &project,
+        request,
+        state,
+        &control,
+        &commands,
+        Arc::clone(&calls),
+    );
+    let matched = attestation.match_recapture(second).unwrap();
+    assert_eq!(matched.metadata(), &metadata);
+    assert_eq!(matched.metadata().output_buses.len(), 32);
+    assert_eq!(
+        matched.metadata().event_output_buses,
+        [(16, true, Some(true))]
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(serde_json::to_vec(&project).unwrap(), before);
+    let published = test_commit_verified_occurrence(&mut project, &media, &matched).unwrap();
+    assert_eq!(published, files.path());
+    assert!(published.exists());
 }
 
 #[test]
@@ -595,13 +646,14 @@ fn occurrence_second_capture_cancel_timeout_and_fault_are_drained_without_insert
         let now = Instant::now();
         let mut second =
             InstrumentBounceCapture::begin(plan, stamp, status(), &control, now).unwrap();
+        let mut queued = commands.try_recv().unwrap();
         let AdminCommand::CaptureInstrumentBounce {
             expected_epoch,
             parameter_ids,
             parameter_admission,
             lease,
             reply,
-        } = commands.try_recv().unwrap()
+        } = queued.take_command()
         else {
             panic!("expected the second dedicated capture request");
         };

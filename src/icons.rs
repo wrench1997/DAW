@@ -38,6 +38,7 @@ pub enum StudioIcon {
 
 pub fn icon_button(ui: &mut Ui, icon: StudioIcon, active: bool, size: f32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::click());
+    let depressed = active || response.is_pointer_button_down_on();
     let fill = if active {
         theme::ORANGE_DIM
     } else if response.hovered() {
@@ -45,7 +46,12 @@ pub fn icon_button(ui: &mut Ui, icon: StudioIcon, active: bool, size: f32) -> Re
     } else {
         theme::PANEL_ALT
     };
-    ui.painter().rect_filled(rect, 3.0, fill);
+    ui.painter().add(theme::button_face(
+        rect,
+        if depressed { theme::WELL } else { fill },
+        depressed,
+        response.has_focus(),
+    ));
     if active || response.has_focus() {
         ui.painter().line_segment(
             [
@@ -57,7 +63,8 @@ pub fn icon_button(ui: &mut Ui, icon: StudioIcon, active: bool, size: f32) -> Re
     }
     paint_icon(
         ui.painter(),
-        rect.shrink(size * 0.24),
+        rect.shrink(size * 0.24)
+            .translate(Vec2::new(0.0, if depressed { 1.0 } else { 0.0 })),
         icon,
         if active { theme::ORANGE } else { theme::TEXT },
     );
@@ -66,6 +73,7 @@ pub fn icon_button(ui: &mut Ui, icon: StudioIcon, active: bool, size: f32) -> Re
 
 pub fn transport_button(ui: &mut Ui, icon: StudioIcon, active: bool, color: Color32) -> Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::click());
+    let depressed = active || response.is_pointer_button_down_on();
     let fill = if active {
         theme::ORANGE_DIM
     } else if response.hovered() {
@@ -73,15 +81,22 @@ pub fn transport_button(ui: &mut Ui, icon: StudioIcon, active: bool, color: Colo
     } else {
         theme::RAISED
     };
+    let center = rect.center() + Vec2::new(0.0, if depressed { 1.0 } else { 0.0 });
     ui.painter()
-        .circle_filled(rect.center() + Vec2::new(0.0, 1.0), 17.0, theme::WELL);
-    ui.painter().circle_filled(rect.center(), 16.0, fill);
+        .circle_filled(rect.center() + Vec2::new(0.0, 2.0), 17.0, theme::WELL);
+    ui.painter()
+        .circle_filled(center, 16.0, if depressed { theme::WELL } else { fill });
     ui.painter().circle_stroke(
-        rect.center(),
+        center,
         16.0,
         Stroke::new(1.0, if active { color } else { theme::HIGHLIGHT }),
     );
-    paint_icon(ui.painter(), rect.shrink(11.0), icon, color);
+    paint_icon(
+        ui.painter(),
+        rect.shrink(11.0).translate(center - rect.center()),
+        icon,
+        color,
+    );
     response
 }
 

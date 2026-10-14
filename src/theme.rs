@@ -6,17 +6,17 @@ use egui::{
 
 // A cool, layered workstation palette. Color belongs to musical content;
 // orange is reserved for selection, transport, and the Citrus identity.
-pub const BG: Color32 = Color32::from_rgb(37, 43, 49);
-pub const PANEL: Color32 = Color32::from_rgb(53, 62, 71);
-pub const PANEL_ALT: Color32 = Color32::from_rgb(62, 72, 82);
-pub const RAISED: Color32 = Color32::from_rgb(76, 88, 99);
-pub const GRID: Color32 = Color32::from_rgb(80, 91, 101);
+pub const BG: Color32 = Color32::from_rgb(26, 30, 36);
+pub const PANEL: Color32 = Color32::from_rgb(43, 50, 59);
+pub const PANEL_ALT: Color32 = Color32::from_rgb(51, 60, 70);
+pub const RAISED: Color32 = Color32::from_rgb(65, 77, 90);
+pub const GRID: Color32 = Color32::from_rgb(62, 73, 86);
 pub const TEXT: Color32 = Color32::from_rgb(227, 232, 236);
 pub const MUTED: Color32 = Color32::from_rgb(181, 192, 201);
 pub const ORANGE: Color32 = Color32::from_rgb(240, 164, 82);
 pub const ORANGE_DIM: Color32 = Color32::from_rgb(107, 82, 57);
-pub const WELL: Color32 = Color32::from_rgb(31, 38, 44);
-pub const HIGHLIGHT: Color32 = Color32::from_rgb(93, 106, 117);
+pub const WELL: Color32 = Color32::from_rgb(20, 25, 32);
+pub const HIGHLIGHT: Color32 = Color32::from_rgb(90, 106, 123);
 pub const GREEN: Color32 = Color32::from_rgb(96, 211, 177);
 pub const RED: Color32 = Color32::from_rgb(244, 92, 106);
 pub const BLUE: Color32 = Color32::from_rgb(103, 161, 255);
@@ -49,6 +49,131 @@ pub fn mix(background: Color32, foreground: Color32, amount: f32) -> Color32 {
         channel(background.g(), foreground.g()),
         channel(background.b(), foreground.b()),
     )
+}
+
+/// A raised face at rest and an inset face while held. Hit bounds remain fixed.
+pub fn button_face(rect: egui::Rect, fill: Color32, depressed: bool, focused: bool) -> egui::Shape {
+    let face = if depressed { rect.shrink(0.5) } else { rect };
+    let top = if depressed {
+        WELL
+    } else {
+        mix(fill, Color32::WHITE, 0.17)
+    };
+    let bottom = if depressed {
+        mix(fill, Color32::WHITE, 0.10)
+    } else {
+        WELL
+    };
+    egui::Shape::Vec(vec![
+        egui::Shape::rect_filled(face, 3, fill),
+        egui::Shape::rect_stroke(face, 3, Stroke::new(1.0, WELL), egui::StrokeKind::Inside),
+        egui::Shape::line_segment(
+            [
+                face.left_top() + egui::vec2(3.0, 1.0),
+                face.right_top() + egui::vec2(-3.0, 1.0),
+            ],
+            Stroke::new(1.0, top),
+        ),
+        egui::Shape::line_segment(
+            [
+                face.left_bottom() + egui::vec2(3.0, -1.0),
+                face.right_bottom() + egui::vec2(-3.0, -1.0),
+            ],
+            Stroke::new(1.0, bottom),
+        ),
+        if focused {
+            egui::Shape::rect_stroke(
+                rect.shrink(1.0),
+                3,
+                Stroke::new(1.0, ORANGE),
+                egui::StrokeKind::Inside,
+            )
+        } else {
+            egui::Shape::Noop
+        },
+    ])
+}
+
+/// Keep egui's native accessibility, keyboard activation, sizing and click semantics.
+/// Only the face and the one-point pressed content offset are custom.
+pub struct Button<'a> {
+    native: egui::Button<'a>,
+    selected: bool,
+}
+
+impl<'a> Button<'a> {
+    pub fn new(atoms: impl egui::IntoAtoms<'a>) -> Self {
+        Self {
+            native: egui::Button::new(atoms),
+            selected: false,
+        }
+    }
+
+    pub fn selected(mut self, selected: bool) -> Self {
+        self.native = self.native.selected(selected);
+        self.selected = selected;
+        self
+    }
+
+    pub fn small(mut self) -> Self {
+        self.native = self.native.small();
+        self
+    }
+
+    pub fn truncate(mut self) -> Self {
+        self.native = self.native.truncate();
+        self
+    }
+}
+
+impl egui::Widget for Button<'_> {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        // Reserve the face underneath the native text without allocating a new widget ID.
+        let face_index = ui.painter().add(egui::Shape::Noop);
+        let response = ui.add(self.native.fill(Color32::TRANSPARENT).stroke(Stroke::NONE));
+        if ui.is_rect_visible(response.rect) {
+            let depressed = self.selected || response.is_pointer_button_down_on();
+            let fill = if depressed {
+                WELL
+            } else if response.hovered() {
+                HIGHLIGHT
+            } else {
+                RAISED
+            };
+            ui.painter().set(
+                face_index,
+                button_face(response.rect, fill, depressed, response.has_focus()),
+            );
+            if depressed {
+                ui.ctx().graphics_mut(|graphics| {
+                    if let Some(list) = graphics.get_mut(ui.layer_id()) {
+                        let end = list.all_entries().len();
+                        for index in face_index.0 + 1..end {
+                            list.mutate_shape(egui::layers::ShapeIdx(index), |shape| {
+                                shape.shape.translate(egui::vec2(0.0, 1.0));
+                            });
+                        }
+                    }
+                });
+            }
+        }
+        response
+    }
+}
+
+pub trait UiButtons {
+    fn studio_button<'a>(&mut self, atoms: impl egui::IntoAtoms<'a>) -> egui::Response;
+    fn studio_small_button<'a>(&mut self, atoms: impl egui::IntoAtoms<'a>) -> egui::Response;
+}
+
+impl UiButtons for egui::Ui {
+    fn studio_button<'a>(&mut self, atoms: impl egui::IntoAtoms<'a>) -> egui::Response {
+        self.add(Button::new(atoms))
+    }
+
+    fn studio_small_button<'a>(&mut self, atoms: impl egui::IntoAtoms<'a>) -> egui::Response {
+        self.add(Button::new(atoms).small())
+    }
 }
 
 /// Keep small white clip titles readable for arbitrary user-assigned colors.
@@ -91,11 +216,12 @@ pub fn install(ctx: &egui::Context) {
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, PANEL_ALT);
     visuals.widgets.inactive.bg_fill = RAISED;
     visuals.widgets.inactive.weak_bg_fill = PANEL_ALT;
-    visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, WELL);
     visuals.widgets.hovered.bg_fill = HIGHLIGHT;
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, HIGHLIGHT);
-    visuals.widgets.active.bg_fill = ORANGE_DIM;
-    visuals.widgets.active.bg_stroke = Stroke::NONE;
+    visuals.widgets.active.bg_fill = WELL;
+    visuals.widgets.active.weak_bg_fill = WELL;
+    visuals.widgets.active.bg_stroke = Stroke::new(1.0, HIGHLIGHT);
     visuals.selection.bg_fill = ORANGE_DIM;
     visuals.selection.stroke = Stroke::new(1.0, ORANGE);
 

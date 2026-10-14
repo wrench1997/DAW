@@ -1,15 +1,15 @@
-//! Dormant, bounded preparation for a selected-instrument bounce.
+//! Bounded preparation for a selected-instrument bounce.
 //!
-//! There is deliberately no App action, renderer or file publication in this checkpoint.
 //! A capture is delivered on a private one-shot channel, never through project-save/native
 //! publications. The caller must keep session actions fenced while this coordinator is pending.
+//! Experimental App occurrence conversion uses this capture contract before isolated rendering.
 
 #[path = "instrument_bounce_render.rs"]
-#[allow(dead_code)] // Dormant engine; experimental strict clone has no App/UI caller.
+#[allow(dead_code)] // Shared preparation paths are not exposed by every feature configuration.
 pub(crate) mod render;
 
 #[path = "instrument_bounce_occurrence.rs"]
-#[allow(dead_code)] // Dormant occurrence/capture join, no App controller.
+#[allow(dead_code)] // Experimental App conversion is unavailable in ordinary builds.
 pub(crate) mod occurrence;
 pub(crate) use occurrence::OccurrenceRenderProvenance;
 
@@ -21,10 +21,14 @@ use std::{
 };
 
 use crate::{
+    automation::{AutomationTarget, canonicalize_automation_target},
     model::{PluginFormat, Project},
     plugins::plugin_runtime::{BounceStateReceiver, PluginChainControl},
     tempo_map::TempoMap,
-    timeline::{CompiledTimeline, TimelineCompileOptions},
+    timeline::{
+        CompiledAutomationTarget, CompiledTimeline, PluginRouteDestination, TimelineCompileOptions,
+        TimelineEventKind,
+    },
 };
 
 #[cfg(any(feature = "vst3", test))]
@@ -142,6 +146,44 @@ pub(crate) fn validate_bounce_audio_topology(
     Ok(())
 }
 
+pub(crate) fn kontakt_selected_stereo_bounce_eligible(
+    uid: &str,
+    version: &str,
+    category: &str,
+) -> bool {
+    uid == "5653544E694B386B6F6E74616B742038"
+        && version == "8.4.1"
+        && category
+            .split('|')
+            .any(|token| token.trim() == "Instrument")
+}
+
+fn validate_selected_stereo_bounce_audio(
+    inputs: &[BounceAudioBus],
+    outputs: &[BounceAudioBus],
+) -> Result<(), String> {
+    if inputs.len() > 1
+        || inputs.iter().any(|bus| {
+            !bus.is_main || !matches!(bus.channel_count, 1 | 2) || bus.active != Some(true)
+        })
+        || !(1..=32).contains(&outputs.len())
+        || !outputs
+            .first()
+            .is_some_and(|bus| bus.is_main && bus.channel_count == 2 && bus.active == Some(true))
+        || outputs
+            .iter()
+            .enumerate()
+            .any(|(index, bus)| bus.channel_count == 0 || bus.active != Some(index == 0))
+        || !outputs
+            .iter()
+            .try_fold(0_usize, |total, bus| total.checked_add(bus.channel_count))
+            .is_some_and(|total| total <= 64)
+    {
+        return Err("Kontakt bounce requires a completely acknowledged main stereo output at index zero, all other declared outputs inactive, and at most 32 output buses / 64 declared output channels".into());
+    }
+    Ok(())
+}
+
 /// Actual loaded metadata. Project/cache role and path-based IDs cannot construct this receipt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BouncePluginMetadata {
@@ -160,6 +202,17 @@ pub struct BouncePluginMetadata {
 }
 
 impl BouncePluginMetadata {
+    pub(crate) fn uses_selected_stereo_bounce(&self) -> bool {
+        kontakt_selected_stereo_bounce_eligible(&self.class_uid, &self.version, &self.category)
+    }
+
+    pub(crate) fn validate_audio_topology(&self) -> Result<(), String> {
+        if self.uses_selected_stereo_bounce() {
+            validate_selected_stereo_bounce_audio(&self.input_buses, &self.output_buses)
+        } else {
+            validate_bounce_audio_topology(&self.input_buses, &self.output_buses)
+        }
+    }
     /// Flat input storage contains only participating channels; no external audio is read.
     #[cfg(any(feature = "vst3", test))]
     pub(crate) fn participating_input_channels(&self) -> usize {
@@ -183,11 +236,21 @@ impl BouncePluginMetadata {
                 self.event_input_buses.first(),
                 Some((1..=16, true, Some(true)))
             )
-            || !self.event_output_buses.is_empty()
+            || (!self.event_output_buses.is_empty()
+                && (!self.uses_selected_stereo_bounce()
+                    || self.event_output_buses.len() > 1
+                    || self
+                        .event_output_buses
+                        .iter()
+                        .any(|bus| !matches!(bus, (1..=16, true, Some(_))))))
         {
-            return Err("Instrument bounce requires an actual VST3 instrument with MIDI input and no MIDI output".into());
+            return Err(if self.uses_selected_stereo_bounce() {
+                "Kontakt bounce requires a known main MIDI input and at most one known declared MIDI output; every rendered block must emit no MIDI events".into()
+            } else {
+                "Instrument bounce requires an actual VST3 instrument with MIDI input and no MIDI output".into()
+            });
         }
-        validate_bounce_audio_topology(&self.input_buses, &self.output_buses)?;
+        self.validate_audio_topology()?;
         if self.latency_samples > sample_rate.saturating_mul(MAX_BOUNCE_LATENCY_SECONDS) {
             return Err("Instrument bounce plug-in latency exceeds the one-second bound".into());
         }
@@ -271,6 +334,7 @@ pub struct InstrumentBouncePlan {
     spec: PluginLoadSpec,
     parameter_ids: Vec<u32>,
     occurrence: Option<Arc<crate::occurrence_request::OccurrenceRenderRequest>>,
+    master_song: bool,
 }
 
 impl InstrumentBouncePlan {
@@ -280,7 +344,20 @@ impl InstrumentBouncePlan {
         sample_rate: u32,
         tail_frames: u32,
     ) -> Result<Self, String> {
-        Self::prepare_internal(project, channel_id, sample_rate, tail_frames, None)
+        Self::prepare_internal(project, channel_id, sample_rate, tail_frames, None, false)
+    }
+
+    /// Prepare a complete single-generator song for the master export owner.
+    /// The original project is compiled and fingerprinted without filtering;
+    /// static channel/mixer controls and admitted master automation remain in
+    /// the timeline for composition after the isolated generator render.
+    pub fn prepare_master_song(
+        project: &Project,
+        channel_id: u32,
+        sample_rate: u32,
+        tail_frames: u32,
+    ) -> Result<Self, String> {
+        Self::prepare_internal(project, channel_id, sample_rate, tail_frames, None, true)
     }
 
     #[allow(dead_code)] // Dormant Stop A entry; the App controller is separately gated.
@@ -295,6 +372,7 @@ impl InstrumentBouncePlan {
             request.sample_rate(),
             request.tail_frames(),
             Some(request),
+            false,
         )
     }
 
@@ -304,6 +382,7 @@ impl InstrumentBouncePlan {
         sample_rate: u32,
         tail_frames: u32,
         occurrence: Option<Arc<crate::occurrence_request::OccurrenceRenderRequest>>,
+        master_song: bool,
     ) -> Result<Self, String> {
         if !(8_000..=192_000).contains(&sample_rate)
             || tail_frames > sample_rate.saturating_mul(MAX_BOUNCE_TAIL_SECONDS)
@@ -313,15 +392,25 @@ impl InstrumentBouncePlan {
         project
             .validate_mixer_graph()
             .map_err(|error| error.to_string())?;
-        if let Some(lane) = project
+        if master_song && (!project.tempo.is_finite() || !(20.0..=400.0).contains(&project.tempo)) {
+            return Err(
+                "Master song bounce requires a finite fixed tempo within 20–400 BPM".into(),
+            );
+        }
+        if master_song && !project.piano_notes.is_empty() {
+            return Err("Master song bounce refuses unresolved legacy Piano Roll sources".into());
+        }
+        for lane in project
             .automation_lanes
             .iter()
-            .find(|lane| lane.lane.is_enabled() && !lane.lane.points().is_empty())
+            .filter(|lane| lane.lane.is_enabled() && !lane.lane.points().is_empty())
         {
-            return Err(format!(
-                "Instrument bounce does not support active automation, including Tempo (lane {}: {})",
-                lane.id, lane.name
-            ));
+            if !master_song || !master_song_automation_target(lane.lane.target()) {
+                return Err(format!(
+                    "Instrument bounce does not support active automation, including Tempo (lane {}: {})",
+                    lane.id, lane.name
+                ));
+            }
         }
         if project.plugin_instances.iter().any(|instance| {
             instance.midi_ports.input.is_some() || instance.midi_ports.output.is_some()
@@ -335,7 +424,7 @@ impl InstrumentBouncePlan {
         let channel = channels
             .next()
             .ok_or("Instrument bounce channel is missing")?;
-        if channels.next().is_some() || channel.muted {
+        if channels.next().is_some() || (!master_song && channel.muted) {
             return Err("Instrument bounce requires one unmuted channel identity".into());
         }
         let instance_id = channel
@@ -369,6 +458,9 @@ impl InstrumentBouncePlan {
                 "Instrument bounce refuses Timeline diagnostics rather than omitting content: {:?}",
                 timeline.diagnostics().first()
             ));
+        }
+        if master_song {
+            validate_master_song_timeline(project, &timeline, channel_id, instance_id)?;
         }
         if let Some(request) = &occurrence {
             occurrence::check_compiled_request(request, &timeline, instance_id)?;
@@ -411,10 +503,11 @@ impl InstrumentBouncePlan {
             spec,
             parameter_ids: instance.parameters.keys().copied().collect(),
             occurrence,
+            master_song,
         })
     }
 
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(all(test, any(target_os = "linux", windows)))]
     pub(crate) fn retained_project_state_bytes(&self) -> usize {
         self.spec.initial_state.len()
     }
@@ -427,6 +520,9 @@ impl InstrumentBouncePlan {
 
     pub fn channel_id(&self) -> u32 {
         self.channel_id
+    }
+    pub fn is_master_song(&self) -> bool {
+        self.master_song
     }
     pub fn instance_id(&self) -> u64 {
         self.instance_id
@@ -443,6 +539,104 @@ impl InstrumentBouncePlan {
     pub fn project_fingerprint(&self) -> u64 {
         self.project_fingerprint
     }
+}
+
+fn master_song_automation_target(target: &AutomationTarget) -> bool {
+    matches!(
+        canonicalize_automation_target(target.clone()),
+        AutomationTarget::MasterVolume
+            | AutomationTarget::MasterPan
+            | AutomationTarget::MixerMute {
+                track: crate::mixer_graph::MASTER_MIXER_TRACK_ID
+            }
+    )
+}
+
+fn master_song_compiled_automation_target(target: CompiledAutomationTarget) -> bool {
+    matches!(
+        target,
+        CompiledAutomationTarget::MasterVolume
+            | CompiledAutomationTarget::MasterPan
+            | CompiledAutomationTarget::MixerMute { track: 0 }
+    )
+}
+
+/// Admission uses the complete compiled stream, including muted Channel Rack
+/// sources, so no other musical source can disappear during generator render.
+fn validate_master_song_timeline(
+    project: &Project,
+    timeline: &CompiledTimeline,
+    channel_id: u32,
+    instance_id: u64,
+) -> Result<(), String> {
+    if !timeline.plugin_routes().iter().any(|route| {
+        route.instance_id == instance_id
+            && route.destination
+                == (PluginRouteDestination::Generator {
+                    channel_id,
+                    slot: 0,
+                })
+    }) {
+        return Err(
+            "Master song bounce requires the exact unambiguous source generator binding".into(),
+        );
+    }
+    for route in timeline.plugin_routes() {
+        if route.instance_id == instance_id {
+            continue;
+        }
+        let instance = project
+            .plugin_instances
+            .iter()
+            .find(|instance| instance.id == route.instance_id)
+            .ok_or("Master song bounce contains an unresolved plug-in route")?;
+        if instance.enabled && !instance.bypass {
+            return Err(match route.destination {
+                PluginRouteDestination::Generator { .. } => {
+                    "Master song bounce does not support another active generator".into()
+                }
+                PluginRouteDestination::MixerInsert { .. } => {
+                    "Master song bounce does not support active mixer effects".into()
+                }
+            });
+        }
+    }
+    if !timeline.midi_port_routes().is_empty() {
+        return Err("Master song bounce does not support MIDI-port routing".into());
+    }
+    if !timeline.audio_clips().is_empty() {
+        return Err("Master song bounce does not support Timeline audio sources".into());
+    }
+    for event in timeline.events() {
+        match event.kind {
+            TimelineEventKind::NoteOn {
+                channel_id: source_channel,
+                ..
+            }
+            | TimelineEventKind::NoteOff {
+                channel_id: source_channel,
+                ..
+            } if source_channel != channel_id => {
+                return Err(
+                    "Master song bounce does not support another musical channel source".into(),
+                );
+            }
+            TimelineEventKind::AudioStart(_) | TimelineEventKind::AudioStop { .. } => {
+                return Err("Master song bounce does not support Timeline audio sources".into());
+            }
+            TimelineEventKind::AutomationRamp(crate::timeline::AutomationRampDescriptor {
+                target,
+                ..
+            })
+            | TimelineEventKind::AutomationEnd { target, .. }
+                if !master_song_compiled_automation_target(target) =>
+            {
+                return Err("Master song bounce contains unsupported compiled automation".into());
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// Typed coordinator outcome for the App insertion owner. The legacy public
@@ -512,7 +706,10 @@ impl CapturedInstrumentBounce {
     /// Borrow only captured load identity and the original requested base-ID set.
     /// The strict clone borrows authoritative state separately; no source endpoint
     /// or mutable capture authority escapes and no opaque state is copied here.
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn strict_load_inputs(&self) -> (&PluginLoadSpec, &[u32]) {
         (&self.plan.spec, &self.plan.parameter_ids)
     }
@@ -676,6 +873,10 @@ impl InstrumentBounceCapture {
     }
 }
 
-#[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    test,
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 #[path = "instrument_bounce_strict_backend_tests.rs"]
 mod strict_backend_tests;

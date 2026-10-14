@@ -16,6 +16,7 @@ use winapi::um::winbase::STD_OUTPUT_HANDLE;
 use winapi::um::winuser::*;
 
 const BUTTON_ID: usize = 4101;
+const MODAL_BUTTON_ID: usize = 4102;
 const CLASS_NAME: &str = "CitrusVst3FixturePanelV1";
 
 // Each line is a valid HostResponse, so a host cannot pass this check merely by
@@ -143,6 +144,24 @@ impl NativeWindow {
             drop(window);
             return None;
         }
+        let modal_control = CreateWindowExW(
+            0,
+            wide("BUTTON").as_ptr(),
+            wide("Open modal IPC regression").as_ptr(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            24,
+            88,
+            256,
+            48,
+            hwnd,
+            MODAL_BUTTON_ID as _,
+            module,
+            ptr::null_mut(),
+        );
+        if modal_control.is_null() {
+            drop(window);
+            return None;
+        }
         // The standard Windows button draws its caption/border and implements BM_CLICK.
         // The acceptance harness verifies non-uniform painted pixels as well as callbacks.
         UpdateWindow(hwnd);
@@ -206,6 +225,20 @@ unsafe fn dispatch(hwnd: HWND, msg: UINT, w: WPARAM, l: LPARAM) -> LRESULT {
                 wide("Cutoff = 0.25 (edited)").as_ptr(),
             );
         }
+        return 0;
+    }
+    if msg == WM_COMMAND
+        && (w & 0xffff) == MODAL_BUTTON_ID
+        && ((w >> 16) & 0xffff) == BN_CLICKED as usize
+    {
+        // A real native nested message loop, just like Kontakt's file picker.
+        // Do not keep any fixture lock or borrowed edit data across the dialog.
+        MessageBoxW(
+            hwnd,
+            wide("Keep helper IPC alive while this modal dialog is open.").as_ptr(),
+            wide("Citrus fixture modal IPC regression").as_ptr(),
+            MB_OK,
+        );
         return 0;
     }
     if msg == WM_NCDESTROY {

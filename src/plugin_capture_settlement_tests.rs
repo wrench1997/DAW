@@ -560,6 +560,7 @@ impl QueuedWorker {
         let (failure_tx, failure_rx) = RingBuffer::new(16);
         let (receipt_tx, receipt_rx) = RingBuffer::new(16);
         let (admin, admin_rx) = mpsc::sync_channel(4);
+        let admin = AdminCommandSender::new(admin, &metrics);
         if shutdown_first {
             assert!(admin.try_send(AdminCommand::Shutdown).is_ok());
         }
@@ -598,6 +599,7 @@ impl QueuedWorker {
             admin,
             join: Some(join),
             metrics: Arc::clone(&metrics),
+            fresh_retained_shutdown: false,
             retained_shutdown: if shutdown_first {
                 RetainedShutdownState::WaitingForJoin
             } else {

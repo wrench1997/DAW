@@ -476,6 +476,68 @@ fn clamped_bus_count<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i32, 
     Ok(raw.clamp(0, MAX_WIRE_BUSES))
 }
 
+/// Closed policy for the already-reviewed actual Kontakt factory only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SelectedMetadataPolicy {
+    /// UID 5653544E694B386B6F6E74616B742038, version 8.4.1, Instrument category.
+    Kontakt841SelectedStereo,
+}
+
+/// Closed request payload; unknown request fields are refused by helper serde.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectedMetadataRequest {
+    /// Finite policy independently verified against actual helper factory identity.
+    pub policy: SelectedMetadataPolicy,
+}
+
+/// Actual getter within one metadata bundle, never a separate wire request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MetadataGetter {
+    /// Complete checked audio declarations and activation.
+    CheckedAudioBusLayout,
+    /// Complete event declarations and activation.
+    EventBusLayout,
+    /// Fresh processor latency getter.
+    LatencySamples,
+    /// Fresh processor tail getter.
+    TailSamples,
+}
+impl MetadataGetter {
+    /// Fixed getter label for diagnostics, independent of remote error text.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CheckedAudioBusLayout => "CheckedAudioBusLayout",
+            Self::EventBusLayout => "EventBusLayout",
+            Self::LatencySamples => "LatencySamples",
+            Self::TailSamples => "TailSamples",
+        }
+    }
+}
+
+/// Pure admission refusal, distinct from an SDK or transport failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SelectedMetadataAdmission {
+    /// The helper's actual loaded factory is outside the closed policy.
+    FactoryIdentity,
+    /// The current event input fails the original early selected-bounce guard.
+    EventInput,
+}
+
+/// Four complete sequential fresh reads. This is not an atomic SDK snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrictMetadataSnapshot {
+    /// All declared audio buses, including inactive and unknown activation.
+    pub audio: crate::plugin::CheckedAudioBusLayout,
+    /// All declared event buses, including inactive and unknown activation.
+    pub events: crate::plugin::EventBusLayout,
+    /// Exact processor latency, retaining zero.
+    pub latency_samples: u32,
+    /// Exact processor tail, retaining zero and u32::MAX.
+    pub tail_samples: u32,
+}
+
 /// Commands that can be sent to the isolated plugin process.
 ///
 /// This enum is the single source of truth for the isolation IPC protocol — the
@@ -644,6 +706,8 @@ pub enum HostCommand {
     AudioBusLayout,
     /// Check actual component audio buses against prepared shape without servicing I/O.
     CheckedAudioBusLayout,
+    /// Four fresh selected-Kontakt metadata getters under one closed owner operation.
+    StrictMetadataSnapshot(SelectedMetadataRequest),
     /// Enumerate current component event buses on the helper's owner thread.
     EventBusLayout,
     /// Serialize the plugin's current state to an opaque byte blob.
@@ -919,6 +983,30 @@ pub enum HostResponse {
     CheckedAudioBusLayout {
         /// Complete attested input/output layout.
         layout: crate::plugin::CheckedAudioBusLayout,
+    },
+    /// Complete fresh selected metadata, with no omitted bus declarations.
+    StrictMetadataSnapshot {
+        /// All four accepted getter results.
+        snapshot: StrictMetadataSnapshot,
+    },
+    /// Pure early admission refusal; later getters were not called.
+    StrictMetadataAdmissionRejected {
+        /// Finite admission boundary, independent of helper text.
+        stage: SelectedMetadataAdmission,
+    },
+    /// Actual typed getter refusal inside the real bundle wire request.
+    StrictMetadataRejected {
+        /// Fully identified getter that returned the refusal.
+        getter: MetadataGetter,
+        /// Existing bounded metadata refusal category.
+        reason: crate::MetadataQueryRejection,
+    },
+    /// Actual ordinary getter error inside the real bundle wire request.
+    StrictMetadataFailed {
+        /// Fully identified getter that returned this error.
+        getter: MetadataGetter,
+        /// Original bounded operation diagnostic, not parsed for identity.
+        message: String,
     },
     /// Explicit harmless refusal of one of the new strict metadata queries.
     MetadataQueryRejected {

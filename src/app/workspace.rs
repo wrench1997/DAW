@@ -497,17 +497,17 @@ impl CitrusApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("WORKSPACE").size(9.0).color(theme::MUTED))
                 .on_hover_text("Drag title bars or resize window edges. Release within 8 points of a workspace or window edge to align. Hold Alt to release without snapping.");
-            if ui.small_button("Arrange windows").clicked() {
+            if ui.studio_small_button("Arrange windows").clicked() {
                 self.arrange_editors(false);
             }
-            if ui.small_button("Cascade windows").clicked() {
+            if ui.studio_small_button("Cascade windows").clicked() {
                 self.arrange_editors(true);
             }
             let any_visible = self.workspace.windows.iter().any(|window| window.visible);
             if ui
                 .add_enabled(
                     any_visible,
-                    egui::Button::new(if self.workspace.maximized {
+                    theme::Button::new(if self.workspace.maximized {
                         "Restore windows"
                     } else {
                         "Maximize editor"
@@ -523,7 +523,7 @@ impl CitrusApp {
                 self.workspace.raise_focused = 2;
             }
             if ui
-                .add_enabled(any_visible, egui::Button::new("Hide editor").small())
+                .add_enabled(any_visible, theme::Button::new("Hide editor").small())
                 .clicked()
             {
                 self.hide_editor(self.workspace.focused);
@@ -636,18 +636,21 @@ impl CitrusApp {
                     self.project.active_pattern().length_steps
                 ),
                 StudioView::PianoRoll => format!(
-                    "{} · {}",
+                    "{} · {} · {} bars",
                     self.project
                         .channels
                         .get(self.selected_channel)
                         .map(|channel| channel.name.as_str())
                         .unwrap_or("Unassigned"),
-                    self.project.active_pattern().name
+                    self.project.active_pattern().name,
+                    (pattern_playback_length_beats(&self.project) / 4.0).ceil() as usize
                 ),
                 StudioView::Mixer => "Insert routing & effects".to_owned(),
             };
             let mut window = egui::Window::new(
-                RichText::new(format!("{}   ·   {context}", title(view))).size(11.0),
+                RichText::new(format!("{}   ·   {context}", title(view)))
+                    .size(12.0)
+                    .strong(),
             )
             .id(window_id(view))
             .open(&mut open)
@@ -664,18 +667,18 @@ impl CitrusApp {
             .frame(
                 egui::Frame::window(ui.style())
                     .inner_margin(egui::Margin::symmetric(2, 1))
-                    .corner_radius(2)
+                    .corner_radius(4)
                     .shadow(egui::epaint::Shadow {
-                        offset: [0, 2],
-                        blur: 4,
+                        offset: [0, 3],
+                        blur: 12,
                         spread: 0,
-                        color: Color32::from_black_alpha(80),
+                        color: Color32::from_black_alpha(110),
                     })
                     .fill(theme::PANEL)
                     .stroke(Stroke::new(
                         1.0,
                         if self.workspace.focused == view {
-                            theme::ORANGE.gamma_multiply(0.75)
+                            theme::HIGHLIGHT
                         } else {
                             theme::GRID
                         },
@@ -768,7 +771,7 @@ impl CitrusApp {
                     .id_salt("channel-rack-scroll")
                     .auto_shrink(false)
                     .show(ui, |ui| {
-                        ui.set_min_width(720.0);
+                        ui.set_min_width(768.0);
                         self.channel_rack(ui);
                     });
             }

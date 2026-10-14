@@ -42,6 +42,18 @@ pub use offline_instrument::OfflineInstrument;
 mod source_restoration;
 pub(crate) use source_restoration::SourceRestorationExpectation;
 
+#[path = "plugin_runtime_diagnostics.rs"]
+mod diagnostics;
+pub use diagnostics::{
+    PluginFaultDecisionSnapshot, PluginReceiveBranch, PluginRuntimeDiagnosticsSnapshot,
+    PluginWorkerAdminCommand, PluginWorkerNativeEditorCommand, PluginWorkerStage,
+    PluginWorkerStageSnapshot,
+};
+
+#[cfg(feature = "vst3")]
+#[path = "kontakt_realtime_outputs.rs"]
+mod kontakt_realtime_outputs;
+
 #[cfg(test)]
 #[path = "instrument_bounce_tests.rs"]
 mod instrument_bounce_tests;
@@ -990,6 +1002,8 @@ struct EndpointScratch {
     bridge_lookahead_quanta: usize,
     strict_timing: bool,
     processing_fault: Option<(crate::plugin_timing::PluginProcessingFaultReason, u64)>,
+    diagnostic_receive: diagnostics::ReceiveDecision,
+    stopped_output_fence: u64,
     future_outputs: Box<[StereoBlock]>,
     future_output_valid: [bool; DEFAULT_QUEUE_CAPACITY],
 }
@@ -1005,6 +1019,8 @@ impl EndpointScratch {
             bridge_lookahead_quanta: 1,
             strict_timing: false,
             processing_fault: None,
+            diagnostic_receive: diagnostics::ReceiveDecision::default(),
+            stopped_output_fence: 0,
             future_outputs: (0..DEFAULT_QUEUE_CAPACITY)
                 .map(|_| StereoBlock::silence())
                 .collect::<Vec<_>>()
@@ -1351,6 +1367,50 @@ pub(crate) struct GenuineBridgeSnapshot {
 }
 
 impl AudioThreadEndpoint {
+    pub(crate) fn fence_stopped_playback_output(&mut self, epoch: u64) {
+        debug_assert_eq!(self.epoch, epoch);
+        self.scratch.stopped_output_fence = self.next_sequence.saturating_sub(1);
+        self.scratch.midi_output = PluginMidiBatch::default();
+    }
+
+    /// Bounded read of the worker's real reset/input terminal publication.
+    /// Owned output/pre-roll is deliberately retained for the coming music.
+    pub(crate) fn stopped_playback_settled(&self, epoch: u64) -> bool {
+        let worker = &self.metrics.worker_settlement;
+        for _ in 0..LATENCY_SNAPSHOT_READ_ATTEMPTS {
+            let before = worker.publication.sequence.load(Ordering::Acquire);
+            if before & 1 != 0 {
+                continue;
+            }
+            let submitted = self.metrics.submitted.load(Ordering::Acquire);
+            let ready = epoch != 0
+                && self.epoch == epoch
+                && self.requested_epoch.load(Ordering::Acquire) == epoch
+                && worker.valid.load(Ordering::Relaxed)
+                && !worker.terminated.load(Ordering::Relaxed)
+                && !worker.publication.exhausted.load(Ordering::Acquire)
+                && worker.reset_completed_epoch.load(Ordering::Relaxed) == epoch
+                && worker.consumed.load(Ordering::Relaxed) == submitted
+                && worker.terminal.load(Ordering::Relaxed) == submitted
+                && worker.busy.load(Ordering::Relaxed) == 0
+                && self.metrics.outstanding_admin_work.load(Ordering::Acquire) == 0
+                && self.input.slots() == self.input.buffer().capacity()
+                && self.scratch.pending_rt_event_count == 0
+                && self.parameter_edit_admission.load(Ordering::Acquire) == 0
+                && !self.metrics.bounce_capture_busy.load(Ordering::Acquire)
+                && !self.metrics.stopped.load(Ordering::Acquire)
+                && !self.metrics.midi_blocked.load(Ordering::Acquire)
+                && self.metrics.faults.load(Ordering::Acquire) == 0
+                && !(self.metrics.output_overflows.load(Ordering::Acquire) != 0
+                    && self.metrics.output_loss_epoch.load(Ordering::Relaxed) == epoch);
+            atomic::fence(Ordering::Acquire);
+            if worker.publication.sequence.load(Ordering::Relaxed) == before {
+                return ready;
+            }
+        }
+        false
+    }
+
     /// Invalidate before callback work or endpoint mutation. No allocation,
     /// lock, I/O, backend call or retry occurs on this callback-owned surface.
     pub(crate) fn invalidate_bounce_source_settlement(&self) {
@@ -1461,6 +1521,7 @@ impl AudioThreadEndpoint {
 
         self.epoch = epoch;
         self.next_sequence = 1;
+        self.scratch.stopped_output_fence = 0;
         self.scratch.processing_fault = None;
         self.metrics.midi_blocked.store(false, Ordering::Release);
         self.requested_epoch.store(epoch, Ordering::Release);
@@ -1531,6 +1592,13 @@ impl AudioThreadEndpoint {
         if left.len() != right.len() || left.is_empty() || left.len() > self.max_block_frames() {
             return SubmitStatus::InvalidFrameCount;
         }
+        if self.metrics.diagnostics.enabled() {
+            self.scratch.diagnostic_receive = diagnostics::ReceiveDecision {
+                requested_frames: left.len(),
+                expected_latency_revision,
+                ..Default::default()
+            };
+        }
         self.submit_valid_block(left, right, expected_latency_revision)
     }
 
@@ -1597,6 +1665,7 @@ impl AudioThreadEndpoint {
         self.scratch.pending_rt_event_count = 0;
         match self.input.push(block) {
             Ok(()) => {
+                self.metrics.diagnostics.count_input_frames(left.len());
                 self.scratch
                     .delayed_dry
                     .store(self.epoch, sequence, left, right, true);
@@ -1708,6 +1777,13 @@ impl AudioThreadEndpoint {
         {
             return RealtimeProcessStatus::InvalidFrameCount;
         }
+        if self.metrics.diagnostics.enabled() {
+            self.scratch.diagnostic_receive = diagnostics::ReceiveDecision {
+                requested_frames: frames,
+                expected_latency_revision: expected_revision,
+                ..Default::default()
+            };
+        }
         if self.scratch.strict_timing && expected_revision == 0 {
             self.latch_processing_fault(
                 crate::plugin_timing::PluginProcessingFaultReason::LatencyDrift,
@@ -1742,6 +1818,25 @@ impl AudioThreadEndpoint {
         } else {
             self.try_receive_expected(self.epoch, expected_sequence, output_left, output_right)
         };
+        if self.metrics.diagnostics.enabled() {
+            let (branch, received_sequence, received_frames) = match received {
+                ReceiveStatus::Processed { sequence, frames } => {
+                    (PluginReceiveBranch::Processed, sequence, frames)
+                }
+                ReceiveStatus::LatencyDrift { sequence, frames } => {
+                    (PluginReceiveBranch::LatencyDrift, sequence, frames)
+                }
+                ReceiveStatus::OutputTooSmall { required } => (
+                    PluginReceiveBranch::OutputTooSmall,
+                    expected_sequence,
+                    required,
+                ),
+                ReceiveStatus::Empty => (PluginReceiveBranch::Empty, 0, 0),
+            };
+            self.scratch.diagnostic_receive.branch = branch;
+            self.scratch.diagnostic_receive.received_sequence = received_sequence;
+            self.scratch.diagnostic_receive.received_frames = received_frames;
+        }
         let source = match received {
             ReceiveStatus::Processed {
                 frames: received_frames,
@@ -1877,13 +1972,15 @@ impl AudioThreadEndpoint {
                 }
                 std::cmp::Ordering::Equal => {
                     self.scratch.future_output_valid[index] = false;
-                    return copy_received_block(
+                    let status = copy_received_block(
                         &self.scratch.future_outputs[index],
                         left,
                         right,
                         &self.metrics,
                         &mut self.scratch.midi_output,
                     );
+                    self.silence_stopped_output(expected_sequence, status, left, right);
+                    return status;
                 }
                 std::cmp::Ordering::Greater => {}
             }
@@ -1904,13 +2001,15 @@ impl AudioThreadEndpoint {
                     self.metrics.stale_outputs.fetch_add(1, Ordering::Relaxed);
                 }
                 std::cmp::Ordering::Equal => {
-                    return copy_received_block(
+                    let status = copy_received_block(
                         &block,
                         left,
                         right,
                         &self.metrics,
                         &mut self.scratch.midi_output,
                     );
+                    self.silence_stopped_output(expected_sequence, status, left, right);
+                    return status;
                 }
                 std::cmp::Ordering::Greater => {
                     if let Some(index) = self
@@ -1928,6 +2027,12 @@ impl AudioThreadEndpoint {
                         self.metrics
                             .future_output_overflows
                             .fetch_add(1, Ordering::Relaxed);
+                        if self.metrics.diagnostics.enabled() {
+                            self.scratch.diagnostic_receive.branch =
+                                PluginReceiveBranch::FutureOutputOverflow;
+                            self.scratch.diagnostic_receive.received_sequence = block.sequence;
+                            self.scratch.diagnostic_receive.received_frames = block.frames();
+                        }
                         self.latch_processing_fault(
                             crate::plugin_timing::PluginProcessingFaultReason::OutputLoss,
                             expected_sequence,
@@ -1937,6 +2042,28 @@ impl AudioThreadEndpoint {
             }
         }
         ReceiveStatus::Empty
+    }
+
+    fn silence_stopped_output(
+        &mut self,
+        sequence: u64,
+        status: ReceiveStatus,
+        left: &mut [f32],
+        right: &mut [f32],
+    ) {
+        if sequence > self.scratch.stopped_output_fence {
+            return;
+        }
+        let frames = match status {
+            ReceiveStatus::Processed { frames, .. }
+            | ReceiveStatus::LatencyDrift { frames, .. } => frames,
+            _ => return,
+        };
+        left[..frames].fill(0.0);
+        right[..frames].fill(0.0);
+        self.scratch.midi_output = PluginMidiBatch::default();
+        // Keep the real receive status: latency drift or a missing block still
+        // follows the ordinary strict processing fault path.
     }
 
     pub fn configure_timing_plan(
@@ -1961,12 +2088,66 @@ impl AudioThreadEndpoint {
         self.scratch.processing_fault
     }
 
+    /// Fixed-copy observation only; never changes bridge admission or deadlines.
+    pub fn runtime_diagnostics_snapshot(&self) -> PluginRuntimeDiagnosticsSnapshot {
+        self.metrics.diagnostics.snapshot()
+    }
+
     fn latch_processing_fault(
         &mut self,
         reason: crate::plugin_timing::PluginProcessingFaultReason,
         sequence: u64,
     ) {
         if self.scratch.strict_timing && self.scratch.processing_fault.is_none() {
+            if self.metrics.diagnostics.enabled() {
+                let decision = self.scratch.diagnostic_receive;
+                let stats = self.metrics.snapshot();
+                self.metrics
+                    .diagnostics
+                    .first_fault(PluginFaultDecisionSnapshot {
+                        reason,
+                        epoch: self.epoch,
+                        fault_sequence: sequence,
+                        next_sequence: self.next_sequence,
+                        expected_sequence: self.expected_sequence(),
+                        receive_branch: decision.branch,
+                        received_sequence: decision.received_sequence,
+                        received_frames: decision.received_frames,
+                        requested_frames: decision.requested_frames,
+                        expected_latency_revision: decision.expected_latency_revision,
+                        lookahead_quanta: self.scratch.bridge_lookahead_quanta,
+                        input_pending: self
+                            .input
+                            .buffer()
+                            .capacity()
+                            .saturating_sub(self.input.slots()),
+                        output_owned: self.output.slots(),
+                        future_output_owned: self
+                            .scratch
+                            .future_output_valid
+                            .iter()
+                            .filter(|valid| **valid)
+                            .count(),
+                        delayed_dry_frames: usize::from(self.scratch.delayed_dry.frames),
+                        delayed_dry_submitted: self.scratch.delayed_dry.submitted,
+                        pending_inline_events: usize::from(self.scratch.pending_rt_event_count),
+                        callback_sequences: stats.callback_sequences,
+                        submitted: stats.submitted,
+                        completed: stats.completed,
+                        input_gaps: stats.input_gaps,
+                        input_overflows: stats.input_overflows,
+                        deadline_misses: stats.deadline_misses,
+                        output_overflows: stats.output_overflows,
+                        output_loss_epoch: stats.output_loss_epoch,
+                        frame_mismatches: stats.frame_mismatches,
+                        stale_outputs: stats.stale_outputs,
+                        dropped_old_epoch_outputs: stats.dropped_old_epoch_outputs,
+                        input_frames: 0,
+                        output_frames: 0,
+                        frame_counter_overflow: false,
+                        worker_at_fault: PluginWorkerStageSnapshot::default(),
+                    });
+            }
             self.scratch.processing_fault = Some((reason, sequence));
             self.block_midi_until_epoch();
         }
@@ -2326,6 +2507,88 @@ enum AdminCommand {
     Shutdown,
 }
 
+/// Queue ownership begins before enqueue and ends after the command's actual
+/// worker execution (or queued payload reclamation), independently of UI timeout.
+struct AdminWorkLease {
+    metrics: Arc<BridgeMetrics>,
+}
+
+impl AdminWorkLease {
+    fn acquire(metrics: &Arc<BridgeMetrics>) -> Option<Self> {
+        metrics
+            .outstanding_admin_work
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_add(1)
+            })
+            .ok()?;
+        Some(Self {
+            metrics: Arc::clone(metrics),
+        })
+    }
+}
+
+impl Drop for AdminWorkLease {
+    fn drop(&mut self) {
+        let previous = self
+            .metrics
+            .outstanding_admin_work
+            .fetch_sub(1, Ordering::AcqRel);
+        debug_assert_ne!(previous, 0, "admin work ownership released exactly once");
+    }
+}
+
+struct QueuedAdminCommand {
+    // Field order reclaims unconsumed command fields before releasing ownership.
+    command: Option<AdminCommand>,
+    _lease: AdminWorkLease,
+}
+
+impl QueuedAdminCommand {
+    fn take_command(&mut self) -> AdminCommand {
+        self.command
+            .take()
+            .expect("queued admin command consumed once")
+    }
+}
+
+#[derive(Clone)]
+struct AdminCommandSender {
+    sender: SyncSender<QueuedAdminCommand>,
+    metrics: Arc<BridgeMetrics>,
+}
+
+impl AdminCommandSender {
+    fn new(sender: SyncSender<QueuedAdminCommand>, metrics: &Arc<BridgeMetrics>) -> Self {
+        Self {
+            sender,
+            metrics: Arc::clone(metrics),
+        }
+    }
+
+    fn try_send(&self, command: AdminCommand) -> Result<(), TrySendError<AdminCommand>> {
+        let Some(lease) = AdminWorkLease::acquire(&self.metrics) else {
+            return Err(TrySendError::Full(command));
+        };
+        let queued = QueuedAdminCommand {
+            command: Some(command),
+            _lease: lease,
+        };
+        match self.sender.try_send(queued) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(mut queued)) => {
+                let command = queued.take_command();
+                drop(queued);
+                Err(TrySendError::Full(command))
+            }
+            Err(TrySendError::Disconnected(mut queued)) => {
+                let command = queued.take_command();
+                drop(queued);
+                Err(TrySendError::Disconnected(command))
+            }
+        }
+    }
+}
+
 /// Kind of tagged parameter command that failed without fault-isolating the plug-in slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PluginParameterCommand {
@@ -2398,7 +2661,7 @@ pub enum RuntimeEvent {
 
 /// UI/control half of a running chain. Its bounded channel may lock; never use it in audio code.
 pub struct PluginChainControl {
-    admin: SyncSender<AdminCommand>,
+    admin: AdminCommandSender,
     events: Consumer<RuntimeEvent>,
     metrics: Arc<BridgeMetrics>,
     manifest: PluginEndpointManifest,
@@ -2805,6 +3068,17 @@ impl PluginChainControl {
         self.parameter_edit_admission.load(Ordering::Acquire)
     }
 
+    /// Control-side production evidence; disabled unless explicitly enabled at spawn.
+    pub fn runtime_diagnostics_snapshot(&self) -> PluginRuntimeDiagnosticsSnapshot {
+        self.metrics.diagnostics.snapshot()
+    }
+
+    /// Production ownership, including admitted work not yet consumed by the
+    /// worker. UI cancellation/timeout does not imply a backend call returned.
+    pub fn has_outstanding_admin_work(&self) -> bool {
+        self.metrics.outstanding_admin_work.load(Ordering::Acquire) != 0
+    }
+
     pub fn stats(&self) -> BridgeStats {
         self.metrics.snapshot()
     }
@@ -2957,6 +3231,8 @@ fn manifest_accepts_slot(manifest: PluginEndpointManifest, slot: usize) -> bool 
 
 #[derive(Default)]
 struct BridgeMetrics {
+    diagnostics: diagnostics::RuntimeDiagnostics,
+    outstanding_admin_work: AtomicU32,
     callback_settlement: CallbackSettlement,
     worker_settlement: WorkerSettlement,
     // Shared by the callback, worker guard and settlement reader: no mirror authority.
@@ -3158,10 +3434,13 @@ pub struct BridgeStats {
 
 /// Owns the worker lifetime. Keep this on the control thread, not in callback state.
 pub struct PluginWorkerGuard {
-    admin: SyncSender<AdminCommand>,
+    admin: AdminCommandSender,
     join: Option<JoinHandle<()>>,
     metrics: Arc<BridgeMetrics>,
     retained_shutdown: RetainedShutdownState,
+    // Worker ownership qualification, independent of transient Project/session
+    // intent metadata. Only explicitly fresh sources opt into retained retirement.
+    fresh_retained_shutdown: bool,
 }
 
 /// Nonblocking source-retirement progress for the exact worker owned by this guard.
@@ -3175,6 +3454,7 @@ pub enum RetainedShutdownPoll {
     WorkerPanicked,
 }
 
+#[derive(Clone, Copy)]
 enum RetainedShutdownState {
     NotRequested,
     WaitingForJoin,
@@ -3190,6 +3470,14 @@ pub enum ShutdownOutcome {
 }
 
 impl PluginWorkerGuard {
+    pub(crate) const fn requires_retained_fresh_shutdown(&self) -> bool {
+        self.fresh_retained_shutdown
+    }
+
+    pub(crate) fn mark_fresh_retained_shutdown(&mut self) {
+        self.fresh_retained_shutdown = true;
+    }
+
     /// Test-profile identity observation of the already retained metrics owner.
     /// This does not poll, command, clone, prepare, or alter the worker lifetime.
     #[cfg(test)]
@@ -3205,8 +3493,9 @@ impl PluginWorkerGuard {
     /// Terminal results are cached, including a joined worker panic; no timeout detaches here.
     ///
     /// The caller must retain this guard and keep polling through cancellation, engine loss and
-    /// ordinary App close while Pending. Dropping it or using either legacy consuming shutdown
-    /// method still has that method's original detaching behavior. This seam belongs on the
+    /// ordinary App close while Pending. An explicitly fresh guard dropped before admission
+    /// transfers to a retained shutdown owner; unqualified Drop and the legacy consuming
+    /// shutdown_blocking method preserve their original behavior. This seam belongs on the
     /// control thread after exact callback removal acknowledgment, never on the audio callback.
     #[must_use]
     pub fn poll_shutdown_retained(&mut self) -> RetainedShutdownPoll {
@@ -3316,6 +3605,64 @@ impl PluginWorkerGuard {
 
 impl Drop for PluginWorkerGuard {
     fn drop(&mut self) {
+        if self.fresh_retained_shutdown
+            && let Some(join) = self.join.take()
+        {
+            // Pre-admission validation/unwind can destroy an unpublished fresh
+            // chain before App storage owns it. Move its exact handle to a
+            // retained control-thread owner rather than invoking legacy detach.
+            let mut owner = Self {
+                admin: self.admin.clone(),
+                join: Some(join),
+                metrics: Arc::clone(&self.metrics),
+                retained_shutdown: self.retained_shutdown,
+                fresh_retained_shutdown: true,
+            };
+            // Attempt the nonblocking shutdown before allocating its final
+            // owner. Even a thread-creation failure leaves the exact source
+            // retained after this request; it never becomes a detached success.
+            if !matches!(
+                owner.poll_shutdown_retained(),
+                RetainedShutdownPoll::Pending
+            ) {
+                return;
+            }
+            let slot = Arc::new(Mutex::new(Some(owner)));
+            let worker_slot = Arc::clone(&slot);
+            let spawn = thread::Builder::new()
+                .name("fresh-source-guard-shutdown-owner".into())
+                .spawn(move || {
+                    let Some(mut owner) = worker_slot
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take()
+                    else {
+                        return;
+                    };
+                    loop {
+                        match owner.poll_shutdown_retained() {
+                            RetainedShutdownPoll::Pending => {
+                                thread::sleep(Duration::from_millis(10))
+                            }
+                            RetainedShutdownPoll::Joined | RetainedShutdownPoll::WorkerPanicked => {
+                                return;
+                            }
+                        }
+                    }
+                });
+            #[cfg(test)]
+            genuine_observer::record_lifecycle(if spawn.is_ok() {
+                "fresh guard retained shutdown owner started"
+            } else {
+                "fresh guard retained shutdown owner start failed; source retained unjoined"
+            });
+            if spawn.is_err() {
+                // The closure owned only an Arc; the original slot still holds
+                // the unjoined source. Preserve it without a terminal claim.
+                let _ = Box::leak(Box::new(slot));
+            }
+            return;
+        }
         if self.join.take().is_some() {
             let _ = self.admin.try_send(AdminCommand::Shutdown);
             self.metrics
@@ -3411,7 +3758,10 @@ impl PluginChain {
     ) -> Result<Self, String> {
         let config = config.validate()?;
         expectation.validate_spec(project_session, instance_id, &spec, config)?;
-        #[cfg(not(all(target_os = "linux", feature = "experimental-fresh-helper")))]
+        #[cfg(not(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        )))]
         if fresh_load {
             return Err(
                 "This build cannot restore the recorded experimental fresh-load intent".into(),
@@ -3419,12 +3769,15 @@ impl PluginChain {
         }
         let manifest = PluginEndpointManifest::identified(&[instance_id])?;
         let expected_timing = expectation.expected_timing();
-        Self::spawn_loader(config, manifest, move || {
+        let mut chain = Self::spawn_loader(config, manifest, move || {
             let result = (|| {
                 let mut spec = spec;
                 super::prepare_runtime_spec(&mut spec)?;
                 let backend = Vst3Backend::load_with_restoration(spec, config, Some(expectation))?;
-                #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+                #[cfg(all(
+                    any(target_os = "linux", windows),
+                    feature = "experimental-fresh-helper"
+                ))]
                 let backend = {
                     let mut backend = backend;
                     if fresh_load {
@@ -3439,12 +3792,19 @@ impl PluginChain {
                 })
             })();
             vec![result]
-        })
+        })?;
+        if fresh_load {
+            chain.guard.mark_fresh_retained_shutdown();
+        }
+        Ok(chain)
     }
 
     /// Dormant, one-shot dry-generator source qualification. The default loaders do not
     /// select this path. Returned endpoints remain unusable until the worker emits SlotReady.
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn spawn_fresh_bounce_source(
         instance_id: u64,
         spec: PluginLoadSpec,
@@ -3465,7 +3825,7 @@ impl PluginChain {
                 "Fresh bounce source requires an enabled, dry, identified VST3 instrument".into(),
             );
         }
-        Self::spawn_loader(config, manifest, move || {
+        let mut chain = Self::spawn_loader(config, manifest, move || {
             let result = (|| {
                 let mut spec = spec;
                 super::prepare_runtime_spec(&mut spec)?;
@@ -3473,7 +3833,9 @@ impl PluginChain {
                 Ok(BackendSlot::new(Box::new(backend)))
             })();
             vec![result]
-        })
+        })?;
+        chain.guard.mark_fresh_retained_shutdown();
+        Ok(chain)
     }
 
     /// Spawn test/custom backends from a factory that runs inside the worker thread. Constructing
@@ -3526,6 +3888,23 @@ impl PluginChain {
     where
         F: FnOnce() -> Vec<Result<BackendSlot, String>> + Send + 'static,
     {
+        Self::spawn_loader_with_diagnostics(
+            config,
+            manifest,
+            loader,
+            diagnostics::RuntimeDiagnostics::from_environment(),
+        )
+    }
+
+    fn spawn_loader_with_diagnostics<F>(
+        config: PluginPrepareConfig,
+        manifest: PluginEndpointManifest,
+        loader: F,
+        diagnostics: diagnostics::RuntimeDiagnostics,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce() -> Vec<Result<BackendSlot, String>> + Send + 'static,
+    {
         let capacity = DEFAULT_QUEUE_CAPACITY;
         let (input_tx, input_rx) = RingBuffer::new(capacity);
         let (output_tx, output_rx) = RingBuffer::new(capacity);
@@ -3535,7 +3914,11 @@ impl PluginChain {
         let (parameter_edit_receipt_tx, parameter_edit_receipt_rx) =
             RingBuffer::new(MAX_OUTSTANDING_PARAMETER_EDITS as usize);
         let (admin_tx, admin_rx) = mpsc::sync_channel(64);
-        let metrics = Arc::new(BridgeMetrics::default());
+        let metrics = Arc::new(BridgeMetrics {
+            diagnostics,
+            ..Default::default()
+        });
+        let admin_tx = AdminCommandSender::new(admin_tx, &metrics);
         metrics
             .current_epoch
             .store(INITIAL_TRANSPORT_EPOCH, Ordering::Relaxed);
@@ -3554,6 +3937,12 @@ impl PluginChain {
         let join = thread::Builder::new()
             .name("citrus-plugin-chain".into())
             .spawn(move || {
+                worker_metrics
+                    .diagnostics
+                    .context(INITIAL_TRANSPORT_EPOCH, 0);
+                let startup_stage = worker_metrics
+                    .diagnostics
+                    .stage(PluginWorkerStage::Startup, None);
                 #[cfg(test)]
                 let _observation_worker =
                     genuine_observer::enter_worker(Arc::as_ptr(&worker_metrics) as usize, manifest);
@@ -3564,6 +3953,7 @@ impl PluginChain {
                         panic_payload_message(payload.as_ref())
                     ))],
                 };
+                drop(startup_stage);
                 run_worker(
                     slots,
                     config,
@@ -3605,6 +3995,7 @@ impl PluginChain {
                 join: Some(join),
                 metrics,
                 retained_shutdown: RetainedShutdownState::NotRequested,
+                fresh_retained_shutdown: false,
             },
         })
     }
@@ -3631,13 +4022,15 @@ fn run_worker(
     config: PluginPrepareConfig,
     mut input: Consumer<StereoBlock>,
     mut output: Producer<StereoBlock>,
-    admin: Receiver<AdminCommand>,
+    admin: Receiver<QueuedAdminCommand>,
     mut events: Producer<RuntimeEvent>,
     mut parameter_edit_failures: Consumer<DeferredParameterEditFailure>,
     mut parameter_edit_receipts: Producer<ParameterEditReceipt>,
     metrics: Arc<BridgeMetrics>,
     requested_epoch: Arc<AtomicU64>,
 ) {
+    // Retain shutdown ownership through backend destruction, including unwind.
+    let mut shutdown_admin = None;
     let mut slots = Vec::with_capacity(loaded.len());
     // Declared after slots so unwinding invalidates before destroying backends.
     let _settlement_lifetime = WorkerSettlementLifetime(&metrics.worker_settlement);
@@ -3648,6 +4041,9 @@ fn run_worker(
         for (slot_index, result) in loaded.into_iter().enumerate() {
             match result {
                 Ok(mut slot) => {
+                    let _startup_stage = metrics
+                        .diagnostics
+                        .stage(PluginWorkerStage::Startup, Some(slot_index));
                     initial_expected_timing[slot_index] = slot.initial_expected_timing;
                     slot.config = slot.config.normalized();
                     let prepared = catch_backend(|| slot.backend.prepare(config));
@@ -3741,12 +4137,26 @@ fn run_worker(
             metrics.worker_epoch_resets.fetch_add(1, Ordering::Relaxed);
             update_latency_and_tail(&mut slots, &mut events, &metrics);
             reset_operation.reset_completed(active_epoch);
+            #[cfg(test)]
+            genuine_observer::record_worker(
+                "reset settlement published",
+                active_epoch,
+                None,
+                metrics.snapshot(),
+            );
         }
         let blocked = metrics.midi_blocked.load(Ordering::Acquire);
         if blocked && !midi_panic_applied {
             let reset_operation = WorkerSettlementOperation::new(&metrics, false);
             reset_worker_epoch(active_epoch, &mut slots, &mut events, &metrics);
             reset_operation.reset_completed(active_epoch);
+            #[cfg(test)]
+            genuine_observer::record_worker(
+                "reset settlement published",
+                active_epoch,
+                None,
+                metrics.snapshot(),
+            );
         }
         midi_panic_applied = blocked;
         if Instant::now() >= next_native_poll {
@@ -3758,20 +4168,44 @@ fn run_worker(
         drain_parameter_edit_failures(&mut parameter_edit_failures, &mut parameter_edit_receipts);
         let admin_operation = WorkerSettlementOperation::new(&metrics, false);
         let mut admin_metadata_changed = false;
-        for _ in 0..MAX_ADMIN_COMMANDS_PER_WORKER_TURN {
-            match admin.try_recv() {
-                Ok(AdminCommand::Shutdown) => {
+        let mut completed_admin: [Option<QueuedAdminCommand>; MAX_ADMIN_COMMANDS_PER_WORKER_TURN] =
+            std::array::from_fn(|_| None);
+        for completed in &mut completed_admin {
+            let mut queued = match admin.try_recv() {
+                Ok(queued) => queued,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
                     metrics.worker_settlement.invalidate();
                     shutdown = true;
                     break;
                 }
-                Ok(AdminCommand::CaptureInstrumentBounce {
+            };
+            match queued.take_command() {
+                AdminCommand::Shutdown => {
+                    let _admin_stage = metrics.diagnostics.admin(
+                        PluginWorkerAdminCommand::Shutdown,
+                        None,
+                        0,
+                        PluginWorkerNativeEditorCommand::None,
+                    );
+                    metrics.worker_settlement.invalidate();
+                    shutdown = true;
+                    shutdown_admin = Some(queued);
+                    break;
+                }
+                AdminCommand::CaptureInstrumentBounce {
                     expected_epoch,
                     parameter_ids,
                     parameter_admission,
                     lease,
                     reply,
-                }) => {
+                } => {
+                    let _admin_stage = metrics.diagnostics.admin(
+                        PluginWorkerAdminCommand::CaptureInstrumentBounce,
+                        None,
+                        0,
+                        PluginWorkerNativeEditorCommand::None,
+                    );
                     let result = capture_instrument_bounce_on_worker(
                         &lease.fence,
                         expected_epoch,
@@ -3789,11 +4223,17 @@ fn run_worker(
                     // A reply alone is not completion. No capture calls remain after this ack.
                     drop(lease);
                 }
-                Ok(AdminCommand::SaveState {
+                AdminCommand::SaveState {
                     slot,
                     request_id,
                     expected_epoch: Some(epoch),
-                }) => {
+                } => {
+                    let _admin_stage = metrics.diagnostics.admin(
+                        PluginWorkerAdminCommand::SaveState,
+                        Some(slot),
+                        request_id,
+                        PluginWorkerNativeEditorCommand::None,
+                    );
                     if requested_epoch.load(Ordering::Acquire) != epoch {
                         push_event(
                             &mut events,
@@ -3818,6 +4258,13 @@ fn run_worker(
                         metrics.worker_epoch_resets.fetch_add(1, Ordering::Relaxed);
                         update_latency_and_tail(&mut slots, &mut events, &metrics);
                         reset_operation.reset_completed(active_epoch);
+                        #[cfg(test)]
+                        genuine_observer::record_worker(
+                            "reset settlement published",
+                            active_epoch,
+                            None,
+                            metrics.snapshot(),
+                        );
                     }
                     admin_metadata_changed |= capture_worker_state(
                         slot,
@@ -3828,17 +4275,13 @@ fn run_worker(
                         &metrics,
                     );
                 }
-                Ok(command) => {
+                command => {
                     admin_metadata_changed |=
                         handle_admin(command, &mut slots, &mut events, &metrics);
                 }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    metrics.worker_settlement.invalidate();
-                    shutdown = true;
-                    break;
-                }
             }
+            // Metadata refresh induced by a command is still actual admin work.
+            *completed = Some(queued);
         }
         if shutdown {
             break;
@@ -3846,6 +4289,7 @@ fn run_worker(
         if admin_metadata_changed {
             update_latency_and_tail(&mut slots, &mut events, &metrics);
         }
+        drop(completed_admin);
         drop(admin_operation);
         match input.pop() {
             Ok(mut block) => {
@@ -3870,7 +4314,15 @@ fn run_worker(
                     metrics.worker_epoch_resets.fetch_add(1, Ordering::Relaxed);
                     update_latency_and_tail(&mut slots, &mut events, &metrics);
                     reset_operation.reset_completed(active_epoch);
+                    #[cfg(test)]
+                    genuine_observer::record_worker(
+                        "reset settlement published",
+                        active_epoch,
+                        None,
+                        metrics.snapshot(),
+                    );
                 }
+                metrics.diagnostics.context(block.epoch, block.sequence);
                 let expected_latency_revision = block.expected_latency_revision;
                 let mut latency_attestation_valid = expected_latency_revision == 0
                     || metrics.plugin_latency_revision.load(Ordering::Relaxed)
@@ -3878,6 +4330,8 @@ fn run_worker(
                 let mut rt_metadata_changed = false;
                 let frames = block.frames();
                 let had_rt_events = block.rt_event_count != 0;
+                #[cfg(test)]
+                record_first_sequence_worker("first sequence MIDI attempt", &block, &metrics);
                 for command in block.rt_events().iter().copied() {
                     if matches!(command, RtCommand::Midi { .. })
                         && metrics.midi_blocked.load(Ordering::Acquire)
@@ -3893,6 +4347,8 @@ fn run_worker(
                         &metrics,
                     );
                 }
+                #[cfg(test)]
+                record_first_sequence_worker("first sequence MIDI returned", &block, &metrics);
                 block.rt_event_count = 0;
                 if rt_metadata_changed || (expected_latency_revision != 0 && had_rt_events) {
                     update_latency_and_tail(&mut slots, &mut events, &metrics);
@@ -3920,7 +4376,11 @@ fn run_worker(
                 // A plug-in may change its reported latency or tail while processing without a
                 // host parameter/configuration command. Polling on the worker after each block
                 // keeps the callback's fixed snapshot current without calling plug-in code there.
+                #[cfg(test)]
+                record_first_sequence_worker("first sequence metadata attempt", &block, &metrics);
                 update_latency_and_tail(&mut slots, &mut events, &metrics);
+                #[cfg(test)]
+                record_first_sequence_worker("first sequence metadata returned", &block, &metrics);
                 if expected_latency_revision == 0 {
                     block.latency_attestation = LatencyAttestation::Unchecked;
                 } else if latency_attestation_valid
@@ -3940,8 +4400,20 @@ fn run_worker(
                         .fetch_add(1, Ordering::Relaxed);
                     continue;
                 }
+                #[cfg(test)]
+                record_first_sequence_worker(
+                    "first sequence publication attempt",
+                    &block,
+                    &metrics,
+                );
+                #[cfg(test)]
+                let first_sequence_publication = (block.sequence == 1).then_some(block.epoch);
+                let _output_stage = metrics
+                    .diagnostics
+                    .stage(PluginWorkerStage::OutputPush, None);
                 match output.push(block) {
                     Ok(()) => {
+                        metrics.diagnostics.count_output_frames(frames);
                         metrics.completed.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(PushError::Full(block)) => {
@@ -3951,14 +4423,27 @@ fn run_worker(
                         metrics.output_overflows.fetch_add(1, Ordering::Release);
                     }
                 }
+                #[cfg(test)]
+                if let Some(epoch) = first_sequence_publication {
+                    genuine_observer::record_worker(
+                        "first sequence publication returned",
+                        epoch,
+                        Some(1),
+                        metrics.snapshot(),
+                    );
+                }
             }
             // Active chains normally receive the next block before this timeout. A millisecond
             // avoids the extreme idle wakeup rate of a sub-100us poll while keeping workers free
             // of callback-side locks/syscalls (the callback deliberately does not call unpark).
-            Err(PopError::Empty) => thread::park_timeout(Duration::from_millis(1)),
+            Err(PopError::Empty) => {
+                let _idle_stage = metrics.diagnostics.stage(PluginWorkerStage::IdlePark, None);
+                thread::park_timeout(Duration::from_millis(1));
+            }
         }
     }
 
+    let _shutdown_stage = metrics.diagnostics.stage(PluginWorkerStage::Shutdown, None);
     metrics.worker_settlement.invalidate();
     drain_parameter_edit_failures(&mut parameter_edit_failures, &mut parameter_edit_receipts);
     while let Ok(block) = input.pop() {
@@ -3982,6 +4467,21 @@ fn run_worker(
     }
     metrics.stopped.store(true, Ordering::Release);
     push_event(&mut events, RuntimeEvent::ShutdownComplete, &metrics);
+    drop(admin);
+    drop(slots);
+    drop(shutdown_admin);
+}
+
+#[cfg(test)]
+fn record_first_sequence_worker(site: &'static str, block: &StereoBlock, metrics: &BridgeMetrics) {
+    if block.sequence == 1 {
+        genuine_observer::record_worker(
+            site,
+            block.epoch,
+            Some(block.sequence),
+            metrics.snapshot(),
+        );
+    }
 }
 
 fn push_parameter_edit_receipt(
@@ -4048,6 +4548,8 @@ fn reset_worker_epoch(
     events: &mut Producer<RuntimeEvent>,
     metrics: &BridgeMetrics,
 ) {
+    metrics.diagnostics.context(epoch, 0);
+    let _reset_stage = metrics.diagnostics.stage(PluginWorkerStage::Reset, None);
     #[cfg(test)]
     genuine_observer::record_worker(
         "reset_worker_epoch attempt",
@@ -4056,6 +4558,9 @@ fn reset_worker_epoch(
         metrics.snapshot(),
     );
     for (slot_index, slot) in slots.iter_mut().enumerate() {
+        let _slot_reset_stage = metrics
+            .diagnostics
+            .stage(PluginWorkerStage::Reset, Some(slot_index));
         if slot.fault.is_some() {
             continue;
         }
@@ -4166,12 +4671,24 @@ fn process_chain(
             metrics.snapshot(),
         );
         let result = catch_backend(|| {
-            backend.set_transport(transport)?;
+            {
+                let _transport_stage = metrics
+                    .diagnostics
+                    .stage(PluginWorkerStage::Transport, Some(slot_index));
+                backend.set_transport(transport)?;
+            }
+            #[cfg(test)]
+            record_first_sequence_worker("first sequence DSP attempt", block, metrics);
+            let _process_stage = metrics
+                .diagnostics
+                .stage(PluginWorkerStage::BackendProcess, Some(slot_index));
             backend.process(
                 &mut block.left[..frames],
                 &mut block.right[..frames],
                 frames,
             )?;
+            #[cfg(test)]
+            record_first_sequence_worker("first sequence DSP returned", block, metrics);
             backend.drain_midi_output(&mut block.midi_output, slot_index as u8, frames);
             Ok(())
         });
@@ -4242,6 +4759,18 @@ fn handle_rt(
     parameter_edit_receipts: &mut Producer<ParameterEditReceipt>,
     metrics: &BridgeMetrics,
 ) -> bool {
+    let (stage, slot) = match command {
+        RtCommand::Midi {
+            target: RtTarget::Slot(slot),
+            ..
+        } => (PluginWorkerStage::Midi, Some(usize::from(slot))),
+        RtCommand::Midi {
+            target: RtTarget::All,
+            ..
+        } => (PluginWorkerStage::Midi, None),
+        RtCommand::Parameter { slot, .. } => (PluginWorkerStage::Admin, Some(usize::from(slot))),
+    };
+    let _rt_stage = metrics.diagnostics.stage(stage, slot);
     match command {
         RtCommand::Midi { target, message } => match target {
             RtTarget::Slot(slot) => {
@@ -4252,6 +4781,9 @@ fn handle_rt(
             RtTarget::All => {
                 let mut faulted = false;
                 for slot in 0..slots.len() {
+                    let _slot_midi_stage = metrics
+                        .diagnostics
+                        .stage(PluginWorkerStage::Midi, Some(slot));
                     faulted |= with_backend(slot, slots, events, metrics, |backend| {
                         backend.send_midi(message)
                     });
@@ -4585,6 +5117,82 @@ fn handle_admin(
     events: &mut Producer<RuntimeEvent>,
     metrics: &BridgeMetrics,
 ) -> bool {
+    let (kind, slot, request_id, native_command) = match &command {
+        AdminCommand::NativeEditor {
+            slot,
+            request_id,
+            command,
+            ..
+        } => (
+            PluginWorkerAdminCommand::NativeEditor,
+            Some(*slot),
+            *request_id,
+            match command {
+                NativeEditorCommand::Open { .. } => PluginWorkerNativeEditorCommand::Open,
+                NativeEditorCommand::Focus => PluginWorkerNativeEditorCommand::Focus,
+                NativeEditorCommand::Close => PluginWorkerNativeEditorCommand::Close,
+            },
+        ),
+        AdminCommand::SetSlotConfig { slot, .. } => (
+            PluginWorkerAdminCommand::SetSlotConfig,
+            Some(*slot),
+            0,
+            PluginWorkerNativeEditorCommand::None,
+        ),
+        AdminCommand::SetParameter {
+            slot, request_id, ..
+        } => (
+            PluginWorkerAdminCommand::SetParameter,
+            Some(*slot),
+            *request_id,
+            PluginWorkerNativeEditorCommand::None,
+        ),
+        AdminCommand::QueryParameter {
+            slot, request_id, ..
+        } => (
+            PluginWorkerAdminCommand::QueryParameter,
+            Some(*slot),
+            *request_id,
+            PluginWorkerNativeEditorCommand::None,
+        ),
+        AdminCommand::RequestParameterPage {
+            slot, request_id, ..
+        } => (
+            PluginWorkerAdminCommand::RequestParameterPage,
+            Some(*slot),
+            *request_id,
+            PluginWorkerNativeEditorCommand::None,
+        ),
+        AdminCommand::SaveState {
+            slot, request_id, ..
+        } => (
+            PluginWorkerAdminCommand::SaveState,
+            Some(*slot),
+            *request_id,
+            PluginWorkerNativeEditorCommand::None,
+        ),
+        AdminCommand::LoadState { slot, .. } => (
+            PluginWorkerAdminCommand::LoadState,
+            Some(*slot),
+            0,
+            PluginWorkerNativeEditorCommand::None,
+        ),
+        AdminCommand::CaptureInstrumentBounce { .. } => (
+            PluginWorkerAdminCommand::CaptureInstrumentBounce,
+            None,
+            0,
+            PluginWorkerNativeEditorCommand::None,
+        ),
+        AdminCommand::Shutdown => (
+            PluginWorkerAdminCommand::Shutdown,
+            None,
+            0,
+            PluginWorkerNativeEditorCommand::None,
+        ),
+    };
+    let _admin_stage = metrics
+        .diagnostics
+        .admin(kind, slot, request_id, native_command);
     match command {
         AdminCommand::NativeEditor {
             slot,
@@ -4821,6 +5429,9 @@ fn capture_native_backend(
     base_parameter_ids: &[u32],
     metrics: &BridgeMetrics,
 ) -> Result<Vec<u8>, String> {
+    let _capture_stage = metrics
+        .diagnostics
+        .stage(PluginWorkerStage::NativeStateCapture, Some(slot));
     close_native_before_state(backend)?;
     let before = backend.native_editor_feedback()?;
     let refresh_bases = metrics
@@ -4912,7 +5523,13 @@ fn poll_native_editors(
     events: &mut Producer<RuntimeEvent>,
     metrics: &BridgeMetrics,
 ) {
+    let _native_stage = metrics
+        .diagnostics
+        .stage(PluginWorkerStage::NativeFeedback, None);
     for slot in 0..slots.len() {
+        let _slot_native_stage = metrics
+            .diagnostics
+            .stage(PluginWorkerStage::NativeFeedback, Some(slot));
         let was_open = metrics
             .native_editors
             .lock()
@@ -5433,6 +6050,7 @@ fn update_latency_and_tail_expected(
     metrics: &BridgeMetrics,
     initial_expected: Option<&[Option<(u32, u32)>]>,
 ) {
+    let _metadata_stage = metrics.diagnostics.stage(PluginWorkerStage::Metadata, None);
     let mut latency = 0u64;
     let mut tail = 0u32;
     let mut active_mask = 0_u16;
@@ -5443,6 +6061,9 @@ fn update_latency_and_tail_expected(
             continue;
         }
         if let Some(backend) = slot.backend.as_ref() {
+            let _slot_metadata_stage = metrics
+                .diagnostics
+                .stage(PluginWorkerStage::Metadata, Some(slot_index));
             let expected = initial_expected
                 .and_then(|pairs| pairs.get(slot_index))
                 .copied()
@@ -5958,7 +6579,10 @@ fn validate_vst3_reset_maximum(max_block_frames: usize, reset_frames: usize) -> 
     Ok(())
 }
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 #[derive(Clone, Copy)]
 enum FreshBounceSourceSetup {
     Pending,
@@ -5974,10 +6598,14 @@ enum FreshBounceSourceSetup {
 struct Vst3Backend {
     #[cfg(test)]
     observation: InstanceObserver,
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     fresh_bounce_setup: Option<FreshBounceSourceSetup>,
     restoration: Option<SourceRestorationExpectation>,
     restoration_consumed: bool,
+    kontakt_realtime_selection: Option<kontakt_realtime_outputs::Selection>,
     last_transport: PluginTransport,
     native_revision_base: u64,
     plugin: vst3_host::Plugin,
@@ -5992,7 +6620,46 @@ struct Vst3Backend {
 
 #[cfg(feature = "vst3")]
 impl Vst3Backend {
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    fn uses_kontakt_realtime_selection(&self) -> bool {
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        let fresh_bounce = self.fresh_bounce_setup.is_some();
+        #[cfg(not(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        )))]
+        let fresh_bounce = false;
+        let info = self.plugin.info();
+        kontakt_realtime_outputs::eligible(
+            &info.uid,
+            &info.version,
+            &info.category,
+            fresh_bounce,
+            self.restoration.is_some() || self.restoration_consumed,
+        )
+    }
+
+    fn publish_kontakt_realtime_selection(
+        &mut self,
+        selection: kontakt_realtime_outputs::Selection,
+    ) {
+        self.kontakt_realtime_selection = Some(selection);
+        self.input_channels = 0;
+        self.output_channels = 2;
+    }
+
+    fn kontakt_selection_failure(&mut self, error: String, cleanup_attempted: &mut bool) -> String {
+        self.prepared = false;
+        let error = kontakt_realtime_outputs::stop_after_failure(self, error, cleanup_attempted);
+        format!("{error}; Kontakt instance requires explicit reload before processing or reset")
+    }
+
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     fn validate_fresh_latency(&self, observed: u32) -> Result<(), String> {
         if let Some(FreshBounceSourceSetup::Pinned {
             latency_samples: expected,
@@ -6007,7 +6674,10 @@ impl Vst3Backend {
         Ok(())
     }
 
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     fn validate_fresh_tail(&self, observed: u32) -> Result<(), String> {
         if let Some(FreshBounceSourceSetup::Pinned {
             tail_samples: expected,
@@ -6022,7 +6692,10 @@ impl Vst3Backend {
         Ok(())
     }
 
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     fn load_fresh_bounce_source(
         spec: PluginLoadSpec,
         config: PluginPrepareConfig,
@@ -6150,10 +6823,14 @@ impl Vst3Backend {
             Ok(Self {
                 #[cfg(test)]
                 observation: observation.clone(),
-                #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+                #[cfg(all(
+                    any(target_os = "linux", windows),
+                    feature = "experimental-fresh-helper"
+                ))]
                 fresh_bounce_setup: None,
                 restoration,
                 restoration_consumed: false,
+                kontakt_realtime_selection: None,
                 last_transport: PluginTransport::default(),
                 native_revision_base: 0,
                 plugin,
@@ -6241,7 +6918,9 @@ impl PluginBackend for Vst3Backend {
             None,
             None,
         );
-        let result = (|| {
+        let select_kontakt = self.uses_kontakt_realtime_selection();
+        let mut cleanup_attempted = false;
+        let mut result = (|| {
             if self.restoration_consumed {
                 return Err(
                     "Recreated-source preparation is one-shot; load a new candidate".into(),
@@ -6251,7 +6930,10 @@ impl PluginBackend for Vst3Backend {
             self.restoration_consumed = restoration.is_some();
             // Consume before any fallible guard: neither failed setup nor a published source
             // may use a later prepare to gain another activation opportunity.
-            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
             let qualify_fresh_source = match self.fresh_bounce_setup {
                 None => false,
                 Some(FreshBounceSourceSetup::Pending) => {
@@ -6281,7 +6963,13 @@ impl PluginBackend for Vst3Backend {
                 support.max_block_frames as usize,
                 self.reset_origin_frames(),
             )?;
-            if self.prepared {
+            let was_prepared = self.prepared;
+            if select_kontakt {
+                // Prepared becomes true only after the complete stopped selection
+                // and post-Start proof, including native revision initialization.
+                self.prepared = false;
+            }
+            if was_prepared {
                 self.plugin
                     .stop_processing()
                     .map_err(|error| error.to_string())?;
@@ -6295,48 +6983,70 @@ impl PluginBackend for Vst3Backend {
             }
             if !self.pending_state.is_empty() {
                 let state = std::mem::take(&mut self.pending_state);
-                let loaded = self
-                    .plugin
-                    .load_state(&state)
-                    .map_err(|error| error.to_string());
-                #[cfg(test)]
-                self.observation.state_load(&state, &loaded);
-                loaded?;
+                if select_kontakt {
+                    kontakt_realtime_outputs::Access::load_state(self, &state)?;
+                } else {
+                    let loaded = self
+                        .plugin
+                        .load_state(&state)
+                        .map_err(|error| error.to_string());
+                    #[cfg(test)]
+                    self.observation.state_load(&state, &loaded);
+                    loaded?;
+                }
             }
             if let Some(expected) = restoration.as_ref() {
                 expected.restore_bases(self)?;
             }
-            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
             let fresh_metadata = if qualify_fresh_source {
                 Some(self.qualify_fresh_bounce_source(config.sample_rate as u32)?)
             } else {
                 None
             };
-            #[cfg(test)]
-            observation.call(
-                Operation::StartProcessing,
-                Boundary::Attempt,
-                None,
-                Some(self.last_transport),
-                None,
-            );
-            let start_result = self
-                .plugin
-                .start_processing()
-                .map_err(|error| error.to_string());
-            #[cfg(test)]
-            observation.string_result(
-                Operation::StartProcessing,
-                None,
-                Some(self.last_transport),
-                &start_result,
-            );
-            start_result?;
+            if select_kontakt {
+                let previous = self.kontakt_realtime_selection.clone();
+                let selection = kontakt_realtime_outputs::restart(
+                    self,
+                    previous.as_ref(),
+                    None,
+                    false,
+                    &mut cleanup_attempted,
+                )?;
+                self.publish_kontakt_realtime_selection(selection);
+            } else {
+                #[cfg(test)]
+                observation.call(
+                    Operation::StartProcessing,
+                    Boundary::Attempt,
+                    None,
+                    Some(self.last_transport),
+                    None,
+                );
+                let start_result = self
+                    .plugin
+                    .start_processing()
+                    .map_err(|error| error.to_string());
+                #[cfg(test)]
+                observation.string_result(
+                    Operation::StartProcessing,
+                    None,
+                    Some(self.last_transport),
+                    &start_result,
+                );
+                start_result?;
+            }
             self.native_revision_base = self
                 .plugin
                 .native_dirty_revision()
                 .map_err(|error| error.to_string())?;
-            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
             if let Some(before_start) = fresh_metadata {
                 let current = self
                     .bounce_metadata(None)
@@ -6366,6 +7076,9 @@ impl PluginBackend for Vst3Backend {
             self.prepared = true;
             Ok(())
         })();
+        if select_kontakt && let Err(error) = result {
+            result = Err(self.kontakt_selection_failure(error, &mut cleanup_attempted));
+        }
         #[cfg(test)]
         observation.string_result(Operation::SourcePrepare, None, None, &result);
         result
@@ -6663,69 +7376,93 @@ impl PluginBackend for Vst3Backend {
     }
 
     fn native_editor_feedback(&mut self) -> Result<NativeEditorFeedback, String> {
-        let state = self
-            .plugin
-            .isolated_editor(vst3_host::IsolatedEditorCommand::Query)
-            .map(native_editor_state)
-            .map_err(|error| error.to_string())?;
-        let edits = self
-            .plugin
-            .try_take_parameter_edits()
-            .map_err(|error| error.to_string())?;
-        let notifications = self
-            .plugin
-            .try_take_host_notifications()
-            .map_err(|error| error.to_string())?;
-        // Service lifecycle-sensitive restart requests on the helper's main thread. Returned
-        // flags refresh host-side caches; failures never masquerade as an empty feedback batch.
-        let flags = self
-            .plugin
-            .service_host_requests()
-            .map_err(|error| error.to_string())?;
-        let revision = self
-            .plugin
-            .native_dirty_revision()
-            .map_err(|error| error.to_string())?;
-        let dirty_revision = revision
-            .checked_sub(self.native_revision_base)
-            .ok_or_else(|| {
-                "VST3 native revision reset; helper state may have been lost".to_owned()
-            })?;
-        if flags.reload_component() {
-            return Err(
+        let selected = self.kontakt_realtime_selection.clone();
+        let result = (|| {
+            let state = self
+                .plugin
+                .isolated_editor(vst3_host::IsolatedEditorCommand::Query)
+                .map(native_editor_state)
+                .map_err(|error| error.to_string())?;
+            let edits = self
+                .plugin
+                .try_take_parameter_edits()
+                .map_err(|error| error.to_string())?;
+            let notifications = self
+                .plugin
+                .try_take_host_notifications()
+                .map_err(|error| error.to_string())?;
+            // Service lifecycle-sensitive restart requests on the helper's main thread. Returned
+            // flags refresh host-side caches; failures never masquerade as an empty feedback batch.
+            let flags = self
+                .plugin
+                .service_host_requests()
+                .map_err(|error| error.to_string())?;
+            let revision = self
+                .plugin
+                .native_dirty_revision()
+                .map_err(|error| error.to_string())?;
+            let dirty_revision =
+                revision
+                    .checked_sub(self.native_revision_base)
+                    .ok_or_else(|| {
+                        "VST3 native revision reset; helper state may have been lost".to_owned()
+                    })?;
+            if flags.reload_component() {
+                return Err(
                 "VST3 requested component reload; native state must be recovered before reloading"
                     .into(),
             );
+            }
+            if flags.io_changed() {
+                if let Some(selection) = selected.as_ref() {
+                    // The helper owner serviced the inactive I/O transaction and
+                    // reapplied explicit host intent. Running feedback only checks it;
+                    // it never silently selects outputs or restarts DSP here.
+                    kontakt_realtime_outputs::verify(self, selection)?;
+                    self.input_channels = 0;
+                    self.output_channels = 2;
+                } else {
+                    let layout = self
+                        .plugin
+                        .audio_bus_layout()
+                        .map_err(|error| error.to_string())?;
+                    self.input_channels = layout
+                        .inputs
+                        .iter()
+                        .filter(|bus| bus.active)
+                        .map(|bus| bus.channel_count)
+                        .sum();
+                    self.output_channels = layout
+                        .outputs
+                        .iter()
+                        .filter(|bus| bus.active)
+                        .map(|bus| bus.channel_count)
+                        .sum();
+                }
+            }
+            let catalog_invalidated = !edits.is_empty()
+                || flags.param_values_changed()
+                || flags.param_titles_changed()
+                || notifications
+                    .iter()
+                    .any(|item| matches!(item, vst3_host::HostNotification::DirtyChanged(true)));
+            Ok(NativeEditorFeedback {
+                state,
+                dirty_revision,
+                catalog_invalidated,
+            })
+        })();
+        if selected.is_some()
+            && let Err(error) = result
+        {
+            // The worker publishes the failure and stops accepting Process. Do
+            // not mutate a running component to disguise topology drift.
+            self.prepared = false;
+            return Err(format!(
+                "{error}; Kontakt instance requires explicit reload before processing or reset"
+            ));
         }
-        if flags.io_changed() {
-            let layout = self
-                .plugin
-                .audio_bus_layout()
-                .map_err(|error| error.to_string())?;
-            self.input_channels = layout
-                .inputs
-                .iter()
-                .filter(|bus| bus.active)
-                .map(|bus| bus.channel_count)
-                .sum();
-            self.output_channels = layout
-                .outputs
-                .iter()
-                .filter(|bus| bus.active)
-                .map(|bus| bus.channel_count)
-                .sum();
-        }
-        let catalog_invalidated = !edits.is_empty()
-            || flags.param_values_changed()
-            || flags.param_titles_changed()
-            || notifications
-                .iter()
-                .any(|item| matches!(item, vst3_host::HostNotification::DirtyChanged(true)));
-        Ok(NativeEditorFeedback {
-            state,
-            dirty_revision,
-            catalog_invalidated,
-        })
+        result
     }
 
     fn save_state(&mut self) -> Result<Vec<u8>, String> {
@@ -6764,6 +7501,26 @@ impl PluginBackend for Vst3Backend {
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), String> {
+        if self.prepared && self.uses_kontakt_realtime_selection() {
+            let previous = self.kontakt_realtime_selection.clone();
+            self.prepared = false;
+            let mut cleanup_attempted = false;
+            let result = kontakt_realtime_outputs::restart(
+                self,
+                previous.as_ref(),
+                Some(state),
+                true,
+                &mut cleanup_attempted,
+            );
+            return match result {
+                Ok(selection) => {
+                    self.publish_kontakt_realtime_selection(selection);
+                    self.prepared = true;
+                    Ok(())
+                }
+                Err(error) => Err(self.kontakt_selection_failure(error, &mut cleanup_attempted)),
+            };
+        }
         #[cfg(test)]
         let observation = self.observation.clone();
         let result = self
@@ -6777,6 +7534,9 @@ impl PluginBackend for Vst3Backend {
 
     fn preflight_reset_processing(&self) -> Result<(), String> {
         if !self.prepared {
+            if self.uses_kontakt_realtime_selection() {
+                return Err("Kontakt reset requested before preparation or after a configuration fault; explicitly reload the instance before processing or reset".into());
+            }
             return Err("VST3 reset requested before preparation".into());
         }
         validate_vst3_reset_maximum(self.max_block_frames, self.reset_origin_frames())?;
@@ -6799,8 +7559,13 @@ impl PluginBackend for Vst3Backend {
             Some(self.last_transport),
             None,
         );
-        let result = (|| {
+        let select_kontakt = self.uses_kontakt_realtime_selection();
+        let mut cleanup_attempted = false;
+        let mut result = (|| {
             self.preflight_reset_processing()?;
+            if select_kontakt {
+                self.prepared = false;
+            }
             // Native releases are necessary when CC mapping is absent. The origin-only reset
             // preserves old one-frame input ordering. The exact Surge XT 1.3.4
             // instrument uses its bounded 256-frame CC120 cleanup; all others use
@@ -6875,6 +7640,19 @@ impl PluginBackend for Vst3Backend {
                 &stop_result,
             );
             stop_result?;
+            if select_kontakt {
+                let previous = self.kontakt_realtime_selection.clone();
+                let selection = kontakt_realtime_outputs::restart(
+                    self,
+                    previous.as_ref(),
+                    None,
+                    false,
+                    &mut cleanup_attempted,
+                )?;
+                self.publish_kontakt_realtime_selection(selection);
+                self.prepared = true;
+                return Ok(());
+            }
             #[cfg(test)]
             observation.call(
                 Operation::StartProcessing,
@@ -6896,6 +7674,9 @@ impl PluginBackend for Vst3Backend {
             );
             start_result
         })();
+        if select_kontakt && let Err(error) = result {
+            result = Err(self.kontakt_selection_failure(error, &mut cleanup_attempted));
+        }
         #[cfg(test)]
         observation.string_result(Operation::Reset, None, Some(self.last_transport), &result);
         result
@@ -6914,13 +7695,19 @@ impl PluginBackend for Vst3Backend {
             .plugin
             .try_latency_samples()
             .map_err(|error| error.to_string())?;
-        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
         self.validate_fresh_latency(latency)?;
         let tail = self
             .plugin
             .try_tail_samples()
             .map_err(|error| error.to_string())?;
-        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
         self.validate_fresh_tail(tail)?;
         Ok((latency, tail))
     }
@@ -6946,11 +7733,15 @@ impl Drop for Vst3Backend {
         let _ = self
             .plugin
             .isolated_editor(vst3_host::IsolatedEditorCommand::Close);
-        let should_stop =
-            self.prepared || (self.restoration_consumed && self.plugin.is_processing());
+        let should_stop = self.prepared
+            || ((self.restoration_consumed || self.uses_kontakt_realtime_selection())
+                && self.plugin.is_processing());
         // A one-shot candidate can fail its post-Start fence before prepared becomes
         // true. Dispose its processing lifecycle without affecting any older source.
-        #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
         let should_stop =
             should_stop || (self.fresh_bounce_setup.is_some() && self.plugin.is_processing());
         if should_stop {
@@ -10360,6 +11151,7 @@ mod tests {
         let (_parameter_edit_receipt_tx, parameter_edit_receipts) =
             RingBuffer::new(MAX_OUTSTANDING_PARAMETER_EDITS as usize);
         let metrics = Arc::new(BridgeMetrics::default());
+        let admin = AdminCommandSender::new(admin, &metrics);
         let control = PluginChainControl {
             admin,
             events,

@@ -584,6 +584,7 @@ class NativeStageAggregationTests(unittest.TestCase):
         with mock.patch.object(smoke, "Session", FakeSession), \
              mock.patch.object(smoke, "assert_handshake", side_effect=lambda session, desktop: (session.editor("Query"), 10)), \
              mock.patch.object(smoke, "assert_interaction", side_effect=interaction), \
+             mock.patch.object(smoke, "assert_modal_ipc"), \
              mock.patch.object(smoke, "verified_fixture_button", return_value=[10, 20, 30]) as identity, \
              mock.patch.object(smoke, "assert_state_roundtrip", side_effect=lambda session, *unused: session.editor("Close")) as state:
             with self.assertRaisesRegex(smoke.SmokeError, "Failed native acceptance stages"):

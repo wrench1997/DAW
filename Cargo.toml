@@ -17,7 +17,7 @@ vst2 = ["dep:vst"]
 vst3 = ["dep:vst3-host", "dep:xcb"]
 # Development-only library session. No helper caller or metadata-policy activation.
 experimental-scoped-worker = ["vst3", "vst3-host/experimental-scoped-worker"]
-# Experimental Linux strict clone and selected-clip App entry; separately qualified use only.
+# Experimental Linux/Windows strict clone and selected-clip App entry; separately qualified use only.
 experimental-fresh-helper = ["vst3", "vst3-host/experimental-fresh-helper"]
 
 [dependencies]
@@ -42,7 +42,7 @@ xcb = { version = "1.7", optional = true }
 [target.'cfg(windows)'.dependencies]
 # Keep midir's default WinMM backend. In particular, do not enable its optional `winrt` feature.
 midir = { version = "0.11", default-features = false }
-winapi = { version = "0.3.9", features = ["winuser", "windef", "libloaderapi", "errhandlingapi", "processthreadsapi"] }
+winapi = { version = "0.3.9", features = ["winuser", "windef", "libloaderapi", "errhandlingapi", "processthreadsapi", "fileapi", "winbase", "minwinbase", "handleapi"] }
 raw-window-handle = "0.6.2"
 
 # The local, MIT-licensed 0.9.0 copy preserves upstream APIs and adds explicit isolated editor

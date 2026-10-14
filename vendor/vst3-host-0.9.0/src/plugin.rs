@@ -132,6 +132,14 @@ pub struct EventBusLayout {
 }
 
 impl EventBusLayout {
+    /// Original early selected-bounce input admission, shared with the helper.
+    /// Output admission remains in the caller's complete final metadata guard.
+    pub fn admits_selected_bounce_input(&self) -> bool {
+        self.inputs.len() == 1
+            && self.inputs[0].is_main
+            && self.inputs[0].active == Some(true)
+            && (1..=16).contains(&self.inputs[0].channel_count)
+    }
     pub(crate) fn validate(&self) -> Result<()> {
         if self.inputs.len() > 32
             || self.outputs.len() > 32

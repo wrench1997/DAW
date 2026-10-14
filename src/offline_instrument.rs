@@ -1,11 +1,19 @@
 //! Thread-affine synchronous owner for one fresh isolated VST3 instrument.
 //!
-//! This is preparation/processing infrastructure only. No App action or WAV renderer calls it
-//! yet. It deliberately bypasses the realtime bridge, never its backend/helper contracts.
+//! Isolated bounce preparation deliberately bypasses the realtime bridge while retaining
+//! its backend/helper contracts. The experimental App occurrence renderer uses a strict clone.
 
 #[cfg(feature = "vst3")]
 use crate::instrument_bounce::BounceAudioBus;
 use crate::instrument_bounce::{BouncePluginMetadata, CapturedInstrumentBounce};
+
+#[cfg(all(
+    feature = "vst3",
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[path = "bounce_selected_outputs.rs"]
+mod bounce_selected_outputs;
 
 #[cfg(all(test, feature = "vst3", unix))]
 #[path = "offline_instrument_protocol_tests.rs"]
@@ -22,7 +30,10 @@ use {
 
 // Refusal-only, scalar diagnostics for unpublished experimental fresh candidates.
 // These records never query or change the plugin and never alter admission.
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 mod fresh_topology_diagnostic {
     use crate::instrument_bounce::BouncePluginMetadata;
     use serde::Serialize;
@@ -360,7 +371,10 @@ mod fresh_topology_diagnostic {
 
 // The sole initialization exception is tail settlement at the first fresh Start.
 // Exhaustive destructuring requires an explicit decision for every future field.
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 mod fresh_start_admission {
     use crate::instrument_bounce::{BounceAudioBus, BouncePluginMetadata};
 
@@ -501,7 +515,10 @@ mod fresh_start_admission {
 
 // Equality-only diagnostics borrow the snapshots already read at the Start fence.
 // They neither query the owner nor participate in the admission decision.
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 mod fresh_metadata_mismatch_diagnostic {
     use crate::instrument_bounce::{BounceAudioBus, BouncePluginMetadata};
     use serde::Serialize;
@@ -1074,7 +1091,10 @@ impl Vst3Backend {
     /// Only the new owner's first prepare may call this, after restore and before Start.
     /// Preflight the entire declaration before the first acknowledgment, then check that
     /// every intermediate operation preserved all descriptors and prepared participation.
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(super) fn qualify_fresh_bounce_source(
         &mut self,
         sample_rate: u32,
@@ -1084,6 +1104,17 @@ impl Vst3Backend {
             return Err(
                 "Fresh bounce source setup requires an unpublished inactive candidate".into(),
             );
+        }
+        let identity = self.plugin.info();
+        if crate::instrument_bounce::kontakt_selected_stereo_bounce_eligible(
+            &identity.uid,
+            &identity.version,
+            &identity.category,
+        ) {
+            let checked = bounce_selected_outputs::configure_stopped(self, sample_rate)?;
+            self.input_channels = checked.participating_input_channels();
+            self.output_channels = checked.output_buses[0].channel_count;
+            return Ok(checked);
         }
         let mut actual = self
             .bounce_metadata(None)
@@ -1185,7 +1216,10 @@ impl Vst3Backend {
         Ok(checked)
     }
 
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(super) fn fresh_topology_post_start_error(
         error: String,
         current: &BouncePluginMetadata,
@@ -1201,7 +1235,10 @@ impl Vst3Backend {
         )
     }
 
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(super) fn fresh_start_metadata_mismatch_error(
         before_start: &BouncePluginMetadata,
         current: &BouncePluginMetadata,
@@ -1209,7 +1246,10 @@ impl Vst3Backend {
         fresh_metadata_mismatch_diagnostic::error(before_start, current)
     }
 
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(super) fn fresh_start_metadata_compatible(
         before_start: &BouncePluginMetadata,
         current: &BouncePluginMetadata,
@@ -1240,7 +1280,10 @@ impl Vst3Backend {
                     .map_err(classify_metadata_error)?;
                 // A returned drift is an observed backend fault, even if cancellation
                 // arrives before capture_call's subsequent successful-call checkpoint.
-                #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+                #[cfg(all(
+                    any(target_os = "linux", windows),
+                    feature = "experimental-fresh-helper"
+                ))]
                 self.validate_fresh_latency(value)
                     .map_err(BounceCaptureError::BackendFailed)?;
                 Ok(value)
@@ -1250,7 +1293,10 @@ impl Vst3Backend {
                     .plugin
                     .try_tail_samples()
                     .map_err(classify_metadata_error)?;
-                #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+                #[cfg(all(
+                    any(target_os = "linux", windows),
+                    feature = "experimental-fresh-helper"
+                ))]
                 self.validate_fresh_tail(value)
                     .map_err(BounceCaptureError::BackendFailed)?;
                 Ok(value)

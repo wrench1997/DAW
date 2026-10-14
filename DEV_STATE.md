@@ -1,98 +1,145 @@
 # 当前开发状态
 
-最后更新：2026-10-10 03:16 UTC。以当前源码、集成状态和实际执行结果为准。
+更新：2026-10-14（Asia/Shanghai）。Citrus Studio 0.5.0-alpha.1 仍为开发版。
+开发分支：`ci/windows-reliability-20261009`；本轮起点：`b0d8d5c0`。
+当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
+完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
-## 当前检查点：短音符属性与无意舍入修复
+## 当前支持边界
 
-- 已按原提交快进集成审查通过的 `96223cc`、`3adc585`、`707e0ea` 和文档提交 `97be40b`。全部 700 文件的大小、SHA256 和 Git blob 与冻结清单一致；实际执行测试的代码是 `707e0ea`。仅 expression 实现、测试和既有指南发生功能提交变化，没有混入实验 runtime 分支。
-- Piano Note Properties 的新 timing 编辑与 Draw/resize 共用 1/64 beat 最小长度。1/24 beat 等合法短音符只改 start 不再被拒绝；最晚合法最小音符 start 为 4095.984375。以 f64 检查存储的 f32 start+length，避免浮点舍入掩盖越界。
-- Start/Length 显示使用可以精确往返 f32 的最短文本。只聚焦数值后 Enter 或直接 Apply，不再把短音符舍入，也不应制造 dirty 或 Undo。生产 egui 输入测试覆盖 1/64、1/24 和末端合法 start 的两字段、两种提交路径。
-- 最终源码执行通过：22 expression checks、1,175 core、1,192 App +25 helper +13 protocol、fmt、两套严格 all-target Clippy、all-bin build、普通 helper smoke 和 239 Python（零 skip）。集成目录再次检查 Python/package 文档/QA 清单；不重复或冒称新的 Rust执行。`3adc585` 的 21 pass/1 fixture dirty-baseline 失败保留，后续只初始化保存指纹修正测试，无 runtime 改动。
-- 没有新的 rendered capture、native desktop、physical input/audio、真实插件或性能验收；新 Windows CI 待发布后执行，终态另写源包验证记录。上一 `3018b41` 的 [preview](https://github.com/wrench1997/DAW/actions/runs/38015281690) 通过，[quality](https://github.com/wrench1997/DAW/actions/runs/38015281682) 仍保留两次 paint capture 失败和 repaint 跳过。既有证据与旧 helper 归属不变。
+| 路径 | 已实现 | 当前结论 |
+| --- | --- | --- |
+| 实时 Master 录音 | 录制实际播放经过的 Master 输出 | 已有 NOIRE Pure 录音及用户试听确认；不等于离线导出 |
+| 选中 MIDI 片段转音频 | Windows/Linux 实验 helper、状态捕获、无覆盖发布、取消和历史恢复 | NOIRE 实测仍被两次 opaque 捕获差异明确拒绝；原 MIDI 保留 |
+| 整曲离线 WAV | 普通内置音源；实验模式下单 VST 的完整编曲、静态路由及 Master 自动化 | 短 NOIRE 工程通过；完整原曲、效果器链和通用图 PDC 未验收 |
 
-## 历史检查点：拒绝未知插件元数据
+普通构建不静默降级导出活动 VST 的错误声音；不支持的图和自动化明确拒绝。
+实验整曲路径要求 `experimental-fresh-helper`、单个活动 VST、无 insert 效果器。
+Master 音量/声像/静音自动化已接线；尾音须明确确认固定窗口。
+未知或无限插件 tail 保留提示，不能把固定尾音窗口称为完整自然释放保证。
 
-- 已按原提交快进集成 `6fdfb8f` 和 `959958f`，与独立审查、执行测试的 700 个源码文件逐字节一致。生产路径不再把 latency/tail 查询失败当作合法零值，也不再把 `AudioBusLayout` 查询失败猜成 stereo；合法零值、无限 tail 和合法 empty/mono/multibus 回答仍保留。
-- 当前源码测试通过：1,188 all-feature App、1,171 core、两套严格 root Clippy、fmt；集成目录重新执行 239 Python（含四项真实 Unix descriptor）及 vendor patch 重建。第二提交未变的 68 个 vendor/helper/protocol 输入明确复用第一提交的 400 available vendor、26 doctests、25 helper、13 protocol 结果，不冒称重新执行。
-- 失败候选不得变成 ready；后续元数据错误保留既有 sticky fault 和旧候选保留规则。Timing Retry/新 epoch 不会复活已故障的 helper。没有自动状态重载、静默预热、新线程或协议变更。App 通用 loader 失败保留用不存在的 VST2 fixture 测试，VST3 layout 拒绝由直接 backend/candidate 测试覆盖，不宣称端到端 App VST3 layout 验收。
-- 本轮尚无新的真实插件、原生编辑器、Windows runtime 或性能验收。下方真实插件记录绑定历史 `f086170`/`cbbbe1f`，不得借作新 helper 的通过。新 Windows CI 待发布后执行；终态写入源码交付包的外部验证记录。
-- 已交付历史 `cbbbe1f` 的 [preview](https://github.com/wrench1997/DAW/actions/runs/37967569203) 通过；[quality](https://github.com/wrench1997/DAW/actions/runs/37967569032) 源码和独立 native control/state/lifecycle 通过，但两次 paint capture 失败，repaint 跳过。没有完整 native paint 或商业发布结论。
+## 本轮已实现的功能
 
-## 已交付历史检查点：scoped session 与 reset origin
+- Channel Rack、钢琴卷帘和 Playlist 的视图布局、缩放、定位/放置与按钮反馈已调整。
+- 钢琴黑白键几何、按下/松开及播放反馈、键盘试听和试听取消已接入实际状态。
+- 播放启动与循环重启等待 Timeline、参数和插件实际确认，避免错误首音/旧 epoch。
+- Master 音量/声像/静音控制和自动化进入实时及离线路径，保留两条路径各自的验证。
+- Kontakt 实时输出选择以实际总线布局为依据，保留声明拓扑并拒绝不确定的布局。
+- Windows 插件窗口初始尺寸/可见性、关闭/重开、modal 生命周期及 fault 后打开指引已修复。
+- Windows 片段转换使用真实异步 named pipe 与原生文件身份/无覆盖发布；不靠去掉平台判断。
+- 片段转换与整曲导出共用停止/捕获所有权，保留失败、取消、保存和历史操作屏障。
+- 新 fresh source 的 pending/running/失败/强制退出 guard 保留至实际 Join，见下方回归。
+- 新选定 Kontakt 元数据请求和完整输入加载基础已应用；当前门禁状态见“最新源码”。
 
+上述 UI 与后台源码变化不代表最新构建已完成本机视觉、流畅性或完整歌曲验收。
+现有快捷键、复制/量化/力度/和弦/撤销功能继续沿用；未以重新实现替代已有功能。
 
-- **新 scoped-session + reset-origin 合并源码：`f08617092f74903862a9e7bf04698c2db49b523c`。** 审查通过的96410ec与fd6f5b1已合并，独立语义审查确认普通/reset SDK调用共用restricted AtomicBool RAII gate；两种私有facade仍!Send/!Sync，reset只可在session rejoin后由owner执行。新增三路径gate回归与六项reset编译期权限检查；精确Surge instrument1.3.4 reset256兼容修正236f784已合入，136源码hash一致。最终组合源码门禁及新的真实图/UI/state验收通过；新Windows CI须发布后独立执行。
-- **Reset边界：** DAW专用Q128 reset将待处理event/host parameter归零偏移并保留FIFO，单独丢弃旧epoch和reset生成的processor输出，保留native UI feedback与真实SDK确认，拒绝unsupported/不确定helper回复。DAW准备max一般要求128..=2048；实际加载的精确Surge instrument UID/version1.3.4使用单次reset256并要求max至少256，其他插件/版本/SurgeFX仍128。Standalone17/47等仍支持。它不改变strict latency/identity fence，不加入DSP线程或通用tail-clear。详见[reset-origin](docs/PLUGIN_RESET_ORIGIN.md)。
-- **最终组合门禁通过：** Linux 1,179 app +25 helper +6 reset +5 editor +2 transport protocol、1,167 core，零失败/忽略；395 available vendor cases（同一缺失fixture明确排除）、26 doctests、53/53 private compiler contracts、239 Python（含四项真实Unix descriptor、无skip）、fmt/两套严格rootClippy/build/helper smoke/两种MSVCsource checks通过。Direct vendor Clippy仅保留既有deprecated/drain_collect例外。中断的首次contract日志保留；仅完整重跑的53项计为通过。官方archive+patch重建46文件。
-- **新真实插件验收通过：** source236f784与f086170逐字节对应，helper421a8d7d…73c41实际重新绑定。五次genuine调用全部exit0：自动reset后的G4 offsets0/1/127持续发声，held/future+sustain清理和max128拒绝、八个图phase、故意FX32 drift/actualRetry、blank-tail和fresh-state通过。原始旧1/128 immediate-note失败保留；修正仅针对精确instrument1.3.4。Changing debug callback仍有12/14 ordinary和15/17 routed overruns，不代表实时性能认证。
-- **新native UI/state smoke通过：** 新Surge停止编辑/20轮poll/save/fresh数值、same-window/closed-used guard、Stochas used-state重开及关闭通过；同一新GUI blob的17/47/128/256首音通过，无positive warmup。未重复fixture/EOF/crash/mixed-Wayland/hardware验收，历史346.9ms resize stall仍在。Reset256在48k只额外推进内部DSP/连续时钟5.333ms，不推进timeline位置或改变PDC。
+## 实机结果
 
-- **历史 checked-event admission 合并源码：`7d7294b36df8f877c30a16a14afb98cf0f1ac047`。** 只集成审查通过的7d8a416，41 source hashes及native receipt一致。先检查event容量/元数据再copy，明确回传拒绝；普通音符计数、tracked ID和panic release obligation仅在接受后提交，拒绝保留重试责任。App/helper wire/timing/reset保持b92c394不变；完整组合源码门禁及20a9dfc Windows source/preview已通过；native paint仍失败。
-- **历史event完整门禁：** Linux1170app+22helper+5+2protocol、1166core，默认stack/零失败忽略；362available vendor（一个明确缺失fixture排除）、26doctests、239Python、fmt/两套严格rootClippy/build/实际helper smoke/两种MSVCsource checks全部通过。Fresh copied helper59b6bcbd…0d086与独立native/default2048验收一致，124production hashes匹配已测event源码；未重复宣称新性能测量。
-- **已验证切片与边界：** 362 available vendor tests（一个明确缺失fixture排除）、26 doctests、22helper+5+2protocol及source/native功能检查通过。Exact helper59b6bcbd已通过四项default2048/fresh-state，12/14 changing debug overruns保留。Admission只表示入队，不表示SDK已经处理；payload仍分配/释放，mutex及legacy忽略结果的caller仍在。未加入payload arena、DSP线程或性能提升保证。
+| 项目 | 实际结果 | 限制 |
+| --- | --- | --- |
+| 扫描/空实例 | 本机 Kontakt 8.4.1 元数据、约 3 秒空实例加载及 MIDI/PCM 请求通过 | 空 rack 的静音不算 NOIRE 发声 |
+| 插件窗口 | 用户看到 NOIRE Pure；旧构建实际打开、关闭、重开独立 Kontakt 窗口 | 新构建缩放/播放卡顿仍需复测；截图失败不能证明界面坏了 |
+| 声卡监听 | 用户确认钢琴声“听到了，音量正常” | 输出为 `扬声器 (2- CB4ND HW 1/2)`，厂家 Icon ProAudio，具体型号未确认 |
+| 保存重开 | 静音最小工程保存重开通过；Saved13 正常保存并在 native14 冷打开 | 静音检查不证明 NOIRE；未验证 Felt 和全部内部音色参数 |
+| 试听文件 | 独立曲子有 MIDI 和实际 Master 录音派生试听文件 | 派生文件是实时录音，不是片段转换或整曲离线导出 |
+| 短整曲离线 | Whole run02 实际通过并独立核对全部 PCM/WAV | 2 patterns、2 placements、2 beats；不等于原 405 音符整曲 |
 
-- **历史 bounded parameter storage 合并源码：`fb7b91a82d31226485a22e9e5e0b73d1f9a1fe3f`。** 只集成审查通过的bf573a4，41 source hashes一致；App/helper dispatcher/wire/timing不变。Input8192 queues/total points、output4096，检查输入接受与SDK Process结果；输出丢失为Process/SaveState sticky fault，需fresh实例恢复。已通过切片native/首音/cost审查，完整组合源码门禁通过；new-helper2048四项及fresh-state复验通过，两个调用exit0。13/14 changing debug core overruns保留，不代表实时性能提升。
-- **上一轮parameter checkpoint完整门禁：** Linux1170 app +22 helper +5+2 protocol、1166 core，零失败/忽略，默认stack；339 available vendor tests（一个明确缺失fixture排除）、26 doctests、231 Python、fmt/两套严格root Clippy/build/实际helper smoke及两种MSVC source checks全部通过。新helper为a29e4942…aee64，与native/首音切片验收helper字节一致。
-- **边界：** 无分配/释放只覆盖host owner仍存活时测试到的parameter-container操作，不覆盖整个Process或owner销毁后的插件final Release。构造器合计请求1,573,104bytes，另加外层wrapper/allocator开销；大量populated suffix与部分小输入/读取仍有成本回退。Mutex/event/metering、GUI单线程及历史346.9ms resize stall仍在。
+## 短整曲通过与转换拒绝
 
-- **历史 native-edit 合并源码：`87ceb06ce3dc23d817b1623093c8a51fddc2bea3`，完整源码门禁通过，default2048/fresh-state限定复验通过。** 审查通过的48d3f97加入固定容量、generation/sequence标记、明确DSP应用确认的原生编辑通道；display/gesture polling不再消费待交给DSP的编辑。真实停止编辑→20轮polling→zero-sample SaveState→fresh实例数值/组件/首音已通过独立切片验收。helper仍单线程；350ms fixture只证明通道consumer独立，不代表真实resize stall或全进程实时安全改善。新helper已独立通过default2048四项/fresh-state复验；旧优化结果保持历史归属。
+Whole run02 使用真实 App/controller、StrictBackend 和 NOIRE source，未用 mock renderer。
+84 BPM、48 kHz、MasterVolume `.85 → .35`、固定 3 秒尾音；源停止/捕获后实际渲染。
+clone 1661 个 Q128 回复，自然 exit0、实际 reap/destruct 先于 typed Complete/发布。
+最终 WAV 为 Float32 stereo，212571 frames、4.4285625 秒。
+独立分析核对全部 425142 个最终样本，最大绝对误差约 `2.05e-9`，固定容差 `2e-6`。
+非有限值/削波为 0，37 个 padding frames 为 0；末 100 ms 为静音，实际尾音非零。
+浮点 bit 差异如实记录；该检查不保证听感无爆音，也不保证未知 tail 全部释放。
 
-- **历史 timing/guard 合并、源码门禁及组合真实插件限定验收通过：`4fdfbc2ea5c828fd9c329f31e9be203810fa62c7`。** 审查通过的 Surge guard `c056dc5` 已与五个 timing 提交合并。Guard 为精确 factory UID + version 1.3.4、首次 positive Process/native open 尝试后拒绝 LoadState，在 helper editor closure/状态改动前返回错误。旧实例/窗口保持的真实测试与 fresh restore 通过；未实现静默 settle 或通用 restore 修复，legacy full-chain Admin 在 backend LoadState 前关闭 editor，并在拒绝返回后 fault 其 slot。公共 worker timing 已加入：whole-callback admission、独立 health/fault latch、停止状态 Retry/new epoch，以及带 epoch 的 live-state capture/prevalidated replacement。默认2048；128/256/512 明确 Experimental。先前 timing-only debug真实矩阵 quiet13/16、CPU4 load10/16，2048四种配置均通过两轮，小 profile仍有 DeadlineMiss，不能宣称低延迟/无掉音。详见 [状态恢复边界](docs/PLUGIN_STATE_RESTORE_LIMITS.md)。
+NOIRE 片段转换 run07/08 已实际取得短 WAV，但 production recapture 保护拒绝提交。
+实际报错：`The second actual source capture differs from the consumed render capture`。
+run08 的 NI component 177 字节不同；已知 host envelope 相同，期间无原 source 正数帧处理。
+独立三次同源捕获仍连续不同；尚未解释 NI payload 含义，不能猜测 volatile 字段并删保护。
+原 MIDI、工程、状态、历史及失败产生的证据保留；NOIRE 转换/撤销重做尚未实测通过。
 
-Citrus Studio 0.5.0-alpha.1 是 clean-room Rust DAW 开发版，尚未达到完整 FL-class 商用品质。Linux 优先开发与验证，Windows 持续检查兼容性。当前产品目标仍是「做一首歌 → 无损编辑 → 保存 → 找回缺失媒体 → 导出 → 重新打开」。
+## 当前回归及最新源码
 
-- **上一轮 Linux 已验证源码：`87ceb06ce3dc23d817b1623093c8a51fddc2bea3`。** 全部41 reviewed helper/vendor/Cargo hashes一致；App/audio/timing/wire保持244f622不变。完整all-feature/all-target为 **1170 application +22 helper +5 editor protocol +2 transport protocol**，no-default为 **1166 application**，零失败/忽略；fmt、两套严格root Clippy、build、实际helper smoke、两种MSVC source checks及 **215 Python tests** 通过。**304 available vendor tests** 串行通过（一个缺失upstream Dexed fixture明确排除），全部 **26 vendor doctests** 通过。新helper SHA256为dca08353…8cbe8，与独立native/PCM验收版本字节一致。
-- **真实 Mixer 电平表已集成：** `21989d0` + `ad565d7`，读取实际 post-fader stereo 图缓冲；Master 在 tanh 保护前测量，显示 dBFS、hold、CLIP/fault。稳定 track ID/graph/epoch 防错位，排队峰值、超时失效、点击 reset 和暂停时 live-MIDI 路径均有回归。已移除 UI 假 sine 动画。详见 [MIXER_METERING](docs/MIXER_METERING.md)。
-- **最新终态 Windows checkpoint：`20a9dfcb75c0b8aad2b0f43568258679e4eb1690`。** [Quality 37955606457](https://github.com/wrench1997/DAW/actions/runs/37955606457)通过1165app+15helper+5+2protocol、14helper/61editor Python及源码门禁；native state/control/lifecycle通过，paint前后失败、repaint跳过，整个quality仍失败。[Preview 37955606487](https://github.com/wrench1997/DAW/actions/runs/37955606487)通过239Python cases（235passed/four Unix-only skips）、上述Rust tests、optimized/static-CRT/vendor/license/PE/ZIP/extracted-helper smoke；上传跳过、两run artifact API为0。当前session/reset组合需自己的源码/真实插件/Windows复验。
-- 项目格式 **v12**，旧 v10/v11 文件可加载，MIDI ports 默认 Off、source audio monitor 默认启用；新保存需 v12 构建重新打开。评估前保留原项目备份。`main` 未合并，未发布 Release 或二进制 artifact。
+| 检查点 | 实际执行结果 | 适用范围 |
+| --- | --- | --- |
+| source22 历史完整套件 | 1963 passed /0 failed；主程序 1932、helper/protocol 31，5 个 NI 用例忽略 | 历史冻结源码，不认证后续改动 |
+| source29 fresh 生命周期 | 新增 12 项全部通过；相邻整组 50 passed /1 failed | 原 full-ring fixture 失败记录保留 |
+| source31 修正夹具 | clip-glue 全组 51 passed /0 failed；两套严格 Clippy、fmt/include/diff exit0 | 历史范围验证；不等于后续完整套件 |
+| 私有流式基础 | spool 24、state sidecar 24，共 48 passed；格式检查通过 | `target` 内 std-only 基础，尚未接真实 SDK/整曲 owner |
+| source32 新代码 | 编译 E0433 共 4 处；该检查点未执行测试或 Clippy | 新测试遗漏 `strict` import；原日志保留 |
+| source33 回归 | 编译通过；strict backend 29 passed /2 failed | 旧 IPC 断言及 Windows mock 写错误漏记录；原日志保留 |
+| source34 root 完整套件 | 2015 passed /0 failed；主程序 1977、helper 25、协议 6/5/2，7 个 NI/显式本机用例忽略 | 该源码实际终态 exit0；后续未变的主程序/协议结果复用，不是 native 验收 |
+| source34 vendor 未过滤首轮 | 574 passed /1 failed | 上游 Dexed metadata 外部素材缺失；原失败保留 |
+| source34 vendor 单项排除续跑 | 575 passed /0 failed；仅 1 项 Dexed filtered，probe 0 tests；exit0 | 574 library +1 legacy helper；不是未过滤完整通过 |
+| source34 fixture | check exit0；独立 fmt-check exit1 | `native_windows.rs` 三块排版，原失败和改前字节保留 |
+| source35 已完成门禁 | fixture check/fmt exit0；Python 259 passed（package 170、extract 28、editor 61） | 本次实际执行；root 2015/vendor 575 仍属 source34 |
+| source35 严格 all-feature Clippy | exit101：`result_large_err` 两处 | `src/bin/strict_metadata_bundle/mod.rs:50/67`，Err HostResponse 至少 160B；原失败保留 |
+| source36 当前 helper/质量 | helper 25 passed /0 failed；严格 all-feature/default Clippy、root/vendor/include fmt、diff 全 exit0 | 内部 Failure 表示紧凑化后实际覆核；25 项不再重复计入 source34 的 2015 |
+| source36 实际 Saved13 load-only | 1 passed /0 failed；body 0.40 秒，含编译 18.79 秒 | 只读原完整工程，不创建 SDK/NOIRE 实例，不等于 native 重开或导出 |
 
-## 已执行的验证与边界
+source34 root 完整命令耗时 805.36 秒，主程序测试耗时 635.87 秒，真实终态已保存。
+vendor 失败项 `internal::module_info::tests::reads_sdk_generated_bundle_metadata` 要求外部
+`vendor/test_plugins/Dexed.vst3`；该素材缺失，生产读取正常返回 `Ok(None)`。
+既有 [processor domains](docs/PLUGIN_PROCESSOR_DOMAINS.md) 已声明该单项素材排除边界，
+不是本轮未过滤套件通过，也不是历史 exact CLI 证据；原未过滤失败保留。
+source35 相对 source34 仅独立 fixture 的空白和 `MB_OK` 调用尾逗号变化，root/vendor 源码未变；
+保留 source34 已执行完整结果，不为这次格式变化冒称重新执行完整套件。
+source35 历史 MIDI 库存 49 payloads 核验 PASS，仅验证历史库存；Kontakt `--help` exit0，未 spawn 插件。
+source36 相对 source35 仅 helper 内部 Failure 表示变化，wire、查询顺序与准入保护保持。
+当前源码门禁已完成：复用未变的 source34 主程序/vendor 和 source35 fixture/Python，另跑新 helper/质量。
+实际 load-only 保留原音符、状态、路由和自动化；所有这些检查均不构成新声学/NI 实测。
 
-- Linux `cargo test --offline --locked --all-features --all-targets`：**1170 application +22 helper +5 editor protocol +2 transport protocol passed**；`--no-default-features --all-targets`：**1166 application passed**，均零失败/忽略。fmt、两套严格 Clippy 与 all-feature app/helper build 通过。依赖内部已有一处 upstream deprecated warning，未放宽项目 Clippy。
-- 当前 native-edit 切片不改 App/audio/UI，完整 application suites 已重跑既有 app/input 回归。最近一次完整真实离屏画面为4fdfbc2的 **123 entries /49 genuine Vulkan frames**，保持原源码归属，不重复宣称新截图。新build已验证与独立native/PCM helper dca08353…字节一致。
-- 为实现严格 Linux 门禁，将仅 Windows backend 与测试使用的 MIDI helper 用 `cfg(any(windows, test))` 编译，并把 BTreeMap import 移到 Windows 模块。没有关闭 warning、删除测试或改动 Windows backend 行为；Linux 物理 MIDI backend 仍未实现。
-- Windows 历史完整门禁使用 Windows Server 2025 / MSVC / Rust 1.99，包含 all-features app/helper、严格 Clippy、helper smoke 和 no-default all-target check；测试数量按平台/feature 分别记录，不能互相代替。
-- 普通 helper smoke 只证实 JSON 协议、错误恢复、Shutdown/子进程回收；不加载真实插件。另有仅加载仓库 MIT 源构建 fixture 的 Windows native lifecycle/state/stdout harness，执行结果独立记录；Linux 返回 77（UNSUPPORTED / NOT VERIFIED）。Python 是开发验证工具，不是应用运行依赖。
-- Linux `4045cb24` 实际创建了原生 X11 窗口，但 Mesa `eglSwapBuffers` 在 `xcb_shm_attach_checked` 报 `EGL_BAD_SURFACE`，界面无法显示。create/edit/undo/save/reopen、WAV native picker/cancel 与真实电平表 GUI 流程均 **BLOCKED / NOT RUN**；没有把启动进程或单元测试当作 GUI 验收。云端也没有物理音频设备。真实设备/插件、固定 gnullvm Release、干净系统安装/启动及完整歌曲场景仍待验收。
+fresh guard 的回归覆盖安装入队拒绝、真实 callback 安装失败、晚完成、panic、引擎丢失、
+New/Open 后身份复用、强制 App Drop 与早退 guard Drop；普通 legacy 行为保持。
+Pending/超时或 OS 进程消失均不能替代实际 Join；创建回收线程失败也不报告成功。
+source30 的 E0425 和 source29 的原组失败保留；source31 后来的通过不改写历史原因。
 
-## 当前源码已经具备什么
+source32 的选定元数据 bundle 从源码计数上将 Q128 wrapper IPC 11 次减至 5 次。
+149 次真实 SDK 查询/调用及顺序保持；尚无新 NI 实测速度、延迟或预算可行性结论。
+完整输入加载器保留 Saved13 全部 405 notes、5 patterns/placements、160 beats 含 coda。
+原 source 直接接 MASTER，channel `.55`、Master base `.7`、全局 `.7 → .56` 自动化保留。
+它只提供加载/拒绝变更基础，尚未构造完整 owner/history 或执行流式原曲导出。
+既有观察/状态/回复容量和 35/280/300 秒期限未通过简单放大绕过。
+独立 state-file auditor 首轮 23 项有 11 failures/6 errors；修稿未通过当前门禁。
+完整 PCM/WAV 流式审核工具仍为私有候选，不能当真实长曲音频通过。
 
-- [Native VST3 editors](docs/NATIVE_VST3_EDITORS.md) 保留 Windows HWND、Linux standalone X11/XWayland-compatible 生命周期和 state/snapshot/automation guards。历史 ownership checkpoint exact helper 的真实 fixture、fresh-instance Surge/Stochas paint/input/state 检查通过，但 **reused Surge 首音丢失、controller getter 过期与内容/容器尺寸不一致仍失败**；旧/新 helper 均复现，属于已有缺陷。新 guard 在明确限定的已使用/已打开编辑器 Surge1.3.4 实例上拒绝这个危险操作；拒绝保持原窗口/状态，不能表述为原操作已成功修复。组件音量在后续正数帧处理后正确应用，不能误报永久 state 丢失。详见 [state limits](docs/PLUGIN_STATE_RESTORE_LIMITS.md)。历史 resize 346.9ms stall 与 Windows paint failure 保留，未宣称 realtime continuity。
-- [Plugin ownership preparation](docs/PLUGIN_PROCESSOR_DOMAINS.md) 将 control owner 与 prepared processor storage 分离，提供不可跨线程移动的 facade 和 exclusive borrowed lease；LoadState/bus/topology 重建及 loader/error-unwind lifetime 已加固。仍为单线程同步执行；固定容量编辑通道移除了processor消费GUI edit/display mutex的依赖；新parameter容器在限定生命周期内准备固定storage，但mutex、事件分配及data-exchange/metering仍待处理；真实 helper DSP/GUI 线程拆分未包含；公共 callback timing 已加入但不解决原生 resize stall；Surge 定向 guard 已加入，但只是拒绝危险操作，通用成功恢复仍未实现。
-- 新发现并修复旧 Browser 基线中的并发问题：MIDI teardown 后排队的 generator 全 Project 候选可能覆盖刚完成的 WAV 导入。现由 import/native Open 共用 project snapshot-transition predicate；实际 app 回归覆盖成功/失败 replacement 和导入独立 Undo，消费结果后仍保留 generation/session 检查。此问题在本轮集成审查发现，不冒充早先已验证。
+## 失败复现与下一步
 
-- [FL-inspired 视觉](docs/FL_INSPIRED_NATIVE_THEME.md) 与[多窗口工作区](docs/MULTIWINDOW_WORKSPACE.md)：四个真实 editor 同时存在，拖移/缩放、关闭重开、Arrange/Cascade、最大化/还原、layout/focus/stacking 持久化已接线。新 [compact refinement](docs/COMPACT_WORKSPACE.md) 降低 chrome/row 密度、修复 reset geometry 并提供 release-only 边缘对齐；Piano 增加当前 session 的 select-all/Copy/Cut/Paste、typed bounded validation 和单步 Undo，文本框继续独占文字剪贴板。原生 OS clipboard round-trip、跨 DAW/MIDI interchange 和 OS-detached editors 仍未实现或未验收。
+- 转换：在独立已加载 Pure 工程停止 source，启动短片段转换；两次状态捕获不一致时明确拒绝。
+- 初始化：Whole run03 在 source ready 前报 `qualification poll/pump deadline or bound exceeded`。
+  18 条观察、0 capture/clone/Process、无 WAV；cleanup 缺实际 source Join，原因未确定。
+  已补有界只读初始化诊断和 fresh guard 保留；不能仅提高期限后称问题解决。
+- 回归：source32 的测试 import 遗漏导致 E0433；source33 编译已通过。
+  source33 两项失败分别为旧 `LatencySamples:1` IPC 断言和 mock stdout `OSError: [Errno 22] Invalid argument`。
+  source34 修夹具后 root 通过；vendor 缺素材、fixture 格式及 source35 Clippy 失败仍保留。
+  source35 格式与 source36 内部 error 修正现已通过对应门禁，不改写此前失败。
+- 优先完成完整原曲离线验证、全部恢复和转换可撤销路径；再扩展效果器/复杂图 PDC。
+- 新构建需本机复测窗口尺寸、按键与视图缩放、播放期间编辑器卡顿、尾音和监听。
 
-- 本地素材浏览器：SOUNDS 已替换硬编码假条目/假预览，增加显式文件夹选择、有界单层 WAV 列表、搜索、Up/Refresh/Cancel 和复用真实 decoder 的 Playlist 导入；成功导入独立 Undo。实现与验收边界见 [Local sample browser](docs/LOCAL_SAMPLE_BROWSER.md)，最终集成源码 Linux no-default/all-target **901 项通过**，fmt、严格 Clippy 和 debug build 通过；该 Browser checkpoint 已通过 Windows 900 项测试；不宣称 audition、GUI/设备验收或完整素材库完成。
-- [播放节拍器](docs/METRONOME.md)：Record 旁 CLICK OFF/ON，旧偏好与新安装默认 Off；独立 app preference，不改变 Project/history/dirty。callback 原子开关停止新 click 并清除活动 envelope，保留 transport phase；已进入 PDC/FX/device 的声音可继续衰减。离线 WAV 不包含 click，实时 Master Capture 包含启用时实际渲染的 click；设备恢复/实听仍独立待验收。
-- 当前创作重点：[Piano keyboard](docs/PIANO_KEYBOARD_EDITING.md) 支持 Ctrl/Cmd+D deselect、Ctrl/Cmd+B phrase repeat、移动/半音/八度、quick quantize、discard length、ghost toggle；[Piano mouse](docs/PIANO_MOUSE_WORKFLOW.md) 支持按下即 Draw、临时 Ctrl selection、Shift clone、按键时序轴锁与 Draw length、继承触碰音符长度。active Channel/group、ghost exclusion、有限值/全局 ID/bounds 与按手势 Undo 均受保护。发现并修复旧流程中 held-pointer Undo/Redo 可能弹出更早 history 的风险；production undo()/redo() 在 release 前阻止操作。新 [Note expression](docs/PIANO_NOTE_EXPRESSION.md) 支持 Alt+wheel / Ctrl+Alt+wheel 相对力度与细调，边界采用共同 delta 保留强弱差；Inspector 与双击共享一套 draft-only 属性窗，单音已有模型字段、多音相对 pitch/velocity、Reset/Cancel/单步 Apply。Imported timing、frozen targets、stale identity、wheel tail、press-time modifier 和 modal/save/import 屏障均有回归；新 [Range/snap](docs/PIANO_RANGES_AND_SNAP.md) 支持独立 ruler edit range、range-width repeat、Off/fine/triplet local snap；paste 统一使用 viewport 左边所在四拍小节，不依赖 PAT/SONG playhead。窄 Piano 的 NOTE EDIT / SCALE 菜单保留 480×420 minimum 的 note/velocity 空间。Range 不写 Project/history，也不是 playback loop。
-- 编辑：Pattern/Piano Roll、Playlist 分组、Slip、Fade/Crossfade、手势 Undo/Redo 已接线。`playlist::create_audio_crossfade` 支持同轨、非嵌套重叠的两条 Audio Clips；`clip_fade.rs` 的等功率 envelope 由实时与离线路径复用。
-- 保存/恢复：blank project、Save/Save As、New/Open/Quit 未保存变更保护、插件状态屏障、同步后原子替换、autosave 和恢复/丢弃对话框已存在。不能把本轮媒体恢复工作描述成首次加入自动保存。
-- 导出：`export.rs` 支持 plugin-free Pattern/WAV arrangement 的 stereo PCM24 WAV；会阻止可能漏掉启用插件或 sidechain 的离线导出。`master_capture.rs` / `audio.rs` / `app.rs` 已连接实时 Master Capture，包含有界队列、PCM24 后台写入、停止确认和无覆盖发布。
-- 导出进度/Cancel、单任务/session 保护、最终发布竞争判定及 active unsupported automation 拒绝已通过 805 项 Windows checkpoint。新 [WAV 选项](docs/WAV_EXPORT_OPTIONS.md) 已集成：PCM16/PCM24/float32、文件采样率、legacy peak attenuation 或 preserve-level 显式选择/复核。默认保持旧 PCM24/0.95 peak 策略；preserve-level PCM 超限会拒绝，float 保留有限超限样本。新选项与 v11 渲染已通过当前 Windows 全部门禁；真实 native Save/GUI/audio 场景仍待验收。
-- [VST3 metadata scanner](docs/VST3_SCANNING.md) 已集成：通过隔离 helper 读取实际 default class 的 name/vendor/category/MIDI capabilities，不再用文件名猜测 VST3 类型；旧 cache 请求 rescan，超时/失败保留 Unknown 与可见原因。Surge XT Effects 的错误 Instrument 分类已修正。精确 e6bd216 已重新执行官方 Surge instrument/Effects metadata 与 cache round-trip；fresh helper hash 与旧已验证 helper 相同。完整 [source-only receipts](docs/REAL_VST3_VALIDATION.md) 保留先前 b57076a controlled-offline instrument/FX/audio-chain 和配置后 Stochas MIDI 生成结果；该历史 bundle 本身不证明 downstream MIDI routing；原始数据与 source identity 保持不变。新的路由证据单独记录如下。
-- [Plugin MIDI ports](docs/PLUGIN_MIDI_ROUTING.md) 已集成：播放时一个 producer 对一个或多个 exclusive-input instruments，Off/0..255、source audio monitor、停止时编辑和 shared snapshot/history barriers。限制为 constant tempo、bus 0、非零 producer latency 拒绝；stop/seek/loop 重新预滚，无 seamless loop 或停止时 live chain。[真实 production graph 验证](docs/PLUGIN_MIDI_ROUTE_VALIDATION.md) 在精确 e54a6e4 源码上通过 5/5，涵盖官方 Stochas → Surge、FX latency fence/recovery、held/retrigger release 与刻意 overload fail-closed/restart。该历史版本的两个 bridge 在48kHz增加4352 frames /90.667ms；当前 timing default2048则为4864 frames /101.3ms，明确按版本区分；旧 Off 路径 15/10 deadline misses、debug 128-frame callback 3.116ms 超时及原因未确定的历史并发 source-batch loss 均保留。没有据此宣称低延迟、真实设备、Harmony Blueprint 或 native GUI 通过。
-- 实时捕获不等于 VST 离线 bounce、自动 tails、stems 或实时/离线完全等价。真实媒体、TempoMap、鼠标、硬件和长期运行仍需单独验收。
+## 证据与保留约定
 
-## 当前正在补齐的两个缺口
+原三处未提交改动：`src/main.rs`、`scripts/qa_windows_kontakt.py`、`src/windows_kontakt_qa.rs`。
+先审查并备份后才编辑；两个 Rust 文件后续有格式/窗口/接线变更，不能称原字节始终不变。
+原脚本保留；没有 reset、覆盖作品、改系统安全设置或擅自合并 main。
+原作品、状态、音频与本机 receipt 留本地，不随源码发行，也不承诺干净 clone 自带证据。
 
-### M1：切分后保持声音与编辑语义
+本机证据目录（仅原验证机器）：
 
-已集成 `audio_clip::split_audio_clip` 与逐边 envelope/source-phase/exact-length 引用，覆盖模型 v11、旧 v10 兼容、JSON 精确浮点回读、实时 Timeline/callback、离线导出与 UI 编辑。取消/进度/不支持 automation 的导出保护保留。切片独立验证有 200 项生产模块测试、严格 Clippy、3 项真实 callback 和4项 App/history 测试通过；当前合并源码已通过本地全目标 typecheck 与860项完整测试，完整 Windows 已通过，GUI/设备验收待执行。细节见 [切分保真](docs/AUDIO_SPLIT_FIDELITY.md)。
+- `target/kontakt-noire-local-20261011`：最初 Kontakt probe。
+- `target/melody-stability-20261011`：原改动副本、独立原生工程、保存/监听/录音。
+- `target/backend-reliability-20261014`：冻结清单、真实终态、失败日志与独立审核。
+- `target/backend-reliability-20261014/pre-push-docs-archive-01`：本次精简前两份完整历史原字节。
 
-### M2：项目媒体诊断和安全重定位
+## 其他既有模块
 
-已集成 File → Project media / relink：持续显示路径/加载错误、后台校验候选文件、显式 Apply/Cancel、稳定 asset ID 的单步 Undo/Redo。候选需匹配 sample rate、channels、frame count，防止改变已有 native-frame offsets；旧 session/path/generation 的结果会拒绝。状态为 **源码已集成，Windows 全部门禁通过，GUI 验收待执行**，未改 schema。15 项模块回归与2项 App 新回归均包含在 792 项通过结果中；工作流与限制见 [Project media](docs/PROJECT_MEDIA.md)。
+既有功能和历史限定验收以专题文档为准；以下链接不代表本轮重新实测：
 
-这不是整套 crash recovery 或便携项目打包完成。必须串联「保存 → 媒体丢失 → 定位 → 重开 → 导出」与恢复点 Restore/保存场景，保留实际结果。
-
-## 基线已完成的可靠性工作
-
-- `model.rs` 保存前有限数检查与失败清理；四项新增回归包含 60 个损坏字段/值组合。
-- `playlist.rs` 组缩放最小边界、Slip 极值/半开区间、Audio offset 溢出、Fade/Crossfade 非有限终点加固；`app.rs` / `playlist.rs` 手势快照包含 Clips、Automation lanes、Audio routing，离散编辑独立提交。
-- `master_capture.rs` 修复停止时最终队列帧可能变成静音的竞态；`export.rs` 拒绝 8000..=192000 Hz 之外的速率和非有限音频数据。
-- Rust 1.99 的 9 处 Clippy 兼容性问题修正，未降低门禁或更改固定 Release 工具链。上述 15 项新增 Rust 回归已包含在 775 项 Windows 通过结果中，不能据此推断后来新增测试通过。
-
-## 交接与记录
-
-[开发路线图](docs/DEVELOPMENT_ROADMAP.md) 跟踪优先级、完成条件与实现/设备/发布边界；[工作日志](docs/WORK_LOG.md) 追加实际变更和验证结果；[构建文档](docs/BUILD_AND_RELEASE.md) 记录固定发布流程。[历史交接](docs/HISTORICAL_DEV_STATE.md) 仅用于追溯。当前文档持续跟随实质变更，不以 CI 通过作为开发结束标志。
+- [钢琴快捷键/鼠标](docs/PIANO_KEYBOARD_EDITING.md)、[范围与吸附](docs/PIANO_RANGES_AND_SNAP.md)。
+- [多窗口](docs/MULTIWINDOW_WORKSPACE.md)、[紧凑布局](docs/COMPACT_WORKSPACE.md)、[FL 功能盘点](docs/FL_STUDIO_PARITY.md)。
+- [媒体恢复](docs/PROJECT_MEDIA.md)、[离线导出](docs/OFFLINE_EXPORT_WORKFLOW.md)、[WAV 选项](docs/WAV_EXPORT_OPTIONS.md)。
+- [插件时间与恢复](docs/PLUGIN_TIMING.md)、[状态边界](docs/PLUGIN_STATE_RESTORE_LIMITS.md)、[原生编辑器](docs/NATIVE_VST3_EDITORS.md)。
+- [MIDI 路由](docs/PLUGIN_MIDI_ROUTING.md)、[真实电平表](docs/MIXER_METERING.md)、[构建发行](docs/BUILD_AND_RELEASE.md)。
+- Windows 本轮支持与验收步骤见 [Windows melody workflow](docs/WINDOWS_MELODY_WORKFLOW.md)。

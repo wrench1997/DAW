@@ -1,12 +1,16 @@
-//! Dormant selected-generator engine with a closed, typed backend contract.
-//! The opt-in strict adapter remains separate from the public export/UI caller.
+//! Experimental renderer-owned backend seam with a closed, typed contract.
+//! Dry, occurrence and single-source master paths share checked backend disposal.
+//! The App master Stop/capture controller and NI qualification of the whole-song
+//! master path are not yet integrated or validated.
 use super::{
     BOUNCE_QUANTUM, BouncePluginMetadata, BounceSourceIdentity, CapturedInstrumentBounce,
     MAX_BOUNCE_FRAMES,
 };
 use crate::{
-    export::{StereoFrame, write_stereo_float32_checked},
+    export::{CapturedMasterSongMix, StereoFrame, write_stereo_float32_checked},
     export_job::ExportControl,
+    export_options::{WavExportOptions, WavExportReport, WavSampleFormat},
+    model::Project,
     plugins::plugin_runtime::PluginTransport,
     timeline::{
         NoteSourceDescriptor, PluginRouteDestination,
@@ -64,10 +68,41 @@ pub(crate) struct BackendFailure {
     pub kind: BackendFailureKind,
     pub delivery: Option<BackendDelivery>,
     diagnostic: String,
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub strict_kind: Option<vst3_host::strict_offline::FailureKind>,
-    #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub strict_diagnostic_unavailable: Option<vst3_host::strict_offline::FailureKind>,
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub strict_stage: Option<&'static str>,
+    /// Fixed context of the exchange that returned this error. It is independent
+    /// of helper diagnostics and does not itself prove any wire delivery.
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub last_wire_request: Option<vst3_host::strict_offline::RequestContext>,
+    /// Getter identity exists only after a complete valid bundle failure reply.
+    /// The actual wire request remains last_wire_request=StrictMetadataSnapshot.
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub strict_metadata_getter: Option<vst3_host::strict_offline::MetadataGetter>,
+    /// First actual catalog guard refusal; the full catalog/text size is unknown.
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub limit_evidence: Option<vst3_host::strict_offline::LimitEvidence>,
 }
 impl BackendFailure {
     pub fn new(kind: BackendFailureKind, diagnostic: impl AsRef<str>) -> Self {
@@ -75,14 +110,48 @@ impl BackendFailure {
             kind,
             delivery: None,
             diagnostic: bounded_diagnostic(diagnostic.as_ref()),
-            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
             strict_kind: None,
-            #[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
             strict_diagnostic_unavailable: None,
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            strict_stage: None,
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            last_wire_request: None,
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            strict_metadata_getter: None,
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            limit_evidence: None,
         }
     }
     pub fn with_delivery(mut self, delivery: BackendDelivery) -> Self {
         self.delivery = Some(delivery);
+        self
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub fn with_strict_context(mut self, stage: &'static str) -> Self {
+        self.strict_stage = Some(stage);
         self
     }
     pub fn diagnostic(&self) -> &str {
@@ -104,7 +173,10 @@ impl std::fmt::Display for BackendFailure {
         f.write_str(self.diagnostic())
     }
 }
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 impl From<vst3_host::strict_offline::Failure> for BackendFailure {
     fn from(value: vst3_host::strict_offline::Failure) -> Self {
         use vst3_host::strict_offline::{Delivery, FailureKind as StrictKind};
@@ -127,6 +199,9 @@ impl From<vst3_host::strict_offline::Failure> for BackendFailure {
         });
         failure.strict_kind = Some(value.kind);
         failure.strict_diagnostic_unavailable = value.diagnostic_unavailable;
+        failure.last_wire_request = value.request_context;
+        failure.strict_metadata_getter = value.metadata_getter;
+        failure.limit_evidence = value.limit_evidence;
         failure
     }
 }
@@ -756,6 +831,12 @@ fn run_owned<B: RenderBackend>(
     progress: &JobProgress,
     fixture_owner: impl FnOnce() -> B,
 ) -> RenderOutcome {
+    if capture.plan().is_master_song() {
+        return RenderOutcome::Failed(RenderFailure::new(
+            FailureKind::Invalid,
+            "A whole-song master capture requires the master composition entry point",
+        ));
+    }
     let prepared = match catch_unwind(AssertUnwindSafe(|| {
         PreparedRender::from_capture(&capture, acknowledge_fixed_tail, control)
     })) {
@@ -1096,6 +1177,276 @@ fn render_audio<B: RenderBackend>(
 #[path = "instrument_bounce_render_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "export_vst_master_tests.rs"]
+mod master_song_tests;
+
+/// Dry source evidence and final master evidence intentionally remain distinct:
+/// native latency is trimmed once by the strict renderer; mixer/master controls
+/// and the requested encoding/level policy are applied before one publication.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct MasterSongRenderReport {
+    pub dry_render: RenderReport,
+    pub master_output: WavExportReport,
+    pub sample_format: WavSampleFormat,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum MasterSongRenderOutcome {
+    Complete(MasterSongRenderReport),
+    Failed(RenderFailure),
+}
+
+pub(crate) struct MasterSongRenderReceipt {
+    receiver: Receiver<MasterSongRenderOutcome>,
+    control: RenderControl,
+    terminated: Arc<AtomicBool>,
+    progress: Arc<JobProgress>,
+}
+impl MasterSongRenderReceipt {
+    pub(crate) fn cancel(&self) -> bool {
+        self.control.export.cancel()
+    }
+    pub(crate) fn status(&self) -> RenderStatus {
+        self.progress.status()
+    }
+    pub(crate) fn termination_acknowledged(&self) -> bool {
+        self.terminated.load(Ordering::Acquire)
+    }
+    pub(crate) fn try_recv(&self) -> Result<MasterSongRenderOutcome, TryRecvError> {
+        if !self.termination_acknowledged() {
+            return Err(TryRecvError::Empty);
+        }
+        self.receiver.try_recv()
+    }
+    #[cfg(test)]
+    fn expire_cleanup_grace(&self) {
+        self.progress
+            .expire_cleanup_grace
+            .store(true, Ordering::Release);
+    }
+}
+impl Drop for MasterSongRenderReceipt {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
+impl RenderAdmission {
+    /// Device-free App regressions only. Production whole-song dispatch still
+    /// accepts exclusively the strict backend factory below.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start_master_song_mock<B: RenderBackend>(
+        &self,
+        project: Project,
+        capture: CapturedInstrumentBounce,
+        options: WavExportOptions,
+        path: PathBuf,
+        control: RenderControl,
+        reviewed_fixed_tail: bool,
+        factory: impl FnOnce() -> B + Send + 'static,
+    ) -> Result<MasterSongRenderReceipt, String> {
+        self.start_master_song_with_backend(
+            project,
+            capture,
+            options,
+            path,
+            control,
+            reviewed_fixed_tail,
+            factory,
+        )
+    }
+
+    /// Production can select only the disposable strict backend. Construction
+    /// remains on its worker; a loaded source owner never crosses threads.
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start_master_song(
+        &self,
+        project: Project,
+        capture: CapturedInstrumentBounce,
+        options: WavExportOptions,
+        path: PathBuf,
+        control: RenderControl,
+        reviewed_fixed_tail: bool,
+        factory: impl FnOnce() -> crate::plugins::strict_backend::StrictBackend + Send + 'static,
+    ) -> Result<MasterSongRenderReceipt, String> {
+        self.start_master_song_with_backend(
+            project,
+            capture,
+            options,
+            path,
+            control,
+            reviewed_fixed_tail,
+            factory,
+        )
+    }
+
+    // The closed generic seam is private, permitting device-free mock tests
+    // without admitting an ordinary realtime VST backend in production.
+    #[allow(clippy::too_many_arguments)]
+    fn start_master_song_with_backend<B: RenderBackend>(
+        &self,
+        project: Project,
+        capture: CapturedInstrumentBounce,
+        options: WavExportOptions,
+        path: PathBuf,
+        control: RenderControl,
+        reviewed_fixed_tail: bool,
+        factory: impl FnOnce() -> B + Send + 'static,
+    ) -> Result<MasterSongRenderReceipt, String> {
+        self.0
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "An instrument renderer still owns this job")?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let terminated = Arc::new(AtomicBool::new(false));
+        let ack = Arc::clone(&terminated);
+        let slot = Arc::clone(&self.0);
+        let progress = Arc::new(JobProgress::new());
+        *self.0.job.lock().unwrap_or_else(|p| p.into_inner()) = Some(Arc::clone(&progress));
+        let worker_progress = Arc::clone(&progress);
+        let worker_control = control.clone();
+        let spawn = std::thread::Builder::new()
+            .name("strict-master-song-render".into())
+            .spawn(move || {
+                let outcome = run_master_song_owned(
+                    project,
+                    capture,
+                    options,
+                    path,
+                    &worker_control,
+                    &worker_progress,
+                    reviewed_fixed_tail,
+                    factory,
+                );
+                let _ = sender.try_send(outcome);
+                drop(sender);
+                // All backend, PCM and file owners finish before releasing admission.
+                worker_progress.set(RenderStatus::Terminated);
+                slot.busy.store(false, Ordering::Release);
+                ack.store(true, Ordering::Release);
+            });
+        if let Err(error) = spawn {
+            progress.set(RenderStatus::Terminated);
+            self.0.busy.store(false, Ordering::Release);
+            return Err(error.to_string());
+        }
+        Ok(MasterSongRenderReceipt {
+            receiver,
+            control,
+            terminated,
+            progress,
+        })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_master_song_owned<B: RenderBackend>(
+    project: Project,
+    capture: CapturedInstrumentBounce,
+    options: WavExportOptions,
+    path: PathBuf,
+    control: &RenderControl,
+    progress: &JobProgress,
+    reviewed_fixed_tail: bool,
+    factory: impl FnOnce() -> B,
+) -> MasterSongRenderOutcome {
+    let preflight = catch_unwind(AssertUnwindSafe(|| {
+        let mix = CapturedMasterSongMix::prepare(
+            &project,
+            &capture,
+            options,
+            &control.export,
+            control.deadline,
+        )
+        .map_err(|error| {
+            let mut failure = writer_failure(error);
+            if failure.kind == FailureKind::Output {
+                failure.kind = FailureKind::Invalid;
+            }
+            failure
+        })?;
+        // The explicit fixed-window decision comes from the reviewed caller.
+        // Preflight rejects missing consent before constructing any backend.
+        let prepared = PreparedRender::from_capture(&capture, reviewed_fixed_tail, control)?;
+        Ok::<_, RenderFailure>((prepared, mix))
+    }));
+    let (prepared, mix) = match preflight {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => return MasterSongRenderOutcome::Failed(error),
+        Err(_) => {
+            return MasterSongRenderOutcome::Failed(RenderFailure::new(
+                FailureKind::Panic,
+                "Whole-song master preflight panicked",
+            ));
+        }
+    };
+    let audio = match render_and_dispose(&capture, &prepared, control, progress, factory) {
+        Ok(audio) => audio,
+        Err(error) => return MasterSongRenderOutcome::Failed(error),
+    };
+    let dry_peak = match checked_master_dry_peak(&audio, control) {
+        Ok(peak) => peak,
+        Err(error) => return MasterSongRenderOutcome::Failed(error),
+    };
+    let dry_render = RenderReport {
+        identity: prepared.identity,
+        origin_frame: prepared.origin_frame,
+        musical_frames: prepared.song_frames,
+        frames: prepared.retained_frames,
+        native_latency: prepared.metadata.latency_samples,
+        reported_tail: prepared.metadata.tail_samples,
+        fixed_tail: prepared.tail_frames,
+        generated_frames: prepared.generated_frames,
+        sample_peak: dry_peak,
+    };
+    // Composition consumes the owned PCM directly; there is no dry file and no
+    // earlier begin_commit on this ExportControl. Disposal must already succeed.
+    let published = catch_unwind(AssertUnwindSafe(|| {
+        mix.compose_and_publish(
+            audio,
+            &path,
+            prepared.metadata.tail_samples,
+            &control.export,
+            control.deadline,
+        )
+    }));
+    match published {
+        Ok(Ok(master_output)) => MasterSongRenderOutcome::Complete(MasterSongRenderReport {
+            dry_render,
+            master_output,
+            sample_format: options.sample_format,
+        }),
+        Ok(Err(error)) => MasterSongRenderOutcome::Failed(writer_failure(error)),
+        Err(_) => MasterSongRenderOutcome::Failed(RenderFailure::new(
+            FailureKind::Panic,
+            "Whole-song master composition or checked writer panicked",
+        )),
+    }
+}
+
+/// Dry evidence can span 24 million retained frames. Keep this scan bounded
+/// between cooperative fences without advancing composition/encoding progress.
+fn checked_master_dry_peak(
+    audio: &[StereoFrame],
+    control: &RenderControl,
+) -> Result<f32, RenderFailure> {
+    let mut peak = 0.0_f32;
+    for frames in audio.chunks(4096) {
+        control.checkpoint()?;
+        for frame in frames {
+            peak = peak.max(frame.left.abs()).max(frame.right.abs());
+        }
+    }
+    control.checkpoint()?;
+    Ok(peak)
+}
+
 /// The occurrence writer carries its linked-file evidence separately from a
 /// render/backend failure. A successful file is never retroactively cancelled.
 #[derive(Debug)]
@@ -1115,7 +1466,11 @@ pub(crate) struct OccurrenceRenderReceipt {
     progress: Arc<JobProgress>,
 }
 impl OccurrenceRenderReceipt {
-    #[cfg(all(test, target_os = "linux", feature = "experimental-fresh-helper"))]
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(crate) fn genuine_hooks_inactive(&self) -> bool {
         !self.progress.expire_cleanup_grace.load(Ordering::Acquire)
     }

@@ -69,7 +69,7 @@ midi-input = ["dep:midir"]
 process-isolation = []
 # Explicit opt-in; absent from defaults. Scoped worker API is Linux-only.
 experimental-scoped-worker = []
-# Low-level Linux mock-only transport foundation; absent from defaults.
+# Owner-thread Linux/Windows transport foundation; absent from defaults.
 experimental-fresh-helper = ["process-isolation"]
 
 [lib]
@@ -182,4 +182,12 @@ features = [
     "winuser",
     "windef",
     "libloaderapi",
+    "fileapi",
+    "handleapi",
+    "ioapiset",
+    "namedpipeapi",
+    "synchapi",
+    "winbase",
+    "winerror",
+    "processthreadsapi",
 ]

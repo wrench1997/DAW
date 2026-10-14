@@ -1,10 +1,10 @@
 //! Actual controller publications supply every sealed PCM used below. No
 //! fabricated receipt, replacement sample buffer, SDK, or file decoder is used.
 use super::*;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use crate::app::clip_render_job::{ClipRenderPhase, tests::Fixture};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn complete(fixture: &mut Fixture) -> u64 {
     fixture.begin();
     fixture.until(|fixture| {
@@ -29,7 +29,7 @@ fn exact_aggregate_arithmetic_and_separate_metadata_bounds() {
     assert!(retained_budget(0, 8, MAX_RETAINED_CLIP_ENTRIES - 1).is_ok());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn successful_commit_retains_actual_compact_producer_pcm_once() {
     let mut fixture = Fixture::new();
@@ -62,7 +62,7 @@ fn successful_commit_retains_actual_compact_producer_pcm_once() {
     assert_eq!(fixture.app().retained_clip_pcm_bytes, bytes);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn retained_restore_refuses_id_path_rate_channel_frame_and_cache_substitution() {
     let mut fixture = Fixture::new();
@@ -146,7 +146,7 @@ fn retained_restore_refuses_id_path_rate_channel_frame_and_cache_substitution() 
     );
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn deleted_or_replaced_file_cannot_change_the_retained_session_pcm() {
     let mut fixture = Fixture::new();
@@ -184,7 +184,7 @@ fn deleted_or_replaced_file_cannot_change_the_retained_session_pcm() {
     assert_eq!(fixture.app().retained_clip_pcm_bytes, bytes);
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn every_existing_asset_id_collision_refuses_without_overwrite() {
     // The first completed actual producer contributes the existing sealed owner.
@@ -262,7 +262,7 @@ fn bounded_path_copy_refuses_oversize_and_relative_paths() {
     assert!(copied_path(Path::new("relative.wav")).is_err());
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_generic_register_and_late_loader_completion_cannot_replace_sealed_pcm() {
     let mut fixture = Fixture::new();
@@ -326,7 +326,7 @@ fn actual_generic_register_and_late_loader_completion_cannot_replace_sealed_pcm(
     ));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 #[test]
 fn actual_session_transition_releases_completed_retained_authority() {
     let mut fixture = Fixture::new();

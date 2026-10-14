@@ -61,6 +61,9 @@ mod windows;
 /// macOS retains the upstream movable-plugin implementation in this preparatory stage.
 type SharedPlugin = PluginOwner<Mutex<Option<Plugin>>>;
 
+#[path = "strict_metadata_bundle/mod.rs"]
+mod strict_metadata_bundle;
+
 fn main() {
     // Before anything else -- certainly before a plugin binary is loaded and can run its own
     // code -- take the protocol channel away from stdout. A hosted plugin shares this
@@ -657,6 +660,9 @@ fn handle(
             Ok(layout) => HostResponse::AudioBusLayout { layout },
             Err(e) => err("AudioBusLayout", e),
         }),
+        HostCommand::StrictMetadataSnapshot(request) => {
+            with(plugin, |p| strict_metadata_bundle::read(p, request.policy))
+        }
         HostCommand::CheckedAudioBusLayout => {
             with(plugin, |p| match p.checked_audio_bus_layout() {
                 Ok(layout) => HostResponse::CheckedAudioBusLayout { layout },

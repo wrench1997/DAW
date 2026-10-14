@@ -53,28 +53,15 @@ pub mod timeline_executor;
 pub mod timeline_plugin_automation;
 pub mod timeline_runtime;
 pub mod wav;
+mod window_startup;
+#[cfg(all(test, windows, feature = "vst3"))]
+mod windows_kontakt_qa;
 
 use app::CitrusApp;
 use eframe::egui;
-use std::sync::Arc;
 
 fn main() -> eframe::Result {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Citrus Studio")
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([1080.0, 680.0])
-            .with_maximized(true)
-            .with_icon(Arc::new(citrus_icon()))
-            .with_app_id("com.citrus.studio"),
-        renderer: eframe::Renderer::Wgpu,
-        multisampling: 4,
-        depth_buffer: 0,
-        stencil_buffer: 0,
-        dithering: true,
-        persist_window: true,
-        ..Default::default()
-    };
+    let options = window_startup::native_options(citrus_icon());
 
     eframe::run_native(
         "Citrus Studio",

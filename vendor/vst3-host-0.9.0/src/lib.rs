@@ -79,11 +79,17 @@ pub mod backends;
 
 pub mod process_isolation;
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "experimental-fresh-helper"
+))]
 #[allow(dead_code)] // Deliberately private foundation; caller integration is a later checkpoint.
 mod fresh_helper;
 
-#[cfg(all(target_os = "linux", feature = "experimental-fresh-helper"))]
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "experimental-fresh-helper"
+))]
 #[doc(hidden)]
 pub mod strict_offline;
 

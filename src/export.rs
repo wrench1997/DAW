@@ -12,24 +12,41 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::{
     audio_clip::{audio_end_beat, audio_metadata_valid, source_elapsed_frames},
-    automation::AutomationTarget,
+    automation::{AutomationTarget, canonicalize_automation_target},
     clip_fade::{CompiledClipFades, compile_clip_fades},
     export_job::ExportControl,
     export_options::{WavExportOptions, WavExportReport, WavSampleFormat},
+    instrument_bounce::{CapturedInstrumentBounce, InstrumentBouncePlan},
     mixer_graph::{
-        CompiledMixerGraph, MIXER_GRAPH_MAX_NODES, MixerRouteTap, MixerTrackId, compile_mixer_graph,
+        CompiledMixerGraph, MASTER_MIXER_TRACK_ID, MIXER_GRAPH_MAX_NODES, MixerRouteTap,
+        MixerTrackId, compile_mixer_graph,
     },
-    model::{AudioAsset, Clip, ClipKind, Pattern, Project},
+    model::{AudioAsset, Channel, Clip, ClipKind, Pattern, Project},
     tempo_map::TempoMap,
     wav,
 };
 
 const PROGRESS_FRAME_INTERVAL: usize = 4096;
+#[path = "export_master_controls.rs"]
+mod master_controls;
+use master_controls::OfflineMasterControls;
+#[cfg(test)]
+#[path = "export_channel_controls_tests.rs"]
+mod channel_controls_tests;
+#[cfg(test)]
+#[path = "export_master_mute_tests.rs"]
+mod master_mute_tests;
+#[cfg(windows)]
+#[path = "export_native_file.rs"]
+pub(crate) mod native_file;
+#[cfg(test)]
+#[path = "export_workflow_tests.rs"]
+mod workflow_tests;
 const WAV_WRITE_BUFFER_BYTES: usize = 64 * 1024;
-// Keep offline rendering aligned with the callback timeline's legacy Piano Roll period
-// (`TimelineCompileOptions::default().legacy_piano_period_beats`). Channel Rack steps retain
+// Preserve the callback timeline's default minimum while both paths derive a
+// longer cycle from the same Piano Roll content. Channel Rack steps retain
 // their independent Pattern-length cycle below.
-const LEGACY_PIANO_REPEAT_BEATS: f32 = 16.0;
+const LEGACY_PIANO_MINIMUM_BEATS: f64 = 16.0;
 static STAGED_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy)]
@@ -87,8 +104,31 @@ struct OfflineMixerPlan {
 }
 
 impl OfflineMixerPlan {
+    #[cfg(test)]
     fn build(project: &Project) -> Result<Self> {
-        ensure_no_active_plugins(project)?;
+        Self::build_with_master_controls(project, false, false, false)
+    }
+
+    fn build_with_master_controls(
+        project: &Project,
+        volume_driven: bool,
+        pan_driven: bool,
+        mute_driven: bool,
+    ) -> Result<Self> {
+        Self::build_validated(project, volume_driven, pan_driven, mute_driven, None)
+    }
+
+    fn build_validated(
+        project: &Project,
+        volume_driven: bool,
+        pan_driven: bool,
+        mute_driven: bool,
+        captured_generator: Option<&CapturedGeneratorWhitelist>,
+    ) -> Result<Self> {
+        match captured_generator {
+            Some(source) => ensure_only_captured_generator(project, source)?,
+            None => ensure_no_active_plugins(project)?,
+        }
         let graph = compile_mixer_graph(project)
             .context("Unable to compile the mixer graph for offline export")?;
 
@@ -133,21 +173,33 @@ impl OfflineMixerPlan {
         for node in graph.nodes() {
             let runtime_slot = usize::from(node.runtime_slot);
             let track = &project.mixer_tracks[node.project_index];
-            node_gate[runtime_slot] = !track.muted
+            // The master mute kernel runs after source mixing. Preserve raw
+            // sources even when its persisted base is muted, so an automated
+            // unmute can make notes and decoded assets audible again.
+            let static_muted = track.muted && !(mute_driven && track.id == MASTER_MIXER_TRACK_ID);
+            node_gate[runtime_slot] = !static_muted
                 && (!any_solo || solo_ancestors[runtime_slot] || solo_descendants[runtime_slot]);
         }
 
         let master = graph.nodes()[usize::from(graph.master_dense_index())];
         let master_slot = usize::from(master.runtime_slot);
         let master_track = &project.mixer_tracks[master.project_index];
-        let (master_pan_left, master_pan_right) = pan_balance(master_track.pan);
+        // Driven controls are applied after source mixing. Preserve the
+        // original project bases in the compiled automation, including zero.
+        let master_volume = if volume_driven {
+            1.0
+        } else {
+            master_track.volume
+        };
+        let (master_pan_left, master_pan_right) =
+            pan_balance(if pan_driven { 0.0 } else { master_track.pan });
         let mut left_transfer = [0.0_f32; MIXER_GRAPH_MAX_NODES];
         let mut right_transfer = [0.0_f32; MIXER_GRAPH_MAX_NODES];
         let mut reaches_master = [false; MIXER_GRAPH_MAX_NODES];
         if node_gate[master_slot] {
             reaches_master[master_slot] = true;
-            left_transfer[master_slot] = master_track.volume * master_pan_left;
-            right_transfer[master_slot] = master_track.volume * master_pan_right;
+            left_transfer[master_slot] = master_volume * master_pan_left;
+            right_transfer[master_slot] = master_volume * master_pan_right;
         }
 
         for dense in graph.topological_order().iter().copied().rev() {
@@ -201,6 +253,248 @@ impl OfflineMixerPlan {
     }
 }
 
+/// Only a capture validated against the original immutable project can create
+/// this exception to the ordinary active-plug-in guard. No project projection
+/// or disabled-instance copy participates in mixer validation.
+struct CapturedGeneratorWhitelist {
+    channel_id: u32,
+    instance_id: u64,
+}
+
+fn ensure_only_captured_generator(
+    project: &Project,
+    source: &CapturedGeneratorWhitelist,
+) -> Result<()> {
+    // Even bypassed/inactive insert endpoints apply safe_plugin_sample to
+    // their bus output. Folding those nonlinear stages into route gains would
+    // change the realtime signal, so this bounded seam admits no insert slots.
+    ensure!(
+        project.mixer_insert_slots.is_empty(),
+        "Whole-song master export does not support mixer insert slots, including disabled or bypassed slots"
+    );
+    let mut selected = 0;
+    for channel in &project.channels {
+        let Some(id) = channel.instrument_plugin_instance_id else {
+            continue;
+        };
+        let mut instances = project
+            .plugin_instances
+            .iter()
+            .filter(|instance| instance.id == id);
+        let instance = instances
+            .next()
+            .context("Captured mixer references a missing plug-in")?;
+        ensure!(
+            instances.next().is_none(),
+            "Captured mixer references a duplicate plug-in identity"
+        );
+        if instance.enabled && !instance.bypass {
+            ensure!(
+                channel.id == source.channel_id && id == source.instance_id,
+                "Only the captured generator may be active in whole-song master export"
+            );
+            selected += 1;
+        }
+    }
+    ensure!(
+        selected == 1,
+        "Whole-song master export requires exactly one captured active generator"
+    );
+    Ok(())
+}
+
+/// Validated composition of one strict dry instrument render into the original
+/// static mixer graph and Master Volume/Pan/Mute timeline. It owns controls but
+/// never owns a plug-in or publishes an intermediate file.
+pub(crate) struct CapturedMasterSongMix {
+    options: WavExportOptions,
+    music_frames: usize,
+    tail_frames: usize,
+    left_gain: f32,
+    right_gain: f32,
+    master_controls: OfflineMasterControls,
+}
+
+impl CapturedMasterSongMix {
+    pub(crate) fn prepare(
+        project: &Project,
+        capture: &CapturedInstrumentBounce,
+        options: WavExportOptions,
+        control: &ExportControl,
+        deadline: Instant,
+    ) -> Result<Self> {
+        control.check_deadline(deadline)?;
+        options.validate()?;
+        let plan = capture.plan();
+        ensure!(
+            plan.is_master_song() && plan.occurrence_request().is_none(),
+            "A whole-song master capture is required"
+        );
+        let tail_frames = options.tail_frames()?;
+        ensure!(
+            options.sample_rate == plan.sample_rate()
+                && u32::try_from(tail_frames)? == plan.tail_frames(),
+            "Master WAV options differ from captured sample rate or fixed tail"
+        );
+        // Revalidate all source/automation restrictions against the *original*
+        // snapshot, then bind its complete serialized fingerprint to capture.
+        let validated = InstrumentBouncePlan::prepare_master_song(
+            project,
+            plan.channel_id(),
+            options.sample_rate,
+            plan.tail_frames(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        ensure!(
+            validated.project_fingerprint() == plan.project_fingerprint()
+                && capture.identity().project_fingerprint == plan.project_fingerprint()
+                && capture.identity().channel_id == plan.channel_id()
+                && capture.identity().instance_id == plan.instance_id(),
+            "Whole-song master snapshot differs from captured source fingerprint"
+        );
+        let tempo_map = TempoMap::from_project(project, options.sample_rate)?;
+        let master_controls = OfflineMasterControls::prepare(project, &tempo_map)?;
+        let master = project
+            .mixer_tracks
+            .iter()
+            .find(|track| track.id == MASTER_MIXER_TRACK_ID)
+            .context("Captured master mixer identity is absent")?;
+        // Realtime SetMaster and automated bases are canonicalized to 0..1.2.
+        // Reject a wider model-only base instead of silently exporting a gain
+        // that cannot be represented by that realtime control contract.
+        ensure!(
+            master.volume.is_finite() && (0.0..=1.2).contains(&master.volume),
+            "Whole-song master base volume must match the realtime range 0..1.2"
+        );
+        let source = CapturedGeneratorWhitelist {
+            channel_id: plan.channel_id(),
+            instance_id: plan.instance_id(),
+        };
+        let mixer = OfflineMixerPlan::build_validated(
+            project,
+            master_controls.drives_volume(),
+            master_controls.drives_pan(),
+            master_controls.drives_mute(),
+            Some(&source),
+        )?;
+        let channel = project
+            .channels
+            .iter()
+            .find(|channel| channel.id == source.channel_id)
+            .context("Captured master source channel is absent")?;
+        ensure!(
+            channel.volume.is_finite() && channel.pan.is_finite(),
+            "Captured master channel controls must be finite"
+        );
+        let any_solo = project.channels.iter().any(|channel| channel.solo);
+        let audible = !channel.muted && (!any_solo || channel.solo);
+        let (pan_left, pan_right) = pan_balance(channel.pan);
+        let (left_gain, right_gain) = match mixer.route_for_track_id(channel.mixer_track) {
+            Some(route) if audible => (
+                channel.volume * pan_left * route.gain * route.left_gain,
+                channel.volume * pan_right * route.gain * route.right_gain,
+            ),
+            _ => (0.0, 0.0),
+        };
+        ensure!(
+            left_gain.is_finite() && right_gain.is_finite(),
+            "Captured master routing gains must be finite"
+        );
+        let music_frames = usize::try_from(tempo_map.duration_frames())?;
+        ensure!(
+            tempo_map.duration_frames() == plan.timeline().duration_frames(),
+            "Master controls duration differs from captured musical duration"
+        );
+        options.sample_format.data_size_for_frames(
+            music_frames
+                .checked_add(tail_frames)
+                .context("Master frame count overflow")?,
+        )?;
+        control.check_deadline(deadline)?;
+        Ok(Self {
+            options,
+            music_frames,
+            tail_frames,
+            left_gain,
+            right_gain,
+            master_controls,
+        })
+    }
+
+    /// Consumes caller-owned latency-trimmed N+tail PCM. Deadline/cancellation
+    /// fences continue through composition, encoding and the only commit CAS.
+    pub(crate) fn compose_and_publish(
+        mut self,
+        mut stereo: Vec<StereoFrame>,
+        path: &Path,
+        reported_tail: u32,
+        control: &ExportControl,
+        deadline: Instant,
+    ) -> Result<WavExportReport> {
+        ensure!(
+            stereo.len() == self.music_frames + self.tail_frames,
+            "Strict dry PCM does not span the complete master N+tail interval"
+        );
+        for (block, samples) in stereo.chunks_mut(PROGRESS_FRAME_INTERVAL).enumerate() {
+            control.check_deadline(deadline)?;
+            let start = block
+                .checked_mul(PROGRESS_FRAME_INTERVAL)
+                .context("Master block offset overflow")?;
+            control.work_progress(start, self.music_frames + self.tail_frames, 6_000, 6_500)?;
+            for sample in samples.iter_mut() {
+                ensure!(
+                    sample.left.is_finite() && sample.right.is_finite(),
+                    "Strict dry PCM contains non-finite audio"
+                );
+                // Realtime generator endpoint samples are protected before
+                // channel volume/pan or bus routing, even for finite headroom.
+                sample.left = sample.left.clamp(-8.0, 8.0) * self.left_gain;
+                sample.right = sample.right.clamp(-8.0, 8.0) * self.right_gain;
+            }
+            self.master_controls
+                .apply_block(u64::try_from(start)?, samples)?;
+            // Both realtime graph and legacy master paths apply this once,
+            // after route accumulation and Master Volume/Pan/Mute controls.
+            for sample in samples {
+                sample.left = sample.left.tanh();
+                sample.right = sample.right.tanh();
+            }
+            control.check_deadline(deadline)?;
+        }
+        let mut peak = 0.0_f32;
+        for (index, sample) in stereo.iter().enumerate() {
+            if index % PROGRESS_FRAME_INTERVAL == 0 {
+                control.work_progress(index, stereo.len(), 6_500, 7_000)?;
+                control.check_deadline(deadline)?;
+            }
+            ensure!(
+                sample.left.is_finite() && sample.right.is_finite(),
+                "Whole-song master composition contains non-finite audio at frame {index}"
+            );
+            peak = peak.max(sample.left.abs()).max(sample.right.abs());
+        }
+        let gain = self.options.gain_for_peak(peak)?;
+        write_stereo_wav_core(
+            path,
+            self.options,
+            &stereo,
+            gain,
+            control,
+            WavWritePolicy::checked(deadline),
+        )?;
+        Ok(WavExportReport {
+            sample_rate: self.options.sample_rate,
+            frames: stereo.len(),
+            music_frames: self.music_frames,
+            tail_frames: self.tail_frames,
+            // Metadata-based truncation evidence; this is not a silence test.
+            tail_limit_reached: u64::from(reported_tail) > self.tail_frames as u64,
+            sample_peak: peak,
+            applied_gain: gain,
+        })
+    }
+}
+
 fn ensure_no_active_plugins(project: &Project) -> Result<()> {
     let active_instance = |instance_id: u64| -> Result<bool> {
         let mut instances = project
@@ -244,7 +538,15 @@ fn ensure_no_active_plugins(project: &Project) -> Result<()> {
 /// renderer independently repeats these guards against its cloned snapshot.
 pub fn ensure_supported_project(project: &Project) -> Result<()> {
     ensure_supported_automation(project)?;
-    OfflineMixerPlan::build(project).map(|_| ())
+    let tempo_map = TempoMap::from_project(project, 48_000)?;
+    let controls = OfflineMasterControls::prepare(project, &tempo_map)?;
+    OfflineMixerPlan::build_with_master_controls(
+        project,
+        controls.drives_volume(),
+        controls.drives_pan(),
+        controls.drives_mute(),
+    )
+    .map(|_| ())
 }
 
 /// Pure preflight shared by the UI and renderer. Legacy lanes without any
@@ -255,7 +557,15 @@ pub fn ensure_supported_automation(project: &Project) -> Result<()> {
         let lane = &automation.lane;
         if !lane.is_enabled()
             || lane.points().is_empty()
-            || *lane.target() == AutomationTarget::Tempo
+            || matches!(
+                canonicalize_automation_target(lane.target().clone()),
+                AutomationTarget::Tempo
+                    | AutomationTarget::MasterVolume
+                    | AutomationTarget::MasterPan
+                    | AutomationTarget::MixerMute {
+                        track: MASTER_MIXER_TRACK_ID
+                    }
+            )
         {
             continue;
         }
@@ -285,7 +595,7 @@ pub fn ensure_supported_automation(project: &Project) -> Result<()> {
         };
         if active {
             bail!(
-                "Offline WAV export cannot render automation '{}' (lane {}, target {}). Only Tempo automation is supported. Disable this lane or use Realtime Master Capture to preserve the live result.",
+                "Offline WAV export cannot render automation '{}' (lane {}, target {}). Only Tempo, Master Volume, Master Pan and Master Mute automation are supported. Disable this lane or use Realtime Master Capture to preserve the live result.",
                 automation.name,
                 automation.id,
                 automation_target_description(lane.target())
@@ -373,18 +683,28 @@ pub fn render_project_wav_with_options(
     options.validate()?;
     let sample_rate = options.sample_rate;
     ensure_supported_automation(project)?;
-    let mixer_plan = OfflineMixerPlan::build(project)?;
     let tempo_map = TempoMap::from_project(project, sample_rate)
         .context("Unable to build the project tempo map for WAV export")?;
-    let frame_count = usize::try_from(tempo_map.duration_frames())
+    let mut master_controls = OfflineMasterControls::prepare(project, &tempo_map)?;
+    let mixer_plan = OfflineMixerPlan::build_with_master_controls(
+        project,
+        master_controls.drives_volume(),
+        master_controls.drives_pan(),
+        master_controls.drives_mute(),
+    )?;
+    let music_frames = usize::try_from(tempo_map.duration_frames())
         .context("Project is too long for this platform")?;
+    let tail_frames = options.tail_frames()?;
+    let frame_count = music_frames
+        .checked_add(tail_frames)
+        .context("WAV music and tail frame count overflow")?;
     options.sample_format.data_size_for_frames(frame_count)?;
     let (audio_assets, audio_clips) = prepare_audio_clips(
         project,
         &mixer_plan,
         sample_rate,
         &tempo_map,
-        frame_count,
+        music_frames,
         control,
     )?;
     control.checkpoint(1000)?;
@@ -400,7 +720,12 @@ pub fn render_project_wav_with_options(
         if frame % PROGRESS_FRAME_INTERVAL == 0 {
             control.work_progress(frame, frame_count, 1500, 5000)?;
         }
-        while next_event < events.len() && events[next_event].sample <= frame {
+        // A fixed tail drains existing voices. It never admits another note
+        // or replays the arrangement at its exclusive end.
+        while frame < music_frames
+            && next_event < events.len()
+            && events[next_event].sample <= frame
+        {
             let event = events[next_event];
             let duration_samples = (event.duration * sample_rate as f32).max(1.0);
             voices.push(Voice {
@@ -458,11 +783,13 @@ pub fn render_project_wav_with_options(
     // not contribute to the same peak.
     drop(audio_clips);
     drop(audio_assets);
+    master_controls.apply_all(&mut stereo, control)?;
+    let tail_limit_reached = !voices.is_empty();
 
     let mut peak = 0.0_f32;
     for (index, frame) in stereo.iter().enumerate() {
         if index % PROGRESS_FRAME_INTERVAL == 0 {
-            control.work_progress(index, stereo.len(), 6500, 7000)?;
+            control.work_progress(index, stereo.len(), 6900, 7000)?;
         }
         ensure!(
             frame.left.is_finite() && frame.right.is_finite(),
@@ -474,7 +801,11 @@ pub fn render_project_wav_with_options(
     write_stereo_wav_controlled(path, options, &stereo, gain, control)
         .with_context(|| format!("Unable to export WAV to {}", path.display()))?;
     Ok(WavExportReport {
+        sample_rate,
         frames: frame_count,
+        music_frames,
+        tail_frames,
+        tail_limit_reached,
         sample_peak: peak,
         applied_gain: gain,
     })
@@ -551,13 +882,15 @@ fn collect_pattern_events(
     if clip_end <= clip_start {
         return Ok(());
     }
+    let any_channel_solo = project.channels.iter().any(|channel| channel.solo);
     for (channel_index, channel) in project.channels.iter().enumerate() {
-        if channel.muted {
+        if !native_channel_audible(channel, any_channel_solo) {
             continue;
         }
         let Some(route) = mixer_plan.route_for_track_id(channel.mixer_track) else {
             continue;
         };
+        let (channel_left, channel_right) = pan_balance(channel.pan);
         let Some(steps) = pattern.channel_steps.get(channel_index) else {
             continue;
         };
@@ -598,15 +931,16 @@ fn collect_pattern_events(
                     })
                     .min(clip_stop.saturating_sub(sample) as f32 / tempo_map.sample_rate() as f32),
                     waveform,
-                    left_gain: route.left_gain,
-                    right_gain: route.right_gain,
+                    left_gain: route.left_gain * channel_left,
+                    right_gain: route.right_gain * channel_right,
                 });
             }
             cycle += cycle_beats;
         }
     }
 
-    let mut cycle = -source_offset.rem_euclid(LEGACY_PIANO_REPEAT_BEATS);
+    let piano_period = pattern.piano_period_beats(LEGACY_PIANO_MINIMUM_BEATS) as f32;
+    let mut cycle = -source_offset.rem_euclid(piano_period);
     while clip_start + cycle < clip_end {
         control.check_cancelled()?;
         for note in &pattern.notes {
@@ -638,12 +972,13 @@ fn collect_pattern_events(
                 note.id,
                 channel_id
             );
-            if channel.muted {
+            if !native_channel_audible(channel, any_channel_solo) {
                 continue;
             }
             let Some(route) = mixer_plan.route_for_track_id(channel.mixer_track) else {
                 continue;
             };
+            let (channel_left, channel_right) = pan_balance(channel.pan);
             let beat = clip_start + cycle + note.start;
             if beat < clip_start || beat >= clip_end {
                 continue;
@@ -657,13 +992,17 @@ fn collect_pattern_events(
                 velocity: note.velocity * channel.volume * route.gain * clip_gain * 0.55,
                 duration: end_sample.saturating_sub(sample) as f32 / tempo_map.sample_rate() as f32,
                 waveform: Waveform::Triangle,
-                left_gain: route.left_gain,
-                right_gain: route.right_gain,
+                left_gain: route.left_gain * channel_left,
+                right_gain: route.right_gain * channel_right,
             });
         }
-        cycle += LEGACY_PIANO_REPEAT_BEATS;
+        cycle += piano_period;
     }
     Ok(())
+}
+
+fn native_channel_audible(channel: &Channel, any_solo: bool) -> bool {
+    !channel.muted && (!any_solo || channel.solo) && channel.instrument_plugin_instance_id.is_none()
 }
 
 fn pan_balance(pan: f32) -> (f32, f32) {
@@ -1017,6 +1356,7 @@ pub(crate) fn write_stereo_float32_checked(
             sample_rate,
             sample_format: WavSampleFormat::Float32,
             level_policy: crate::export_options::WavLevelPolicy::PreserveLevel,
+            tail_milliseconds: 0,
         },
         stereo,
         1.0,
@@ -1043,13 +1383,25 @@ pub(crate) enum PublicationPhase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PublishedFileIdentity {
     pub(crate) device: u64,
-    pub(crate) inode: u64,
+    pub(crate) inode: u128,
     pub(crate) bytes: u64,
     pub(crate) modified_seconds: i64,
     pub(crate) modified_nanoseconds: i64,
 }
 
 impl PublishedFileIdentity {
+    pub(crate) fn from_file(file: &File) -> std::io::Result<Self> {
+        #[cfg(windows)]
+        {
+            native_file::inspect(file).map(|snapshot| snapshot.identity)
+        }
+        #[cfg(not(windows))]
+        {
+            Self::from_metadata(&file.metadata()?)
+        }
+    }
+
+    #[cfg(not(windows))]
     pub(crate) fn from_metadata(metadata: &std::fs::Metadata) -> std::io::Result<Self> {
         #[cfg(target_os = "linux")]
         {
@@ -1061,7 +1413,7 @@ impl PublishedFileIdentity {
             }
             Ok(Self {
                 device: metadata.dev(),
-                inode: metadata.ino(),
+                inode: u128::from(metadata.ino()),
                 bytes: metadata.len(),
                 modified_seconds: metadata.mtime(),
                 modified_nanoseconds: metadata.mtime_nsec(),
@@ -1072,7 +1424,7 @@ impl PublishedFileIdentity {
             let _ = metadata;
             Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "Owned occurrence publication requires Linux identity and directory durability",
+                "Owned occurrence publication requires Linux or Windows file identity",
             ))
         }
     }
@@ -1093,7 +1445,9 @@ pub(crate) enum PublicationOperation {
     Write,
     Link,
     AfterLink,
+    #[cfg(not(windows))]
     StageUnlink,
+    #[cfg(not(windows))]
     ParentSync,
     Abort,
 }
@@ -1223,6 +1577,7 @@ impl PublishedFloat32 {
 
 struct CreateNewPublication {
     destination: PathBuf,
+    #[cfg(not(windows))]
     parent: Option<File>,
     phase: PublicationPhase,
     identity: Option<PublishedFileIdentity>,
@@ -1264,6 +1619,7 @@ impl CreateNewPublication {
         }
     }
 
+    #[cfg(not(windows))]
     fn finish_link(&mut self, staged: &mut StagedOutput, _policy: &WavWritePolicy) -> Result<()> {
         // Disable implicit Drop cleanup BEFORE either fallible attempt. We make
         // exactly one observable unlink attempt and retain its path on failure.
@@ -1302,8 +1658,18 @@ impl CreateNewPublication {
         }
         Ok(())
     }
+
+    #[cfg(windows)]
+    fn finish_link(&mut self, staged: &mut StagedOutput, _policy: &WavWritePolicy) -> Result<()> {
+        // The checked same-volume, no-replace WRITE_THROUGH move consumed the
+        // stage. Windows has no Linux directory-fsync step to pretend to perform.
+        // Even a post-publication panic must leave the destination retained.
+        staged.cleanup_on_drop = false;
+        Ok(())
+    }
 }
 
+#[cfg(not(windows))]
 fn catch_publication_io(operation: impl FnOnce() -> std::io::Result<()>) -> Result<()> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
         .map_err(|payload| anyhow::Error::from(WavStagingPanic::from_payload(payload)))?
@@ -1338,6 +1704,7 @@ fn write_float32_create_new_with_policy(
 ) -> std::result::Result<PublishedFloat32, Box<CreateNewFailure>> {
     let mut publication = CreateNewPublication {
         destination: PathBuf::new(),
+        #[cfg(not(windows))]
         parent: None,
         phase: PublicationPhase::PreLink,
         identity: None,
@@ -1366,10 +1733,10 @@ fn write_float32_create_new_with_policy(
             .context("Unable to reserve occurrence path")?;
         owned_path.push_str(path_text);
         publication.destination = PathBuf::from(owned_path);
-        if !cfg!(target_os = "linux") {
+        if !cfg!(any(target_os = "linux", windows)) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
-                "Create-new occurrence durability is supported only on Linux",
+                "Create-new occurrence publication is supported only on Linux and Windows",
             )
             .into());
         }
@@ -1380,15 +1747,22 @@ fn write_float32_create_new_with_policy(
         let parent = path
             .parent()
             .context("Occurrence output has no parent directory")?;
-        publication.parent = Some(
-            File::open(parent).context("Unable to open occurrence output directory for sync")?,
-        );
+        #[cfg(not(windows))]
+        {
+            publication.parent = Some(
+                File::open(parent)
+                    .context("Unable to open occurrence output directory for sync")?,
+            );
+        }
+        #[cfg(windows)]
+        ensure!(parent.is_dir(), "Occurrence output directory is absent");
         write_stereo_wav_kernel(
             path,
             WavExportOptions {
                 sample_rate,
                 sample_format: WavSampleFormat::Float32,
                 level_policy: crate::export_options::WavLevelPolicy::PreserveLevel,
+                tail_milliseconds: 0,
             },
             stereo,
             1.0,
@@ -1661,11 +2035,23 @@ fn write_stereo_wav_kernel(
             .sync_all()
             .with_context(|| format!("Unable to sync staged WAV for {}", path.display()))?;
         if let Some(publication) = publication.as_deref_mut() {
-            publication.identity = Some(PublishedFileIdentity::from_metadata(
-                &writer.get_ref().metadata()?,
-            )?);
+            publication.identity = Some(PublishedFileIdentity::from_file(writer.get_ref())?);
         }
         drop(writer);
+        #[cfg(windows)]
+        if let Some(publication) = publication.as_deref_mut() {
+            // Windows finalizes LastWriteTime when the write handle closes.
+            // Reinspect the same file ID rather than sealing a provisional stamp.
+            let finalized =
+                PublishedFileIdentity::from_file(&native_file::open_unfollowed(&staged.path)?)?;
+            let original = publication.identity.expect("staged producer identity");
+            ensure!(
+                (finalized.device, finalized.inode, finalized.bytes)
+                    == (original.device, original.inode, original.bytes),
+                "Staged occurrence file changed before publication"
+            );
+            publication.identity = Some(finalized);
+        }
         // The cancellation/commit CAS makes the final boundary unambiguous even
         // if the UI requests Cancel concurrently with the worker's publication.
         policy.begin_commit(control)?;
@@ -1678,7 +2064,10 @@ fn write_stereo_wav_kernel(
                 }
                 policy.operation(StagedOperation::Link)?;
             }
+            #[cfg(not(windows))]
             std::fs::hard_link(&staged.path, &publication.destination)?;
+            #[cfg(windows)]
+            native_file::move_file(&staged.path, &publication.destination, false)?;
             // This assignment MUST be the first operation after successful link.
             // Paths and identity storage already exist outside the unwind scope.
             publication.phase = PublicationPhase::Linked;
@@ -1975,7 +2364,7 @@ mod tests {
     };
     use std::{collections::BTreeMap, time::Duration};
 
-    fn arrangement_project() -> Project {
+    pub(super) fn arrangement_project() -> Project {
         let mut project = Project {
             tempo: 120.0,
             song_length_beats: 8.0,
@@ -2040,7 +2429,7 @@ mod tests {
         std::env::temp_dir().join(format!("citrus-{name}-{}.wav", std::process::id()))
     }
 
-    fn write_pcm16_wav(path: &Path, sample_rate: u32, channels: u16, samples: &[i16]) {
+    pub(super) fn write_pcm16_wav(path: &Path, sample_rate: u32, channels: u16, samples: &[i16]) {
         assert!(channels > 0);
         assert!(samples.len().is_multiple_of(usize::from(channels)));
         let data_size = u32::try_from(samples.len() * 2).unwrap();
@@ -2090,7 +2479,7 @@ mod tests {
         }
     }
 
-    fn audio_project(
+    pub(super) fn audio_project(
         source: &Path,
         source_rate: u32,
         channels: u16,
@@ -2208,7 +2597,7 @@ mod tests {
         );
     }
 
-    fn test_plugin(id: u64) -> PluginInstance {
+    pub(super) fn test_plugin(id: u64) -> PluginInstance {
         PluginInstance {
             midi_ports: crate::plugin_midi_routing::PluginMidiPorts::default(),
             id,
@@ -2465,7 +2854,7 @@ mod tests {
         clip
     }
 
-    fn workflow_test_directory(name: &str) -> PathBuf {
+    pub(super) fn workflow_test_directory(name: &str) -> PathBuf {
         let sequence = STAGED_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let directory = std::env::temp_dir().join(format!(
             "citrus-export-{name}-{}-{sequence}",
@@ -2488,6 +2877,7 @@ mod tests {
                 sample_rate: 8000,
                 sample_format: WavSampleFormat::Float32,
                 level_policy: crate::export_options::WavLevelPolicy::PreserveLevel,
+                tail_milliseconds: 0,
             },
             &[StereoFrame {
                 left: 0.25,
@@ -2520,6 +2910,7 @@ mod tests {
                 sample_rate: 8000,
                 sample_format: WavSampleFormat::Float32,
                 level_policy: crate::export_options::WavLevelPolicy::PreserveLevel,
+                tail_milliseconds: 0,
             },
             &frames,
             1.0,
@@ -2822,14 +3213,12 @@ mod tests {
     }
 
     #[test]
-    fn all_non_tempo_targets_fail_preflight_without_replacing_destination() {
+    fn unsupported_targets_fail_preflight_without_replacing_destination() {
         let directory = workflow_test_directory("automation");
         let path = directory.join("existing.wav");
         let original = b"original destination bytes";
         std::fs::write(&path, original).unwrap();
         let targets = [
-            AutomationTarget::MasterVolume,
-            AutomationTarget::MasterPan,
             AutomationTarget::Swing,
             AutomationTarget::MixerVolume { track: 1 },
             AutomationTarget::MixerPan { track: 1 },
@@ -2865,13 +3254,16 @@ mod tests {
         let mut project = arrangement_project();
         project
             .automation_lanes
-            .push(unsupported_lane(AutomationTarget::MasterVolume));
+            .push(unsupported_lane(AutomationTarget::ChannelVolume {
+                channel: 1,
+            }));
         project.automation_lanes[0].lane.set_enabled(false);
         ensure_supported_automation(&project).unwrap();
         project.automation_lanes[0].lane.set_enabled(true);
         project.automation_lanes[0].lane.replace_points([]);
         ensure_supported_automation(&project).unwrap();
-        project.automation_lanes[0] = unsupported_lane(AutomationTarget::MasterVolume);
+        project.automation_lanes[0] =
+            unsupported_lane(AutomationTarget::ChannelVolume { channel: 1 });
         for (start, length, muted) in [
             (0.0, 8.0, true),
             (8.0, 1.0, false),
@@ -2898,7 +3290,9 @@ mod tests {
         let mut project = arrangement_project();
         project
             .automation_lanes
-            .push(unsupported_lane(AutomationTarget::MasterPan));
+            .push(unsupported_lane(AutomationTarget::ChannelPan {
+                channel: 1,
+            }));
         assert!(ensure_supported_automation(&project).is_err());
         let mut unrelated = automation_placement(0.0, 1.0, true);
         unrelated.automation_id = Some(901);
@@ -3091,6 +3485,101 @@ mod tests {
         );
         assert!((events[0].duration - 1.0).abs() < 0.000_01);
         assert!((events[1].duration - 0.5).abs() < 0.000_01);
+    }
+
+    #[test]
+    fn piano_period_overflow_export_events_repeat_at_bar_nine_with_fixed_clip_tail() {
+        let mut project = arrangement_project();
+        project.song_length_beats = 33.0;
+        project.clips[0] = pattern_clip(0.0, 33.0, 1.0, false);
+        project.patterns[0].channel_steps = vec![[false; 16]];
+        project.patterns[0].notes = vec![
+            PianoNote {
+                id: 901,
+                channel_id: Some(project.channels[0].id),
+                group_id: None,
+                note: 60,
+                start: 0.0,
+                length: 2.0,
+                velocity: 1.0,
+                selected: false,
+                muted: false,
+            },
+            PianoNote {
+                id: 902,
+                channel_id: Some(project.channels[0].id),
+                group_id: None,
+                note: 72,
+                start: 16.0,
+                length: 1.0 / 64.0,
+                velocity: 1.0,
+                selected: false,
+                muted: false,
+            },
+        ];
+        let mut events = collected_events(&project, 128);
+        events.sort_by_key(|event| event.sample);
+        assert_eq!(
+            events.iter().map(|event| event.sample).collect::<Vec<_>>(),
+            vec![0, 1024, 2048]
+        );
+        assert_eq!(events[0].frequency, midi_frequency(60));
+        assert_eq!(events[1].frequency, midi_frequency(72));
+        assert_eq!(events[2].frequency, midi_frequency(60));
+        assert_eq!(events[2].duration, 0.5);
+        assert_eq!(project.clips[0].length, 33.0);
+    }
+
+    #[test]
+    fn piano_period_overflow_builtin_wav_has_finite_audio_without_early_retrigger_overlap() {
+        let mut project = arrangement_project();
+        project.song_length_beats = 34.0;
+        project.clips[0] = pattern_clip(0.0, 34.0, 1.0, false);
+        project.patterns[0].channel_steps = vec![[false; 16]];
+        project.patterns[0].notes = vec![
+            PianoNote {
+                id: 901,
+                channel_id: Some(project.channels[0].id),
+                group_id: None,
+                note: 60,
+                start: 0.0,
+                length: 1.0,
+                velocity: 1.0,
+                selected: false,
+                muted: false,
+            },
+            PianoNote {
+                id: 902,
+                channel_id: Some(project.channels[0].id),
+                group_id: None,
+                note: 72,
+                start: 16.0,
+                length: 0.25,
+                velocity: 1.0,
+                selected: false,
+                muted: false,
+            },
+        ];
+        let path = temporary_wav("piano-four-bar-cycle");
+        let rendered = render_and_decode(&project, &path);
+        assert_eq!(rendered.len(), 136_000);
+        assert!(
+            rendered
+                .iter()
+                .all(|frame| frame.left.is_finite() && frame.right.is_finite())
+        );
+        assert!(rendered[..200].iter().any(|frame| frame.left.abs() > 0.001));
+        assert_eq!(
+            &rendered[..200],
+            &rendered[128_000..128_200],
+            "the bar-nine retrigger must contain the original voice without an overlapping bar-five copy"
+        );
+        assert!(
+            rendered[76_000..127_000]
+                .iter()
+                .all(|frame| frame.left == 0.0 && frame.right == 0.0)
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -4418,6 +4907,7 @@ mod tests {
                 sample_rate: 8000,
                 sample_format,
                 level_policy: WavLevelPolicy::PreserveLevel,
+                tail_milliseconds: 0,
             };
             std::fs::write(&path, b"original").unwrap();
             let result = render_project_wav_with_options(
@@ -4576,6 +5066,7 @@ mod tests {
                         sample_rate: 8000,
                         sample_format,
                         level_policy,
+                        tail_milliseconds: 0,
                     };
                     let control = ExportControl::default();
                     control.cancel_at(threshold);
@@ -4685,12 +5176,17 @@ mod tests {
         let mut automation = arrangement_project();
         automation
             .automation_lanes
-            .push(unsupported_lane(AutomationTarget::MasterVolume));
+            .push(unsupported_lane(AutomationTarget::ChannelVolume {
+                channel: 1,
+            }));
         for (project, reason) in [
             (instrument, "active instrument"),
             (insert, "active mixer"),
             (sidechain, "sidechain"),
-            (automation, "Only Tempo"),
+            (
+                automation,
+                "Only Tempo, Master Volume, Master Pan and Master Mute",
+            ),
         ] {
             assert!(
                 format!("{:#}", ensure_supported_project(&project).unwrap_err()).contains(reason)
