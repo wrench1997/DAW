@@ -69,6 +69,8 @@ Source68 已实际通过离线元数据 45 项纯回归、SDK x64 sizeof/offseto
 
 只读源码复核确认最终 Shutdown 先退出主消息循环并移除 TLS dispatcher，再清空 plugin slot；ExitDll 执行时 OLE 和 message-only command HWND 仍存活。普通 metadata 加载会探测并释放未挂载的 createView；宿主源码不证明 NI 自有 HWND/工作线程的等待关系。消息依赖仍是假设，不能以此盲改退出顺序或宣布原因已明。证据在 `source68-*`、`minidump-reader-pure-01/`、`minidump-sdk-layout-build-01/`、`minidump-capture-managed-checks-01/`、`minidump-frames-build-01/` 和 `windows-kontakt-default-scan-run-05*`，均在 Git 外；NOIRE 状态/声音和完整保存重开/导出仍未由本轮验证。
 
+后续独立离线窗口：reader02 的 52 项回归全部通过、输入 SHA 无漂移；同一原 dump 实际重解析 exit2=`partial`，明确保留未知 streams、misc 扩展与 flags 的未解析边界。PID、线程 birth、进程 creation 秒级字段、SHA/size 及 AMD64 目标上下文均核对通过；四个全零 UnusedStream 不再误拒，其他重复/非法项的 guard 保留。既有 DbgEng 工具实际进程 PID24668 exit0（0.328s），20 个线程切换/读栈均 S_OK，无 cap、所有 pipe 完成、输入无漂移，NoExit 宿主实际 exit0 后 fresh owned0 并交回窗口。主 TID20900 得到 32 个引擎帧，经过 Kontakt、msvcp140、KERNELBASE、ntdll；返回的 symbol 文本只有 module 名，不能当作精确函数名或完整 unwind/等待原因证明。没有重编译、重采 NI、编辑器或声卡请求。证据为 `minidump-reader-pure-02/`、`source68-minidump-metadata-02.json` 和 `source68-offline-frames-01/`；原 reader01、拒绝结果、dump 和旧回归完整保留。
+
 - Channel Rack、钢琴卷帘和 Playlist 的视图布局、缩放、定位/放置与按钮反馈已调整。
 - 钢琴黑白键几何、按下/松开及播放反馈、键盘试听和试听取消已接入实际状态。
 - 播放启动与循环重启等待 Timeline、参数和插件实际确认，避免错误首音/旧 epoch。

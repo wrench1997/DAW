@@ -487,6 +487,23 @@ Preserve `source68-*`, the four `minidump-*-01/` gate directories and
 `windows-kontakt-default-scan-run-05*` outside Git. This round requested no NOIRE
 state, MIDI/DSP, editor, device, save/reopen or export and proves none of them.
 
+The subsequent explicitly handed-off offline window passed all 52 reader02
+fixtures with unchanged inputs. Re-reading the original dump returned exit2,
+explicit `partial` for unknown streams and misc-info extensions/flags. PID,
+thread birth, second-resolution process creation, bytes/SHA and the target AMD64
+context matched. Only all-zero UnusedStream slots gained compatibility; invalid
+unused slots and duplicate meaningful streams remain rejected.
+
+The existing offline DbgEng reader PID24668 actually exited0 (0.328s), with all
+20 thread selections/stack calls S_OK, no cap reached, completed pipes and no input
+drift. Main TID20900 produced 32 engine frames through Kontakt, msvcp140,
+KERNELBASE and ntdll. The returned symbol strings contain only module names, so
+they do not establish exact functions, complete unwind, wait ownership or cause.
+The same NoExit host exited0 before a fresh zero-owned check and explicit
+handback. There was no recompilation, new NI capture, editor or device request.
+Preserve `minidump-reader-pure-02/`, `source68-minidump-metadata-02.json` and
+`source68-offline-frames-01/` alongside the original rejected reader01 result.
+
 Use private new directories and explicit opt-in ignored QA only after the coordinated desktop/build window is available. Preserve the original project and identify the exact test/helper/source inputs.
 Normal source checks can be reproduced independently; real NI tests are intentionally excluded:
 
