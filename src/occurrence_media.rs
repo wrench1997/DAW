@@ -404,17 +404,67 @@ pub(crate) struct VerificationTestGuard {
 
 #[cfg(test)]
 pub(crate) fn verification_test_guard() -> VerificationTestGuard {
-    let serial = VERIFICATION_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    assert_eq!(
-        VERIFICATION_FIXTURE_CLEANUP_FAILURE.load(Ordering::Acquire),
-        0,
-        "Prior verifier fixture cleanup failed; any pending slot retained and subsequent fixture admission refused"
+    let serial = wait_for_verification_test_admission(
+        &VERIFICATION_TEST_LOCK,
+        &VERIFICATION_FIXTURE_CLEANUP_FAILURE,
+        crate::app::CitrusApp::fixture_cleanup_failed_for_test,
     );
     VerificationTestGuard {
         _serial: serial,
         joined: std::sync::Arc::new(std::sync::Mutex::new(None)),
+    }
+}
+
+#[cfg(test)]
+fn wait_for_verification_test_admission<'a>(
+    admission: &'a std::sync::Mutex<()>,
+    cleanup_failure: &std::sync::atomic::AtomicU8,
+    parent_cleanup_failed: impl Fn() -> bool,
+) -> std::sync::MutexGuard<'a, ()> {
+    wait_for_verification_test_admission_observed(
+        admission,
+        cleanup_failure,
+        parent_cleanup_failed,
+        || {},
+    )
+}
+
+#[cfg(test)]
+fn wait_for_verification_test_admission_observed<'a>(
+    admission: &'a std::sync::Mutex<()>,
+    cleanup_failure: &std::sync::atomic::AtomicU8,
+    parent_cleanup_failed: impl Fn() -> bool,
+    mut queued: impl FnMut(),
+) -> std::sync::MutexGuard<'a, ()> {
+    let assert_admissible = || {
+        assert_eq!(
+            cleanup_failure.load(Ordering::Acquire),
+            0,
+            "Prior verifier fixture cleanup failed; any pending slot retained and subsequent fixture admission refused"
+        );
+        assert!(
+            !parent_cleanup_failed(),
+            "Prior App fixture cleanup is unproven; its retained verifier guard cannot admit another fixture"
+        );
+    };
+    // The App may correctly retain this mutex guard with an unproven source.
+    // Queue without charging earlier healthy fixtures to a work deadline, but
+    // observe sticky failure instead of blocking forever behind that owner.
+    loop {
+        assert_admissible();
+        let guard = match admission.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                queued();
+                None
+            }
+        };
+        if let Some(guard) = guard {
+            assert_admissible();
+            return guard;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
@@ -1726,6 +1776,55 @@ mod tests {
         assert!(returned.path().is_file());
         std::fs::remove_dir_all(directory).unwrap();
         std::fs::remove_dir_all(other_directory).unwrap();
+    }
+
+    #[test]
+    fn queued_verifier_fixture_refuses_sticky_failure_without_releasing_retained_guard() {
+        for parent_failure in [false, true] {
+            let admission = std::sync::Mutex::new(());
+            let cleanup_failure = std::sync::atomic::AtomicU8::new(0);
+            let parent_failed = AtomicBool::new(false);
+            let held = admission.lock().unwrap();
+            let (queued_tx, queued_rx) = std::sync::mpsc::sync_channel(1);
+            let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
+            std::thread::scope(|scope| {
+                let waiter = scope.spawn(|| {
+                    let refused = catch_unwind(AssertUnwindSafe(|| {
+                        let _guard = wait_for_verification_test_admission_observed(
+                            &admission,
+                            &cleanup_failure,
+                            || parent_failed.load(Ordering::Acquire),
+                            || {
+                                let _ = queued_tx.try_send(());
+                            },
+                        );
+                    }))
+                    .is_err();
+                    finished_tx.send(refused).unwrap();
+                });
+                let queued = queued_rx.recv_timeout(Duration::from_secs(5));
+                if parent_failure {
+                    parent_failed.store(true, Ordering::Release);
+                } else {
+                    cleanup_failure.store(1, Ordering::Release);
+                }
+                let refused_while_retained = finished_rx.recv_timeout(Duration::from_secs(5));
+                let still_retained = matches!(
+                    admission.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                );
+                // Even a failing regression releases its local test gate before
+                // joining; it cannot recreate the suite's retained-lock hang.
+                drop(held);
+                waiter.join().unwrap();
+                assert!(
+                    queued.is_ok(),
+                    "the waiter must actually observe the retained lock"
+                );
+                assert_eq!(refused_while_retained, Ok(true));
+                assert!(still_retained);
+            });
+        }
     }
 
     #[test]

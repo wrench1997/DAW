@@ -174,6 +174,14 @@ fn wait_for_fixture_admission<'a>(
     admission: &'a std::sync::Mutex<()>,
     poisoned: &AtomicBool,
 ) -> std::sync::MutexGuard<'a, ()> {
+    wait_for_fixture_admission_observed(admission, poisoned, || {})
+}
+
+fn wait_for_fixture_admission_observed<'a>(
+    admission: &'a std::sync::Mutex<()>,
+    poisoned: &AtomicBool,
+    mut queued: impl FnMut(),
+) -> std::sync::MutexGuard<'a, ()> {
     // This is queueing before creating an App, callback, worker or directory.
     // A wall-clock deadline here charges all earlier serial tests to this one
     // and can expire on a healthy parallel CI runner. Owned work still has its
@@ -187,7 +195,10 @@ fn wait_for_fixture_admission<'a>(
         let guard = match admission.try_lock() {
             Ok(guard) => Some(guard),
             Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
-            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                queued();
+                None
+            }
         };
         if let Some(guard) = guard {
             assert!(
@@ -202,6 +213,69 @@ fn wait_for_fixture_admission<'a>(
 
 pub(in crate::app) fn fixture_admission() -> std::sync::MutexGuard<'static, ()> {
     wait_for_fixture_admission(&FIXTURE_ADMISSION, &FIXTURE_POISONED)
+}
+
+impl CitrusApp {
+    /// Other tests installing the process-global observer share the same
+    /// admission as App fixtures, for the full lifetime of their original run.
+    pub(crate) fn with_observer_fixture_admission_for_test<T>(run: impl FnOnce() -> T) -> T {
+        let _admission = fixture_admission();
+        run()
+    }
+
+    pub(crate) fn mark_fixture_cleanup_failed_for_test() {
+        FIXTURE_POISONED.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn fixture_cleanup_failed_for_test() -> bool {
+        FIXTURE_POISONED.load(Ordering::Acquire)
+    }
+}
+
+#[test]
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+fn queued_observer_fixture_admission_waits_for_the_original_run_to_retire() {
+    // Keep unrelated App/global-observer fixtures outside this two-owner test.
+    // The local admission exercises the same wait path without charging any
+    // other queued App fixture's work to this handoff's observation deadline.
+    let _shared_admission = fixture_admission();
+    let admission = std::sync::Mutex::new(());
+    let poisoned = AtomicBool::new(false);
+    let (queued_tx, queued_rx) = mpsc::sync_channel(1);
+    let (admitted_tx, admitted_rx) = mpsc::sync_channel(1);
+    std::thread::scope(|scope| {
+        // Closure locals release in unwind before Scope joins the waiter.
+        let held = admission.lock().unwrap();
+        let original = crate::genuine_app_observer::ObservationRun::install().unwrap();
+        let waiter = scope.spawn(|| {
+            let _admission = wait_for_fixture_admission_observed(&admission, &poisoned, || {
+                let _ = queued_tx.try_send(());
+            });
+            let next =
+                crate::genuine_app_observer::ObservationRun::install_with_clone_reply_limit(2048)
+                    .unwrap();
+            admitted_tx.send(next.finish().clone_reply_cap).unwrap();
+        });
+        queued_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            admitted_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        drop(original);
+        assert!(matches!(
+            admitted_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        drop(held);
+        assert_eq!(
+            admitted_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            2048
+        );
+        waiter.join().unwrap();
+    });
 }
 
 #[test]
@@ -563,6 +637,55 @@ impl Fixture {
             && self.admission_guard.is_some()
             && self.directory.exists()
             && WHOLE_DROP_OBSERVATION.with(|slot| slot.borrow().is_some())
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(in crate::app) fn whole_drop_observation_metadata_for_test(&self) -> String {
+        WHOLE_DROP_OBSERVATION.with(|slot| {
+            let slot = slot.borrow();
+            let Some(observed) = slot.as_ref() else {
+                return "forced Drop observation owner absent".into();
+            };
+            observed.observer.with_snapshot(|snapshot| {
+                let mut joined = 0;
+                let mut panicked = 0;
+                let mut foreign_worker_records = 0;
+                let mut bad_shutdown_records = 0;
+                for record in &snapshot.records {
+                    match &record.kind {
+                        crate::genuine_app_observer::RecordKind::WorkerJoin {
+                            worker_id,
+                            outcome,
+                        } if *worker_id == observed.worker => match outcome {
+                            crate::genuine_app_observer::WorkerJoinOutcome::Joined => joined += 1,
+                            crate::genuine_app_observer::WorkerJoinOutcome::WorkerPanicked => panicked += 1,
+                        },
+                        crate::genuine_app_observer::RecordKind::Worker {
+                            worker_id, stats, ..
+                        } => {
+                            if *worker_id != observed.worker {
+                                foreign_worker_records += 1;
+                            } else if stats.detached_workers != 0 || stats.shutdown_timeouts != 0 {
+                                bad_shutdown_records += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                format!(
+                    "observer(worker,failure,records,joined,panicked,bad_shutdown_records,foreign_worker_records)=({},{:?},{},{},{},{},{})",
+                    observed.worker,
+                    snapshot.failure,
+                    snapshot.records.len(),
+                    joined,
+                    panicked,
+                    bad_shutdown_records,
+                    foreign_worker_records,
+                )
+            })
+        })
     }
     fn whole_drop_join_proven(&self) -> Result<bool, &'static str> {
         WHOLE_DROP_OBSERVATION.with(|slot| {

@@ -229,9 +229,113 @@ fn until(fixture: &mut Fixture, predicate: impl Fn(&Fixture) -> bool) {
     while !predicate(fixture) {
         assert!(
             Instant::now() < deadline,
-            "actual whole App fixture condition did not complete"
+            "actual whole App fixture condition did not complete; {}",
+            whole_fixture_diagnostic(fixture)
         );
         tick(fixture);
+    }
+}
+fn bounded_whole_failure_text(text: &str) -> String {
+    let mut chars = text.chars();
+    let mut bounded = chars.by_ref().take(256).collect::<String>();
+    if chars.next().is_some() {
+        bounded.push('…');
+    }
+    bounded
+}
+fn whole_fixture_diagnostic(fixture: &Fixture) -> String {
+    let app = fixture.app();
+    let job = app.whole_song_export_job.as_ref();
+    let source = app.running_generator_chains.values().next();
+    format!(
+        "job(phase,pending,failure,capture_failure)={:?}, capture(pending,ack)={:?}, renderer(present,busy)={:?}, stop={:?}, settlement={:?}, source(ids,faults,reset_faults,stopped,detached,timeouts)={:?}, backend(captures,resets,processes)={:?}, timeline(desired,compiled,confirmed,sync)={:?}",
+        job.map(|job| (
+            job.phase.label(),
+            job.pending(),
+            job.failure.as_deref().map(bounded_whole_failure_text),
+            job.capture_failure
+                .as_ref()
+                .map(|error| bounded_whole_failure_text(&error.to_string())),
+        )),
+        job.map(|job| (
+            job.actor.owns_pending_capture(),
+            job.actor
+                .capture
+                .as_ref()
+                .map(|capture| capture.termination_acknowledged()),
+        )),
+        job.map(|job| (job.render.is_some(), job.admission.is_busy())),
+        job.and_then(|job| job.actor.stop_preparation),
+        job.and_then(|job| job.actor.stop_settlement),
+        source.map(|source| {
+            let stats = source.control.stats();
+            (
+                (
+                    source.project_session,
+                    source.endpoint_id,
+                    source.instance_id,
+                ),
+                stats.faults,
+                stats.reset_faults,
+                stats.stopped,
+                stats.detached_workers,
+                stats.shutdown_timeouts,
+            )
+        }),
+        (
+            fixture.source_handle().capture_count(),
+            fixture.source_handle().reset_count(),
+            fixture.source_handle().process_count(),
+        ),
+        (
+            app.timeline_desired_generation,
+            app.timeline_compiled_generation,
+            app.audio
+                .as_ref()
+                .and_then(AudioEngine::confirmed_timeline_identity),
+            app.timeline_audio_sync.phase,
+        ),
+    )
+}
+
+struct WholeFailureTrace {
+    case: String,
+    stage: &'static str,
+    observation: String,
+}
+impl WholeFailureTrace {
+    fn at(&mut self, stage: &'static str, observation: String) {
+        self.stage = stage;
+        self.observation = observation;
+    }
+}
+
+fn diagnose_whole_failure(test: &'static str, run: impl FnOnce(&mut WholeFailureTrace)) {
+    let mut trace = WholeFailureTrace {
+        case: String::new(),
+        stage: "construct Fixture",
+        observation: String::new(),
+    };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&mut trace)));
+    if let Err(payload) = result {
+        let panic = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("non-string panic payload");
+        // libtest normally withholds assertion output until every test ends.
+        // Write this bounded control-only context directly so a later hung
+        // fixture cannot hide the first failure; preserve the original panic.
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "Whole test failure: test={test}, case={}, stage={}, panic={:?}; {}",
+            trace.case,
+            trace.stage,
+            bounded_whole_failure_text(panic),
+            trace.observation,
+        );
+        std::panic::resume_unwind(payload);
     }
 }
 fn exact_source(fixture: &Fixture) -> (u64, u64, u64) {
@@ -688,18 +792,40 @@ fn actual_whole_unconfirmed_fixed_window_cannot_choose_destination_stop_source_o
 #[test]
 fn actual_whole_review_permit_tail_zero_and_three_seconds_keep_metadata_warning_and_tight_noteoff()
 {
+    diagnose_whole_failure(
+        "review_permit_tail_zero_and_three_seconds",
+        whole_tail_cases_with_failure_diagnostics,
+    );
+}
+
+fn whole_tail_cases_with_failure_diagnostics(trace: &mut WholeFailureTrace) {
     for reported in [48_000 * 4, u32::MAX] {
         for tail_ms in [0, 3_000] {
+            trace.case = format!("reported_tail={reported}, selected_tail_ms={tail_ms}");
+            trace.at("construct Fixture", String::new());
             let mut fixture = Fixture::new_whole_tail_for_test(reported);
+            trace.at("settle initial source", whole_fixture_diagnostic(&fixture));
             settle_initial_source(&mut fixture);
             let before = fixture.bytes();
             let source = exact_source(&fixture);
             let mut selected = options(&fixture);
             selected.tail_milliseconds = tail_ms;
+            trace.at(
+                "review and begin export",
+                whole_fixture_diagnostic(&fixture),
+            );
             let (path, started, midi) = begin_with_options(&mut fixture, selected);
+            trace.at(
+                "wait for actual export owner",
+                whole_fixture_diagnostic(&fixture),
+            );
             until(&mut fixture, |fixture| {
                 !fixture.app().whole_song_export_fence_active()
             });
+            trace.at(
+                "verify rendered report and MIDI",
+                whole_fixture_diagnostic(&fixture),
+            );
             let job = fixture.app().whole_song_export_job.as_ref().unwrap();
             assert!(job.phase == WholeExportPhase::Complete && job.reviewed_fixed_tail);
             assert_eq!(fixture.source_handle().capture_count(), 1);
@@ -734,6 +860,10 @@ fn actual_whole_review_permit_tail_zero_and_three_seconds_keep_metadata_warning_
             // This mock deliberately remains nonzero at the file boundary. The
             // result explains its metadata comparison and makes no silence claim.
             assert!(wav.samples.last().unwrap().abs() > 0.01);
+            trace.at(
+                "verify retained tail warning",
+                whole_fixture_diagnostic(&fixture),
+            );
             let result = fixture
                 .app()
                 .whole_song_export_tail_result
@@ -767,6 +897,10 @@ fn actual_whole_review_permit_tail_zero_and_three_seconds_keep_metadata_warning_
             }
             assert!(fixture.app().whole_song_export_tail_result.is_some());
             fixture.app_mut().reopen_whole_song_tail_result();
+            trace.at(
+                "reopen retained tail warning",
+                whole_fixture_diagnostic(&fixture),
+            );
             let ctx = fixture.ctx();
             let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
                 fixture.app_mut().whole_song_export_progress_ui(ui.ctx())
@@ -790,6 +924,10 @@ fn actual_whole_review_permit_tail_zero_and_three_seconds_keep_metadata_warning_
                         .unwrap()
                         .snapshot()
                         .transport_playing
+            );
+            trace.at(
+                "drain exact Fixture owners",
+                whole_fixture_diagnostic(&fixture),
             );
         }
     }
@@ -1297,14 +1435,34 @@ fn actual_whole_window_close_retains_a_pending_clone_disposal_receipt_until_its_
 
 #[test]
 fn actual_whole_forced_app_drop_keeps_the_cancelled_capture_and_exact_source_until_worker_join() {
+    diagnose_whole_failure(
+        "forced_app_drop_exact_source_until_worker_join",
+        whole_forced_drop_with_failure_diagnostics,
+    );
+}
+
+fn whole_forced_drop_with_failure_diagnostics(trace: &mut WholeFailureTrace) {
     let mut fixture = Fixture::new_whole_drop_observer_for_test();
+    trace.at("settle initial source", whole_fixture_diagnostic(&fixture));
     settle_initial_source(&mut fixture);
     fixture.source_handle().pause_capture();
+    trace.at(
+        "review and begin held capture",
+        whole_fixture_diagnostic(&fixture),
+    );
     let (path, started) = begin(&mut fixture);
     std::fs::write(&path, b"existing destination marker").unwrap();
     until(&mut fixture, |fixture| {
         fixture.source_handle().capture_count() == 1
     });
+    trace.at(
+        "verify held capture before App Drop",
+        format!(
+            "{}; {}",
+            whole_fixture_diagnostic(&fixture),
+            fixture.whole_drop_observation_metadata_for_test()
+        ),
+    );
     let job = fixture.app().whole_song_export_job.as_ref().unwrap();
     assert!(
         job.actor.owns_pending_capture()
@@ -1318,6 +1476,10 @@ fn actual_whole_forced_app_drop_keeps_the_cancelled_capture_and_exact_source_unt
     assert!(job.render.is_none() && !job.admission.is_busy());
     assert_eq!(fixture.whole_drop_join_count_for_test(), 0);
     fixture.force_drop_app_for_whole_test();
+    trace.at(
+        "verify resources retained after actual App Drop",
+        fixture.whole_drop_observation_metadata_for_test(),
+    );
     // App/actual callback are gone. The original source gate has not been
     // released by normal Fixture drain; shutdown polling runs independently.
     assert!(fixture.whole_drop_resources_retained_for_test());
@@ -1330,9 +1492,15 @@ fn actual_whole_forced_app_drop_keeps_the_cancelled_capture_and_exact_source_unt
     );
 
     fixture.source_handle().release_gates();
-    fixture
-        .wait_whole_drop_join_for_test(Instant::now() + Duration::from_secs(5))
-        .unwrap();
+    let joined = fixture.wait_whole_drop_join_for_test(Instant::now() + Duration::from_secs(5));
+    trace.at(
+        "verify exact worker Join result",
+        format!(
+            "join_result={joined:?}; {}",
+            fixture.whole_drop_observation_metadata_for_test()
+        ),
+    );
+    joined.unwrap();
     assert_eq!(fixture.whole_drop_join_count_for_test(), 1);
     assert!(fixture.whole_drop_resources_retained_for_test());
     assert_eq!(fixture.source_handle().capture_count(), 1);
@@ -1347,4 +1515,8 @@ fn actual_whole_forced_app_drop_keeps_the_cancelled_capture_and_exact_source_unt
     // the existing finished-only join tap, not backend destruction or a sleep.
     // Fixture Drop keeps files/admission/observer until that exact proof; an
     // assertion or cleanup failure retains them with the original poison path.
+    trace.at(
+        "drain exact Fixture owners",
+        fixture.whole_drop_observation_metadata_for_test(),
+    );
 }

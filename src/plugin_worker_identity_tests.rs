@@ -1,5 +1,5 @@
 //! Plugin-free proofs for the test-only allocation witness and run-owned collector.
-//! These global-observer cases also require the qualification runner's serial isolation.
+//! Global-observer cases share App fixture admission for their complete lifetime.
 
 use super::*;
 use crate::genuine_app_observer::{
@@ -154,6 +154,7 @@ impl SpawnFixture {
         self.cleanup = Some(outcome);
         if outcome != RetainedShutdownPoll::Joined {
             CLEANUP_FAILED.store(true, Ordering::Release);
+            crate::app::CitrusApp::mark_fixture_cleanup_failed_for_test();
             let failed = FailedOwner {
                 _chain: self.chain.take().expect("failed exact chain remains owned"),
                 _observer: self.observer.take(),
@@ -202,6 +203,12 @@ impl Drop for SpawnFixture {
 
 #[test]
 fn worker_identity_witness_preserves_allocation_not_metrics_or_worker_lifetime() {
+    crate::app::CitrusApp::with_observer_fixture_admission_for_test(
+        worker_identity_witness_preserves_allocation_under_admission,
+    );
+}
+
+fn worker_identity_witness_preserves_allocation_under_admission() {
     let _admission = admission();
     let metrics = Arc::new(BridgeMetrics::default());
     let contents = Arc::clone(&metrics.requested_epoch);
@@ -273,6 +280,12 @@ fn worker_identity_witness_preserves_allocation_not_metrics_or_worker_lifetime()
 
 #[test]
 fn worker_identity_observer_retention_is_bounded_lazy_and_run_local() {
+    crate::app::CitrusApp::with_observer_fixture_admission_for_test(
+        worker_identity_observer_retention_under_admission,
+    );
+}
+
+fn worker_identity_observer_retention_under_admission() {
     let _admission = admission();
     let built = Cell::new(0);
     let metrics: [Arc<BridgeMetrics>; MAX_WORKER_IDENTITIES] =

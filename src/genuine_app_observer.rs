@@ -2424,25 +2424,29 @@ mod tests {
         feature = "experimental-fresh-helper"
     ))]
     fn qa_pcm_limit_is_explicit_bounded_and_does_not_change_other_observer_caps() {
-        for invalid in [0, 4097, usize::MAX] {
-            assert!(ObservationRun::install_with_clone_reply_limit(invalid).is_err());
-        }
-        let run = ObservationRun::install_with_clone_reply_limit(2048).unwrap();
-        run.with_snapshot(|state| {
-            assert_eq!(state.clone_reply_cap, 2048);
-            assert_eq!(state.record_cap, MAX_RECORDS);
-            assert_eq!(state.byte_cap, MAX_PRIVATE_BYTES);
+        crate::app::CitrusApp::with_observer_fixture_admission_for_test(|| {
+            for invalid in [0, 4097, usize::MAX] {
+                assert!(ObservationRun::install_with_clone_reply_limit(invalid).is_err());
+            }
+            let run = ObservationRun::install_with_clone_reply_limit(2048)
+                .expect("cap fixture holds shared App admission before installing its QA run");
+            run.with_snapshot(|state| {
+                assert_eq!(state.clone_reply_cap, 2048);
+                assert_eq!(state.record_cap, MAX_RECORDS);
+                assert_eq!(state.byte_cap, MAX_PRIVATE_BYTES);
+            });
+            assert!(
+                ObservationRun::install_with_clone_reply_limit(4096).is_err(),
+                "an active run must retain sole observation ownership"
+            );
+            assert_eq!(run.finish().clone_reply_cap, 2048);
+            let ordinary = ObservationRun::install()
+                .expect("cap fixture retains the same admission through the ordinary install");
+            assert_eq!(
+                ordinary.finish().clone_reply_cap,
+                MAX_CLONE_REPLIES,
+                "QA storage settings cannot leak into a later ordinary run"
+            );
         });
-        assert!(
-            ObservationRun::install_with_clone_reply_limit(4096).is_err(),
-            "an active run must retain sole observation ownership"
-        );
-        assert_eq!(run.finish().clone_reply_cap, 2048);
-        let ordinary = ObservationRun::install().unwrap();
-        assert_eq!(
-            ordinary.finish().clone_reply_cap,
-            MAX_CLONE_REPLIES,
-            "QA storage settings cannot leak into a later ordinary run"
-        );
     }
 }

@@ -57,10 +57,11 @@ authorize a replacement child.
 Existing `scan_checked`/`scan` retain explicit loaded-default verification with
 None class,48k/Q128 settings and strict metadata consumers. They are not a catalog
 fallback. Strict clone gates/class selection/state/budgets remain unchanged.
-The new catalog/cache/mock-child/UI/default-load/save/reopen/refusal regressions
-and independent production-catalog native selector have passed source formatting
-and diff checks only. Compilation, Rust execution and the actual new production
-route are unrun; Source74's lower-level factory result is separate evidence.
+Source75's cloud quality job passed32 factory regressions,2342 root tests with
+12 ignored, strict Clippy, both bins, protocol/harness smoke, no-default-feature
+and fixture builds. The workflow failed native paint capture; the new
+production-catalog selector has not run against NI. Source74's lower-level
+factory result remains separate evidence.
 
 The first complete catalog-to-export flow also needs a live-load identity bridge:
 the current whole-song Review rejects persistent Unknown role. Use identity
@@ -776,12 +777,58 @@ Preserve `source74-factory-native-run-01/`, its sibling raw logs/terminal,
 default-build receipts, `ci-f79fd3f-windows-quality-01.log` and actual run/jobs
 JSON outside Git; the frozen preparation and actual runner remain distinct.
 
-Source75 implements the module catalog contract described above. Source formatting
-and independent read-only review found no acceptance-blocking defect; compilation,
-Rust execution and the new production route's actual NI result remain unrun.
-Source74's success did not activate that connection or fix the older component
-ExitDll stall. Strict conversion/full-owner qualification still needs actual
-class/bus/MIDI evidence, and the live-load export identity bridge remains open.
+Source74 [preview run38650940397](https://github.com/wrench1997/DAW/actions/runs/38650940397)
+was later cancelled by the existing workflow concurrency on the next source push.
+Before cancellation, these tests had already reported FAILED:
+
+- `actual_whole_forced_app_drop_keeps_the_cancelled_capture_and_exact_source_until_worker_join`
+- `actual_whole_review_permit_tail_zero_and_three_seconds_keep_metadata_warning_and_tight_noteoff`
+- `qa_pcm_limit_is_explicit_bounded_and_does_not_change_other_observer_caps`
+
+Four `occurrence_media` tests reported running for over60s and never completed:
+`verifier_admission_drop_cancels_but_live_receipt_can_drain_same_worker`,
+`verifier_assertion_unwind_releases_gate_drains_same_handle_and_preserves_panic`,
+`verifier_busy_refusal_returns_the_exact_unstarted_publication` and
+`verifier_cancel_capability_cannot_release_admission_or_erase_media`.
+The unfinished libtest run did not print final assertion/panic details. Preserve
+`ci-f79fd3f-windows-preview-01.log` and both actual terminal run/jobs JSON.
+Root tests, Clippy, release build, archive verification and extracted-helper smoke
+did not complete; Source73's release build cannot be attributed to this run.
+
+Source75 implements the module catalog contract described above. Its
+[quality run38654912869](https://github.com/wrench1997/DAW/actions/runs/38654912869)
+passed32 factory and2277 app+52 helper+13 protocol tests (2342 passed/12 ignored),
+formatting, strict Clippy, both bins, protocol/harness smoke, no-default-feature
+and fixture builds. Only native paint before/after edit failed, including
+same-process Button PrintWindow=false; control/gesture/dirty feedback, stopped
+state round-trip, lifecycle and Shutdown/EOF/crash cleanup passed separately.
+The workflow remains failure. Its preview job was still running at the Source76
+checkpoint. Preserve `ci-46359c2-windows-quality-01.log` and its actual terminal
+run/jobs JSON. Independent source review found no acceptance-blocking catalog
+defect. The new production route's actual NI result remains unrun. Source74's
+success did not activate that connection or fix the older component ExitDll
+stall. Strict conversion/full-owner qualification still needs actual class/bus/
+MIDI evidence, and the live-load export identity bridge remains open.
+
+Source76 addresses definite test-isolation gaps found while investigating the
+unfinished Source74 run. The two regular worker-identity tests and the cap test
+now share App admission for their full observer lifetime. Identity cleanup
+failure retains the original chain/observer and marks the same sticky failure
+before releasing admission. A verifier waiter observes both local and parent
+sticky failure instead of blocking forever behind a correctly retained guard.
+Healthy queued owners retain their original admission and work deadlines.
+Both new handoff/refusal regressions observe actual WouldBlock before proceeding.
+
+The two whole-export failures now write bounded control-only diagnostics
+directly to stderr before resuming the original panic. Their assertions,
+five-second Join and ten-second work-observation limits are unchanged. The final
+candidate actually compiled and passed45 targeted cases: queued16, worker
+identity2, observer cap1, whole export14 and verifier12. Targeted rustfmt and diff
+checks passed. Logs are `source76-fixture-targeted-02.log` and
+`source76-fixture-targeted-terminal-02.json`; candidate01 predates the review
+repairs and is retained separately. Full parallel-suite, strict Clippy and
+no-feature checks for Source76 await CI. These focused results do not establish
+the missing original CI assertion or qualify NI restore/audio/export.
 
 The existing GitHub Windows quality/preview workflows can run source checks away
 from the local desktop. A cloud coding environment still needs the repository and
