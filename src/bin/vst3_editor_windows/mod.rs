@@ -246,6 +246,7 @@ pub(super) use native::run;
 #[cfg(target_os = "windows")]
 mod native {
     use super::*;
+    use crate::load_response_timing::shutdown::{self, Cause, Phase};
     use crate::{SharedPlugin, err, handle, respond};
     use std::cell::RefCell;
     use std::mem::zeroed;
@@ -288,6 +289,7 @@ mod native {
                     Ok(input) => input,
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
+                        shutdown::main_consumed(Cause::Disconnected);
                         self.running = false;
                         break;
                     }
@@ -437,9 +439,9 @@ mod native {
         fn drop(&mut self) {
             // SAFETY: the guard never leaves the UI thread, and successful initialization
             // owns one balance. Plugin/view teardown runs before this guard is dropped.
-            unsafe {
+            shutdown::around_phase(Phase::OleUninitialize, || unsafe {
                 OleUninitialize();
-            }
+            });
         }
     }
     const CLASS_NAME: &str = "CitrusVst3EditorContainerV1";
@@ -1187,14 +1189,23 @@ mod native {
             let input = match read_command_line(&mut reader, MAX_COMMAND_BYTES) {
                 Ok(CommandLine::Line(line)) if line.iter().all(u8::is_ascii_whitespace) => continue,
                 Ok(CommandLine::Line(line)) => match serde_json::from_slice::<HostCommand>(&line) {
-                    Ok(command) => Input::Command(Box::new(command)),
+                    Ok(command) => {
+                        if matches!(command, HostCommand::Shutdown) {
+                            shutdown::reader_shutdown_decoded();
+                        }
+                        Input::Command(Box::new(command))
+                    }
                     Err(error) => Input::Invalid(format!("Invalid command: {error}")),
                 },
                 Ok(CommandLine::Oversized) => {
                     Input::Invalid("Command exceeds bounded wire line limit".into())
                 }
-                Ok(CommandLine::Eof) => break,
+                Ok(CommandLine::Eof) => {
+                    shutdown::reader_eof();
+                    break;
+                }
                 Err(error) => {
+                    shutdown::reader_read_error();
                     let _ = queue_input(
                         &tx,
                         command_window,
@@ -1204,11 +1215,16 @@ mod native {
                 }
             };
             let shutdown = matches!(&input, Input::Command(command) if matches!(**command, HostCommand::Shutdown));
-            if !queue_input(&tx, command_window, input) || shutdown {
+            let queued = queue_input(&tx, command_window, input);
+            if shutdown {
+                shutdown::reader_shutdown_enqueued(queued);
+            }
+            if !queued || shutdown {
                 return;
             }
         }
-        let _ = queue_input(&tx, command_window, Input::Eof);
+        let queued = queue_input(&tx, command_window, Input::Eof);
+        shutdown::reader_eof_enqueued(queued);
     }
 
     fn handle_input(
@@ -1223,9 +1239,13 @@ mod native {
                 respond(protocol, &HostResponse::Error { message });
                 return true;
             }
-            Input::Eof => return false,
+            Input::Eof => {
+                shutdown::main_consumed(Cause::Eof);
+                return false;
+            }
         };
         if matches!(command, HostCommand::Shutdown) {
+            shutdown::main_consumed(Cause::Shutdown);
             return false;
         }
         let response = match command {
@@ -1343,6 +1363,7 @@ mod native {
                 }
                 activity = true;
                 if message.message == WM_QUIT {
+                    shutdown::main_consumed(Cause::NativeQuit);
                     running = false;
                     break;
                 }
@@ -1381,16 +1402,26 @@ mod native {
                 }
             }
         }
+        shutdown::main_loop_exited();
         COMMAND_DISPATCHER.with(|cell| {
-            if let Some(mut dispatcher) = cell.borrow_mut().take()
-                && let Err(error) = dispatcher.editor.close()
-            {
-                eprintln!("Editor shutdown: {error}");
+            if let Some(mut dispatcher) = cell.borrow_mut().take() {
+                if let Err(error) =
+                    shutdown::around_phase(Phase::EditorClose, || dispatcher.editor.close())
+                {
+                    eprintln!("Editor shutdown: {error}");
+                }
+                // Keep the aggregate intact: its drop glue preserves the
+                // original Editor -> Protocol -> Receiver order even when
+                // Editor::drop unwinds. A close return is not a drop return.
+                shutdown::around_phase(Phase::DispatcherDrop, || drop(dispatcher));
             }
         });
         // Plugin destruction, including DSP shutdown, also stays on this main thread.
         if let Ok(mut guard) = plugin.lock() {
-            *guard = None;
+            // SDK PluginDrop/ExitDll markers describe only their existing
+            // bodies. Only this returned edge brackets the whole slot clear,
+            // including the subsequent SDK fields/library destruction.
+            shutdown::around_phase(Phase::PluginSlotClear, || *guard = None);
         }
     }
 }

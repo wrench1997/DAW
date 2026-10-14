@@ -28,14 +28,22 @@ Source57 实际通过 306 项针对性 Rust 测试：默认插件后端 187、�
 Source58 仅修正测试辅助函数返回值及 Unix 夹具的分平台错误文字，生产行为不变；当前默认 Clippy 和 12 项 Probe 回归再次通过，原清理断言保留。SDK 的 `-D unused_must_use`、最终 root/vendor/独立夹具格式检查通过；该 SDK 检查保留既有样式警告，不宣称整个 vendor 零警告。完整 vendor 补丁实际重放 73 个源文件逐字节一致；正确 discover 入口实跑 170 项打包测试全部通过。
 
 首次门禁的 `result_large_err`/`collapsible_if`、测试 `err_expect`、离线 metadata 缺缓存、错误 unittest 导入入口和额外 rustc 参数多 target 拒绝均保留原始失败记录；已分别修正源码或调用方式。strict 取消/断管道夹具的 `OSError: [Errno 22] Invalid argument` 及 vendor 既有平台警告也保留，不当作 NI 实机结果。
-本轮没有启动 Kontakt、桌面或声卡。新扫描在真实 NI、Linux/macOS 及播放时的表现仍未测；Source52 原曲音频结果属于此前冻结源码。作品、状态、WAV、日志、构建及完整本机收据仍在 Git 外，初始三个受保护文件和 Saved13 原工程本轮未改。
+Source57/58 验证期间没有启动 Kontakt、桌面或声卡；Source61 的真实普通扫描失败记录见下文。Linux/macOS 及播放时的扫描表现仍未测；Source52 原曲音频结果属于此前冻结源码。作品、状态、WAV、日志、构建及完整本机收据仍在 Git 外，初始三个受保护文件和 Saved13 原工程本轮未改。
 证据：`target/backend-reliability-20261014/source57-scan-*`、`source58-*` 和两个 provenance 目录；只提交源码、必要回归及文档。
 
 ## 本轮已实现的功能
 
 Source59 接线、Source60 验证：真实完整工程的两个 QA 入口使用 checked scan，先保存完整 Completed/Stopped 收据，再验证单模块 metadata；后续失败仍保留扫描 helper 的实际 reap 事实。已有 Windows QA 增加普通构建的单次 Kontakt 默认 class 扫描入口，明确只测空实例扫描/清理，不验证 NOIRE 音色或声音。原 source/renderer/stream 的证明保持独立。Source60 将新增测试模块限定到实际消费者所在的 Windows，避免 Linux 测试构建的未使用代码；生产 Windows/Linux 扫描不变。
 
-Source60 实际通过默认及 all-feature 的 root `Clippy --all-targets -D warnings`、新增 6 项扫描证据回归、已有整曲/完整 source 的 34 项回归（3 项显式本机测试 ignored）、普通构建 native selector 编译/列举、root/独立 QA 格式及 diff 检查。依赖 SDK 的 4 项既有 Windows 未使用代码警告保留，不宣称整个 vendor 零警告。Source59 冻结记录未运行并保留；本次 8 项实际 terminal 收据在 `target/backend-reliability-20261014/source60-scan-*`。本次新入口的真实 Kontakt 扫描、NOIRE 音色恢复和声音验证仍未测，不能以合成测试或 selector 列举替代。
+Source60 实际通过默认及 all-feature 的 root `Clippy --all-targets -D warnings`、新增 6 项扫描证据回归、已有整曲/完整 source 的 34 项回归（3 项显式本机测试 ignored）、普通构建 native selector 编译/列举、root/独立 QA 格式及 diff 检查。依赖 SDK 的 4 项既有 Windows 未使用代码警告保留，不宣称整个 vendor 零警告。Source59 冻结记录未运行并保留；本次 8 项实际 terminal 收据在 `target/backend-reliability-20261014/source60-scan-*`。Source60 只编译/列举新入口，未启动 NI，不能以合成测试或 selector 列举替代实机。
+
+Source61 在已推送 `1d374ce` 上实测普通 Kontakt 扫描：默认 helper 构建、默认测试 EXE 的真实 Cargo artifact、全部 284 输入及原作品/二进制 pins 通过；实际安装模块 FileVersionInfo 为 8.4.1。唯一测试 PID22476 实际 exit101，body 6.55 秒；helper PID25428 的 LoadPlugin 元数据已返回，但清理窗口内未自然退出，最终强制终止并实际回收，`kill_requested=true`、exit1、`reaped=true`，无 load/shutdown/kill/wait/pipe error 字段。生产正确返回 `UncleanRetirement`：`metadata returned but helper did not retire cleanly`，没有准入新索引；本次未操作 App 索引 UI，也未加载 NOIRE 状态、试听、编辑器、声卡、保存重开或导出。
+
+Source61 外层的 `Root typed reap fields disagree with the actual bound receipt.` 是 PowerShell 单元素数组被解包成 11 字段 Hashtable 的校验误报；独立显式 object[] 核对三个布尔字段全部一致、校验错误数 0。实际扫描仍失败，不能将解析修正当作健康退出通过。原 JSON/log/terminal 字节全部保留，独立核对在 `source61-default-scan-independent-validation-01.json`；失败在 `windows-kontakt-default-scan-run-01/`。下一步保留原 5 秒加载及 250/2250ms 清理预算，观测 Shutdown/EOF、dispatcher、插件整体析构及 OLE 的实际边界；当前不能归因于 terminate 或 FreeLibrary。已有 SDK teardown 标记在 LoadInfo 回复后失去 active trace，需要补显式退出 trace 后再实测。
+
+Source62 退出诊断初版复用原精确 `windows-load-response-timing-v1` opt-in，独立 reader/main trace、首个退出原因及每进程 128 条退出记录上限；未启用时不读 clock/TLS、不分配或写日志。记录命令消费、dispatcher 清理、整个插件 slot 清空、OLE 及 Windows run 返回，现有 6 个 SDK teardown 阶段归入退出 trace。SDK Drop/ExitDll body returned 不称为 FreeLibrary 完成；只有实际外层返回才记录相应 returned。6 项新增纯回归及原 39 项 helper 回归实际通过，default/all-feature 严格 Clippy、root/private fmt 和 diff 共 6 项门禁 exit0；未运行新诊断实机。无 vendor 或预算改动。
+
+Source62 只读审查另外发现异常语义问题：拆出 dispatcher 字段使 Editor Rust unwind 时剩余局部变量改成 receiver→protocol，而原 aggregate dropglue 是 protocol→receiver，disabled 路径也受影响。该初版不能以门禁通过宣称顺序完全保留；Source63 已恢复完整 dispatcher 的聚合析构，仅括住原显式 editor.close，并补诊断开/关 × Editor 正常/unwind 四组合回归。复核确认原问题解决；修正版实际 46 项 helper 回归通过，default/all-feature 严格 Clippy、root/private fmt、diff 共 6 项门禁全 exit0，全部 284 pins 前后不变。原 Source62 冻结、45 项通过和 review 问题分别保留。新退出诊断尚未运行真实 Kontakt，不能据此宣布退出卡顿已修复；证据在 `source63-exit-*`，作品及初始三个受保护文件未改。
 
 - Channel Rack、钢琴卷帘和 Playlist 的视图布局、缩放、定位/放置与按钮反馈已调整。
 - 钢琴黑白键几何、按下/松开及播放反馈、键盘试听和试听取消已接入实际状态。

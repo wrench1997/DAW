@@ -88,7 +88,12 @@ fn main() {
     }
 
     #[cfg(target_os = "windows")]
-    windows::run(plugin, protocol);
+    {
+        windows::run(plugin, protocol);
+        // Reached only after Windows run and its automatic local drops return.
+        // This does not claim helper process exit or parent-side child reap.
+        load_response_timing::shutdown::windows_run_returned();
+    }
 
     #[cfg(target_os = "linux")]
     linux::run(plugin, protocol);

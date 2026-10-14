@@ -289,11 +289,70 @@ private QA formatting, and diff checks. All eight terminal receipts have exit 0 
 `target/backend-reliability-20261014/source60-scan-*`; four existing dependency SDK
 warnings remain, so this is not a zero-warning vendor qualification.
 
-Native acceptance of these new QA changes is still unrun. The scanner-only entry
+Source60 native acceptance remained unrun. The scanner-only entry
 compares actual binary bytes before/after; its supplied SHA fields require
 independent outer runner verification and do not establish Kontakt version or
 NOIRE audio. Synthetic evidence tests and listing an ignored selector are not an
 actual Kontakt scan, NOIRE state restoration or sound qualification.
+
+Source61 bound pushed commit `1d374ce` to the same 282 tested source/provenance
+bytes plus two current document pins. Default helper build and actual Cargo test
+artifact binding passed (`default,vst2,vst3`, no experimental feature). The one
+ordinary Kontakt scan actually ran: test PID22476 exited101, body 6.55s; helper
+PID25428 returned metadata but did not retire naturally within the unchanged
+cleanup budget. The same typed receipt records `reaped=true`, `kill_requested=true`,
+exit1 and no load/shutdown/kill/wait/pipe error fields. Production correctly stopped
+with `UncleanRetirement` and `metadata returned but helper did not retire cleanly`.
+This did not exercise the actual App index UI. Static installed PE FileVersionInfo
+is 8.4.1; it is not an SDK loaded-version reply. No NOIRE state, editor, MIDI/DSP,
+audio device, save/reopen, conversion or export was requested.
+
+The original outer receipt additionally reported a false field-consistency error:
+PowerShell unwrapped the one-element receipt array into a Hashtable whose Count
+was 11. Independent explicit object[] validation of the frozen JSON agrees with
+all three reap/healthy-exit booleans, with zero validation errors. This fixes the
+interpretation, not the failed native scan. Original result, terminal and log bytes
+are unchanged. Evidence is in `windows-kontakt-default-scan-run-01/` and
+`source61-default-scan-independent-validation-01.json`.
+
+Reproduction used the exact ignored selector
+`windows_kontakt_qa::runtime_qa::windows_kontakt_default_class_scan_and_reap`
+with `--ignored --exact --test-threads=1 --nocapture`, a new private adjacent helper,
+and the explicit scanner opt-in. Preserve this failed cohort; any diagnostic run
+needs a new source/binary binding and new directories. Keep the five-second load
+and 250/2250ms cleanup deadlines. Shutdown consumption, dispatcher destruction,
+whole-plugin destruction and OLE teardown need observation before attributing the
+stall to terminate or FreeLibrary; successful local Shutdown write is not command
+consumption. Existing SDK teardown markers currently lose their active trace after
+the LoadInfo response and need a separate opt-in shutdown trace.
+
+Source62 implements that explicit exit trace in the existing helper logger; it
+reuses the exact `windows-load-response-timing-v1` opt-in and preserves the load
+trace. Reader and main causes remain separate, the first cause is retained, and
+exit records share a 128-record per-process cap before clock/sink access. Disabled
+paths avoid clock/TLS/allocation/I/O. Fixed markers cover input consumption,
+dispatcher field destruction, whole plugin slot clear, OLE teardown and the actual
+return from Windows run; six existing SDK teardown stages use the exit prefix.
+SDK Drop/ExitDll body return is not labelled FreeLibrary or process termination.
+Original commands and deadlines are unchanged; there is no vendor patch. Six new
+pure regressions plus the original 39 helper regressions actually passed, along
+with default/all-feature strict Clippy, root/private formatting and diff checks
+(six gates, exit0). The next actual diagnostic scan remains unrun; this
+instrumentation does not fix or reclassify Source61's failure.
+
+Source62 read-only review found a separate unwind-order regression despite those
+passing gates: extracting dispatcher fields into locals reverses the remaining
+receiver/protocol destruction order if Editor drops with a Rust unwind, including
+the disabled path. It must not be described as fully preserving original cleanup.
+Source63 restores aggregate dispatcher destruction, brackets only the original
+explicit editor.close, and adds a diagnostic on/off by Editor normal/unwind
+four-case regression. Read-only review confirms the original order is restored.
+Actual corrected acceptance passed all 46 helper regressions, default/all-feature
+strict Clippy, root/private formatting and diff checks (six gates, exit0, all 284
+pins unchanged). Evidence is in `source63-exit-*`. Original Source62 source and
+successful gate receipts remain intact alongside the review finding. The new exit
+trace has not run against actual Kontakt; the native retirement problem is still
+unresolved, and the works/protected files are unchanged.
 
 Use private new directories and explicit opt-in ignored QA only after the coordinated desktop/build window is available. Preserve the original project and identify the exact test/helper/source inputs.
 Normal source checks can be reproduced independently; real NI tests are intentionally excluded:

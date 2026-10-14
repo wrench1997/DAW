@@ -269,12 +269,809 @@ fn around_phase<T>(
 
 #[cfg(windows)]
 fn sdk_load_phase(phase: &'static str, before: bool, sdk_result: Option<i32>) {
+    if shutdown::sdk_phase(phase, before, sdk_result) {
+        return;
+    }
     mark(Event::LoadPhase {
         origin: PhaseOrigin::Sdk,
         phase,
         before,
         sdk_result,
     });
+}
+
+/// Separate from ACTIVE: responding to LoadPlugin must not end a later exit
+/// trace. Only Windows production callers exist; the core has pure local tests.
+#[cfg(any(windows, test))]
+pub(super) mod shutdown {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    const MAX_RECORDS: usize = 128;
+    #[cfg(windows)]
+    static RECORDS: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(windows)]
+    thread_local! {
+        static READER: Slot = const { Slot::new() };
+        static MAIN: Slot = const { Slot::new() };
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Role {
+        Reader,
+        Main,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Cause {
+        Shutdown,
+        Eof,
+        ReadError,
+        Disconnected,
+        NativeQuit,
+        RunReturn,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum Phase {
+        ReaderShutdownDecoded,
+        ReaderShutdownEnqueue,
+        ReaderEof,
+        ReaderReadError,
+        ReaderEofEnqueue,
+        MainShutdownConsumed,
+        MainEofConsumed,
+        MainDisconnected,
+        MainNativeQuit,
+        LoopExited,
+        DispatcherDrop,
+        EditorClose,
+        PluginSlotClear,
+        OleUninitialize,
+        WindowsRunReturned,
+        SdkInitializedComponentDrop,
+        SdkPluginDrop,
+        SdkDisconnect,
+        SdkControllerTerminate,
+        SdkComponentTerminate,
+        SdkExitDll,
+    }
+    impl Phase {
+        fn name(self) -> &'static str {
+            match self {
+                Self::ReaderShutdownDecoded => "reader_shutdown_decoded",
+                Self::ReaderShutdownEnqueue => "reader_shutdown_enqueue_completed",
+                Self::ReaderEof => "reader_eof_observed",
+                Self::ReaderReadError => "reader_read_error_observed",
+                Self::ReaderEofEnqueue => "reader_eof_enqueue_completed",
+                Self::MainShutdownConsumed => "main_shutdown_consumed",
+                Self::MainEofConsumed => "main_eof_consumed",
+                Self::MainDisconnected => "main_receiver_disconnected",
+                Self::MainNativeQuit => "main_native_quit_consumed",
+                Self::LoopExited => "main_loop_exited",
+                Self::DispatcherDrop => "dispatcher_drop",
+                Self::EditorClose => "editor_close",
+                Self::PluginSlotClear => "plugin_slot_clear",
+                Self::OleUninitialize => "ole_uninitialize",
+                Self::WindowsRunReturned => "windows_run_returned",
+                Self::SdkInitializedComponentDrop => "initialized_component_drop_teardown",
+                Self::SdkPluginDrop => "plugin_drop_teardown",
+                Self::SdkDisconnect => "disconnect_component_controller",
+                Self::SdkControllerTerminate => "controller_terminate",
+                Self::SdkComponentTerminate => "component_terminate",
+                Self::SdkExitDll => "windows_exit_dll",
+            }
+        }
+        fn sdk(name: &str) -> Option<Self> {
+            match name {
+                "initialized_component_drop_teardown" => Some(Self::SdkInitializedComponentDrop),
+                "plugin_drop_teardown" => Some(Self::SdkPluginDrop),
+                "disconnect_component_controller" => Some(Self::SdkDisconnect),
+                "controller_terminate" => Some(Self::SdkControllerTerminate),
+                "component_terminate" => Some(Self::SdkComponentTerminate),
+                "windows_exit_dll" => Some(Self::SdkExitDll),
+                _ => None,
+            }
+        }
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Edge {
+        Observed,
+        Before,
+        Returned,
+    }
+    #[derive(Clone, Copy)]
+    struct ShutdownTrace {
+        role: Role,
+        cause: Cause,
+        start: Instant,
+    }
+    struct Slot(Cell<Option<ShutdownTrace>>);
+    impl Slot {
+        const fn new() -> Self {
+            Self(Cell::new(None))
+        }
+    }
+    #[derive(Clone, Copy)]
+    struct ShutdownRecord {
+        trace: ShutdownTrace,
+        elapsed_ns: u128,
+        phase: Phase,
+        edge: Edge,
+        queued: Option<bool>,
+        sdk_result: Option<i32>,
+    }
+
+    /// Saturating shared budget: even concurrent callers can reserve no more
+    /// than MAX_RECORDS. Reservation precedes clock/formatting/sink access.
+    fn reserve(budget: &AtomicUsize) -> bool {
+        budget
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                (used < MAX_RECORDS).then_some(used + 1)
+            })
+            .is_ok()
+    }
+    struct Event {
+        phase: Phase,
+        edge: Edge,
+        queued: Option<bool>,
+        sdk_result: Option<i32>,
+    }
+    impl Event {
+        fn observed(phase: Phase) -> Self {
+            Self {
+                phase,
+                edge: Edge::Observed,
+                queued: None,
+                sdk_result: None,
+            }
+        }
+    }
+    fn record(
+        enabled: bool,
+        slot: &Slot,
+        start: Option<(Role, Cause)>,
+        event: Event,
+        budget: &AtomicUsize,
+        clock: &mut impl FnMut() -> Instant,
+        sink: &mut impl FnMut(ShutdownRecord),
+    ) {
+        if !enabled {
+            return;
+        }
+        let current = slot.0.get();
+        if (current.is_none() && start.is_none()) || !reserve(budget) {
+            return;
+        }
+        let now = clock();
+        let trace = match current {
+            Some(trace) => trace,
+            None => {
+                let Some((role, cause)) = start else { return };
+                let trace = ShutdownTrace {
+                    role,
+                    cause,
+                    start: now,
+                };
+                slot.0.set(Some(trace));
+                trace
+            }
+        };
+        sink(ShutdownRecord {
+            trace,
+            elapsed_ns: now.saturating_duration_since(trace.start).as_nanos(),
+            phase: event.phase,
+            edge: event.edge,
+            queued: event.queued,
+            sdk_result: event.sdk_result,
+        });
+    }
+    fn write_record(stderr: &mut impl Write, record: ShutdownRecord) {
+        // Fixed vocabulary and primitive facts only. This prefix is not a Load
+        // response, metadata receipt, process exit, or proof of OS child reap.
+        let _ = writeln!(
+            stderr,
+            "[citrus-shutdown-timing-v1] trace={:?} cause={:?} elapsed_ns={} stage={} edge={:?} queued={:?} sdk_result={:?}",
+            record.trace.role,
+            record.trace.cause,
+            record.elapsed_ns,
+            record.phase.name(),
+            record.edge,
+            record.queued,
+            record.sdk_result,
+        );
+    }
+    #[cfg(windows)]
+    fn emit(record: ShutdownRecord) {
+        write_record(&mut io::stderr().lock(), record);
+    }
+    #[cfg(windows)]
+    fn reader(cause: Option<Cause>, event: Event) {
+        if !enabled() {
+            return;
+        }
+        let _ = READER.try_with(|slot| {
+            record(
+                true,
+                slot,
+                cause.map(|cause| (Role::Reader, cause)),
+                event,
+                &RECORDS,
+                &mut Instant::now,
+                &mut emit,
+            )
+        });
+    }
+    #[cfg(windows)]
+    fn main(cause: Option<Cause>, event: Event) {
+        if !enabled() {
+            return;
+        }
+        let _ = MAIN.try_with(|slot| {
+            record(
+                true,
+                slot,
+                cause.map(|cause| (Role::Main, cause)),
+                event,
+                &RECORDS,
+                &mut Instant::now,
+                &mut emit,
+            )
+        });
+    }
+    #[cfg(windows)]
+    pub(crate) fn reader_shutdown_decoded() {
+        reader(
+            Some(Cause::Shutdown),
+            Event::observed(Phase::ReaderShutdownDecoded),
+        );
+    }
+    #[cfg(windows)]
+    pub(crate) fn reader_shutdown_enqueued(queued: bool) {
+        reader(
+            None,
+            Event {
+                queued: Some(queued),
+                ..Event::observed(Phase::ReaderShutdownEnqueue)
+            },
+        );
+    }
+    #[cfg(windows)]
+    pub(crate) fn reader_eof() {
+        reader(Some(Cause::Eof), Event::observed(Phase::ReaderEof));
+    }
+    #[cfg(windows)]
+    pub(crate) fn reader_read_error() {
+        reader(
+            Some(Cause::ReadError),
+            Event::observed(Phase::ReaderReadError),
+        );
+    }
+    #[cfg(windows)]
+    pub(crate) fn reader_eof_enqueued(queued: bool) {
+        reader(
+            None,
+            Event {
+                queued: Some(queued),
+                ..Event::observed(Phase::ReaderEofEnqueue)
+            },
+        );
+    }
+    #[cfg(windows)]
+    pub(crate) fn main_consumed(cause: Cause) {
+        let phase = match cause {
+            Cause::Shutdown => Phase::MainShutdownConsumed,
+            Cause::Eof => Phase::MainEofConsumed,
+            Cause::Disconnected => Phase::MainDisconnected,
+            Cause::NativeQuit => Phase::MainNativeQuit,
+            // Reader-only causes never masquerade as main-loop input.
+            Cause::ReadError | Cause::RunReturn => return,
+        };
+        main(Some(cause), Event::observed(phase));
+    }
+    #[cfg(windows)]
+    pub(crate) fn main_loop_exited() {
+        main(None, Event::observed(Phase::LoopExited));
+    }
+    #[cfg(windows)]
+    pub(crate) fn windows_run_returned() {
+        main(
+            Some(Cause::RunReturn),
+            Event::observed(Phase::WindowsRunReturned),
+        );
+    }
+    fn around<T>(invoke: impl FnOnce() -> T, mut marker: impl FnMut(Edge)) -> T {
+        marker(Edge::Before);
+        let returned = invoke();
+        marker(Edge::Returned);
+        returned
+    }
+    #[cfg(windows)]
+    pub(crate) fn around_phase<T>(phase: Phase, invoke: impl FnOnce() -> T) -> T {
+        if !enabled() {
+            return invoke();
+        }
+        around(invoke, |edge| {
+            main(
+                None,
+                Event {
+                    edge,
+                    ..Event::observed(phase)
+                },
+            )
+        })
+    }
+    fn record_sdk(
+        slot: &Slot,
+        phase: &'static str,
+        before: bool,
+        sdk_result: Option<i32>,
+        budget: &AtomicUsize,
+        clock: &mut impl FnMut() -> Instant,
+        sink: &mut impl FnMut(ShutdownRecord),
+    ) -> bool {
+        if slot.0.get().is_none() {
+            return false;
+        }
+        if let Some(phase) = Phase::sdk(phase) {
+            record(
+                true,
+                slot,
+                None,
+                Event {
+                    phase,
+                    edge: if before { Edge::Before } else { Edge::Returned },
+                    queued: None,
+                    sdk_result,
+                },
+                budget,
+                clock,
+                sink,
+            );
+        }
+        // A terminal main trace wins even when its budget is exhausted or an
+        // SDK stage is outside the closed teardown vocabulary. Never relabel
+        // terminal SDK teardown as another active load/reply.
+        true
+    }
+    #[cfg(windows)]
+    pub(super) fn sdk_phase(phase: &'static str, before: bool, sdk_result: Option<i32>) -> bool {
+        if !enabled() {
+            return false;
+        }
+        MAIN.try_with(|slot| {
+            record_sdk(
+                slot,
+                phase,
+                before,
+                sdk_result,
+                &RECORDS,
+                &mut Instant::now,
+                &mut emit,
+            )
+        })
+        .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::cell::RefCell;
+        use std::time::Duration;
+
+        #[derive(Default)]
+        struct ClosedSink {
+            writes: usize,
+        }
+        impl Write for ClosedSink {
+            fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+                self.writes += 1;
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+        }
+
+        #[test]
+        fn disabled_shutdown_does_not_read_clock_sink_slot_or_budget() {
+            let slot = Slot::new();
+            let budget = AtomicUsize::new(0);
+            record(
+                false,
+                &slot,
+                Some((Role::Main, Cause::Shutdown)),
+                Event::observed(Phase::MainShutdownConsumed),
+                &budget,
+                &mut || panic!("disabled shutdown clock"),
+                &mut |_| panic!("disabled shutdown sink"),
+            );
+            assert!(slot.0.get().is_none());
+            assert_eq!(budget.load(Ordering::Relaxed), 0);
+        }
+
+        #[test]
+        fn reader_and_main_keep_separate_origins_and_first_causes() {
+            let reader = Slot::new();
+            let main = Slot::new();
+            let budget = AtomicUsize::new(0);
+            let start = Instant::now();
+            let mut records = Vec::new();
+            record(
+                true,
+                &reader,
+                Some((Role::Reader, Cause::Shutdown)),
+                Event::observed(Phase::ReaderShutdownDecoded),
+                &budget,
+                &mut || start,
+                &mut |row| records.push(row),
+            );
+            record(
+                true,
+                &main,
+                Some((Role::Main, Cause::Eof)),
+                Event::observed(Phase::MainEofConsumed),
+                &budget,
+                &mut || start + Duration::from_nanos(7),
+                &mut |row| records.push(row),
+            );
+            record(
+                true,
+                &reader,
+                Some((Role::Reader, Cause::Eof)),
+                Event::observed(Phase::ReaderEof),
+                &budget,
+                &mut || start + Duration::from_nanos(9),
+                &mut |row| records.push(row),
+            );
+            record(
+                true,
+                &main,
+                Some((Role::Main, Cause::RunReturn)),
+                Event::observed(Phase::WindowsRunReturned),
+                &budget,
+                &mut || start + Duration::from_nanos(12),
+                &mut |row| records.push(row),
+            );
+            assert_eq!(records[0].trace.role, Role::Reader);
+            assert_eq!(records[1].trace.role, Role::Main);
+            assert_eq!(records[2].trace.cause, Cause::Shutdown);
+            assert_eq!(records[3].trace.cause, Cause::Eof);
+            assert_eq!(records[2].elapsed_ns, 9);
+            assert_eq!(records[3].elapsed_ns, 5);
+
+            let terminal = Slot::new();
+            for (cause, phase) in [
+                (Cause::Shutdown, Phase::MainShutdownConsumed),
+                (Cause::Eof, Phase::MainEofConsumed),
+                (Cause::RunReturn, Phase::WindowsRunReturned),
+            ] {
+                record(
+                    true,
+                    &terminal,
+                    Some((Role::Main, cause)),
+                    Event::observed(phase),
+                    &budget,
+                    &mut || start,
+                    &mut |row| assert_eq!(row.trace.cause, Cause::Shutdown),
+                );
+            }
+        }
+
+        #[test]
+        fn shared_shutdown_record_cap_stops_before_clock_and_sink() {
+            let reader = Slot::new();
+            let main = Slot::new();
+            let budget = AtomicUsize::new(0);
+            let mut count = 0;
+            let start = Instant::now();
+            for index in 0..MAX_RECORDS {
+                let (slot, role) = if index % 2 == 0 {
+                    (&reader, Role::Reader)
+                } else {
+                    (&main, Role::Main)
+                };
+                record(
+                    true,
+                    slot,
+                    Some((role, Cause::Shutdown)),
+                    Event::observed(Phase::MainShutdownConsumed),
+                    &budget,
+                    &mut || start,
+                    &mut |_| count += 1,
+                );
+            }
+            record(
+                true,
+                &main,
+                None,
+                Event::observed(Phase::LoopExited),
+                &budget,
+                &mut || panic!("budgeted clock"),
+                &mut |_| panic!("budgeted sink"),
+            );
+            assert_eq!(count, MAX_RECORDS);
+            assert_eq!(budget.load(Ordering::Relaxed), MAX_RECORDS);
+            assert!(record_sdk(
+                &main,
+                "windows_exit_dll",
+                false,
+                None,
+                &budget,
+                &mut || panic!("budgeted SDK clock"),
+                &mut |_| panic!("budgeted SDK sink"),
+            ));
+        }
+
+        #[test]
+        fn sdk_shutdown_markers_use_main_exit_trace_after_load_reply_scope_ended() {
+            let main = Slot::new();
+            let reader = Slot::new();
+            let budget = AtomicUsize::new(0);
+            let start = Instant::now();
+            assert!(!record_sdk(
+                &main,
+                "component_terminate",
+                false,
+                Some(-17),
+                &budget,
+                &mut || panic!("inactive SDK clock"),
+                &mut |_| panic!("inactive SDK sink")
+            ));
+            record(
+                true,
+                &reader,
+                Some((Role::Reader, Cause::Shutdown)),
+                Event::observed(Phase::ReaderShutdownDecoded),
+                &budget,
+                &mut || start,
+                &mut |_| {},
+            );
+            // Reader activity does not activate main-thread SDK tracing.
+            assert!(!record_sdk(
+                &main,
+                "component_terminate",
+                false,
+                Some(-17),
+                &budget,
+                &mut || panic!("reader SDK clock"),
+                &mut |_| {}
+            ));
+            record(
+                true,
+                &main,
+                Some((Role::Main, Cause::Shutdown)),
+                Event::observed(Phase::MainShutdownConsumed),
+                &budget,
+                &mut || start,
+                &mut |_| {},
+            );
+            let mut output = Vec::new();
+            assert!(record_sdk(
+                &main,
+                "component_terminate",
+                false,
+                Some(-17),
+                &budget,
+                &mut || start + Duration::from_nanos(3),
+                &mut |row| write_record(&mut output, row)
+            ));
+            let text = std::str::from_utf8(&output).unwrap();
+            assert!(text.starts_with(
+                "[citrus-shutdown-timing-v1] trace=Main cause=Shutdown elapsed_ns=3 "
+            ));
+            assert!(text.contains("stage=component_terminate edge=Returned"));
+            assert!(text.contains("sdk_result=Some(-17)"));
+            assert!(!text.contains("load="));
+            assert!(record_sdk(
+                &main,
+                "component_initialize",
+                true,
+                None,
+                &budget,
+                &mut || panic!("non-teardown SDK clock"),
+                &mut |_| {}
+            ));
+        }
+
+        #[test]
+        fn closed_shutdown_sink_preserves_original_calls_order_return_and_panic() {
+            let operations = RefCell::new(Vec::new());
+            let mut diagnostic = ClosedSink::default();
+            let slot = Slot::new();
+            let budget = AtomicUsize::new(0);
+            let start = Instant::now();
+            record(
+                true,
+                &slot,
+                Some((Role::Main, Cause::Shutdown)),
+                Event::observed(Phase::MainShutdownConsumed),
+                &budget,
+                &mut || start,
+                &mut |_| {},
+            );
+            let original = Box::new([13_u8, 17]);
+            let pointer = original.as_ptr();
+            let returned: Result<(), Box<[u8; 2]>> = around(
+                || {
+                    operations.borrow_mut().push("original");
+                    Err(original)
+                },
+                |edge| {
+                    operations.borrow_mut().push(match edge {
+                        Edge::Before => "before",
+                        Edge::Returned => "returned",
+                        Edge::Observed => unreachable!(),
+                    });
+                    record(
+                        true,
+                        &slot,
+                        None,
+                        Event {
+                            edge,
+                            ..Event::observed(Phase::PluginSlotClear)
+                        },
+                        &budget,
+                        &mut || start,
+                        &mut |row| write_record(&mut diagnostic, row),
+                    );
+                },
+            );
+            let returned = returned.unwrap_err();
+            assert_eq!(returned.as_ptr(), pointer);
+            assert_eq!(*operations.borrow(), ["before", "original", "returned"]);
+            assert_eq!(diagnostic.writes, 2);
+            let mut edges = Vec::new();
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                around(|| std::panic::panic_any(71_u32), |edge| edges.push(edge));
+            }));
+            assert_eq!(*panic.unwrap_err().downcast::<u32>().unwrap(), 71);
+            assert_eq!(edges, [Edge::Before]);
+        }
+
+        #[test]
+        fn dispatcher_aggregate_unwind_preserves_protocol_then_receiver_and_no_returned_edge() {
+            struct DropStep<'a> {
+                name: &'static str,
+                operations: &'a RefCell<Vec<&'static str>>,
+                panics: bool,
+            }
+            impl Drop for DropStep<'_> {
+                fn drop(&mut self) {
+                    self.operations.borrow_mut().push(self.name);
+                    if self.panics {
+                        std::panic::panic_any(83_u32);
+                    }
+                }
+            }
+            // Match CommandDispatcher's aggregate field order; never unpack
+            // these owners into locals, whose unwind order would be reversed.
+            struct Dispatcher<'a> {
+                _editor: DropStep<'a>,
+                _protocol: DropStep<'a>,
+                _receiver: DropStep<'a>,
+            }
+            for diagnostics in [false, true] {
+                for editor_panics in [false, true] {
+                    let operations = RefCell::new(Vec::new());
+                    let invocations = Cell::new(0);
+                    let dispatcher = Dispatcher {
+                        _editor: DropStep {
+                            name: "editor",
+                            operations: &operations,
+                            panics: editor_panics,
+                        },
+                        _protocol: DropStep {
+                            name: "protocol",
+                            operations: &operations,
+                            panics: false,
+                        },
+                        _receiver: DropStep {
+                            name: "receiver",
+                            operations: &operations,
+                            panics: false,
+                        },
+                    };
+                    let mut edges = Vec::new();
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let invoke = || {
+                            invocations.set(invocations.get() + 1);
+                            drop(dispatcher);
+                        };
+                        if diagnostics {
+                            around(invoke, |edge| edges.push(edge));
+                        } else {
+                            invoke();
+                        }
+                    }));
+                    assert_eq!(invocations.get(), 1);
+                    assert_eq!(*operations.borrow(), ["editor", "protocol", "receiver"]);
+                    if editor_panics {
+                        assert_eq!(*result.unwrap_err().downcast::<u32>().unwrap(), 83);
+                    } else {
+                        assert!(result.is_ok());
+                    }
+                    let expected = match (diagnostics, editor_panics) {
+                        (false, _) => Vec::new(),
+                        (true, true) => vec![Edge::Before],
+                        (true, false) => vec![Edge::Before, Edge::Returned],
+                    };
+                    assert_eq!(edges, expected);
+                }
+            }
+        }
+
+        #[test]
+        fn shutdown_vocabulary_is_closed_and_logs_only_fixed_primitive_facts() {
+            let phases = [
+                Phase::ReaderShutdownDecoded,
+                Phase::ReaderShutdownEnqueue,
+                Phase::ReaderEof,
+                Phase::ReaderReadError,
+                Phase::ReaderEofEnqueue,
+                Phase::MainShutdownConsumed,
+                Phase::MainEofConsumed,
+                Phase::MainDisconnected,
+                Phase::MainNativeQuit,
+                Phase::LoopExited,
+                Phase::DispatcherDrop,
+                Phase::EditorClose,
+                Phase::PluginSlotClear,
+                Phase::OleUninitialize,
+                Phase::WindowsRunReturned,
+                Phase::SdkInitializedComponentDrop,
+                Phase::SdkPluginDrop,
+                Phase::SdkDisconnect,
+                Phase::SdkControllerTerminate,
+                Phase::SdkComponentTerminate,
+                Phase::SdkExitDll,
+            ];
+            let names = phases.map(Phase::name);
+            for (index, name) in names.iter().enumerate() {
+                assert!(
+                    name.bytes()
+                        .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                );
+                assert!(!names[..index].contains(name));
+            }
+            for unknown in [
+                "",
+                "component_initialize",
+                "C:/private",
+                "windows_free_library",
+            ] {
+                assert!(Phase::sdk(unknown).is_none());
+            }
+            for cause in [
+                Cause::Shutdown,
+                Cause::Eof,
+                Cause::ReadError,
+                Cause::Disconnected,
+                Cause::NativeQuit,
+                Cause::RunReturn,
+            ] {
+                let mut output = Vec::new();
+                write_record(
+                    &mut output,
+                    ShutdownRecord {
+                        trace: ShutdownTrace {
+                            role: Role::Main,
+                            cause,
+                            start: Instant::now(),
+                        },
+                        elapsed_ns: 0,
+                        phase: Phase::ReaderShutdownEnqueue,
+                        edge: Edge::Observed,
+                        queued: Some(false),
+                        sdk_result: None,
+                    },
+                );
+                assert!(
+                    std::str::from_utf8(&output)
+                        .unwrap()
+                        .contains("queued=Some(false) sdk_result=None")
+                );
+            }
+        }
+    }
 }
 
 #[cfg(windows)]
