@@ -270,32 +270,48 @@ fn handle_inner(
             class_id,
         } => {
             *sample_rate = sr;
-            let mut host = match Vst3Host::builder()
-                .sample_rate(sr)
-                .block_size(block_size as usize)
-                .tempo(tempo)
-                .time_signature(time_sig_numerator, time_sig_denominator)
-                .build()
-            {
+            let mut host = match load_response_timing::around_load_phase(
+                load_response_timing::HelperLoadPhase::HostBuild,
+                || {
+                    Vst3Host::builder()
+                        .sample_rate(sr)
+                        .block_size(block_size as usize)
+                        .tempo(tempo)
+                        .time_signature(time_sig_numerator, time_sig_denominator)
+                        .build()
+                },
+            ) {
                 Ok(h) => h,
                 Err(e) => return err("Failed to build host", e),
             };
             #[cfg(any(target_os = "windows", target_os = "linux"))]
-            let loaded = match class_id.as_deref() {
-                Some(class_id) => host.load_main_thread_plugin_class(&path, class_id),
-                None => host.load_main_thread_plugin(&path),
-            };
+            let loaded = load_response_timing::around_load_phase(
+                load_response_timing::HelperLoadPhase::HostLoad,
+                || match class_id.as_deref() {
+                    Some(class_id) => host.load_main_thread_plugin_class(&path, class_id),
+                    None => host.load_main_thread_plugin(&path),
+                },
+            );
             #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-            let loaded = match class_id {
-                Some(class_id) => host.load_plugin_class(&path, &class_id),
-                None => host.load_plugin(&path),
-            };
+            let loaded = load_response_timing::around_load_phase(
+                load_response_timing::HelperLoadPhase::HostLoad,
+                || match class_id {
+                    Some(class_id) => host.load_plugin_class(&path, &class_id),
+                    None => host.load_plugin(&path),
+                },
+            );
             match loaded {
                 Ok(p) => {
                     let info = p.info().clone();
                     let compatibility = p.class_compatibility().to_vec();
-                    let output_channels = p.output_channel_count() as i32;
-                    *plugin.lock().unwrap() = Some(p);
+                    let output_channels = load_response_timing::around_load_phase(
+                        load_response_timing::HelperLoadPhase::OutputChannelQuery,
+                        || p.output_channel_count() as i32,
+                    );
+                    load_response_timing::around_load_phase(
+                        load_response_timing::HelperLoadPhase::PluginPublication,
+                        || *plugin.lock().unwrap() = Some(p),
+                    );
                     HostResponse::PluginInfo {
                         vendor: info.vendor,
                         name: info.name,

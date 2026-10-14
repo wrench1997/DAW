@@ -112,6 +112,8 @@ pub use discovery::{
 pub use embed::{EditorRect, EmbeddedEditor};
 pub use error::{Error, MetadataQueryRejection, Result};
 pub use host::{DiscoveryProgress, ProbeResult, Vst3Host, Vst3HostBuilder};
+#[doc(hidden)]
+pub use internal::load_phase_diagnostics::install_load_phase_diagnostics;
 pub use midi::{
     cc, MidiChannel, MidiEvent, NoteExpressionInfo, NoteExpressionType, NoteId, OutputEvent,
     PluginEvent, PluginEventData,

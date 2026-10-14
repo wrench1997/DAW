@@ -11,7 +11,7 @@
 | --- | --- | --- |
 | 实时 Master 录音 | 录制实际播放经过的 Master 输出 | 已有 NOIRE Pure 录音及用户试听确认；不等于离线导出 |
 | 选中 MIDI 片段转音频 | Windows/Linux 实验 helper、状态捕获、无覆盖发布、取消和历史恢复 | NOIRE 实测仍被两次 opaque 捕获差异明确拒绝；原 MIDI 保留 |
-| 整曲离线 WAV | 普通内置音源；实验模式下单 VST 的完整编曲、静态路由及 Master 自动化 | 短 NOIRE 工程通过；完整原曲、效果器链和通用图 PDC 未验收 |
+| 整曲离线 WAV | 普通内置音源；实验模式下单 VST 的完整编曲、静态路由及 Master 自动化 | 短工程及原 405 音符整曲的后台离线导出通过；效果器链和通用图 PDC 未验收 |
 
 普通构建不静默降级导出活动 VST 的错误声音；不支持的图和自动化明确拒绝。
 实验整曲路径要求 `experimental-fresh-helper`、单个活动 VST、无 insert 效果器。
@@ -44,6 +44,21 @@ Master 音量/声像/静音自动化已接线；尾音须明确确认固定窗�
 | 保存重开 | 静音最小工程保存重开通过；Saved13 正常保存并在 native14 冷打开 | 静音检查不证明 NOIRE；未验证 Felt 和全部内部音色参数 |
 | 试听文件 | 独立曲子有 MIDI 和实际 Master 录音派生试听文件 | 派生文件是实时录音，不是片段转换或整曲离线导出 |
 | 短整曲离线 | Whole run02 实际通过并独立核对全部 PCM/WAV | 2 patterns、2 placements、2 beats；不等于原 405 音符整曲 |
+| 完整原曲离线 | Source52 full-song run02 实际 exit0；原 405 音符/5 patterns/160 beats、782 条 MIDI 及全部最终样本审计通过 | 后台设备无关验证；不等于本轮声卡试听、新保存冷重开、转换撤销、Felt 或效果器/PDC 验收 |
+
+## 完整原曲首次离线通过
+
+Source52 使用原 Saved13、真实生产 App/controller/StrictBackend 和新诊断 helper，未缩短乐谱、改状态或使用替代 renderer。
+实际得到 43983 个 Q128、662248 条完整流式观察，spool/state writer 均实际 Join；源 worker Join 一次，clone disposal/destruction 先于 typed report。
+48k Float32 stereo WAV 为 5629714 frames、117.285708 秒、45037770 字节，SHA-256 `60f1c023b139114c10764e47b1b0d499f4f1a8f89184913e1528ce150076a396`。
+独立审计比较全部 11259428 个最终样本，固定容差 `2e-6`，最大绝对误差 `3.72529e-9`；浮点 bit 差异如实记录。
+实际音乐非零，非有限样本/削波均 0，最大同声道相邻差约 `.001802`；末 100 ms 和固定 3 秒尾窗为静音。
+原曲保留 128–160 beats 的空 coda，尾部约 23 秒静音不当作丢音；不据数字检查宣称听感无爆音或未知自然 tail 全部释放。
+原工程、音符、状态、历史、路由、自动化及二进制 pins 均未变。实际 sidecar 验证源加载原 591772 字节，捕获和 clone 加载的 591761 字节逐字节相同，不证明 NI 内部参数语义。
+本轮总耗时 396.064 秒（test 395.07 秒），外部 280 秒观测阈值跨过后只记录 Pending，同一 PID 3496 最终 exit0，没有重启或扩大原预算；不能称总耗时/性能达标。
+扫描本次通过不解释 source50 的超时；scan/source helper 独立严格 reap、音色名/所有内部参数、GUI、声卡、新保存冷重开、Felt、转换/撤销及效果器/PDC 仍未测或未通过。
+证据及音频在 `target/backend-reliability-20261014/windows-noire-full-song-run-02`，保持在 Git 外。
+结果中的 production_export 是发布时的阶段快照，其 audit pending 为 true；最终 result.sound_audit_passed 和独立审计均为 true，不改写已冻结的阶段证据。
 
 ## 短整曲通过与转换拒绝
 
@@ -97,6 +112,10 @@ run08 的 NI component 177 字节不同；已知 host envelope 相同，期间�
 | source48 接线后 Clippy | exit101：未使用的 replay 测试 helper、raw reader 循环样式 | 编译已通过，尚未执行新 Rust 回归；原失败保留 |
 | source49 接线门禁 | 235 stream +34 full-owner passed；3 个显式本机用例忽略；strict default/all-feature/all-target Clippy、fmt/include/diff exit0 | 默认上限、23 类回读、原分配与实际 Drop/recovery/Join 回归通过；独立总审计另 16 passed，无原生音频验收 |
 | source50 完整原曲 native run01 | 实际 27.767 秒，test exit101；再次在生产 scan 的 5 秒 helper 响应处失败 | 源/clone/stream/WAV 均未启动；完整工程/历史/592KB 原状态及二进制 SHA 未变，不能算原曲导出通过 |
+| source51 vendor 诊断源码重放/打包 | 固定上游重放 70 个源文件逐字节一致；apply check/apply exit0，Python 170 passed | 原收据解析 CRLF 误判保留；测试进程实际 exit0，未重跑，仅从原日志修正绑定，不证明 NI/运行时行为 |
+| source51 首次诊断 Clippy | 实际 exit101：`dangling-pointers-from-temporaries` | 新 helper 回归中临时 Box.as_ptr；未执行 Rust 回归/NI，原日志保留 |
+| source52 诊断修正门禁 | 39 helper +5 SDK +34 full-owner passed；3 显式本机用例 ignored，9 项质量/构建检查 exit0；Python 打包 170 passed | 仅修测试返回 Box 存活期，生产诊断代码未变；新补丁 70 文件完整实际重放 |
+| source52 完整原曲 native run02 | 实际总 396.064 秒、exit0；完整输入、782 MIDI、全部 PCM/WAV、流式/状态 Join 审计通过 | 280 秒仅外部观测阈值跨越，不称性能通过；单 VST/无 insert/L=0/明确固定 3 秒尾窗，完整工作流仍未验收 |
 
 source34 root 完整命令耗时 805.36 秒，主程序测试耗时 635.87 秒，真实终态已保存。
 vendor 失败项 `internal::module_info::tests::reads_sdk_generated_bundle_metadata` 要求外部
@@ -127,7 +146,7 @@ source32 的选定元数据 bundle 从源码计数上将 Q128 wrapper IPC 11 次
 保留全部 Project/history/dirty/saved path，仅允许源的会话 runtime_status 更新；source42 run02 已实际初始化原曲源。
 类别按 `|` 分隔的精确 Instrument token 匹配；清理未完成时整 owner 留在失败 quarantine。
 只有实际 join 完成后才允许释放；quarantine 的继续恢复接口尚未实现，禁止超时当成功。
-完整状态比较放在阶段边界，避免每 8ms 复制原曲及历史；尚未执行流式原曲导出。
+完整状态比较放在阶段边界，避免每 8ms 复制原曲及历史；source52 现已执行并审计完整流式原曲导出。
 既有观察/状态/回复容量和 35/280/300 秒期限未通过简单放大绕过。
 独立 state-file auditor 首轮 23 项有 11 failures/6 errors，保留原记录；candidate02 已实跑 28 passed。
 完整 PCM/WAV auditor candidate02 已实跑 35 passed：各 API 自身身份基线、短读后锁定失败。
@@ -137,9 +156,17 @@ source46 已注册并实测实例字典、状态 sidecar 和 stream sink；取�
 source49 已通过 23 类借用 tap、完整 owner Drop/recovery、逐条 typed replay、原始 PCM 派生及完整歌曲生产 driver 的针对性合并门禁。
 默认内存观察器的限制和原始 prelude 没有提高、清空或重置；流式预算独立，成功高频记录不再复制 PCM/RecordKind。
 source50 完整 NOIRE 实机入口实际失败于 scan，未执行渲染、收口及全部样本审计；源码接线和夹具通过不代表原生歌曲通过。
-本次提交 19 个相关源码、回归、文档及字节保留配置文件，覆盖 source49/50 已验证的整曲测试接线和独立审计。
-另 5 个新写的 vendor 加载阶段诊断文件尚未运行格式、编译及实机检查，原样保留在工作区，暂不提交。
+018cb92 已提交并推送 19 个相关源码、回归、文档及字节保留配置文件，覆盖 source49/50 已验证的整曲测试接线和独立审计。
+当时另 5 个新写的 vendor 加载阶段诊断文件未验证，保留在工作区，没有混入该提交。
 14 个本地作品及 target 验证记录、插件状态、PCM、二进制由现有忽略规则排除并保留。
+
+加载定位的新源码已接入 31 个固定 SDK 阶段和 4 个 helper 阶段的 before/returned 标记。
+仅已有精确启动 opt-in 安装回调，共用实际 load 序号和时钟；默认门关闭先返回，错误结果和原 SDK 调用/顺序/期限不变。
+原始 HRESULT 只在实际取得时记录；probe view Release、错误 teardown 和 ExitDll 分开观察，不把 Drop 正文或 ExitDll 当作 FreeLibrary 完成。
+TLS 已销毁时不产生诊断 panic。5 个库局部门回归和新增 4 个 helper 边界回归在 source52 已通过，Clippy/格式/构建及完整原曲实测通过。
+source51 的旧 PowerShell 执行器策略拒绝、复制 runner 漏改 source49 清单导致的两次预检失败均保留；这些尝试均未启动 Cargo。
+校正后的 source51 277 输入门禁报新测试临时 Box 指针错误；source52 保留原失败并绑定返回 Box 后通过。单任务 CPU 门禁与另一聊天的功能 UI 收尾已通知协调；不作为性能测试。
+完整歌曲的新结果字段区分 owned_native_resources_joined 与 source_readiness_verified；无源的清理完成不再命名为音源 Join，扫描 helper 的严格 reap 仍未证明。
 
 ## 失败复现与下一步
 

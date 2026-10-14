@@ -1,6 +1,7 @@
 //! Internal VST3 plugin implementation
 
 use super::data_exchange::DataExchangeProcessGate;
+use super::load_phase_diagnostics::{self as load_diagnostics, Stage as LoadStage};
 use super::native_edit_transport::NativeEditReceiver;
 
 #[cfg(test)]
@@ -1356,13 +1357,17 @@ impl PluginImpl {
             // Find and create the audio component
             log::debug!("Step 4: Creating audio component...");
             let (component, class_index) =
-                Self::create_component(&factory, target_class_id.as_deref())?;
+                load_diagnostics::around(LoadStage::ComponentCreate, || {
+                    Self::create_component(&factory, target_class_id.as_deref())
+                })?;
             log::debug!("Component created successfully (class index {class_index})");
 
             // Initialize component with a host-application context. Passing null here
             // crashes plugins that query the host (u-he, Waves, ...); see HostApplication.
             log::debug!("Step 5: Initializing component...");
+            load_diagnostics::emit(LoadStage::ComponentInitialize, true, None);
             let init_result = component.initialize(context);
+            load_diagnostics::emit(LoadStage::ComponentInitialize, false, Some(init_result));
             if init_result != kResultOk {
                 // A component that failed to initialize must NOT be terminated (terminate pairs
                 // with a *successful* initialize), and must certainly not be driven on through
@@ -1388,15 +1393,22 @@ impl PluginImpl {
 
             // Establish the component's declared default bus state while it is inactive.
             log::debug!("Step 6: Activating default buses...");
-            let bus_activation = Self::activate_default_buses(&component)?;
+            let bus_activation = load_diagnostics::around(LoadStage::DefaultBusActivation, || {
+                Self::activate_default_buses(&component)
+            })?;
             log::debug!("Default buses activated");
 
             // Get processor interface
             log::debug!("Step 7: Getting IAudioProcessor interface...");
-            let processor = component.cast::<IAudioProcessor>().ok_or_else(|| {
+            let processor = load_diagnostics::around(LoadStage::ProcessorInterface, || {
+                component.cast::<IAudioProcessor>()
+            })
+            .ok_or_else(|| {
                 Error::InterfaceError("Component does not implement IAudioProcessor".to_string())
             })?;
-            let sample_size = Self::select_sample_size(&processor)?;
+            let sample_size = load_diagnostics::around(LoadStage::SampleFormatSelection, || {
+                Self::select_sample_size(&processor)
+            })?;
             log::debug!("IAudioProcessor interface obtained");
 
             // Create component handler for parameter change notifications
@@ -1410,8 +1422,11 @@ impl PluginImpl {
             log::debug!("Step 9: Getting or creating controller...");
             // A component that directly implements IEditController is a single-component
             // plugin; this distinction matters for state restore (see `single_component`).
+            load_diagnostics::emit(LoadStage::ControllerAcquisition, true, None);
             let single_component = component.cast::<IEditController>().is_some();
-            let controller = Self::get_or_create_controller(&component, &factory, context)?;
+            let controller_result = Self::get_or_create_controller(&component, &factory, context);
+            load_diagnostics::emit(LoadStage::ControllerAcquisition, false, None);
+            let controller = controller_result?;
             initialized.attach_controller(controller.clone(), single_component);
             log::debug!(
                 "Controller obtained: {} (single_component: {single_component})",
@@ -1421,14 +1436,19 @@ impl PluginImpl {
             // Connect component and controller if they are separate
             if let Some(ref ctrl) = controller {
                 log::debug!("Step 10: Connecting component and controller...");
-                let connection = Self::connect_component_and_controller(&component, ctrl)?;
+                let connection =
+                    load_diagnostics::around(LoadStage::ConnectComponentController, || {
+                        Self::connect_component_and_controller(&component, ctrl)
+                    })?;
                 initialized.attach_connection(connection);
                 log::debug!("Component and controller connected");
 
                 // Set component handler on controller for parameter change notifications
                 log::debug!("Step 11: Setting component handler on controller...");
                 if let Some(handler_ptr) = component_handler.as_com_ref::<IComponentHandler>() {
+                    load_diagnostics::emit(LoadStage::SetComponentHandler, true, None);
                     let result = ctrl.setComponentHandler(handler_ptr.as_ptr());
+                    load_diagnostics::emit(LoadStage::SetComponentHandler, false, Some(result));
                     if result == kResultOk {
                         log::debug!("Component handler set on controller successfully");
                     } else {
@@ -1453,7 +1473,13 @@ impl PluginImpl {
                                 "failed to create initial component-state stream".to_string(),
                             )
                         })?;
+                    load_diagnostics::emit(LoadStage::InitialGetState, true, None);
                     let get_state_result = component.getState(component_state_ptr.as_ptr());
+                    load_diagnostics::emit(
+                        LoadStage::InitialGetState,
+                        false,
+                        Some(get_state_result),
+                    );
                     if get_state_result == kResultOk || get_state_result == kResultTrue {
                         let controller_state = create_memory_stream_from_with_metadata(
                             component_state.to_vec(),
@@ -1466,8 +1492,14 @@ impl PluginImpl {
                                     "failed to create initial controller-state stream".to_string(),
                                 )
                             })?;
+                        load_diagnostics::emit(LoadStage::InitialSetComponentState, true, None);
                         let set_state_result =
                             ctrl.setComponentState(controller_state_ptr.as_ptr());
+                        load_diagnostics::emit(
+                            LoadStage::InitialSetComponentState,
+                            false,
+                            Some(set_state_result),
+                        );
                         if set_state_result != kResultOk
                             && set_state_result != kResultTrue
                             && set_state_result != kNotImplemented
@@ -1507,17 +1539,23 @@ impl PluginImpl {
             // Extract plugin info from the factory and component. Keyed on the class that was
             // actually instantiated, so a multi-class factory reports the uid the host can
             // reload (or respawn under isolation) to get this same component back.
-            let info = Self::extract_plugin_info(path, &factory, &component, class_index)?;
+            let info = load_diagnostics::around(LoadStage::ExtractPluginInfo, || {
+                Self::extract_plugin_info(path, &factory, &component, class_index)
+            })?;
 
             let has_gui = controller.is_some() && {
                 if let Some(ref ctrl) = controller {
                     let view_type = c"editor".as_ptr();
+                    load_diagnostics::emit(LoadStage::CreateView, true, None);
                     let view_ptr = ctrl.createView(view_type);
+                    load_diagnostics::emit(LoadStage::CreateView, false, None);
                     if !view_ptr.is_null() {
                         // Release the probe view; never call `removed()` on it — that pairs with
                         // `attached()`, and an unmatched `removed()` crashes some plugins that
                         // initialize their close state only on attach.
+                        load_diagnostics::emit(LoadStage::ReleaseProbeView, true, None);
                         let _ = ComPtr::<IPlugView>::from_raw(view_ptr);
+                        load_diagnostics::emit(LoadStage::ReleaseProbeView, false, None);
                         true
                     } else {
                         false
@@ -1612,13 +1650,19 @@ impl PluginImpl {
 
             // IMidiMapping and unit/program metadata are controller calls and therefore belong
             // here on the loading thread, never in process() or a playback command drain.
-            plugin.refresh_midi_mapping_cache();
-            plugin.refresh_program_change_cache();
+            load_diagnostics::around(LoadStage::MidiMappingCache, || {
+                plugin.refresh_midi_mapping_cache()
+            });
+            load_diagnostics::around(LoadStage::ProgramChangeCache, || {
+                plugin.refresh_program_change_cache()
+            });
 
             // Give the processor its own currently-advertised arrangements before the first
             // setup. A refusal is legitimate (the plugin keeps its layout); other failures are
             // surfaced instead of being silently discarded.
-            plugin.negotiate_default_bus_arrangements()?;
+            load_diagnostics::around(LoadStage::DefaultBusArrangements, || {
+                plugin.negotiate_default_bus_arrangements()
+            })?;
 
             // VST3 lifecycle: `setupProcessing` and bus activation require an INACTIVE
             // component, and a plugin sizes its DSP buffers when it goes active, from the
@@ -1707,7 +1751,9 @@ impl PluginImpl {
             // gate inactive before entering that callback so closeQueue is accepted there.
             self.control._host_app.set_data_exchange_active(false);
         }
+        load_diagnostics::emit(LoadStage::SetActive, true, None);
         let result = unsafe { self.control.component.setActive(u8::from(active)) };
+        load_diagnostics::emit(LoadStage::SetActive, false, Some(result));
         if result == kResultOk || result == kResultTrue {
             self.control._host_app.set_data_exchange_active(active);
         } else if !active {
@@ -1834,11 +1880,13 @@ impl PluginImpl {
                 if category.contains("Audio Module Class") && is_target {
                     let mut component_ptr: *mut IComponent = ptr::null_mut();
 
+                    load_diagnostics::emit(LoadStage::ComponentCreateInstance, true, None);
                     let result = factory.createInstance(
                         class_info.cid.as_ptr() as *const std::os::raw::c_char,
                         IComponent::IID.as_ptr() as *const std::os::raw::c_char,
                         &mut component_ptr as *mut _ as *mut _,
                     );
+                    load_diagnostics::emit(LoadStage::ComponentCreateInstance, false, Some(result));
 
                     if result == kResultOk && !component_ptr.is_null() {
                         let component = ComPtr::from_raw(component_ptr).ok_or_else(|| {
@@ -1899,12 +1947,14 @@ impl PluginImpl {
         };
         let mut inputs: Vec<u64> = arrangements.inputs.iter().map(|a| a.raw()).collect();
         let mut outputs: Vec<u64> = arrangements.outputs.iter().map(|a| a.raw()).collect();
+        load_diagnostics::emit(LoadStage::SetBusArrangements, true, None);
         let result = self.control.processor.setBusArrangements(
             inputs.as_mut_ptr(),
             inputs.len() as i32,
             outputs.as_mut_ptr(),
             outputs.len() as i32,
         );
+        load_diagnostics::emit(LoadStage::SetBusArrangements, false, Some(result));
         if result == kResultOk || result == kResultTrue || result == kResultFalse {
             if result == kResultFalse {
                 log::debug!("plugin declined its advertised default bus arrangements");
@@ -1946,10 +1996,12 @@ impl PluginImpl {
                 sampleRate: self.runtime.sample_rate,
             };
 
+            load_diagnostics::emit(LoadStage::SetupProcessing, true, None);
             let result = self
                 .control
                 .processor
                 .setupProcessing(&setup as *const _ as *mut _);
+            load_diagnostics::emit(LoadStage::SetupProcessing, false, Some(result));
             if result != kResultOk {
                 self.runtime.bus_activation.invalidate_acknowledgments();
                 return Err(Error::InterfaceError(format!(
@@ -5341,10 +5393,16 @@ impl PluginImpl {
 
         log::debug!("Got controller class ID, creating controller...");
         let mut controller_ptr: *mut IEditController = ptr::null_mut();
+        load_diagnostics::emit(LoadStage::ControllerCreateInstance, true, None);
         let create_result = factory.createInstance(
             controller_cid.as_ptr(),
             IEditController::IID.as_ptr() as *const std::os::raw::c_char,
             &mut controller_ptr as *mut _ as *mut _,
+        );
+        load_diagnostics::emit(
+            LoadStage::ControllerCreateInstance,
+            false,
+            Some(create_result),
         );
 
         if create_result != kResultOk || controller_ptr.is_null() {
@@ -5361,7 +5419,9 @@ impl PluginImpl {
 
         // Initialize controller with the same host context as the component.
         log::debug!("Initializing controller...");
+        load_diagnostics::emit(LoadStage::ControllerInitialize, true, None);
         let init_result = controller.initialize(context);
+        load_diagnostics::emit(LoadStage::ControllerInitialize, false, Some(init_result));
         if init_result != kResultOk {
             log::warn!("Failed to initialize controller: {:#x}", init_result);
             return Ok(None);
@@ -5503,6 +5563,7 @@ impl Drop for InitializedComponent {
             return;
         }
         log::debug!("Plugin load failed after initialize; terminating the component");
+        load_diagnostics::emit(LoadStage::InitializedComponentDrop, true, None);
         unsafe {
             terminate_component(
                 &self.component,
@@ -5511,6 +5572,7 @@ impl Drop for InitializedComponent {
                 self.connection.as_ref(),
             );
         }
+        load_diagnostics::emit(LoadStage::InitializedComponentDrop, false, None);
     }
 }
 
@@ -5528,18 +5590,25 @@ unsafe fn terminate_component(
     connection: Option<&ConnectionPair>,
 ) {
     if let Some(connection) = connection {
+        load_diagnostics::emit(LoadStage::DisconnectComponentController, true, None);
         connection.disconnect();
+        load_diagnostics::emit(LoadStage::DisconnectComponentController, false, None);
     }
     if let Some(controller) = controller {
         if !single_component {
-            controller.terminate();
+            load_diagnostics::emit(LoadStage::ControllerTerminate, true, None);
+            let result = controller.terminate();
+            load_diagnostics::emit(LoadStage::ControllerTerminate, false, Some(result));
         }
     }
-    component.terminate();
+    load_diagnostics::emit(LoadStage::ComponentTerminate, true, None);
+    let result = component.terminate();
+    load_diagnostics::emit(LoadStage::ComponentTerminate, false, Some(result));
 }
 
 impl Drop for PluginImpl {
     fn drop(&mut self) {
+        load_diagnostics::emit(LoadStage::PluginDrop, true, None);
         // VST3 teardown order: detach the editor, stop processing, deactivate the component,
         // disconnect the component/controller connection points, terminate the controller and the
         // component, then drop the COM references. Many plugins (dual-component ones especially)
@@ -5572,6 +5641,9 @@ impl Drop for PluginImpl {
         }
         #[cfg(target_os = "linux")]
         self.control._host_app.clear_run_loop();
+        // This covers the teardown calls above, not the field COM releases or
+        // module/library field drops which follow this Drop body.
+        load_diagnostics::emit(LoadStage::PluginDrop, false, None);
     }
 }
 

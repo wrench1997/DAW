@@ -601,7 +601,10 @@ impl FullSongRun {
             && observer_failure.is_none();
         self.evidence["result"] = json!({"success":success,"body_passed":body.is_ok(),
             "actual_body_error":body.as_ref().err(),"cleanup_passed":cleanup.is_ok(),
-            "actual_cleanup_error":cleanup.as_ref().err(),"source_resources_joined":resources_joined,
+            "actual_cleanup_error":cleanup.as_ref().err(),"owned_native_resources_joined":resources_joined,
+            "source_readiness_verified":self.source_instance.is_some(),
+            "resource_boolean_alone_does_not_prove_source_worker_join":true,
+            "scan_helper_strict_reap_proven":false,
             "stream_and_sidecar_retirement_passed":retirement.is_ok(),"sound_audit_passed":audit.is_ok(),
             "original_project_and_binaries_unchanged":pins.is_ok(),"actual_pin_error":pins.as_ref().err(),
             "full_model_history_unchanged":model.is_ok(),"actual_model_error":model.as_ref().err(),

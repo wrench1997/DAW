@@ -8,6 +8,7 @@
 
 use super::{ModuleLoader, VstModule};
 use crate::error::{Error, Result};
+use crate::internal::load_phase_diagnostics::{self as load_diagnostics, Stage as LoadStage};
 use std::path::Path;
 use vst3::Steinberg::IPluginFactory;
 
@@ -62,13 +63,14 @@ impl WindowsModule {
 
             // Step 1: Load the library
             log::debug!("Step 1: Loading DLL: {}", binary.display());
-            let library = Library::new(&binary).map_err(|e| {
-                // A common failure on the wrong host arch (e.g. an x86_64-only plugin on an
-                // arm64 host). Diagnose it from the PE header so the error is actionable.
-                let detail = arch_mismatch_detail(&binary)
-                    .unwrap_or_else(|| format!("Failed to load DLL: {}", e));
-                Error::PluginLoadFailed(detail)
-            })?;
+            let library = load_diagnostics::around(LoadStage::LibraryNew, || Library::new(&binary))
+                .map_err(|e| {
+                    // A common failure on the wrong host arch (e.g. an x86_64-only plugin on an
+                    // arm64 host). Diagnose it from the PE header so the error is actionable.
+                    let detail = arch_mismatch_detail(&binary)
+                        .unwrap_or_else(|| format!("Failed to load DLL: {}", e));
+                    Error::PluginLoadFailed(detail)
+                })?;
             log::debug!("DLL loaded successfully");
 
             // Step 2: Try to get InitDll function (OPTIONAL).
@@ -79,7 +81,9 @@ impl WindowsModule {
             match init_dll_result {
                 Ok(init_dll) => {
                     log::debug!("InitDll function found, calling it...");
+                    load_diagnostics::emit(LoadStage::InitDll, true, None);
                     let init_result = init_dll();
+                    load_diagnostics::emit(LoadStage::InitDll, false, None);
                     if init_result {
                         log::debug!("InitDll called successfully");
                     } else {
@@ -143,7 +147,9 @@ impl WindowsModule {
 
 impl VstModule for WindowsModule {
     fn get_factory(&self) -> Result<*mut IPluginFactory> {
+        load_diagnostics::emit(LoadStage::GetPluginFactory, true, None);
         let factory = unsafe { (self.get_factory_fn)() };
+        load_diagnostics::emit(LoadStage::GetPluginFactory, false, None);
         if factory.is_null() {
             Err(Error::PluginLoadFailed(
                 "GetPluginFactory returned null".to_string(),
@@ -166,7 +172,9 @@ impl Drop for WindowsModule {
             // Step 1: Call ExitDll if available
             if let Some(exit_dll) = self.exit_dll.take() {
                 log::debug!("Calling ExitDll...");
+                load_diagnostics::emit(LoadStage::ExitDll, true, None);
                 let exit_result = exit_dll();
+                load_diagnostics::emit(LoadStage::ExitDll, false, None);
                 if exit_result {
                     log::debug!("ExitDll called successfully");
                 } else {

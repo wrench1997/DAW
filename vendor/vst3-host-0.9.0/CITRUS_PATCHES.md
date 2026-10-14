@@ -665,3 +665,83 @@ A real private git applycheck and apply reproduced all 69 files exactly.
 This is byte replay/source provenance evidence, not runtime or package acceptance.
 The complete source ledger and root dirty preimage backups are retained in
 target/backend-reliability-20261014/source32-vendor-provenance-01.
+
+
+### 2026-10-14 source51 opt-in SDK load diagnostics (runtime tests UNRUN)
+
+Five vendored SDK source files add a process-wide diagnostic gate and 31 closed,
+static Windows load/teardown stage names. The public callback is installed once.
+The disabled gate reads AtomicBool before accessing the callback and introduces
+no environment lookup, clock, file I/O, allocation or thread-local state.
+The production helper owns timing and active load scope through its existing
+explicit startup option; that separate root implementation is not vendored here.
+Callbacks carry only the fixed stage, before/returned marker and the original
+SDK HRESULT when actually available. None does not invent a result or success.
+Paths, plugin state, PCM, parameters and arbitrary error text are excluded.
+
+Observed stages cover Windows library construction/InitDll/factory/ExitDll,
+component/controller creation and initialization, controller synchronization,
+view creation and immediate probe Release, the whole MIDI/program caches,
+bus arrangements, setup/activation and existing error/normal teardown.
+The SDK order, return handling, original budgets and release ownership are
+preserved. A wrapper return including Err/None is an actual return marker, not
+a success claim. ExitDll is not evidence of FreeLibrary, process exit or reap.
+This source change diagnoses the retained scan/load timeout; it neither fixes
+nor identifies that timeout before an actual new native run.
+
+The five frozen vendor paths passed isolated formatting/check and diff checking
+as reported by their owner. Five pure local-gate tests are authored but UNRUN.
+Compilation, Clippy, Rust tests, actual Kontakt/NOIRE/UI behavior and performance
+have not been run for these new SDK diagnostic sources at this regeneration.
+Earlier Source49 Rust gates and Source50's timed-out scan do not qualify this
+new implementation. Synthetic Python packaging tests are recorded separately;
+they execute no Windows binaries and do not establish native/runtime acceptance.
+
+The full reviewable patch was regenerated from the verified original archive
+against all 70 actual source files outside vendor/target, excluding only
+CITRUS.patch and this provenance document from patch inputs. The archive contains
+41 original files; 43 paths differ, 29 are additions and
+0 are deletions. LICENSE and .cargo_vcs_info.json remain byte-identical
+upstream; package/version/license, archive checksum and upstream commit are
+unchanged. Patch SHA-256 is b1e42cd73c98c5a87668a0d2b2463d6c8f2fca64b32c53e7db46e088c5311e1a.
+Actual private git apply --check and git apply succeeded with core.autocrlf=false
+and reproduced the full 70-file set and every raw byte, including line
+endings and missing final newlines. This is source provenance evidence.
+Existing four-file packaging pins and hard regression assertions retain the
+same enforcement, with only the patch/document hashes refreshed. Raw preimages,
+the five SDK pins, original archive, complete source ledger and actual replay
+receipts are retained in
+target/backend-reliability-20261014/source51-provenance-01.
+
+
+### 2026-10-14 source52 diagnostic test lifetime repair (quality/runtime pending)
+
+The actual Source51 root all-feature Clippy gate exited 101 on a new helper
+test's pointer borrowed from a temporary Box. Its original terminal/log remain
+retained; no Rust test or new native NI run followed that failed gate.
+Source52 binds returned Boxes for the lifetime of the root helper assertion
+and two equivalent vendor assertions. Within the vendor, only
+src/internal/load_phase_diagnostics.rs changed: its production prefix is
+byte-identical to Source51 and all other 69 source files remain byte-identical.
+The five local-gate test functions and original assertions remain intact.
+These test-only repairs passed their owners' isolated formatting/check; current
+root Clippy/Rust/native gates are pending at this regeneration. They do not
+resolve the actual prior scan timeout or establish Kontakt/NOIRE behavior.
+
+Source51's original 70-file byte replay and actual 170-test synthetic package
+pass remain historical evidence. Its first receipt-parser wrapper failed to
+recognize Windows CRLF summary lines despite the test process's exit0; the raw
+logs, first receipt and corrected binding remain unchanged in the Source51
+directory. No test rerun or product repair was needed for that parser correction.
+
+The Source52 patch was independently regenerated against the verified original
+41-file archive and all 70 actual vendor source files; only CITRUS.patch
+and this document are excluded as patch inputs. There are 43 changed
+paths, 29 additions and 0 deletions. Patch SHA-256 is
+daff9a294e6e987adabe548aeed2be1a1808e9852ef2f440b2ad9e85f7eb9ea1. Actual private git apply --check and apply succeeded and all
+70 file paths/raw bytes matched, with original line endings retained.
+Upstream archive/commit/license pins and all packaging hard assertions remain
+unchanged; only patch/document hash literals are refreshed. New synthetic Python
+package execution is recorded separately and executes no Windows/SDK/NI binary.
+Complete fresh replay, four-file preimages, test-only delta and source bindings
+are retained in target/backend-reliability-20261014/source52-provenance-01.

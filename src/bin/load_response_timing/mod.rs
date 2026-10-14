@@ -34,6 +34,32 @@ pub(super) enum LoadOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum HelperLoadPhase {
+    HostBuild,
+    HostLoad,
+    OutputChannelQuery,
+    PluginPublication,
+}
+
+impl HelperLoadPhase {
+    fn name(self) -> &'static str {
+        match self {
+            Self::HostBuild => "host_build",
+            Self::HostLoad => "host_load",
+            Self::OutputChannelQuery => "output_channel_query",
+            Self::PluginPublication => "plugin_publication",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PhaseOrigin {
+    Helper,
+    #[cfg(any(windows, test))]
+    Sdk,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SerializationOutcome {
     Ok {
         json_bytes: usize,
@@ -70,6 +96,12 @@ impl IoOutcome {
 enum Event {
     HandleEntry,
     HandleReturned(LoadOutcome),
+    LoadPhase {
+        origin: PhaseOrigin,
+        phase: &'static str,
+        before: bool,
+        sdk_result: Option<i32>,
+    },
     #[cfg(any(windows, test))]
     PluginChangedBefore,
     #[cfg(any(windows, test))]
@@ -116,7 +148,14 @@ pub(super) fn enabled() -> bool {
 }
 
 pub(super) fn initialize_from_environment() {
-    ENABLED.store(environment_opt_in(), Ordering::Relaxed);
+    let enabled = environment_opt_in();
+    ENABLED.store(enabled, Ordering::Relaxed);
+    #[cfg(windows)]
+    if enabled {
+        // Only the exact existing startup opt-in installs the SDK gate. The
+        // callback borrows fixed stage names and uses this thread's load clock.
+        let _ = vst3_host::install_load_phase_diagnostics(sdk_load_phase);
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -179,7 +218,9 @@ pub(super) fn begin_load() {
 
 fn current_trace() -> Option<Trace> {
     if enabled() {
-        ACTIVE.with(Cell::get)
+        // Diagnostics can also arrive from SDK cleanup. An unavailable TLS
+        // scope must not turn that cleanup into a diagnostic panic.
+        ACTIVE.try_with(Cell::get).ok().flatten()
     } else {
         None
     }
@@ -193,6 +234,47 @@ fn mark(event: Event) {
 
 pub(super) fn load_returned(outcome: LoadOutcome) {
     mark(Event::HandleReturned(outcome));
+}
+
+/// Preserve the original call and returned value, including Err/None. A panic
+/// or blocked call has no fabricated returned marker.
+pub(super) fn around_load_phase<T>(phase: HelperLoadPhase, invoke: impl FnOnce() -> T) -> T {
+    if !enabled() {
+        return invoke();
+    }
+    around_phase(PhaseOrigin::Helper, phase.name(), invoke, &mut mark)
+}
+
+fn around_phase<T>(
+    origin: PhaseOrigin,
+    phase: &'static str,
+    invoke: impl FnOnce() -> T,
+    sink: &mut impl FnMut(Event),
+) -> T {
+    sink(Event::LoadPhase {
+        origin,
+        phase,
+        before: true,
+        sdk_result: None,
+    });
+    let returned = invoke();
+    sink(Event::LoadPhase {
+        origin,
+        phase,
+        before: false,
+        sdk_result: None,
+    });
+    returned
+}
+
+#[cfg(windows)]
+fn sdk_load_phase(phase: &'static str, before: bool, sdk_result: Option<i32>) {
+    mark(Event::LoadPhase {
+        origin: PhaseOrigin::Sdk,
+        phase,
+        before,
+        sdk_result,
+    });
 }
 
 #[cfg(windows)]
@@ -335,6 +417,16 @@ fn write_record(stderr: &mut impl Write, record: Record) {
         Event::HandleReturned(outcome) => {
             writeln!(stderr, "stage=handle_returned outcome={outcome:?}")
         }
+        Event::LoadPhase {
+            origin,
+            phase,
+            before,
+            sdk_result,
+        } => writeln!(
+            stderr,
+            "stage=load_phase origin={origin:?} phase={phase} edge={} sdk_result={sdk_result:?}",
+            if before { "before" } else { "returned" },
+        ),
         #[cfg(any(windows, test))]
         Event::PluginChangedBefore => writeln!(stderr, "stage=plugin_changed_before"),
         #[cfg(any(windows, test))]
@@ -365,6 +457,129 @@ fn write_record(stderr: &mut impl Write, record: Record) {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn helper_phase_returns_the_original_error_once_without_result_invention() {
+        let original = Box::new([3_u8, 5, 7]);
+        let pointer = original.as_ptr();
+        let mut invocations = 0;
+        let mut events = Vec::new();
+        let result: Result<(), Box<[u8; 3]>> = around_phase(
+            PhaseOrigin::Helper,
+            HelperLoadPhase::HostLoad.name(),
+            || {
+                invocations += 1;
+                Err(original)
+            },
+            &mut |event| events.push(event),
+        );
+        assert_eq!(invocations, 1);
+        let returned_error = result.unwrap_err();
+        assert_eq!(returned_error.as_ptr(), pointer);
+        assert_eq!(
+            events,
+            [
+                Event::LoadPhase {
+                    origin: PhaseOrigin::Helper,
+                    phase: "host_load",
+                    before: true,
+                    sdk_result: None,
+                },
+                Event::LoadPhase {
+                    origin: PhaseOrigin::Helper,
+                    phase: "host_load",
+                    before: false,
+                    sdk_result: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unwinding_load_phase_has_no_fabricated_returned_marker() {
+        let mut events = Vec::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            around_phase(
+                PhaseOrigin::Helper,
+                HelperLoadPhase::PluginPublication.name(),
+                || std::panic::panic_any(31_u32),
+                &mut |event| events.push(event),
+            );
+        }));
+        assert_eq!(*result.unwrap_err().downcast::<u32>().unwrap(), 31);
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            Event::LoadPhase {
+                origin: PhaseOrigin::Helper,
+                phase: "plugin_publication",
+                before: true,
+                sdk_result: None,
+            }
+        );
+    }
+
+    #[test]
+    fn sdk_phases_share_the_actual_load_clock_and_original_signed_hresult() {
+        let start = Instant::now();
+        let trace = Trace { load: 23, start };
+        let mut tick = 0;
+        let mut records = Vec::new();
+        for (before, sdk_result) in [(true, None), (false, Some(-2_147_467_259))] {
+            trace.record(
+                Event::LoadPhase {
+                    origin: PhaseOrigin::Sdk,
+                    phase: "component_initialize",
+                    before,
+                    sdk_result,
+                },
+                &mut || {
+                    tick += 1;
+                    start + Duration::from_nanos(tick)
+                },
+                &mut |record| records.push(record),
+            );
+        }
+        assert!(records.iter().all(|record| record.load == 23));
+        assert_eq!(records[0].elapsed_ns, 1);
+        assert_eq!(records[1].elapsed_ns, 2);
+        let mut output = Vec::new();
+        write_record(&mut output, records[1]);
+        assert_eq!(
+            std::str::from_utf8(&output).unwrap(),
+            "[citrus-load-response-timing-v1] load=23 elapsed_ns=2 stage=load_phase origin=Sdk phase=component_initialize edge=returned sdk_result=Some(-2147467259)\n"
+        );
+    }
+
+    #[test]
+    fn closed_phase_diagnostic_sink_preserves_original_success_and_return_order() {
+        let mut output = ProtocolProbe {
+            fail_after: Some(0),
+            ..Default::default()
+        };
+        let mut events = Vec::new();
+        let start = Instant::now();
+        let returned = around_phase(
+            PhaseOrigin::Helper,
+            HelperLoadPhase::OutputChannelQuery.name(),
+            || 64_i32,
+            &mut |event| {
+                events.push(event);
+                write_record(
+                    &mut output,
+                    Record {
+                        load: 9,
+                        elapsed_ns: start.elapsed().as_nanos(),
+                        event,
+                    },
+                );
+            },
+        );
+        assert_eq!(returned, 64);
+        assert!(output.bytes.is_empty());
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[1], Event::LoadPhase { before: false, .. }));
+    }
 
     #[derive(Default)]
     struct ProtocolProbe {
