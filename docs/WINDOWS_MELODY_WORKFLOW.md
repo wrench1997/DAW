@@ -567,12 +567,37 @@ taps. Shared App fixtures no longer apply a work deadline while queued before
 owning resources; sticky failed-owner rejection and actual work/cleanup deadlines
 remain. Concurrent retirement and failed-admission regressions were added.
 
-The current factory/QA and fixture sources passed rustfmt. The complete vendor
-patch actually replayed all74 source files byte-for-byte, and all170 packaging
-tests passed. New Rust compilation/tests and the factory-only NI experiment have
-not run. The Windows quality workflow adds the dependency's factory/mock-child
-tests explicitly, because root cargo test does not execute dependency unit tests.
-These source and Python checks used no local NI, GUI, GPU or audio device.
+Source70 (`2e0fcdd`) passed rustfmt, complete vendor patch replay of all74 source
+files byte-for-byte and all170 packaging tests. The Windows quality workflow now
+runs dependency factory/mock-child tests explicitly; root cargo test alone does
+not execute dependency unit tests.
+
+The actual [quality run38638030631](https://github.com/wrench1997/DAW/actions/runs/38638030631)
+passed31 vendor factory regressions. Both that run and
+[preview run38638030629](https://github.com/wrench1997/DAW/actions/runs/38638030629)
+passed the complete root suite:2254 app+51 helper+13 protocol tests,2318 passed
+and11 ignored. All four prior failing cases passed in each relevant suite.
+Both workflows subsequently failed strict Clippy: the newer toolchain deprecates
+`Atomic::fetch_update` in `plugin_runtime.rs` and `load_response_timing/mod.rs`.
+Later application/helper build and smoke/native fixture steps were skipped;
+the final preview archive was not verified. Actual logs and terminal run JSON
+remain in `ci-2e0fcdd-windows-{quality,preview}-01.log` and
+`source70-{quality,preview}-ci-actual-terminal-01.json` outside Git.
+
+The repair now uses short compare_exchange_weak loops with the same original
+Acquire/AcqRel or Relaxed orderings, overflow rejection,128-record limit and lease
+release behavior. It retains the pinned Rust1.97.1 release toolchain rather than
+silencing warnings or adopting a newer-only API. Three boundary/concurrency
+regressions were added and formatting passed; the repaired source still needs
+Rust compilation/tests and cloud Clippy. Existing vendor replay/package inputs
+are unchanged by this root-only repair.
+
+In the explicitly handed-off local window, the new default helper and QA Cargo
+artifacts actually built exit0 with source/binary bindings and no pin errors.
+No NI, GUI, GPU or audio device was started. The window was returned after both
+actual exec owners completed and a fresh heavy-process inventory was0. The
+factory-only native runner is prepared but unrun; its former source/CI/binary
+bindings must not be relabeled as qualification of the next repaired cohort.
 
 The existing GitHub Windows quality/preview workflows can run source checks away
 from the local desktop. A cloud coding environment still needs the repository and

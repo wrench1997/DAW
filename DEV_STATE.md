@@ -5,11 +5,11 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
-本轮最新实测：Source69 的 51 项 helper 回归、默认 helper/QA 构建和 helper 全功能 Clippy 通过。
-单次 Kontakt 诊断仍失败：额外消息 pass 实际返回、队列为空，ExitDll 仍未返回，helper 被原期限强制结束并实际回收。
+Source70（`2e0fcdd`）最新云端实测：quality 的独立 factory 回归 31 passed；quality/preview 均通过完整 root 套件，主程序 2254、helper 51、协议 13，共 2318 passed / 11 ignored。此前四个失败项本轮全部通过。
+两条流水线仍失败于后续严格 Clippy：新工具链弃用 `Atomic::fetch_update`，涉及 `plugin_runtime.rs` 和 `load_response_timing/mod.rs`；后续双 bin 构建/smoke 及成品预览未到达，不计为通过。当前源码改用原内存序的 CAS 循环，保留 Rust 1.97.1 发布工具链，新增三项边界/并发回归；格式通过，修复后的编译/测试/Clippy 待下一轮云端验证。
+Source70 新默认 helper/QA 在协调窗口内实际构建成功；没有启动 NI、GUI 或声卡。此前 Source69 单次 Kontakt 诊断仍失败：额外消息 pass 实际返回、队列为空，ExitDll 仍未返回，helper 被原期限强制结束并实际回收。
 该诊断保持默认关闭，不计为修复。独立 factory-only 查询已实现：复用现有 helper 与保留式清理，只读 factory 声明，不调用组件/控制器/view 实例化；它尚未接入生产扫描，不改变现有 verified 索引或运行时默认类选择。
-`b37cc39` 的两条云端 Windows 流水线现已失败：各 2247 passed / 4 failed / 10 ignored，完整 Clippy/构建与成品 smoke 未到达。
-共同失败涉及 LF/CRLF 源字节断言及已故障 source 夹具；另分别出现观察 witness 释放断言、fixture 准入超时。对应源码修复及回归已补齐，原日志和断言保留。新 factory 路径、QA 及夹具修复已格式化；完整 vendor 补丁实际重放 74 个源文件逐字节一致，170 项打包测试通过。新增 Rust 编译/回归和 factory-only NI 实测仍未运行；云端 quality 流水线增加独立依赖 factory/mock-child 回归，不以 root 测试冒充依赖测试。
+历史 `b37cc39` 的共同失败涉及 LF/CRLF 源字节断言及已故障 source 夹具；另分别出现观察 witness 释放断言、fixture 准入超时。对应修复已有上述云端回归通过，原失败日志和断言保留。完整 vendor 补丁实际重放 74 个源文件逐字节一致，170 项打包测试通过。factory-only NI 实测仍未运行；新实验只在对应门禁及资源交接就绪后单次执行，不沿用旧二进制。
 
 ## 当前支持边界
 

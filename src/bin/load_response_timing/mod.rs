@@ -403,11 +403,17 @@ pub(super) mod shutdown {
     /// Saturating shared budget: even concurrent callers can reserve no more
     /// than MAX_RECORDS. Reservation precedes clock/formatting/sink access.
     fn reserve(budget: &AtomicUsize) -> bool {
-        budget
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                (used < MAX_RECORDS).then_some(used + 1)
-            })
-            .is_ok()
+        let mut used = budget.load(Ordering::Relaxed);
+        loop {
+            if used >= MAX_RECORDS {
+                return false;
+            }
+            match budget.compare_exchange_weak(used, used + 1, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => return true,
+                Err(observed) => used = observed,
+            }
+        }
     }
     struct Event {
         phase: Phase,
@@ -822,6 +828,31 @@ pub(super) mod shutdown {
                 &mut || panic!("budgeted SDK clock"),
                 &mut |_| panic!("budgeted SDK sink"),
             ));
+        }
+
+        #[test]
+        fn concurrent_shutdown_reservations_cannot_exceed_the_shared_cap() {
+            let budget = std::sync::Arc::new(AtomicUsize::new(MAX_RECORDS - 4));
+            let start = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let contenders: Vec<_> = (0..8)
+                .map(|_| {
+                    let budget = std::sync::Arc::clone(&budget);
+                    let start = std::sync::Arc::clone(&start);
+                    std::thread::spawn(move || {
+                        start.wait();
+                        reserve(&budget)
+                    })
+                })
+                .collect();
+            let admitted = contenders
+                .into_iter()
+                .map(|contender| contender.join().expect("record reservation contender"))
+                .filter(|admitted| *admitted)
+                .count();
+            assert_eq!(admitted, 4);
+            assert_eq!(budget.load(Ordering::Relaxed), MAX_RECORDS);
+            assert!(!reserve(&budget));
+            assert_eq!(budget.load(Ordering::Relaxed), MAX_RECORDS);
         }
 
         #[test]

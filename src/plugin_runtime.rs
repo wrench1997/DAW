@@ -2515,12 +2515,20 @@ struct AdminWorkLease {
 
 impl AdminWorkLease {
     fn acquire(metrics: &Arc<BridgeMetrics>) -> Option<Self> {
-        metrics
-            .outstanding_admin_work
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_add(1)
-            })
-            .ok()?;
+        let outstanding = &metrics.outstanding_admin_work;
+        let mut count = outstanding.load(Ordering::Acquire);
+        loop {
+            let next = count.checked_add(1)?;
+            match outstanding.compare_exchange_weak(
+                count,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => count = observed,
+            }
+        }
         Some(Self {
             metrics: Arc::clone(metrics),
         })
@@ -7756,6 +7764,67 @@ impl Drop for Vst3Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admin_work_lease_rejects_overflow_and_releases_each_success_once() {
+        let metrics = Arc::new(BridgeMetrics::default());
+        let lease = AdminWorkLease::acquire(&metrics).expect("initial admission");
+        assert_eq!(metrics.outstanding_admin_work.load(Ordering::Acquire), 1);
+        drop(lease);
+        assert_eq!(metrics.outstanding_admin_work.load(Ordering::Acquire), 0);
+
+        metrics
+            .outstanding_admin_work
+            .store(u32::MAX - 1, Ordering::Release);
+        let lease = AdminWorkLease::acquire(&metrics).expect("last admission");
+        assert_eq!(
+            metrics.outstanding_admin_work.load(Ordering::Acquire),
+            u32::MAX
+        );
+        assert!(AdminWorkLease::acquire(&metrics).is_none());
+        assert_eq!(
+            metrics.outstanding_admin_work.load(Ordering::Acquire),
+            u32::MAX
+        );
+        drop(lease);
+        assert_eq!(
+            metrics.outstanding_admin_work.load(Ordering::Acquire),
+            u32::MAX - 1
+        );
+    }
+
+    #[test]
+    fn concurrent_admin_work_leases_cannot_wrap_the_shared_count() {
+        let metrics = Arc::new(BridgeMetrics::default());
+        metrics
+            .outstanding_admin_work
+            .store(u32::MAX - 4, Ordering::Release);
+        let start = Arc::new(std::sync::Barrier::new(8));
+        let contenders: Vec<_> = (0..8)
+            .map(|_| {
+                let metrics = Arc::clone(&metrics);
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    AdminWorkLease::acquire(&metrics)
+                })
+            })
+            .collect();
+        let leases: Vec<_> = contenders
+            .into_iter()
+            .map(|contender| contender.join().expect("admission contender"))
+            .collect();
+        assert_eq!(leases.iter().filter(|lease| lease.is_some()).count(), 4);
+        assert_eq!(
+            metrics.outstanding_admin_work.load(Ordering::Acquire),
+            u32::MAX
+        );
+        drop(leases);
+        assert_eq!(
+            metrics.outstanding_admin_work.load(Ordering::Acquire),
+            u32::MAX - 4
+        );
+    }
 
     #[derive(Default)]
     struct NativeMock {
