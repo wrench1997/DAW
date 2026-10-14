@@ -29,7 +29,7 @@ Master 音量/声像/静音自动化已接线；尾音须明确确认固定窗�
 - Windows 片段转换使用真实异步 named pipe 与原生文件身份/无覆盖发布；不靠去掉平台判断。
 - 片段转换与整曲导出共用停止/捕获所有权，保留失败、取消、保存和历史操作屏障。
 - 新 fresh source 的 pending/running/失败/强制退出 guard 保留至实际 Join，见下方回归。
-- 新选定 Kontakt 元数据请求和完整输入加载基础已应用；当前门禁状态见“最新源码”。
+- 新选定 Kontakt 元数据请求、完整输入加载及测试 owner 基础已应用；门禁见“最新源码”。
 
 上述 UI 与后台源码变化不代表最新构建已完成本机视觉、流畅性或完整歌曲验收。
 现有快捷键、复制/量化/力度/和弦/撤销功能继续沿用；未以重新实现替代已有功能。
@@ -79,6 +79,9 @@ run08 的 NI component 177 字节不同；已知 host envelope 相同，期间�
 | source35 严格 all-feature Clippy | exit101：`result_large_err` 两处 | `src/bin/strict_metadata_bundle/mod.rs:50/67`，Err HostResponse 至少 160B；原失败保留 |
 | source36 当前 helper/质量 | helper 25 passed /0 failed；严格 all-feature/default Clippy、root/vendor/include fmt、diff 全 exit0 | 内部 Failure 表示紧凑化后实际覆核；25 项不再重复计入 source34 的 2015 |
 | source36 实际 Saved13 load-only | 1 passed /0 failed；body 0.40 秒，含编译 18.79 秒 | 只读原完整工程，不创建 SDK/NOIRE 实例，不等于 native 重开或导出 |
+| source37 完整 owner | 针对性 14 passed；严格 Clippy exit101：`new_ret_no_self` | 原失败记录保留；模型/所有权策略测试，不构造实际 NOIRE worker |
+| source38 当前 owner/质量 | 14 passed /0 failed，body 1.76 秒；严格 all-feature/all-target Clippy、root/include fmt、diff 全 exit0 | 构造函数改名、释放时先销毁 callback；248 项源码输入冻结，不等于原曲实测 |
+| 私有文件审核 candidate02 | PCM/WAV 35 passed、state sidecar 28 passed | 实际 Windows 文件夹具；不证明 SDK、writer join 或 NOIRE 声音 |
 
 source34 root 完整命令耗时 805.36 秒，主程序测试耗时 635.87 秒，真实终态已保存。
 vendor 失败项 `internal::module_info::tests::reads_sdk_generated_bundle_metadata` 要求外部
@@ -89,6 +92,8 @@ source35 相对 source34 仅独立 fixture 的空白和 `MB_OK` 调用尾逗号�
 保留 source34 已执行完整结果，不为这次格式变化冒称重新执行完整套件。
 source35 历史 MIDI 库存 49 payloads 核验 PASS，仅验证历史库存；Kontakt `--help` exit0，未 spawn 插件。
 source36 相对 source35 仅 helper 内部 Failure 表示变化，wire、查询顺序与准入保护保持。
+source38 新增显式完整工程测试 owner；未修改普通构建的 UI/音频行为，未重新跑 source34 完整套件。
+source38 首次 runner 引用了旧 manifest，预检 exit1 且未启动 Cargo；修正 runner 后全部门禁通过。
 当前源码门禁已完成：复用未变的 source34 主程序/vendor 和 source35 fixture/Python，另跑新 helper/质量。
 实际 load-only 保留原音符、状态、路由和自动化；所有这些检查均不构成新声学/NI 实测。
 
@@ -101,10 +106,15 @@ source32 的选定元数据 bundle 从源码计数上将 Q128 wrapper IPC 11 次
 149 次真实 SDK 查询/调用及顺序保持；尚无新 NI 实测速度、延迟或预算可行性结论。
 完整输入加载器保留 Saved13 全部 405 notes、5 patterns/placements、160 beats 含 coda。
 原 source 直接接 MASTER，channel `.55`、Master base `.7`、全局 `.7 → .56` 自动化保留。
-它只提供加载/拒绝变更基础，尚未构造完整 owner/history 或执行流式原曲导出。
+完整工程 owner 已接入显式 Windows 测试模块，沿用生产队列、实际回调和 worker 确认。
+保留全部 Project/history/dirty/saved path，仅允许源的会话 runtime_status 更新；未运行原曲原生初始化。
+类别按 `|` 分隔的精确 Instrument token 匹配；清理未完成时整 owner 留在失败 quarantine。
+只有实际 join 完成后才允许释放；quarantine 的继续恢复接口尚未实现，禁止超时当成功。
+完整状态比较放在阶段边界，避免每 8ms 复制原曲及历史；尚未执行流式原曲导出。
 既有观察/状态/回复容量和 35/280/300 秒期限未通过简单放大绕过。
-独立 state-file auditor 首轮 23 项有 11 failures/6 errors；修稿未通过当前门禁。
-完整 PCM/WAV 流式审核工具仍为私有候选，不能当真实长曲音频通过。
+独立 state-file auditor 首轮 23 项有 11 failures/6 errors，保留原记录；candidate02 已实跑 28 passed。
+完整 PCM/WAV auditor candidate02 已实跑 35 passed：各 API 自身身份基线、短读后锁定失败。
+这些都是私有文件夹具审核，不代表 SDK、写入线程实际退出或真实 NOIRE 长曲音频通过。
 
 ## 失败复现与下一步
 

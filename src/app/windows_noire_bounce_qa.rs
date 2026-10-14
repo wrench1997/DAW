@@ -38,6 +38,11 @@ mod windows_noire_whole_song_qa;
 #[path = "windows_noire_full_inputs.rs"]
 mod windows_noire_full_inputs;
 
+// Complete-project owner foundation; the native stream driver remains separate.
+#[allow(dead_code)]
+#[path = "windows_noire_full_owner.rs"]
+mod windows_noire_full_owner;
+
 type Check<T = ()> = Result<T, String>;
 const SELECTOR: &str = "app::clip_render_job::windows_noire_bounce_qa::windows_noire_pure_source_capture_strict_clone_conversion_undo_redo";
 const OPT_IN: &str = "actual-noire-pure-source-capture-strict-clone-app-v1";

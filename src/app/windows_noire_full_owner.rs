@@ -1,0 +1,714 @@
+//! Complete saved-project App owner for the explicit Windows NOIRE driver.
+//! This module never reduces the score, creates scan metadata, or replaces a
+//! native receipt with a model count. Register under windows_noire_bounce_qa.
+use super::windows_noire_full_inputs::{FullInputPins, FullInputs, ValidatedSource};
+use super::*;
+use crate::app::stopped_bounce_capture::LiveBinding;
+use crate::model::ProjectMigrationDiagnostic;
+
+/// The single permitted model observation change during source initialization
+/// is its session-only runtime_status. Persisted data and every other skipped
+/// field remain exact, including selection and dormant asset waveform bits.
+#[derive(PartialEq)]
+struct FullProjectImage {
+    persisted: Vec<u8>,
+    legacy_notes: Vec<u8>,
+    legacy_selection: Vec<bool>,
+    pattern_selection: Vec<Vec<bool>>,
+    runtime_statuses: Vec<(u64, PluginRuntimeStatus)>,
+    waveform_bits: Vec<(u64, Vec<u32>)>,
+    migrations: Vec<ProjectMigrationDiagnostic>,
+}
+impl FullProjectImage {
+    fn take(project: &Project, source_runtime: Option<u64>) -> Check<Self> {
+        Ok(Self {
+            persisted: serde_json::to_vec(project).map_err(error)?,
+            legacy_notes: serde_json::to_vec(&project.piano_notes).map_err(error)?,
+            legacy_selection: project
+                .piano_notes
+                .iter()
+                .map(|note| note.selected)
+                .collect(),
+            pattern_selection: project
+                .patterns
+                .iter()
+                .map(|pattern| pattern.notes.iter().map(|note| note.selected).collect())
+                .collect(),
+            runtime_statuses: project
+                .plugin_instances
+                .iter()
+                .filter(|instance| Some(instance.id) != source_runtime)
+                .map(|instance| (instance.id, instance.runtime_status))
+                .collect(),
+            waveform_bits: project
+                .audio_assets
+                .iter()
+                .map(|asset| {
+                    (
+                        asset.id,
+                        asset
+                            .waveform_peaks
+                            .iter()
+                            .map(|value| value.to_bits())
+                            .collect(),
+                    )
+                })
+                .collect(),
+            migrations: project.migration_diagnostics.clone(),
+        })
+    }
+}
+
+#[derive(PartialEq)]
+struct FullHistoryImage {
+    project: FullProjectImage,
+    history: FullProjectImage,
+    undo: Vec<FullProjectImage>,
+    redo: Vec<FullProjectImage>,
+    history_fingerprint: u64,
+    project_fingerprint: u64,
+    dirty: bool,
+    saved_path: Option<PathBuf>,
+}
+impl FullHistoryImage {
+    fn take(app: &CitrusApp, source: u64) -> Check<Self> {
+        Ok(Self {
+            project: FullProjectImage::take(&app.project, Some(source))?,
+            history: FullProjectImage::take(&app.history_snapshot, None)?,
+            undo: app
+                .undo_stack
+                .iter()
+                .map(|project| FullProjectImage::take(project, None))
+                .collect::<Check<_>>()?,
+            redo: app
+                .redo_stack
+                .iter()
+                .map(|project| FullProjectImage::take(project, None))
+                .collect::<Check<_>>()?,
+            history_fingerprint: app.history_fingerprint,
+            project_fingerprint: app.project_fingerprint,
+            dirty: app.dirty,
+            saved_path: app.saved_path.clone(),
+        })
+    }
+    fn unchanged(&self, app: &CitrusApp, source: u64) -> Check {
+        require(
+            Self::take(app, source)? == *self,
+            "complete Project, history, dirty state or saved path changed during source initialization",
+        )
+    }
+}
+
+/// Match the persisted source using stable IDs. A scan descriptor is supplied
+/// by the real scanner; its serialized verified flag is not live SDK evidence.
+/// Actual factory/version/bus/worker witnesses must still come from the worker.
+fn complete_source_intent(
+    project: &Project,
+    source: &ValidatedSource,
+    scanned: &PluginDescriptor,
+) -> Check<(String, PathBuf, String)> {
+    require(
+        source.plugin_instance_id != 0 && source.channel_id != 0,
+        "complete source has an invalid stable identity",
+    )?;
+    let mut instances = project
+        .plugin_instances
+        .iter()
+        .filter(|instance| instance.id == source.plugin_instance_id);
+    let instance = instances
+        .next()
+        .ok_or("complete source instance is absent")?;
+    require(
+        instances.next().is_none(),
+        "complete source instance identity is ambiguous",
+    )?;
+    let mut channels = project
+        .channels
+        .iter()
+        .filter(|channel| channel.id == source.channel_id);
+    let channel = channels.next().ok_or("complete source channel is absent")?;
+    require(
+        channels.next().is_none()
+            && channel.instrument_plugin_instance_id == Some(instance.id)
+            && project
+                .channels
+                .iter()
+                .filter(|item| item.instrument_plugin_instance_id == Some(instance.id))
+                .count()
+                == 1,
+        "complete source channel assignment is absent or ambiguous",
+    )?;
+    let persisted = plugins::plugin_load_identity_from_instance(instance).descriptor;
+    require(
+        instance.uid == KONTAKT_UID
+            && instance.format == ModelPluginFormat::Vst3
+            && instance.role == PluginRole::Instrument
+            && instance.enabled
+            && !instance.bypass
+            && instance.wet.to_bits() == 1.0_f32.to_bits()
+            && persisted.id == source.descriptor.id
+            && persisted.path == source.descriptor.path
+            && persisted.format == source.descriptor.format
+            && instance.opaque_state.len() == source.state_bytes
+            && oracles::sha256_hex(&instance.opaque_state) == source.state_sha256,
+        "complete source changed, or is not supported by actual fresh-source initialization",
+    )?;
+    state_envelope(&instance.opaque_state)?;
+    require(
+        project.mixer_runtime_slot(channel.mixer_track).is_some(),
+        "complete source has no valid mixer destination",
+    )?;
+    project.validate_mixer_graph().map_err(error)?;
+    let metadata = scanned
+        .vst3_metadata
+        .as_ref()
+        .ok_or("complete source requires an actual scanner result with VST3 factory metadata")?;
+    require(
+        scanned.verified
+            && scanned.scan_error.is_none()
+            && scanned.format == plugins::PluginFormat::Vst3
+            && scanned.is_instrument
+            && scanned.path == instance.path
+            && metadata.class_uid == instance.uid
+            && metadata.class_uid.len() == 32
+            && metadata
+                .class_uid
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && metadata
+                .category
+                .split('|')
+                .any(|part| part.trim() == "Instrument")
+            && metadata.has_midi_input,
+        "actual scan descriptor does not match the complete persisted Kontakt source",
+    )?;
+    require(
+        !persisted.id.is_empty()
+            && persisted.id.len() <= 4096
+            && persisted.path.is_absolute()
+            && persisted.path.as_os_str().len() <= 4096,
+        "complete fresh-source descriptor exceeds its identity bounds",
+    )?;
+    // Keep the historical persisted descriptor ID. The scanner's independent
+    // cache ID is not written into the Project or substituted for a worker ID.
+    Ok((persisted.id, persisted.path, metadata.class_uid.clone()))
+}
+
+fn register_and_enqueue_complete_source(
+    app: &mut CitrusApp,
+    source: &ValidatedSource,
+    scanned: &PluginDescriptor,
+    enqueue: impl FnOnce(&mut CitrusApp, u32, Project, Option<ChannelGeneratorState>) -> Check,
+) -> Check {
+    require(
+        cfg!(all(windows, feature = "experimental-fresh-helper")),
+        "complete source initialization requires the explicit Windows experimental fresh-helper build",
+    )?;
+    let intent = complete_source_intent(&app.project, source, scanned)?;
+    require(
+        !app.fresh_bounce_sources
+            .contains_key(&source.plugin_instance_id)
+            && !app
+                .clip_render_restorations
+                .contains_key(&source.plugin_instance_id)
+            && !app
+                .pending_generator_chains
+                .contains_key(&source.channel_id)
+            && !app
+                .running_generator_chains
+                .contains_key(&source.channel_id)
+            && !app
+                .pending_generator_removals
+                .contains_key(&source.channel_id),
+        "complete source already has an owner, preparation or callback request",
+    )?;
+    require(
+        app.fresh_bounce_sources.len() < 4096,
+        "complete source registry has reached its existing 4096-entry bound",
+    )?;
+    app.fresh_bounce_sources.try_reserve(1).map_err(error)?;
+    let previous = snapshot_channel_generator(&app.project, source.channel_id)
+        .ok_or("complete source channel disappeared before initialization")?;
+    let candidate = app.project.clone();
+    app.fresh_bounce_sources
+        .insert(source.plugin_instance_id, intent);
+    // A failed queue may already own a spawned worker in retirement storage.
+    // Keep the session intent; never discard its guard or call failure joined.
+    enqueue(app, source.channel_id, candidate, Some(previous))
+}
+
+fn exact_complete_registry(
+    source: &ValidatedSource,
+    session: u64,
+    mixer_slot: usize,
+    observed: (u64, u32, u64, u64, usize, usize),
+) -> Check {
+    let (actual_session, channel, endpoint, instance, actual_mixer, worker) = observed;
+    require(
+        actual_session == session
+            && session != 0
+            && channel == source.channel_id
+            && endpoint != 0
+            && instance == source.plugin_instance_id
+            && actual_mixer == mixer_slot
+            && worker != 0,
+        "callback-confirmed complete source registry is bound to a different identity",
+    )
+}
+
+pub(super) struct FullReadySource {
+    pub binding: LiveBinding,
+    pub actual_worker_id: usize,
+}
+
+/// Run-local device-free owner of the entire original saved Project. The
+/// streaming observer is installed and owned by the outer run, never here.
+pub(super) struct FullParent {
+    app: Option<Box<CitrusApp>>,
+    callback: Option<audio::TestAudioCallback>,
+    pub ctx: egui::Context,
+    pub source: ValidatedSource,
+    pub pins: FullInputPins,
+    original: FullHistoryImage,
+    initialization_requested: bool,
+    joins_complete: bool,
+    pub pumps: usize,
+    pub callback_segments: usize,
+    pub lifecycle_receipts: usize,
+}
+impl FullParent {
+    pub(super) fn new_retained(
+        inputs: FullInputs,
+        callback_token: [u8; 32],
+    ) -> Check<RetainedFullParent> {
+        require(
+            !FULL_OWNER_ADMITTED.swap(true, Ordering::AcqRel),
+            "only one complete native owner may be admitted per qualification process",
+        )?;
+        let FullInputs {
+            project,
+            source,
+            pins,
+        } = inputs;
+        let ctx = egui::Context::default();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = CitrusApp::new_boxed_with_services(&cc, false);
+        // This new test App has no earlier user session. Establish the loaded
+        // full input as its initial history, rather than laundering a reduced
+        // scratch or clearing an already-existing App's undo/redo stack.
+        app.history_snapshot = project.clone();
+        app.history_fingerprint = project_fingerprint(&project);
+        app.project_fingerprint = app.history_fingerprint;
+        app.project = project;
+        app.saved_path = Some(pins.project_path.clone());
+        app.transport_mode = TransportMode::Song;
+        app.dirty = false;
+        let (engine, mut callback) = AudioEngine::test_engine_with_callback();
+        callback
+            .enable_genuine_observation(callback_token)
+            .map_err(error)?;
+        app.audio = Some(engine);
+        let original = FullHistoryImage::take(&app, source.plugin_instance_id)?;
+        let owner = Self {
+            app: Some(app),
+            callback: Some(callback),
+            ctx,
+            source,
+            pins,
+            original,
+            initialization_requested: false,
+            joins_complete: false,
+            pumps: 0,
+            callback_segments: 0,
+            lifecycle_receipts: 0,
+        };
+        owner.inputs_unchanged()?;
+        Ok(RetainedFullParent {
+            owner: Some(ManuallyDrop::new(owner)),
+        })
+    }
+    pub(super) fn app(&self) -> &CitrusApp {
+        self.app.as_deref().expect("complete App remains owned")
+    }
+    pub(super) fn app_mut(&mut self) -> &mut CitrusApp {
+        self.app.as_deref_mut().expect("complete App remains owned")
+    }
+    pub(super) fn callback(&self) -> Check<&audio::TestAudioCallback> {
+        self.callback
+            .as_ref()
+            .ok_or("complete actual callback is no longer owned".into())
+    }
+    pub(super) fn paused(&self) -> bool {
+        let app = self.app();
+        let Some((generation, epoch)) = app
+            .audio
+            .as_ref()
+            .and_then(AudioEngine::confirmed_timeline_identity)
+        else {
+            return false;
+        };
+        let Some(callback) = self.callback.as_ref() else {
+            return false;
+        };
+        let snapshot = callback.genuine_snapshot();
+        app.timeline_audio_matches_desired()
+            && generation == app.timeline_desired_generation
+            && !app.playing
+            && !snapshot.playing
+            && snapshot.generation == Some(generation)
+            && snapshot.active_epoch == Some(epoch)
+            && snapshot.epoch == epoch
+            && snapshot.paused_work_quiescent(generation, epoch)
+    }
+    pub(super) fn model_unchanged(&self) -> Check {
+        self.original
+            .unchanged(self.app(), self.source.plugin_instance_id)
+    }
+    pub(super) fn inputs_unchanged(&self) -> Check {
+        let bytes = read_bounded(&self.pins.project_path, 2 * 1024 * 1024)?;
+        require(
+            bytes.len() == self.pins.project_bytes
+                && oracles::sha256_hex(&bytes) == self.pins.project_sha256,
+            "complete original saved input changed after admission",
+        )?;
+        require(
+            self.source.state_bytes == self.pins.saved_state_bytes
+                && self.source.state_sha256 == self.pins.saved_state_sha256
+                && self.source.descriptor.path.canonicalize().map_err(error)?
+                    == self.pins.actual_bundle_path,
+            "complete input source state or actual bundle binding changed",
+        )
+    }
+    pub(super) fn begin_source_initialization(
+        &mut self,
+        scanned: &PluginDescriptor,
+        observer: &mut ObservationRun,
+        deadline: Instant,
+    ) -> Check {
+        require(
+            !self.initialization_requested,
+            "complete source initialization must not be retried on the same owner",
+        )?;
+        require(
+            !self.app().playing && !self.app().transport_clock_playing,
+            "complete source initialization requires the original App to stay paused",
+        )?;
+        self.inputs_unchanged()?;
+        self.model_unchanged()?;
+        complete_source_intent(&self.app().project, &self.source, scanned)?;
+        observer.set_stage(Stage::InitialSource).map_err(error)?;
+        self.initialization_requested = true;
+        let session = self.app().project_session;
+        require(
+            self.app_mut()
+                .audio
+                .as_mut()
+                .ok_or("complete audio engine is absent")?
+                .set_project_session(session),
+            "actual complete project-session command rejected",
+        )?;
+        self.app_mut().rebuild_tempo_map();
+        self.app_mut().request_immediate_timeline_compile();
+        for command in mixer_control_commands(&self.app().project) {
+            require(
+                self.app_mut().audio.as_mut().unwrap().command(command),
+                "actual complete mixer command admission failed",
+            )?;
+            self.tick(deadline)?;
+        }
+        let source = &self.source;
+        let app = self.app.as_deref_mut().unwrap();
+        register_and_enqueue_complete_source(
+            app,
+            source,
+            scanned,
+            |app, channel, candidate, previous| {
+                app.queue_channel_generator_candidate(channel, candidate, previous)
+            },
+        )?;
+        self.model_unchanged()
+    }
+    pub(super) fn wait_source_initialization(
+        &mut self,
+        observer: &ObservationRun,
+        deadline: Instant,
+    ) -> Check<FullReadySource> {
+        loop {
+            observer.with_snapshot(|snapshot| {
+                require(
+                    snapshot.failure.is_none(),
+                    snapshot.failure.unwrap_or("complete observer failed"),
+                )
+            })?;
+            match self.source_ready() {
+                Ok(ready) => return Ok(ready),
+                Err(reason) => {
+                    if Instant::now() >= deadline {
+                        return Err(format!("complete source initialization deadline: {reason}"));
+                    }
+                    if self.app().project.plugin_instances.iter().any(|instance| {
+                        instance.id == self.source.plugin_instance_id
+                            && instance.runtime_status == PluginRuntimeStatus::Crashed
+                    }) {
+                        return Err(format!("complete source initialization faulted: {reason}"));
+                    }
+                }
+            }
+            self.tick(deadline)?;
+            std::thread::sleep(Duration::from_millis(8));
+        }
+    }
+    /// Drive existing production poll methods and the real device-free audio
+    /// callback. No Installed/SlotReady/Timeline/native receipt is synthesized.
+    pub(super) fn tick(&mut self, deadline: Instant) -> Check {
+        // Full snapshots include opaque state and history. Validate them at
+        // admission/ready/cleanup boundaries rather than repeatedly copying
+        // the whole score while an asynchronous worker is still loading.
+        self.drive_tick(deadline)
+    }
+    fn drive_tick(&mut self, deadline: Instant) -> Check {
+        require(
+            Instant::now() < deadline && self.pumps < MAX_PUMPS,
+            "complete source polling deadline or callback pump bound exceeded",
+        )?;
+        let ctx = self.ctx.clone();
+        let app = self.app_mut();
+        app.drive_clip_session_retirement();
+        app.poll_clip_restorations();
+        app.poll_generator_endpoint_events();
+        app.poll_plugin_runtime_events();
+        app.poll_plugin_parameter_worker_receipts();
+        app.poll_plugin_parameter_callback_receipts();
+        app.drive_plugin_parameter_edit_drafts();
+        app.poll_native_editor_snapshots();
+        app.poll_plugin_processing_health();
+        app.poll_timeline_compile(&ctx);
+        app.poll_audio_asset_events();
+        app.poll_timeline_audio_runtime(&ctx);
+        app.drive_clip_render_job();
+        app.drive_whole_song_export();
+        let callback = self
+            .callback
+            .as_mut()
+            .ok_or("complete callback owner is absent")?;
+        let app = self.app.as_ref().unwrap();
+        let engine = app
+            .audio
+            .as_ref()
+            .ok_or("complete audio engine disappeared")?;
+        let snapshot = callback.genuine_snapshot();
+        if snapshot.callback_work_pending()
+            || snapshot.request_id != engine.test_transport_request_id()
+        {
+            callback.pump(engine, 128);
+            self.pumps += 1;
+            self.callback_segments += callback.take_genuine_segments().len();
+            self.lifecycle_receipts += callback.take_genuine_lifecycle_receipts().len();
+        }
+        Ok(())
+    }
+    /// A running map alone is insufficient: the production stopped-source
+    /// validator checks SlotReady, coherent active metadata, native quiescence,
+    /// exact route, source health and acknowledged current Timeline epoch.
+    pub(super) fn source_ready(&self) -> Check<FullReadySource> {
+        require(
+            self.initialization_requested,
+            "complete source was never submitted for initialization",
+        )?;
+        require(
+            self.paused(),
+            "complete actual callback has not reached its exact paused Timeline epoch",
+        )?;
+        let app = self.app();
+        let binding = app.stopped_bounce_observe(self.source.channel_id)?;
+        let source = app
+            .running_generator_chains
+            .get(&self.source.channel_id)
+            .ok_or("complete source has no callback-confirmed running owner")?;
+        require(
+            source.guard.requires_retained_fresh_shutdown(),
+            "complete source did not use the actual fresh-worker owner path",
+        )?;
+        let worker = source.guard.genuine_worker_id();
+        let channel = app
+            .project
+            .channels
+            .iter()
+            .find(|item| item.id == self.source.channel_id)
+            .ok_or("complete source channel disappeared")?;
+        exact_complete_registry(
+            &self.source,
+            app.project_session,
+            app.project
+                .mixer_runtime_slot(channel.mixer_track)
+                .ok_or("complete mixer route disappeared")?,
+            (
+                source.project_session,
+                binding.stamp.channel_id,
+                source.endpoint_id,
+                source.instance_id,
+                source.mixer_track,
+                worker,
+            ),
+        )?;
+        require(
+            binding.stamp.instance_id == self.source.plugin_instance_id
+                && binding.stamp.endpoint_id == source.endpoint_id,
+            "actual stopped-source receipt does not match the complete source owner",
+        )?;
+        self.model_unchanged()?;
+        Ok(FullReadySource {
+            binding,
+            actual_worker_id: worker,
+        })
+    }
+    /// A stop/failure does not commit a candidate or reset history. Actual
+    /// guards remain in App ownership until cleanup completes a real join.
+    pub(super) fn keep_paused(&mut self) -> Check {
+        let app = self.app_mut();
+        app.playing = false;
+        app.transport_clock_playing = false;
+        if let Some(audio) = &app.audio {
+            audio.set_playing(false);
+        }
+        self.model_unchanged()
+    }
+    pub(super) fn cleanup(&mut self, observer: &mut ObservationRun, deadline: Instant) -> Check {
+        let mut failure = observer.set_stage(Stage::Cleanup).map_err(error).err();
+        if let Err(reason) = self.keep_paused() {
+            failure.get_or_insert(reason);
+        }
+        self.app_mut().cancel_clip_render_job();
+        self.app_mut().cancel_whole_song_export();
+        while self.app().whole_song_export_fence_active()
+            || self
+                .app()
+                .clip_render_job
+                .as_ref()
+                .is_some_and(ClipRenderJob::owns_pending_resource)
+            || !self.app().pending_generator_removals.is_empty()
+        {
+            self.drive_tick(deadline)?;
+            std::thread::sleep(Duration::from_millis(8));
+        }
+        require(
+            self.app()
+                .whole_song_export_job
+                .as_ref()
+                .is_none_or(|job| job.genuine_whole_terminal_owners_drained())
+                && self.app().deferred_generator_rebuilds.is_empty()
+                && self.app().pending_clip_restorations.is_empty()
+                && self.app().clip_session_retirement.is_none(),
+            "complete cleanup still owns deferred construction, capture, renderer or restoration",
+        )?;
+        // Destroy the actual callback endpoint before asking the worker guards
+        // to finish; empty OS process lists never stand in for JoinHandle::join.
+        self.callback.take();
+        loop {
+            require(
+                Instant::now() < deadline,
+                "complete actual worker joins remain pending",
+            )?;
+            let app = self.app_mut();
+            let mut pending = false;
+            for source in app.running_generator_chains.values_mut() {
+                pending |= full_poll_guard(&mut source.guard, &mut failure);
+            }
+            for source in app.pending_generator_chains.values_mut() {
+                pending |= full_poll_guard(&mut source.guard, &mut failure);
+            }
+            for chain in app.running_insert_chains.values_mut() {
+                pending |= full_poll_guard(&mut chain.guard, &mut failure);
+            }
+            for chain in app.pending_insert_chains.values_mut() {
+                pending |= full_poll_guard(&mut chain.guard, &mut failure);
+            }
+            for guard in &mut app.retired_fresh_source_candidates {
+                pending |= full_poll_guard(guard, &mut failure);
+            }
+            for guard in &mut app.retired_clip_restorations {
+                pending |= full_poll_guard(guard, &mut failure);
+            }
+            if !pending {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Resource completion is independent of final model/input equality.
+        // A changed model still fails qualification after actual joins.
+        self.joins_complete = true;
+        self.model_unchanged()?;
+        self.inputs_unchanged()?;
+        failure.map_or(Ok(()), Err)
+    }
+}
+
+static FULL_OWNER_ADMITTED: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    // One qualification process owns one full native attempt. A deadline,
+    // panic or failed cleanup retains the entire owner for diagnosis instead
+    // of invoking App Drop or interpreting missing OS processes as a join.
+    static FULL_OWNER_QUARANTINED: std::cell::RefCell<Option<ManuallyDrop<FullParent>>>
+        = const { std::cell::RefCell::new(None) };
+}
+
+pub(super) struct RetainedFullParent {
+    owner: Option<ManuallyDrop<FullParent>>,
+}
+
+impl std::ops::Deref for RetainedFullParent {
+    type Target = FullParent;
+
+    fn deref(&self) -> &Self::Target {
+        self.owner.as_ref().expect("complete native owner retained")
+    }
+}
+
+impl std::ops::DerefMut for RetainedFullParent {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.owner.as_mut().expect("complete native owner retained")
+    }
+}
+
+impl Drop for RetainedFullParent {
+    fn drop(&mut self) {
+        let Some(mut owner) = self.owner.take() else {
+            return;
+        };
+        if !owner.initialization_requested || owner.joins_complete {
+            // No native initialization was requested, or the actual callback
+            // was destroyed and every retained guard has completed its join.
+            owner.callback.take();
+            unsafe { ManuallyDrop::drop(&mut owner) };
+            return;
+        }
+        // A second owner cannot normally exist because admission is once-only.
+        // Keep ManuallyDrop even if TLS is unavailable during thread exit, or
+        // the slot is busy: this never becomes permission to release resources.
+        let mut pending = Some(owner);
+        let _ = FULL_OWNER_QUARANTINED.try_with(|slot| {
+            if let Ok(mut slot) = slot.try_borrow_mut()
+                && slot.is_none()
+            {
+                *slot = pending.take();
+            }
+        });
+    }
+}
+
+fn full_poll_guard(guard: &mut PluginWorkerGuard, failure: &mut Option<String>) -> bool {
+    match guard.poll_shutdown_retained() {
+        RetainedShutdownPoll::Pending => true,
+        RetainedShutdownPoll::Joined => false,
+        RetainedShutdownPoll::WorkerPanicked => {
+            failure.get_or_insert_with(|| {
+                "complete actual worker joined after a shutdown panic".into()
+            });
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+include!("windows_noire_full_owner_tests.rs");

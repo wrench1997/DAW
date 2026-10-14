@@ -155,6 +155,9 @@ No production success predicate or 35/280/300-second budget was widened to hide 
 | source35 strict all-feature Clippy | exit101: two result_large_err diagnostics | src/bin/strict_metadata_bundle/mod.rs:50/67; Err HostResponse at least 160B; original failure retained |
 | source36 current helper/quality | Helper 25 passed, 0 failed; strict all-feature/default Clippy, root/vendor/include fmt and diff all exit0 | Compact internal Failure representation tested; these 25 are not added again to source34's 2015 |
 | source36 actual Saved13 load-only | 1 passed, 0 failed; body 0.40s, including compile 18.79s | Reads the intact original project; no SDK/NOIRE instance, native reopen or export |
+| source37 full owner | 14 targeted tests passed; strict Clippy exit101 (`new_ret_no_self`) | Original failure retained; model/binding/retention-policy tests, not a real NOIRE worker |
+| source38 current owner/quality | 14 passed, 0 failed; body 1.76s; strict all-feature/all-target Clippy, root/include fmt and diff exit0 | Constructor renamed and callback released before App; 248 source inputs pinned, no original-song native claim |
+| Private auditors candidate02 | PCM/WAV 35 and state sidecar 28 tests passed | Actual Windows file fixtures; not SDK, writer Join or NOIRE sound acceptance |
 
 The source34 root command actually completed in 805.36 seconds; main tests took 635.87 seconds.
 The vendor failure is `internal::module_info::tests::reads_sdk_generated_bundle_metadata`, which requires the absent external `vendor/test_plugins/Dexed.vst3`; production read returns `Ok(None)`.
@@ -162,7 +165,7 @@ The existing [processor domains](PLUGIN_PROCESSOR_DOMAINS.md) documents this sin
 Source35 changes only fixture whitespace and the `MB_OK` call's trailing comma; root/vendor source is unchanged. Source34's actual complete results are retained without claiming a new full-suite rerun.
 Source35 also verifies 49 historical MIDI payloads (inventory only); Kontakt `--help` exits0 without spawning a plugin.
 Source36 changes only the helper's internal Failure representation and preserves wire/query order/admission guards.
-Current source gates are complete using unchanged source34 main/vendor and source35 fixture/Python results plus the new source36 helper/quality checks.
+The unchanged source34 implementation coverage, source35 fixture/Python and source36 helper checks retain their original attribution. Source38 adds the targeted full-owner regression and current all-feature quality gates; it does not claim a new complete source34-suite execution. Its initial runner referenced the old manifest, so preflight exited1 before any Cargo command; the corrected runner then completed all checks.
 None of these checks is new acoustic/NI acceptance.
 
 Source29's isolated full-ring retry passed but did not erase the original group failure or prove its cause.
@@ -170,6 +173,7 @@ Source31 additionally inherits unchanged source29 retained-shutdown (7) and pure
 Current exact receipts are `source31-quality-receipt-01.json`, `source32-strict-backend-tests-terminal-01.json`, `source33-strict-backend-tests-terminal-01.json`,
 `source34-pre-push-root-all-target-tests-terminal-01.json`, `source34-pre-push-vendor-all-target-tests-terminal-01.json`, its precisely filtered rest receipt,
 `source36-pre-push-*-terminal-01.json` and `pure-stream-foundations-quality-03.json` under the local backend directory. Each receipt retains its actual source/stage attribution.
+New owner receipts are `source37-owner-tests-terminal-01.json`, its failed Clippy receipt, and `source38-*-terminal-01.json`. Auditor receipts are `independent-full-pcm-audit02-tests-terminal-01.json` and `independent-state-sidecar-audit02-tests-terminal-01.json`.
 
 ## Newly applied and remaining full-song foundations
 
@@ -183,13 +187,16 @@ The additive full-input loader preserves the complete pinned Saved13 through pro
 Original 405 notes, five placements and 160 beats including coda remain intact.
 The source routes directly to stable MASTER, channel `.55`, Master base `.7`, global `.7 → .56`.
 The driven Master value replaces its base; it must not be multiplied by a second `.7`.
-The loader is not a full owner/history initializer and has not rendered the original song.
+The explicit Windows test module now has a full-project owner using production source initialization, actual callback installation and stopped-source readiness checks. Its model/history image preserves every persisted field and skipped selection/waveform/migration data, allowing only the live source's session runtime status to change.
+The owner requires an actual caller-supplied scan descriptor with an exact `Instrument` category token. A retained wrapper keeps the entire owner in failure quarantine on unfinished cleanup; this has no continuation/recovery interface yet and is not successful retirement. Resource completion is distinct from final model equality. Complete images are checked at stage boundaries rather than copied every 8ms while loading.
+This foundation has not initialized or rendered the original song with a real NOIRE instance.
 Its ordinary regressions are covered by source34; the explicit source36 actual Saved13 load-only check passes, preserving original notes/state/routing/automation without creating a native instance.
 
 Private bounded spool and opaque sidecar foundations have executed 48 selected tests. They retain bounded storage, partial-write/cancel/unwind state and actual writer Join obligations.
 They are not registered in product source and supply no real SDK instance dictionary or source authority.
-Complete typed-control replay, streamed observation integration and full original-input owner remain open. The independent state-file audit first ran 23 cases with 11 failures/6 errors; its fix is not yet qualified.
-A complete PCM/WAV streaming auditor remains a private candidate, with no full NOIRE audio to certify.
+Complete typed-control replay and streamed observation integration remain open. The independent state-file audit first ran 23 cases with 11 failures/6 errors; that original result remains. Candidate02 subsequently executed 28 tests successfully, retaining separate Path.stat/fstat baselines and comparing only common identity fields across APIs.
+Complete PCM/WAV auditor candidate02 executed 35 tests successfully. Actual Windows stat/fstat ctime differences are covered without weakening each API's own mutation checks; a short read locks WaveCursor failure and forbids further draining. The independent builder and numerical policy remain unchanged.
+These are private file fixtures. They do not certify real SDK identity, source retirement, writer Join or full NOIRE audio.
 Old finite observation/reply/state quotas cannot be bypassed by resetting counts or dropping evidence.
 
 ## Reproduction and next acceptance
