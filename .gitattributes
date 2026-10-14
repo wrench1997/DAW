@@ -34,3 +34,7 @@
 /qa/event_admission_regression/**/*.log whitespace=-blank-at-eof
 # Unified-diff context spaces are original pinned evidence bytes.
 /qa/event_admission_regression/receipts/reviewed-rust-source.diff -whitespace
+
+# Independent Saved13 geometry is admitted by its exact reviewed source hash.
+# Keep the frozen builder bytes identical on Windows and Linux checkouts.
+/scripts/build_full_spec.py -text

@@ -4,7 +4,10 @@
 use super::windows_noire_full_inputs::{FullInputPins, FullInputs, ValidatedSource};
 use super::*;
 use crate::app::stopped_bounce_capture::LiveBinding;
+use crate::export_options::WavExportOptions;
+use crate::instrument_bounce::render::{MasterSongRenderOutcome, MasterSongRenderReport};
 use crate::model::ProjectMigrationDiagnostic;
+use crate::plugins::plugin_runtime::BounceSourceSettlement;
 
 /// The single permitted model observation change during source initialization
 /// is its session-only runtime_status. Persisted data and every other skipped
@@ -94,7 +97,7 @@ impl FullHistoryImage {
     fn unchanged(&self, app: &CitrusApp, source: u64) -> Check {
         require(
             Self::take(app, source)? == *self,
-            "complete Project, history, dirty state or saved path changed during source initialization",
+            "complete Project, history, dirty state or saved path changed during the native workflow",
         )
     }
 }
@@ -567,6 +570,163 @@ impl FullParent {
             binding,
             actual_worker_id: worker,
         })
+    }
+    /// Submit the unchanged complete Project through the production review,
+    /// stopped-source capture and whole-song controller. Consent to the fixed
+    /// tail is explicit at the caller; this backend test does not click a UI
+    /// checkbox or claim that a native destination dialog was exercised.
+    pub(super) fn begin_full_export(
+        &mut self,
+        observer: &mut ObservationRun,
+        path: PathBuf,
+        options: WavExportOptions,
+        confirmed_fixed_tail: bool,
+    ) -> Check<LiveBinding> {
+        self.model_unchanged()?;
+        self.inputs_unchanged()?;
+        require(
+            self.app().whole_song_export_job.is_none()
+                && self.app().clip_render_job.is_none()
+                && self.app().clip_session_retirement.is_none(),
+            "complete export must start once, without an earlier render or retirement owner",
+        )?;
+        require(
+            path.is_absolute() && !path.exists() && path.parent().is_some_and(Path::is_dir),
+            "complete export requires a new absolute destination in an existing private directory",
+        )?;
+        let ready = self.source_ready()?;
+        let review = self
+            .app()
+            .prepare_whole_song_export_review(options, confirmed_fixed_tail)?;
+        observer.set_stage(Stage::WholeExport).map_err(error)?;
+        self.app_mut().begin_whole_song_export(review, path)?;
+        require(
+            self.app()
+                .whole_song_export_job
+                .as_ref()
+                .is_some_and(|job| job.genuine_whole_production_factory_selected()),
+            "complete export selected a replacement render starter instead of the production strict backend",
+        )?;
+        self.model_unchanged()?;
+        Ok(ready.binding)
+    }
+    /// Await the production typed publication outcome. A WAV file or an idle
+    /// fence never substitutes for actual capture/render/disposal termination.
+    pub(super) fn wait_full_export(
+        &mut self,
+        observer: &ObservationRun,
+        expected_source: LiveBinding,
+        expected_path: &Path,
+        deadline: Instant,
+    ) -> Check<MasterSongRenderReport> {
+        loop {
+            observer.with_snapshot(|snapshot| {
+                require(
+                    snapshot.failure.is_none(),
+                    snapshot
+                        .failure
+                        .unwrap_or("complete export observer failed"),
+                )
+            })?;
+            let job = self
+                .app()
+                .whole_song_export_job
+                .as_ref()
+                .ok_or("complete production export owner disappeared")?;
+            require(
+                job.genuine_whole_production_factory_selected(),
+                "complete export no longer owns the production strict backend factory",
+            )?;
+            if let Some(failure) = job.genuine_whole_failure() {
+                return Err(failure.to_owned());
+            }
+            if !self.app().whole_song_export_fence_active() {
+                require(
+                    job.genuine_whole_terminal_owners_drained(),
+                    "complete export published before capture/render/disposal owners drained",
+                )?;
+                require(
+                    job.genuine_whole_path() == expected_path,
+                    "complete export output path differs from the reviewed private destination",
+                )?;
+                let report = match job.genuine_whole_outcome() {
+                    Some(MasterSongRenderOutcome::Complete(report)) => report.clone(),
+                    Some(MasterSongRenderOutcome::Failed(failure)) => {
+                        return Err(error(&failure.primary));
+                    }
+                    None => {
+                        return Err("complete export has no typed publication outcome".into());
+                    }
+                };
+                self.full_export_ownership_check(expected_source)?;
+                self.model_unchanged()?;
+                self.inputs_unchanged()?;
+                // This is the actual production typed report received by the
+                // full driver, after controller owner retirement. No backend
+                // query is performed to manufacture this observation.
+                crate::genuine_app_observer::record_render_report(&report.dry_render);
+                return Ok(report);
+            }
+            self.drive_tick(deadline)?;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    pub(super) fn full_export_ownership_check(&self, expected: LiveBinding) -> Check {
+        let app = self.app();
+        let job = app
+            .whole_song_export_job
+            .as_ref()
+            .ok_or("complete export owner is absent at its ownership boundary")?;
+        let binding = job
+            .genuine_whole_binding()
+            .ok_or("complete export has no actual stopped-source binding")?;
+        let stop = job
+            .genuine_whole_stop_preparation()
+            .ok_or("complete export has no actual stop preparation")?;
+        let activation = stop
+            .activation
+            .ok_or("complete export has no actual stop queue receipt")?;
+        let target = job
+            .genuine_whole_source_target()
+            .ok_or("complete export has no actual source settlement target")?;
+        let settled = job
+            .genuine_whole_settlement()
+            .ok_or("complete export has no actual source settlement observation")?;
+        require(
+            binding.stamp.project_session == expected.stamp.project_session
+                && binding.stamp.engine_session == expected.stamp.engine_session
+                && binding.stamp.endpoint_id == expected.stamp.endpoint_id
+                && binding.stamp.instance_id == expected.stamp.instance_id
+                && binding.stamp.channel_id == expected.stamp.channel_id
+                && binding.stamp.timeline_revision == expected.stamp.timeline_revision
+                && binding.sample_rate == expected.sample_rate,
+            "complete export changed the exact source or full Timeline binding",
+        )?;
+        require(
+            !stop.superseded
+                && activation.committed_epoch == Some(binding.stamp.epoch)
+                && stop.generation == binding.stamp.timeline_revision
+                && job.genuine_whole_old_epoch() != Some(binding.stamp.epoch)
+                && settled.settlement == BounceSourceSettlement::Ready
+                && settled.coherent
+                && settled.callback_ready
+                && settled.callback_identity == Some(target)
+                && settled.worker_valid
+                && !settled.exhausted
+                && settled.busy == 0
+                && settled.parameter_admission == 0
+                && !settled.capture_busy,
+            "complete export lacked actual stop confirmation, source drain or worker settlement",
+        )?;
+        require(
+            app.running_generator_chains.len() == 1
+                && app.pending_generator_chains.is_empty()
+                && app.pending_generator_removals.is_empty()
+                && app.clip_render_job.is_none()
+                && self.paused(),
+            "complete export did not preserve its paused original source without MIDI conversion",
+        )?;
+        self.model_unchanged()
     }
     /// A stop/failure does not commit a candidate or reset history. Actual
     /// guards remain in App ownership until cleanup completes a real join.

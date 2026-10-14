@@ -68,6 +68,33 @@ mod stream_instances_tests;
     any(target_os = "linux", windows),
     feature = "experimental-fresh-helper"
 ))]
+mod stream_live;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+pub(crate) use stream_live::{
+    StreamError, StreamFinishPoll, StreamRecoveryHandle, StreamRetirement,
+};
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod stream_export_audit;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod stream_replay;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+pub(crate) use stream_export_audit::StreamReplayEvidence;
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 mod stream_sink;
 #[cfg(all(
     any(target_os = "linux", windows),
@@ -434,6 +461,16 @@ pub(crate) struct ObservationSnapshot {
     record_cap: usize,
     byte_cap: usize,
     worker_identities: [Option<WorkerIdentityWitness>; MAX_WORKER_IDENTITIES],
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    stream: Option<stream_live::LiveStream>,
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    stream_taken: bool,
 }
 impl ObservationSnapshot {
     fn new(record_cap: usize, byte_cap: usize) -> Result<Self, &'static str> {
@@ -460,10 +497,58 @@ impl ObservationSnapshot {
             record_cap,
             byte_cap,
             worker_identities: std::array::from_fn(|_| None),
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            stream: None,
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            stream_taken: false,
         })
     }
     fn fail(&mut self, failure: &'static str) {
         self.failure.get_or_insert(failure);
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if let Some(stream) = &mut self.stream {
+            stream.observer_failed(failure);
+        }
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    fn try_stream(
+        &mut self,
+        instance: Option<InstanceIdentity>,
+        view: stream_live::View<'_>,
+    ) -> bool {
+        if self.stream_taken {
+            self.fail("observer tap after stream retirement");
+            return true;
+        }
+        if self.stream.is_none() {
+            return false;
+        }
+        let monotonic_ns = self.elapsed_ns();
+        let stream = self.stream.as_mut().expect("checked live stream");
+        if stream.failure().is_some() {
+            return true;
+        }
+        let sequence = stream.next_sequence();
+        match stream.emit(sequence, monotonic_ns, self.stage, instance, view) {
+            Ok(()) => true,
+            Err(_) => {
+                self.failure
+                    .get_or_insert("observer stream original operand rejected");
+                false
+            }
+        }
     }
     #[cfg(all(
         test,
@@ -489,6 +574,47 @@ impl ObservationSnapshot {
         transport: PluginTransport,
         reply: &BlockReply,
     ) {
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        {
+            if self.stream.is_some() || self.stream_taken {
+                if reply.channels.len() > 2
+                    || reply.channels.iter().any(|channel| channel.len() > 128)
+                {
+                    self.fail("observer strict PCM cap exceeded");
+                    return;
+                }
+                if self.try_stream(
+                    identity,
+                    stream_live::View::Native(stream_codec::NativeView::StrictPcm {
+                        frames,
+                        transport: &transport,
+                        channels: &reply.channels,
+                        transport_applied: reply.transport_applied,
+                        output_events: reply.output_events,
+                        output_events_lost: reply.output_events_lost,
+                    }),
+                ) {
+                    return;
+                }
+                let bytes = reply
+                    .channels
+                    .iter()
+                    .map(|c| c.len() * std::mem::size_of::<f32>())
+                    .sum();
+                self.push(identity, bytes, || RecordKind::StrictPcm {
+                    frames,
+                    transport,
+                    channels: reply.channels.clone(),
+                    transport_applied: reply.transport_applied,
+                    output_events: reply.output_events,
+                    output_events_lost: reply.output_events_lost,
+                });
+                return;
+            }
+        }
         if self.clone_replies >= self.clone_reply_cap
             || reply.channels.len() > 2
             || reply.channels.iter().any(|channel| channel.len() > 128)
@@ -524,6 +650,20 @@ impl ObservationSnapshot {
             return;
         }
         self.timeline_events += 1;
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if self.try_stream(
+            None,
+            stream_live::View::App(stream_app_control::AppView::Timeline {
+                event: &event,
+                before: &before,
+                after: &after,
+            }),
+        ) {
+            return;
+        }
         self.push(None, 0, || RecordKind::AppTimelineRuntimeEvent {
             event,
             before,
@@ -537,6 +677,20 @@ impl ObservationSnapshot {
         bytes: usize,
         build: impl FnOnce() -> RecordKind,
     ) {
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        let streamed_header = if self.stream_taken {
+            return;
+        } else if let Some(stream) = &mut self.stream {
+            let Some(header) = stream.failed_header_to_retain.take() else {
+                return;
+            };
+            Some(header)
+        } else {
+            None
+        };
         if self.records.len() >= self.record_cap {
             self.fail("observer record cap exceeded");
             return;
@@ -550,13 +704,37 @@ impl ObservationSnapshot {
             return;
         };
         self.private_bytes = total;
-        self.records.push(Arc::new(Record {
-            ordinal: self.records.len() as u64 + 1,
-            monotonic_elapsed_ns: self.elapsed_ns(),
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        let (ordinal, monotonic_elapsed_ns) = if let Some(header) = streamed_header {
+            (header.sequence, header.monotonic_ns)
+        } else {
+            (self.records.len() as u64 + 1, self.elapsed_ns())
+        };
+        #[cfg(not(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        )))]
+        let (ordinal, monotonic_elapsed_ns) = (self.records.len() as u64 + 1, self.elapsed_ns());
+        let record = Arc::new(Record {
+            ordinal,
+            monotonic_elapsed_ns,
             stage: self.stage,
             instance,
             kind: build(),
-        }));
+        });
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if streamed_header.is_some()
+            && let Some(stream) = &mut self.stream
+        {
+            stream.retain_failed_original(Arc::clone(&record));
+        }
+        self.records.push(record);
     }
     fn elapsed_ns(&self) -> u64 {
         u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX)
@@ -688,6 +866,90 @@ impl ObservationRun {
         with_run(&self.state, |state| result = state.stage(next));
         result
     }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn enable_stream(
+        &self,
+        transcript: &std::path::Path,
+        state_sidecar: &std::path::Path,
+        source: InstanceIdentity,
+        deadline: Instant,
+    ) -> Result<(), StreamError> {
+        let mut result = Err(stream_live::StreamError::admission(
+            "observer stream lock unavailable",
+        ));
+        with_run(&self.state, |state| {
+            if state.stream.is_some()
+                || state.stream_taken
+                || state.failure.is_some()
+                || state.records.len() >= state.record_cap
+            {
+                result = Err(stream_live::StreamError::admission(
+                    "stream requires an intact unstreamed prelude and room for one bounded failed record",
+                ));
+                return;
+            }
+            match stream_live::LiveStream::start(
+                transcript,
+                state_sidecar,
+                source,
+                deadline,
+                &state.records,
+            ) {
+                Ok(stream) => {
+                    let failure = stream.failure().cloned();
+                    state.stream = Some(stream);
+                    if failure.is_some() {
+                        state
+                            .failure
+                            .get_or_insert("observer stream prelude or startup failed");
+                    }
+                    result = failure.map_or(Ok(()), Err);
+                }
+                Err(error) => result = Err(error),
+            }
+        });
+        result
+    }
+    /// Call only after the driver has actually retired all App/callback/source/clone tap owners.
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn take_stream_after_taps_retired(
+        &self,
+        taps_retired: bool,
+    ) -> Result<StreamRetirement, StreamError> {
+        if !taps_retired {
+            return Err(stream_live::StreamError::admission(
+                "actual caller tap retirement is required",
+            ));
+        }
+        let mut result = Err(stream_live::StreamError::admission(
+            "stream owner is absent or already transferred",
+        ));
+        with_run(&self.state, |state| {
+            if let Some(stream) = state.stream.take() {
+                state.stream_taken = true;
+                result = Ok(stream.retire());
+            }
+        });
+        result
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn stream_recovery_handle(&self) -> Option<StreamRecoveryHandle> {
+        self.with_snapshot(|state| {
+            state
+                .stream
+                .as_ref()
+                .map(stream_live::LiveStream::recovery_handle)
+        })
+    }
     pub(crate) fn with_snapshot<T>(&self, inspect: impl FnOnce(&ObservationSnapshot) -> T) -> T {
         let state = self.state.lock().unwrap_or_else(|p| {
             let mut state = p.into_inner();
@@ -776,6 +1038,18 @@ impl InstanceObserver {
         with_run(&run, |state| {
             let value = state.bind_instance(phase, worker);
             identity = Some(value);
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            if state.try_stream(
+                identity,
+                stream_live::View::Control(stream_control::View::Lifecycle(
+                    "instance construction observed",
+                )),
+            ) {
+                return;
+            }
             state.push(identity, 0, || {
                 RecordKind::Lifecycle("instance construction observed")
             });
@@ -807,14 +1081,42 @@ impl InstanceObserver {
                 )
                 && frames.is_some_and(|n| n > 0)
             {
-                state.source_positive_attempts += 1;
-                if state.source_positive_attempts > MAX_SOURCE_POSITIVE_ATTEMPTS {
-                    state.fail("source positive processing attempt cap exceeded");
+                #[cfg(all(
+                    any(target_os = "linux", windows),
+                    feature = "experimental-fresh-helper"
+                ))]
+                let memory = state.stream.is_none() && !state.stream_taken;
+                #[cfg(not(all(
+                    any(target_os = "linux", windows),
+                    feature = "experimental-fresh-helper"
+                )))]
+                let memory = true;
+                if memory {
+                    state.source_positive_attempts += 1;
+                    if state.source_positive_attempts > MAX_SOURCE_POSITIVE_ATTEMPTS {
+                        state.fail("source positive processing attempt cap exceeded");
+                    }
                 }
             }
             let bytes = outcome.as_ref().map_or(0, outcome_size);
             if bytes > MAX_TEXT {
                 state.fail("observer diagnostic cap exceeded");
+                return;
+            }
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            if state.try_stream(
+                identity,
+                stream_live::View::Control(stream_control::View::Call {
+                    operation,
+                    boundary,
+                    frames,
+                    transport: transport.as_ref(),
+                    outcome: outcome.as_ref().map(stream_control::OutcomeRef::from),
+                }),
+            ) {
                 return;
             }
             state.push(identity, bytes, || RecordKind::Call {
@@ -838,6 +1140,25 @@ impl InstanceObserver {
             let bytes = result.as_ref().err().map_or(0, |s| s.len());
             if bytes > MAX_TEXT {
                 state.fail("observer diagnostic cap exceeded");
+                return;
+            }
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            if state.try_stream(
+                identity,
+                stream_live::View::Control(stream_control::View::Call {
+                    operation,
+                    boundary: Boundary::Returned,
+                    frames,
+                    transport: transport.as_ref(),
+                    outcome: Some(match result {
+                        Ok(_) => stream_control::OutcomeRef::Ok,
+                        Err(error) => stream_control::OutcomeRef::Error(error),
+                    }),
+                }),
+            ) {
                 return;
             }
             state.push(identity, bytes, || RecordKind::Call {
@@ -869,6 +1190,21 @@ impl InstanceObserver {
                 state.fail("observer strict diagnostic cap exceeded");
                 return;
             }
+            if state.try_stream(
+                identity,
+                stream_live::View::Control(stream_control::View::Call {
+                    operation,
+                    boundary: Boundary::Returned,
+                    frames,
+                    transport: transport.as_ref(),
+                    outcome: Some(match result {
+                        Ok(_) => stream_control::OutcomeRef::Ok,
+                        Err(error) => stream_control::OutcomeRef::StrictError(error),
+                    }),
+                }),
+            ) {
+                return;
+            }
             state.push(identity, bytes, || RecordKind::Call {
                 operation,
                 boundary: Boundary::Returned,
@@ -887,6 +1223,12 @@ impl InstanceObserver {
     ))]
     pub(crate) fn capture_identity(&self, source: BounceSourceIdentity) {
         self.with(|state, identity| {
+            if state.try_stream(
+                identity,
+                stream_live::View::Control(stream_control::View::StrictCaptureIdentity(&source)),
+            ) {
+                return;
+            }
             state.push(identity, 0, || RecordKind::StrictCaptureIdentity(source))
         });
     }
@@ -899,6 +1241,18 @@ impl InstanceObserver {
             let diagnostic_bytes = result.as_ref().err().map_or(0, |e| e.diagnostic().len());
             if bytes.len() > MAX_STATE_BYTES || diagnostic_bytes > MAX_TEXT {
                 state.fail("observer state-load input cap exceeded");
+                return;
+            }
+            if state.try_stream(
+                identity,
+                stream_live::View::StateLoad {
+                    bytes,
+                    outcome: match result {
+                        Ok(_) => stream_control::OutcomeRef::Ok,
+                        Err(error) => stream_control::OutcomeRef::StrictError(error),
+                    },
+                },
+            ) {
                 return;
             }
             state.push(identity, bytes.len() + diagnostic_bytes, || {
@@ -928,6 +1282,19 @@ impl InstanceObserver {
                 state.fail("observer base diagnostic cap exceeded");
                 return;
             }
+            if state.try_stream(
+                identity,
+                stream_live::View::Control(stream_control::View::BaseRead {
+                    site,
+                    id,
+                    raw_bits: result
+                        .as_ref()
+                        .map(|v| v.to_bits())
+                        .map_err(|e| e.diagnostic()),
+                }),
+            ) {
+                return;
+            }
             state.push(identity, size, || RecordKind::BaseRead {
                 site,
                 id,
@@ -944,6 +1311,22 @@ impl InstanceObserver {
             let diagnostic_bytes = result.as_ref().err().map_or(0, |s| s.len());
             if bytes.len() > MAX_STATE_BYTES || diagnostic_bytes > MAX_TEXT {
                 state.fail("observer state-load input cap exceeded");
+                return;
+            }
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            if state.try_stream(
+                identity,
+                stream_live::View::StateLoad {
+                    bytes,
+                    outcome: match result {
+                        Ok(_) => stream_control::OutcomeRef::Ok,
+                        Err(error) => stream_control::OutcomeRef::Error(error),
+                    },
+                },
+            ) {
                 return;
             }
             state.push(identity, bytes.len() + diagnostic_bytes, || {
@@ -963,6 +1346,20 @@ impl InstanceObserver {
             let size = result.as_ref().err().map_or(0, |s| s.len());
             if size > MAX_TEXT {
                 state.fail("observer base diagnostic cap exceeded");
+                return;
+            }
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            if state.try_stream(
+                identity,
+                stream_live::View::Control(stream_control::View::BaseRead {
+                    site,
+                    id,
+                    raw_bits: result.as_ref().map(|v| v.to_bits()).map_err(String::as_str),
+                }),
+            ) {
                 return;
             }
             state.push(identity, size, || RecordKind::BaseRead {
@@ -988,6 +1385,15 @@ impl InstanceObserver {
             }
             let bytes = (inputs.len() + outputs.len())
                 * std::mem::size_of::<crate::instrument_bounce::BounceAudioBus>();
+            if state.try_stream(
+                identity,
+                stream_live::View::Native(stream_codec::NativeView::AudioDeclaration {
+                    inputs,
+                    outputs,
+                }),
+            ) {
+                return;
+            }
             state.push(identity, bytes, || RecordKind::AudioDeclaration {
                 input_buses: inputs.to_vec(),
                 output_buses: outputs.to_vec(),
@@ -1010,6 +1416,42 @@ impl InstanceObserver {
             }
             let bytes =
                 (inputs.len() + outputs.len()) * std::mem::size_of::<(u32, bool, Option<bool>)>();
+            if state.stream.is_some() || state.stream_taken {
+                let mut in_buses = [(0, false, None); MAX_BUSES];
+                let mut out_buses = [(0, false, None); MAX_BUSES];
+                let mut in_count = 0;
+                let mut out_count = 0;
+                for value in inputs {
+                    if in_count == MAX_BUSES {
+                        state.fail("observer event declaration cap exceeded");
+                        return;
+                    }
+                    in_buses[in_count] = value;
+                    in_count += 1;
+                }
+                for value in outputs {
+                    if out_count == MAX_BUSES {
+                        state.fail("observer event declaration cap exceeded");
+                        return;
+                    }
+                    out_buses[out_count] = value;
+                    out_count += 1;
+                }
+                if state.try_stream(
+                    identity,
+                    stream_live::View::Native(stream_codec::NativeView::EventDeclaration {
+                        inputs: &in_buses[..in_count],
+                        outputs: &out_buses[..out_count],
+                    }),
+                ) {
+                    return;
+                }
+                state.push(identity, bytes, || RecordKind::EventDeclaration {
+                    inputs: in_buses[..in_count].to_vec(),
+                    outputs: out_buses[..out_count].to_vec(),
+                });
+                return;
+            }
             state.push(identity, bytes, || RecordKind::EventDeclaration {
                 inputs: inputs.collect(),
                 outputs: outputs.collect(),
@@ -1020,16 +1462,44 @@ impl InstanceObserver {
     pub(crate) fn metadata(&self, site: &'static str, result: Result<&BouncePluginMetadata, &str>) {
         self.with(|state, identity| match result {
             Ok(value) => match metadata_size(value) {
-                Some(size) => state.push(identity, size, || RecordKind::Metadata {
-                    site,
-                    result: Ok(value.clone()),
-                }),
+                Some(size) => {
+                    #[cfg(all(
+                        any(target_os = "linux", windows),
+                        feature = "experimental-fresh-helper"
+                    ))]
+                    if state.try_stream(
+                        identity,
+                        stream_live::View::Native(stream_codec::NativeView::Metadata {
+                            site,
+                            result: Ok(value),
+                        }),
+                    ) {
+                        return;
+                    }
+                    state.push(identity, size, || RecordKind::Metadata {
+                        site,
+                        result: Ok(value.clone()),
+                    });
+                }
                 None => state.fail("observer metadata cap exceeded"),
             },
             Err(error) => {
                 if error.len() > MAX_TEXT {
                     state.fail("observer metadata diagnostic cap exceeded");
                 } else {
+                    #[cfg(all(
+                        any(target_os = "linux", windows),
+                        feature = "experimental-fresh-helper"
+                    ))]
+                    if state.try_stream(
+                        identity,
+                        stream_live::View::Native(stream_codec::NativeView::Metadata {
+                            site,
+                            result: Err(error),
+                        }),
+                    ) {
+                        return;
+                    }
                     state.push(identity, error.len(), || RecordKind::Metadata {
                         site,
                         result: Err(error.to_owned()),
@@ -1044,6 +1514,25 @@ impl InstanceObserver {
             let size = report.process_error.as_ref().map_or(0, String::len);
             if size > MAX_TEXT {
                 state.fail("observer reset diagnostic cap exceeded");
+                return;
+            }
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            if state.try_stream(
+                identity,
+                stream_live::View::Control(stream_control::View::ResetReport {
+                    frames: report.frames,
+                    discarded_prior_midi_events: report.discarded_prior_midi_events,
+                    discarded_midi_events: report.discarded_midi_events,
+                    discarded_prior_parameter_points: report.discarded_prior_parameter_points,
+                    discarded_parameter_points: report.discarded_parameter_points,
+                    output_events_lost: report.output_events_lost,
+                    parameter_output_fault: report.parameter_output_fault,
+                    process_error: report.process_error.as_deref(),
+                }),
+            ) {
                 return;
             }
             state.push(identity, size, || RecordKind::ResetReport {
@@ -1070,7 +1559,15 @@ impl InstanceObserver {
         feature = "experimental-fresh-helper"
     ))]
     pub(crate) fn midi(&self, data: [u8; 3], offset: u16) {
-        self.with(|state, identity| state.push(identity, 0, || RecordKind::Midi { data, offset }));
+        self.with(|state, identity| {
+            if state.try_stream(
+                identity,
+                stream_live::View::Native(stream_codec::NativeView::Midi { data, offset }),
+            ) {
+                return;
+            }
+            state.push(identity, 0, || RecordKind::Midi { data, offset });
+        });
     }
     #[cfg(all(
         any(target_os = "linux", windows),
@@ -1090,6 +1587,16 @@ impl InstanceObserver {
             }
             let size = value.diagnostics.iter().map(String::len).sum::<usize>()
                 + value.error.as_ref().map_or(0, |e| e.diagnostic().len());
+            if state.try_stream(
+                identity,
+                stream_live::View::Control(stream_control::View::Disposal {
+                    terminated: value.terminated,
+                    error: value.error.as_ref(),
+                    diagnostics: &value.diagnostics,
+                }),
+            ) {
+                return;
+            }
             state.push(identity, size, || RecordKind::Disposal {
                 terminated: value.terminated,
                 error: value.error.clone(),
@@ -1099,7 +1606,19 @@ impl InstanceObserver {
     }
     #[cfg(feature = "vst3")]
     pub(crate) fn lifecycle(&self, name: &'static str) {
-        self.with(|state, identity| state.push(identity, 0, || RecordKind::Lifecycle(name)));
+        self.with(|state, identity| {
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            if state.try_stream(
+                identity,
+                stream_live::View::Control(stream_control::View::Lifecycle(name)),
+            ) {
+                return;
+            }
+            state.push(identity, 0, || RecordKind::Lifecycle(name));
+        });
     }
 }
 #[cfg(feature = "vst3")]
@@ -1152,6 +1671,21 @@ pub(crate) fn record_capture(label: CaptureLabel, capture: &CapturedInstrumentBo
         let bytes = metadata_bytes
             + capture.state.opaque_state.len()
             + capture.state.parameter_bases.len() * 32;
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if state.try_stream(
+            None,
+            stream_live::View::Capture {
+                label,
+                identity: capture.identity(),
+                receipt_identity: capture.genuine_receipt_identity(),
+                state: &capture.state,
+            },
+        ) {
+            return;
+        }
         state.push(None, bytes, || RecordKind::Capture {
             label,
             identity: capture.identity(),
@@ -1162,10 +1696,34 @@ pub(crate) fn record_capture(label: CaptureLabel, capture: &CapturedInstrumentBo
 }
 /// App-owned receipt consumption only, never called by the callback.
 pub(crate) fn record_app_asset_event(event: AudioAssetEvent) {
-    with_active(|state| state.push(None, 0, || RecordKind::AppAudioAssetEvent(event)));
+    with_active(|state| {
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if state.try_stream(
+            None,
+            stream_live::View::App(stream_app_control::AppView::AudioAsset(&event)),
+        ) {
+            return;
+        }
+        state.push(None, 0, || RecordKind::AppAudioAssetEvent(event));
+    });
 }
 pub(crate) fn record_app_generator_event(event: GeneratorEndpointEvent) {
-    with_active(|state| state.push(None, 0, || RecordKind::AppGeneratorEndpointEvent(event)));
+    with_active(|state| {
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if state.try_stream(
+            None,
+            stream_live::View::App(stream_app_control::AppView::GeneratorEndpoint(&event)),
+        ) {
+            return;
+        }
+        state.push(None, 0, || RecordKind::AppGeneratorEndpointEvent(event));
+    });
 }
 pub(crate) fn record_app_timeline_event(
     event: crate::timeline_runtime::TimelineRuntimeEvent,
@@ -1231,6 +1789,19 @@ fn record_capture_guard_into(
     worker_id: Option<usize>,
     operands: WorkerCaptureGuard,
 ) {
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    if state.try_stream(
+        None,
+        stream_live::View::Control(stream_control::View::WorkerCaptureGuard {
+            worker_id,
+            operands: &operands,
+        }),
+    ) {
+        return;
+    }
     state.push(None, 0, || RecordKind::WorkerCaptureGuard {
         worker_id,
         operands,
@@ -1238,15 +1809,49 @@ fn record_capture_guard_into(
 }
 
 pub(crate) fn record_worker_join(worker_id: usize, outcome: WorkerJoinOutcome) {
-    with_active(|state| state.push(None, 0, || RecordKind::WorkerJoin { worker_id, outcome }));
+    with_active(|state| {
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if state.try_stream(
+            None,
+            stream_live::View::Control(stream_control::View::WorkerJoin { worker_id, outcome }),
+        ) {
+            return;
+        }
+        state.push(None, 0, || RecordKind::WorkerJoin { worker_id, outcome });
+    });
 }
 pub(crate) fn record_render_report(report: &RenderReport) {
-    with_active(|state| state.push(None, 0, || RecordKind::RenderReport(report.clone())));
+    with_active(|state| {
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if state.try_stream(
+            None,
+            stream_live::View::Control(stream_control::View::RenderReport(report)),
+        ) {
+            return;
+        }
+        state.push(None, 0, || RecordKind::RenderReport(report.clone()));
+    });
 }
 pub(crate) fn record_hooks(site: &'static str, inactive: bool) {
     with_active(|state| {
         if !inactive {
             state.fail("a behavior-changing test hook was active");
+        }
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if state.try_stream(
+            None,
+            stream_live::View::Control(stream_control::View::HookInventory { site, inactive }),
+        ) {
+            return;
         }
         state.push(None, 0, || RecordKind::HookInventory { site, inactive });
     });
@@ -1261,6 +1866,23 @@ pub(crate) fn record_worker(
         return;
     };
     with_active(|state| {
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if state.try_stream(
+            None,
+            stream_live::View::Control(stream_control::View::Worker {
+                site,
+                worker_id: worker.id,
+                manifest: &worker.manifest,
+                epoch,
+                sequence,
+                stats: &stats,
+            }),
+        ) {
+            return;
+        }
         state.push(None, 0, || RecordKind::Worker {
             site,
             worker_id: worker.id,
@@ -1272,7 +1894,19 @@ pub(crate) fn record_worker(
     });
 }
 pub(crate) fn record_lifecycle(site: &'static str) {
-    with_active(|state| state.push(None, 0, || RecordKind::Lifecycle(site)));
+    with_active(|state| {
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if state.try_stream(
+            None,
+            stream_live::View::Control(stream_control::View::Lifecycle(site)),
+        ) {
+            return;
+        }
+        state.push(None, 0, || RecordKind::Lifecycle(site));
+    });
 }
 
 /// App consumption tap: preserve tagged replies without draining or replacing
@@ -1326,6 +1960,24 @@ pub(crate) fn record_runtime_event(
                 epoch,
                 bytes,
             } => {
+                #[cfg(all(
+                    any(target_os = "linux", windows),
+                    feature = "experimental-fresh-helper"
+                ))]
+                if state.try_stream(
+                    None,
+                    stream_live::View::Control(stream_control::View::OrdinaryState {
+                        endpoint_id,
+                        project_session,
+                        instance_id,
+                        slot: *slot,
+                        request_id: *request_id,
+                        epoch: *epoch,
+                        byte_len: bytes.len(),
+                    }),
+                ) {
+                    return;
+                }
                 state.push(None, 0, || RecordKind::OrdinaryState {
                     endpoint_id,
                     project_session,
@@ -1339,6 +1991,21 @@ pub(crate) fn record_runtime_event(
             }
             _ => 0,
         };
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if state.try_stream(
+            None,
+            stream_live::View::App(stream_app_control::AppView::Runtime {
+                endpoint_id,
+                project_session,
+                instance_id,
+                event,
+            }),
+        ) {
+            return;
+        }
         state.push(None, bytes, || RecordKind::RuntimeEvent {
             endpoint_id,
             project_session,

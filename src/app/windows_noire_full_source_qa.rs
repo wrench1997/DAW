@@ -120,7 +120,7 @@ fn metadata_evidence(metadata: &crate::instrument_bounce::BouncePluginMetadata) 
         "audio_outputs":metadata.output_buses.iter().map(|bus|json!({"channel_count":bus.channel_count,"is_main":bus.is_main,"active":bus.active})).collect::<Vec<_>>(),
         "event_inputs":metadata.event_input_buses,"event_outputs":metadata.event_output_buses})
 }
-fn actual_source_identity(
+pub(super) fn actual_source_identity(
     records: &[Arc<observe::Record>],
     worker: usize,
     source_id: u64,
@@ -147,7 +147,7 @@ fn actual_source_identity(
     )?;
     Ok(first)
 }
-fn validate_state_operands(
+pub(super) fn validate_state_operands(
     records: &[Arc<observe::Record>],
     identity: observe::InstanceIdentity,
     expected_bytes: usize,
@@ -174,7 +174,7 @@ fn validate_state_operands(
     }
     Ok(())
 }
-fn validate_metadata(
+pub(super) fn validate_metadata(
     records: &[Arc<observe::Record>],
     identity: observe::InstanceIdentity,
     sample_rate: u32,

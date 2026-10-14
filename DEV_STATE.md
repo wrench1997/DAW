@@ -91,7 +91,12 @@ run08 的 NI component 177 字节不同；已知 host envelope 相同，期间�
 | source43 流式基础迁入源码 | 115 passed；Clippy exit101，5 项新 decoder/样式/枚举大小问题 | 原失败保留；测试实际 1.26 秒，不证明 NI 吞吐或完整歌曲 |
 | source44 流式基础修正 | 116 passed（1.27 秒）；strict default/all-feature Clippy、fmt/include/diff 全 exit0 | 257 源码输入冻结；固定 64×2KiB 池、64KiB 完整记录、健康背压与真实 writer Join 已测；尚未安装实际流式观察 sink |
 | source45 全部流式模块首次门禁 | 198 passed（1.57 秒）；strict Clippy exit101，15 项未使用代码和样式问题 | 263 源码输入冻结；实例字典、状态 sidecar 和 stream sink 已注册为测试模块；原失败日志保留，无 NI/完整歌曲验收 |
-| source46 本次提交门禁 | 200 passed（1.46 秒）；root strict default/all-feature/all-target Clippy、fmt/include/diff 全 exit0 | 移除无实际实例对应的 FinalSource；新增真实取消/recovery/同 writer Join 验证；263 源码输入冻结，无 NI/完整歌曲验收 |
+| source46 基础模块提交门禁 | 200 passed（1.46 秒）；root strict default/all-feature/all-target Clippy、fmt/include/diff 全 exit0 | 移除无实际实例对应的 FinalSource；新增真实取消/recovery/同 writer Join 验证；263 源码输入冻结，无 NI/完整歌曲验收 |
+| source47 独立全曲审计迁入源码 | 42 passed（1.14 秒）；完整 405-note/810-boundary/782-wire 输入检查及 35 项文件/PCM 回归 | 冻结 builder 字节保持原 SHA；音乐静音不能算 NOIRE 发声；未提供真实完整 raw/WAV |
+| source47 真实流式接线首次编译 | exit101：`E0063`，完整歌曲入口缺 `WavExportOptions.sample_rate` | 274 输入冻结；未执行新 Rust 回归或启动 NI；失败和后续补齐 48k 配置分别保留 |
+| source48 接线后 Clippy | exit101：未使用的 replay 测试 helper、raw reader 循环样式 | 编译已通过，尚未执行新 Rust 回归；原失败保留 |
+| source49 接线门禁 | 235 stream +34 full-owner passed；3 个显式本机用例忽略；strict default/all-feature/all-target Clippy、fmt/include/diff exit0 | 默认上限、23 类回读、原分配与实际 Drop/recovery/Join 回归通过；独立总审计另 16 passed，无原生音频验收 |
+| source50 完整原曲 native run01 | 实际 27.767 秒，test exit101；再次在生产 scan 的 5 秒 helper 响应处失败 | 源/clone/stream/WAV 均未启动；完整工程/历史/592KB 原状态及二进制 SHA 未变，不能算原曲导出通过 |
 
 source34 root 完整命令耗时 805.36 秒，主程序测试耗时 635.87 秒，真实终态已保存。
 vendor 失败项 `internal::module_info::tests::reads_sdk_generated_bundle_metadata` 要求外部
@@ -129,8 +134,12 @@ source32 的选定元数据 bundle 从源码计数上将 Q128 wrapper IPC 11 次
 这些都是私有文件夹具审核，不代表 SDK、写入线程实际退出或真实 NOIRE 长曲音频通过。
 source44 已将控制/App/native 编解码、完整身份外层和 spool 迁入测试源码并实际检查。
 source46 已注册并实测实例字典、状态 sidecar 和 stream sink；取消后保留原分配，实际 Join 后仍拒绝成功。
-23 类实时借用 tap、实际收口/replay 和完整歌曲 driver 仍在接线；默认内存观察器及其限制没有提高或清空。
-本次只提交 16 个相关源码/回归/文档文件；14 个本地作品及 target 验证记录、插件状态、PCM、二进制由现有忽略规则排除并保留。
+source49 已通过 23 类借用 tap、完整 owner Drop/recovery、逐条 typed replay、原始 PCM 派生及完整歌曲生产 driver 的针对性合并门禁。
+默认内存观察器的限制和原始 prelude 没有提高、清空或重置；流式预算独立，成功高频记录不再复制 PCM/RecordKind。
+source50 完整 NOIRE 实机入口实际失败于 scan，未执行渲染、收口及全部样本审计；源码接线和夹具通过不代表原生歌曲通过。
+本次提交 19 个相关源码、回归、文档及字节保留配置文件，覆盖 source49/50 已验证的整曲测试接线和独立审计。
+另 5 个新写的 vendor 加载阶段诊断文件尚未运行格式、编译及实机检查，原样保留在工作区，暂不提交。
+14 个本地作品及 target 验证记录、插件状态、PCM、二进制由现有忽略规则排除并保留。
 
 ## 失败复现与下一步
 
