@@ -1,12 +1,14 @@
 //! Explicit init-only qualification of the complete pinned Saved13 source.
 //! The real scan happens before observation and is a separate empty default
-//! Kontakt instance. Its legacy best-effort Drop is not a source-worker join.
+//! Kontakt instance. Its checked helper reap is independent of the source
+//! worker join; that join still does not prove the source helper's strict reap.
 //! No MIDI playback, device, editor, save, capture, clone or WAV is exercised.
 #![cfg(all(test, windows, feature = "experimental-fresh-helper"))]
 
 use super::windows_noire_full_inputs::FullInputs;
 use super::windows_noire_full_owner::{FullParent, RetainedFullParent};
 use super::*;
+use crate::plugins::scan_qa::{CheckedScan, SingleModuleScan};
 
 const FULL_SOURCE_SELECTOR: &str = "app::clip_render_job::windows_noire_bounce_qa::windows_noire_full_source_qa::windows_noire_full_saved13_source_initialization_only";
 const FULL_SOURCE_OPT_IN: &str = "actual-noire-pure-complete-saved13-source-init-v1";
@@ -357,13 +359,14 @@ struct SourceRun {
     parent: RetainedFullParent,
     observer: ObservationRun,
     binaries: BinaryPins,
+    scan: SingleModuleScan,
     evidence: Value,
     ready_worker: Option<usize>,
     ready_instance: Option<observe::InstanceIdentity>,
     deadline: Instant,
 }
 impl SourceRun {
-    fn new(inputs: FullInputs, binaries: BinaryPins, scan: Value) -> Check<Self> {
+    fn new(inputs: FullInputs, binaries: BinaryPins, scan: SingleModuleScan) -> Check<Self> {
         let pins = json!({"path":inputs.pins.project_path,"bytes":inputs.pins.project_bytes,
             "sha256":inputs.pins.project_sha256,"state_bytes":inputs.pins.saved_state_bytes,
             "state_sha256":inputs.pins.saved_state_sha256,"actual_bundle_path":inputs.pins.actual_bundle_path,
@@ -374,7 +377,7 @@ impl SourceRun {
         let parent = FullParent::new_retained(inputs, [0x46; 32])?;
         let evidence = json!({"schema":1,"fixture":FULL_SOURCE_OPT_IN,
             "scope":"complete original Saved13 initialization only; device-free App source and callback, no writing the original project",
-            "original_project":pins,"binaries":binaries.evidence(),"separate_scan_preflight":scan,
+            "original_project":pins,"binaries":binaries.evidence(),"separate_scan_preflight":scan.evidence(),
             "budgets":{"outer_driver_seconds":RUN_SECONDS,"initialization_seconds":INITIALIZATION_SECONDS,
                 "cleanup_seconds":CLEANUP_SECONDS,"existing_render_budget_seconds":300,"render_started":false,
                 "cooperative_deadlines_are_not_hard_OS_time_guarantees":true},
@@ -385,6 +388,7 @@ impl SourceRun {
             parent,
             observer,
             binaries,
+            scan,
             evidence,
             ready_worker: None,
             ready_instance: None,
@@ -616,6 +620,10 @@ impl SourceRun {
             });
         let terminal_result = (|| {
             require(
+                self.scan.helper_reaped() && self.scan.metadata_admitted(),
+                "actual separate scanner helper reap or single-module metadata admission is not proven",
+            )?;
+            require(
                 self.parent.resources_joined(),
                 "complete source cleanup has not finished its actual retained joins",
             )?;
@@ -662,7 +670,11 @@ impl SourceRun {
             "observer_error":observer_failure,"owner_wrapper_quarantined":body.is_err() || cleanup.is_err() || terminal_result.is_err() || pins.is_err() || model.is_err(),
             "source_resources_joined":self.parent.resources_joined(),
             "scope":"initialization and exact paused source/callback/worker only",
-            "scan_instance_is_not_source_instance":true,"scan_cleanup_is_legacy_best_effort":true,
+            "scan_instance_is_not_source_instance":true,
+            "scan_helper_strict_reap_proven":self.scan.helper_reaped(),
+            "scan_metadata_admitted":self.scan.metadata_admitted(),
+            "scan_reap_evidence_source":"same retained checked single-module ScanReport",
+            "source_helper_strict_reap_proven":false,
             "source_worker_join_is_not_independent_source_helper_reap_evidence":true,
             "wrapper_lifecycle_and_worker_join_do_not_count_internal_LoadPlugin_retries":true,
             "all_native_owners_strictly_joined_not_proven":true,"OS_process_absence_is_not_join_evidence":true,
@@ -711,6 +723,7 @@ fn windows_noire_full_saved13_source_initialization_only() {
     fs::create_dir(&directory)
         .expect("full-source QA directory must be new; old receipts are never overwritten");
     let mut scan_attempted = false;
+    let mut scan_helper_reaped = None;
     let preflight = catch_unwind(AssertUnwindSafe(|| {
         let binaries = BinaryPins::load()?;
         let inputs = FullInputs::load_from_env()?;
@@ -721,16 +734,12 @@ fn windows_noire_full_saved13_source_initialization_only() {
         // Production scan uses the exact saved spelling. Canonical paths are
         // input/binary pins only. No scan metadata is invented or substituted.
         scan_attempted = true;
-        let mut scanned = plugins::scan(std::slice::from_ref(&inputs.source.descriptor.path));
-        let scan = json!({"source":"production plugins::scan plus isolated default-class LoadPlugin",
-            "requested_path":inputs.source.descriptor.path,"result_count":scanned.len(),
-            "results":scanned,"default_class_id":Value::Null,
-            "scope":"separate default empty scan instance before source observer installation",
-            "SDK_version_not_in_descriptor":true,"source_worker_identity":Value::Null,
-            "legacy_best_effort_Drop_not_strict_join_or_all_native_owner_termination":true});
-        new_json(&directory.join("separate-scan-preflight.json"), &scan)?;
-        require(scanned.len() == 1, "production scan did not return exactly one complete source descriptor")?;
-        let descriptor = scanned.pop().ok_or("production scan descriptor disappeared")?;
+        let checked = CheckedScan::perform(&inputs.source.descriptor.path);
+        scan_helper_reaped = Some(checked.helper_reaped());
+        new_json(&directory.join("separate-scan-preflight.json"), &checked.evidence())?;
+        let scan = checked.admit(KONTAKT_UID)?;
+        require(scan.helper_reaped() && scan.metadata_admitted(), "complete source scan helper or metadata admission is not proven")?;
+        let descriptor = scan.descriptor().clone();
         binaries.unchanged()?;
         Ok((inputs, binaries, descriptor, scan))
     })).unwrap_or_else(|payload| Err(raw_panic(payload, "full source preflight including separate scan")));
@@ -739,7 +748,10 @@ fn windows_noire_full_saved13_source_initialization_only() {
             &directory.join("source-result.json"),
             &json!({"schema":1,"stage":"preflight",
             "success":false,"actual_error":reason,"source_owner_started":false,
-            "separate_scan_attempted":scan_attempted,"scan_cleanup_not_strictly_proven":scan_attempted,
+            "separate_scan_attempted":scan_attempted,"scan_helper_strict_reap_proven":scan_helper_reaped,
+            "scan_outcome_observed":scan_helper_reaped.is_some(),
+            "scan_receipt_path":directory.join("separate-scan-preflight.json"),
+            "source_helper_strict_reap_proven":false,
             "partial_files_preserved":true}),
         );
         panic!(
@@ -754,7 +766,9 @@ fn windows_noire_full_saved13_source_initialization_only() {
             &directory.join("source-result.json"),
             &json!({"schema":1,"stage":"owner-construction",
             "success":false,"actual_error":reason,"source_initialization_requested":false,
-            "scan_cleanup_not_strictly_proven":true,"partial_files_preserved":true}),
+            "scan_helper_strict_reap_proven":scan_helper_reaped,
+            "scan_receipt_path":directory.join("separate-scan-preflight.json"),
+            "source_helper_strict_reap_proven":false,"partial_files_preserved":true}),
         );
         panic!(
             "complete NOIRE owner construction failed; preserve {}",

@@ -33,6 +33,10 @@ Source58 仅修正测试辅助函数返回值及 Unix 夹具的分平台错误�
 
 ## 本轮已实现的功能
 
+Source59 接线、Source60 验证：真实完整工程的两个 QA 入口使用 checked scan，先保存完整 Completed/Stopped 收据，再验证单模块 metadata；后续失败仍保留扫描 helper 的实际 reap 事实。已有 Windows QA 增加普通构建的单次 Kontakt 默认 class 扫描入口，明确只测空实例扫描/清理，不验证 NOIRE 音色或声音。原 source/renderer/stream 的证明保持独立。Source60 将新增测试模块限定到实际消费者所在的 Windows，避免 Linux 测试构建的未使用代码；生产 Windows/Linux 扫描不变。
+
+Source60 实际通过默认及 all-feature 的 root `Clippy --all-targets -D warnings`、新增 6 项扫描证据回归、已有整曲/完整 source 的 34 项回归（3 项显式本机测试 ignored）、普通构建 native selector 编译/列举、root/独立 QA 格式及 diff 检查。依赖 SDK 的 4 项既有 Windows 未使用代码警告保留，不宣称整个 vendor 零警告。Source59 冻结记录未运行并保留；本次 8 项实际 terminal 收据在 `target/backend-reliability-20261014/source60-scan-*`。本次新入口的真实 Kontakt 扫描、NOIRE 音色恢复和声音验证仍未测，不能以合成测试或 selector 列举替代。
+
 - Channel Rack、钢琴卷帘和 Playlist 的视图布局、缩放、定位/放置与按钮反馈已调整。
 - 钢琴黑白键几何、按下/松开及播放反馈、键盘试听和试听取消已接入实际状态。
 - 播放启动与循环重启等待 Timeline、参数和插件实际确认，避免错误首音/旧 epoch。

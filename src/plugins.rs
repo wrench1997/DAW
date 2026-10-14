@@ -20,6 +20,10 @@ pub mod plugin_runtime;
 mod scan_lifecycle;
 use scan_lifecycle::{ProbeFailure, ScanControl};
 
+#[cfg(all(test, feature = "vst3", windows))]
+#[path = "plugin_scan_qa.rs"]
+pub(crate) mod scan_qa;
+
 #[cfg(all(test, feature = "vst3", any(windows, target_os = "linux")))]
 pub(crate) fn helper_transport_test_lock() -> std::sync::MutexGuard<'static, ()> {
     // Ordinary probes and strict clones share one process-global reservation.

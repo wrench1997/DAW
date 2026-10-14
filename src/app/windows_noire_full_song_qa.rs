@@ -15,6 +15,7 @@ use crate::app::stopped_bounce_capture::LiveBinding;
 use crate::export_options::{WavExportOptions, WavLevelPolicy, WavSampleFormat};
 use crate::instrument_bounce::BouncePluginMetadata;
 use crate::instrument_bounce::render::MasterSongRenderReport;
+use crate::plugins::scan_qa::{CheckedScan, SingleModuleScan};
 
 const SELECTOR: &str = "app::clip_render_job::windows_noire_bounce_qa::windows_noire_full_song_qa::windows_noire_full_saved13_whole_song_offline";
 const OPT_IN: &str = "actual-noire-pure-complete-saved13-whole-offline-v1";
@@ -351,6 +352,7 @@ struct FullSongRun {
     parent: RetainedFullParent,
     observer: ObservationRun,
     binaries: BinaryPins,
+    scan: SingleModuleScan,
     verification: Box<dyn FullSongVerification>,
     paths: FullSongEvidencePaths,
     source_instance: Option<observe::InstanceIdentity>,
@@ -367,7 +369,7 @@ impl FullSongRun {
         binaries: BinaryPins,
         verification: Box<dyn FullSongVerification>,
         directory: PathBuf,
-        scan: Value,
+        scan: SingleModuleScan,
     ) -> Check<Self> {
         let evidence = json!({"schema":1,"fixture":OPT_IN,
             "scope":"complete original Saved13 production stopped-source capture and whole-song offline export; device-free actual App callback",
@@ -378,14 +380,14 @@ impl FullSongRun {
                 "pattern_count":inputs.project.patterns.len(),"placements":inputs.project.clips.len(),
                 "song_length_beats":inputs.project.song_length_beats,"tempo":inputs.project.tempo,
                 "mixer_tracks":inputs.project.mixer_tracks.len(),"mixer_routes":inputs.project.mixer_routes.len()},
-            "binaries":binaries.evidence(),"separate_scan_preflight":scan,
+            "binaries":binaries.evidence(),"separate_scan_preflight":scan.evidence(),
             "budgets":{"outer_driver_seconds":RUN_SECONDS,"initialization_seconds":INITIALIZATION_SECONDS,
                 "cleanup_seconds":CLEANUP_SECONDS,"existing_renderer_budget_seconds":300,
                 "cooperative_deadlines_are_not_hard_OS_time_guarantees":true},
             "unverified":{"physical_monitoring":true,"plugin_editor":true,"NOIRE_preset_name":true,
                 "all_NOIRE_internal_parameters":true,"new_save_cold_reopen":true,
                 "realtime_recording":true,"clip_conversion":true,"undo_redo":true,"Felt":true,
-                "scan_and_source_helper_independent_strict_reap":true},
+                "source_helper_independent_strict_reap":true},
             "original_project_writes":0,"conversion_performed":false,"source_normalizer_used":false,
             "fixed_tail_explicitly_confirmed":true,"tail_milliseconds":3_000,
             "empty_coda_beats":[128,160],"tail_nonzero_required":false,
@@ -402,6 +404,7 @@ impl FullSongRun {
             parent,
             observer,
             binaries,
+            scan,
             verification,
             paths,
             source_instance: None,
@@ -591,6 +594,8 @@ impl FullSongRun {
             .and_then(|()| self.parent.inputs_unchanged());
         let model = self.parent.model_unchanged();
         let observer_failure = self.observer.with_snapshot(|snapshot| snapshot.failure);
+        let scan_reaped = self.scan.helper_reaped();
+        let scan_metadata_admitted = self.scan.metadata_admitted();
         let success = body.is_ok()
             && cleanup.is_ok()
             && retirement.is_ok()
@@ -598,13 +603,18 @@ impl FullSongRun {
             && pins.is_ok()
             && model.is_ok()
             && resources_joined
-            && observer_failure.is_none();
+            && observer_failure.is_none()
+            && scan_reaped
+            && scan_metadata_admitted;
         self.evidence["result"] = json!({"success":success,"body_passed":body.is_ok(),
             "actual_body_error":body.as_ref().err(),"cleanup_passed":cleanup.is_ok(),
             "actual_cleanup_error":cleanup.as_ref().err(),"owned_native_resources_joined":resources_joined,
             "source_readiness_verified":self.source_instance.is_some(),
             "resource_boolean_alone_does_not_prove_source_worker_join":true,
-            "scan_helper_strict_reap_proven":false,
+            "scan_helper_strict_reap_proven":scan_reaped,
+            "scan_metadata_admitted":scan_metadata_admitted,
+            "scan_reap_evidence_source":"same retained checked single-module ScanReport",
+            "source_helper_strict_reap_proven":false,
             "stream_and_sidecar_retirement_passed":retirement.is_ok(),"sound_audit_passed":audit.is_ok(),
             "original_project_and_binaries_unchanged":pins.is_ok(),"actual_pin_error":pins.as_ref().err(),
             "full_model_history_unchanged":model.is_ok(),"actual_model_error":model.as_ref().err(),
@@ -657,6 +667,7 @@ fn windows_noire_full_saved13_whole_song_offline() {
     fs::create_dir(&directory)
         .expect("complete whole-song directory must be new; prior evidence is never overwritten");
     let mut scan_attempted = false;
+    let mut scan_helper_reaped = None;
     let preflight = catch_unwind(AssertUnwindSafe(|| {
         let binaries = BinaryPins::load()?;
         let inputs = FullInputs::load_from_env()?;
@@ -666,14 +677,12 @@ fn windows_noire_full_saved13_whole_song_offline() {
                 "state_bytes":inputs.pins.saved_state_bytes,"state_sha256":inputs.pins.saved_state_sha256},
             "native_source_owner_not_started":true,"original_project_writes":0}))?;
         scan_attempted = true;
-        let mut scanned = plugins::scan(std::slice::from_ref(&inputs.source.descriptor.path));
-        let scan = json!({"source":"production plugins::scan plus isolated default-class LoadPlugin",
-            "requested_path":inputs.source.descriptor.path,"result_count":scanned.len(),"results":scanned,
-            "scope":"separate empty scan instance before source observer installation",
-            "source_worker_identity":Value::Null,"legacy_scan_Drop_is_not_strict_helper_reap":true});
-        new_json(&directory.join("separate-scan-preflight.json"), &scan)?;
-        require(scanned.len() == 1, "production scan did not return exactly one complete source descriptor")?;
-        let descriptor = scanned.pop().ok_or("production scan descriptor disappeared")?;
+        let checked = CheckedScan::perform(&inputs.source.descriptor.path);
+        scan_helper_reaped = Some(checked.helper_reaped());
+        new_json(&directory.join("separate-scan-preflight.json"), &checked.evidence())?;
+        let scan = checked.admit(KONTAKT_UID)?;
+        require(scan.helper_reaped() && scan.metadata_admitted(), "complete whole-song scan helper or metadata admission is not proven")?;
+        let descriptor = scan.descriptor().clone();
         binaries.unchanged()?;
         Ok((inputs, binaries, descriptor, scan))
     }))
@@ -681,7 +690,10 @@ fn windows_noire_full_saved13_whole_song_offline() {
     let (inputs, binaries, descriptor, scan) = preflight.unwrap_or_else(|reason| {
         let _ = new_json(&directory.join("full-song-result.json"), &json!({"schema":1,
             "stage":"preflight","success":false,"actual_error":reason,"source_owner_started":false,
-            "separate_scan_attempted":scan_attempted,"scan_cleanup_not_strictly_proven":scan_attempted,
+            "separate_scan_attempted":scan_attempted,"scan_helper_strict_reap_proven":scan_helper_reaped,
+            "scan_outcome_observed":scan_helper_reaped.is_some(),
+            "scan_receipt_path":directory.join("separate-scan-preflight.json"),
+            "source_helper_strict_reap_proven":false,
             "partial_files_preserved":true}));
         panic!("complete NOIRE whole-song preflight failed; preserve {}", directory.display());
     });
@@ -699,7 +711,9 @@ fn windows_noire_full_saved13_whole_song_offline() {
             &directory.join("full-song-result.json"),
             &json!({"schema":1,
             "stage":"owner-construction","success":false,"actual_error":reason,
-            "source_initialization_requested":false,"partial_files_preserved":true}),
+            "source_initialization_requested":false,"scan_helper_strict_reap_proven":scan_helper_reaped,
+            "scan_receipt_path":directory.join("separate-scan-preflight.json"),
+            "source_helper_strict_reap_proven":false,"partial_files_preserved":true}),
         );
         panic!(
             "complete NOIRE whole-song owner construction failed; preserve {}",

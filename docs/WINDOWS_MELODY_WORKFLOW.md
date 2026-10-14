@@ -274,6 +274,27 @@ Source51 retains the legacy PowerShell policy refusal and two source precheck fa
 
 ## Reproduction and next acceptance
 
+Source59 wires both complete-project preflights to retained checked scan evidence
+and adds a single ordinary-build Kontakt scanner-only ignored entry in the existing
+Windows QA module. Completed/Stopped and reap/healthy-exit/metadata admission
+remain separate; evidence is written before admission, and later failures retain
+observed scan reap. Source helper, renderer, writer and audio proof stay independent.
+Source60 narrows this test-only module to Windows, matching its actual consumers
+and avoiding Linux test-build dead code; production Windows/Linux scanning is
+unchanged. Source59 remains an unrun frozen cohort. Source60 actually passed both
+default and all-feature root Clippy with all targets and `-D warnings`, six new scan
+evidence tests, 34 existing full-source/full-song regressions (three explicit native
+fixtures ignored), ordinary-build native selector compilation/listing, root and
+private QA formatting, and diff checks. All eight terminal receipts have exit 0 in
+`target/backend-reliability-20261014/source60-scan-*`; four existing dependency SDK
+warnings remain, so this is not a zero-warning vendor qualification.
+
+Native acceptance of these new QA changes is still unrun. The scanner-only entry
+compares actual binary bytes before/after; its supplied SHA fields require
+independent outer runner verification and do not establish Kontakt version or
+NOIRE audio. Synthetic evidence tests and listing an ignored selector are not an
+actual Kontakt scan, NOIRE state restoration or sound qualification.
+
 Use private new directories and explicit opt-in ignored QA only after the coordinated desktop/build window is available. Preserve the original project and identify the exact test/helper/source inputs.
 Normal source checks can be reproduced independently; real NI tests are intentionally excluded:
 

@@ -36,6 +36,161 @@ use crate::{
 const BLOCKS: usize = 64;
 const FRAMES: usize = 128;
 
+const SCAN_SELECTOR: &str =
+    "windows_kontakt_qa::runtime_qa::windows_kontakt_default_class_scan_and_reap";
+const SCAN_OPT_IN: &str = "actual-kontakt-default-class-scan-and-reap-v1";
+static SCAN_ADMITTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn scan_binary_snapshot(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let bytes = file.metadata().map_err(|error| error.to_string())?.len();
+    if bytes == 0 || bytes > limit {
+        return Err(
+            "scanner-only binary is empty or exceeds the original bounded pin input".into(),
+        );
+    }
+    let mut snapshot = Vec::new();
+    snapshot
+        .try_reserve_exact(bytes as usize)
+        .map_err(|error| error.to_string())?;
+    file.take(limit + 1)
+        .read_to_end(&mut snapshot)
+        .map_err(|error| error.to_string())?;
+    if snapshot.len() as u64 != bytes {
+        return Err("scanner-only binary size changed during the snapshot".into());
+    }
+    Ok(snapshot)
+}
+
+fn scan_new_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    file.write_all(&bytes).map_err(|error| error.to_string())
+}
+
+#[test]
+#[ignore = "actual ordinary Kontakt default-class scan only; explicit once-only opt-in, private adjacent helper and outer binary pins required"]
+fn windows_kontakt_default_class_scan_and_reap() {
+    use crate::plugins::scan_qa::CheckedScan;
+    use serde_json::{Value, json};
+    use std::sync::atomic::Ordering;
+
+    assert_eq!(
+        std::env::var("CITRUS_KONTAKT_SCAN_QA_OPT_IN").as_deref(),
+        Ok(SCAN_OPT_IN)
+    );
+    assert_eq!(
+        std::env::args().skip(1).collect::<Vec<_>>(),
+        [
+            SCAN_SELECTOR,
+            "--ignored",
+            "--exact",
+            "--test-threads=1",
+            "--nocapture",
+        ]
+    );
+    assert!(
+        !SCAN_ADMITTED.swap(true, Ordering::AcqRel),
+        "scanner-only fixture is one-shot"
+    );
+    let output = absolute_env("CITRUS_KONTAKT_SCAN_QA_DIR");
+    fs::create_dir(&output).expect("scanner-only output must be new; preserve every prior receipt");
+    let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let helper = executable
+        .parent()
+        .unwrap()
+        .join("vst3-host-helper.exe")
+        .canonicalize()
+        .unwrap();
+    // The production scan resolves only this adjacent helper. No helper override,
+    // instrument state, source worker, editor, MIDI, Process or device is requested.
+    let supplied_executable_sha =
+        std::env::var("CITRUS_KONTAKT_SCAN_QA_EXECUTABLE_SHA256").unwrap();
+    let supplied_helper_sha = std::env::var("CITRUS_KONTAKT_SCAN_QA_HELPER_SHA256").unwrap();
+    for supplied in [&supplied_executable_sha, &supplied_helper_sha] {
+        assert!(
+            supplied.len() == 64
+                && supplied
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
+    }
+    let executable_before = scan_binary_snapshot(&executable, 256 * 1024 * 1024).unwrap();
+    let helper_before = scan_binary_snapshot(&helper, 64 * 1024 * 1024).unwrap();
+    let plugin = PathBuf::from(r"C:\Program Files\Common Files\VST3\Kontakt 8.vst3");
+    assert!(plugin.exists());
+    scan_new_json(&output.join("preflight.json"), &json!({
+        "schema":1,"selector":SCAN_SELECTOR,"plugin":plugin,
+        "test_executable":{"path":executable,"bytes":executable_before.len(),"outer_runner_sha256":supplied_executable_sha},
+        "adjacent_production_helper":{"path":helper,"bytes":helper_before.len(),"outer_runner_sha256":supplied_helper_sha},
+        "sha256_fields_supplied_by_outer_runner":true,
+        "sha256_fields_verified_in_this_test":false,
+        "outer_runner_verification_required_for_binary_binding":true,
+        "this_test_compares_actual_binary_bytes_before_and_after":true,
+        "scope":"one ordinary default-class scan; no NOIRE state or audio acceptance",
+        "SDK_load_may_probe_createView_capability":true,
+    })).unwrap();
+    let started = Instant::now();
+    let attempted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        CheckedScan::perform(&plugin)
+    }));
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let mut scan = Value::Null;
+    let mut reaped = None;
+    let result = (|| -> Result<(), String> {
+        let checked = attempted.map_err(|_| {
+            "ordinary production scanner unwound; preserve retained cleanup ownership".to_owned()
+        })?;
+        reaped = Some(checked.helper_reaped());
+        scan = checked.evidence();
+        scan_new_json(&output.join("scan-preflight.json"), &scan)?;
+        let accepted = checked.admit("5653544E694B386B6F6E74616B742038")?;
+        scan = accepted.evidence();
+        if !accepted.descriptor().is_instrument {
+            return Err("actual Kontakt default descriptor is not an instrument".into());
+        }
+        Ok(())
+    })();
+    let unchanged = scan_binary_snapshot(&executable, 256 * 1024 * 1024)
+        .and_then(|bytes| {
+            if bytes == executable_before {
+                Ok(())
+            } else {
+                Err("test binary changed during scan".into())
+            }
+        })
+        .and_then(|()| scan_binary_snapshot(&helper, 64 * 1024 * 1024))
+        .and_then(|bytes| {
+            if bytes == helper_before {
+                Ok(())
+            } else {
+                Err("helper binary changed during scan".into())
+            }
+        });
+    let passed = result.is_ok() && unchanged.is_ok() && reaped == Some(true);
+    scan_new_json(&output.join("result.json"), &json!({
+        "schema":1,"passed":passed,"actual_error":result.as_ref().err(),
+        "actual_binary_bytes_unchanged":unchanged.is_ok(),"actual_binary_pin_error":unchanged.as_ref().err(),
+        "scan_helper_strict_reap_proven":reaped,"scan":scan,
+        "single_call_elapsed_ms_including_spawn_load_and_cleanup":elapsed_ms,
+        "elapsed_value_not_a_performance_or_audio_deadline_acceptance":true,
+        "source_worker_started":false,"source_helper_reap_proven":false,
+        "state_MIDI_Process_editor_open_and_audio_device_requests":0,
+        "Kontakt_version_NOIRE_instrument_and_audio_not_proven_by_descriptor":true,
+        "OS_process_absence_not_used_as_reap_evidence":true,
+    })).unwrap();
+    assert!(
+        passed,
+        "ordinary Kontakt scan failed; preserve {}",
+        output.display()
+    );
+}
+
 fn absolute_env(name: &str) -> PathBuf {
     let path = PathBuf::from(std::env::var_os(name).unwrap_or_else(|| panic!("set {name}")));
     assert!(
