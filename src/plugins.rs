@@ -16,6 +16,20 @@ use walkdir::{DirEntry, WalkDir};
 #[allow(dead_code)] // public control-plane surface is consumed incrementally by Mixer/UI code
 pub mod plugin_runtime;
 
+#[path = "plugin_scan_lifecycle.rs"]
+mod scan_lifecycle;
+use scan_lifecycle::{ProbeFailure, ScanControl};
+
+#[cfg(all(test, feature = "vst3", any(windows, target_os = "linux")))]
+pub(crate) fn helper_transport_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    // Ordinary probes and strict clones share one process-global reservation.
+    // Their actual-child fixtures must therefore share the same test lock.
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+pub use scan_lifecycle::{ScanOutcome, ScanReport, ScanStopKind, ScanStopped};
+
 #[cfg(all(
     any(target_os = "linux", windows),
     feature = "experimental-fresh-helper"
@@ -109,39 +123,56 @@ pub fn decode_cache(content: &str) -> Result<PluginCache, serde_json::Error> {
     })
 }
 
-/// Dropping a scan prevents further probes. An in-flight helper load has a deadline and
-/// bounded teardown; no join or plugin call runs on the UI thread, including during exit.
+/// Dropping a scan wakes the current exchange and prevents further probes. The
+/// worker retains actual helper/pipe ownership through cleanup, never the UI.
 pub struct PluginScan {
-    receiver: Receiver<Vec<PluginDescriptor>>,
-    cancelled: Arc<AtomicBool>,
+    receiver: Receiver<ScanOutcome>,
+    control: Arc<ScanControl>,
 }
 
 impl PluginScan {
-    pub fn try_recv(&self) -> Result<Vec<PluginDescriptor>, TryRecvError> {
+    pub fn try_recv(&self) -> Result<ScanOutcome, TryRecvError> {
         self.receiver.try_recv()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_outcome(outcome: Option<ScanOutcome>) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        if let Some(outcome) = outcome {
+            sender.send(outcome).unwrap();
+        }
+        Self {
+            receiver,
+            control: ScanControl::new(),
+        }
     }
 }
 
 impl Drop for PluginScan {
     fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+        self.control.cancel();
     }
 }
 
 pub fn start_scan(paths: Vec<PathBuf>) -> PluginScan {
     let (sender, receiver) = mpsc::channel();
-    let cancelled = Arc::new(AtomicBool::new(false));
-    let worker_cancelled = cancelled.clone();
-    std::thread::spawn(move || {
-        let mut probe = installed_vst3_probe();
-        if let Some(found) = scan_with_probe(&paths, &worker_cancelled, &mut probe) {
-            let _ = sender.send(found);
-        }
-    });
-    PluginScan {
-        receiver,
-        cancelled,
+    let control = ScanControl::new();
+    let worker_control = control.clone();
+    let failed_start = sender.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("plugin-scan".into())
+        .spawn(move || {
+            let mut probe = installed_vst3_probe(worker_control.clone());
+            let outcome = scan_with_probe(&paths, worker_control.flag(), &mut probe);
+            let _ = sender.send(outcome);
+        })
+    {
+        let _ = failed_start.send(ScanOutcome::Stopped(ScanStopped::new(
+            ScanStopKind::WorkerExited,
+            format!("worker could not start: {error}"),
+        )));
     }
+    PluginScan { receiver, control }
 }
 
 pub fn default_scan_paths() -> Vec<PathBuf> {
@@ -170,16 +201,61 @@ pub fn default_scan_paths() -> Vec<PathBuf> {
 
 #[allow(dead_code)] // synchronous discovery API for external/offline callers
 pub fn scan(paths: &[PathBuf]) -> Vec<PluginDescriptor> {
-    scan_with_probe(paths, &AtomicBool::new(false), &mut installed_vst3_probe()).unwrap_or_default()
+    scan_checked(paths)
+        .map(|report| report.plugins)
+        .unwrap_or_default()
+}
+
+/// Checked synchronous discovery keeps stopped scans distinct from empty folders.
+pub fn scan_checked(paths: &[PathBuf]) -> Result<ScanReport, ScanStopped> {
+    let control = ScanControl::new();
+    match scan_with_probe(
+        paths,
+        control.flag(),
+        &mut installed_vst3_probe(control.clone()),
+    ) {
+        ScanOutcome::Completed(report) => Ok(report),
+        ScanOutcome::Stopped(reason) => Err(reason),
+    }
 }
 
 fn scan_with_probe(
     paths: &[PathBuf],
     cancelled: &AtomicBool,
-    probe: &mut impl FnMut(&Path) -> Result<Vst3ProbeInfo, String>,
-) -> Option<Vec<PluginDescriptor>> {
+    probe: &mut impl FnMut(&Path) -> Result<Vst3ProbeInfo, ProbeFailure>,
+) -> ScanOutcome {
     let mut plugins = Vec::new();
+    let mut probe_lifecycle = Vec::new();
     let mut seen = HashSet::new();
+
+    fn add_probe(
+        path: &Path,
+        result: Result<Vst3ProbeInfo, ProbeFailure>,
+        plugins: &mut Vec<PluginDescriptor>,
+        receipts: &mut Vec<scan_lifecycle::ProbeLifecycle>,
+    ) -> Result<(), ScanStopped> {
+        match result {
+            Ok(info) => {
+                if let Some(receipt) = &info.lifecycle {
+                    receipts.push(receipt.clone());
+                }
+                plugins.push(vst3_descriptor(path, Ok(info)));
+            }
+            Err(mut failure) => {
+                if let Some(receipt) = failure.lifecycle.take() {
+                    receipts.push(*receipt);
+                }
+                if let Some(mut stopped) = failure.stopped {
+                    let mut retained = std::mem::take(receipts);
+                    retained.append(&mut stopped.probe_lifecycle);
+                    stopped.probe_lifecycle = retained;
+                    return Err(stopped);
+                }
+                plugins.push(vst3_descriptor(path, Err(failure.message)));
+            }
+        }
+        Ok(())
+    }
 
     for root in paths {
         if !root.exists() {
@@ -192,8 +268,10 @@ fn scan_with_probe(
             .filter_entry(|entry| !hidden_or_arch(entry));
 
         while let Some(entry) = walker.next() {
-            if cancelled.load(Ordering::Relaxed) {
-                return None;
+            if cancelled.load(Ordering::Acquire) {
+                let mut stopped = ScanStopped::cancelled();
+                stopped.probe_lifecycle = probe_lifecycle;
+                return ScanOutcome::Stopped(stopped);
             }
             let Ok(entry) = entry else { continue };
             let path = entry.path();
@@ -206,8 +284,15 @@ fn scan_with_probe(
                 // A bundle is one module. Never index its nested binaries as extra plugins.
                 walker.skip_current_dir();
                 let canonical = path.to_path_buf();
-                if seen.insert(canonical.clone()) {
-                    plugins.push(vst3_descriptor(&canonical, probe(&canonical)));
+                if seen.insert(canonical.clone())
+                    && let Err(stopped) = add_probe(
+                        &canonical,
+                        probe(&canonical),
+                        &mut plugins,
+                        &mut probe_lifecycle,
+                    )
+                {
+                    return ScanOutcome::Stopped(stopped);
                 }
                 continue;
             }
@@ -217,8 +302,15 @@ fn scan_with_probe(
             }
             if extension.eq_ignore_ascii_case("vst3") {
                 let canonical = path.to_path_buf();
-                if seen.insert(canonical.clone()) {
-                    plugins.push(vst3_descriptor(&canonical, probe(&canonical)));
+                if seen.insert(canonical.clone())
+                    && let Err(stopped) = add_probe(
+                        &canonical,
+                        probe(&canonical),
+                        &mut plugins,
+                        &mut probe_lifecycle,
+                    )
+                {
+                    return ScanOutcome::Stopped(stopped);
                 }
             } else if extension.eq_ignore_ascii_case("dll") {
                 let is_vst3 = inspect_export(path, b"GetPluginFactory");
@@ -234,52 +326,102 @@ fn scan_with_probe(
                 if let Some(format) = format {
                     let canonical = path.to_path_buf();
                     if seen.insert(canonical.clone()) {
-                        plugins.push(if format == PluginFormat::Vst3 {
-                            vst3_descriptor(&canonical, probe(&canonical))
+                        if format == PluginFormat::Vst3 {
+                            if let Err(stopped) = add_probe(
+                                &canonical,
+                                probe(&canonical),
+                                &mut plugins,
+                                &mut probe_lifecycle,
+                            ) {
+                                return ScanOutcome::Stopped(stopped);
+                            }
                         } else {
-                            descriptor_from_path(&canonical, format, true)
-                        });
+                            plugins.push(descriptor_from_path(&canonical, format, true));
+                        }
                     }
                 }
             }
         }
     }
-    if cancelled.load(Ordering::Relaxed) {
-        return None;
+    if cancelled.load(Ordering::Acquire) {
+        let mut stopped = ScanStopped::cancelled();
+        stopped.probe_lifecycle = probe_lifecycle;
+        return ScanOutcome::Stopped(stopped);
     }
     plugins.sort_by_key(|plugin| plugin.name.to_lowercase());
-    Some(plugins)
+    ScanOutcome::Completed(ScanReport {
+        plugins,
+        probe_lifecycle,
+    })
 }
 
 struct Vst3ProbeInfo {
     name: String,
     vendor: String,
     metadata: Vst3ScanMetadata,
+    lifecycle: Option<scan_lifecycle::ProbeLifecycle>,
 }
 
-fn installed_vst3_probe() -> impl FnMut(&Path) -> Result<Vst3ProbeInfo, String> {
+fn installed_vst3_probe(
+    control: Arc<ScanControl>,
+) -> impl FnMut(&Path) -> Result<Vst3ProbeInfo, ProbeFailure> {
     #[cfg(feature = "vst3")]
     let helper = installed_vst3_helper_path();
     move |path| {
         #[cfg(feature = "vst3")]
         {
-            probe_vst3(path, helper.as_ref().map_err(Clone::clone)?)
+            let helper = helper.as_ref().map_err(|error| {
+                ProbeFailure::stop(ScanStopKind::HelperUnavailable, error.clone())
+            })?;
+            probe_vst3_with_control(path, helper, std::time::Duration::from_secs(5), &control)
         }
         #[cfg(not(feature = "vst3"))]
         {
-            let _ = path;
-            Err("This build does not include VST3 hosting".into())
+            let _ = (path, &control);
+            Err(ProbeFailure::metadata(
+                "This build does not include VST3 hosting",
+            ))
         }
     }
 }
 
-#[cfg(feature = "vst3")]
+#[cfg(all(test, feature = "vst3", unix))]
 fn probe_vst3(path: &Path, helper: &Path) -> Result<Vst3ProbeInfo, String> {
     probe_vst3_with_timeout(path, helper, std::time::Duration::from_secs(5))
 }
 
-#[cfg(feature = "vst3")]
+#[cfg(all(test, feature = "vst3", unix))]
 fn probe_vst3_with_timeout(
+    path: &Path,
+    helper: &Path,
+    timeout: std::time::Duration,
+) -> Result<Vst3ProbeInfo, String> {
+    probe_vst3_with_control(path, helper, timeout, &ScanControl::new())
+        .map_err(|failure| failure.message)
+}
+
+#[cfg(all(feature = "vst3", any(windows, target_os = "linux")))]
+fn probe_vst3_with_control(
+    path: &Path,
+    helper: &Path,
+    timeout: std::time::Duration,
+    control: &ScanControl,
+) -> Result<Vst3ProbeInfo, ProbeFailure> {
+    scan_lifecycle::probe(path, helper, timeout, control)
+}
+
+#[cfg(all(feature = "vst3", not(any(windows, target_os = "linux"))))]
+fn probe_vst3_with_control(
+    path: &Path,
+    helper: &Path,
+    timeout: std::time::Duration,
+    _control: &ScanControl,
+) -> Result<Vst3ProbeInfo, ProbeFailure> {
+    probe_vst3_legacy(path, helper, timeout).map_err(ProbeFailure::metadata)
+}
+
+#[cfg(all(feature = "vst3", not(any(windows, target_os = "linux"))))]
+fn probe_vst3_legacy(
     path: &Path,
     helper: &Path,
     timeout: std::time::Duration,
@@ -312,6 +454,7 @@ fn probe_vst3_with_timeout(
         } => Ok(Vst3ProbeInfo {
             name,
             vendor,
+            lifecycle: None,
             metadata: Vst3ScanMetadata {
                 class_uid: uid,
                 category,
@@ -648,12 +791,31 @@ mod tests {
         Vst3ProbeInfo {
             name: "Actual plugin name".into(),
             vendor: "Actual vendor".into(),
+            lifecycle: None,
             metadata: Vst3ScanMetadata {
                 class_uid: "ABCDEF019182FAEB566D624153465854".into(),
                 category: category.into(),
                 has_midi_input: midi_in,
                 has_midi_output: midi_out,
             },
+        }
+    }
+
+    // Synthetic traversal evidence only. Real child/reap acceptance belongs to
+    // scan_lifecycle's protocol fixtures; these rows never claim SDK execution.
+    fn synthetic_receipt(path: &Path, helper_pid: u32) -> scan_lifecycle::ProbeLifecycle {
+        scan_lifecycle::ProbeLifecycle {
+            path: path.to_path_buf(),
+            helper_pid: Some(helper_pid),
+            load_failure: None,
+            reaped: true,
+            exit_success: true,
+            exit_code: Some(0),
+            kill_requested: false,
+            shutdown_failure: None,
+            kill_error: None,
+            wait_error: None,
+            pipe_error: None,
         }
     }
 
@@ -823,12 +985,15 @@ mod tests {
             calls.push(path.to_path_buf());
             Ok(metadata("Fx|Delay", false, false))
         };
-        let plugins = scan_with_probe(
+        let outcome = scan_with_probe(
             &[dir.0.clone(), bundle.clone()],
             &AtomicBool::new(false),
             &mut probe,
-        )
-        .unwrap();
+        );
+        let ScanOutcome::Completed(report) = outcome else {
+            panic!("synthetic default-class scan unexpectedly stopped")
+        };
+        let plugins = report.plugins;
         assert_eq!(calls, vec![bundle.clone()]);
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].path, bundle);
@@ -849,27 +1014,199 @@ mod tests {
             cancelled.store(true, Ordering::Relaxed);
             Ok(metadata("Fx", false, false))
         };
-        assert!(scan_with_probe(std::slice::from_ref(&dir.0), &cancelled, &mut probe).is_none());
+        assert!(matches!(
+            scan_with_probe(std::slice::from_ref(&dir.0), &cancelled, &mut probe),
+            ScanOutcome::Stopped(ScanStopped {
+                kind: ScanStopKind::Cancelled,
+                ..
+            })
+        ));
         cancelled.store(false, Ordering::Relaxed);
-        assert!(scan_with_probe(std::slice::from_ref(&dir.0), &cancelled, &mut probe).is_none());
+        assert!(matches!(
+            scan_with_probe(std::slice::from_ref(&dir.0), &cancelled, &mut probe),
+            ScanOutcome::Stopped(ScanStopped {
+                kind: ScanStopKind::Cancelled,
+                ..
+            })
+        ));
         assert_eq!(calls, 1);
     }
 
     #[test]
     fn dropping_scan_job_sets_cancellation_without_joining_worker() {
         let (_, receiver) = mpsc::channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let control = ScanControl::new();
         let scan = PluginScan {
             receiver,
-            cancelled: cancelled.clone(),
+            control: control.clone(),
         };
         drop(scan);
-        assert!(cancelled.load(Ordering::Relaxed));
+        assert!(control.cancelled());
+    }
+
+    #[test]
+    fn cancelled_probe_keeps_retirement_evidence_without_publishing_partial_index() {
+        let dir = TestDirectory::new();
+        for name in ["First.vst3", "Second.vst3"] {
+            std::fs::create_dir(dir.0.join(name)).unwrap();
+        }
+        let cancelled = AtomicBool::new(false);
+        let mut calls = Vec::new();
+        let mut probe = |path: &Path| {
+            calls.push(path.to_path_buf());
+            let mut info = metadata("Instrument", true, false);
+            info.lifecycle = Some(synthetic_receipt(path, 101));
+            cancelled.store(true, Ordering::Release);
+            Ok(info)
+        };
+        let outcome = scan_with_probe(std::slice::from_ref(&dir.0), &cancelled, &mut probe);
+        let ScanOutcome::Stopped(stopped) = outcome else {
+            panic!("cancelled scan published its partial plugin index")
+        };
+        assert!(matches!(stopped.kind, ScanStopKind::Cancelled));
+        assert_eq!(calls.len(), 1);
+        assert_eq!(stopped.probe_lifecycle.len(), 1);
+        assert_eq!(stopped.probe_lifecycle[0].path, calls[0]);
+        assert_eq!(stopped.probe_lifecycle[0].helper_pid, Some(101));
+        assert!(stopped.probe_lifecycle[0].reaped);
+    }
+
+    #[test]
+    fn cancelling_last_probe_still_stops_instead_of_publishing_completed_report() {
+        let dir = TestDirectory::new();
+        let bundle = dir.0.join("Only.vst3");
+        std::fs::create_dir(&bundle).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let mut calls = 0;
+        let mut probe = |path: &Path| {
+            calls += 1;
+            let mut info = metadata("Fx", false, false);
+            info.lifecycle = Some(synthetic_receipt(path, 102));
+            cancelled.store(true, Ordering::Release);
+            Ok(info)
+        };
+        let outcome = scan_with_probe(std::slice::from_ref(&bundle), &cancelled, &mut probe);
+        let ScanOutcome::Stopped(stopped) = outcome else {
+            panic!("cancellation at traversal EOF became Completed")
+        };
+        assert!(matches!(stopped.kind, ScanStopKind::Cancelled));
+        assert_eq!(calls, 1);
+        assert_eq!(stopped.probe_lifecycle.len(), 1);
+        assert_eq!(stopped.probe_lifecycle[0].path, bundle);
+    }
+
+    #[test]
+    fn stopped_probe_preserves_previous_current_and_nested_receipts_without_next_probe() {
+        let dir = TestDirectory::new();
+        for name in ["First.vst3", "Second.vst3", "Third.vst3"] {
+            std::fs::create_dir(dir.0.join(name)).unwrap();
+        }
+        let mut calls = Vec::new();
+        let mut expected_receipts = Vec::new();
+        let mut probe = |path: &Path| {
+            calls.push(path.to_path_buf());
+            if calls.len() == 1 {
+                let receipt = synthetic_receipt(path, 201);
+                expected_receipts.push(receipt.clone());
+                let mut info = metadata("Fx", false, false);
+                info.lifecycle = Some(receipt);
+                return Ok(info);
+            }
+            let mut current = synthetic_receipt(path, 202);
+            current.reaped = false;
+            current.exit_success = false;
+            current.exit_code = None;
+            current.wait_error = Some(5);
+            let nested = synthetic_receipt(&dir.0.join("retained-callee-evidence"), 203);
+            expected_receipts.extend([current.clone(), nested.clone()]);
+            let mut stopped =
+                ScanStopped::new(ScanStopKind::CleanupPending, "synthetic pending owner");
+            stopped.probe_lifecycle.push(nested);
+            Err(ProbeFailure {
+                message: "synthetic pending owner".into(),
+                stopped: Some(stopped),
+                lifecycle: Some(Box::new(current)),
+            })
+        };
+        let outcome = scan_with_probe(
+            std::slice::from_ref(&dir.0),
+            &AtomicBool::new(false),
+            &mut probe,
+        );
+        let ScanOutcome::Stopped(stopped) = outcome else {
+            panic!("pending owner published a partial scan report")
+        };
+        assert!(matches!(stopped.kind, ScanStopKind::CleanupPending));
+        assert_eq!(stopped.detail, "synthetic pending owner");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&stopped.probe_lifecycle).unwrap(),
+            serde_json::to_value(&expected_receipts).unwrap()
+        );
+    }
+
+    #[test]
+    fn reaped_metadata_failure_is_unverified_and_keeps_receipt_in_completed_report() {
+        let dir = TestDirectory::new();
+        for name in ["First.vst3", "Second.vst3"] {
+            std::fs::create_dir(dir.0.join(name)).unwrap();
+        }
+        let mut calls = Vec::new();
+        let mut probe = |path: &Path| {
+            calls.push(path.to_path_buf());
+            let mut receipt = synthetic_receipt(path, 301 + calls.len() as u32);
+            if calls.len() == 1 {
+                let mut info = metadata("Fx", false, false);
+                info.lifecycle = Some(receipt);
+                return Ok(info);
+            }
+            receipt.load_failure = Some("synthetic refused metadata".into());
+            let mut failed = ProbeFailure::metadata("synthetic refused metadata");
+            failed.lifecycle = Some(Box::new(receipt));
+            Err(failed)
+        };
+        let outcome = scan_with_probe(
+            std::slice::from_ref(&dir.0),
+            &AtomicBool::new(false),
+            &mut probe,
+        );
+        let ScanOutcome::Completed(report) = outcome else {
+            panic!("fully reaped per-plugin metadata failure stopped the entire scan")
+        };
+        assert_eq!(calls.len(), 2);
+        assert_eq!(report.plugins.len(), 2);
+        assert_eq!(report.probe_lifecycle.len(), 2);
+        let succeeded = report
+            .plugins
+            .iter()
+            .find(|plugin| plugin.path == calls[0])
+            .unwrap();
+        assert!(succeeded.verified);
+        let failed = report
+            .plugins
+            .iter()
+            .find(|plugin| plugin.path == calls[1])
+            .unwrap();
+        assert!(!failed.verified);
+        assert_eq!(failed.category, "Unknown");
+        assert!(failed.vst3_metadata.is_none());
+        assert_eq!(
+            failed.scan_error.as_deref(),
+            Some("synthetic refused metadata")
+        );
+        assert_eq!(report.probe_lifecycle[1].path, calls[1]);
+        assert_eq!(
+            report.probe_lifecycle[1].load_failure.as_deref(),
+            Some("synthetic refused metadata")
+        );
+        assert!(report.probe_lifecycle[1].reaped);
     }
 
     #[cfg(all(feature = "vst3", unix))]
     #[test]
     fn isolated_metadata_probe_bounds_a_hung_helper_load() {
+        #[cfg(target_os = "linux")]
+        let _guard = helper_transport_test_lock();
         use std::{
             os::unix::fs::PermissionsExt,
             time::{Duration, Instant},
@@ -888,13 +1225,20 @@ mod tests {
         let Err(error) = result else {
             panic!("hung helper unexpectedly replied")
         };
-        assert!(error.contains("Timed out"), "{error}");
+        let expected = if cfg!(target_os = "linux") {
+            "Deadline"
+        } else {
+            "Timed out"
+        };
+        assert!(error.contains(expected), "{error}");
         assert!(start.elapsed() < Duration::from_secs(4));
     }
 
     #[cfg(all(feature = "vst3", unix))]
     #[test]
     fn isolated_metadata_request_uses_only_runtime_default_class_without_gui_or_dsp() {
+        #[cfg(target_os = "linux")]
+        let _guard = helper_transport_test_lock();
         use std::os::unix::fs::PermissionsExt;
         let dir = TestDirectory::new();
         let helper = dir.0.join("trusted-metadata-test-helper");

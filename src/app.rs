@@ -5244,6 +5244,7 @@ pub struct CitrusApp {
     scan_paths: Vec<PathBuf>,
     scan_receiver: Option<plugins::PluginScan>,
     plugin_cache_needs_rescan: bool,
+    plugin_scan_error: Option<String>,
     export_job: ExportJob,
     export_error: Option<String>,
     export_dialog: export_ui::ExportDialog,
@@ -5624,6 +5625,7 @@ impl CitrusApp {
                 plugin_cache_needs_rescan: plugin_cache.needs_rescan,
                 scan_paths: plugins::default_scan_paths(),
                 scan_receiver: None,
+                plugin_scan_error: None,
                 export_job: ExportJob::default(),
                 export_error: None,
                 export_dialog: export_ui::ExportDialog::default(),
@@ -26184,6 +26186,7 @@ impl CitrusApp {
         if self.scan_receiver.is_some() {
             return;
         }
+        self.plugin_scan_error = None;
         self.scan_receiver = Some(plugins::start_scan(self.scan_paths.clone()));
     }
 
@@ -26195,11 +26198,19 @@ impl CitrusApp {
             Err(mpsc::TryRecvError::Empty) => (),
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.scan_receiver = None;
-                self.notify(
-                    "Plugin scan stopped before completion; previous index retained".into(),
-                );
+                let message =
+                    "Plugin scan stopped before completion; previous index retained".to_owned();
+                self.plugin_scan_error = Some(message.clone());
+                self.notify(message);
             }
-            Ok(found) => {
+            Ok(plugins::ScanOutcome::Stopped(reason)) => {
+                self.scan_receiver = None;
+                let message = reason.description();
+                self.plugin_scan_error = Some(message.clone());
+                self.notify(message);
+            }
+            Ok(plugins::ScanOutcome::Completed(report)) => {
+                let found = report.plugins;
                 let count = found.len();
                 let unavailable = found
                     .iter()
@@ -26208,6 +26219,7 @@ impl CitrusApp {
                 self.plugins = found;
                 self.plugin_cache_needs_rescan = false;
                 self.scan_receiver = None;
+                self.plugin_scan_error = None;
                 if let Some(path) = &self.plugin_cache_path
                     && let Ok(content) = serde_json::to_string_pretty(&self.plugins)
                 {
@@ -26546,6 +26558,9 @@ impl CitrusApp {
                 ui.label(RichText::new("Native VST2 + isolated VST3 host · scanning never touches the audio thread").size(9.0).color(theme::MUTED));
                 if self.plugin_cache_needs_rescan {
                     ui.label(RichText::new("VST3 index needs a rescan: old filename-based classifications were discarded.").size(9.0).color(theme::ORANGE));
+                }
+                if let Some(error) = &self.plugin_scan_error {
+                    ui.label(RichText::new(error).size(10.0).color(theme::ORANGE));
                 }
                 let selected_track = if self
                     .project
@@ -31439,6 +31454,254 @@ fn vertical_fader(ui: &mut egui::Ui, value: &mut f32, height: f32) -> Response {
         "Gain {} dB · drag vertically",
         mixer_gain_label(*value)
     ))
+}
+
+#[cfg(test)]
+mod plugin_scan_result_tests {
+    use super::*;
+    use crate::plugins::{PluginScan, ScanOutcome, ScanReport, ScanStopKind, ScanStopped};
+    use eframe::App;
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_CACHE: AtomicU64 = AtomicU64::new(1);
+
+    struct CacheBaseline {
+        path: PathBuf,
+        bytes: Vec<u8>,
+        index: serde_json::Value,
+    }
+
+    impl CacheBaseline {
+        fn new(plugins: &[PluginDescriptor]) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "citrus-scan-result-{}-{}.json",
+                std::process::id(),
+                NEXT_CACHE.fetch_add(1, Ordering::Relaxed),
+            ));
+            let bytes =
+                format!("\r\n{}\r\n", serde_json::to_string_pretty(plugins).unwrap()).into_bytes();
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(&bytes).unwrap();
+            Self {
+                path,
+                bytes,
+                index: serde_json::to_value(plugins).unwrap(),
+            }
+        }
+
+        fn assert_retained(&self, app: &CitrusApp, needs_rescan: bool) {
+            assert_eq!(serde_json::to_value(&app.plugins).unwrap(), self.index);
+            assert_eq!(app.plugin_cache_needs_rescan, needs_rescan);
+            assert_eq!(std::fs::read(&self.path).unwrap(), self.bytes);
+            assert!(app.scan_receiver.is_none());
+        }
+    }
+
+    impl Drop for CacheBaseline {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    fn indexed_plugin(name: &str, available: bool) -> PluginDescriptor {
+        PluginDescriptor {
+            id: format!("scan-result-fixture:{name}"),
+            name: name.into(),
+            vendor: "Fixture vendor".into(),
+            path: PathBuf::from(format!("{name}.vst3")),
+            format: ScannedPluginFormat::Vst3,
+            category: if available { "Instrument" } else { "Unknown" }.into(),
+            is_instrument: available,
+            verified: available,
+            vst3_metadata: available.then(|| plugins::Vst3ScanMetadata {
+                class_uid: "00112233445566778899AABBCCDDEEFF".into(),
+                category: "Instrument".into(),
+                has_midi_input: true,
+                has_midi_output: false,
+            }),
+            scan_error: (!available).then(|| "fixture metadata unavailable".into()),
+        }
+    }
+
+    fn fixture(needs_rescan: bool) -> (egui::Context, Box<CitrusApp>, CacheBaseline) {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let cc = eframe::CreationContext::_new_kittest(ctx.clone());
+        let mut app = CitrusApp::new_boxed_with_services(&cc, false);
+        assert!(app.audio.is_none());
+        assert!(app.autosave_path.is_none());
+        assert!(app.plugin_cache_path.is_none());
+        assert!(app.recordings_dir.is_none());
+        app.plugins = vec![
+            indexed_plugin("cached-piano", true),
+            indexed_plugin("cached-failure", false),
+        ];
+        let cache = CacheBaseline::new(&app.plugins);
+        app.plugin_cache_path = Some(cache.path.clone());
+        app.plugin_cache_needs_rescan = needs_rescan;
+        app.scan_paths.clear();
+        (ctx, app, cache)
+    }
+
+    fn paint_contains(
+        ctx: &egui::Context,
+        app: &mut CitrusApp,
+        frame: &mut eframe::Frame,
+        time: f64,
+        message: &str,
+    ) -> bool {
+        // Production UI and accessibility only: no periodic device enumeration,
+        // offscreen GPU capture, scanner worker, helper or native window.
+        app.midi_input.last_refresh = Instant::now();
+        let output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1440.0, 900.0))),
+                time: Some(time),
+                ..Default::default()
+            },
+            |ui| app.ui(ui, frame),
+        );
+        assert!(!output.shapes.is_empty());
+        output
+            .platform_output
+            .accesskit_update
+            .unwrap()
+            .nodes
+            .iter()
+            .any(|(_, node)| node.value().or_else(|| node.label()) == Some(message))
+    }
+
+    #[test]
+    fn plugin_scan_stopped_preserves_index_rescan_flag_and_cache_bytes() {
+        for needs_rescan in [false, true] {
+            for kind in [
+                ScanStopKind::Cancelled,
+                ScanStopKind::HelperUnavailable,
+                ScanStopKind::ResourceBusy,
+                ScanStopKind::CleanupPending,
+                ScanStopKind::UncleanRetirement,
+                ScanStopKind::WorkerExited,
+            ] {
+                let (_, mut app, cache) = fixture(needs_rescan);
+                let reason = ScanStopped::new(kind, "test-owned stop before publication");
+                let message = reason.description();
+                app.scan_receiver = Some(PluginScan::with_test_outcome(Some(
+                    ScanOutcome::Stopped(reason),
+                )));
+                app.poll_plugin_scan();
+                cache.assert_retained(&app, needs_rescan);
+                assert_eq!(app.plugin_scan_error.as_deref(), Some(message.as_str()));
+                assert_eq!(
+                    app.toast.as_ref().map(|(text, _)| text.as_str()),
+                    Some(message.as_str())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plugin_scan_disconnected_preserves_index_rescan_flag_and_cache_bytes() {
+        for needs_rescan in [false, true] {
+            let (_, mut app, cache) = fixture(needs_rescan);
+            app.scan_receiver = Some(PluginScan::with_test_outcome(None));
+            app.poll_plugin_scan();
+            cache.assert_retained(&app, needs_rescan);
+            let message = app.plugin_scan_error.as_deref().unwrap();
+            assert!(message.contains("previous index retained"));
+            assert_eq!(
+                app.toast.as_ref().map(|(text, _)| text.as_str()),
+                Some(message)
+            );
+        }
+    }
+
+    #[test]
+    fn plugin_scan_completed_replaces_index_and_cache_and_clears_previous_error() {
+        for found in [Vec::new(), vec![indexed_plugin("new-unavailable", false)]] {
+            let (_, mut app, cache) = fixture(true);
+            let expected = serde_json::to_value(&found).unwrap();
+            app.plugin_scan_error = Some("previous stopped scan".into());
+            app.scan_receiver = Some(PluginScan::with_test_outcome(Some(ScanOutcome::Completed(
+                ScanReport {
+                    plugins: found,
+                    probe_lifecycle: Vec::new(),
+                },
+            ))));
+            app.poll_plugin_scan();
+            assert_eq!(serde_json::to_value(&app.plugins).unwrap(), expected);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&std::fs::read(&cache.path).unwrap())
+                    .unwrap(),
+                expected
+            );
+            assert_ne!(std::fs::read(&cache.path).unwrap(), cache.bytes);
+            assert!(!app.plugin_cache_needs_rescan);
+            assert!(app.plugin_scan_error.is_none());
+            assert!(app.scan_receiver.is_none());
+            assert!(
+                app.toast
+                    .as_ref()
+                    .unwrap()
+                    .0
+                    .starts_with("Plugin scan complete")
+            );
+            if !app.plugins.is_empty() {
+                assert!(!app.plugins[0].verified);
+                assert!(app.plugins[0].vst3_metadata.is_none());
+                assert!(
+                    app.toast
+                        .as_ref()
+                        .unwrap()
+                        .0
+                        .contains("metadata probes unavailable")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn plugin_scan_error_remains_visible_after_toast_expires_and_completed_clears_it() {
+        for outcome in [
+            Some(ScanOutcome::Stopped(ScanStopped::new(
+                ScanStopKind::CleanupPending,
+                "test-owned cleanup still pending",
+            ))),
+            None,
+        ] {
+            let (ctx, mut app, cache) = fixture(true);
+            app.show_plugins = true;
+            app.scan_receiver = Some(PluginScan::with_test_outcome(outcome));
+            app.poll_plugin_scan();
+            let message = app.plugin_scan_error.clone().unwrap();
+            app.toast = Some((message.clone(), Instant::now() - Duration::from_secs(5)));
+            let mut frame = eframe::Frame::_new_kittest();
+            // Allow egui's newly opened floating window to settle its bounds.
+            let mut visible = false;
+            for time in [0.1, 0.2, 0.3] {
+                visible = paint_contains(&ctx, &mut app, &mut frame, time, &message);
+            }
+            assert!(visible);
+            assert!(app.toast.is_none());
+            assert!(paint_contains(&ctx, &mut app, &mut frame, 0.4, &message));
+            cache.assert_retained(&app, true);
+
+            app.scan_receiver = Some(PluginScan::with_test_outcome(Some(ScanOutcome::Completed(
+                ScanReport {
+                    plugins: vec![indexed_plugin("new-piano", true)],
+                    probe_lifecycle: Vec::new(),
+                },
+            ))));
+            assert!(!paint_contains(&ctx, &mut app, &mut frame, 0.5, &message));
+            assert!(app.plugin_scan_error.is_none());
+            assert!(!app.plugin_cache_needs_rescan);
+            assert_eq!(app.plugins[0].name, "new-piano");
+        }
+    }
 }
 
 #[cfg(test)]

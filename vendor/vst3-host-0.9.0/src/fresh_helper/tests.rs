@@ -5,10 +5,10 @@ use std::time::Duration;
 // Every test that reserves the process-global slot holds this independent lock.
 // Codec tests and cancellation-FD-only tests need no child reservation.
 static CHILD_TESTS: Mutex<()> = Mutex::new(());
-struct TestScope {
+pub(crate) struct TestScope {
     _serial: MutexGuard<'static, ()>,
 }
-fn serial() -> TestScope {
+pub(crate) fn serial() -> TestScope {
     TestScope {
         _serial: CHILD_TESTS
             .lock()
@@ -31,7 +31,7 @@ impl Drop for TestScope {
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(3)
 }
-fn python(script: &str) -> Command {
+pub(crate) fn python(script: &str) -> Command {
     let executable = std::env::var_os("CITRUS_STRICT_TEST_PYTHON").unwrap_or_else(|| {
         if cfg!(windows) {
             "python".into()
@@ -42,6 +42,12 @@ fn python(script: &str) -> Command {
     let mut command = Command::new(executable);
     command.args(["-u", "-c", script]);
     command
+}
+pub(crate) fn arm_probe_setup_failure() {
+    pump::test_hooks::arm(pump::test_hooks::Fault::Setup);
+}
+pub(crate) fn arm_probe_wait_failure() {
+    pump::test_hooks::arm(pump::test_hooks::Fault::Wait);
 }
 fn spawn(script: &str) -> FreshHelperSession {
     match FreshHelperSession::spawn(&mut python(script), deadline()) {
@@ -1205,6 +1211,7 @@ fn pending_cleanup_evidence_travels_with_abandoned_owner() {
     assert_eq!(final_report.shutdown_error, Some(ErrorKind::Deadline));
 }
 
+#[cfg(feature = "experimental-fresh-helper")]
 #[path = "client_tests.rs"]
 mod client_tests;
 
@@ -1447,7 +1454,7 @@ assert sys.stdin.read() == ''
         failure.metadata_getter,
         Some(crate::process_isolation::MetadataGetter::LatencySamples)
     );
-    let failure = crate::strict_offline::Failure::from(failure);
+    let failure = crate::helper_lifecycle::Failure::from(failure);
     assert_eq!(
         failure.metadata_getter,
         Some(crate::process_isolation::MetadataGetter::LatencySamples)

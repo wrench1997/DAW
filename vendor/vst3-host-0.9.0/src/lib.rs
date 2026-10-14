@@ -81,10 +81,22 @@ pub mod process_isolation;
 
 #[cfg(all(
     any(target_os = "linux", target_os = "windows"),
-    feature = "experimental-fresh-helper"
+    feature = "process-isolation"
 ))]
-#[allow(dead_code)] // Deliberately private foundation; caller integration is a later checkpoint.
+#[allow(dead_code)] // The shared transport also supports the separately gated strict API.
 mod fresh_helper;
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "process-isolation"
+))]
+mod helper_lifecycle;
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "windows"),
+    feature = "process-isolation"
+))]
+pub mod default_class_probe;
 
 #[cfg(all(
     any(target_os = "linux", target_os = "windows"),

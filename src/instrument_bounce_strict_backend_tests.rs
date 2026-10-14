@@ -34,7 +34,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Mutex, MutexGuard,
+        MutexGuard,
         atomic::{AtomicU64, Ordering},
     },
     thread,
@@ -42,13 +42,12 @@ use std::{
 use vst3_host::strict_offline as strict;
 use vst3_host::{MetadataQueryRejection, strict_offline::FailureKind as StrictKind};
 
-static SERIAL: Mutex<()> = Mutex::new(());
 static NEXT: AtomicU64 = AtomicU64::new(1);
 const UID: &str = "ABCDEF019182FAEB566D624153675854";
 const SENTINEL: &[u8] = b"unchanged destination";
 
 fn serial() -> MutexGuard<'static, ()> {
-    SERIAL.lock().unwrap_or_else(|p| p.into_inner())
+    crate::plugins::helper_transport_test_lock()
 }
 
 // No shell, environment overrides, network, real bundle, or external assets.

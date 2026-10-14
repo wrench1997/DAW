@@ -1,6 +1,6 @@
 # Windows melody workflow — support and verification
 
-Updated: 2026-10-14 (Asia/Shanghai). Development branch:
+Updated: 2026-10-15 (Asia/Shanghai). Development branch:
 `ci/windows-reliability-20261009`; this effort started from `b0d8d5c0`.
 Citrus Studio remains a development DAW. The complete melody workflow is not yet qualified.
 This document separates implemented behavior, actual local acceptance, failures and untested work.
@@ -27,6 +27,40 @@ It preserves MIDI until verified success, handles cancellation/failure and retai
 Removing a platform condition was not treated as a Windows implementation.
 Whole export shares the stopped-source capture actor but does not create a conversion history item.
 Project/session, Timeline, asset, parameter and save fences remain active during pending work.
+
+## Ordinary scan reliability in this commit
+
+The default Windows/Linux scanner uses the retained ordinary default-class Probe,
+with original None class, 48k/Q128 settings and five-second exchange window.
+It attempts one load. Verified metadata additionally requires successful natural
+child exit, concrete reap, complete owned pipes and no cleanup error. A fully
+reaped metadata failure remains Unknown/unverified. Cancelled, busy, pending or
+unclean scans stop before publishing a partial index and preserve the previous
+index, rescan flag and exact cache bytes. The persistent UI message survives the
+toast. A rescan advances the same abandoned cleanup owner before another spawn;
+Pending and Busy cannot authorize a replacement child.
+
+Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
+Clippy in default/all-feature/no-feature profiles, exact preview feature checks,
+ordinary debug binaries and root/vendor formatting. The actual locked inventory
+contains 483 packages with root vst2,vst3 and no experimental vendor feature;
+this does not qualify a release preview artifact. Source58 preserves production
+bytes while fixing the default-probe test helper's unused result and a Unix-only
+fixture assertion. Default Clippy and all 12 Probe tests passed again. The SDK
+cleanup-result use lint and final root/vendor/fixture formatting passed;
+existing vendor style warnings are retained, not claimed as a warning-free SDK. Its full
+73-file vendor patch replay is byte-exact, and all 170 package tests passed with
+the correct unittest discover entry. Strict rendering stays experimental.
+
+Original failed checks remain in local evidence: large Err/style lints, test
+err_expect, offline metadata with an uncached dependency, the wrong unittest
+import entry and rustc's refusal to accept extra arguments for multiple targets.
+The intentional strict fixture's late OSError errno22 and existing platform
+warnings remain in logs. No failure or synthetic process is claimed as NI audio.
+New Kontakt/NOIRE, Linux/macOS, hardware and native UI acceptance is unrun.
+Earlier Source52 native audio remains bound to its original source cohort.
+Local source57/source58 receipts, recordings, state and build artifacts remain
+outside Git; protected initial files and the original Saved13 were unchanged.
 
 ## Preservation and evidence policy
 

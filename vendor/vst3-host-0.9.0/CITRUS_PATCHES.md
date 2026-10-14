@@ -745,3 +745,84 @@ unchanged; only patch/document hash literals are refreshed. New synthetic Python
 package execution is recorded separately and executes no Windows/SDK/NI binary.
 Complete fresh replay, four-file preimages, test-only delta and source bindings
 are retained in target/backend-reliability-20261014/source52-provenance-01.
+
+
+### 2026-10-14 source53 ordinary checked default-class probe (Rust/native UNRUN)
+
+The existing retained fresh-child transport is now also compiled for ordinary
+process-isolation on Linux and Windows. A closed DefaultClass Probe API performs
+one LoadPlugin with the scanner's original class_id None, 48000 Hz/Q128, tempo120
+and meter4/4. It exposes no editor, state, Process, arbitrary command or request
+replay interface. Spawn failure retains a real post-spawn cleanup owner; sticky
+cancellation authority wakes the same in-flight transport. Metadata acceptance
+and actual child/pipe teardown remain separate facts. Dispose sends at most one
+healthy Shutdown, retains the original absolute deadlines and clamps the ordinary
+two-second natural-exit preference with 250 ms reserved for kill/reap. Failed or
+cancelled loads retain the existing short policy. Pending/Busy, kill requested,
+Drop, process absence and pipe completion alone cannot establish concrete reap.
+
+Delivery, Failure, LoadedPlugin, CancelHandle and CleanupObservation now have one
+shared internal definition used by the ordinary probe and re-exported by the
+strict API. There is one transport/quarantine/reservation rather than a second
+child pool. The selected strict client and renderer remain explicitly behind
+experimental-fresh-helper, with original class selection, block2048, state/audio
+policies and bounded cleanup. No Cargo feature default, dependency, lock entry,
+package/version/license or original archive checksum is changed. Preview still
+requires exact root vst2,vst3 features with no experimental feature activation.
+The root scanner/App's distinct Completed/Stopped handling and prior-index
+preservation are separate root source changes, not vendored in this patch.
+
+Twelve new real Python-child protocol/cleanup regressions are authored for the
+ordinary API: original load configuration/metadata and actual Shutdown/reap,
+no repeated load/respawn, helper crash, timeout, pre/in-flight cancellation,
+post-spawn setup failure, retained wait error/Pending, Drop quarantine, failed
+healthy disposal, expired exchange and wrong reply. Shared existing test hooks
+are reused under cfg(test). The seven vendor paths passed their owner's isolated
+format/check and diff checking; current Rust/Clippy/build/native gates are UNRUN
+at regeneration, and package tests await the coordinated CPU handoff.
+Earlier Source52 whole-song evidence does not qualify this changed ordinary
+scan/shared-transport implementation or establish new NI stability/performance.
+
+The verified original archive still has 41 files. This full patch now
+reproduces all 73 actual source files outside vendor/target; only
+CITRUS.patch and this document are excluded as inputs. There are 46
+changed paths, 32 additions and 0 deletions. Patch SHA-256 is
+82316984b16d5e904fdd8fe5e9e700dc50178d07fba975c9ccd0cfae96f04a1d. Actual private git apply --check and apply succeeded and every
+file path/raw byte matched, including original line endings and final-newline
+state. LICENSE/.cargo_vcs_info.json remain byte-identical upstream, and the
+archive/commit/license hard pins and package assertions are unchanged. Only the
+patch/document literal hashes are refreshed. The Source52 evidence remains
+intact; fresh preimages, source delta, complete ledger and actual replay receipts
+are retained in target/backend-reliability-20261014/source53-provenance-01.
+
+
+### 2026-10-15 source58 ordinary probe test helper result cleanup
+
+Source57 completed 16 actual Rust/build/format/metadata gates, with 306 Rust tests
+passed (187+5 root scan/App, 12 Probe, 45 shared transport, 26 strict client and
+31 root strict-backend cases). Its last Python module entry failed to import
+package_windows_preview before executing the 170-test package suite; the original
+failure log is retained. Source58 uses the standard scripts-directory unittest
+discovery entry for that separate actual package gate. The Probe test helper
+returned a must_use CleanupObservation
+that seven test callers did not consume, producing new unused-result warnings.
+Source58 makes only that test helper return unit and removes its final result
+expression. All actual disposal/reap/failure assertions and the same seven
+calls remain intact, with all 12 test functions preserved. The other 72 vendor
+source files are byte-identical to the Source53/57 production snapshot.
+No production API, feature/dependency, transport, protocol, cleanup predicate,
+deadline or state/audio behavior is changed by this repair. Current Source58
+test/package gates remain pending at regeneration; prior Source57 production
+gates are separate exact-source evidence, and no new NI/GUI/performance claim is
+made. Historical failures, warnings and Source52 native receipts are retained.
+
+The complete patch is freshly regenerated from the same verified 41-file
+original archive against all 73 source files, excluding only this document
+and CITRUS.patch as patch inputs. There are 46 changed paths,
+32 additions and 0 deletions. Patch SHA-256 is
+352fbe0c34167f0a4babacae4a0a8b096241194ff081a3eb33f6328de5e19303. Actual private git apply --check and apply succeeded, and the
+complete 73-file set/raw bytes matched exactly, including line endings.
+Original archive/commit/LICENSE/VCS pins and all package hard assertions are
+preserved; only the two provenance hashes in each Python file are refreshed.
+Fresh preimages, the exact test-only delta, complete ledger and replay receipts
+are retained in target/backend-reliability-20261014/source58-provenance-01.

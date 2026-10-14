@@ -1,7 +1,8 @@
-//! Experimental owner-thread fresh-child transport foundation for Linux/Windows.
+//! Retained owner-thread fresh-child transport shared on Linux and Windows.
 //!
-//! This crate-private module has no production caller. It does not load a plugin by
-//! itself, retry a command, alter SIGPIPE disposition, or create an I/O thread.
+//! Ordinary default-class probes and experimental strict clients share this
+//! retained transport. It does not load a plugin by itself, retry a command,
+//! alter SIGPIPE disposition, or create an I/O thread.
 //! The process-wide one-child reservation is deliberately restrictive: caller
 //! integration and simultaneous fresh candidate replacement need a later design.
 
@@ -14,9 +15,11 @@ mod pump;
 mod pump;
 mod quarantine;
 mod request;
-pub(crate) use request::{RequestView, StateContextView};
+pub(crate) use request::RequestView;
+#[cfg(feature = "experimental-fresh-helper")]
+pub(crate) use request::StateContextView;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use crate::process_isolation::{HostCommand, HostResponse};
 use std::marker::PhantomData;
@@ -434,6 +437,10 @@ impl FreshHelperSession {
 
     pub(crate) fn cancellation(&self) -> CancelHandle {
         CancelHandle(self.cancel.clone())
+    }
+
+    pub(crate) fn helper_pid(&self) -> Option<u32> {
+        self.owner.as_ref().map(|owner| owner.child.id())
     }
 
     pub(crate) fn exchange(

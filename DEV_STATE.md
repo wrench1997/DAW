@@ -1,6 +1,6 @@
 # 当前开发状态
 
-更新：2026-10-14（Asia/Shanghai）。Citrus Studio 0.5.0-alpha.1 仍为开发版。
+更新：2026-10-15（Asia/Shanghai）。Citrus Studio 0.5.0-alpha.1 仍为开发版。
 开发分支：`ci/windows-reliability-20261009`；本轮起点：`b0d8d5c0`。
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
@@ -17,6 +17,19 @@
 实验整曲路径要求 `experimental-fresh-helper`、单个活动 VST、无 insert 效果器。
 Master 音量/声像/静音自动化已接线；尾音须明确确认固定窗口。
 未知或无限插件 tail 保留提示，不能把固定尾音窗口称为完整自然释放保证。
+
+## 普通插件扫描的清理与失败恢复（本次提交）
+
+普通 Windows/Linux 构建的默认 class 扫描现已复用实际子进程/管道所有权与取消机制，保持原 `None` class、48k/Q128 配置和 5 秒响应窗口；一次加载，不自动重播请求。
+只有元数据成功且 helper 自然成功退出、实际 reap 和管道完成、没有清理错误时才标记 verified。已清理的单插件元数据失败保留 Unknown/unverified；取消、资源占用、清理未完成或异常退出则停止整次扫描，保留旧索引、rescan 标志和磁盘缓存原字节，错误在 toast 消失后仍可见。
+清理 Pending 保留原 owner；再次扫描只推进该 owner 的清理，实际 Reaped 前不创建新 helper。普通 Probe 和实验 strict client 共用类型及 transport，严格渲染的实验门、class 选择、状态检查及块大小未放开。
+
+Source57 实际通过 306 项针对性 Rust 测试：默认插件后端 187、扫描/App 5、默认 Probe 12、普通 transport 45、strict client 26、strict backend 31。默认/all-feature/no-feature 的 root `Clippy --all-targets -D warnings`、普通双 bin 构建、精确 `vst2,vst3` 配置检查及 root/vendor 格式检查通过。实际依赖清单验证 483 packages，root 仅 `vst2,vst3`，vendor 不启用实验 feature；这不是 release 预览包验收。
+Source58 仅修正测试辅助函数返回值及 Unix 夹具的分平台错误文字，生产行为不变；当前默认 Clippy 和 12 项 Probe 回归再次通过，原清理断言保留。SDK 的 `-D unused_must_use`、最终 root/vendor/独立夹具格式检查通过；该 SDK 检查保留既有样式警告，不宣称整个 vendor 零警告。完整 vendor 补丁实际重放 73 个源文件逐字节一致；正确 discover 入口实跑 170 项打包测试全部通过。
+
+首次门禁的 `result_large_err`/`collapsible_if`、测试 `err_expect`、离线 metadata 缺缓存、错误 unittest 导入入口和额外 rustc 参数多 target 拒绝均保留原始失败记录；已分别修正源码或调用方式。strict 取消/断管道夹具的 `OSError: [Errno 22] Invalid argument` 及 vendor 既有平台警告也保留，不当作 NI 实机结果。
+本轮没有启动 Kontakt、桌面或声卡。新扫描在真实 NI、Linux/macOS 及播放时的表现仍未测；Source52 原曲音频结果属于此前冻结源码。作品、状态、WAV、日志、构建及完整本机收据仍在 Git 外，初始三个受保护文件和 Saved13 原工程本轮未改。
+证据：`target/backend-reliability-20261014/source57-scan-*`、`source58-*` 和两个 provenance 目录；只提交源码、必要回归及文档。
 
 ## 本轮已实现的功能
 

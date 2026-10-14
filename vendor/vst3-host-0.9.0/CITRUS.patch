@@ -236,6 +236,499 @@ diff --git a/src/bin/vst3-host-helper.rs b/src/bin/vst3-host-helper.rs
 +        assert_eq!(sample_rate, 44100.0);
 +    }
 +}
+diff --git a/src/default_class_probe.rs b/src/default_class_probe.rs
+new file mode 100644
+--- /dev/null
++++ b/src/default_class_probe.rs
+@@ -0,0 +1,140 @@
++//! Retained, owner-thread default-class metadata probes on Linux and Windows.
++//!
++//! This ordinary process-isolation API loads exactly once with the scanner's
++//! original default class and 48 kHz/Q128 configuration. It exposes no editor,
++//! state, DSP, generic command, recovery or request replay operations. Actual
++//! metadata and actual child/pipe cleanup remain separate acceptance facts.
++
++use crate::fresh_helper::{self, FreshHelperSession, ReplyShape, RequestView};
++use crate::helper_lifecycle::unsent;
++use std::process::Command;
++use std::time::{Duration, Instant};
++
++pub use crate::fresh_helper::{LimitEvidence, LimitSite};
++pub use crate::helper_lifecycle::{
++    CancelHandle, CleanupObservation, CleanupState, Delivery, Failure, FailureKind, LoadedPlugin,
++    RequestContext,
++};
++
++/// A post-spawn failure retains its actual child owner for checked cleanup.
++#[must_use = "retain the cleanup owner; dropping transfers unresolved ownership to quarantine"]
++pub struct SpawnFailure {
++    /// Original typed setup/admission failure, before any LoadPlugin request.
++    pub failure: Failure,
++    /// Present when a real child exists despite failed setup or spawn expiry.
++    pub cleanup: Option<Box<Probe>>,
++}
++
++/// One default-class metadata attempt and its same-thread cleanup authority.
++/// No Clone, Send, Sync or raw-child interface is available. Dropping transfers
++/// an unresolved child into the existing process-wide quarantine reservation.
++#[must_use = "metadata does not prove child termination; finish checked disposal"]
++pub struct Probe {
++    session: FreshHelperSession,
++    attempted: bool,
++}
++
++impl Probe {
++    /// Spawn once with owned pipes and inherited stderr. The caller supplies
++    /// the trusted helper command and an original absolute spawn deadline.
++    /// Sample the separate full exchange deadline only after successful spawn.
++    pub fn spawn(command: &mut Command, deadline: Instant) -> Result<Self, SpawnFailure> {
++        FreshHelperSession::spawn(command, deadline)
++            .map(|session| Self {
++                session,
++                attempted: false,
++            })
++            .map_err(|failure| SpawnFailure {
++                failure: unsent(failure.cause),
++                cleanup: failure.cleanup.map(|session| {
++                    Box::new(Self {
++                        session: *session,
++                        attempted: false,
++                    })
++                }),
++            })
++    }
++
++    /// Obtain sticky cancellation-only authority before the single exchange.
++    pub fn cancellation(&self) -> CancelHandle {
++        CancelHandle(self.session.cancellation())
++    }
++
++    /// Read the actual directly owned child ID before cleanup. A later None
++    /// means ownership was released; only Reaped proves child and pipe cleanup.
++    pub fn helper_pid(&self) -> Option<u32> {
++        self.session.helper_pid()
++    }
++
++    /// Load only the runtime's default class: None, 48 kHz, block128, tempo120,
++    /// meter4/4. One original absolute deadline covers encoding, delivery,
++    /// response and validated decode. There is no retry even on helper crash.
++    pub fn load_default_class(
++        &mut self,
++        path: &str,
++        deadline: Instant,
++    ) -> Result<LoadedPlugin, Failure> {
++        if self.attempted {
++            return Err(unsent(fresh_helper::ErrorKind::Terminal));
++        }
++        self.attempted = true;
++        let request = RequestView::LoadPlugin {
++            path,
++            sample_rate: 48_000.0,
++            block_size: 128,
++            tempo: 120.0,
++            time_sig_numerator: 4,
++            time_sig_denominator: 4,
++            class_id: None,
++        };
++        let context = crate::helper_lifecycle::RequestContext::from_request(request);
++        self.session
++            .exchange_view(request, ReplyShape::PluginInfo, deadline)
++            .map(LoadedPlugin::from_plugin_info)
++            .map_err(|error| {
++                let mut failure = Failure::from(error);
++                failure.request_context = Some(context);
++                failure
++            })
++    }
++
++    /// Seal load admission, send at most one healthy Shutdown within the
++    /// earlier original protocol/cleanup deadline, close owned pipes and reap.
++    /// Preserve the scanner's two-second natural-exit preference with 250 ms
++    /// reserved for kill/reap, clamped to the original cleanup deadline.
++    /// Failed, cancelled or terminal loads keep the transport's 100 ms policy.
++    /// Pending/Busy and kill_requested alone never prove resource completion.
++    pub fn dispose(
++        &mut self,
++        protocol_deadline: Instant,
++        cleanup_deadline: Instant,
++    ) -> CleanupObservation {
++        self.session
++            .dispose_with_deadlines_and_natural_grace(
++                protocol_deadline,
++                cleanup_deadline,
++                Duration::from_secs(2),
++                Duration::from_millis(250),
++            )
++            .into()
++    }
++
++    /// Perform one nonwaiting continuation on this same disposed owner. This
++    /// never sends Shutdown, renews grace, sleeps or replays a load request.
++    pub fn continue_cleanup(&mut self) -> Result<CleanupObservation, Failure> {
++        self.session
++            .continue_cleanup()
++            .map(Into::into)
++            .map_err(unsent)
++    }
++
++    /// Observe/reap an abandoned owner, without protocol or a new child. Busy
++    /// means another live owner still holds the shared global reservation.
++    pub fn cleanup_abandoned(deadline: Instant) -> CleanupObservation {
++        FreshHelperSession::cleanup_abandoned(deadline).into()
++    }
++}
++
++#[cfg(test)]
++#[path = "default_class_probe_tests.rs"]
++mod tests;
+diff --git a/src/default_class_probe_tests.rs b/src/default_class_probe_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/src/default_class_probe_tests.rs
+@@ -0,0 +1,343 @@
++//! Actual child/pipe protocol regressions for the ordinary default-class API.
++//! No plugin SDK, native editor, hardware audio or Kontakt is involved.
++use super::*;
++use crate::fresh_helper::tests::{arm_probe_setup_failure, arm_probe_wait_failure, python, serial};
++use crate::process_isolation::{HostCommand, HostResponse};
++
++fn deadline() -> Instant {
++    Instant::now() + Duration::from_secs(3)
++}
++fn probe(script: &str) -> Probe {
++    match Probe::spawn(&mut python(script), deadline()) {
++        Ok(probe) => probe,
++        Err(mut failure) => {
++            if let Some(owner) = failure.cleanup.as_mut() {
++                let _ = owner.dispose(Instant::now(), deadline());
++            }
++            panic!("actual mock probe spawn failed: {:?}", failure.failure);
++        }
++    }
++}
++fn info() -> HostResponse {
++    HostResponse::PluginInfo {
++        vendor: "Fixture vendor".into(),
++        name: "Only the default fixture class".into(),
++        version: "1.2.3".into(),
++        category: "Fx|Fixture".into(),
++        uid: "ABCDEF019182FAEB566D624153465854".into(),
++        has_gui: true,
++        audio_inputs: 3,
++        audio_outputs: 32,
++        output_channels: 64,
++        has_midi_input: false,
++        has_midi_output: true,
++        compatibility: Vec::new(),
++    }
++}
++fn default_load() -> HostCommand {
++    HostCommand::LoadPlugin {
++        path: "fixture-default.vst3".into(),
++        sample_rate: 48_000.0,
++        block_size: 128,
++        tempo: 120.0,
++        time_sig_numerator: 4,
++        time_sig_denominator: 4,
++        class_id: None,
++    }
++}
++fn ledger(reply: HostResponse, ending: &str) -> String {
++    let expected = serde_json::to_string(&default_load()).unwrap();
++    let response = serde_json::to_string(&reply).unwrap();
++    format!(
++        "import json,sys,time\nassert json.loads(sys.stdin.readline())==json.loads({expected:?})\nprint({response:?},flush=True)\n{ending}\n"
++    )
++}
++fn clean_finish(probe: &mut Probe, protocol_deadline: Instant) {
++    let result = probe.dispose(protocol_deadline, deadline());
++    assert!(matches!(result.state, CleanupState::Reaped(status) if status.success()));
++    assert!(!result.kill_requested);
++    assert!(result.shutdown_failure.is_none());
++    assert!(result.kill_error.is_none());
++    assert!(result.wait_error.is_none());
++    assert!(result.pipe_error.is_none());
++}
++fn failure(result: Result<LoadedPlugin, Failure>) -> Failure {
++    match result {
++        Err(failure) => failure,
++        Ok(_) => panic!("expected an actual failed default probe exchange"),
++    }
++}
++
++#[test]
++fn default_probe_sends_original_configuration_and_reaps_actual_shutdown() {
++    let _serial = serial();
++    let mut probe = probe(&ledger(
++        info(),
++        "assert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''",
++    ));
++    let actual_pid = probe.helper_pid().unwrap();
++    assert_ne!(actual_pid, 0);
++    let exchange_deadline = deadline();
++    let metadata = probe
++        .load_default_class("fixture-default.vst3", exchange_deadline)
++        .unwrap();
++    assert_eq!(metadata.vendor, "Fixture vendor");
++    assert_eq!(metadata.name, "Only the default fixture class");
++    assert_eq!(metadata.version, "1.2.3");
++    assert_eq!(metadata.category, "Fx|Fixture");
++    assert_eq!(metadata.uid, "ABCDEF019182FAEB566D624153465854");
++    assert!(metadata.has_gui);
++    assert_eq!(metadata.audio_inputs, 3);
++    assert_eq!(metadata.audio_outputs, 32);
++    assert_eq!(metadata.output_channels, 64);
++    assert!(!metadata.has_midi_input);
++    assert!(metadata.has_midi_output);
++    assert!(metadata.compatibility.is_empty());
++    assert_eq!(probe.helper_pid(), Some(actual_pid));
++    clean_finish(&mut probe, exchange_deadline);
++    assert_eq!(probe.helper_pid(), None);
++    let repeated = probe.continue_cleanup().unwrap();
++    assert!(matches!(repeated.state, CleanupState::Reaped(status) if status.success()));
++    assert!(!repeated.kill_requested);
++}
++
++#[test]
++fn default_probe_rejects_a_second_load_without_request_or_respawn() {
++    let _serial = serial();
++    let mut probe = probe(&ledger(
++        info(),
++        "assert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''",
++    ));
++    let actual_pid = probe.helper_pid().unwrap();
++    let exchange_deadline = deadline();
++    probe
++        .load_default_class("fixture-default.vst3", exchange_deadline)
++        .unwrap();
++    let second = failure(probe.load_default_class("never-loaded.vst3", exchange_deadline));
++    assert_eq!(second.kind, FailureKind::Terminal);
++    assert_eq!(second.delivery, Delivery::NotSent);
++    assert!(second.request_context.is_none());
++    assert_eq!(probe.helper_pid(), Some(actual_pid));
++    clean_finish(&mut probe, exchange_deadline);
++}
++
++#[test]
++fn default_probe_reported_crash_is_not_retried_and_retains_original_error() {
++    let _serial = serial();
++    let mut probe = probe(&ledger(
++        HostResponse::Crashed {
++            message: "actual fixture LoadPlugin crash".into(),
++        },
++        "assert sys.stdin.read()==''",
++    ));
++    let actual_pid = probe.helper_pid().unwrap();
++    let first = failure(probe.load_default_class("fixture-default.vst3", deadline()));
++    assert_eq!(first.kind, FailureKind::ReportedCrash);
++    assert_eq!(first.delivery, Delivery::MayHaveApplied);
++    assert_eq!(
++        first.diagnostic.as_deref(),
++        Some("actual fixture LoadPlugin crash")
++    );
++    assert_eq!(first.request_context.unwrap().operation, "LoadPlugin");
++    let second = failure(probe.load_default_class("fixture-default.vst3", deadline()));
++    assert_eq!(second.kind, FailureKind::Terminal);
++    assert_eq!(second.delivery, Delivery::NotSent);
++    assert_eq!(probe.helper_pid(), Some(actual_pid));
++    clean_finish(&mut probe, Instant::now());
++}
++
++#[test]
++fn default_probe_timeout_requires_same_owner_reap_and_stays_failed() {
++    let _serial = serial();
++    let mut probe = probe("import sys,time\nsys.stdin.readline()\ntime.sleep(30)\n");
++    let actual_pid = probe.helper_pid().unwrap();
++    let exchange_deadline = Instant::now() + Duration::from_millis(120);
++    let error = failure(probe.load_default_class("fixture-default.vst3", exchange_deadline));
++    assert_eq!(error.kind, FailureKind::Deadline);
++    assert_eq!(error.delivery, Delivery::MayHaveApplied);
++    assert_eq!(error.request_context.unwrap().operation, "LoadPlugin");
++    assert_eq!(probe.helper_pid(), Some(actual_pid));
++    let result = probe.dispose(exchange_deadline, deadline());
++    assert!(matches!(result.state, CleanupState::Reaped(_)));
++    assert!(result.kill_requested);
++    assert_eq!(probe.helper_pid(), None);
++    let second = failure(probe.load_default_class("fixture-default.vst3", deadline()));
++    assert_eq!(second.kind, FailureKind::Terminal);
++    assert_eq!(second.delivery, Delivery::NotSent);
++}
++
++#[test]
++fn default_probe_pre_cancel_delivers_no_load_bytes_and_reaps_same_child() {
++    let _serial = serial();
++    let mut probe = probe("import sys\nassert sys.stdin.read()==''\n");
++    let actual_pid = probe.helper_pid().unwrap();
++    probe.cancellation().cancel();
++    let error = failure(probe.load_default_class("fixture-default.vst3", deadline()));
++    assert_eq!(error.kind, FailureKind::Cancelled);
++    assert_eq!(error.delivery, Delivery::NotSent);
++    assert_eq!(probe.helper_pid(), Some(actual_pid));
++    clean_finish(&mut probe, Instant::now());
++}
++
++#[test]
++fn default_probe_cross_thread_cancel_wakes_same_inflight_owner() {
++    let _serial = serial();
++    let mut probe = probe("import sys,time\nsys.stdin.readline()\ntime.sleep(30)\n");
++    let actual_pid = probe.helper_pid().unwrap();
++    let cancel = probe.cancellation();
++    let join = std::thread::spawn(move || {
++        std::thread::sleep(Duration::from_millis(150));
++        cancel.cancel();
++    });
++    let error = failure(probe.load_default_class("fixture-default.vst3", deadline()));
++    join.join().unwrap();
++    assert_eq!(error.kind, FailureKind::Cancelled);
++    assert_eq!(error.delivery, Delivery::MayHaveApplied);
++    assert_eq!(probe.helper_pid(), Some(actual_pid));
++    let result = probe.dispose(Instant::now(), deadline());
++    assert!(matches!(result.state, CleanupState::Reaped(_)));
++    assert!(result.kill_requested);
++}
++
++#[test]
++fn default_probe_failed_spawn_keeps_real_cleanup_owner_and_blocks_another_child() {
++    let _serial = serial();
++    arm_probe_setup_failure();
++    let mut failed = match Probe::spawn(
++        &mut python("import sys\nassert sys.stdin.read()==''\n"),
++        deadline(),
++    ) {
++        Ok(_) => panic!("actual post-spawn setup fault unexpectedly succeeded"),
++        Err(failure) => failure,
++    };
++    assert_eq!(failed.failure.kind, FailureKind::Io(libc::EIO));
++    assert_eq!(failed.failure.delivery, Delivery::NotSent);
++    let owner = failed.cleanup.as_mut().expect("actual child remains owned");
++    assert_ne!(owner.helper_pid().unwrap(), 0);
++    let blocked = match Probe::spawn(
++        &mut Command::new("must-not-spawn-while-reserved"),
++        deadline(),
++    ) {
++        Ok(_) => panic!("another child escaped the occupied reservation"),
++        Err(failure) => failure,
++    };
++    assert_eq!(blocked.failure.kind, FailureKind::Busy);
++    assert_eq!(blocked.failure.delivery, Delivery::NotSent);
++    assert!(blocked.cleanup.is_none());
++    clean_finish(owner, Instant::now());
++}
++
++#[test]
++fn default_probe_wait_error_remains_after_actual_reap_and_pending_blocks_spawn() {
++    let _serial = serial();
++    let mut probe = probe("import sys\nassert sys.stdin.read()==''\n");
++    arm_probe_wait_failure();
++    let first = probe.dispose(Instant::now(), deadline());
++    assert!(matches!(first.state, CleanupState::Pending));
++    assert_eq!(first.wait_error, Some(libc::EIO));
++    assert_eq!(
++        first.shutdown_failure.as_ref().unwrap().kind,
++        FailureKind::Deadline
++    );
++    let blocked = match Probe::spawn(
++        &mut Command::new("must-not-spawn-while-pending"),
++        deadline(),
++    ) {
++        Ok(_) => panic!("another child escaped pending cleanup"),
++        Err(failure) => failure,
++    };
++    assert_eq!(blocked.failure.kind, FailureKind::Busy);
++    let cleanup_deadline = deadline();
++    let joined = loop {
++        let observed = probe.continue_cleanup().unwrap();
++        if matches!(observed.state, CleanupState::Reaped(_)) {
++            break observed;
++        }
++        assert!(
++            Instant::now() < cleanup_deadline,
++            "same child still pending: {observed:?}"
++        );
++        std::thread::sleep(Duration::from_millis(5));
++    };
++    assert_eq!(joined.wait_error, first.wait_error);
++    assert_eq!(
++        joined.shutdown_failure.as_ref().unwrap().kind,
++        FailureKind::Deadline
++    );
++    assert_eq!(
++        joined.shutdown_failure.as_ref().unwrap().delivery,
++        Delivery::NotSent
++    );
++    assert!(matches!(joined.state, CleanupState::Reaped(_)));
++}
++
++#[test]
++fn default_probe_drop_quarantines_same_child_without_claiming_reap() {
++    let _serial = serial();
++    let probe = probe("import sys\nassert sys.stdin.read()==''\n");
++    let actual_pid = probe.helper_pid().unwrap();
++    drop(probe);
++    let blocked = match Probe::spawn(
++        &mut Command::new("must-not-spawn-while-abandoned"),
++        deadline(),
++    ) {
++        Ok(_) => panic!("abandoned child lost its reservation"),
++        Err(failure) => failure,
++    };
++    assert_eq!(blocked.failure.kind, FailureKind::Busy);
++    assert_ne!(actual_pid, 0);
++    let result = Probe::cleanup_abandoned(deadline());
++    assert!(matches!(result.state, CleanupState::Reaped(_)));
++    assert!(matches!(
++        Probe::cleanup_abandoned(Instant::now()).state,
++        CleanupState::Empty
++    ));
++}
++
++#[test]
++fn default_probe_metadata_cannot_substitute_a_failed_healthy_disposal() {
++    let _serial = serial();
++    let mut probe = probe(&ledger(
++        info(),
++        "assert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''\ntime.sleep(30)",
++    ));
++    let exchange_deadline = deadline();
++    let metadata = probe
++        .load_default_class("fixture-default.vst3", exchange_deadline)
++        .unwrap();
++    assert_eq!(metadata.uid, "ABCDEF019182FAEB566D624153465854");
++    let cleanup_deadline = Instant::now() + Duration::from_secs(1);
++    let result = probe.dispose(exchange_deadline, cleanup_deadline);
++    assert!(matches!(result.state, CleanupState::Reaped(_)));
++    assert!(result.kill_requested);
++    // Metadata still proves only the actual returned class, while this
++    // cleanup receipt explicitly prevents a healthy natural-exit claim.
++}
++
++#[test]
++fn default_probe_expired_exchange_never_delivers_load_or_extends_deadline() {
++    let _serial = serial();
++    let mut probe = probe("import sys\nassert sys.stdin.read()==''\n");
++    let error = failure(probe.load_default_class("fixture-default.vst3", Instant::now()));
++    assert_eq!(error.kind, FailureKind::Deadline);
++    assert_eq!(error.delivery, Delivery::NotSent);
++    assert_eq!(error.request_context.unwrap().operation, "LoadPlugin");
++    clean_finish(&mut probe, Instant::now());
++}
++
++#[test]
++fn default_probe_wrong_reply_cannot_become_metadata_or_request_replay() {
++    let _serial = serial();
++    let mut probe = probe(&ledger(
++        HostResponse::Success {
++            message: "not PluginInfo".into(),
++        },
++        "assert sys.stdin.read()==''",
++    ));
++    let error = failure(probe.load_default_class("fixture-default.vst3", deadline()));
++    assert_eq!(error.kind, FailureKind::WrongReply);
++    assert_eq!(error.delivery, Delivery::MayHaveApplied);
++    assert_eq!(error.request_context.unwrap().operation, "LoadPlugin");
++    assert!(error.diagnostic.is_none());
++    clean_finish(&mut probe, Instant::now());
++}
 diff --git a/src/error.rs b/src/error.rs
 --- a/src/error.rs
 +++ b/src/error.rs
@@ -6923,11 +7416,12 @@ diff --git a/src/fresh_helper/mod.rs b/src/fresh_helper/mod.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/fresh_helper/mod.rs
-@@ -0,0 +1,823 @@
-+//! Experimental owner-thread fresh-child transport foundation for Linux/Windows.
+@@ -0,0 +1,830 @@
++//! Retained owner-thread fresh-child transport shared on Linux and Windows.
 +//!
-+//! This crate-private module has no production caller. It does not load a plugin by
-+//! itself, retry a command, alter SIGPIPE disposition, or create an I/O thread.
++//! Ordinary default-class probes and experimental strict clients share this
++//! retained transport. It does not load a plugin by itself, retry a command,
++//! alter SIGPIPE disposition, or create an I/O thread.
 +//! The process-wide one-child reservation is deliberately restrictive: caller
 +//! integration and simultaneous fresh candidate replacement need a later design.
 +
@@ -6940,9 +7434,11 @@ new file mode 100644
 +mod pump;
 +mod quarantine;
 +mod request;
-+pub(crate) use request::{RequestView, StateContextView};
++pub(crate) use request::RequestView;
++#[cfg(feature = "experimental-fresh-helper")]
++pub(crate) use request::StateContextView;
 +#[cfg(test)]
-+mod tests;
++pub(crate) mod tests;
 +
 +use crate::process_isolation::{HostCommand, HostResponse};
 +use std::marker::PhantomData;
@@ -7360,6 +7856,10 @@ new file mode 100644
 +
 +    pub(crate) fn cancellation(&self) -> CancelHandle {
 +        CancelHandle(self.cancel.clone())
++    }
++
++    pub(crate) fn helper_pid(&self) -> Option<u32> {
++        self.owner.as_ref().map(|owner| owner.child.id())
 +    }
 +
 +    pub(crate) fn exchange(
@@ -9552,7 +10052,7 @@ diff --git a/src/fresh_helper/tests.rs b/src/fresh_helper/tests.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/fresh_helper/tests.rs
-@@ -0,0 +1,1758 @@
+@@ -0,0 +1,1765 @@
 +use super::*;
 +use std::sync::{Mutex, MutexGuard};
 +use std::time::Duration;
@@ -9560,10 +10060,10 @@ new file mode 100644
 +// Every test that reserves the process-global slot holds this independent lock.
 +// Codec tests and cancellation-FD-only tests need no child reservation.
 +static CHILD_TESTS: Mutex<()> = Mutex::new(());
-+struct TestScope {
++pub(crate) struct TestScope {
 +    _serial: MutexGuard<'static, ()>,
 +}
-+fn serial() -> TestScope {
++pub(crate) fn serial() -> TestScope {
 +    TestScope {
 +        _serial: CHILD_TESTS
 +            .lock()
@@ -9586,7 +10086,7 @@ new file mode 100644
 +fn deadline() -> Instant {
 +    Instant::now() + Duration::from_secs(3)
 +}
-+fn python(script: &str) -> Command {
++pub(crate) fn python(script: &str) -> Command {
 +    let executable = std::env::var_os("CITRUS_STRICT_TEST_PYTHON").unwrap_or_else(|| {
 +        if cfg!(windows) {
 +            "python".into()
@@ -9597,6 +10097,12 @@ new file mode 100644
 +    let mut command = Command::new(executable);
 +    command.args(["-u", "-c", script]);
 +    command
++}
++pub(crate) fn arm_probe_setup_failure() {
++    pump::test_hooks::arm(pump::test_hooks::Fault::Setup);
++}
++pub(crate) fn arm_probe_wait_failure() {
++    pump::test_hooks::arm(pump::test_hooks::Fault::Wait);
 +}
 +fn spawn(script: &str) -> FreshHelperSession {
 +    match FreshHelperSession::spawn(&mut python(script), deadline()) {
@@ -10760,6 +11266,7 @@ new file mode 100644
 +    assert_eq!(final_report.shutdown_error, Some(ErrorKind::Deadline));
 +}
 +
++#[cfg(feature = "experimental-fresh-helper")]
 +#[path = "client_tests.rs"]
 +mod client_tests;
 +
@@ -11002,7 +11509,7 @@ new file mode 100644
 +        failure.metadata_getter,
 +        Some(crate::process_isolation::MetadataGetter::LatencySamples)
 +    );
-+    let failure = crate::strict_offline::Failure::from(failure);
++    let failure = crate::helper_lifecycle::Failure::from(failure);
 +    assert_eq!(
 +        failure.metadata_getter,
 +        Some(crate::process_isolation::MetadataGetter::LatencySamples)
@@ -11309,6 +11816,362 @@ new file mode 100644
 +            std::fs::remove_file(root.join(name)).unwrap();
 +        }
 +        std::fs::remove_dir(&root).unwrap();
++    }
++}
+diff --git a/src/helper_lifecycle.rs b/src/helper_lifecycle.rs
+new file mode 100644
+--- /dev/null
++++ b/src/helper_lifecycle.rs
+@@ -0,0 +1,351 @@
++//! Shared retained-helper evidence used by ordinary default-class probes and
++//! experimental strict clients. Transport, delivery and cleanup facts have one
++//! definition and conversion; neither API guesses reap from process absence.
++
++use crate::audio::{BusDirection, MediaType};
++use crate::discovery::ClassCompatibility;
++use crate::fresh_helper::{self, LimitEvidence, RequestView};
++use crate::process_isolation::{HostResponse, MetadataGetter};
++use crate::MetadataQueryRejection;
++use std::process::ExitStatus;
++
++/// Whether request bytes could have reached the helper. No value proves rollback.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Delivery {
++    /// No request byte was written.
++    NotSent,
++    /// At least one request byte was written; even a reported error may have applied.
++    MayHaveApplied,
++}
++
++/// Closed transport/operation categories, without string-prefix interpretation.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum FailureKind {
++    /// Request is outside the closed subset.
++    UnsupportedRequest,
++    /// Response contains an unsupported payload, such as output events.
++    UnsupportedReply,
++    /// Request scalars are invalid.
++    InvalidRequest,
++    /// Response syntax or required fields are invalid.
++    MalformedReply,
++    /// Response variant does not match this request.
++    WrongReply,
++    /// A checked count, length or payload budget was exceeded.
++    Limit,
++    /// Exact audio shape differs.
++    Shape,
++    /// The original absolute exchange deadline elapsed.
++    Deadline,
++    /// The registered sticky cancellation was observed.
++    Cancelled,
++    /// A checked allocation failed.
++    Allocation,
++    /// OS error, preserving errno on Linux or GetLastError on Windows.
++    Io(i32),
++    /// The response pipe closed unexpectedly.
++    Eof,
++    /// The direct child was observed exited.
++    ChildExited,
++    /// A write returned zero.
++    ZeroWrite,
++    /// Unexpected extra response bytes were observed.
++    Unsolicited,
++    /// The session is permanently sealed.
++    Terminal,
++    /// The global strict-child reservation is occupied.
++    Busy,
++    /// The supported ignored-SIGPIPE host precondition failed.
++    Sigpipe,
++    /// Required child setup failed.
++    Spawn,
++    /// A fully validated helper Error; this never implies rollback.
++    OperationRejected,
++    /// A fully validated helper Crashed response.
++    ReportedCrash,
++    /// A fully validated owner-only metadata refusal.
++    MetadataRejected(MetadataQueryRejection),
++    /// Nonwaiting cleanup was requested before disposal closed its pipes.
++    CleanupNotBegun,
++}
++
++/// Fixed context of the exchange that returned a failure. This is an attempted
++/// wire request, not proof of delivery; `Failure::delivery` remains authoritative.
++/// No plugin path, state, parameter value, title or caller borrow is retained.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct RequestContext {
++    /// Closed request discriminator; this always points to a fixed static label.
++    pub operation: &'static str,
++    /// SetBusActive's media type, and None for every other request.
++    pub media_type: Option<MediaType>,
++    /// SetBusActive's direction, and None for every other request.
++    pub direction: Option<BusDirection>,
++    /// SetBusActive's bus index, and None for every other request.
++    pub bus_index: Option<i32>,
++}
++impl RequestContext {
++    pub(crate) fn from_request(request: RequestView<'_>) -> Self {
++        let operation = match request {
++            RequestView::LoadPlugin { .. } => "LoadPlugin",
++            RequestView::LoadState { .. } => "LoadState",
++            RequestView::SaveState => "SaveState",
++            RequestView::Process { .. } => "Process",
++            RequestView::ProcessBuses { .. } => "ProcessBuses",
++            RequestView::GetParameter { .. } => "GetParameter",
++            RequestView::LatencySamples => "LatencySamples",
++            RequestView::TailSamples => "TailSamples",
++            RequestView::SetProcessMode { .. } => "SetProcessMode",
++            RequestView::ResetOriginSupport => "ResetOriginSupport",
++            RequestView::StartProcessing => "StartProcessing",
++            RequestView::StopProcessing => "StopProcessing",
++            RequestView::NativeDirtyRevision => "NativeDirtyRevision",
++            RequestView::GetAllParameters => "GetAllParameters",
++            RequestView::SetParameter { .. } => "SetParameter",
++            RequestView::SendMidiAt { .. } => "SendMidiAt",
++            RequestView::CheckedAudioBusLayout => "CheckedAudioBusLayout",
++            RequestView::StrictMetadataSnapshot { .. } => "StrictMetadataSnapshot",
++            RequestView::EventBusLayout => "EventBusLayout",
++            RequestView::SetBusActive {
++                media_type,
++                direction,
++                bus_index,
++                ..
++            } => {
++                return Self {
++                    operation: "SetBusActive",
++                    media_type: Some(media_type),
++                    direction: Some(direction),
++                    bus_index: Some(bus_index),
++                }
++            }
++        };
++        Self {
++            operation,
++            media_type: None,
++            direction: None,
++            bus_index: None,
++        }
++    }
++}
++
++/// Bounded failure evidence; no command, caller borrow, pipe or owner can escape.
++#[derive(Debug)]
++pub struct Failure {
++    /// Original observed failure category.
++    pub kind: FailureKind,
++    /// Conservative delivery evidence.
++    pub delivery: Delivery,
++    /// Bounded helper Error/Crashed message, if its diagnostic copy succeeded.
++    pub diagnostic: Option<String>,
++    /// Diagnostic-copy failure, without erasing the known helper failure.
++    pub diagnostic_unavailable: Option<FailureKind>,
++    /// The failing exchange's fixed request context, independent of helper text.
++    /// Local rejection, spawn and cleanup failures have None, so an earlier
++    /// successful query can never be misrepresented as the failed exchange.
++    pub request_context: Option<RequestContext>,
++    /// Validated actual getter within a bundle, never inferred from transport faults.
++    pub metadata_getter: Option<MetadataGetter>,
++    /// First checked catalog limit prefix, without assuming the complete size.
++    pub limit_evidence: Option<LimitEvidence>,
++}
++
++impl From<fresh_helper::ErrorKind> for FailureKind {
++    fn from(value: fresh_helper::ErrorKind) -> Self {
++        use fresh_helper::ErrorKind as K;
++        match value {
++            K::UnsupportedRequest => Self::UnsupportedRequest,
++            K::UnsupportedReply => Self::UnsupportedReply,
++            K::InvalidRequest => Self::InvalidRequest,
++            K::MalformedReply => Self::MalformedReply,
++            K::WrongReply => Self::WrongReply,
++            K::Limit => Self::Limit,
++            K::Shape => Self::Shape,
++            K::Deadline => Self::Deadline,
++            K::Cancelled => Self::Cancelled,
++            K::Allocation => Self::Allocation,
++            K::Io(n) => Self::Io(n),
++            K::Eof => Self::Eof,
++            K::ChildExited => Self::ChildExited,
++            K::ZeroWrite => Self::ZeroWrite,
++            K::Unsolicited => Self::Unsolicited,
++            K::Terminal => Self::Terminal,
++            K::Busy => Self::Busy,
++            K::Sigpipe => Self::Sigpipe,
++            K::Spawn => Self::Spawn,
++            K::OperationRejected => Self::OperationRejected,
++            K::ReportedCrash => Self::ReportedCrash,
++            K::MetadataRejected(reason) => Self::MetadataRejected(reason),
++            K::CleanupNotBegun => Self::CleanupNotBegun,
++        }
++    }
++}
++impl From<fresh_helper::Delivery> for Delivery {
++    fn from(value: fresh_helper::Delivery) -> Self {
++        match value {
++            fresh_helper::Delivery::NotSent => Self::NotSent,
++            fresh_helper::Delivery::MayHaveApplied => Self::MayHaveApplied,
++        }
++    }
++}
++impl From<fresh_helper::ExchangeFailure> for Failure {
++    fn from(value: fresh_helper::ExchangeFailure) -> Self {
++        Self {
++            kind: value.cause.into(),
++            delivery: value.delivery.into(),
++            diagnostic: value.reported.and_then(|reply| match *reply {
++                HostResponse::Error { message }
++                | HostResponse::Crashed { message }
++                | HostResponse::StrictMetadataFailed { message, .. } => Some(message),
++                _ => None, // Partial/error audio can never become successful output.
++            }),
++            diagnostic_unavailable: value.diagnostic_unavailable.map(Into::into),
++            request_context: None,
++            metadata_getter: value.metadata_getter,
++            limit_evidence: value.limit_evidence,
++        }
++    }
++}
++pub(crate) fn unsent(kind: fresh_helper::ErrorKind) -> Failure {
++    Failure {
++        kind: kind.into(),
++        delivery: Delivery::NotSent,
++        diagnostic: None,
++        diagnostic_unavailable: None,
++        request_context: None,
++        metadata_getter: None,
++        limit_evidence: None,
++    }
++}
++
++/// Cancellation-only authority. Its shared wake FD remains owned after disposal.
++#[derive(Clone)]
++pub struct CancelHandle(pub(crate) fresh_helper::CancelHandle);
++impl CancelHandle {
++    /// Publish sticky cancellation and attempt a bounded nonblocking wake.
++    pub fn cancel(&self) {
++        self.0.cancel();
++    }
++}
++
++/// Checked cleanup state. Only Reaped proves direct-child resource completion.
++#[derive(Debug, Clone, Copy)]
++pub enum CleanupState {
++    /// Actual try_wait status, cached after the child owner is released.
++    Reaped(ExitStatus),
++    /// The same child remains owned and blocks another strict spawn.
++    Pending,
++    /// No abandoned child exists; a live client may still own the global slot.
++    Empty,
++    /// A live owner or another cleanup observation owns the global reservation.
++    Busy,
++}
++
++/// Bounded first cleanup evidence remains available across continuation/reap.
++#[derive(Debug)]
++#[must_use = "Pending/Busy cannot authorize render publication or another clone"]
++pub struct CleanupObservation {
++    /// Concrete reap or retained-ownership state.
++    pub state: CleanupState,
++    /// First Shutdown failure with original delivery; cancellation remains typed.
++    pub shutdown_failure: Option<Failure>,
++    /// First failed kill OS error, retained even if a later kill succeeds.
++    pub kill_error: Option<i32>,
++    /// First failed wait OS error, retained even after eventual reap.
++    pub wait_error: Option<i32>,
++    /// First pipe cancellation/completion OS error, retained after eventual reap.
++    pub pipe_error: Option<i32>,
++    /// Whether a force-kill request succeeded; this is not proof of reap.
++    pub kill_requested: bool,
++}
++impl From<fresh_helper::CleanupReport> for CleanupObservation {
++    fn from(value: fresh_helper::CleanupReport) -> Self {
++        Self {
++            state: match value.state {
++                fresh_helper::CleanupState::Reaped(s) => CleanupState::Reaped(s),
++                fresh_helper::CleanupState::Pending => CleanupState::Pending,
++                fresh_helper::CleanupState::Empty => CleanupState::Empty,
++                fresh_helper::CleanupState::Busy => CleanupState::Busy,
++            },
++            shutdown_failure: value.shutdown_error.map(|kind| Failure {
++                kind: kind.into(),
++                delivery: value
++                    .shutdown_delivery
++                    .unwrap_or(fresh_helper::Delivery::NotSent)
++                    .into(),
++                diagnostic: None,
++                diagnostic_unavailable: None,
++                request_context: None,
++                metadata_getter: None,
++                limit_evidence: None,
++            }),
++            kill_error: value.kill_error,
++            wait_error: value.wait_error,
++            pipe_error: value.pipe_error,
++            kill_requested: value.kill_requested,
++        }
++    }
++}
++
++/// Bounded, un-clamped PluginInfo fields returned by the helper.
++#[derive(Debug)]
++pub struct LoadedPlugin {
++    /// Reported vendor.
++    pub vendor: String,
++    /// Reported name.
++    pub name: String,
++    /// Reported version.
++    pub version: String,
++    /// Reported category.
++    pub category: String,
++    /// Actual instantiated class identifier.
++    pub uid: String,
++    /// Reported editor capability; the closed client has no editor operations.
++    pub has_gui: bool,
++    /// Reported input buses; checked layouts are separate owner queries.
++    pub audio_inputs: i32,
++    /// Reported output buses.
++    pub audio_outputs: i32,
++    /// Reported total output channels.
++    pub output_channels: i32,
++    /// Reported event input capability.
++    pub has_midi_input: bool,
++    /// Reported event output capability.
++    pub has_midi_output: bool,
++    /// Bounded current/retired class mappings.
++    pub compatibility: Vec<ClassCompatibility>,
++}
++
++impl LoadedPlugin {
++    pub(crate) fn from_plugin_info(reply: HostResponse) -> Self {
++        match reply {
++            HostResponse::PluginInfo {
++                vendor,
++                name,
++                version,
++                category,
++                uid,
++                has_gui,
++                audio_inputs,
++                audio_outputs,
++                output_channels,
++                has_midi_input,
++                has_midi_output,
++                compatibility,
++            } => Self {
++                vendor,
++                name,
++                version,
++                category,
++                uid,
++                has_gui,
++                audio_inputs,
++                audio_outputs,
++                output_channels,
++                has_midi_input,
++                has_midi_output,
++                compatibility,
++            },
++            _ => unreachable!("closed plugin-info shape"),
++        }
 +    }
 +}
 diff --git a/src/host.rs b/src/host.rs
@@ -33714,17 +34577,29 @@ diff --git a/src/lib.rs b/src/lib.rs
  pub mod discovery;
  
  #[cfg(feature = "egui-widgets")]
-@@ -75,6 +78,20 @@
+@@ -75,6 +78,32 @@
  pub mod backends;
  
  pub mod process_isolation;
 +
 +#[cfg(all(
 +    any(target_os = "linux", target_os = "windows"),
-+    feature = "experimental-fresh-helper"
++    feature = "process-isolation"
 +))]
-+#[allow(dead_code)] // Deliberately private foundation; caller integration is a later checkpoint.
++#[allow(dead_code)] // The shared transport also supports the separately gated strict API.
 +mod fresh_helper;
++
++#[cfg(all(
++    any(target_os = "linux", target_os = "windows"),
++    feature = "process-isolation"
++))]
++mod helper_lifecycle;
++
++#[cfg(all(
++    any(target_os = "linux", target_os = "windows"),
++    feature = "process-isolation"
++))]
++pub mod default_class_probe;
 +
 +#[cfg(all(
 +    any(target_os = "linux", target_os = "windows"),
@@ -33735,7 +34610,7 @@ diff --git a/src/lib.rs b/src/lib.rs
  
  #[cfg(feature = "midi-input")]
  pub mod midi_input;
-@@ -93,8 +110,10 @@
+@@ -93,8 +122,10 @@
  };
  #[cfg(feature = "egui-widgets")]
  pub use embed::{EditorRect, EmbeddedEditor};
@@ -33747,7 +34622,7 @@ diff --git a/src/lib.rs b/src/lib.rs
  pub use midi::{
      cc, MidiChannel, MidiEvent, NoteExpressionInfo, NoteExpressionType, NoteId, OutputEvent,
      PluginEvent, PluginEventData,
-@@ -111,9 +130,11 @@
+@@ -111,9 +142,11 @@
      RtAudioHandle,
  };
  pub use plugin::{
@@ -33762,7 +34637,7 @@ diff --git a/src/lib.rs b/src/lib.rs
  };
  pub use realtime::{RealtimePluginRunner, RtControl};
  pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
-@@ -142,8 +163,8 @@
+@@ -142,8 +175,8 @@
          plugin::{
              AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification,
              OutputEventConsumer, OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin,
@@ -37091,7 +37966,7 @@ diff --git a/src/strict_offline.rs b/src/strict_offline.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/strict_offline.rs
-@@ -0,0 +1,897 @@
+@@ -0,0 +1,570 @@
 +//! Disabled-by-default Linux/Windows client for one disposable offline generator.
 +//!
 +//! This closed development API has no App caller. One process-wide reservation
@@ -37108,18 +37983,22 @@ new file mode 100644
 +//! validate all returned samples before publishing anything.
 +
 +use crate::audio::{BusDirection, MediaType};
-+use crate::discovery::ClassCompatibility;
 +use crate::fresh_helper::{self, FreshHelperSession, ReplyShape, RequestView, StateContextView};
 +use crate::midi::MidiEvent;
 +use crate::plugin::{
 +    CheckedAudioBusLayout, EventBusLayout, ProcessMode, ProcessTransport, ResetOriginSupport,
 +};
 +use crate::process_isolation::HostResponse;
-+use crate::{MetadataQueryRejection, Parameter};
-+use std::process::{Command, ExitStatus};
++use crate::Parameter;
++use std::process::Command;
 +use std::time::Instant;
 +
 +pub use crate::fresh_helper::{LimitEvidence, LimitSite};
++use crate::helper_lifecycle::unsent;
++pub use crate::helper_lifecycle::{
++    CancelHandle, CleanupObservation, CleanupState, Delivery, Failure, FailureKind, LoadedPlugin,
++    RequestContext,
++};
 +pub use crate::process_isolation::{
 +    MetadataGetter, SelectedMetadataAdmission, SelectedMetadataPolicy, StrictMetadataSnapshot,
 +};
@@ -37133,224 +38012,6 @@ new file mode 100644
 +    Rejected(SelectedMetadataAdmission),
 +}
 +
-+/// Whether request bytes could have reached the helper. No value proves rollback.
-+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-+pub enum Delivery {
-+    /// No request byte was written.
-+    NotSent,
-+    /// At least one request byte was written; even a reported error may have applied.
-+    MayHaveApplied,
-+}
-+
-+/// Closed transport/operation categories, without string-prefix interpretation.
-+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-+pub enum FailureKind {
-+    /// Request is outside the closed subset.
-+    UnsupportedRequest,
-+    /// Response contains an unsupported payload, such as output events.
-+    UnsupportedReply,
-+    /// Request scalars are invalid.
-+    InvalidRequest,
-+    /// Response syntax or required fields are invalid.
-+    MalformedReply,
-+    /// Response variant does not match this request.
-+    WrongReply,
-+    /// A checked count, length or payload budget was exceeded.
-+    Limit,
-+    /// Exact audio shape differs.
-+    Shape,
-+    /// The original absolute exchange deadline elapsed.
-+    Deadline,
-+    /// The registered sticky cancellation was observed.
-+    Cancelled,
-+    /// A checked allocation failed.
-+    Allocation,
-+    /// OS error, preserving errno on Linux or GetLastError on Windows.
-+    Io(i32),
-+    /// The response pipe closed unexpectedly.
-+    Eof,
-+    /// The direct child was observed exited.
-+    ChildExited,
-+    /// A write returned zero.
-+    ZeroWrite,
-+    /// Unexpected extra response bytes were observed.
-+    Unsolicited,
-+    /// The session is permanently sealed.
-+    Terminal,
-+    /// The global strict-child reservation is occupied.
-+    Busy,
-+    /// The supported ignored-SIGPIPE host precondition failed.
-+    Sigpipe,
-+    /// Required child setup failed.
-+    Spawn,
-+    /// A fully validated helper Error; this never implies rollback.
-+    OperationRejected,
-+    /// A fully validated helper Crashed response.
-+    ReportedCrash,
-+    /// A fully validated owner-only metadata refusal.
-+    MetadataRejected(MetadataQueryRejection),
-+    /// Nonwaiting cleanup was requested before disposal closed its pipes.
-+    CleanupNotBegun,
-+}
-+
-+/// Fixed context of the exchange that returned a failure. This is an attempted
-+/// wire request, not proof of delivery; `Failure::delivery` remains authoritative.
-+/// No plugin path, state, parameter value, title or caller borrow is retained.
-+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-+pub struct RequestContext {
-+    /// Closed request discriminator; this always points to a fixed static label.
-+    pub operation: &'static str,
-+    /// SetBusActive's media type, and None for every other request.
-+    pub media_type: Option<MediaType>,
-+    /// SetBusActive's direction, and None for every other request.
-+    pub direction: Option<BusDirection>,
-+    /// SetBusActive's bus index, and None for every other request.
-+    pub bus_index: Option<i32>,
-+}
-+impl RequestContext {
-+    fn from_request(request: RequestView<'_>) -> Self {
-+        let operation = match request {
-+            RequestView::LoadPlugin { .. } => "LoadPlugin",
-+            RequestView::LoadState { .. } => "LoadState",
-+            RequestView::SaveState => "SaveState",
-+            RequestView::Process { .. } => "Process",
-+            RequestView::ProcessBuses { .. } => "ProcessBuses",
-+            RequestView::GetParameter { .. } => "GetParameter",
-+            RequestView::LatencySamples => "LatencySamples",
-+            RequestView::TailSamples => "TailSamples",
-+            RequestView::SetProcessMode { .. } => "SetProcessMode",
-+            RequestView::ResetOriginSupport => "ResetOriginSupport",
-+            RequestView::StartProcessing => "StartProcessing",
-+            RequestView::StopProcessing => "StopProcessing",
-+            RequestView::NativeDirtyRevision => "NativeDirtyRevision",
-+            RequestView::GetAllParameters => "GetAllParameters",
-+            RequestView::SetParameter { .. } => "SetParameter",
-+            RequestView::SendMidiAt { .. } => "SendMidiAt",
-+            RequestView::CheckedAudioBusLayout => "CheckedAudioBusLayout",
-+            RequestView::StrictMetadataSnapshot { .. } => "StrictMetadataSnapshot",
-+            RequestView::EventBusLayout => "EventBusLayout",
-+            RequestView::SetBusActive {
-+                media_type,
-+                direction,
-+                bus_index,
-+                ..
-+            } => {
-+                return Self {
-+                    operation: "SetBusActive",
-+                    media_type: Some(media_type),
-+                    direction: Some(direction),
-+                    bus_index: Some(bus_index),
-+                }
-+            }
-+        };
-+        Self {
-+            operation,
-+            media_type: None,
-+            direction: None,
-+            bus_index: None,
-+        }
-+    }
-+}
-+
-+/// Bounded failure evidence; no command, caller borrow, pipe or owner can escape.
-+#[derive(Debug)]
-+pub struct Failure {
-+    /// Original observed failure category.
-+    pub kind: FailureKind,
-+    /// Conservative delivery evidence.
-+    pub delivery: Delivery,
-+    /// Bounded helper Error/Crashed message, if its diagnostic copy succeeded.
-+    pub diagnostic: Option<String>,
-+    /// Diagnostic-copy failure, without erasing the known helper failure.
-+    pub diagnostic_unavailable: Option<FailureKind>,
-+    /// The failing exchange's fixed request context, independent of helper text.
-+    /// Local rejection, spawn and cleanup failures have None, so an earlier
-+    /// successful query can never be misrepresented as the failed exchange.
-+    pub request_context: Option<RequestContext>,
-+    /// Validated actual getter within a bundle, never inferred from transport faults.
-+    pub metadata_getter: Option<MetadataGetter>,
-+    /// First checked catalog limit prefix, without assuming the complete size.
-+    pub limit_evidence: Option<LimitEvidence>,
-+}
-+
-+impl From<fresh_helper::ErrorKind> for FailureKind {
-+    fn from(value: fresh_helper::ErrorKind) -> Self {
-+        use fresh_helper::ErrorKind as K;
-+        match value {
-+            K::UnsupportedRequest => Self::UnsupportedRequest,
-+            K::UnsupportedReply => Self::UnsupportedReply,
-+            K::InvalidRequest => Self::InvalidRequest,
-+            K::MalformedReply => Self::MalformedReply,
-+            K::WrongReply => Self::WrongReply,
-+            K::Limit => Self::Limit,
-+            K::Shape => Self::Shape,
-+            K::Deadline => Self::Deadline,
-+            K::Cancelled => Self::Cancelled,
-+            K::Allocation => Self::Allocation,
-+            K::Io(n) => Self::Io(n),
-+            K::Eof => Self::Eof,
-+            K::ChildExited => Self::ChildExited,
-+            K::ZeroWrite => Self::ZeroWrite,
-+            K::Unsolicited => Self::Unsolicited,
-+            K::Terminal => Self::Terminal,
-+            K::Busy => Self::Busy,
-+            K::Sigpipe => Self::Sigpipe,
-+            K::Spawn => Self::Spawn,
-+            K::OperationRejected => Self::OperationRejected,
-+            K::ReportedCrash => Self::ReportedCrash,
-+            K::MetadataRejected(reason) => Self::MetadataRejected(reason),
-+            K::CleanupNotBegun => Self::CleanupNotBegun,
-+        }
-+    }
-+}
-+impl From<fresh_helper::Delivery> for Delivery {
-+    fn from(value: fresh_helper::Delivery) -> Self {
-+        match value {
-+            fresh_helper::Delivery::NotSent => Self::NotSent,
-+            fresh_helper::Delivery::MayHaveApplied => Self::MayHaveApplied,
-+        }
-+    }
-+}
-+impl From<fresh_helper::ExchangeFailure> for Failure {
-+    fn from(value: fresh_helper::ExchangeFailure) -> Self {
-+        Self {
-+            kind: value.cause.into(),
-+            delivery: value.delivery.into(),
-+            diagnostic: value.reported.and_then(|reply| match *reply {
-+                HostResponse::Error { message }
-+                | HostResponse::Crashed { message }
-+                | HostResponse::StrictMetadataFailed { message, .. } => Some(message),
-+                _ => None, // Partial/error audio can never become successful output.
-+            }),
-+            diagnostic_unavailable: value.diagnostic_unavailable.map(Into::into),
-+            request_context: None,
-+            metadata_getter: value.metadata_getter,
-+            limit_evidence: value.limit_evidence,
-+        }
-+    }
-+}
-+fn unsent(kind: fresh_helper::ErrorKind) -> Failure {
-+    Failure {
-+        kind: kind.into(),
-+        delivery: Delivery::NotSent,
-+        diagnostic: None,
-+        diagnostic_unavailable: None,
-+        request_context: None,
-+        metadata_getter: None,
-+        limit_evidence: None,
-+    }
-+}
-+
-+/// Cancellation-only authority. Its shared wake FD remains owned after disposal.
-+#[derive(Clone)]
-+pub struct CancelHandle(fresh_helper::CancelHandle);
-+impl CancelHandle {
-+    /// Publish sticky cancellation and attempt a bounded nonblocking wake.
-+    pub fn cancel(&self) {
-+        self.0.cancel();
-+    }
-+}
-+
 +/// Still-owning spawn failure. Store the cleanup client before returning failure.
 +#[must_use = "a returned cleanup client retains the process-wide reservation"]
 +pub struct SpawnFailure {
@@ -37358,65 +38019,6 @@ new file mode 100644
 +    pub failure: Failure,
 +    /// The actual child owner when spawn succeeded but setup failed.
 +    pub cleanup: Option<Box<Client>>,
-+}
-+
-+/// Checked cleanup state. Only Reaped proves direct-child resource completion.
-+#[derive(Debug, Clone, Copy)]
-+pub enum CleanupState {
-+    /// Actual try_wait status, cached after the child owner is released.
-+    Reaped(ExitStatus),
-+    /// The same child remains owned and blocks another strict spawn.
-+    Pending,
-+    /// No abandoned child exists; a live client may still own the global slot.
-+    Empty,
-+    /// A live owner or another cleanup observation owns the global reservation.
-+    Busy,
-+}
-+
-+/// Bounded first cleanup evidence remains available across continuation/reap.
-+#[derive(Debug)]
-+#[must_use = "Pending/Busy cannot authorize render publication or another clone"]
-+pub struct CleanupObservation {
-+    /// Concrete reap or retained-ownership state.
-+    pub state: CleanupState,
-+    /// First Shutdown failure with original delivery; cancellation remains typed.
-+    pub shutdown_failure: Option<Failure>,
-+    /// First failed kill OS error, retained even if a later kill succeeds.
-+    pub kill_error: Option<i32>,
-+    /// First failed wait OS error, retained even after eventual reap.
-+    pub wait_error: Option<i32>,
-+    /// First pipe cancellation/completion OS error, retained after eventual reap.
-+    pub pipe_error: Option<i32>,
-+    /// Whether a force-kill request succeeded; this is not proof of reap.
-+    pub kill_requested: bool,
-+}
-+impl From<fresh_helper::CleanupReport> for CleanupObservation {
-+    fn from(value: fresh_helper::CleanupReport) -> Self {
-+        Self {
-+            state: match value.state {
-+                fresh_helper::CleanupState::Reaped(s) => CleanupState::Reaped(s),
-+                fresh_helper::CleanupState::Pending => CleanupState::Pending,
-+                fresh_helper::CleanupState::Empty => CleanupState::Empty,
-+                fresh_helper::CleanupState::Busy => CleanupState::Busy,
-+            },
-+            shutdown_failure: value.shutdown_error.map(|kind| Failure {
-+                kind: kind.into(),
-+                delivery: value
-+                    .shutdown_delivery
-+                    .unwrap_or(fresh_helper::Delivery::NotSent)
-+                    .into(),
-+                diagnostic: None,
-+                diagnostic_unavailable: None,
-+                request_context: None,
-+                metadata_getter: None,
-+                limit_evidence: None,
-+            }),
-+            kill_error: value.kill_error,
-+            wait_error: value.wait_error,
-+            pipe_error: value.pipe_error,
-+            kill_requested: value.kill_requested,
-+        }
-+    }
 +}
 +
 +/// Borrowed load data. The initial configured maximum is fixed at 2048 frames.
@@ -37434,35 +38036,6 @@ new file mode 100644
 +    pub time_sig_denominator: i32,
 +    /// Exact current class identifier, never an automatic fallback.
 +    pub class_id: &'a str,
-+}
-+
-+/// Bounded, un-clamped PluginInfo fields returned by the helper.
-+#[derive(Debug)]
-+pub struct LoadedPlugin {
-+    /// Reported vendor.
-+    pub vendor: String,
-+    /// Reported name.
-+    pub name: String,
-+    /// Reported version.
-+    pub version: String,
-+    /// Reported category.
-+    pub category: String,
-+    /// Actual instantiated class identifier.
-+    pub uid: String,
-+    /// Reported editor capability; the closed client has no editor operations.
-+    pub has_gui: bool,
-+    /// Reported input buses; checked layouts are separate owner queries.
-+    pub audio_inputs: i32,
-+    /// Reported output buses.
-+    pub audio_outputs: i32,
-+    /// Reported total output channels.
-+    pub output_channels: i32,
-+    /// Reported event input capability.
-+    pub has_midi_input: bool,
-+    /// Reported event output capability.
-+    pub has_midi_output: bool,
-+    /// Bounded current/retired class mappings.
-+    pub compatibility: Vec<ClassCompatibility>,
 +}
 +
 +/// Exact Q128 output, available only after a successful strict exchange.
@@ -37593,36 +38166,11 @@ new file mode 100644
 +            time_sig_denominator: spec.time_sig_denominator,
 +            class_id: Some(spec.class_id),
 +        };
-+        match self.exchange(request, ReplyShape::PluginInfo, deadline)? {
-+            HostResponse::PluginInfo {
-+                vendor,
-+                name,
-+                version,
-+                category,
-+                uid,
-+                has_gui,
-+                audio_inputs,
-+                audio_outputs,
-+                output_channels,
-+                has_midi_input,
-+                has_midi_output,
-+                compatibility,
-+            } => Ok(LoadedPlugin {
-+                vendor,
-+                name,
-+                version,
-+                category,
-+                uid,
-+                has_gui,
-+                audio_inputs,
-+                audio_outputs,
-+                output_channels,
-+                has_midi_input,
-+                has_midi_output,
-+                compatibility,
-+            }),
-+            _ => unreachable!("strict plugin-info shape"),
-+        }
++        Ok(LoadedPlugin::from_plugin_info(self.exchange(
++            request,
++            ReplyShape::PluginInfo,
++            deadline,
++        )?))
 +    }
 +    /// Set Offline mode on the helper owner before preparation/start.
 +    pub fn set_offline(&mut self, deadline: Instant) -> Result<(), Failure> {
