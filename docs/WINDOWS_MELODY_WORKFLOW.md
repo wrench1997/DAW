@@ -446,6 +446,47 @@ a fresh zero owned-process inventory and explicit CPU/native handback. Preserve
 or full project flow was requested. Stack evidence is still needed to identify
 the wait that WCT did not expose.
 
+Source68 passed 45 offline metadata fixtures, the installed SDK x64 layout and
+function-signature compile assertions, Add-Type with 25 managed capture checks,
+C++ `/W4 /WX` compilation, and default helper/test artifact builds. All 284 source
+pins were unchanged. An initial native preflight refused the still-open VK3D
+PID8068 through the existing occupancy guard; no private bins or NI test started.
+The requested inner exit2 was initially misrecorded as observed status; preserve
+the original refusal and independent validation recording actual outer exit1.
+The unsaved GUI was retained. Only after the peer saved, normally closed and
+explicitly handed off did the single actual NI attempt run.
+
+Test PID26516 actually exited101 (outer7.693s, zero validation errors). Helper
+PID21868, logged main TID20900, returned component terminate result0 and the Drop
+body, then recorded ExitDll Before at451214800ns with no Returned. It was forcibly
+terminated and actually reaped with exit1; ordinary scanning still failed with
+UncleanRetirement. The 20 WCT callbacks and actual Close/owner/raw EOF completed.
+
+The external Normal|ThreadInfo MiniDumpWriteDump call actually returned true:
+126110 bytes, SHA256 `f31a3fa4f8b721af5a4059494cabbab89f6748fb0880116292d11a1b3795f483`.
+The original native-output handle hash matched the independently reopened file.
+Fresh PID/path/creation and current numeric TID/creation checks passed; actual
+collector DLL paths matched the pinned SDK pair. Read handles and collector DLLs
+were released before ending the same NoExit host (actual outer exit101). Original
+cleanup budgets and privileges were unchanged; capture may perturb timing.
+
+Reader01 actually rejected the same file with exit4, `duplicate_stream`: its
+14-entry directory includes four all-zero UnusedStream slots, which the parser
+treated as duplicate payload streams. Preserve the original dump, failed metadata
+and 45 passing old fixtures. New reader02 admits only type0/size0/RVA0 unused slots;
+nonzero entries and duplicate meaningful streams remain guarded. Its regressions,
+actual reparse and C++ frame reading are still unrun. No new NI capture is needed
+to debug this offline format issue.
+
+Read-only lifecycle review establishes that final Shutdown stops the host message
+pump and removes its TLS dispatcher before plugin-slot clearing; OLE and the
+message-only command HWND remain alive during ExitDll. Metadata loading probes
+and releases an unattached createView. Host source cannot establish NI's hidden
+HWNDs or wait ownership, so a message dependency remains an unproved hypothesis.
+Preserve `source68-*`, the four `minidump-*-01/` gate directories and
+`windows-kontakt-default-scan-run-05*` outside Git. This round requested no NOIRE
+state, MIDI/DSP, editor, device, save/reopen or export and proves none of them.
+
 Use private new directories and explicit opt-in ignored QA only after the coordinated desktop/build window is available. Preserve the original project and identify the exact test/helper/source inputs.
 Normal source checks can be reproduced independently; real NI tests are intentionally excluded:
 

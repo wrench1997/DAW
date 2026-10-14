@@ -61,6 +61,14 @@ Source67 在再次明确交接的独立窗口完成修正版04采集。相同 bo
 
 本次原 helper 的实际 image path/creation 和同一 process/thread handle 存活核对通过；342 条进程记录包含 2 个 direct child，PID14120 因 path mismatch 排除，唯一匹配 PID15912。4889 条线程记录中匹配 19 个 helper 线程，各提交一次异步 WCT（false/997 为正常 Pending），19 个 callback status0、都只有一个 Thread 节点，无等待对象/拥有者。日志 TID12940 的节点为 Blocked，数字关联及观测区间身份成立；marker 不含线程 birth，严格原 emitter incarnation 仍未证明。IsCycle=false 不证明没有死锁，原始 WaitTime 数字不当作本次等待时长。实际 Close 返回、owner completed、raw EOF 后才退出同一 NoExit 宿主，fresh owned 进程为 0，再明确交回 CPU/native 窗口。证据在 `windows-kontakt-default-scan-run-04*`、`waitchain-observer-source-checks-07/` 和 `source67-default-*`。未改权限、预算或用户作品，也未请求 NOIRE 状态/声音或完整工程流程；下一步需调用栈证据定位 WCT 未给出的等待点。
 
+Source68 已实际通过离线元数据 45 项纯回归、SDK x64 sizeof/offsetof/函数签名编译断言、C# Add-Type 与 25 项托管检查、C++ `/W4 /WX` 编译，以及普通 helper/test EXE 构建；全部 284 正式输入前后不变。最初采集尝试因仍打开的 VK3D PID8068 被原占用 guard 拒绝，未创建 private bins 或启动 NI；原拒绝及请求 inner exit2/外层实际 exit1 的独立校正保留。未弱化 guard、强关其他聊天的未保存界面或修改权限。
+
+对方正常保存关闭并明确交接后，本轮唯一实际 NI 测试 PID26516 exit101（外层 7.693 秒、校验错误0）；helper PID21868、主日志 TID20900。组件 terminate result0、Drop 正文已返回，ExitDll Before（451214800ns）仍无 Returned；生产强制终止并实际 reap exit1，普通扫描仍为 UncleanRetirement。实际 WCT 20 个 callback 的 Close/owner/raw EOF 完成；这不证明健康退出。
+
+外部单次 Normal|ThreadInfo 快照 API 实际返回 true，126110B、SHA `f31a3fa4f8b721af5a4059494cabbab89f6748fb0880116292d11a1b3795f483`；原写入 handle 与关闭后独立文件的 SHA/size 一致，fresh process/TID birth 绑定、实际 DLL 路径及所有读取 handle/DLL 释放完成后，才结束同一 NoExit 宿主（外层实际 exit101）。未延长原清理预算，诊断可能扰动时序。离线 reader01 实际 exit4：`duplicate_stream`；目录含四个 type0/size0/RVA0 的 SDK 空槽，已有 parser 将其重复误拒。原文件、失败和 45 项旧回归保留；reader02 仅兼容全零 UnusedStream，新的回归与实文件解析仍未测，C++ 实际读帧也未运行。
+
+只读源码复核确认最终 Shutdown 先退出主消息循环并移除 TLS dispatcher，再清空 plugin slot；ExitDll 执行时 OLE 和 message-only command HWND 仍存活。普通 metadata 加载会探测并释放未挂载的 createView；宿主源码不证明 NI 自有 HWND/工作线程的等待关系。消息依赖仍是假设，不能以此盲改退出顺序或宣布原因已明。证据在 `source68-*`、`minidump-reader-pure-01/`、`minidump-sdk-layout-build-01/`、`minidump-capture-managed-checks-01/`、`minidump-frames-build-01/` 和 `windows-kontakt-default-scan-run-05*`，均在 Git 外；NOIRE 状态/声音和完整保存重开/导出仍未由本轮验证。
+
 - Channel Rack、钢琴卷帘和 Playlist 的视图布局、缩放、定位/放置与按钮反馈已调整。
 - 钢琴黑白键几何、按下/松开及播放反馈、键盘试听和试听取消已接入实际状态。
 - 播放启动与循环重启等待 Timeline、参数和插件实际确认，避免错误首音/旧 epoch。
