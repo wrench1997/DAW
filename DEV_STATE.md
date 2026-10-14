@@ -57,6 +57,10 @@ Source66 在已推送 `07e08de` 上实测身份日志：普通 helper/test artif
 
 实机采集被 `Direct child enumeration exceeded cap 128.` 拒绝，WCT session 未打开、Chains 为空；采集 owner 和 raw EOF 均完成后才退出同一 NoExit 宿主，fresh owned Cargo/helper/test 为 0。源码复核发现 do-while 中 continue 跳过 Process32NextW、重复同一候选直到上限；不能把 128 计数解释为 128 个不同子进程，也不能宣称已有死锁证据。实际候选的可执行路径没有记录，私有相邻 helper 的文件预检不替代实际 child image 绑定。新枚举修正及其回归仍在 target 准备、未编译/实测；原预算、权限和健康退出要求不改。证据在 `windows-kontakt-default-scan-run-03*`、`waitchain-observer-source-checks-01..05/`、`waitchain-sdk-layout-build-01/`；新采集仍需独立源码/二进制绑定和再次协调窗口。
 
+Source67 在再次明确交接的独立窗口完成修正版04采集。相同 bounded 枚举核心的跳过/失败/重复/上限回归及原检查实际 279 项通过（20 组 callback/process 用例另含枚举检查），普通 helper/test artifact 构建通过，284 输入 pins 前后不变。唯一测试 PID25468 exit101，外层 5.547 秒、校验错误 0；helper PID15912 元数据返回、ExitDll Before（486396700ns）后未返回，仍强制终止并实际 reap exit1。采集成功不改变普通扫描失败结论。
+
+本次原 helper 的实际 image path/creation 和同一 process/thread handle 存活核对通过；342 条进程记录包含 2 个 direct child，PID14120 因 path mismatch 排除，唯一匹配 PID15912。4889 条线程记录中匹配 19 个 helper 线程，各提交一次异步 WCT（false/997 为正常 Pending），19 个 callback status0、都只有一个 Thread 节点，无等待对象/拥有者。日志 TID12940 的节点为 Blocked，数字关联及观测区间身份成立；marker 不含线程 birth，严格原 emitter incarnation 仍未证明。IsCycle=false 不证明没有死锁，原始 WaitTime 数字不当作本次等待时长。实际 Close 返回、owner completed、raw EOF 后才退出同一 NoExit 宿主，fresh owned 进程为 0，再明确交回 CPU/native 窗口。证据在 `windows-kontakt-default-scan-run-04*`、`waitchain-observer-source-checks-07/` 和 `source67-default-*`。未改权限、预算或用户作品，也未请求 NOIRE 状态/声音或完整工程流程；下一步需调用栈证据定位 WCT 未给出的等待点。
+
 - Channel Rack、钢琴卷帘和 Playlist 的视图布局、缩放、定位/放置与按钮反馈已调整。
 - 钢琴黑白键几何、按下/松开及播放反馈、键盘试听和试听取消已接入实际状态。
 - 播放启动与循环重启等待 Timeline、参数和插件实际确认，避免错误首音/旧 epoch。

@@ -421,6 +421,31 @@ Preserve `windows-kontakt-default-scan-run-03*`, source-check cohorts01..05 and
 explicit resource handoff; budgets, privileges and healthy-exit requirements stay
 unchanged.
 
+Source67 acquired a new explicit resource handoff and tested collector04's shared
+bounded enumeration core. All 279 managed checks passed, including skip/error/
+duplicate/cap regressions; default helper/test artifact builds passed and all 284
+source pins were unchanged. Test PID25468 exited101 (outer 5.547s, zero validation
+errors). Helper PID15912 returned metadata but never recorded ExitDll Returned
+after Before at 486396700ns; production forcibly terminated and actually reaped
+it with exit1. Successful collection does not reclassify the failed scan.
+
+The actual child image path/creation and retained process/thread interval checks
+matched. The 342 process records contained two direct children: PID14120 was
+excluded for PathMismatch, leaving the unique bound helper PID15912. Of 4889
+thread records, 19 helper threads were queried once through asynchronous WCT;
+false/997 is the expected pending submission. All 19 callbacks had status0 and
+returned only a singleton Thread node. The node numerically correlated with
+logged TID12940 was Blocked, with no waiting object or owner supplied. Its interval
+binding passed, but the marker lacks thread birth identity, so strict original
+emitter incarnation remains unproven. IsCycle=false is not proof of no deadlock;
+raw WaitTime is not treated as this attempt's wait duration. Actual Close return,
+owner completion and raw EOF preceded ending the same NoExit host, followed by
+a fresh zero owned-process inventory and explicit CPU/native handback. Preserve
+`windows-kontakt-default-scan-run-04*`, `waitchain-observer-source-checks-07/` and
+`source67-default-*`. No privileges, budgets or works changed, and no NOIRE sound
+or full project flow was requested. Stack evidence is still needed to identify
+the wait that WCT did not expose.
+
 Use private new directories and explicit opt-in ignored QA only after the coordinated desktop/build window is available. Preserve the original project and identify the exact test/helper/source inputs.
 Normal source checks can be reproduced independently; real NI tests are intentionally excluded:
 
