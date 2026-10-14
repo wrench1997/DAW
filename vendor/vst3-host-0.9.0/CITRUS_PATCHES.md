@@ -857,3 +857,32 @@ Private git apply --check/apply succeeded; complete file inventory and raw bytes
 matched. Patch SHA256: ed3a7915361126d278b7085f0e57edaaf2eaf64a785c6196d9991115783acd94. Original archive/commit/LICENSE/VCS pins are
 unchanged; only the two provenance digest literals in each packaging Python file
 are refreshed. Evidence remains in target/backend-reliability-20261014/source70-provenance-01.
+
+
+### Optional factory host-context offer (source74)
+
+Source73's actual factory-only Kontakt 8.4.1 attempt returned E_NOTIMPL from
+IPluginFactory3::setHostContext, before declaration getters. That attempt failed,
+while its helper naturally exited0 and was actually reaped without kill/pipe
+errors. Ordinary component scan retirement and NOIRE state/audio are separate.
+
+Only this new declaration-only API now accepts the SDK kNotImplemented result
+from the context setter. It still offers context, retaining it through module
+unload; other setter failures and all required getter failures remain errors.
+The shared getter success predicate, runtime loading, scanner/cache/verified,
+class selection, protocol, cleanup and existing budgets are unchanged. The
+[official SDK hosting helper](https://github.com/steinbergmedia/vst3_public_sdk/blob/master/source/vst/hosting/module.cpp)
+offers context without propagating the setter result into class declarations.
+
+New mock regressions distinguish unsupported context from mandatory factory
+and base-class metadata, retain zero createInstance calls, and preserve factory
+release before module unload. Formatting passed; new Rust compilation/tests and
+actual NI behavior remain UNRUN at this provenance regeneration. Source73's
+passed31 factory regressions do not qualify this new branch or production scan.
+
+The complete patch was regenerated from the same original archive against all
+74 current source files, excluding only this document/CITRUS.patch.
+Private git apply --check/apply succeeded; complete inventory and raw bytes
+matched. Patch SHA256: 256a299ccafb7450ed89aaa8ac8d8780982e6539b90000561ab59bc1ecbd53f9. Original archive/commit/LICENSE/VCS pins are
+unchanged; only the two provenance digest literals in each packaging Python file
+are refreshed. Evidence remains in target/backend-reliability-20261014/source74-provenance-01.

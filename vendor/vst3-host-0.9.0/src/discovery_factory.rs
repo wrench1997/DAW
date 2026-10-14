@@ -53,6 +53,8 @@ pub struct FactoryClassMetadata {
 /// No `createInstance`, `initialize`, component query, or `createView` is called.
 /// Every factory/interface reference is released before normal module unload;
 /// the host context outlives that unload. The result is returned only afterwards.
+/// Factory3's host-context offer may return `kNotImplemented`; other setter errors
+/// and all required metadata-getter failures remain errors.
 /// Base class identity/category/cardinality must agree with any successful
 /// extended getter; failed optional getters fall back without invented values.
 /// Existing `ExitDll`/`FreeLibrary` behavior is unchanged, including failures to
@@ -103,7 +105,9 @@ fn read_factory(
         let factory2 = factory.cast::<IPluginFactory2>();
         if let Some(factory3) = &factory3 {
             let result = factory3.setHostContext(context);
-            if !succeeded(result) {
+            // A Factory3 may provide class metadata but not implement this
+            // optional context offer. Do not relax any metadata getter result.
+            if !succeeded(result) && result != kNotImplemented {
                 return Err(invalid(format!("setHostContext failed: {result:#x}")));
             }
         }
@@ -565,6 +569,36 @@ mod tests {
     }
 
     #[test]
+    fn unimplemented_host_context_preserves_full_declarations_and_unload_order() {
+        let expected = probe(&Arc::new(State::default()), true).unwrap();
+        let state = Arc::new(State {
+            context_result: kNotImplemented,
+            ..State::default()
+        });
+        let result = probe(&state, true).unwrap();
+        assert_eq!(result, expected);
+        assert!(state.context_received.load(Ordering::Relaxed));
+        // probe also checks zero createInstance calls. The mock never exposes
+        // a component/controller, so no initialize or createView path exists.
+        assert_eq!(
+            state.trace.lock().unwrap().as_slice(),
+            [
+                "module.factory",
+                "factory.context",
+                "factory.info",
+                "factory.count",
+                "class.base.0",
+                "class.unicode.0",
+                "class.base.1",
+                "class.unicode.1",
+                "factory.drop",
+                "module.drop",
+                "probe.returned",
+            ]
+        );
+    }
+
+    #[test]
     fn failed_unicode_getter_falls_back_to_factory2_without_creating_instance() {
         let state = Arc::new(State {
             unicode_result: kNotImplemented,
@@ -641,18 +675,21 @@ mod tests {
 
     #[test]
     fn failed_factory_info_is_not_replaced_by_zero_initialized_metadata() {
-        let state = Arc::new(State {
-            factory_result: kNotImplemented,
-            ..State::default()
-        });
-        let error = probe(&state, true).unwrap_err().to_string();
-        assert!(error.contains("getFactoryInfo failed"));
-        assert!(!state
-            .trace
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|event| event == "factory.count"));
+        for context_result in [kResultOk, kNotImplemented] {
+            let state = Arc::new(State {
+                factory_result: kNotImplemented,
+                context_result,
+                ..State::default()
+            });
+            let error = probe(&state, true).unwrap_err().to_string();
+            assert!(error.contains("getFactoryInfo failed"));
+            assert!(!state
+                .trace
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event == "factory.count"));
+        }
     }
 
     #[test]
@@ -673,22 +710,28 @@ mod tests {
 
     #[test]
     fn failed_base_class_getter_is_an_error_not_an_omitted_class() {
-        let state = Arc::new(State {
-            unicode_result: kNotImplemented,
-            extended_result: kNotImplemented,
-            base_result: kInvalidArgument,
-            ..State::default()
-        });
-        assert!(probe(&state, true)
-            .unwrap_err()
-            .to_string()
-            .contains("class 0 getClassInfo failed"));
-        assert!(!state
-            .trace
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|event| event.starts_with("class.unicode")));
+        for (context_result, base_result) in [
+            (kResultOk, kInvalidArgument),
+            (kNotImplemented, kNotImplemented),
+        ] {
+            let state = Arc::new(State {
+                unicode_result: kNotImplemented,
+                extended_result: kNotImplemented,
+                context_result,
+                base_result,
+                ..State::default()
+            });
+            assert!(probe(&state, true)
+                .unwrap_err()
+                .to_string()
+                .contains("class 0 getClassInfo failed"));
+            assert!(!state
+                .trace
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|event| event.starts_with("class.unicode")));
+        }
     }
 
     #[test]

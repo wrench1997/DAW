@@ -5,13 +5,14 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
-Source72（`87e3141`）最新云端实测：quality 的独立 factory 回归 31 passed；完整 root 套件主程序 2257、helper 52、协议 13，共 2322 passed / 11 ignored。严格 Clippy、双 bin 构建、helper 协议 smoke 和无默认 feature 检查均通过；原子计数兼容修复已有 Source71/72 验证，Rust 1.97.1 发布工具链不变。
+Source73（`329fe23`）最新云端实测：quality 的独立 factory 回归 31 passed；quality/preview 均通过完整 root 套件，主程序 2258、helper 52、协议 13，共 2323 passed / 11 ignored。严格 Clippy 和构建通过；quality 的 helper 协议 smoke、无默认 feature 检查也通过。上轮两个时序夹具修复及新增受控回归均已执行通过，原产品期限、状态、历史和 ownership 断言保留；Rust 1.97.1 发布工具链不变。
 quality 整体仍为 failure：最后的 native paint 前/后捕获失败，同进程按钮的 PrintWindow 诊断也返回 false；control/state/lifecycle/cleanup 独立通过。这不证明 Kontakt 界面故障，也不是 GUI 验收通过。
-preview 为 2255 passed / 2 failed / 11 ignored：保存超时后的后台 ownership 断言、旧整曲 Review 拒绝后的 reset 计数断言失败。源码发现测试持有 gate 会自行在 5 秒到期，以及 Review 已绑定不等于先前 worker reset 已完成。当前仅修正两个测试模块：显式 hold/release、Drop 释放后实际 join；等待同一 binding 的真实 settlement Ready 后再采拒绝计数，并新增受控 held-reset 回归。原产品期限、ownership、计数、文件、状态及历史保护断言保留。格式通过，新增修复尚未编译/运行；原日志未记录 gate 到期或 reset 完成时序，源码解释仍待回归确认。
-上轮 saved-fingerprint 夹具修复的原重启用例与新负/正对照在本轮均通过，没有放宽产品 dirty 判断。
-Source70 新默认 helper/QA 此前在协调窗口内实际构建成功；尚未为后续修复源码重建本机二进制，也未启动新 NI 实验。Source69 单次 Kontakt 诊断仍失败：额外消息 pass 实际返回、队列为空，ExitDll 仍未返回，helper 被原期限强制结束并实际回收。
-该诊断保持默认关闭，不计为修复。独立 factory-only 查询已实现：复用现有 helper 与保留式清理，只读 factory 声明，不调用组件/控制器/view 实例化；它尚未接入生产扫描，不改变现有 verified 索引或运行时默认类选择。
-历史 `b37cc39` 的四项失败修复已有 Source70/71 云端回归通过，原失败日志和断言保留。完整 vendor 补丁实际重放 74 个源文件逐字节一致，170 项打包测试通过；后续 root-only 修复未改这些输入。factory-only NI 实测仍未运行；新实验以相关源码/后台 CI 步骤、实际新默认构建及资源交接为门，不以云端截图失败冒充后台未编译或插件界面故障，也不冒称整个 quality 通过。
+preview 已完成静态 CRT release 构建，随后包内链接校验失败：`Broken package document link: DEV_STATE.md -> docs/WINDOWS_MELODY_WORKFLOW.md`；最终 ZIP smoke 和上传未执行。Source74 已将工作流文档补进必需清单，新增真实文档闭包、ZIP 复制/提取与缺文档拒绝回归；完整打包测试 175 passed，实际发行包仍待云端重建验证。
+
+Source73 本机新默认 helper/QA 实际构建 exit0。协调窗口内的唯一 factory-only NI 测试 exit101：`setHostContext failed: 0x80004001`，声明 getter 尚未执行。helper 自然 exit0、实际 Reaped、没有 kill 或 shutdown/wait/pipe 错误；这是该失败路径的清理通过，不是元数据或普通扫描通过。无组件/控制器/view、音色状态、MIDI/DSP、声卡或作品请求。
+新修复保留 context offer 和卸载前生命周期，仅接受该 setter 的 SDK `kNotImplemented`，其他 setter 错误及必需 getter 失败仍拒绝；不能将它加入通用成功判定。依据是 [Steinberg 官方宿主实现](https://github.com/steinbergmedia/vst3_public_sdk/blob/master/source/vst/hosting/module.cpp)：提供 context，但不把 setter 返回值作为声明查询前提。此修复尚待编译、回归及再次实机确认。
+
+factory-only 尚未接入生产扫描，不改变 verified 索引或运行时默认类选择。Source69 的普通组件扫描仍在 ExitDll 未返回并被原期限强制回收；此次不创建组件的失败路径健康退出不能替代该问题。Source74 已刷新完整 vendor provenance，从原始 archive 实际重放 74 个源文件逐字节一致；新 Rust 回归及 NI 实测待执行。当前仅源码、Python 和云端工作，不占用本机桌面、声卡或 native 编译窗口。
 
 ## 当前支持边界
 

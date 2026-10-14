@@ -139,6 +139,18 @@ class PeTests(unittest.TestCase):
             pkg.inspect_pe(pe_image(imports=()))
 
 
+class RepositoryDocumentTests(unittest.TestCase):
+    def test_actual_release_document_set_has_complete_local_link_closure(self):
+        source = Path(__file__).resolve().parents[1]
+        names = (set(pkg.SOURCE_FILES) | pkg.VENDOR_FILES |
+                 {name for name in pkg.OPTIONAL_SOURCE_FILES if (source / name).exists()})
+        self.assertIn("docs/WINDOWS_MELODY_WORKFLOW.md", pkg.SOURCE_FILES)
+        payload = {name: pkg.read_input(pkg.repository_file(source, name)) for name in names}
+        # Exercise the current published docs, not the link-free synthetic
+        # placeholders used by package policy tests. No executable or SDK runs.
+        pkg.check_document_links(payload)
+
+
 class PackageTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -295,6 +307,32 @@ class PackageTests(unittest.TestCase):
             "[App](docs/SELECTED_CLIP_APP.md)\n")
         info = pkg.verify_package(self.create())
         self.assertTrue(set(guides) <= set(info["source_documents"]))
+
+    def test_windows_melody_workflow_and_linked_guide_are_copied_and_extracted(self):
+        workflow = "docs/WINDOWS_MELODY_WORKFLOW.md"
+        keyboard = "docs/PIANO_KEYBOARD_EDITING.md"
+        workflow_bytes = ("# Windows melody workflow\r\n"
+                          "[Keyboard](PIANO_KEYBOARD_EDITING.md#shortcuts)\r\n"
+                          "[External](https://example.org/melody)\r\n").encode("utf-8")
+        keyboard_bytes = b"# Keyboard\n[README](../README.md)\n"
+        (self.repo / "DEV_STATE.md").write_text(
+            f"[Windows melody workflow]({workflow})\n", encoding="utf-8")
+        (self.repo / workflow).write_bytes(workflow_bytes)
+        (self.repo / keyboard).write_bytes(keyboard_bytes)
+        archive = self.create()
+        extracted = self.root / "melody-extracted"
+        info = pkg.verify_package(archive, extracted)
+        for name, expected in ((workflow, workflow_bytes), (keyboard, keyboard_bytes)):
+            with self.subTest(name=name), zipfile.ZipFile(archive) as handle:
+                self.assertIn(name, info["source_documents"])
+                self.assertEqual(handle.read(f"{archive.stem}/{name}"), expected)
+                self.assertEqual((extracted / name).read_bytes(), expected)
+
+    def test_windows_melody_workflow_is_required_even_without_a_parent_link(self):
+        (self.repo / "docs/WINDOWS_MELODY_WORKFLOW.md").unlink()
+        with self.assertRaisesRegex(pkg.PackageError, "Missing|non-regular"):
+            self.create()
+        self.assertFalse((self.root / "out").exists())
 
     def test_optional_media_document_is_included_when_present(self):
         (self.repo / "docs/PROJECT_MEDIA.md").write_text("Media recovery guide\n")
@@ -1267,8 +1305,8 @@ class ProvenanceConstantsTests(unittest.TestCase):
         self.assertEqual(pkg.VENDOR_ARCHIVE_SHA256, "6ec579d54bd13b83c60c1fd8bb756cf234e36ccbfb4833ff756b417e64db7fea")
         self.assertEqual(pkg.VENDOR_COMMIT, "ed054908cfe057694d8cf037d0c39dfb5eb4c2ca")
         self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/LICENSE"], "a65a537295910b776a8b2edb2e7410c3b0e975ca6388994e032c4d1842b4952d")
-        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS.patch"], "ed3a7915361126d278b7085f0e57edaaf2eaf64a785c6196d9991115783acd94")
-        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS_PATCHES.md"], "f10034fde97ec14e04632f248e86ec446cace7b2d43037258923cc1fb7d068d2")
+        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS.patch"], "256a299ccafb7450ed89aaa8ac8d8780982e6539b90000561ab59bc1ecbd53f9")
+        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS_PATCHES.md"], "4f4fe110fa07e0efa02a48c2c405950e5ca0586650808ddde611a96ddfe9ffaf")
 
 
 

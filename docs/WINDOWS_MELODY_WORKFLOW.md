@@ -651,9 +651,10 @@ the rejection counters. A new held-reset regression separates callback ACK and
 Review availability from worker Waiting, checks that rejecting the old Review
 changes no transport/file/model/capture count, then releases the original gate
 and verifies Ready. These are source-supported explanations; the old logs did
-not capture gate expiry or the competing reset's completion. Both repaired
-modules passed formatting, not Rust compilation or execution yet. Product
-deadlines and original safety assertions are unchanged.
+not capture gate expiry or the competing reset's completion. Source73 actually
+compiled and passed both repaired modules and their new controlled regressions
+in quality and preview. Product deadlines and original safety assertions are
+unchanged.
 Preserve `ci-87e3141-windows-{quality,preview}-01.log` and corresponding
 `source72-*-ci-{actual-terminal,jobs-actual-terminal}-01.json` outside Git.
 
@@ -663,12 +664,62 @@ an explicit resource handoff. Record the whole workflow's actual conclusion;
 independent cloud editor-paint failure does not replace those step results and
 cannot be relabeled as a complete quality or GUI pass.
 
-In the explicitly handed-off local window, the new default helper and QA Cargo
-artifacts actually built exit0 with source/binary bindings and no pin errors.
-No NI, GUI, GPU or audio device was started. The window was returned after both
-actual exec owners completed and a fresh heavy-process inventory was0. The
-factory-only native runner is prepared but unrun; its former source/CI/binary
-bindings must not be relabeled as qualification of the next repaired cohort.
+The actual [Source73 quality run38646579485](https://github.com/wrench1997/DAW/actions/runs/38646579485)
+passed31 dependency factory tests and2258 app+52 helper+13 protocol tests:
+2323 passed/11 ignored. Formatting, strict Clippy, both bins, protocol/harness
+smoke, no-default-feature and source-built editor fixtures passed. The workflow
+still failed its final native paint capture; control/state/lifecycle/cleanup
+passed separately, without establishing a Kontakt GUI pass.
+
+[Preview run38646579522](https://github.com/wrench1997/DAW/actions/runs/38646579522)
+also passed2323 root tests/11 ignored, strict Clippy and the static-CRT release
+build. Final packaging then failed with `Broken package document link:
+DEV_STATE.md -> docs/WINDOWS_MELODY_WORKFLOW.md`. Final ZIP smoke/upload were
+skipped. Source74 adds the workflow to the required source-document list; all11
+local direct guides were already included. New regressions check the actual
+release document set's link closure, exact ZIP copy/extraction and missing-required-
+document refusal. All175 packaging tests actually passed after refreshed vendor
+pins (19.439s). A rebuilt real preview archive is still unverified.
+Preserve `ci-329fe23-windows-{quality,preview}-01.log` and the corresponding
+`source73-*-ci-{actual-terminal,jobs-actual-terminal}-01.json`. The earlier
+preview observation remains a distinct in-progress snapshot.
+
+In Source73's explicitly handed-off local window, the new default helper and QA
+Cargo artifacts actually built exit0 with source/binary bindings and no pin
+errors. The first native runner failed its DateTime ParseExact preflight before
+copying binaries or launching a native test; the unchanged original is retained.
+Runner02 accepts actual DateTime/DateTimeOffset values as well as ISO strings.
+It started exactly one factory-only Kontakt test, PID84964, which actually
+exited101 (outer diagnostic3.792s, zero validation errors). The request failed
+with `ProbeFactory: Failed to load plugin: factory-only metadata:
+setHostContext failed: 0x80004001`; metadata is null and the expected class is
+not yet verified. This is a new setter-success prerequisite, not a failed
+declaration getter or evidence about NOIRE.
+
+Helper PID73524 naturally exited0 and was actually Reaped, without kill or
+shutdown/wait/pipe errors. EOF, editor.close, aggregate dispatcher destruction,
+slot clear, OLE uninitialization and Windows run completion were observed. This
+proves retirement of this failed factory-only attempt, not healthy ordinary
+component scanning or a source-worker Join. The persistent NoExit host received
+`exit 101`, while its outer exec actually reported exit1; retain both facts.
+All native/pipe owners completed and fresh heavy count0 preceded explicit
+handback. No GUI, GPU, audio device, component/controller/view creation, state,
+MIDI/Process or project access was requested. Preserve `source73-factory-native-run-01/`,
+its sibling logs/terminal, both actual runner revisions and the default-build
+receipts. Do not relabel those bindings as a later source cohort's qualification.
+
+The next narrow repair retains the Factory3 context offer and its lifetime
+through module unload, accepting only the setter's SDK `kNotImplemented` as an
+optional unsupported offer. Other setter failures and required getter failures
+remain errors; the generic success predicate is unchanged. The
+[official Steinberg hosting implementation](https://github.com/steinbergmedia/vst3_public_sdk/blob/master/source/vst/hosting/module.cpp)
+offers the context without propagating the setter result into declaration
+queries. Regression coverage must distinguish optional context from required
+factory/class getters, retain zero createInstance calls and verify reference/
+module release order. Source74 refreshed vendor provenance and actually replayed
+all74 source files byte-for-byte from the original archive. The new Rust repair
+still needs compilation/tests and a new bound actual NI attempt. It does not activate a
+production scanner or alter old runtime loading, default class, cache or budgets.
 
 The existing GitHub Windows quality/preview workflows can run source checks away
 from the local desktop. A cloud coding environment still needs the repository and
