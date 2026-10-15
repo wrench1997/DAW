@@ -490,12 +490,12 @@ Neither diagnostic timing nor Save is established as the failure's cause.
 Native06 below reused those bins/input/cold sequence/options with exact timing
 off. Native04's cleanup-only primary places the failure after render checks but
 does not show whether Shutdown was consumed or which teardown boundary stalled;
-its AppDrop marker follows export failure. The next discriminating run reuses
-Native05's frozen bins, validation02, exact timing on and message-pass off, adds
-only Play/Escape, and exports to a fresh directory without Ctrl+S or editor use.
-Keep clone reader/main/dispatcher/component/ExitDll boundaries and actual exit
-handles. This separates playback from Save and SDK-A/B changes. Do not extend
-deadlines or make forced termination count as successful export.
+its AppDrop marker follows export failure. Native08 below has now reused the
+Native05 bins and validation02 with a Play/Escape prelude, no Ctrl+S or editor,
+exact timing on and message-pass off. Its successful publication and actual exit
+boundaries narrow the next comparison to Save-related or intermittent behavior;
+the preference-seed difference prevents strict single-variable attribution.
+Do not extend deadlines or make forced termination count as successful export.
 
 Evidence in `target/backend-reliability-20261014/normal-noire-workflow-20261015-01/`:
 `launch-05.json`, `cold-open-and-export-native05-01.json`, `stderr-05.log`,
@@ -586,6 +586,45 @@ physical used. Preserve the workflow's `bin-native07/freeze-receipt.json`,
 `ordinary-whole-native07-pcm-audit-01.json` and
 `native05-native06-native07-pcm-comparison-01.json`; the parent contains
 `native07-resource-handback-01.json`.
+
+### Native08: playback before export succeeds once; Save remains open
+
+This run reused Native05's frozen Source87 main/helper, validation02, exact
+timing on and diagnostics 1, with message-pass absent. Normal Open restored Kontakt
+Loaded, Channel 1→FX1, 2304 samples and the iCON output at 48 kHz/XRUN0. Play was sampled
+at 002:02:02; Escape stopped and rewound to 001:01:00 while the project remained
+Saved. No Ctrl+S, parameter/note edit, editor opening or NKI reload followed.
+The pre-Native06 preference seed is not a Native05 launch preimage, so this is
+not a strict single-variable comparison with Native05.
+
+Ordinary Whole Review used 48 kHz/stereo/24-bit PCM, attenuation above 0.95 and explicit
+acceptance of a 3000 ms fixed tail. Native Save navigated into the new
+`native08-play-only` directory, where Untitled.wav was absent before submission.
+No Stop/Escape/Cancel followed Save. Actual publication is 3,024,044 B/504000 frames/
+10.500 s. Independent decoding found signal in all eight onset windows, finite
+samples, 0 clipped samples, peak −26.738 dBFS, and exact digital zero in the final 20 ms
+and last frame. This WAV has not been listened to; complete unknown release
+remains unqualified.
+
+At −100 dBFS its first signal is frame 394/8.208 ms, 256 frames later than Native05. The first
+400 ms overlap has exactly zero RMS difference at that offset. Differences are
+limited to frames 129..33151; all later PCM and the tail match Native05. This adds another
+old-Source87 Q128 onset difference, not SDK-A/B acceptance or a causal explanation.
+
+Clone 107928 actually consumed Shutdown; component terminate returned SDK 0 and
+ExitDll returned after 839.011 ms. Its Main-consume→Windows-run-return span was
+1098.569 ms. Reader and Main clocks have different origins. Held OS handles after
+normal Alt+F4 confirmed App 83328, source 76024, clone 107928 and observer exec 5501
+all exited 0, with no binding failures or budget violation. Fresh process/window
+counts were 0 before handback; resource peaks were 2.222 GiB owned private and
+27.917 GiB global physical used. The Play/Escape prelude is usable in this one
+run; Native04's Save factor and intermittent cleanup failure remain unresolved.
+
+Preserve `launch-08.json`, `cold-open-play-only-and-export-native08-01.json`,
+`stderr-08.log`, `normal-close-process-terminal-08.json`, the new output's
+`ordinary-whole-native08-pcm-audit-01.json`,
+`native05-native08-pcm-comparison-01.json` and `native08-shutdown-trace-audit-01.json`.
+The parent contains `native08-resource-handback-01.json`.
 
 ### Offline event metadata candidate and async-state gap
 
@@ -731,6 +770,19 @@ Source94's actual terminal evidence was retained before the next publication.
 Keep `source95-local-gates-01-*`,
 `source95-local-resource-handback-01.json` and
 `strict-dry-topology-prepare-boundary-candidate-01/`.
+
+Source96 (`1687ec5`) quality has now actually completed: 32 factory, 4 SDK
+offline-MIDI and 15 SDK readiness cases passed; App2333 + helper52 + protocol13 =
+2398 root passes/12 ignored. All previously failing fixtures passed, including
+the complete dry-topology matrix. Strict Clippy, matching bins, all backend
+harness/fixture and no-default-feature gates passed. Linux SDK15/Unix1 also
+passed. Overall quality still failed only at native paint before/after edit:
+PrintWindow and same-process button probes returned false. Attach/resize/DPI,
+modal IPC, control/gesture/dirty, stopped-edit state and Shutdown/EOF/crash
+cleanup passed independently. SDK-B NI remains untested. Preview is still
+running, so release/ZIP qualification is pending. Preserve
+`ci-1687ec5-windows-quality-01.log`, `ci-1687ec5-linux-helper-readiness-01.log`
+and Source96 actual-terminal JSON.
 
 Preserve `async-progress-readiness-candidate-01/applied-handoff-02.json` and
 `async-progress-readiness-provenance-02/`. This guard tracks work reported through
