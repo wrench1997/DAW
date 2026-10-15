@@ -974,6 +974,31 @@ Production/vendor/budgets are unchanged. Formatting/diff passed; one actual
 catalog5 gate is next, followed by repair on its evidence rather than retrying to
 green. Keep `catalog-retirement-diagnostics-01/`.
 
+Source103 (`3e711cc`) actually passed FullOwner20 (3.07s), catalog5 (4.06s),
+strict all-feature/all-target Clippy, test artifact and matching bins. Runner
+27256/exec80781 exited0 and all22 held children terminated; private/global memory
+peaked at3.936/25.004GiB. Catalog cases0/1/4 naturally exited0 at61/67/61ms with
+no kill/pipe/wait errors; the added delayed Error case was killed/reaped as
+UncleanRetirement at156ms with the original rejection retained. The old failure
+did not reproduce. Its owner is removing irrelevant interpreter-teardown timing
+from the normal negative fixtures while retaining the100ms production boundary
+and delayed-kill rejection controls. Corrected NI execution remains unrun.
+The user actually started preview PID14900 at11:04:46Z; it remains an intentional
+independent process, not Root work to adopt or stop. Only Root's software CPU
+window was returned; user desktop/audio testing stays protected. Keep
+`source103-local-gates-01-*` and `source103-local-resource-handback-01.json`.
+
+The catalog fixture repair now ends only matrix cases0/1/4 with `os._exit(0)`
+after all actual request/reply/EOF assertions and stdout/stderr flushes. Normal
+healthy Shutdown, exit9, sleep30, all original health predicates and production/
+vendor deadlines remain. The controlled real-child pair registers the same30s
+atexit finalizer: direct protocol-complete exit must retire healthy; ordinary
+interpreter exit must retain the original rejection and actually kill/reap as
+unclean, with an EOF-finalizer stderr phase marker. Catalog still has5 tests.
+Formatting/diff passed; the changed catalog and Clippy are unrun. Keep
+`catalog-retirement-fixture-exit-repair-01/`. This removes the mock's unnecessary
+interpreter-finalization dependency; the historical CI receipt remains missing.
+
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
 The native harness now probes the OS, current process session, WTS connection
