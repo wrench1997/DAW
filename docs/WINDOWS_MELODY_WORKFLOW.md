@@ -5,13 +5,34 @@ Updated: 2026-10-15 (Asia/Shanghai). Development branch:
 Citrus Studio remains a development DAW. The complete melody workflow is not yet qualified.
 This document separates implemented behavior, actual local acceptance, failures and untested work.
 
+Latest backend qualification: Source87 (`769525d`) quality actually passed 32
+factory and 2321 App + 52 helper + 13 protocol = 2386 root cases/12 ignored, including
+both numeric-entry cases and three new failure-evidence regressions. Strict
+all-feature/all-target Clippy, both bins, protocol/harness, fixture and
+no-default-feature gates passed. Its only failure remains independent before/
+after native paint PrintWindow capture. Both factory child paths emitted all
+phase markers; the old Deadline did not reproduce, which does not establish its
+cause or repair. Preview actually completed success: 344 harness cases, the same
+2386 root passes/12 ignored, strict Clippy, no-default-feature checks, static-CRT
+release, final ZIP verification and extracted sanitized-PATH helper smoke passed.
+No build artifact was uploaded. Preserve both
+`ci-769525d-windows-{quality,preview}-01.log` and Source87 actual terminal JSON.
+
+Native05 subsequently completed an ordinary GUI cold-open and Whole offline WAV
+export from the saved NOIRE Pure validation project. Independent PCM decoding
+confirms 10.500s of stereo 48k/24-bit audio, nonzero signal in all eight onset
+windows, no clipped samples and digital zero in the last 20ms. Clone, source
+helper and App all exited 0. Native04's preceding cleanup failure remains open;
+this success used the exact timing diagnostic. Details and the next single-axis
+no-exact-timing comparison are recorded below.
+
 ## Current implementation and export boundaries
 
 | Workflow | Implementation | Actual NOIRE status |
 | --- | --- | --- |
 | Real-time Master recording | Records the Master audio produced during live playback | Pure was heard and captured locally; not an offline export |
 | Selected MIDI occurrence to audio | Experimental Linux/Windows strict clone, capture validation, native publication and history fences | Actual recapture mismatch refuses replacement; original MIDI is retained |
-| Whole-song offline WAV | Built-in sources; experimental single-VST full arrangement/static routing/Master automation | Short project and intact original 405-note device-free offline export pass; complete live/save workflow remains unqualified |
+| Whole-song offline WAV | Built-in sources; experimental single-VST full arrangement/static routing/Master automation | Native05 ordinary GUI saved-Pure cold-open→10.5s PCM24 WAV passed once; earlier short/405-note device-free evidence remains separate; intermittent cleanup, listening and full state/automation qualification remain open |
 
 These paths must retain their own receipts and must not be substituted for each other.
 The ordinary build explicitly refuses unsupported active-VST offline export.
@@ -297,8 +318,10 @@ individual digit key/text events and Enter, then inspect the actual project or
 Review options and retain arrangement/playback side-effect checks. Neither
 AccessKit SetValue nor direct target-field assignment performs the edit. No
 production input control changed and no ordinary-keyboard defect is established.
-Formatting/diff pass; Cargo, Clippy and native entry remain untested. Source84's
-preview actually ended before pushing this candidate for cloud execution.
+Formatting/diff passed at freeze. Both cases subsequently passed Cargo and
+strict Clippy in both Source87 cloud jobs. Native individual-digit entry is not
+qualified by those headless results. Source84's preview actually ended before
+pushing this candidate for cloud execution.
 
 Source86 (`1200196`, including those tests) quality stopped before root tests:
 31 factory cases passed and `factory_and_default_load_share_one_attempt_seal_in_both_directions`
@@ -315,10 +338,12 @@ original Failure and actual same-owner cleanup, without changing the three-secon
 deadline, single attempt or failure. The old log cannot distinguish those phases.
 The complete vendor patch was replayed from41 upstream to74 current sources:
 48 changed paths,33 additions and0 deletions; explicit bundle integrity and the
-one existing provenance-constants test passed. Rust tests have not run. The tail
+one existing provenance-constants test passed. Rust tests were unrun at freeze;
+current quality results are recorded at the top of this document. The tail
 test read the wrong AccessKit field: egui Role::Label text uses value(), not
 label(). Its candidate checks the actual role/value and retains independent
-digits, focus, Enter and real destination options==3000 assertions; it is unrun.
+digits, focus, Enter and real destination options==3000 assertions. It subsequently
+passed in Source87 quality.
 
 ### Native04: ordinary GUI rendering reaches clone cleanup, then fails
 
@@ -332,7 +357,8 @@ Song length actually became16 after typing only1 and clamping from64; this does
 not qualify two-digit native entry. Tail text entry3000/Return reached Review.
 The saved model retains eight notes, one clip and all routing; only song length
 and opaque state changed. Generic parameters remain empty and opaque bytes differ
-(591683→591681). No new cold reopen or automation qualification follows.
+(591683→591681). Native05 subsequently cold-opened this saved copy; complete
+parameter and automation restoration remain unqualified.
 
 The actual Whole review used48k,24-bit PCM, peak attenuation and an explicitly
 accepted fixed3000ms tail. After native Save, clone41712 started and the UI entered
@@ -350,8 +376,8 @@ explicit peer handback. The observer issued no kill; the product reported forced
 clone cleanup. Receipts: `cold-open-and-export-attempt-native04-01.json`,
 `normal-save-model-audit-04.json`, `normal-close-process-terminal-04.json` in the
 isolated workflow directory, and `native04-resource-handback-01.json` at its parent.
-Next investigate strict-clone shutdown with the existing exact exit-timing opt-in;
-do not extend cleanup budgets or accept forced termination as successful export.
+The subsequent exact exit-timing observation is Native05 below; retain this
+failure rather than treating one later success as a cleanup repair.
 
 Source87 retains the original primary first line in the Whole terminal error and
 adds the existing backend/cleanup typed context and cleanup details. The existing
@@ -361,13 +387,71 @@ the first forced-exit failure receives `dispose.wait_for_exit`. Render-first-err
 cancellation, ownership, fences and budgets are unchanged. Three new tests cover
 actual App/mock-renderer preparation and cleanup failure, payload-free diagnostics
 without invented delivery, and retained cleanup-first-error; the existing held-exit
-test also checks its stage. Formatting/diff pass; Cargo/Clippy/native are unrun.
-Source inspection places the observed cleanup-only primary after successful render
-checks, but no WAV was published. For the next matching native test, enable only
-the existing exact `CITRUS_VST3_HELPER_LOAD_DIAGNOSTIC=windows-load-response-timing-v1`
-alongside the current diagnostics switch. Do not enable `SHUTDOWN_MESSAGE_PASS`,
-which changes cleanup behavior. Use the actual clone PID's last returned reader/
-main/slot-clear/SDK teardown boundary to choose the repair.
+test also checks its stage. Both Source87 CI jobs subsequently passed those
+regressions and Clippy. Source inspection places Native04's cleanup-only primary
+after successful render checks, but no WAV was published in that failed run.
+
+### Native05: ordinary GUI cold-open and Whole WAV complete once
+
+Matching all-feature Source87 main/helper bins actually built with one jobs1
+owner. The normal Open dialog loaded `First-Light-NOIRE-Pure-validation-02.citrus`,
+the independent file saved by Native04, without an NKI reload. The UI showed
+four bars/16 beats, eight notes/one clip, Saved, Kontakt Loaded, Channel→FX1,
+2304 samples latency and `扬声器 (2- CB4ND HW 1/2)` at 48k/XRUN0. There was no
+playback or new project Save in this session; it does not re-qualify monitoring.
+
+Ordinary FILE→Export WAV→Review used stereo 48k/24-bit PCM, peak attenuation
+above 0.95 and an explicitly accepted 3000ms/144000-frame fixed tail. Before native
+Save, the default `Untitled.wav` did not exist. It was accepted without trying to
+change that dialog's filename. Save created that exact file; no Escape/Stop/
+Cancel followed. The final UI reported 7.500s music plus 3.000s fixed tail,
+10.500s total and unity gain/peak 0.046039. This is Whole offline export, not
+Master recording or selected-MIDI replacement. The original native destination
+is retained; an overwrite=false copy is named
+`First-Light-NOIRE-Pure-ordinary-whole-native05.wav`.
+
+Independent bounded PCM24 decoding, without renderer or plug-in imports, found:
+
+- Complete RIFF: 3,024,044 bytes, 504000 stereo frames, 48k/24-bit, 10.500s.
+- Nonzero signal in all eight note-onset windows; all samples finite, no clipped
+  samples. Peak 0.046038747 (−26.74dBFS); this does not establish target loudness.
+- Tail first 500ms RMS about −93.29dBFS; last 500ms peak about −119.39dBFS.
+  Last 20ms and the final stereo frame are exactly zero. At −100dBFS, trailing
+  quiet spans about 1.959s.
+- Maximum adjacent sample delta 0.002964 at 2.851708s is a diagnostic cue.
+  This WAV has not been listened to, so click-free playback is not qualified.
+
+The plug-in reports unknown/unbounded tail. The explicit fixed-window warning
+remains; this one quiet ending does not establish complete natural decay for
+arbitrary settings. Generic parameter maps remain empty, the project has no
+automation, and Felt/full parameter restoration remain untested.
+
+Only the existing exact
+`CITRUS_VST3_HELPER_LOAD_DIAGNOSTIC=windows-load-response-timing-v1` was added to
+the current diagnostics switch; `SHUTDOWN_MESSAGE_PASS` was explicitly absent.
+Clone 112960's reader decoded/enqueued Shutdown, main consumed it and exited the
+loop, and editor close/dispatcher drop/component terminate (SDK 0)/plug-in Drop
+returned. `ExitDll Before→Returned` took about 751ms; Windows run returned at
+about 915ms. Held actual OS handles confirmed clone 112960, source helper 84196
+and App 69668 all exited 0 after normal Alt+F4. Observer 66907 exited 0 and fresh
+heavy=[] preceded explicit resource handback.
+
+Native04→05 also changed the play/Save prelude, cold-start state and diagnostic
+source. Source87 changed failure evidence, not cleanup order or budgets.
+Neither diagnostic timing nor Save is established as the failure's cause.
+The next coordinated native check must reuse the same bins, saved input,
+no-play/no-Save cold sequence and options, write into a new empty destination,
+and change only the exact timing switch to off. Test the warm play/Save branch
+separately after that comparison; do not extend deadlines or make
+forced termination count as successful export.
+
+Evidence in `target/backend-reliability-20261014/normal-noire-workflow-20261015-01/`:
+`launch-05.json`, `cold-open-and-export-native05-01.json`, `stderr-05.log`,
+`ordinary-whole-native05-pcm-audit-01.json`, `audit_native05_pcm24.py` and
+`normal-close-process-terminal-05.json`. Its parent contains the actual build
+terminal receipt, `native05-resource-handback-01.json` and
+`source87-continuation-checkpoint-02.json`. Audio, opaque project state and raw
+runtime evidence stay outside Git.
 
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,
