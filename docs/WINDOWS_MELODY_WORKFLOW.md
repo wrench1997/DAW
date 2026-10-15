@@ -826,11 +826,32 @@ failure tail with counts/truncation and original order. The regression puts75
 successes before Load/Prepare/Metadata/SlotFault failures, then checks overflow
 with13 failures. Receipt Err/panic/write failure gets an independent createNew
 fallback, with original causes sent to stderr if that write also fails. The
-unused-mut warning is removed. The short suite now contains7 cases; five-file
-rustfmt, complete patch replay and diff checks passed. New Rust/Strict36/Clippy,
-cohort construction and NI execution remain unrun. Reuse unchanged observer8 /
+unused-mut warning is removed. Five-file rustfmt, complete patch replay and diff
+checks passed. Frozen `a4850d6` actually compiled and passed short7; Strict36
+finished35 passed/1 failed. The existing cancellation/original-deadline blocked-
+stage matrix expired waiting for the DiscardProgressNotifications:1 marker.
+Retained mock audit contains forced-reap exit1/disposal/drop but no planned
+blocked marker; the cause is not established. The original owner is examining
+the retained fixture instead of increasing the deadline or retrying without new
+evidence. Clippy, cohort construction and NI were not reached. Runner113380 /
+exec64377 actually exited101; every held child terminated and fresh heavy count
+was zero at09:51:15Z before peer handback. Preserve `source99-local-gates-01-*`.
+Reuse unchanged observer8 /
 FullOwner16 passing evidence. Keep `noire-sdk-b-short-source-repair-02/`; the first
 repair and failed Source98 execution are preserved.
+
+A subsequent one-file Strict diagnostic keeps the original2s/20s deadline and
+15s reporting budgets. Its local wait preserves the same receipt's actual typed
+terminal outcome if it finishes before the planned marker, then still fails;
+normal marker paths record their real outcome before the original assertions.
+Primary request/stage/delivery/limit fields remain separate from cleanup. A
+new deterministic LoadPlugin refusal before the planned Discard stage requires
+concrete same-child reap, released admission and no later I/O. Only this new
+exact and the original matrix use the local wait; the other35 passing Strict
+cases keep their existing wait. Formatting/replay/diff passed; both exact runs,
+Clippy/artifacts and NI are unrun. Keep
+`strict-blocked-stage-terminal-evidence-01/`. The original fixture15 has no
+startup ledger witness, so neither slow startup nor SDK-B causality is proven.
 
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 

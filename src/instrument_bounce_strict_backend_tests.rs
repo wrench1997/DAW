@@ -893,6 +893,63 @@ fn audit(root: &Path, value: Value) {
     let mut file = options.open(root.join("audit.jsonl")).unwrap();
     writeln!(file, "{value}").unwrap();
 }
+
+// Only the blocked-stage matrix uses these diagnostics. Do not replace an
+// unobserved planned stage with a guessed timeout/cancel success.
+fn blocked_stage_text(value: &str) -> Value {
+    let mut end = value
+        .len()
+        .min(crate::instrument_bounce::render::MAX_BACKEND_DIAGNOSTIC_BYTES);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    json!({"text":&value[..end],"utf8_bytes":value.len(),"truncated":end<value.len()})
+}
+
+fn blocked_stage_backend_failure(failure: &BackendFailure) -> Value {
+    json!({
+        "kind":format!("{:?}",failure.kind),
+        "diagnostic":blocked_stage_text(failure.diagnostic()),
+        "delivery":failure.delivery.map(|value|format!("{value:?}")),
+        "strict_kind":failure.strict_kind.map(|value|format!("{value:?}")),
+        "strict_diagnostic_unavailable":failure.strict_diagnostic_unavailable.map(|value|format!("{value:?}")),
+        "strict_stage":failure.strict_stage,
+        "last_wire_request":failure.last_wire_request.map(|request|json!({
+            "operation":request.operation,
+            "media_type":request.media_type.map(|value|format!("{value:?}")),
+            "direction":request.direction.map(|value|format!("{value:?}")),
+            "bus_index":request.bus_index})),
+        "strict_metadata_getter":failure.strict_metadata_getter.map(|value|value.label()),
+        "limit_evidence":failure.limit_evidence.map(|limit|json!({
+            "site":format!("{:?}",limit.site),
+            "observed_at_least":limit.observed_at_least,"maximum":limit.maximum}))
+    })
+}
+
+fn blocked_stage_outcome(
+    kind: &str,
+    stage: &str,
+    observed: bool,
+    outcome: &RenderOutcome,
+) -> Value {
+    let actual = match outcome {
+        RenderOutcome::Failed(failure) => json!({
+            "kind":"Failed","failure_kind":format!("{:?}",failure.kind),
+            "primary":blocked_stage_text(&failure.primary),
+            "backend":failure.backend.as_deref().map(blocked_stage_backend_failure),
+            "cleanup_backend":failure.cleanup_backend.as_deref().map(blocked_stage_backend_failure),
+            "cleanup_grace_elapsed":failure.cleanup_grace_elapsed,
+            "cleanup_count":failure.cleanup.len(),"cleanup_row_limit":8,
+            "cleanup_truncated":failure.cleanup.len()>8,
+            "cleanup":failure.cleanup.iter().take(8).map(|text|blocked_stage_text(text)).collect::<Vec<_>>()
+        }),
+        RenderOutcome::Complete(report) => json!({"kind":"Complete","frames":report.frames}),
+    };
+    json!({"kind":"blocked_stage_terminal","planned_marker_kind":kind,"planned_stage":stage,
+        "stage_observed":observed,"actual_outcome":actual,
+        "early_terminal_is_not_expected_stage_success":true})
+}
+
 fn wait_until(mut predicate: impl FnMut() -> bool) {
     let end = Instant::now() + Duration::from_secs(15);
     while !predicate() {
@@ -1067,6 +1124,41 @@ impl<'a> Job<'a> {
             assert_eq!(entry["destination_unchanged"], true);
         }
         result
+    }
+
+    fn wait_stage_or_terminal(&self, kind: &str, stage: &str) -> Result<(), Value> {
+        // Same reporting wait as Mock::wait_stage; the renderer's original
+        // absolute deadline/cancellation and its actual cleanup are untouched.
+        let wait_deadline = Instant::now() + Duration::from_secs(15);
+        let receipt = self.receipt.as_ref().unwrap();
+        loop {
+            if self
+                .mock
+                .ledger()
+                .iter()
+                .any(|value| value["kind"] == kind && value["stage"] == stage)
+            {
+                return Ok(());
+            }
+            if receipt.termination_acknowledged() {
+                let outcome = self.finish();
+                let mut evidence = blocked_stage_outcome(kind, stage, false, &outcome);
+                evidence["destination_unchanged"] =
+                    json!(fs::read(self.mock.output()).unwrap() == SENTINEL);
+                audit(&self.mock.root, evidence.clone());
+                return Err(evidence);
+            }
+            if Instant::now() >= wait_deadline {
+                let evidence = json!({"kind":"blocked_stage_reporting_wait_expired",
+                    "planned_marker_kind":kind,"planned_stage":stage,"stage_observed":false,
+                    "actual_receipt_status":format!("{:?}",receipt.status()),
+                    "destination_unchanged":fs::read(self.mock.output()).unwrap()==SENTINEL,
+                    "termination_acknowledged":false,"original_render_deadline_unchanged":true});
+                audit(&self.mock.root, evidence.clone());
+                return Err(evidence);
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 }
 impl Drop for Job<'_> {
@@ -2196,6 +2288,12 @@ fn strict_clone_cancel_and_original_deadline_interrupt_blocked_stages_without_la
     ] {
         for cancel in [true, false] {
             let mock = Mock::new("block", stage);
+            audit(
+                &mock.root,
+                json!({"kind":"planned_blocked_case","stage":stage,"cancel_case":cancel,
+                    "original_budget_seconds":if cancel {20}else{2},
+                    "destination_unchanged":fs::read(mock.output()).unwrap()==SENTINEL}),
+            );
             let job = Job::start(
                 &mock,
                 Hook::None,
@@ -2205,11 +2303,16 @@ fn strict_clone_cancel_and_original_deadline_interrupt_blocked_stages_without_la
                     Duration::from_secs(2)
                 },
             );
-            mock.wait_stage("blocked", stage);
+            job.wait_stage_or_terminal("blocked", stage)
+                .unwrap_or_else(|evidence| panic!("planned stage was not entered: {evidence}"));
             if cancel {
                 assert!(job.control.export.clone().cancel());
             }
-            let failure = failed(job.finish());
+            let outcome = job.finish();
+            let mut evidence = blocked_stage_outcome("blocked", stage, true, &outcome);
+            evidence["destination_unchanged"] = json!(fs::read(mock.output()).unwrap() == SENTINEL);
+            audit(&mock.root, evidence);
+            let failure = failed(outcome);
             assert_typed(
                 &failure,
                 if cancel {
@@ -2222,6 +2325,94 @@ fn strict_clone_cancel_and_original_deadline_interrupt_blocked_stages_without_la
             mock.assert_terminal_at(stage);
         }
     }
+}
+
+#[test]
+fn strict_clone_missing_blocked_stage_retains_original_typed_failure_and_actual_reap() {
+    let _serial = serial();
+    // A deterministic error BEFORE the planned blocked stage, not a startup
+    // timing guess. An early actual terminal outcome must remain a failure.
+    let mock = Mock::new("error", "LoadPlugin:1");
+    let job = normal_job(&mock);
+    let evidence = job
+        .wait_stage_or_terminal("blocked", "DiscardProgressNotifications:1")
+        .expect_err("the later planned stage was never entered");
+    assert_eq!(evidence["kind"], "blocked_stage_terminal");
+    assert_eq!(evidence["stage_observed"], false);
+    assert_eq!(evidence["planned_stage"], "DiscardProgressNotifications:1");
+    let outcome = &evidence["actual_outcome"];
+    assert_eq!(outcome["kind"], "Failed");
+    assert_eq!(outcome["failure_kind"], "Backend");
+    assert_eq!(
+        outcome["primary"]["text"],
+        "known mock failure LoadPlugin:1"
+    );
+    let backend = &outcome["backend"];
+    assert_eq!(backend["strict_kind"], "OperationRejected");
+    assert_eq!(backend["delivery"], "MayHaveApplied");
+    assert_eq!(backend["strict_stage"], "prepare.load_plugin");
+    assert_eq!(backend["last_wire_request"]["operation"], "LoadPlugin");
+    assert_eq!(backend["diagnostic"]["text"], outcome["primary"]["text"]);
+    assert_eq!(outcome["cleanup_grace_elapsed"], false);
+    assert_eq!(
+        job.receipt.as_ref().unwrap().status(),
+        RenderStatus::Terminated
+    );
+    assert!(!job.admission.is_busy());
+    let records = mock.audit();
+    assert_eq!(records.last().unwrap(), &evidence);
+    let disposal = records
+        .iter()
+        .find(|record| record["kind"] == "disposal")
+        .expect("actual disposal remains independent of primary failure diagnostics");
+    assert!(concrete_child_reap_evidence(disposal), "{disposal}");
+    mock.assert_terminal_at("LoadPlugin:1");
+
+    // Preserve every optional typed field without requiring an actual limit or
+    // cleanup fault in the deterministic real-child scenario above.
+    let mut typed = BackendFailure::from(strict::Failure {
+        kind: StrictKind::Limit,
+        delivery: strict::Delivery::NotSent,
+        diagnostic: Some("界".repeat(4000)),
+        diagnostic_unavailable: Some(StrictKind::Allocation),
+        request_context: Some(strict::RequestContext {
+            operation: "SetBusActive",
+            media_type: Some(vst3_host::audio::MediaType::Audio),
+            direction: Some(vst3_host::audio::BusDirection::Output),
+            bus_index: Some(8),
+        }),
+        metadata_getter: Some(strict::MetadataGetter::TailSamples),
+        limit_evidence: Some(strict::LimitEvidence {
+            site: strict::LimitSite::ParameterTextBytes,
+            observed_at_least: 1025,
+            maximum: 1024,
+        }),
+    })
+    .with_strict_context("synthetic complete-field fixture");
+    let encoded = blocked_stage_backend_failure(&typed);
+    assert_eq!(encoded["strict_diagnostic_unavailable"], "Allocation");
+    assert_eq!(encoded["delivery"], "NotSent");
+    assert_eq!(encoded["last_wire_request"]["media_type"], "Audio");
+    assert_eq!(encoded["last_wire_request"]["direction"], "Output");
+    assert_eq!(encoded["last_wire_request"]["bus_index"], 8);
+    assert_eq!(encoded["strict_metadata_getter"], "TailSamples");
+    assert_eq!(encoded["limit_evidence"]["site"], "ParameterTextBytes");
+    assert_eq!(encoded["limit_evidence"]["observed_at_least"], 1025);
+    assert_eq!(encoded["limit_evidence"]["maximum"], 1024);
+    assert_eq!(encoded["diagnostic"]["text"], "界".repeat(2048 / 3));
+    // Distinct cleanup evidence is not allowed to replace the primary reason.
+    let mut failure = RenderFailure::from(typed.clone());
+    typed.strict_stage = Some("synthetic cleanup fixture");
+    failure.cleanup_backend = Some(Box::new(typed));
+    let both = blocked_stage_outcome("blocked", "planned", false, &RenderOutcome::Failed(failure));
+    assert_eq!(
+        both["actual_outcome"]["backend"]["strict_stage"],
+        "synthetic complete-field fixture"
+    );
+    assert_eq!(
+        both["actual_outcome"]["cleanup_backend"]["strict_stage"],
+        "synthetic cleanup fixture"
+    );
 }
 
 #[test]
