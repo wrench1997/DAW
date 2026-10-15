@@ -2610,6 +2610,8 @@ mod editor_navigation_tests;
 mod keyboard_audition_ui_tests;
 #[path = "master_pan_audition_ui_tests.rs"]
 mod master_pan_audition_ui_tests;
+#[path = "numeric_input_ui_tests.rs"]
+mod numeric_input_ui_tests;
 #[path = "piano_expression_tests.rs"]
 mod piano_expression_tests;
 #[path = "piano_keyboard_playback_tests.rs"]

@@ -27,6 +27,13 @@ It preserves MIDI until verified success, handles cancellation/failure and retai
 Removing a platform condition was not treated as a Windows implementation.
 Whole export shares the stopped-source capture actor but does not create a conversion history item.
 Project/session, Timeline, asset, parameter and save fences remain active during pending work.
+Conversion recaptures the original source after rendering and requires exact
+opaque/parameter equality before replacing MIDI and preparing Undo. The actual
+NOIRE run08 failed that second-capture comparison (177 changed bytes in13 NI
+component ranges). Whole export consumes one capture and does not replace the
+source, so that conversion failure does not block the next ordinary Whole test.
+Earlier Whole capture-to-clone byte equality records the LoadState input, not a
+second serialization of either the original source or clone.
 
 ## Ordinary scan reliability in this commit
 
@@ -271,8 +278,26 @@ deterministic cases cover a one-shot true condition and actual Ready followed by
 a superseding foreign transport request; the latter also verifies that old
 readiness does not authorize the new request. Failure diagnostics add actual
 elapsed time, sample count and settlement operands. The historical Source83
-failure lacks those quantities, so its exact cause remains unproven. Formatting
-and diff checks pass; Source84 compilation/regressions have not run.
+failure lacks those quantities, so its exact cause remains unproven. Source84
+(`42bbf9e`) quality actually passed32 factory and2316 App+52 helper+13 protocol
+=2381 root cases/12 ignored, including both new cases and the previously failing
+forced-App-drop test. Strict all-feature/all-target Clippy, both bins, harness/
+protocol, fixture and no-default-feature gates passed. Quality still failed only
+independent native paint's before/after PrintWindow capture, while native control,
+state, lifecycle and cleanup passed. Preview's344 harness cases passed; its
+validate/build/package step is still running, with no final root/release/ZIP
+claim. Preserve `ci-42bbf9e-windows-quality-01.log` and Source84 quality actual
+terminal JSON. No repaired native NOIRE export has run.
+
+Source85 adds two test-only actual App::ui keyboard-entry cases: Song Length
+64→16 and Release Tail0→3000. They use the real TextEdit focus, Ctrl+A,
+individual digit key/text events and Enter, then inspect the actual project or
+Review options and retain arrangement/playback side-effect checks. Neither
+AccessKit SetValue nor direct target-field assignment performs the edit. No
+production input control changed and no ordinary-keyboard defect is established.
+Formatting/diff pass; Cargo, Clippy and native entry remain untested. This local
+commit is held until the live Source84 preview ends, avoiding a new push that
+would cancel its evidence.
 
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,
