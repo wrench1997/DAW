@@ -1328,8 +1328,8 @@ class ProvenanceConstantsTests(unittest.TestCase):
         self.assertEqual(pkg.VENDOR_ARCHIVE_SHA256, "6ec579d54bd13b83c60c1fd8bb756cf234e36ccbfb4833ff756b417e64db7fea")
         self.assertEqual(pkg.VENDOR_COMMIT, "ed054908cfe057694d8cf037d0c39dfb5eb4c2ca")
         self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/LICENSE"], "a65a537295910b776a8b2edb2e7410c3b0e975ca6388994e032c4d1842b4952d")
-        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS.patch"], "09ea5d0b14587eba9b2358b5463264599894a6a8da0e521c55097d74d389846c")
-        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS_PATCHES.md"], "e76cb86baf38f5dbed1b5839347f2df6c5d24044a2150b42605817bd2939834c")
+        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS.patch"], "8f28c82aaa7d64569145ed7342004c36a42f7f899415469dc143ea2ad62ad1f5")
+        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS_PATCHES.md"], "bceb8d148b6f658127620c26617bcc70773b388bdd0bf52f6fd57ee121aac658")
 
 
 

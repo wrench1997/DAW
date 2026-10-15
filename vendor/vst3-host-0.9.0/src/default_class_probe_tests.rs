@@ -9,7 +9,10 @@ fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(3)
 }
 fn probe(script: &str) -> Probe {
-    match Probe::spawn(&mut python(script), deadline()) {
+    command_probe(&mut python(script))
+}
+fn command_probe(command: &mut Command) -> Probe {
+    match Probe::spawn(command, deadline()) {
         Ok(probe) => probe,
         Err(mut failure) => {
             if let Some(owner) = failure.cleanup.as_mut() {
@@ -55,6 +58,9 @@ fn ledger(reply: HostResponse, ending: &str) -> String {
 }
 fn clean_finish(probe: &mut Probe, protocol_deadline: Instant) {
     let result = probe.dispose(protocol_deadline, deadline());
+    assert_clean_finish(result);
+}
+fn assert_clean_finish(result: CleanupObservation) {
     assert!(matches!(result.state, CleanupState::Reaped(status) if status.success()));
     assert!(!result.kill_requested);
     assert!(result.shutdown_failure.is_none());
@@ -116,18 +122,115 @@ fn factory_failure(result: Result<FactoryMetadata, Failure>) -> Failure {
     }
 }
 
-// Keep phase evidence off the protocol pipe. Spawn returning only proves that
-// the child and owned pipes exist, not that Python has entered this script.
-fn attempt_seal_ledger(request: HostCommand, reply: HostResponse, ending: &str) -> String {
+// This protocol fixture needs only Python's standard library. Do not execute
+// machine/site/PYTHONPATH startup hooks before its first bounded exchange.
+fn attempt_seal_command(script: &str) -> Command {
+    let ordinary = python(script);
+    let mut command = Command::new(ordinary.get_program());
+    command.args(["-I", "-S"]).args(ordinary.get_args());
+    command
+}
+
+struct AttemptSealTrace(std::path::PathBuf);
+impl AttemptSealTrace {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "citrus-attempt-seal-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+        ));
+        std::fs::create_dir(&path).unwrap();
+        let trace = Self(path);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(trace.0.join("phase.log"))
+            .unwrap();
+        trace
+    }
+    fn path_json(&self) -> String {
+        serde_json::to_string(self.0.join("phase.log").to_str().unwrap()).unwrap()
+    }
+    fn text(&self) -> std::io::Result<String> {
+        use std::io::Read;
+        let mut text = String::new();
+        std::fs::File::open(self.0.join("phase.log"))?
+            .take(4097)
+            .read_to_string(&mut text)?;
+        if text.len() > 4096 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "attempt-seal phase evidence exceeds 4096 bytes",
+            ));
+        }
+        Ok(text)
+    }
+    fn assert_completed(&self, operation: &str) {
+        let text = self.text().unwrap();
+        let stages: Vec<_> = text
+            .lines()
+            .map(|line| line.split(' ').next().unwrap())
+            .collect();
+        assert_eq!(
+            stages,
+            [
+                "script-entered",
+                "json-ready",
+                "request-read",
+                "request-validated",
+                "reply-flushed",
+                "shutdown-read",
+                "stdin-eof",
+            ],
+            "attempt-seal {operation} phases: {text}",
+        );
+        eprintln!("attempt-seal {operation} phases: {text}");
+    }
+    fn install_exit_hook(&self) {
+        use std::io::Write;
+        let mut hook = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.0.join("sitecustomize.py"))
+            .unwrap();
+        write!(
+            hook,
+            "import os\nwith open({},'a',encoding='utf-8',newline='') as out: out.write('site-hook-entered\\n')\nos._exit(77)\n",
+            self.path_json(),
+        )
+        .unwrap();
+    }
+}
+impl Drop for AttemptSealTrace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0.join("phase.log"));
+        let _ = std::fs::remove_file(self.0.join("sitecustomize.py"));
+        let _ = std::fs::remove_dir(&self.0);
+    }
+}
+
+// A private bounded phase file survives missing/blocked inherited stderr without
+// changing the protocol pipe. No readiness wait precedes the exchange deadline.
+fn attempt_seal_ledger(
+    request: HostCommand,
+    reply: HostResponse,
+    trace: &AttemptSealTrace,
+) -> String {
     let expected = serde_json::to_string(&request).unwrap();
     let response = serde_json::to_string(&reply).unwrap();
-    let operation = match request {
-        HostCommand::ProbeFactory { .. } => "factory",
-        HostCommand::LoadPlugin { .. } => "default-load",
-        _ => panic!("attempt-seal fixture only permits its two original requests"),
-    };
+    assert!(matches!(
+        request,
+        HostCommand::ProbeFactory { .. } | HostCommand::LoadPlugin { .. }
+    ));
     format!(
-        "import sys,time\n_trace_started=time.monotonic()\ndef _trace(stage): print('attempt-seal {operation} '+stage+' child_elapsed='+str(time.monotonic()-_trace_started),file=sys.stderr,flush=True)\n_trace('script-entered')\nimport json\n_trace('json-ready')\n_request=sys.stdin.readline()\n_trace('request-read')\nassert json.loads(_request)==json.loads({expected:?})\n_trace('request-validated')\nprint({response:?},flush=True)\n_trace('reply-flushed')\n{ending}\n"
+        "import sys,time\n_trace_started=time.monotonic()\ndef _trace(stage):\n with open({},'a',encoding='utf-8',newline='') as out: out.write(stage+' child_elapsed='+str(time.monotonic()-_trace_started)+'\\n')\n_trace('script-entered')\nimport json\n_trace('json-ready')\n_request=sys.stdin.readline()\n_trace('request-read')\nassert json.loads(_request)==json.loads({expected:?})\n_trace('request-validated')\nprint({response:?},flush=True)\n_trace('reply-flushed')\nassert json.loads(sys.stdin.readline())=='Shutdown'\n_trace('shutdown-read')\nassert sys.stdin.read()==''\n_trace('stdin-eof')\n",
+        trace.path_json(),
     )
 }
 
@@ -138,6 +241,7 @@ fn attempt_seal_exchange<T>(
     spawn_elapsed: Duration,
     exchange_started: Instant,
     exchange_deadline: Instant,
+    trace: &AttemptSealTrace,
 ) -> T {
     match result {
         Ok(value) => value,
@@ -148,11 +252,27 @@ fn attempt_seal_exchange<T>(
             // checked disposal, never a second exchange or a fresh child.
             let cleanup = probe.dispose(exchange_deadline, deadline());
             panic!(
-                "attempt-seal {operation} failed: pid={pid:?}, spawn_elapsed={spawn_elapsed:?}, exchange_elapsed={exchange_elapsed:?}, original_budget={:?}, failure={failure:?}, cleanup={cleanup:?}",
+                "attempt-seal {operation} failed: pid={pid:?}, spawn_elapsed={spawn_elapsed:?}, exchange_elapsed={exchange_elapsed:?}, original_budget={:?}, failure={failure:?}, cleanup={cleanup:?}, phases={:?}",
                 exchange_deadline.saturating_duration_since(exchange_started),
+                trace.text(),
             );
         }
     }
+}
+
+fn attempt_seal_finish(
+    probe: &mut Probe,
+    protocol_deadline: Instant,
+    operation: &str,
+    trace: &AttemptSealTrace,
+) {
+    let cleanup = probe.dispose(protocol_deadline, deadline());
+    eprintln!(
+        "attempt-seal {operation} cleanup={cleanup:?}, phases={:?}",
+        trace.text(),
+    );
+    assert_clean_finish(cleanup);
+    trace.assert_completed(operation);
 }
 
 #[test]
@@ -185,7 +305,7 @@ fn factory_probe_sends_only_factory_request_preserves_unknowns_and_reaps_shutdow
 #[test]
 fn factory_and_default_load_share_one_attempt_seal_in_both_directions() {
     let _serial = serial();
-    let ending = "assert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''";
+    let factory_trace = AttemptSealTrace::new();
     let factory_script = attempt_seal_ledger(
         HostCommand::ProbeFactory {
             path: "fixture-factory.vst3".into(),
@@ -193,10 +313,10 @@ fn factory_and_default_load_share_one_attempt_seal_in_both_directions() {
         HostResponse::FactoryMetadata {
             metadata: factory_metadata(),
         },
-        ending,
+        &factory_trace,
     );
     let spawn_started = Instant::now();
-    let mut factory = probe(&factory_script);
+    let mut factory = command_probe(&mut attempt_seal_command(&factory_script));
     let spawn_elapsed = spawn_started.elapsed();
     let exchange_started = Instant::now();
     let exchange_deadline = deadline();
@@ -208,6 +328,7 @@ fn factory_and_default_load_share_one_attempt_seal_in_both_directions() {
         spawn_elapsed,
         exchange_started,
         exchange_deadline,
+        &factory_trace,
     );
     for rejected in [
         factory_failure(factory.probe_factory("never-probed.vst3", deadline())),
@@ -217,10 +338,11 @@ fn factory_and_default_load_share_one_attempt_seal_in_both_directions() {
         assert_eq!(rejected.delivery, Delivery::NotSent);
         assert!(rejected.request_context.is_none());
     }
-    clean_finish(&mut factory, exchange_deadline);
-    let loaded_script = attempt_seal_ledger(default_load(), info(), ending);
+    attempt_seal_finish(&mut factory, exchange_deadline, "factory", &factory_trace);
+    let loaded_trace = AttemptSealTrace::new();
+    let loaded_script = attempt_seal_ledger(default_load(), info(), &loaded_trace);
     let spawn_started = Instant::now();
-    let mut loaded = probe(&loaded_script);
+    let mut loaded = command_probe(&mut attempt_seal_command(&loaded_script));
     let spawn_elapsed = spawn_started.elapsed();
     let exchange_started = Instant::now();
     let exchange_deadline = deadline();
@@ -232,11 +354,92 @@ fn factory_and_default_load_share_one_attempt_seal_in_both_directions() {
         spawn_elapsed,
         exchange_started,
         exchange_deadline,
+        &loaded_trace,
     );
     let rejected = factory_failure(loaded.probe_factory("never-probed.vst3", deadline()));
     assert_eq!(rejected.kind, FailureKind::Terminal);
     assert_eq!(rejected.delivery, Delivery::NotSent);
-    clean_finish(&mut loaded, exchange_deadline);
+    attempt_seal_finish(
+        &mut loaded,
+        exchange_deadline,
+        "default-load",
+        &loaded_trace,
+    );
+}
+
+#[test]
+fn factory_attempt_seal_fixture_excludes_witnessed_site_startup_hook() {
+    let _serial = serial();
+    let trace = AttemptSealTrace::new();
+    trace.install_exit_hook();
+    let script = attempt_seal_ledger(
+        HostCommand::ProbeFactory {
+            path: "fixture-factory.vst3".into(),
+        },
+        HostResponse::FactoryMetadata {
+            metadata: factory_metadata(),
+        },
+        &trace,
+    );
+    let mut ordinary_command = python(&script);
+    ordinary_command
+        .env("PYTHONPATH", &trace.0)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .env_remove("PYTHONHOME");
+    let mut ordinary = command_probe(&mut ordinary_command);
+    let original = factory_failure(ordinary.probe_factory("fixture-factory.vst3", deadline()));
+    let cleanup = ordinary.dispose(Instant::now(), deadline());
+    assert_eq!(trace.text().unwrap(), "site-hook-entered\n");
+    assert!(
+        matches!(
+            original.kind,
+            FailureKind::ChildExited | FailureKind::Eof | FailureKind::Io(_)
+        ),
+        "witnessed startup exit must remain a real failure: {original:?}, {cleanup:?}",
+    );
+    assert!(matches!(cleanup.state, CleanupState::Reaped(status) if status.code() == Some(77)));
+    assert!(!cleanup.kill_requested);
+    assert!(cleanup.shutdown_failure.is_none());
+    assert!(cleanup.kill_error.is_none());
+    assert!(cleanup.wait_error.is_none());
+    assert!(cleanup.pipe_error.is_none());
+    eprintln!("attempt-seal ordinary startup control: failure={original:?}, cleanup={cleanup:?}, phases={:?}", trace.text());
+
+    let isolated_trace = AttemptSealTrace::new();
+    isolated_trace.install_exit_hook();
+    let isolated_script = attempt_seal_ledger(
+        HostCommand::ProbeFactory {
+            path: "fixture-factory.vst3".into(),
+        },
+        HostResponse::FactoryMetadata {
+            metadata: factory_metadata(),
+        },
+        &isolated_trace,
+    );
+    let mut isolated_command = attempt_seal_command(&isolated_script);
+    isolated_command.env("PYTHONPATH", &isolated_trace.0);
+    let spawn_started = Instant::now();
+    let mut isolated = command_probe(&mut isolated_command);
+    let spawn_elapsed = spawn_started.elapsed();
+    let exchange_started = Instant::now();
+    let exchange_deadline = deadline();
+    let actual = isolated.probe_factory("fixture-factory.vst3", exchange_deadline);
+    let metadata = attempt_seal_exchange(
+        actual,
+        &mut isolated,
+        "isolated-startup-control",
+        spawn_elapsed,
+        exchange_started,
+        exchange_deadline,
+        &isolated_trace,
+    );
+    assert_eq!(metadata, factory_metadata());
+    attempt_seal_finish(
+        &mut isolated,
+        exchange_deadline,
+        "isolated-startup-control",
+        &isolated_trace,
+    );
 }
 
 #[test]

@@ -1131,3 +1131,66 @@ Both packaging Python files' two provenance digest literals are refreshed; all
 Root Windows/preview/Linux and original offline-MIDI consumer assertions remain.
 Replay evidence:
 target/backend-reliability-20261014/strict-readiness-fixture-provenance-01.
+
+
+
+### Isolate the attempt-seal fixture startup and retain bounded phases (2026-10-15)
+
+Source233f6f0 Windows quality ran 32 factory cases: 31 passed; the first
+ProbeFactory in factory_and_default_load_share_one_attempt_seal_in_both_directions
+failed with Deadline/MayHaveApplied after 3.0066879 seconds against its original
+three-second exchange budget. Spawn took 11.7158 ms. The actual PID 4564 was
+force-killed and reaped with exit1, without shutdown, kill, wait or pipe errors.
+No stage marker reached that CI log. The historical delay location is unknown;
+this result does not establish a slow Python startup or a production transport
+fault. The complete original log is retained at
+
+target/backend-reliability-20261014/ci-233f6f0-windows-quality-01.log.
+
+Failure.diagnostic contains only validated protocol Error/Crashed messages.
+FreshHelperSession inherits stderr and never captures it into that field, so
+None is not evidence that a script trace was absent. The previous fixture's
+first trace itself wrote to inherited stderr before reading the request.
+
+Only src/default_class_probe_tests.rs changes. The self-contained attempt-seal
+Python fixture now uses -I -S, excluding site and PYTHON* startup hooks without
+changing the interpreter selected by CITRUS_STRICT_TEST_PYTHON. Other fixtures
+and the production helper command are unchanged. A private create-new directory
+and phase file retain only seven fixed stage names and child elapsed times;
+reads are bounded to 4096 bytes. The child writes no phase bytes to protocol
+stdout or inherited stderr. The guard removes only its two named files and its
+own directory, without recursive deletion. Original failure and actual checked
+disposal are reported together with the bounded phase evidence; a successful
+case asserts request validation, reply flush, Shutdown read and stdin EOF.
+
+A new actual-child control installs an explicit PYTHONPATH sitecustomize hook
+that writes site-hook-entered and immediately exits77. The ordinary command
+must retain that witness, fail the real exchange and naturally reap exit77.
+The isolated command is offered the same controlled hook but must complete the
+original metadata protocol, naturally exit0 and retain all seven actual phases.
+This distinguishes the fixture startup contract by witnessed behavior rather
+than an assumed timeout. Original two-way attempt sealing, Terminal/NotSent,
+Shutdown/EOF and every clean-disposal assertion remain. Spawn/exchange/cleanup
+budgets are unchanged; no readiness wait, retry, warmup or production change is
+introduced. The existing real timeout/cancellation cases retain their original
+failure and cleanup assertions.
+
+Actual static checks passed: edition-2021 rustfmt, diff whitespace, actual
+embedded ledger/hook Python syntax and complete private vendor patch replay.
+Rust compilation, the changed two-child seal test, the new startup control and
+Clippy are UNRUN at this checkpoint. The factory selector now selects 33 tests.
+The root cargo test does not run dependency unit tests; the direct gate is:
+
+    cargo +stable-x86_64-pc-windows-msvc test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --lib factory --target-dir target -- --test-threads=1 --nocapture
+
+The complete patch was regenerated from the verified original 41-file
+archive and all 76 current vendor source files, excluding only this
+document/CITRUS.patch and generated vendor/target output. There are 50
+changed paths, 35 additions and 0 deletions. Private git
+apply --check/apply succeeded; complete file inventory and raw bytes matched.
+Patch SHA256: 8f28c82aaa7d64569145ed7342004c36a42f7f899415469dc143ea2ad62ad1f5. Original archive/commit/LICENSE/VCS identities remain.
+Both packaging Python files' two provenance digest literals are refreshed;
+all existing source quality and packaging consumer checks remain.
+Replay evidence:
+
+target/backend-reliability-20261014/factory-attempt-seal-fixture-provenance-01.
