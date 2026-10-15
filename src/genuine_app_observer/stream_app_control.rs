@@ -1261,6 +1261,7 @@ fn write_runtime(w: &mut Writer<'_>, event: &RuntimeEvent) -> Result<(), AppErro
             name,
             latency_samples,
             tail_samples,
+            ..
         } => {
             w.u8(1)?;
             w.usize(*slot)?;
@@ -1934,6 +1935,8 @@ mod tests {
             name: "Kontakt 8\0声音".into(),
             latency_samples: 0,
             tail_samples: u32::MAX,
+            loaded_vst3_identity: None,
+            loaded_vst3_identity_error: None,
         };
         let (_, bytes) = encode_bytes(runtime(&ready));
         let RuntimeBody::SlotReady {

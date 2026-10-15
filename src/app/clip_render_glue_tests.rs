@@ -406,7 +406,7 @@ fn actual_committed_failure_blocks_play_after_stop_and_further_polls() {
     assert_eq!(fixture.bytes(), committed);
 }
 
-fn source_state() -> BouncePluginState {
+pub(in crate::app) fn source_state() -> BouncePluginState {
     BouncePluginState {
         metadata: BouncePluginMetadata {
             class_uid: "ABCDEF019182FAEB566D624153675854".into(),
@@ -720,6 +720,15 @@ impl RestorationFixture {
     }
 
     fn with_preparation(max_block_frames: usize, held: bool, instance_id: u64) -> Self {
+        Self::with_preparation_identity(max_block_frames, held, instance_id, false)
+    }
+
+    fn with_preparation_identity(
+        max_block_frames: usize,
+        held: bool,
+        instance_id: u64,
+        loaded_identity: bool,
+    ) -> Self {
         let admission = fixture_admission();
         let mut app = bare_app();
         app.project = source_project();
@@ -747,11 +756,29 @@ impl RestorationFixture {
             sample_rate: 48_000.0,
             max_block_frames,
         };
+        let loaded_identity = loaded_identity.then(|| {
+            crate::plugins::plugin_runtime::LoadedVst3Identity::test_fixture(
+                fixture.app().project.plugin_instances[0].path.clone(),
+                &source_state().metadata.class_uid,
+                &source_state().metadata.version,
+                "Instrument",
+                true,
+                false,
+            )
+        });
         #[cfg(all(
             any(target_os = "linux", windows),
             feature = "experimental-fresh-helper"
         ))]
-        let created = if held {
+        let created = if let Some(identity) = loaded_identity {
+            TestCaptureSource::new_with_loaded_identity(
+                instance_id,
+                source_state(),
+                config,
+                identity,
+                held,
+            )
+        } else if held {
             TestCaptureSource::new_with_held_prepare(instance_id, source_state(), config)
         } else {
             TestCaptureSource::new(instance_id, source_state(), config)
@@ -762,7 +789,17 @@ impl RestorationFixture {
         )))]
         let created = {
             assert!(!held, "held preparation requires the existing test profile");
-            TestCaptureSource::new(instance_id, source_state(), config)
+            if let Some(identity) = loaded_identity {
+                TestCaptureSource::new_with_loaded_identity(
+                    instance_id,
+                    source_state(),
+                    config,
+                    identity,
+                    false,
+                )
+            } else {
+                TestCaptureSource::new(instance_id, source_state(), config)
+            }
         };
         let (chain, source) = created.unwrap();
         // No assertion, callback, or readiness poll exists between spawn and
@@ -934,6 +971,76 @@ fn restoration_owner_ids(pending: &PendingClipRestoration) -> (usize, usize, usi
         chain.control.genuine_worker_id(),
         chain.guard.genuine_worker_id(),
     )
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn actual_restoration_retains_its_unique_worker_ready_identity_through_installed_receipt() {
+    let mut fixture =
+        RestorationFixture::with_preparation_identity(MAX_MIXER_BLOCK_FRAMES, false, 41, true);
+    let channel = fixture.app().project.channels[0].id;
+    let binding = fixture
+        .app_mut()
+        .prepare_clip_render_restoration(41, &source_state().metadata)
+        .unwrap();
+    fixture.app_mut().install_clip_render_restoration(binding);
+    fixture.wait_for_actual_worker_snapshot();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fixture
+        .app()
+        .pending_generator_chains
+        .contains_key(&channel)
+    {
+        fixture.app_mut().poll_clip_restorations();
+        assert!(!fixture.app().clip_restoration_failed);
+        assert!(
+            Instant::now() < deadline,
+            "actual Ready did not transfer its owner"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(fixture.app().pending_clip_restorations.is_empty());
+    assert!(matches!(
+        &fixture.app().pending_generator_chains[&channel].readiness,
+        GeneratorReadiness::Ready(Some(_), None)
+    ));
+    assert!(
+        fixture.app().loaded_generator_identity(channel).is_none(),
+        "Ready alone never substitutes for callback Installed"
+    );
+    let before = project_and_history(fixture.app());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fixture
+        .app()
+        .running_generator_chains
+        .contains_key(&channel)
+    {
+        fixture
+            .callback
+            .as_mut()
+            .unwrap()
+            .pump(fixture.app.as_ref().unwrap().audio.as_ref().unwrap(), 128);
+        fixture.app_mut().poll_generator_endpoint_events();
+        assert!(!fixture.app().clip_restoration_failed);
+        assert!(
+            Instant::now() < deadline,
+            "actual Installed did not transfer its owner"
+        );
+    }
+    let proof = fixture
+        .app()
+        .loaded_generator_identity(channel)
+        .expect("restoration already consumed the one real Ready before transfer");
+    assert!(proof.matches_current(fixture.app()));
+    assert_eq!(
+        proof.identity().class_uid(),
+        source_state().metadata.class_uid
+    );
+    assert_eq!(proof.identity().version(), source_state().metadata.version);
+    assert_eq!(project_and_history(fixture.app()), before);
 }
 
 #[cfg(all(

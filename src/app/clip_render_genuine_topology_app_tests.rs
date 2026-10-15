@@ -231,6 +231,7 @@ impl TopologyFixture {
                 mixer_track: mixer,
                 control,
                 guard,
+                readiness: GeneratorReadiness::default(),
                 previous_state: None,
                 candidate_state,
             },

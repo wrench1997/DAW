@@ -1333,6 +1333,7 @@ fn assert_fresh_capture_worker_ledger(fake: &FakeHelper, capture: &[&str]) {
     expected.extend([
         "LatencySamples",
         "TailSamples",
+        "EventBusLayout",
         "LatencySamples",
         "TailSamples",
     ]);
@@ -2106,6 +2107,7 @@ fn assert_fresh_success_ledger(fake: &FakeHelper) {
     expected.extend([
         "LatencySamples",
         "TailSamples",
+        "EventBusLayout",
         "LatencySamples",
         "TailSamples",
     ]);
@@ -2563,7 +2565,7 @@ fn fresh_source_timing_drift_faults_at_each_existing_worker_fence_without_rebase
                 }
                 let mut expected = fresh_setup_commands(true);
                 if stage != "ready" {
-                    expected.extend(["LatencySamples", "TailSamples"]);
+                    expected.extend(["LatencySamples", "TailSamples", "EventBusLayout"]);
                 }
                 if stage == "poll" {
                     expected.extend(["LatencySamples", "TailSamples"]);

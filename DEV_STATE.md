@@ -5,8 +5,10 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
-Source75（`46359c2`）最新云端 quality：独立 factory 回归 32 passed；完整 root 套件主程序 2277、helper 52、协议 13，共 2342 passed / 12 ignored。严格 Clippy、双 bin 构建、helper 协议 smoke、无默认 feature 检查和独立 fixture 构建通过。原产品期限、状态、历史和 ownership 断言保留；Rust 1.97.1 发布工具链不变。
+Source76（`389f9af`）最新云端 quality：独立 factory 回归 32 passed；完整 root 套件主程序 2279、helper 52、协议 13，共 2344 passed / 12 ignored。严格 Clippy、双 bin 构建、helper 协议 smoke、无默认 feature 检查和独立 fixture 构建通过。原产品期限、状态、历史和 ownership 断言保留；Rust 1.97.1 发布工具链不变。
 quality 整体仍为 failure：最后的 native paint 前/后捕获失败，同进程按钮的 PrintWindow 诊断也返回 false；control/state/lifecycle/cleanup 独立通过。这不证明 Kontakt 界面故障，也不是 GUI 验收通过。
+Source75 preview 同样完成 2342 passed / 12 ignored，随后完成严格 Clippy 和无默认 feature 检查；静态 CRT release 编译期间被 Source76 提交触发既有并发取消。该轮没有 release 构建完成、最终 ZIP 或提取后 helper smoke 通过记录。
+Source76 preview 已实际 success：2344 passed / 12 ignored、严格 Clippy、无默认 feature 检查、静态 CRT release 构建、最终 ZIP 完整性及解压后 sanitized-PATH helper smoke 全部通过。归档绑定 `389f9af`，不是后续 Source77 的发行验证；按现有配置未上传预览包，没有可下载的构建附件。
 Source73 preview 已完成静态 CRT release 构建，随后包内链接校验失败：`Broken package document link: DEV_STATE.md -> docs/WINDOWS_MELODY_WORKFLOW.md`；该轮最终 ZIP smoke 和上传未执行。Source74 已将工作流文档补进必需清单，新增真实文档闭包、ZIP 复制/提取与缺文档拒绝回归；完整打包测试 175 passed。Source74 preview 最终 cancelled：在后续提交触发既有并发取消前，两个 whole-export 测试及 observer cap 测试已报告 FAILED，四个 verifier 测试超过 60 秒且未结束。原日志没有最终 panic 详情，不能仅凭用例名断言原因；该轮 root 测试、Clippy、release 构建和包验收均未完成。
 
 Source73 本机新默认 helper/QA 实际构建 exit0。协调窗口内的唯一 factory-only NI 测试 exit101：`setHostContext failed: 0x80004001`，声明 getter 尚未执行。helper 自然 exit0、实际 Reaped、没有 kill 或 shutdown/wait/pipe 错误；这是该失败路径的清理通过，不是元数据或普通扫描通过。无组件/控制器/view、音色状态、MIDI/DSP、声卡或作品请求。
@@ -16,7 +18,7 @@ Source74 新默认 helper/QA 本机构建均 exit0。唯一 factory-only NI 测�
 
 Source75 的普通模块目录接线已提交并通过上述云端后台门禁。每个 path 一个条目，目录声明与实际运行验证分开，默认 LOAD/工程恢复仍传 None class，不挑首个声明冒充默认类。严格转换/完整工程 QA 保留实际类元数据门。新生产目录路径的 NI 实测仍未运行，Source69 的组件扫描 ExitDll 问题也未修复。Source74 vendor provenance 已从原始 archive 实际重放 74 个源文件逐字节一致；本轮不占用桌面或声卡。
 
-Source76 只修测试隔离和失败诊断：两个 worker-identity 测试及 cap 测试与 App 共用 observer admission；失败时原 worker/observer 仍保留并置 sticky failure。Verifier 排队现在可观察已保留 owner 的失败，拒绝后续夹具而不无限等待；两个确定性回归均从实际 WouldBlock 分支确认排队。两个 whole 失败用例新增即时 stderr，保留原 panic、断言、5 秒 Join/10 秒观察期限。最终候选已实际编译，五组针对性回归共 45 passed；格式与 diff 检查通过。新完整并行套件、Clippy 和无 feature 检查待云端，不把针对性通过称为已复现并解决原 CI 失败。证据：`source76-fixture-targeted-02.log`、`source76-fixture-targeted-terminal-02.json`。
+Source76 只修测试隔离和失败诊断：两个 worker-identity 测试及 cap 测试与 App 共用 observer admission；失败时原 worker/observer 仍保留并置 sticky failure。Verifier 排队现在可观察已保留 owner 的失败，拒绝后续夹具而不无限等待；两个确定性回归均从实际 WouldBlock 分支确认排队。两个 whole 失败用例新增即时 stderr，保留原 panic、断言、5 秒 Join/10 秒观察期限。最终候选已实际编译，五组针对性回归共 45 passed；格式与 diff 检查通过。该提交云端 quality 的完整并行 root 测试及后续后台门禁也已通过，整体仍因 paint 捕获失败；原 Source74 的缺失断言仍不能据此倒推。证据：`source76-fixture-targeted-02.log`、`source76-fixture-targeted-terminal-02.json`、`ci-389f9af-windows-quality-01.log`。
 
 ## 当前支持边界
 
@@ -40,7 +42,8 @@ Source75 普通 UI 的 `start_scan` 和同步 `scan_catalog_checked` 改走 fact
 
 目录/缓存、真实 mock-child 协议、目标选择、保存重开、默认 LOAD 不重试及严格准入拒绝回归已通过 Source75 云端完整 root 套件，并添加独立本机 selector `windows_kontakt_production_catalog_and_reap`。新生产路径 NI 实测尚未运行；Source74 底层 factory 通过不能替代该项。
 
-完整创作链仍缺新目录来源的实际运行身份桥接：Unknown 项目分类会被整曲 Review 先拒绝。后续应消费真正用户 LOAD 取得的 CID/version/分类与 MIDI 证据，绑定当前 generator 的 control/endpoint/instance，再沿用现有 stopped capture 和 strict clone；不能将目录升级为 verified、自动改工程 role，或放宽转换/完整工程 QA。此项尚未实现。
+Source77 已接入新目录来源的实际运行身份桥接：真实默认 LOAD、完整 prepare 和首次 timing 成功后，取得实际 CID/version/分类及活跃 MIDI input，随原 Ready 绑定当前 generator 的 session/channel/endpoint/instance/slot/control。Unknown 只有实际 Instrument+MIDI 证明才进入整曲 Review；Save 返回及 Stop/Capture 前后复核，捕获 CID/version 漂移时不启动 clone。已分类 Instrument 保留原导出合同，不因新增可选身份附加门槛。身份查询失败不使原普通加载失败，Ready 携带明确不可资格原因。
+证明只存当前运行会话，不修改 Project role、历史、dirty 或 catalog verified；Ready/Installed 两顺序和 restoration 已消费的唯一 Ready 均保留原 control/guard 绑定。现有 stopped capture、状态/参数/总线核对、strict clone、取消和实际 Join 均继续生效；不放宽片段转换/完整工程 QA。实际 all-feature 主测试程序编译通过，17 项 Windows 新增回归通过（App5、Whole10、restoration1、eligibility1）。另 3 项 backend 用例原受 Unix/shebang 夹具限制，初次 Windows 过滤器均为 0 tests；现已迁入 Windows/Unix 共享模块及实际 Python helper 夹具，不改生产启动规则。Windows 在 Shutdown 前持有真实 Python 进程句柄，要求 worker Join 后该进程实际 exit0，不能用 CMD 退出冒充。迁移后的 3 项用例待 CI 编译/执行，不能报作 20 项已通过。证据：`source77-loaded-identity-targeted-01.log`、对应 terminal；新版 Clippy、完整套件及真实 NOIRE 闭环尚未验收。
 
 Source57 实际通过 306 项针对性 Rust 测试：默认插件后端 187、扫描/App 5、默认 Probe 12、普通 transport 45、strict client 26、strict backend 31。默认/all-feature/no-feature 的 root `Clippy --all-targets -D warnings`、普通双 bin 构建、精确 `vst2,vst3` 配置检查及 root/vendor 格式检查通过。实际依赖清单验证 483 packages，root 仅 `vst2,vst3`，vendor 不启用实验 feature；这不是 release 预览包验收。
 Source58 仅修正测试辅助函数返回值及 Unix 夹具的分平台错误文字，生产行为不变；当前默认 Clippy 和 12 项 Probe 回归再次通过，原清理断言保留。SDK 的 `-D unused_must_use`、最终 root/vendor/独立夹具格式检查通过；该 SDK 检查保留既有样式警告，不宣称整个 vendor 零警告。完整 vendor 补丁实际重放 73 个源文件逐字节一致；正确 discover 入口实跑 170 项打包测试全部通过。

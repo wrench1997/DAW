@@ -63,12 +63,34 @@ and fixture builds. The workflow failed native paint capture; the new
 production-catalog selector has not run against NI. Source74's lower-level
 factory result remains separate evidence.
 
-The first complete catalog-to-export flow also needs a live-load identity bridge:
-the current whole-song Review rejects persistent Unknown role. Use identity
-actually obtained by the user's default LOAD, tied to the current generator's
-control/endpoint/instance, without mutating Project role/history or upgrading the
-catalog cache. Current stopped capture and strict clone remain mandatory. That
-bridge is not implemented; catalog discovery alone does not qualify export.
+Source77 adds the live-load identity bridge needed by catalog-only Unknown
+sources. After the actual default LOAD, full prepare and initial timing succeed,
+the original Ready event carries actual class/version/category and active MIDI
+identity tied to the current generator's session/channel/endpoint/instance/slot/
+control. Ready/Installed order and restoration's already-consumed unique Ready
+retain the original owners. Identity-query failure leaves ordinary Ready usable
+with an explicit export-ineligibility reason; it does not make ordinary loading
+fail or guess MIDI support.
+
+Only Unknown sources acquire this new Whole Review anchor, requiring an actual
+Instrument token and active MIDI input. Classified Instrument callers retain
+their original export conditions even when optional identity is available.
+Save return and Stop/Capture stages recheck the bound source; captured class or
+version drift refuses the new path before starting the clone. Project role,
+history, dirty state and catalog verified are not promoted. Existing stopped
+capture, full state/parameter/bus checks, strict clone, cancellation and actual
+Join remain mandatory. Source77's initial all-feature main test artifact actually
+compiled and 17 new Windows cases passed: App5, Whole10, restoration1 and
+eligibility1. Three backend cases originally used a Unix-only shebang fixture,
+so their two Windows filters ran 0 tests. They have now moved into a Windows/Unix
+module and shared protocol fixture without changing production helper launch.
+Windows holds the exact Python process handle before Shutdown and requires its
+actual exit0 after worker Join, separately from CMD. The migrated three cases
+await CI compilation/execution; these are not 20 executed passes. Formatting and
+independent source review passed.
+Evidence is `source77-loaded-identity-targeted-01.log` and its terminal JSON;
+strict Clippy, full-suite and real NI acceptance remain open. Catalog discovery
+and mock identity tests do not qualify a real NOIRE workflow.
 
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,
@@ -802,13 +824,16 @@ formatting, strict Clippy, both bins, protocol/harness smoke, no-default-feature
 and fixture builds. Only native paint before/after edit failed, including
 same-process Button PrintWindow=false; control/gesture/dirty feedback, stopped
 state round-trip, lifecycle and Shutdown/EOF/crash cleanup passed separately.
-The workflow remains failure. Its preview job was still running at the Source76
-checkpoint. Preserve `ci-46359c2-windows-quality-01.log` and its actual terminal
+The workflow remains failure. Its preview job later completed the same2342 root
+tests/12 ignored, strict Clippy and no-default-feature check before the Source76
+push cancelled it during static-CRT release compilation. No completed release
+build, final archive or extracted-helper smoke is recorded for that run.
+Preserve `ci-46359c2-windows-{quality,preview}-01.log` and their actual terminal
 run/jobs JSON. Independent source review found no acceptance-blocking catalog
 defect. The new production route's actual NI result remains unrun. Source74's
 success did not activate that connection or fix the older component ExitDll
 stall. Strict conversion/full-owner qualification still needs actual class/bus/
-MIDI evidence, and the live-load export identity bridge remains open.
+MIDI evidence. The later Source77 bridge is a separate unexecuted candidate.
 
 Source76 addresses definite test-isolation gaps found while investigating the
 unfinished Source74 run. The two regular worker-identity tests and the cap test
@@ -826,9 +851,22 @@ candidate actually compiled and passed45 targeted cases: queued16, worker
 identity2, observer cap1, whole export14 and verifier12. Targeted rustfmt and diff
 checks passed. Logs are `source76-fixture-targeted-02.log` and
 `source76-fixture-targeted-terminal-02.json`; candidate01 predates the review
-repairs and is retained separately. Full parallel-suite, strict Clippy and
-no-feature checks for Source76 await CI. These focused results do not establish
-the missing original CI assertion or qualify NI restore/audio/export.
+repairs and is retained separately. The [Source76 quality run38656787235](https://github.com/wrench1997/DAW/actions/runs/38656787235)
+actually completed32 factory and2279 app+52 helper+13 protocol tests (2344 passed/
+12 ignored), strict Clippy, both bins, protocol/harness smoke, no-default-feature
+and fixture builds. Its final paint before/after capture again failed, including
+same-process PrintWindow=false; attach/resize/DPI, modal IPC, control/state,
+lifecycle and Shutdown/EOF/crash cleanup passed independently. The workflow
+remains failure. Its full raw log is `ci-389f9af-windows-quality-01.log`, with
+actual terminal run/jobs JSON. [Source76 preview38656787312](https://github.com/wrench1997/DAW/actions/runs/38656787312)
+completed success: the same2344 root passes/12 ignored, strict Clippy,
+no-default-feature check, static-CRT release build, final ZIP integrity and
+sanitized-PATH extracted-helper smoke all passed. The archive is bound to
+389f9af, not Source77. Upload was skipped by the existing configuration, so no
+downloadable build attachment was published. Preserve
+`ci-389f9af-windows-preview-01.log` and actual terminal run/jobs JSON.
+These results do not establish the missing original CI assertion or qualify
+NI restore/audio/export.
 
 The existing GitHub Windows quality/preview workflows can run source checks away
 from the local desktop. A cloud coding environment still needs the repository and

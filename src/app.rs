@@ -7,7 +7,9 @@ mod clip_render_glue;
 mod clip_render_job;
 mod clip_render_playback;
 mod clip_render_session;
+mod generator_loaded_identity;
 mod stopped_bounce_capture;
+use generator_loaded_identity::GeneratorReadiness;
 mod whole_song_export_job;
 #[cfg(test)]
 use clip_render_glue::RestorationTestFactory;
@@ -2414,6 +2416,7 @@ struct RunningGeneratorChain {
     mixer_track: usize,
     control: PluginChainControl,
     guard: PluginWorkerGuard,
+    readiness: GeneratorReadiness,
 }
 
 struct PendingGeneratorChain {
@@ -2423,6 +2426,7 @@ struct PendingGeneratorChain {
     mixer_track: usize,
     control: PluginChainControl,
     guard: PluginWorkerGuard,
+    readiness: GeneratorReadiness,
     previous_state: Option<ChannelGeneratorState>,
     candidate_state: ChannelGeneratorState,
 }
@@ -6684,6 +6688,7 @@ impl CitrusApp {
                 mixer_track,
                 control,
                 guard,
+                readiness: GeneratorReadiness::default(),
                 previous_state,
                 candidate_state,
             },
@@ -9245,6 +9250,7 @@ impl CitrusApp {
                             instance_id,
                             control,
                             guard,
+                            readiness,
                             ..
                         } = pending;
                         self.running_generator_chains.insert(
@@ -9256,6 +9262,7 @@ impl CitrusApp {
                                 mixer_track,
                                 control,
                                 guard,
+                                readiness,
                             },
                         );
                         if confirmation_is_current {
@@ -10430,13 +10437,23 @@ impl CitrusApp {
         }
         remaining = generator_budget;
         if remaining > 0 {
-            for chain in self.pending_generator_chains.values_mut() {
+            for (&channel_id, chain) in &mut self.pending_generator_chains {
                 let chain_is_current =
                     plugin_runtime_session_is_current(chain.project_session, project_session);
                 while remaining > 0 {
                     let Some(event) = chain.control.try_next_event() else {
                         break;
                     };
+                    chain.readiness.observe(
+                        &self.project,
+                        project_session,
+                        chain.project_session,
+                        channel_id,
+                        chain.endpoint_id,
+                        chain.instance_id,
+                        &chain.control,
+                        &event,
+                    );
                     if allow_plugin_runtime_commands
                         && chain_is_current
                         && !self
@@ -10470,13 +10487,23 @@ impl CitrusApp {
             }
         }
         if remaining > 0 {
-            for chain in self.running_generator_chains.values_mut() {
+            for (&channel_id, chain) in &mut self.running_generator_chains {
                 let chain_is_current =
                     plugin_runtime_session_is_current(chain.project_session, project_session);
                 while remaining > 0 {
                     let Some(event) = chain.control.try_next_event() else {
                         break;
                     };
+                    chain.readiness.observe(
+                        &self.project,
+                        project_session,
+                        chain.project_session,
+                        channel_id,
+                        chain.endpoint_id,
+                        chain.instance_id,
+                        &chain.control,
+                        &event,
+                    );
                     if allow_plugin_runtime_commands
                         && chain_is_current
                         && !self
@@ -36677,6 +36704,8 @@ mod playback_tests {
                 name: "Actual ready label".into(),
                 latency_samples: 0,
                 tail_samples: 0,
+                loaded_vst3_identity: None,
+                loaded_vst3_identity_error: None,
             },
         );
         assert_eq!(
@@ -36891,6 +36920,8 @@ mod playback_tests {
                     name: "First".into(),
                     latency_samples: 64,
                     tail_samples: 0,
+                    loaded_vst3_identity: None,
+                    loaded_vst3_identity_error: None,
                 },
             )
             .is_none()
@@ -36999,6 +37030,8 @@ mod playback_tests {
                 name: "Old Session Instance".into(),
                 latency_samples: 2048,
                 tail_samples: 4096,
+                loaded_vst3_identity: None,
+                loaded_vst3_identity_error: None,
             },
             RuntimeEvent::ParameterValue {
                 slot: 0,
@@ -37049,6 +37082,8 @@ mod playback_tests {
                     name: "New Session Instance".into(),
                     latency_samples: 64,
                     tail_samples: 0,
+                    loaded_vst3_identity: None,
+                    loaded_vst3_identity_error: None,
                 },
             )
             .is_none()

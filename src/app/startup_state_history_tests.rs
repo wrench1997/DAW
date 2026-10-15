@@ -147,6 +147,7 @@ fn attach_state_history_worker(
             mixer_track: 1,
             control,
             guard,
+            readiness: GeneratorReadiness::default(),
         },
     );
     StateHistoryWorker {

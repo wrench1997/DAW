@@ -423,6 +423,27 @@ impl Fixture {
         Self::new_configured(0, false, true)
     }
     fn new_configured(reported_tail: u32, tight_note_off: bool, observe_whole_drop: bool) -> Self {
+        Self::new_configured_identity(reported_tail, tight_note_off, observe_whole_drop, None)
+    }
+    /// Explicit mock identity travels through the real Ready queue and actual Installed callback.
+    pub(in crate::app) fn new_with_loaded_identity_for_test(
+        category: &str,
+        midi_in: bool,
+        ready_before_install: bool,
+    ) -> Self {
+        Self::new_configured_identity(
+            0,
+            false,
+            false,
+            Some((category, midi_in, ready_before_install)),
+        )
+    }
+    fn new_configured_identity(
+        reported_tail: u32,
+        tight_note_off: bool,
+        observe_whole_drop: bool,
+        loaded: Option<(&str, bool, bool)>,
+    ) -> Self {
         let admission = fixture_admission();
         let whole_drop_observer = observe_whole_drop.then(|| {
             crate::genuine_app_observer::ObservationRun::install()
@@ -475,14 +496,29 @@ impl Fixture {
             .unwrap();
         let endpoint_id = app.allocate_generator_endpoint_id();
         let candidate_state = snapshot_channel_generator(&app.project, channel_id).unwrap();
-        let (chain, source) = TestCaptureSource::new(
-            instance_id,
-            captured_state.clone(),
-            PluginPrepareConfig {
-                sample_rate: 48_000.0,
-                max_block_frames: MAX_MIXER_BLOCK_FRAMES,
-            },
-        )
+        let config = PluginPrepareConfig {
+            sample_rate: 48_000.0,
+            max_block_frames: MAX_MIXER_BLOCK_FRAMES,
+        };
+        let (chain, source) = if let Some((category, midi_in, _)) = loaded {
+            let identity = plugins::plugin_runtime::LoadedVst3Identity::test_fixture(
+                app.project.plugin_instances[0].path.clone(),
+                &captured_state.metadata.class_uid,
+                &captured_state.metadata.version,
+                category,
+                midi_in,
+                false,
+            );
+            TestCaptureSource::new_with_loaded_identity(
+                instance_id,
+                captured_state.clone(),
+                config,
+                identity,
+                false,
+            )
+        } else {
+            TestCaptureSource::new(instance_id, captured_state.clone(), config)
+        }
         .unwrap();
         let plugins::plugin_runtime::PluginChain {
             audio: endpoint,
@@ -504,6 +540,7 @@ impl Fixture {
                 mixer_track,
                 control,
                 guard,
+                readiness: GeneratorReadiness::default(),
                 previous_state: None,
                 candidate_state,
             },
@@ -532,6 +569,38 @@ impl Fixture {
             });
         }
         let project_session = fixture.app.project_session;
+        if loaded.is_some() {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while fixture.app.pending_generator_chains[&channel_id]
+                .control
+                .plugin_latency_snapshot()
+                .is_none()
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "actual worker initial metadata did not publish"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if loaded.is_some_and(|(_, _, ready_first)| ready_first) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while matches!(
+                fixture.app.pending_generator_chains[&channel_id].readiness,
+                GeneratorReadiness::Awaiting
+            ) {
+                assert!(
+                    Instant::now() < deadline,
+                    "actual worker Ready did not arrive before install"
+                );
+                fixture.app.poll_plugin_runtime_events();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                fixture.app.loaded_generator_identity(channel_id).is_none(),
+                "Pending Ready is not callback-confirmed Running"
+            );
+        }
         assert!(
             fixture
                 .app
@@ -547,6 +616,26 @@ impl Fixture {
                     endpoint
                 )
         );
+        if loaded.is_some_and(|(_, _, ready_first)| !ready_first) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !fixture
+                .app
+                .running_generator_chains
+                .contains_key(&channel_id)
+            {
+                assert!(
+                    Instant::now() < deadline,
+                    "actual callback install did not arrive before UI Ready consumption"
+                );
+                fixture.pump_callback_only();
+                fixture.app.poll_generator_endpoint_events();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            assert!(
+                fixture.app.loaded_generator_identity(channel_id).is_none(),
+                "Installed without Ready has no loaded identity"
+            );
+        }
         fixture.app.request_immediate_timeline_compile();
         fixture.until(|fixture| {
             fixture.app.timeline_audio_matches_desired()

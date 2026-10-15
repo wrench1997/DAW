@@ -383,6 +383,7 @@ fn windows_kontakt_actual_worker_load_state_reset_and_retained_shutdown() {
                     name,
                     latency_samples,
                     tail_samples,
+                    ..
                 }) => {
                     // Production adds the actual vendor to its ready display name.
                     // The loader uses the explicit class UID; keep the observed full name.
@@ -892,6 +893,7 @@ fn windows_noire_actual_first_sequence_callback_cadence() {
                 name,
                 latency_samples,
                 tail_samples,
+                ..
             }) => {
                 if name.split(" — ").next() != Some("Kontakt 8") {
                     setup_error = Some(format!("unexpected ready identity: {name:?}"));

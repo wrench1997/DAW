@@ -248,6 +248,8 @@ mod tests {
                 name: "Project-only receipt".into(),
                 latency_samples: 0,
                 tail_samples: 96000,
+                loaded_vst3_identity: None,
+                loaded_vst3_identity_error: None,
             },
         })
     }

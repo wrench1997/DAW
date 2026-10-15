@@ -280,6 +280,7 @@ impl StartFixture {
                 mixer_track: 0,
                 control: chain.control,
                 guard: chain.guard,
+                readiness: GeneratorReadiness::default(),
             },
         );
         ui.app.audio = Some(audio);

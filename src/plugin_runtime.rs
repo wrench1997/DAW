@@ -34,6 +34,10 @@ use crate::instrument_bounce::{BounceCaptureError, BouncePluginState, BounceStat
 use super::installed_vst3_helper_path;
 use super::{PluginDescriptor, PluginFormat};
 
+#[path = "plugin_loaded_identity.rs"]
+mod loaded_identity;
+pub use loaded_identity::LoadedVst3Identity;
+
 #[path = "offline_instrument.rs"]
 mod offline_instrument;
 pub use offline_instrument::OfflineInstrument;
@@ -369,6 +373,10 @@ pub struct NativeEditorFeedback {
 /// none of those operations occur on the device callback.
 pub trait PluginBackend: 'static {
     fn name(&self) -> &str;
+    /// Optional actual prepared identity. VST2/custom backends keep their original contract.
+    fn loaded_vst3_identity(&self) -> Result<Option<LoadedVst3Identity>, String> {
+        Ok(None)
+    }
     fn prepare(&mut self, config: PluginPrepareConfig) -> Result<(), String>;
     fn process(&mut self, left: &mut [f32], right: &mut [f32], frames: usize)
     -> Result<(), String>;
@@ -2619,6 +2627,8 @@ pub enum RuntimeEvent {
         name: String,
         latency_samples: u32,
         tail_samples: u32,
+        loaded_vst3_identity: Option<LoadedVst3Identity>,
+        loaded_vst3_identity_error: Option<String>,
     },
     SlotFault {
         slot: usize,
@@ -2675,6 +2685,15 @@ pub struct PluginChainControl {
     manifest: PluginEndpointManifest,
     parameter_edit_receipts: Consumer<ParameterEditReceipt>,
     parameter_edit_admission: Arc<AtomicU32>,
+}
+
+/// Opaque allocation identity, not a command sender or worker-lifetime owner.
+#[derive(Clone)]
+pub(crate) struct PluginControlIdentity(Arc<BridgeMetrics>);
+impl PluginControlIdentity {
+    pub(crate) fn matches(&self, control: &PluginChainControl) -> bool {
+        Arc::ptr_eq(&self.0, &control.metrics)
+    }
 }
 
 /// Shared cooperative capture fence. One dispatched helper call retains its own timeout;
@@ -2785,6 +2804,9 @@ impl Drop for BounceStateReceiver {
 }
 
 impl PluginChainControl {
+    pub(crate) fn owner_identity(&self) -> PluginControlIdentity {
+        PluginControlIdentity(Arc::clone(&self.metrics))
+    }
     pub(crate) fn observe_bounce_source_settlement(
         &self,
         target: BounceSourceCallbackIdentity,
@@ -4059,13 +4081,29 @@ fn run_worker(
                         Ok(()) => match backend_ready_metadata_expected(
                             slot.backend.as_ref(),
                             slot.initial_expected_timing,
-                        ) {
-                            Ok((name, latency_samples, tail_samples)) => {
+                        )
+                        .map(|(name, latency_samples, tail_samples)| {
+                            let (identity, error) =
+                                match catch_backend(|| slot.backend.loaded_vst3_identity()) {
+                                    Ok(identity) => (identity, None),
+                                    Err(error) => (None, Some(error)),
+                                };
+                            (name, latency_samples, tail_samples, identity, error)
+                        }) {
+                            Ok((
+                                name,
+                                latency_samples,
+                                tail_samples,
+                                loaded_vst3_identity,
+                                loaded_vst3_identity_error,
+                            )) => {
                                 let event = RuntimeEvent::SlotReady {
                                     slot: slot_index,
                                     name,
                                     latency_samples,
                                     tail_samples,
+                                    loaded_vst3_identity,
+                                    loaded_vst3_identity_error,
                                 };
                                 push_event(&mut events, event, &metrics);
                                 slots.push(WorkerSlot {
@@ -6624,6 +6662,8 @@ struct Vst3Backend {
     max_block_frames: usize,
     input_channels: usize,
     output_channels: usize,
+    loaded_path: PathBuf,
+    requested_class_uid: Option<String>,
 }
 
 #[cfg(feature = "vst3")]
@@ -6854,6 +6894,8 @@ impl Vst3Backend {
                 max_block_frames: config.max_block_frames,
                 input_channels,
                 output_channels,
+                loaded_path: spec.descriptor.path,
+                requested_class_uid: spec.class_uid,
             })
         })();
         #[cfg(test)]
@@ -6913,6 +6955,26 @@ impl source_restoration::RestorationAccess for Vst3Backend {
 impl PluginBackend for Vst3Backend {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn loaded_vst3_identity(&self) -> Result<Option<LoadedVst3Identity>, String> {
+        if !self.prepared {
+            return Ok(None);
+        }
+        // Called only after full preparation (including Kontakt's checked output
+        // restart) and successful initial latency/tail. Event activation is read
+        // from the actual component; catalog and persisted role are never inputs.
+        let events = self
+            .plugin
+            .event_bus_layout()
+            .map_err(|error| format!("Prepared VST3 event identity unavailable: {error}"))?;
+        LoadedVst3Identity::from_prepared_plugin(
+            self.loaded_path.clone(),
+            self.requested_class_uid.clone(),
+            self.plugin.info(),
+            &events,
+        )
+        .map(Some)
     }
 
     fn prepare(&mut self, config: PluginPrepareConfig) -> Result<(), String> {
@@ -11546,6 +11608,14 @@ mod tests {
         chain.guard.shutdown();
     }
 }
+
+#[cfg(all(test, any(unix, windows), feature = "vst3"))]
+#[path = "plugin_backend_protocol_test_helper.rs"]
+mod backend_protocol_test_helper;
+
+#[cfg(all(test, any(unix, windows), feature = "vst3"))]
+#[path = "plugin_loaded_identity_backend_tests.rs"]
+mod loaded_identity_backend_tests;
 
 #[cfg(all(test, unix, feature = "vst3"))]
 #[path = "plugin_reset_origin_tests.rs"]

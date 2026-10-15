@@ -658,6 +658,8 @@ fn complete_fixture() -> CompleteFixture {
             name: "real field".into(),
             latency_samples: 3,
             tail_samples: 5,
+            loaded_vst3_identity: None,
+            loaded_vst3_identity_error: None,
         },
     });
     fixture.control(

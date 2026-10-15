@@ -23,6 +23,7 @@ struct Shared {
     reset: ProcessingGate,
     process: ProcessingGate,
     fail_process_after_gate: AtomicBool,
+    loaded_identity: Option<LoadedVst3Identity>,
 }
 
 /// Mock-only backend blocking; production publications still come from the
@@ -71,7 +72,17 @@ impl TestCaptureSource {
         state: BouncePluginState,
         config: PluginPrepareConfig,
     ) -> Result<(PluginChain, Self), String> {
-        Self::new_with_prepare_gate(instance_id, state, config, false)
+        Self::new_with_prepare_gate(instance_id, state, config, false, None)
+    }
+
+    pub(crate) fn new_with_loaded_identity(
+        instance_id: u64,
+        state: BouncePluginState,
+        config: PluginPrepareConfig,
+        identity: LoadedVst3Identity,
+        hold_prepare: bool,
+    ) -> Result<(PluginChain, Self), String> {
+        Self::new_with_prepare_gate(instance_id, state, config, hold_prepare, Some(identity))
     }
 
     /// Explicit plugin-free seam: keep the real worker's preparation pending
@@ -85,7 +96,7 @@ impl TestCaptureSource {
         state: BouncePluginState,
         config: PluginPrepareConfig,
     ) -> Result<(PluginChain, Self), String> {
-        Self::new_with_prepare_gate(instance_id, state, config, true)
+        Self::new_with_prepare_gate(instance_id, state, config, true, None)
     }
 
     fn new_with_prepare_gate(
@@ -93,6 +104,7 @@ impl TestCaptureSource {
         state: BouncePluginState,
         config: PluginPrepareConfig,
         prepare_paused: bool,
+        loaded_identity: Option<LoadedVst3Identity>,
     ) -> Result<(PluginChain, Self), String> {
         let name = state.metadata.name.clone();
         let feedback = NativeEditorFeedback {
@@ -116,6 +128,7 @@ impl TestCaptureSource {
             reset: ProcessingGate::default(),
             process: ProcessingGate::default(),
             fail_process_after_gate: AtomicBool::new(false),
+            loaded_identity,
         });
         let worker_shared = Arc::clone(&shared);
         let chain = PluginChain::spawn_identified_with_backend_factory(
@@ -235,6 +248,10 @@ impl Drop for CaptureBackend {
 impl PluginBackend for CaptureBackend {
     fn name(&self) -> &str {
         &self.name
+    }
+
+    fn loaded_vst3_identity(&self) -> Result<Option<LoadedVst3Identity>, String> {
+        Ok(self.shared.loaded_identity.clone())
     }
 
     fn prepare(&mut self, _: PluginPrepareConfig) -> Result<(), String> {

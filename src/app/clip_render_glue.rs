@@ -55,6 +55,7 @@ pub(super) struct PendingClipRestoration {
     transferred_guard: Option<PluginWorkerGuard>,
     expected_timing: (u32, u32),
     ready: bool,
+    ready_identity_event: Option<RuntimeEvent>,
     started_at: Instant,
 }
 
@@ -563,6 +564,7 @@ impl CitrusApp {
                 transferred_guard: None,
                 expected_timing,
                 ready: false,
+                ready_identity_event: None,
                 started_at: Instant::now(),
             },
         );
@@ -739,6 +741,9 @@ impl CitrusApp {
             );
             match &event {
                 RuntimeEvent::SlotReady { slot: 0, .. } => {
+                    if !pending.ready {
+                        pending.ready_identity_event = Some(event.clone());
+                    }
                     pending.ready = true;
                     let _ = apply_plugin_runtime_event_for_session(
                         pending.candidate.as_mut().expect("candidate retained"),
@@ -875,6 +880,22 @@ impl CitrusApp {
         self.clip_restoration_installs
             .insert(pending.instance_id, (endpoint_id, false));
         self.clip_restoration_timeline = None;
+        let mut readiness = GeneratorReadiness::default();
+        if let Some(event) = pending.ready_identity_event.as_ref() {
+            readiness.observe(
+                pending.candidate.as_ref().expect("retained candidate"),
+                self.project_session,
+                pending.project_session,
+                channel,
+                endpoint_id,
+                pending.instance_id,
+                pending
+                    .transferred_control
+                    .as_ref()
+                    .expect("retained control"),
+                event,
+            );
+        }
         // Capacity and all fallible preparation precede endpoint transfer. The
         // guard is installed before the candidate Project can become visible.
         self.pending_generator_chains.insert(
@@ -889,6 +910,7 @@ impl CitrusApp {
                     .take()
                     .expect("retained control"),
                 guard: pending.transferred_guard.take().expect("retained guard"),
+                readiness,
                 previous_state: pending.previous.take(),
                 candidate_state,
             },
@@ -1247,6 +1269,7 @@ impl CitrusApp {
                         mixer_track,
                         control: pending.control,
                         guard: pending.guard,
+                        readiness: pending.readiness,
                     },
                 );
                 if let Some(receipt) = self.clip_restoration_installs.get_mut(&plugin_instance_id) {

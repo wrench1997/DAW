@@ -2,8 +2,11 @@
 //! The shared stopped-capture actor owns real callback/worker provenance. This
 //! job owns the frozen master request and the only final file-publication CAS.
 //! Normal completion never removes/reloads a source or changes Project/history.
-use super::stopped_bounce_capture::{LiveBinding, StoppedBounceCapture};
 use super::*;
+use super::{
+    generator_loaded_identity::LoadedGeneratorIdentity,
+    stopped_bounce_capture::{LiveBinding, StoppedBounceCapture},
+};
 use crate::{
     export_job::ExportControl,
     export_options::WavExportOptions,
@@ -15,7 +18,7 @@ use crate::{
             RenderStatus,
         },
     },
-    plugins::plugin_runtime::RetainedShutdownPoll,
+    plugins::plugin_runtime::{LoadedVst3Identity, RetainedShutdownPoll},
 };
 
 const RENDER_BUDGET: Duration = Duration::from_secs(300);
@@ -159,6 +162,7 @@ pub(super) struct WholeSongExportReview {
     project: Project,
     snapshot: Arc<[u8]>,
     initial: LiveBinding,
+    loaded_identity: Option<LoadedGeneratorIdentity>,
     options: WavExportOptions,
     reviewed_fixed_tail: bool,
 }
@@ -210,6 +214,7 @@ impl WholeSongTailResult {
 
 pub(super) struct WholeSongExportJob {
     actor: StoppedBounceCapture,
+    loaded_identity: Option<LoadedGeneratorIdentity>,
     frozen_project: Option<Project>,
     options: WavExportOptions,
     #[cfg(any(
@@ -341,6 +346,18 @@ fn pure_master_plan(
     initial_rate: u32,
     options: WavExportOptions,
 ) -> Result<InstrumentBouncePlan, String> {
+    pure_master_plan_with_loaded_identity(project, channel_id, initial_rate, options, None)
+}
+
+/// Loaded identity is an additional whole-export admission, not a Project role
+/// update or authority to capture. Legacy Instrument callers still use None.
+fn pure_master_plan_with_loaded_identity(
+    project: &Project,
+    channel_id: u32,
+    initial_rate: u32,
+    options: WavExportOptions,
+    loaded_identity: Option<&LoadedVst3Identity>,
+) -> Result<InstrumentBouncePlan, String> {
     options.validate().map_err(|error| error.to_string())?;
     if options.sample_rate != initial_rate {
         return Err(format!(
@@ -378,12 +395,49 @@ fn pure_master_plan(
     let instance = instances
         .next()
         .ok_or("The VST source instance is absent")?;
-    if instances.next().is_some() || instance.role != PluginRole::Instrument {
+    if instances.next().is_some() {
         return Err("Whole-song export requires one distinct Instrument instance identity".into());
+    }
+    if loaded_identity.is_some_and(|identity| identity.path() != instance.path.as_path()) {
+        return Err("The actual loaded VST3 identity belongs to a different source path".into());
+    }
+    match instance.role {
+        PluginRole::Instrument => {}
+        PluginRole::Unknown
+            if loaded_identity.is_some_and(LoadedVst3Identity::is_instrument_with_midi_input) => {}
+        _ => {
+            return Err("Whole-song export requires an Instrument instance, or an Unknown instance with actual loaded Instrument and MIDI-input identity".into());
+        }
     }
     let frames = u32::try_from(options.tail_frames().map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
     InstrumentBouncePlan::prepare_master_song(project, channel_id, initial_rate, frames)
+}
+
+fn recheck_loaded_identity(
+    app: &CitrusApp,
+    identity: Option<&LoadedGeneratorIdentity>,
+) -> Result<(), String> {
+    if identity.is_some_and(|identity| !identity.matches_current(app)) {
+        return Err("The reviewed actual loaded VST3 source or control owner changed".into());
+    }
+    Ok(())
+}
+
+fn check_captured_loaded_identity(
+    expected: Option<&LoadedVst3Identity>,
+    actual: &crate::instrument_bounce::BouncePluginMetadata,
+) -> Result<(), String> {
+    if expected.is_some_and(|expected| {
+        expected.class_uid() != actual.class_uid.as_str()
+            || expected.version() != actual.version.as_str()
+    }) {
+        return Err(
+            "The actual captured VST3 class/version differs from the reviewed loaded identity"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 impl CitrusApp {
@@ -474,7 +528,30 @@ impl CitrusApp {
         let snapshot =
             clip_render::project_snapshot(&self.project).map_err(|error| error.to_string())?;
         let initial = self.stopped_bounce_observe(channel_id)?;
-        let plan = pure_master_plan(&self.project, channel_id, initial.sample_rate, options)?;
+        // This bridge authorizes only persistent Unknown. A classified
+        // Instrument keeps its original Review/capture contract even when the
+        // runtime can also publish an optional loaded identity.
+        let loaded_identity = if self.project.plugin_instances.iter().any(|instance| {
+            instance.id == initial.stamp.instance_id && instance.role == PluginRole::Unknown
+        }) {
+            Some(
+                self.loaded_generator_identity(channel_id)
+                    .ok_or_else(|| self.loaded_generator_identity_unavailable_reason(channel_id))?,
+            )
+        } else {
+            None
+        };
+        recheck_loaded_identity(self, loaded_identity.as_ref())?;
+        let plan = match &loaded_identity {
+            Some(identity) => pure_master_plan_with_loaded_identity(
+                &self.project,
+                channel_id,
+                initial.sample_rate,
+                options,
+                Some(identity.identity()),
+            ),
+            None => pure_master_plan(&self.project, channel_id, initial.sample_rate, options),
+        }?;
         if plan.instance_id() != initial.stamp.instance_id {
             return Err("The exact source instance binding changed".into());
         }
@@ -482,6 +559,7 @@ impl CitrusApp {
             project: self.project.clone(),
             snapshot,
             initial,
+            loaded_identity,
             options,
             reviewed_fixed_tail,
         })
@@ -499,10 +577,15 @@ impl CitrusApp {
         }
         // Called after Save returns: the same full snapshot and actual initial
         // binding must still exist before publishing the preparatory Stop.
+        let loaded_identity = review.loaded_identity;
         let mut actor = StoppedBounceCapture::new(review.snapshot, review.initial, Instant::now());
-        actor.begin_stop(self, Self::whole_song_export_operation_admission)?;
+        actor.begin_stop(self, |app| {
+            Self::whole_song_export_operation_admission(app)?;
+            recheck_loaded_identity(app, loaded_identity.as_ref())
+        })?;
         self.whole_song_export_job = Some(WholeSongExportJob {
             actor,
+            loaded_identity,
             frozen_project: Some(review.project),
             options: review.options,
             #[cfg(any(
@@ -632,6 +715,7 @@ impl CitrusApp {
                 .actor
                 .live_recheck(self)
                 .and_then(|_| job.actor.stop_intent_current(self))
+                .and_then(|_| recheck_loaded_identity(self, job.loaded_identity.as_ref()))
         {
             job.fail(reason);
         }
@@ -641,6 +725,11 @@ impl CitrusApp {
                 // cancellation must not issue another StopAll/chase or wait
                 // for Ready and later be relabelled as a stop timeout.
                 if job.cancel_requested || job.failure.is_some() {
+                    job.finish();
+                    return;
+                }
+                if let Err(reason) = recheck_loaded_identity(self, job.loaded_identity.as_ref()) {
+                    job.fail(reason);
                     job.finish();
                     return;
                 }
@@ -663,12 +752,22 @@ impl CitrusApp {
                             {
                                 return Err("Reviewed source/sample rate/snapshot differs from actual stopped Ready".into());
                             }
-                            let plan = pure_master_plan(
-                                &self.project,
-                                binding.stamp.channel_id,
-                                binding.sample_rate,
-                                job.options,
-                            )?;
+                            recheck_loaded_identity(self, job.loaded_identity.as_ref())?;
+                            let plan = match &job.loaded_identity {
+                                Some(identity) => pure_master_plan_with_loaded_identity(
+                                    &self.project,
+                                    binding.stamp.channel_id,
+                                    binding.sample_rate,
+                                    job.options,
+                                    Some(identity.identity()),
+                                ),
+                                None => pure_master_plan(
+                                    &self.project,
+                                    binding.stamp.channel_id,
+                                    binding.sample_rate,
+                                    job.options,
+                                ),
+                            }?;
                             job.actor.stop_intent_current(self)?;
                             job.actor.begin_capture(self, plan)
                         })();
@@ -703,6 +802,18 @@ impl CitrusApp {
                         &captured,
                     );
                     if job.cancel_requested || job.failure.is_some() {
+                        drop(captured);
+                        job.finish();
+                        return;
+                    }
+                    if let Err(reason) = check_captured_loaded_identity(
+                        job.loaded_identity
+                            .as_ref()
+                            .map(LoadedGeneratorIdentity::identity),
+                        captured.metadata(),
+                    ) {
+                        job.capture_failure = Some(CapturePollError::Invalid(reason.clone()));
+                        job.fail(reason);
                         drop(captured);
                         job.finish();
                         return;

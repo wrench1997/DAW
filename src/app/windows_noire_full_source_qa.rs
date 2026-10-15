@@ -284,6 +284,7 @@ fn record_evidence(record: &observe::Record) -> Value {
                     name,
                     latency_samples,
                     tail_samples,
+                    ..
                 } => {
                     json!({"kind":"SlotReady","slot":slot,"name":raw_text(name),"latency_samples":latency_samples,"tail_samples":tail_samples})
                 }

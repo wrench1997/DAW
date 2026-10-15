@@ -375,6 +375,7 @@ fn initial_driver_runtime(event: &crate::plugins::plugin_runtime::RuntimeEvent) 
             name,
             latency_samples,
             tail_samples,
+            ..
         } => json!({
             "kind":"SlotReady","slot":slot,"name":initial_driver_text(name),
             "latency_samples":latency_samples,"tail_samples":tail_samples,

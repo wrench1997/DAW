@@ -1,6 +1,9 @@
 //! Real App + identified source worker + callback + Timeline notification path.
 //! Renderer factory alone is a closed mock; actual captured authority, PCM,
 //! checked WAV publication and Project/history images remain production code.
+#[path = "whole_song_export_identity_tests.rs"]
+mod loaded_identity_tests;
+
 use super::*;
 use crate::{
     app::clip_render_job::tests::Fixture,
