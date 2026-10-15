@@ -717,10 +717,12 @@ mod tests {
 
     #[test]
     fn geometry_clock_retains_tempo_placements_beyond_the_manual_song_end() {
-        let mut project = Project::default();
-        project.song_length_beats = 0.5;
-        project.auto_song_length = false;
-        project.tempo = 120.0;
+        let mut project = Project {
+            song_length_beats: 0.5,
+            auto_song_length: false,
+            tempo: 120.0,
+            ..Project::default()
+        };
         let mut lane = AutomationLane::new(AutomationTarget::Tempo);
         lane.replace_points([AutomationPoint::new(3.0, 60.0)]);
         project.automation_lanes = vec![crate::model::ProjectAutomation {

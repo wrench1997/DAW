@@ -1179,6 +1179,15 @@ Root122096/exec27249 and all14 held children terminated, private/global peaks
 3.728/22.936GiB, fresh heavy empty12:22Z. Keep `source109-local-gates-01-*` and
 `source109-local-resource-handback-01.json`.
 
+Source110 (`34254db`) strict Clippy actually failed101 only at the new TempoMap
+test's same initializer lint (tempo_map.rs721); the main initializer passed.
+The fixture now uses a struct initializer with every value/assertion unchanged,
+no allow/MSRV change; format/diff passed. Root94160/exec7502 and all6 held children
+terminated, private/global2.263/22.806GiB, fresh heavy empty12:25Z. No GPU/artifacts/
+bins ran. Keep `source110-local-gates-01-*` and
+`source110-local-resource-handback-01.json`. Only Clippy/artifacts/matching bins
+and the two genuine render refinements remain for this feature candidate.
+
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
 The native harness now probes the OS, current process session, WTS connection
