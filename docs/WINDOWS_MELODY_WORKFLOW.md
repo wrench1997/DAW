@@ -858,13 +858,31 @@ Final code `9bb3110` cloud outcomes actually completed:
   The terminal transport's100ms natural-exit window is a possible mechanism,
   not an established cause. The same test passed in preview; that does not erase
   this failure. Later build/native screenshot stages were not reached, so cloud
-  PrintWindow PASS/SKIPPED acceptance remains unverified. No failure rule was
-  relaxed. Permission to diagnose this separate Rust test is pending.
+  PrintWindow PASS/SKIPPED acceptance was not reached in this run. No failure
+  rule was relaxed. This independent intermittent test remains undiagnosed.
 
 Keep `ci-9bb3110-{windows-quality,windows-preview,linux-helper-readiness}-01.log`
 and `printwindow-final-*-actual-terminal-01.json`. The environment-only `8f4f35c`
 runs actually ended cancelled when the final capture correction superseded them;
 neither is counted as passing evidence.
+
+
+The unchanged code then actually passed [quality on documentation commit
+`666ce96`](https://github.com/wrench1997/DAW/actions/runs/38706859200): factory32,
+SDK4+15, root2398/12 ignored, strict Clippy, matching Windows bins, helper
+harness14, editor harness80, fixture and no-default-feature gates all passed;
+Linux SDK15/Unix1 also passed. The hosted runner was actually session2/WTSActive,
+visible station, matching Default desktops. It therefore ran real PrintWindow:
+paint before/after edit, the original Button crop's repaint change, interaction,
+state and all three cleanup modes passed. This is real supported-desktop PASS,
+not an environment-forced skip. Unsupported-OS/desktop and genuine failure/
+timeout paths remain covered by the regression suite.
+
+Together with the `9bb3110` preview success, local and cloud acceptance of this
+capture fix is complete. The earlier independent retirement test failure remains
+recorded and was not modified or weakened. Keep `ci-666ce96-windows-quality-01.log`
+and `printwindow-docs-quality-{run,jobs}-actual-terminal-01.json`. This final
+record-only update reuses the same verified code candidate.
 
 The classification follows Microsoft's [process session API](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-processidtosessionid),
 [WTS connection states](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/ne-wtsapi32-wts_connectstate_class)
