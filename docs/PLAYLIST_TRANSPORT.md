@@ -1,6 +1,6 @@
 # Drag the playhead; let the arrangement set its end
 
-**Follow-length source `b2e56dc` locally verified, 2026-10-16. Cloud gates pending.**
+**Follow-length source `b2e56dc` verified locally; both cloud gates passed at `f6678ae`, 2026-10-16.**
 Twelve affected input/focus cases, the explicit Saved13 private-copy round-trip,
 strict Clippy, no-default check, preview unit and matching main/helper builds
 passed. Eight genuine WGPU cases passed; all nine 1498×936 frames were inspected.
@@ -13,7 +13,7 @@ and does not include Follow. The new source writes format 14: save old works as
 copies, because 03/02 cannot read new v14 files. 01/02/03 and their profiles are unchanged.
 Earlier linked-editor [quality](https://github.com/wrench1997/DAW/actions/runs/38746810086)
 and [preview packaging](https://github.com/wrench1997/DAW/actions/runs/38746809594)
-passed at `63d2f99`; these are not the pending Follow cloud gates.
+passed at `63d2f99`; Follow has its own completed cloud evidence below.
 Native NOIRE/device acceptance remains deferred while the user tests 03.
 
 ## Position and view are separate from music
@@ -146,7 +146,33 @@ The final CPU batch peaked at 3.95 GiB private / 22.42 GiB global, guard=false. 
 and WGPU work actually exited and resources were handed back to the peer.
 Original failures, outputs, exact source bindings and readbacks remain under
 `target/backend-reliability-20261014/source116-*` and
-`pattern-follow-length-render-01/`. Cloud quality and preview are the next gates.
+`pattern-follow-length-render-01/`.
+
+### Cloud gates actually completed at `f6678ae`
+
+[Quality 38804721761](https://github.com/wrench1997/DAW/actions/runs/38804721761)
+completed SUCCESS at 21:08:25 UTC. App 2416 + helper 52 + protocol 6/5/2 gave 2481
+passing root tests, with 14 local private/plugin opt-ins ignored. All 25 new
+Follow regressions actually passed, including the repaired numeric cancellation.
+Factory 33, offline MIDI 4, async SDK 15, strict Clippy/build/no-default and Linux
+SDK 15 plus Unix 1 passed. Windows session 2 / Default / WTSActive / visible was eligible:
+real PrintWindow before/after/repaint tests were PASS, not SKIPPED.
+
+[Preview 38804721840](https://github.com/wrench1997/DAW/actions/runs/38804721840)
+completed SUCCESS at 21:15:02 UTC. Python 367 comprised 355 passed and 12 conditional
+skips: 4 Unix descriptor cases and 8 private Saved13 inputs not distributed in Git.
+These are not GUI skips. SDK 4+15 and the same 2481 root tests passed; App runtime
+was 496.69 s. Strict Clippy/no-default, optimized static-CRT release 8m24s, exact
+ZIP/PE/import/whitelist validation and the extracted sanitized-PATH helper smoke
+all passed. Upload was disabled; no new downloadable artifact or independent user
+copy was published. 03 remains the unchanged delivered copy.
+
+Full raw logs and run/job/source indices are `source117-quality-*` and
+`source117-preview-*` under the same local backend directory. Only documentation
+changed between built source `b2e56dc` and cloud source `f6678ae`. The later
+acceptance-record commit is documentation-only and uses `[skip ci]`; it does not
+alter code, tests, dependencies, workflows or binaries. Full NOIRE cold restoration,
+source-state equivalence, FX/PDC and acoustic-tail/listening acceptance remain open.
 
 The reference is Image-Line's [Pattern workflow](https://www.image-line.com/fl-studio-learning-content/fl-studio-online-manual/html/basics_workflow.htm)
 and [Channel Rack Auto length](https://www.image-line.com/fl-studio-learning-content/fl-studio-online-manual/html/channelrack.htm):

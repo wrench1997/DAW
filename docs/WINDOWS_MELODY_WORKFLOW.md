@@ -36,7 +36,12 @@ and exact MIDI Take windows stay fixed. Local12 focused input cases, explicit
 Saved13 private-copy/payload preservation, strict Clippy/no-default/build and8
 real WGPU cases passed;9 frames inspected. The original cancel/Clippy failures
 and valid reused model/WAV evidence are in [Playlist transport](PLAYLIST_TRANSPORT.md).
-New cloud gates are pending.03 does not contain Follow, and03/02 cannot read new14
+Cloud [quality38804721761](https://github.com/wrench1997/DAW/actions/runs/38804721761)
+and [preview38804721840](https://github.com/wrench1997/DAW/actions/runs/38804721840)
+actually passed at `f6678ae`:2481 root tests/14ignored and all25 Follow cases,
+real eligible-session PrintWindow, static-CRT release/ZIP/extracted helper.
+Python355PASS/12 conditional skips reflect4 Unix and8 absent private Saved13 inputs;
+no GUI skip was used in this run. Upload stayed disabled.03 does not contain Follow, and03/02 cannot read new14
 saves: use Save As. The user is still testing03 and requested code-only work;
 Root has not operated main GUI, soundcard or Kontakt. Full NI acceptance waits.
 
