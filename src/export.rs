@@ -4432,6 +4432,22 @@ mod tests {
         std::fs::read(path).unwrap()
     }
 
+    fn rendered_exactly_silent_wav_bytes(
+        project: &Project,
+        output_rate: u32,
+        files: &mut SplitExportFiles,
+    ) -> Vec<u8> {
+        let path = files.path("render-exact-silence", "wav");
+        render_project_wav(project, &path, output_rate).unwrap();
+        let decoded = wav::read_wav(&path).unwrap();
+        assert_eq!(decoded.metadata.sample_rate, output_rate);
+        assert_eq!(decoded.metadata.channels, 2);
+        assert_eq!(decoded.metadata.bits_per_sample, 24);
+        assert!(!decoded.samples.is_empty());
+        assert!(decoded.samples.iter().all(|sample| *sample == 0.0));
+        std::fs::read(path).unwrap()
+    }
+
     #[test]
     fn audio_split_export_pcm_is_bitwise_identical_across_fades_rates_and_tempo() {
         let mut files = SplitExportFiles::new();
@@ -4632,16 +4648,65 @@ mod tests {
                 .retain(|route| route.clip_id == moved_id);
             moved.clips[0].start = 0.0;
             set_split_export_tempo(&mut moved, Some(AutomationCurve::Hold));
-            let moved_pcm = prepared_audio_pcm(&moved, output_rate);
-            let moved_wav = rendered_wav_bytes(&moved, output_rate, &mut files);
-            assert_eq!(moved.song_end_beat(), 0.65);
-            assert_eq!(
-                moved_pcm.len(),
-                TempoMap::from_project(&moved, output_rate)
+            let moved_map = TempoMap::from_project(&moved, output_rate).unwrap();
+            let moved_clip = &moved.clips[0];
+            // This child originally started after the manual song crop. Its
+            // inherited fade-out still ends before beat zero after the move.
+            assert!(
+                moved_clip
+                    .fade_out_reference
                     .unwrap()
-                    .duration_frames() as usize
+                    .end_limit_beats
+                    .unwrap()
+                    < 0.0
             );
+            let moved_fades = compile_clip_fades(
+                moved_clip.start,
+                moved_clip.length,
+                moved_clip.audio_length_reference,
+                moved_clip.fade_in,
+                moved_clip.fade_out,
+                moved_clip.fade_in_reference,
+                moved_clip.fade_out_reference,
+                &moved_map,
+                true,
+            )
+            .unwrap();
+            assert!(moved_fades.fade_out_end < 0);
+            assert!(moved_fades.fade_out_frames > 0);
+            let moved_pcm = prepared_audio_pcm(&moved, output_rate);
+            assert!(
+                moved_pcm
+                    .iter()
+                    .all(|frame| frame.left == 0.0 && frame.right == 0.0)
+            );
+            let moved_wav = rendered_exactly_silent_wav_bytes(&moved, output_rate, &mut files);
+            assert_eq!(moved.song_end_beat(), 0.65);
+            assert_eq!(moved_pcm.len(), moved_map.duration_frames() as usize);
             assert_eq!(moved_wav.len(), 44 + moved_pcm.len() * 2 * 3);
+
+            // Resetting only fade-out must expose the same real source audio;
+            // the silent result above must not hide a broken source route.
+            let mut audible = moved.clone();
+            let mut audible_payload = serde_json::to_value(&moved).unwrap();
+            audible_payload["clips"][0]["fade_out"] = serde_json::json!(0.0);
+            audible_payload["clips"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("fade_out_reference");
+            crate::clip_fade::set_clip_fade(&mut audible.clips[0], false, 0.0);
+            assert_eq!(serde_json::to_value(&audible).unwrap(), audible_payload);
+            assert_eq!(audible.song_end_beat(), 0.65);
+            let audible_pcm = prepared_audio_pcm(&audible, output_rate);
+            assert_eq!(audible_pcm.len(), moved_pcm.len());
+            assert!(
+                audible_pcm
+                    .iter()
+                    .any(|frame| frame.left.abs() > 0.01 || frame.right.abs() > 0.01)
+            );
+            let audible_wav = rendered_wav_bytes(&audible, output_rate, &mut files);
+            assert_eq!(audible_wav.len(), moved_wav.len());
+
             let moved_cut = moved.clips[0].length * 0.375;
             let moved_right = split_export_clip(&mut moved, moved_id, moved_cut, 48_000);
             let reference = moved
@@ -4665,7 +4730,7 @@ mod tests {
                 &case,
             );
             assert_eq!(
-                rendered_wav_bytes(&reloaded, output_rate, &mut files),
+                rendered_exactly_silent_wav_bytes(&reloaded, output_rate, &mut files),
                 moved_wav,
                 "{case}"
             );

@@ -1137,6 +1137,34 @@ frames. Keep `playlist-manual-tail-geometry-repair-01/` (six-path patch, format/
 diff passed). The peer has returned CPU; next are affected geometry/fade/export
 split and remaining FullOwner/Saved13/Clippy/artifact/bins gates.
 
+Source108 (`058baf4`) actually passed TempoMap12, AudioClip6 and ClipFade8,
+including the four new causal cases. Audio-split export6 had5 passes/one failure;
+the old v10 PCM/WAV oracle now passed. Only v11's moved_wav hit the generic
+non-silent guard (export.rs4431/4636), after geometry succeeded. Its owner traced
+the actual inherited fade: Manual end~0.65, last child's original start~1.28703
+and relative fade-out end_limit~-0.63703. Moving start to0 while retaining refs
+puts the fade's ending anchor before the playable window, so the intended PCM
+is exactly silent. The proposed fixture-only correction will assert exact
+silence for this branch and a same-source/same-Manual fade-reset non-silent
+control; the generic threshold and production/refs/persistence assertions stay.
+FullOwner/Saved13/Clippy/artifacts/bins remain unrun. Root45304/exec37648 and all13
+held children terminated, no budget trigger, private/global4.013/24.012GiB;
+fresh heavy empty12:14Z and resources returned. Keep `source108-local-gates-01-*`
+and `source108-local-resource-handback-01.json`.
+
+The inherited-fade fixture is now static-frozen, changing only export test code.
+A dedicated helper actually renders/decodes nonempty PCM24 stereo at the expected
+rate and requires every sample exactly0, only for moved/reloaded branches.
+The ordinary>0.01 audible helper stays unchanged. Actual negative limit/compiled
+ending anchor/positive fade duration and original Manual length are checked
+before exact-zero PCM/WAV. A same-source clone resets only fade-out/ref through
+production set_clip_fade, proves the complete other payload unchanged, and must
+pass the original strong audible PCM/WAV control. Four children/refs/nested cut/
+cold-load/full PCM-WAV equality remain. Format/diff passed; the old v11 exact
+test is next. Production and five split/26 geometry-fade passes remain reusable.
+Keep `playlist-inherited-fade-silence-fixture-01/`. The peer currently owns CPU;
+Root only commits/prepares until its actual handback.
+
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
 The native harness now probes the OS, current process session, WTS connection
