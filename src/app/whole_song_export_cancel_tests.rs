@@ -67,7 +67,12 @@ fn actual_whole_normal_app_frames_keep_capture_then_escape_retains_first_origin_
         assert!(job.actor.owns_pending_capture() && job.pending());
         assert!(job.failure.is_none(), "{:?}", job.failure);
     }
+    let stopped_request = fixture.app().audio.as_ref().unwrap().transport_request_id();
     actual_app_frame(&mut fixture, escape_input());
+    assert_eq!(
+        fixture.app().audio.as_ref().unwrap().transport_request_id(),
+        stopped_request
+    );
     let expected = WholeExportCancellation {
         source: WholeExportCancelSource::EscapeKey,
         phase: WholeExportPhase::Capturing,
@@ -84,6 +89,10 @@ fn actual_whole_normal_app_frames_keep_capture_then_escape_retains_first_origin_
     assert!(fixture.app().whole_song_export_fence_active());
     assert!(fixture.app_mut().cancel_whole_song_export());
     fixture.app_mut().stop();
+    assert_eq!(
+        fixture.app().audio.as_ref().unwrap().transport_request_id(),
+        stopped_request
+    );
     actual_app_frame(&mut fixture, egui::RawInput::default());
     assert_eq!(
         fixture
@@ -101,7 +110,7 @@ fn actual_whole_normal_app_frames_keep_capture_then_escape_retains_first_origin_
         !fixture.app().whole_song_export_fence_active()
     });
     let job = fixture.app().whole_song_export_job.as_ref().unwrap();
-    assert_eq!(job.phase, WholeExportPhase::Cancelled);
+    assert_eq!(job.phase, WholeExportPhase::Cancelled, "{:?}", job.failure);
     assert_eq!(job.first_cancellation, Some(expected));
     assert!(!job.actor.owns_pending_capture());
     assert!(
@@ -214,7 +223,12 @@ fn actual_whole_transport_stop_is_distinct_from_escape_and_programmatic_cancel()
     let mut fixture = Fixture::new();
     settle_initial_source(&mut fixture);
     let (path, started) = begin(&mut fixture);
+    let stopped_request = fixture.app().audio.as_ref().unwrap().transport_request_id();
     fixture.app_mut().stop();
+    assert_eq!(
+        fixture.app().audio.as_ref().unwrap().transport_request_id(),
+        stopped_request
+    );
     fixture.app_mut().drive_whole_song_export();
     let job = fixture.app().whole_song_export_job.as_ref().unwrap();
     assert_eq!(
@@ -226,6 +240,89 @@ fn actual_whole_transport_stop_is_distinct_from_escape_and_programmatic_cancel()
     );
     assert_eq!(job.phase, WholeExportPhase::Cancelled);
     assert!(!started.load(Ordering::Acquire) && !path.exists());
+}
+
+#[test]
+fn actual_whole_stop_overrides_a_foreign_pending_play_request_without_hiding_failure() {
+    let mut fixture = Fixture::new();
+    settle_initial_source(&mut fixture);
+    let before = fixture.bytes();
+    let source = exact_source(&fixture);
+    fixture.source_handle().pause_capture();
+    let (path, started) = begin(&mut fixture);
+    until(&mut fixture, |fixture| {
+        fixture.source_handle().capture_count() == 1
+    });
+    let original_request = fixture.app().audio.as_ref().unwrap().transport_request_id();
+    fixture.app().audio.as_ref().unwrap().set_playing(true);
+    let foreign_request = fixture.app().audio.as_ref().unwrap().transport_request_id();
+    assert_ne!(foreign_request, original_request);
+    // No callback pump: flags/snapshot still look paused, but the foreign Play
+    // is pending. Stop must override its actual mailbox identity immediately.
+    assert!(
+        !fixture
+            .app()
+            .audio
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .transport_playing
+    );
+    fixture.app_mut().stop();
+    let pause_request = fixture.app().audio.as_ref().unwrap().transport_request_id();
+    assert_ne!(pause_request, foreign_request);
+    assert_ne!(pause_request, original_request);
+    fixture.app_mut().drive_whole_song_export();
+    let job = fixture.app().whole_song_export_job.as_ref().unwrap();
+    assert!(job.actor.owns_pending_capture() && job.pending());
+    assert!(
+        job.failure
+            .as_deref()
+            .unwrap()
+            .contains("preparatory stop intent")
+    );
+    assert_eq!(
+        job.first_cancellation,
+        Some(WholeExportCancellation {
+            source: WholeExportCancelSource::TransportStop,
+            phase: WholeExportPhase::Capturing,
+        })
+    );
+    fixture.pump_callback_only();
+    assert!(
+        !fixture
+            .app()
+            .audio
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .transport_playing
+    );
+    assert_eq!(
+        fixture
+            .app()
+            .audio
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .applied_transport_request,
+        pause_request
+    );
+    fixture.source_handle().release_gates();
+    until(&mut fixture, |fixture| {
+        !fixture.app().whole_song_export_fence_active()
+    });
+    let job = fixture.app().whole_song_export_job.as_ref().unwrap();
+    assert_eq!(job.phase, WholeExportPhase::Failed);
+    assert!(
+        job.failure
+            .as_deref()
+            .unwrap()
+            .contains("preparatory stop intent")
+    );
+    assert!(!started.load(Ordering::Acquire) && !path.exists());
+    assert_eq!(fixture.bytes(), before);
+    assert_eq!(exact_source(&fixture), source);
 }
 
 #[test]
@@ -348,7 +445,13 @@ fn actual_selected_clip_normal_app_frames_keep_capture_until_explicit_escape() {
             ClipRenderPhase::Capturing
         );
     }
+    let stopped_request = fixture.app().audio.as_ref().unwrap().transport_request_id();
     actual_app_frame(&mut fixture, escape_input());
+    fixture.app_mut().stop();
+    assert_eq!(
+        fixture.app().audio.as_ref().unwrap().transport_request_id(),
+        stopped_request
+    );
     assert!(fixture.app().clip_render_fence_active());
     fixture.source_handle().release_gates();
     until(&mut fixture, |fixture| {

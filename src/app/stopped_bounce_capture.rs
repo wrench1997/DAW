@@ -156,6 +156,23 @@ impl StoppedBounceCapture {
         self.capture.is_some()
     }
 
+    /// A cancel/Stop need not republish the exact pause already issued by this
+    /// actor. A foreign mailbox request or actual late playback still needs a
+    /// fresh pause; callback lag alone never substitutes for request identity.
+    pub(in crate::app) fn owns_current_pause_request(&self, app: &CitrusApp) -> bool {
+        let (Some(request), Some(audio)) = (self.stop_transport_request, app.audio.as_ref()) else {
+            return false;
+        };
+        let stamp = self.initial.stamp;
+        app.project_session == stamp.project_session
+            && audio.project_session() == stamp.project_session
+            && audio.engine_session() == stamp.engine_session
+            && audio.transport_request_id() == request
+            && !app.playing
+            && !app.transport_clock_playing
+            && !audio.snapshot().transport_playing
+    }
+
     pub(in crate::app) fn cancel_capture(&mut self) {
         if let Some(capture) = &mut self.capture {
             capture.cancel();

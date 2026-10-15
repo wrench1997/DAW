@@ -12911,9 +12911,13 @@ impl CitrusApp {
         self.cancel_prepared_playback_start();
         self.loop_restart_wait = None;
         if self.clip_operation_fence_active() {
+            let pause_already_owned = self.clip_render_owns_current_pause_request();
             self.playing = false;
             self.transport_clock_playing = false;
-            if let Some(audio) = &self.audio {
+            // Preserve the actor's original stopped request during ordinary
+            // cancellation. Real late playback/foreign requests still publish
+            // a fresh pause and remain subject to the unchanged exact fences.
+            if !pause_already_owned && let Some(audio) = &self.audio {
                 audio.set_playing(false);
             }
             self.cancel_clip_render_job_from(source);

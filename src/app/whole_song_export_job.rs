@@ -706,6 +706,11 @@ impl CitrusApp {
     pub(super) fn whole_song_export_blocks_playback(&self) -> bool {
         self.whole_song_export_fence_active()
     }
+    pub(super) fn whole_song_export_owns_current_pause_request(&self) -> bool {
+        self.whole_song_export_job
+            .as_ref()
+            .is_some_and(|job| job.pending() && job.actor.owns_current_pause_request(self))
+    }
     pub(super) fn whole_song_export_allows_timeline_dispatch(&self) -> bool {
         self.whole_song_export_job
             .as_ref()

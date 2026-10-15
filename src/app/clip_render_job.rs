@@ -535,6 +535,13 @@ impl CitrusApp {
                     && job.asset_ack == Some(true)
             })
     }
+    pub(super) fn clip_render_owns_current_pause_request(&self) -> bool {
+        self.whole_song_export_owns_current_pause_request()
+            || self
+                .clip_render_job
+                .as_ref()
+                .is_some_and(|job| job.pending() && job.stopped.owns_current_pause_request(self))
+    }
     pub(super) fn cancel_clip_render_job(&mut self) -> bool {
         let whole = self.cancel_whole_song_export();
         let clip = self.cancel_selected_clip_render_job();

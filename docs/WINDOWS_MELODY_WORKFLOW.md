@@ -227,6 +227,31 @@ gate counterexample is added without changing production predicates or deadlines
 the original failure's varying field was not logged. Both new repairs await
 compilation/regression and another native export; the full workflow remains open.
 
+Source81 (`f807fb0`) subsequently failed root test compilation in both cloud
+lanes: `ParameterEditFailure` in the new cancel fixture omitted `was_pending`
+(`whole_song_export_cancel_tests.rs:263`,E0063). Quality's32 factory and preview's
+344 harness cases passed, but no root test/Clippy/build pass follows. Preserve
+`ci-f807fb0-windows-{quality,preview}-01.log` and Source81 terminal JSON.
+
+Source82 (`098e3f5`) supplies `was_pending=true` for a queued edit's late timeout.
+Local compilation passed and the new cancel group actually reported6 passed/
+1 failed: held capture followed by Escape and repeated Stop ended Failed instead
+of Cancelled. The remaining old/25 safety tests, Clippy and bins did not run.
+Runner89774 exited1/Cargo101, observer35329 exited0 and fresh0 preceded peer CPU
+handback; there was no NI/CU. Preserve `source82-headless-targeted-01.log`,
+`source82-local-gates-terminal-01.json` and its resource handback receipt.
+
+Source83's frozen candidate reuses the original actor's pause only while it is
+the same engine/project's current mailbox request and App/clock/callback all
+remain stopped. Ordinary Escape/repeated Stop no longer invalidates that exact
+request. A foreign pending Play or real playback still causes a new pause; the
+stop-intent, state, capture and cleanup fences are unchanged. Whole/selected-clip
+tests retain Escape/repeated Stop and assert request identity. A new foreign Play
+case requires an override even before the callback sees playback; a genuinely
+invalidated contract remains Failed with capture ownership retained until ACK.
+The cancel group now has8 cases. Formatting/diff pass; compilation, regression,
+Clippy and the repaired native export still need execution.
+
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,
 ordinary debug binaries and root/vendor formatting. The actual locked inventory
