@@ -1295,6 +1295,43 @@ impl PluginInternal for IsolatedPluginImpl {
         .unwrap_or_default()
     }
 
+    fn async_state_snapshot(&mut self) -> Result<crate::plugin::AsyncStateSnapshot> {
+        match self.send_command_once(HostCommand::AsyncStateSnapshot)? {
+            HostResponse::AsyncStateSnapshot { snapshot } => {
+                snapshot.validate()?;
+                Ok(snapshot)
+            }
+            HostResponse::Error { message } => {
+                Err(Error::Other(format!("AsyncStateSnapshot: {message}")))
+            }
+            _ => Err(Error::Other(
+                "AsyncStateSnapshot: unexpected response".into(),
+            )),
+        }
+    }
+    fn discard_progress_notifications(&mut self) -> Result<()> {
+        match self.send_command_once(HostCommand::DiscardProgressNotifications)? {
+            HostResponse::Success { .. } => Ok(()),
+            HostResponse::Error { message } => Err(Error::Other(format!(
+                "DiscardProgressNotifications: {message}"
+            ))),
+            _ => Err(Error::Other(
+                "DiscardProgressNotifications: unexpected response".into(),
+            )),
+        }
+    }
+    fn arm_offline_state_readiness(&mut self, expected_revision: u64) -> Result<()> {
+        match self.send_command_once(HostCommand::ArmOfflineStateReadiness { expected_revision })? {
+            HostResponse::Success { .. } => Ok(()),
+            HostResponse::Error { message } => {
+                Err(Error::Other(format!("ArmOfflineStateReadiness: {message}")))
+            }
+            _ => Err(Error::Other(
+                "ArmOfflineStateReadiness: unexpected response".into(),
+            )),
+        }
+    }
+
     fn native_dirty_revision(&mut self) -> Result<u64> {
         // Never respawn here: recovery would substitute a new instance's clean revision for
         // unsaved edits in the dead helper. The caller must explicitly handle that loss.
@@ -2449,6 +2486,9 @@ mod tests {
     fn checked_native_operations_never_respawn_a_dead_instance() {
         for command in [
             "NativeDirtyRevision",
+            "AsyncStateSnapshot",
+            "DiscardProgressNotifications",
+            "ArmOfflineStateReadiness",
             "TakeParameterEdits",
             "TakeHostNotifications",
             "ServiceHostRequests",
@@ -2461,6 +2501,9 @@ mod tests {
             plugin.auto_recover_max_retries = 1;
             let failed = match command {
                 "NativeDirtyRevision" => plugin.native_dirty_revision().is_err(),
+                "AsyncStateSnapshot" => plugin.async_state_snapshot().is_err(),
+                "DiscardProgressNotifications" => plugin.discard_progress_notifications().is_err(),
+                "ArmOfflineStateReadiness" => plugin.arm_offline_state_readiness(0).is_err(),
                 "TakeParameterEdits" => plugin.try_take_parameter_edits().is_err(),
                 "TakeHostNotifications" => plugin.try_take_host_notifications().is_err(),
                 "ServiceHostRequests" => plugin.service_host_requests().is_err(),

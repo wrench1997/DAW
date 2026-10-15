@@ -4,6 +4,7 @@
 #![allow(non_snake_case)]
 #![allow(clippy::unnecessary_cast)] // SDK enum types vary across platforms.
 
+mod async_state_readiness;
 #[path = "domain_tests/explicit_bus_preferences.rs"]
 mod explicit_bus_preferences;
 mod offline_midi_timing;
@@ -1055,9 +1056,10 @@ fn plugin_fixture(trace: &Trace, state: &Arc<MockState>) -> PluginImpl {
     let plug_frame = create_host_plug_frame(editor_resize.clone(), run_loop.clone());
     #[cfg(not(target_os = "linux"))]
     let plug_frame = create_host_plug_frame(editor_resize.clone());
-    let (handler, native_edits) = ComponentHandler::new(Arc::new(Mutex::new(Vec::with_capacity(
-        MAX_EDITOR_FEEDBACK,
-    ))));
+    let (handler, native_edits) = ComponentHandler::with_progress_registry(
+        Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK))),
+        host_app.progress_registry(),
+    );
     PluginImpl {
         info: PluginInfo {
             path: "ownership-test.vst3".into(),
@@ -1085,6 +1087,8 @@ fn plugin_fixture(trace: &Trace, state: &Arc<MockState>) -> PluginImpl {
             playing: true,
             process_transport: None,
             process_mode: crate::plugin::ProcessMode::Realtime,
+            progress: host_app.progress_registry(),
+            offline_readiness_revision: None,
             process_context_requirements: None,
             sample_size: ProcessingSampleSize::F32,
             bus_activation,

@@ -95,6 +95,11 @@ pub(crate) enum RequestView<'a> {
     ResetOriginSupport,
     StartProcessing,
     StopProcessing,
+    AsyncStateSnapshot,
+    DiscardProgressNotifications,
+    ArmOfflineStateReadiness {
+        expected_revision: u64,
+    },
     NativeDirtyRevision,
     GetAllParameters,
     SetParameter {
@@ -185,6 +190,13 @@ impl<'a> TryFrom<&'a HostCommand> for RequestView<'a> {
             HostCommand::ResetOriginSupport => Self::ResetOriginSupport,
             HostCommand::StartProcessing => Self::StartProcessing,
             HostCommand::StopProcessing => Self::StopProcessing,
+            HostCommand::AsyncStateSnapshot => Self::AsyncStateSnapshot,
+            HostCommand::DiscardProgressNotifications => Self::DiscardProgressNotifications,
+            HostCommand::ArmOfflineStateReadiness { expected_revision } => {
+                Self::ArmOfflineStateReadiness {
+                    expected_revision: *expected_revision,
+                }
+            }
             HostCommand::NativeDirtyRevision => Self::NativeDirtyRevision,
             HostCommand::GetAllParameters => Self::GetAllParameters,
             HostCommand::SetParameter { id, value } => Self::SetParameter {

@@ -142,11 +142,11 @@ pub use playback::{
     RtAudioHandle,
 };
 pub use plugin::{
-    AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification, IsolatedEditorCommand,
-    IsolatedEditorOwner, IsolatedEditorState, MainThreadPlugin, OutputMidiConsumer, ParameterEdit,
-    ParameterEditKind, Plugin, PluginInfo, PluginPreset, PluginUnit, ProcessMode, ProcessTransport,
-    ProgramPitchName, ProgressKind, ProgressValue, ResetOriginReport, ResetOriginSupport,
-    RestartFlags, StateContext, WindowHandle,
+    AsyncStateSnapshot, AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification,
+    IsolatedEditorCommand, IsolatedEditorOwner, IsolatedEditorState, MainThreadPlugin,
+    OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin, PluginInfo, PluginPreset,
+    PluginUnit, ProcessMode, ProcessTransport, ProgramPitchName, ProgressKind, ProgressValue,
+    ResetOriginReport, ResetOriginSupport, RestartFlags, StateContext, WindowHandle,
 };
 pub use realtime::{RealtimePluginRunner, RtControl};
 pub use transport::{AutomationLane, BlockEvents, MidiClip, Timeline};
@@ -173,10 +173,10 @@ pub mod prelude {
         parameters::{AutomationCurve, AutomationPoint, Parameter, ParameterAutomation},
         playback::{play_with_backend, AudioHandle},
         plugin::{
-            AutomationState, ContextMenuItem, DataExchangeBlock, HostNotification,
-            OutputEventConsumer, OutputMidiConsumer, ParameterEdit, ParameterEditKind, Plugin,
-            PluginInfo, ProcessMode, ProcessTransport, ProgramPitchName, ProgressKind,
-            ProgressValue, StateContext, WindowHandle,
+            AsyncStateSnapshot, AutomationState, ContextMenuItem, DataExchangeBlock,
+            HostNotification, OutputEventConsumer, OutputMidiConsumer, ParameterEdit,
+            ParameterEditKind, Plugin, PluginInfo, ProcessMode, ProcessTransport, ProgramPitchName,
+            ProgressKind, ProgressValue, StateContext, WindowHandle,
         },
         transport::{AutomationLane, MidiClip, Timeline},
         window::PluginWindow,

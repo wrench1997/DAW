@@ -248,6 +248,36 @@ impl Client {
         self.success(RequestView::StopProcessing, deadline)?;
         self.verify_selected_audio_layout(deadline)
     }
+    /// Non-consuming observation through the same closed client and original budget.
+    pub fn async_state_snapshot(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<crate::plugin::AsyncStateSnapshot, Failure> {
+        match self.exchange(
+            RequestView::AsyncStateSnapshot,
+            ReplyShape::AsyncStateSnapshot,
+            deadline,
+        )? {
+            HostResponse::AsyncStateSnapshot { snapshot } => Ok(snapshot),
+            _ => unreachable!("strict async-state snapshot shape"),
+        }
+    }
+    /// Clone-only explicit drain; never use on a realtime instance with another consumer.
+    pub fn discard_progress_notifications(&mut self, deadline: Instant) -> Result<(), Failure> {
+        self.success(RequestView::DiscardProgressNotifications, deadline)
+    }
+    /// Arm the actual DSP-boundary guard, not a UI-side cached readiness flag.
+    pub fn arm_offline_state_readiness(
+        &mut self,
+        expected_revision: u64,
+        deadline: Instant,
+    ) -> Result<(), Failure> {
+        self.success(
+            RequestView::ArmOfflineStateReadiness { expected_revision },
+            deadline,
+        )
+    }
+
     /// Read dirty revision evidence; this alone is not an enforced edit fence.
     pub fn native_dirty_revision(&mut self, deadline: Instant) -> Result<u64, Failure> {
         match self.exchange(

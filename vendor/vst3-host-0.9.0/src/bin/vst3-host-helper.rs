@@ -685,6 +685,26 @@ fn handle(
         HostCommand::TakeHostNotifications => with(plugin, |p| HostResponse::HostNotifications {
             notifications: p.take_host_notifications(),
         }),
+        HostCommand::AsyncStateSnapshot => with(plugin, |p| match p.async_state_snapshot() {
+            Ok(snapshot) => HostResponse::AsyncStateSnapshot { snapshot },
+            Err(error) => err("AsyncStateSnapshot", error),
+        }),
+        HostCommand::DiscardProgressNotifications => {
+            with(plugin, |p| match p.discard_progress_notifications() {
+                Ok(()) => HostResponse::Success {
+                    message: "progress notifications discarded".into(),
+                },
+                Err(error) => err("DiscardProgressNotifications", error),
+            })
+        }
+        HostCommand::ArmOfflineStateReadiness { expected_revision } => with(plugin, |p| {
+            match p.arm_offline_state_readiness(expected_revision) {
+                Ok(()) => HostResponse::Success {
+                    message: "offline state-readiness guard armed".into(),
+                },
+                Err(error) => err("ArmOfflineStateReadiness", error),
+            }
+        }),
         HostCommand::NativeDirtyRevision => with(plugin, |p| match p.native_dirty_revision() {
             Ok(revision) => HostResponse::NativeDirtyRevision { revision },
             Err(error) => err("NativeDirtyRevision", error),

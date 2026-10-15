@@ -50,6 +50,10 @@ jobs:
         timeout-minutes: 5
         run: cargo +stable-x86_64-pc-windows-msvc test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --lib offline_midi --target-dir target -- --test-threads=1
 
+      - name: Run async-state readiness regressions
+        timeout-minutes: 5
+        run: cargo +stable-x86_64-pc-windows-msvc test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --features experimental-fresh-helper --lib async_state_readiness --target-dir target -- --test-threads=1
+
       - name: Run locked all-feature tests
         run: cargo +stable-x86_64-pc-windows-msvc test --locked --all-features --all-targets
 
@@ -137,3 +141,26 @@ jobs:
           }
           "PASS: source-built MIT fixture through the production MSVC helper; lifecycle/owned HWND cleanup, stopped native-edit state round-trip, native button paint/event and Rust/Win32/CRT stdout isolation." >> $env:GITHUB_STEP_SUMMARY
           "Scope: fixture-only automated evidence. Human visual review, real vendor plugins, physical input/audio devices, DPI transitions and release acceptance remain NOT VERIFIED." >> $env:GITHUB_STEP_SUMMARY
+
+  linux-helper-readiness:
+    # This narrow SDK lane exercises the existing Unix-only no-respawn contract.
+    # It does not run the DAW, a plug-in, a desktop or an audio device.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Prepare stable Rust and SDK build dependencies
+        run: |
+          rustup toolchain install stable --profile minimal
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev libxcb1-dev libxcb-util-dev
+
+      - name: Run SDK async-state readiness regressions
+        run: cargo +stable test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --features experimental-fresh-helper --lib async_state_readiness --target-dir target -- --test-threads=1
+
+      - name: Preserve Unix ordinary-isolation no-respawn contract
+        run: cargo +stable test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --features experimental-fresh-helper --lib internal::isolated_plugin_impl::tests::checked_native_operations_never_respawn_a_dead_instance --target-dir target -- --exact --test-threads=1

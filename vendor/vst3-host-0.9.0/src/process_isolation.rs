@@ -895,6 +895,15 @@ pub enum HostCommand {
     TakeParameterChanges,
     /// Drain ordered `IComponentHandler2` requests from the helper.
     TakeHostNotifications,
+    /// Non-consuming snapshot of this instance's shared SDK progress registry.
+    AsyncStateSnapshot,
+    /// Explicitly discard only this instance's progress notification queue.
+    DiscardProgressNotifications,
+    /// Opt in Offline DSP to a checked, single-revision restoration guard.
+    ArmOfflineStateReadiness {
+        /// Revision observed after all reported async restoration finished.
+        expected_revision: u64,
+    },
     /// Read the loaded instance's non-draining native edit revision.
     NativeDirtyRevision,
     /// Dispatch and drain owned VST3 data-exchange blocks from the helper.
@@ -1121,6 +1130,11 @@ pub enum HostResponse {
     HostNotifications {
         /// The queued host requests.
         notifications: Vec<crate::plugin::HostNotification>,
+    },
+    /// Complete, non-consuming SDK progress observation.
+    AsyncStateSnapshot {
+        /// Versioned bounded snapshot from the loaded owner.
+        snapshot: crate::plugin::AsyncStateSnapshot,
     },
     /// Durable native edit evidence, independent of bounded feedback queues.
     NativeDirtyRevision {

@@ -110,6 +110,7 @@ pub(crate) enum ReplyShape {
     LatencySamples,
     TailSamples,
     ResetOriginSupport,
+    AsyncStateSnapshot,
     NativeDirtyRevision,
     Parameters,
     CheckedAudioBusLayout,

@@ -27,11 +27,26 @@ without admitting truly pending/failed or replacement owners. The four original
 startup assertions are unchanged. Source91 (`2853db2`) actually passed all eight
 generic restore cases, all11 startup history cases and all five loaded-identity
 cases locally. Strict all-feature/all-target Clippy and a matching main/helper
-build each exited0; formatting passed. Full cloud regression and NI on these
-new bins remain unrun. Preserve the Source91 per-phase stdout/stderr logs and
+build each exited0; formatting passed. Native07 has now used these new bins for
+a successful ordinary cold-open/Whole export; same-source onset repeatability
+remains untested. Preserve the Source91 per-phase stdout/stderr logs and
 `source91-local-gates-01-terminal-recovery.json`.
 Preserve `ci-48ea977-windows-{quality,preview}-01.log` and Source89 actual terminal
 JSON. Native05/06 use earlier frozen bins, not this candidate.
+
+Source92 (`2bb9f80`) quality has actually completed. It passed 32 factory cases,
+all 4 dependency offline-MIDI cases and 2329 App + 52 helper + 13 protocol = 2394
+root cases/12 ignored. All 11 startup history cases passed. Strict Clippy, both
+bins, protocol/harness, fixture and no-default-feature checks also passed. The
+workflow remains failure only at independent native paint before/after edit:
+PrintWindow and the same-process button probes returned false. Control/gesture/
+dirty feedback, stopped state round-trip, lifecycle and Shutdown/EOF/crash cleanup
+passed separately. Preview also completed success: 344 harness cases, the 4 SDK
+cases, the same 2394 root passes/12 ignored, strict Clippy, no-default-feature
+checks, static-CRT release, final ZIP integrity and extracted sanitized-PATH
+helper smoke all passed. The archive is bound to `2bb9f80`; upload was skipped.
+Preserve `ci-2bb9f80-windows-{quality,preview}-01.log` and Source92 actual terminal
+run/jobs JSON. These results predate SDK-B.
 
 Earlier full-cloud backend qualification: Source87 (`769525d`) quality actually passed 32
 factory and 2321 App + 52 helper + 13 protocol = 2386 root cases/12 ignored, including
@@ -65,7 +80,7 @@ cleanup failure and the new onset difference remain open. Details follow below.
 | --- | --- | --- |
 | Real-time Master recording | Records the Master audio produced during live playback | Pure was heard and captured locally; not an offline export |
 | Selected MIDI occurrence to audio | Experimental Linux/Windows strict clone, capture validation, native publication and history fences | Actual recapture mismatch refuses replacement; original MIDI is retained |
-| Whole-song offline WAV | Built-in sources; experimental single-VST full arrangement/static routing/Master automation | Native05/06 ordinary GUI cold-open→10.5s PCM24 WAV completed with/without exact timing; first-note offset, warm-path cleanup, listening and full state/automation remain open; earlier short/405-note evidence is separate |
+| Whole-song offline WAV | Built-in sources; experimental single-VST full arrangement/static routing/Master automation | Native05/06/07 ordinary GUI cold-open→10.5s PCM24 WAV completed; Native07 uses new event semantics and still has a first-note offset. Warm-path cleanup, listening and full state/automation remain open; earlier short/405-note evidence is separate |
 
 These paths must retain their own receipts and must not be substituted for each other.
 The ordinary build explicitly refuses unsupported active-VST offline export.
@@ -523,7 +538,50 @@ The parent contains `native06-resource-handback-01.json`. These native sessions
 predate the parameter-restore and offline-MIDI candidates; neither entered this
 comparison.
 
-### Offline event metadata candidate and unimplemented async-state gap
+### Native07: a successful export does not yet qualify onset repeatability
+
+Native07 froze the actual Source91 Cargo main/helper artifacts into a new
+`bin-native07` directory. It uses SDK-A and the history-ready repair, not the
+next IProgress candidate. With exact timing still disabled and ordinary
+diagnostics1 retained, normal Ctrl+O opened the same validation02 project.
+The GUI showed 4 bars/16 beats, one eight-note clip, Kontakt Loaded, Channel1→FX01,
+2304 samples of latency and the iCON output at 48 kHz/XRUN0. There was no playback, new project Save,
+native-editor operation or instrument reload in this session.
+
+The ordinary GUI export used stereo 48 kHz/24-bit PCM, legacy peak attenuation and
+an explicitly accepted 3000 ms fixed tail. The native Save dialog kept `Untitled`
+and navigated through its actual address control into the new
+`native07-offline-midi` directory; the target was absent before Alt+S. Whole
+published 3,024,044 B/504000 frames/10.500 s, with 7.500 s music and 3.000 s tail. All
+eight onset windows contain signal, samples are finite, clipping count is 0 and
+the final 20 ms are digital zero. Listening and complete unknown release remain
+unqualified.
+
+| Actual export | First sample above −100 dBFS | Time | First 400 ms overlap relative to Native05 |
+| --- | ---: | ---: | --- |
+| Native05 | 138 frames | 2.875 ms | Reference |
+| Native06 | 522 frames | 10.875 ms | Exactly 384 frames later after alignment |
+| Native07 | 266 frames | 5.542 ms | Exactly 128 frames later after alignment |
+
+For Native07, the corresponding shift gives zero RMS sample difference in the
+overlapping portions of both earlier first 400 ms windows. Differences end at
+frame 33151; later audio and the tail are identical. The differences are
+128-frame multiples. Native07 is only one run of the new SDK-A candidate, so its
+same-source repeatability is still untested. Keep these frozen bins for that
+comparison before attributing a change to SDK-B. These outputs do not support a
+fixed warmup, sleep or compensating trim.
+
+Normal Alt+F4 and held OS handles confirmed App3772, source helper1872 and clone2640
+all exited 0; observer1340 also actually exited 0. Fresh windows/processes were 0
+before peer handback. Resource peaks were 2.309 GiB owned private and 23.977 GiB global
+physical used. Preserve the workflow's `bin-native07/freeze-receipt.json`,
+`launch-07.json`, `cold-open-and-export-native07-01.json`,
+`normal-close-process-terminal-07.json`, and the output directory's
+`ordinary-whole-native07-pcm-audit-01.json` and
+`native05-native06-native07-pcm-comparison-01.json`; the parent contains
+`native07-resource-handback-01.json`.
+
+### Offline event metadata candidate and async-state gap
 
 The ordinary MIDI convenience path previously marked every event `kIsLive` and
 set event PPQ to zero, including Whole offline rendering. The SDK defines the
@@ -546,7 +604,8 @@ and matching-bin build did not run. The subsequent Source91 App repair passed
 8+11+5 targeted cases, strict Clippy and matching bins; unchanged SDK4+15 evidence
 was reused rather than rerun. Existing vendor dependency warnings remain. This
 corrects a demonstrated event contract, not a demonstrated cause of the384-frame
-difference; neither new candidate has entered NI acceptance.
+difference. Native07 subsequently exercised SDK-A as recorded above; the next
+IProgress candidate has not entered NI acceptance.
 
 After all Cargo processes terminated, the diagnostic wrapper incorrectly waited
 on its own conhost infrastructure. Only that wrapper was interrupted; exec77452
@@ -566,16 +625,46 @@ the two actual Cargo artifacts and50 resource samples (peak4.076GiB owned privat
 23.665GiB global physical used). Do not call it an aggregate runner exit0 or
 terminate unrelated processes/change system settings to avoid an observer wait.
 
-A second confirmed gap is still unimplemented: IProgress extends the actual
-IComponentHandler, but that COM object does not expose it. The existing separate
-HostApplication progress registry retains active IDs without types and exposes
-only drained incremental notifications. An empty drain cannot prove restoration
-complete. [Official IProgress interface and controller example](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IProgress.html).
-Strict's closed protocol also lacks a typed active-restoration query. A future
-complete repair needs shared typed progress ownership plus a deadline/cancel-aware
-Strict consumer; generic parameter ACK replay does not establish opaque async
-completion. There is no evidence yet that Kontakt used this interface during
-Native05/06. Do not add a fixed wait, silent warmup or 384-frame PDC correction.
+SDK-B now implements a second confirmed gap in source. The actual ComponentHandler
+formerly did not expose IProgress, and the separate HostApplication registry
+retained untyped active IDs with only drained incremental notifications. The SDK
+expects the controller to query IProgress from its component handler.
+[Official IProgress interface and controller example](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IProgress.html).
+
+The candidate shares one bounded typed registry across both COM interfaces and
+the processor. A non-consuming snapshot distinguishes async restoration from UI
+work. Only Strict's disposable clone opts into the readiness guard: it waits
+after LoadState and StartProcessing using its original deadline/cancellation,
+then arms the exact async-start revision under the registry lock after generic
+bases, readback and metadata. Actual DSP checks the revision before and after
+each foreign call. Even an async start+finish within one call rejects output;
+a later block's change rejects the entire staged render. No lock crosses a
+plug-in call. UI-only work and existing Realtime/unarmed Offline entry points
+keep their prior processing prerequisites.
+
+Snapshot, clone-owned progress-notification discard and arm use three additive
+closed helper commands. A drain never clears active tasks or restores a lost
+readiness proof. Static review found two rejected-start gaps: an unknown kind
+could bypass the fault latch when the notification FIFO was full, and async/
+unknown kinds could bypass it on null out-ID or an unterminated 1024-unit
+description. Both now latch a non-UI fault while preserving the original error
+return and legal UI-only behavior. The existing test functions add deterministic
+COM-interface and UI-only counterexamples; none of these Rust tests has run yet.
+
+Static checks passed for 19 source files, two Python provenance/consumer contracts
+and the four-file vendor bundle. The complete patch replays all 76 vendor files
+from the original 41-file archive; notes and both pins are synchronized. Windows
+quality/preview are wired to run the dependency's 15 new readiness cases. A narrow
+Linux SDK job is wired for those cases and the changed Unix-only ordinary no-respawn
+case without running the DAW, a desktop, a plug-in or an audio device. Root's four
+new Strict cases and affected failure/cancel/deadline matrices remain unrun,
+as do all Rust compilation, Clippy, Linux execution and NI on SDK-B.
+
+Preserve `async-progress-readiness-candidate-01/applied-handoff-02.json` and
+`async-progress-readiness-provenance-02/`. This guard tracks work reported through
+IProgress; whether NOIRE reports that work and whether its onset becomes
+repeatable require actual matching-bin acceptance. Native07 and generic parameter
+ACK evidence do not qualify this candidate's opaque asynchronous restoration.
 
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,

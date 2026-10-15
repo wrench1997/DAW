@@ -70,6 +70,9 @@ Invoke-Checked cargo @("+$Toolchain", "fmt", "--all", "--", "--check")
 # Root tests do not execute dependency unit tests. These fixtures inspect the
 # actual COM process-boundary MIDI headers without a DLL, GUI or audio device.
 Invoke-Checked cargo @("+$Toolchain", "test", "--locked", "--manifest-path", "vendor/vst3-host-0.9.0/Cargo.toml", "--lib", "offline_midi", "--target", $Target, "--", "--test-threads=1")
+# Exercise the dependency's real COM/processor and closed-helper readiness
+# contracts; root package tests do not include these dependency unit tests.
+Invoke-Checked cargo @("+$Toolchain", "test", "--locked", "--manifest-path", "vendor/vst3-host-0.9.0/Cargo.toml", "--features", "experimental-fresh-helper", "--lib", "async_state_readiness", "--target", $Target, "--", "--test-threads=1")
 Invoke-Checked cargo @("+$Toolchain", "test", "--locked", "--all-features", "--all-targets", "--target", $Target)
 Invoke-Checked cargo @("+$Toolchain", "clippy", "--locked", "--all-features", "--all-targets", "--target", $Target, "--", "-D", "warnings")
 Invoke-Checked cargo @("+$Toolchain", "check", "--locked", "--no-default-features", "--all-targets", "--target", $Target)

@@ -1289,10 +1289,29 @@ class PreviewBuildContractTests(unittest.TestCase):
             '"--filter-platform", $Target, "--format-version", "1")'])
 
     def test_all_feature_quality_and_core_checks_are_retained(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            'cargo +stable-x86_64-pc-windows-msvc test --locked --manifest-path '
+            'vendor/vst3-host-0.9.0/Cargo.toml --features experimental-fresh-helper '
+            '--lib async_state_readiness --target-dir target -- --test-threads=1', workflow)
+        self.assertIn(
+            'cargo +stable test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml '
+            '--features experimental-fresh-helper --lib async_state_readiness '
+            '--target-dir target -- --test-threads=1', workflow)
+        self.assertIn(
+            'cargo +stable test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml '
+            '--features experimental-fresh-helper --lib '
+            'internal::isolated_plugin_impl::tests::checked_native_operations_never_respawn_a_dead_instance '
+            '--target-dir target -- --exact --test-threads=1', workflow)
         self.assertIn(
             'Invoke-Checked cargo @("+$Toolchain", "test", "--locked", "--manifest-path", '
             '"vendor/vst3-host-0.9.0/Cargo.toml", "--lib", "offline_midi", "--target", '
             '$Target, "--", "--test-threads=1")', self.lines)
+        self.assertIn(
+            'Invoke-Checked cargo @("+$Toolchain", "test", "--locked", "--manifest-path", '
+            '"vendor/vst3-host-0.9.0/Cargo.toml", "--features", "experimental-fresh-helper", '
+            '"--lib", "async_state_readiness", "--target", $Target, "--", '
+            '"--test-threads=1")', self.lines)
         self.assertIn(
             'Invoke-Checked cargo @("+$Toolchain", "test", "--locked", "--all-features", '
             '"--all-targets", "--target", $Target)', self.lines)
@@ -1309,8 +1328,8 @@ class ProvenanceConstantsTests(unittest.TestCase):
         self.assertEqual(pkg.VENDOR_ARCHIVE_SHA256, "6ec579d54bd13b83c60c1fd8bb756cf234e36ccbfb4833ff756b417e64db7fea")
         self.assertEqual(pkg.VENDOR_COMMIT, "ed054908cfe057694d8cf037d0c39dfb5eb4c2ca")
         self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/LICENSE"], "a65a537295910b776a8b2edb2e7410c3b0e975ca6388994e032c4d1842b4952d")
-        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS.patch"], "3b66657084dca6bc2d4428aaa740debbdfa584d80624455c057d1843f4d164d8")
-        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS_PATCHES.md"], "5e3463aacf034016c37203295584565eae9e340b5206b8194bbf9a2b48974705")
+        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS.patch"], "3349d66946abdf97244ac72e9d8703093b7c6b3f5d5d367561688d8e5657943a")
+        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS_PATCHES.md"], "20971ebbbdc5885910f5e8f9eeef957cddf2b3c90266addc472ec165157558d0")
 
 
 

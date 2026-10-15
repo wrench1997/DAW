@@ -831,6 +831,26 @@ fn handle_inner(
         HostCommand::TakeHostNotifications => with(plugin, |p| HostResponse::HostNotifications {
             notifications: p.take_host_notifications(),
         }),
+        HostCommand::AsyncStateSnapshot => with(plugin, |p| match p.async_state_snapshot() {
+            Ok(snapshot) => HostResponse::AsyncStateSnapshot { snapshot },
+            Err(error) => err("AsyncStateSnapshot", error),
+        }),
+        HostCommand::DiscardProgressNotifications => {
+            with(plugin, |p| match p.discard_progress_notifications() {
+                Ok(()) => HostResponse::Success {
+                    message: "progress notifications discarded".into(),
+                },
+                Err(error) => err("DiscardProgressNotifications", error),
+            })
+        }
+        HostCommand::ArmOfflineStateReadiness { expected_revision } => with(plugin, |p| {
+            match p.arm_offline_state_readiness(expected_revision) {
+                Ok(()) => HostResponse::Success {
+                    message: "offline state-readiness guard armed".into(),
+                },
+                Err(error) => err("ArmOfflineStateReadiness", error),
+            }
+        }),
         HostCommand::NativeDirtyRevision => with(plugin, |p| match p.native_dirty_revision() {
             Ok(revision) => HostResponse::NativeDirtyRevision { revision },
             Err(error) => err("NativeDirtyRevision", error),
@@ -1243,15 +1263,19 @@ mod native_state_tests {
     fn native_revision_without_a_loaded_plugin_is_an_error() {
         let plugin = PluginOwner::new(Mutex::new(None));
         let mut sample_rate = 44_100.0;
-        assert!(matches!(
-            handle(
-                HostCommand::NativeDirtyRevision,
-                &plugin,
-                &mut sample_rate,
-                None
-            ),
-            HostResponse::Error { .. }
-        ));
+        for command in [
+            HostCommand::NativeDirtyRevision,
+            HostCommand::AsyncStateSnapshot,
+            HostCommand::DiscardProgressNotifications,
+            HostCommand::ArmOfflineStateReadiness {
+                expected_revision: 0,
+            },
+        ] {
+            assert!(matches!(
+                handle(command, &plugin, &mut sample_rate, None),
+                HostResponse::Error { .. }
+            ));
+        }
     }
 }
 

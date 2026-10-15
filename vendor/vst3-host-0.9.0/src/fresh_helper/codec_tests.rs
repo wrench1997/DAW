@@ -3874,3 +3874,106 @@ fn selected_bundle_codec_unique_escaped_failure_fields_remain_valid() {
         );
     }
 }
+
+#[test]
+fn async_state_readiness_codec_closed_commands_and_exact_integer_snapshot_round_trip() {
+    for (command, shape) in [
+        (
+            HostCommand::AsyncStateSnapshot,
+            ReplyShape::AsyncStateSnapshot,
+        ),
+        (
+            HostCommand::DiscardProgressNotifications,
+            ReplyShape::Success,
+        ),
+        (
+            HostCommand::ArmOfflineStateReadiness {
+                expected_revision: 9_007_199_254_740_993,
+            },
+            ReplyShape::Success,
+        ),
+    ] {
+        let view = RequestView::try_from(&command).unwrap();
+        let bytes = encode_view(&view, &shape, &mut new_budget()).unwrap();
+        assert_eq!(
+            serde_json::to_value(serde_json::from_slice::<HostCommand>(&bytes).unwrap()).unwrap(),
+            serde_json::to_value(command).unwrap()
+        );
+    }
+    let response = HostResponse::AsyncStateSnapshot {
+        snapshot: crate::AsyncStateSnapshot {
+            contract_version: 1,
+            async_started_revision: 9_007_199_254_740_993,
+            active_async: 2,
+            active_ui: 3,
+            active_other: 0,
+            readiness_faulted: false,
+        },
+    };
+    let bytes = wire(&response);
+    assert_eq!(
+        wire(&decode(&bytes, &ReplyShape::AsyncStateSnapshot, &mut new_budget()).unwrap()),
+        bytes
+    );
+    error(
+        &bytes,
+        &ReplyShape::NativeDirtyRevision,
+        ErrorKind::WrongReply,
+    );
+}
+
+#[test]
+fn async_state_readiness_codec_rejects_incomplete_duplicate_unsupported_and_unbounded_snapshots() {
+    let valid = r#"{"AsyncStateSnapshot":{"snapshot":{"contract_version":1,"async_started_revision":7,"active_async":0,"active_ui":0,"active_other":0,"readiness_faulted":false}}}"#;
+    for invalid in [
+        valid.replace("\"contract_version\":1", "\"contract_version\":2"),
+        valid.replace("\"active_async\":0", "\"active_async\":1025"),
+        valid
+            .replace("\"active_async\":0", "\"active_async\":1024")
+            .replace("\"active_ui\":0", "\"active_ui\":1"),
+        valid.replace("\"active_other\":0,", ""),
+        valid.replace(
+            "\"active_other\":0",
+            "\"active_other\":0,\"active_other\":0",
+        ),
+        valid.replace(
+            "\"async_started_revision\":7",
+            "\"async_started_revision\":-1",
+        ),
+        valid.replace(
+            "\"async_started_revision\":7",
+            "\"async_started_revision\":18446744073709551616",
+        ),
+        valid.replace(
+            "\"readiness_faulted\":false",
+            "\"readiness_faulted\":false,\"cached_ready\":true",
+        ),
+    ] {
+        error(
+            invalid.as_bytes(),
+            &ReplyShape::AsyncStateSnapshot,
+            ErrorKind::MalformedReply,
+        );
+    }
+}
+
+#[test]
+fn async_state_readiness_codec_preserves_original_expiry_and_cancel_before_admission() {
+    let request = RequestView::ArmOfflineStateReadiness {
+        expected_revision: 7,
+    };
+    let mut budget = new_budget();
+    budget.deadline = Instant::now();
+    assert_eq!(
+        encode_view(&request, &ReplyShape::Success, &mut budget).unwrap_err(),
+        ErrorKind::Deadline
+    );
+    assert_eq!((budget.live, budget.peak), (0, 0));
+    let mut budget = new_budget();
+    budget.cancel.cancelled.store(true, Ordering::Release);
+    assert_eq!(
+        encode_view(&request, &ReplyShape::Success, &mut budget).unwrap_err(),
+        ErrorKind::Cancelled
+    );
+    assert_eq!((budget.live, budget.peak), (0, 0));
+}

@@ -40,8 +40,8 @@ use super::{
         create_event_list, create_host_application, create_host_plug_frame,
         create_memory_stream_from_with_metadata, create_memory_stream_with_metadata,
         create_state_restore_stream, ComponentHandler, ConnectionPair, HostApplication,
-        HostEventList, HostPlugFrame, ParameterChanges, ParameterQueueLimits, QueuedEvent,
-        StreamStateType, MAX_EDITOR_FEEDBACK, MAX_QUEUED_EVENTS,
+        HostEventList, HostPlugFrame, ParameterChanges, ParameterQueueLimits, ProgressRegistry,
+        QueuedEvent, StreamStateType, MAX_EDITOR_FEEDBACK, MAX_QUEUED_EVENTS,
     },
     module_loader::{load_module, VstModule},
 };
@@ -249,6 +249,8 @@ struct ProcessorRuntime {
     process_transport: Option<crate::plugin::ProcessTransport>,
     /// Real-time vs offline processing, baked into `ProcessSetup`/`process_data` at setup.
     process_mode: crate::plugin::ProcessMode,
+    progress: Arc<ProgressRegistry>,
+    offline_readiness_revision: Option<u64>,
     /// Optional VST3 3.7 declaration of exactly which ProcessContext fields the processor reads.
     /// `None` is the safe legacy path for older processors and advertises the historical context.
     process_context_requirements: Option<u32>,
@@ -1416,7 +1418,10 @@ impl PluginImpl {
             // Create component handler for parameter change notifications
             log::debug!("Step 8: Creating component handler...");
             let parameter_changes = Arc::new(Mutex::new(Vec::with_capacity(MAX_EDITOR_FEEDBACK)));
-            let (component_handler, native_edits) = ComponentHandler::new(parameter_changes);
+            let (component_handler, native_edits) = ComponentHandler::with_progress_registry(
+                parameter_changes,
+                host_app.progress_registry(),
+            );
             let component_handler = ComWrapper::new(component_handler);
             log::debug!("Component handler created");
 
@@ -1598,6 +1603,8 @@ impl PluginImpl {
                     playing: true,
                     process_transport: None,
                     process_mode: crate::plugin::ProcessMode::Realtime,
+                    progress: host_app.progress_registry(),
+                    offline_readiness_revision: None,
                     process_context_requirements,
                     sample_size,
                     bus_activation,
@@ -2395,6 +2402,15 @@ impl ProcessorRuntime {
     ) -> Result<()> {
         if let Some(ref mut data) = self.process_data {
             unsafe {
+                let readiness_revision = if self.process_mode == crate::plugin::ProcessMode::Offline
+                {
+                    self.offline_readiness_revision
+                } else {
+                    None
+                };
+                if let Some(revision) = readiness_revision {
+                    self.progress.verify_ready_revision(revision)?;
+                }
                 if self.process_mode == crate::plugin::ProcessMode::Offline {
                     let quarter_notes_per_sample = if self.playing && self.sample_rate > 0.0 {
                         data.transport_tempo / (60.0 * self.sample_rate)
@@ -2516,6 +2532,11 @@ impl ProcessorRuntime {
                     let _process_scope = gate.enter();
                     processor.process(&mut data.process_data)
                 };
+                // Observe even an async start+finish inside this SDK call. Never hold
+                // the registry lock across foreign code; reject before output copy.
+                let readiness_result = readiness_revision
+                    .map(|revision| self.progress.verify_ready_revision(revision))
+                    .transpose();
                 restore_process_audio_io(&mut data.process_data, saved_audio_io);
                 let _ = self
                     .native_edits
@@ -2604,6 +2625,8 @@ impl ProcessorRuntime {
                     // Leave the caller's buffers as they were (the playback bridges pre-fill them
                     // with silence) rather than copying out whatever the failed call left behind.
                     Err(Error::ProcessFailed(process_result))
+                } else if let Err(error) = readiness_result {
+                    Err(error)
                 } else {
                     data.sample_buffers.update_output_silence_flags(
                         &mut data.output_bus_buffers,
@@ -3959,6 +3982,31 @@ impl PluginInternal for PluginImpl {
             .as_ref()
             .map(|h| h.take_parameter_edits())
             .unwrap_or_default()
+    }
+
+    fn async_state_snapshot(&mut self) -> Result<crate::plugin::AsyncStateSnapshot> {
+        self.ensure_control_thread("async state snapshot")?;
+        self.runtime.progress.snapshot()
+    }
+    fn discard_progress_notifications(&mut self) -> Result<()> {
+        self.ensure_control_thread("progress notification drain")?;
+        self.runtime.progress.discard_notifications()
+    }
+    fn arm_offline_state_readiness(&mut self, expected_revision: u64) -> Result<()> {
+        self.ensure_control_thread("offline state readiness arm")?;
+        if self.runtime.process_mode != crate::plugin::ProcessMode::Offline
+            || self.runtime.offline_readiness_revision.is_some()
+        {
+            return Err(Error::Other(
+                "offline state-readiness arm requires an unarmed Offline instance".into(),
+            ));
+        }
+        // Active membership/revision/integrity are checked in one registry lock.
+        // Later invalidation is caught at the SDK boundary, never silently re-armed.
+        self.runtime.progress.arm_ready_revision(
+            expected_revision,
+            &mut self.runtime.offline_readiness_revision,
+        )
     }
 
     fn native_dirty_revision(&mut self) -> Result<u64> {

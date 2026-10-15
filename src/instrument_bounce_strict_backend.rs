@@ -67,6 +67,7 @@ pub(crate) struct StrictBackend {
     cleanup_diagnostics: Vec<String>,
     /// Preparation evidence only, never an edit-generation or metadata lease.
     prepared_dirty_revision: Option<u64>,
+    prepared_async_revision: Option<u64>,
 }
 
 impl StrictBackend {
@@ -99,6 +100,7 @@ impl StrictBackend {
             cleanup_error: None,
             cleanup_diagnostics: Vec::new(),
             prepared_dirty_revision: None,
+            prepared_async_revision: None,
         }
     }
     #[cfg(test)]
@@ -201,8 +203,54 @@ impl StrictBackend {
             BackendFailure::from(error).with_strict_context(stage)
         })
     }
+    /// All polls consume the existing absolute job budget and sticky cancellation.
+    /// The disposable clone owns this notification queue; the realtime instance is untouched.
+    /// No LoadState, MIDI, Process, lifecycle call or failed exchange is replayed.
+    fn wait_async_state_ready(&mut self, stage: &'static str) -> Result<u64, BackendFailure> {
+        loop {
+            Self::checkpoint(
+                self.control
+                    .as_ref()
+                    .ok_or_else(|| Self::admission("Strict clone has no job budget"))?,
+            )
+            .map_err(|failure| failure.with_strict_context(stage))?;
+            self.exchange_at(
+                "prepare.discard_progress_notifications",
+                Client::discard_progress_notifications,
+            )?;
+            let snapshot = self.exchange_at(stage, Client::async_state_snapshot)?;
+            if snapshot.readiness_faulted || snapshot.active_other != 0 {
+                return Err(Self::admission(
+                    "Strict clone async-state readiness cannot be attested",
+                ));
+            }
+            if snapshot.active_async == 0 {
+                return Ok(snapshot.async_started_revision);
+            }
+            // The next bounded exchange pumps the existing helper owner; no fixed sleep,
+            // new owner, extra timeout or mutation retry is introduced.
+        }
+    }
+    fn verify_armed_async_state(&mut self) -> Result<(), BackendFailure> {
+        let expected = self
+            .prepared_async_revision
+            .ok_or_else(|| Self::admission("Strict clone has no async-state readiness token"))?;
+        let snapshot =
+            self.exchange_at("render.async_state_snapshot", Client::async_state_snapshot)?;
+        snapshot
+            .ensure_ready()
+            .map_err(|error| Self::admission(error.to_string()))?;
+        if snapshot.async_started_revision != expected {
+            return Err(Self::admission(
+                "Strict clone async-state restoration changed after preparation",
+            ));
+        }
+        Ok(())
+    }
+
     fn ready(&self) -> Result<(), BackendFailure> {
-        if !self.prepared
+        if self.prepared_async_revision.is_none()
+            || !self.prepared
             || !self.started
             || self.disposal_begun
             || self.terminated
@@ -679,6 +727,7 @@ impl RenderBackend for StrictBackend {
             #[cfg(test)]
             observation.strict_state_load(&capture.state.opaque_state, &state_loaded);
             state_loaded?;
+            self.wait_async_state_ready("prepare.post_state_async_snapshot")?;
             if capture.metadata().uses_selected_stereo_bounce() {
                 let declared = self.exchange_at(
                     "prepare.post_state_audio_layout",
@@ -724,6 +773,8 @@ impl RenderBackend for StrictBackend {
             }
             self.exchange_at("prepare.start_processing", Client::start_processing)?;
             self.started = true;
+            let async_revision =
+                self.wait_async_state_ready("prepare.post_start_async_snapshot")?;
             self.prepared_dirty_revision = Some(self.exchange_at(
                 "prepare.native_dirty_revision",
                 Client::native_dirty_revision,
@@ -774,6 +825,10 @@ impl RenderBackend for StrictBackend {
             }
             self.input_channels = metadata.participating_input_channels();
             self.output_channels = metadata.output_buses[0].channel_count;
+            self.exchange_at("prepare.arm_async_state_readiness", |client, deadline| {
+                client.arm_offline_state_readiness(async_revision, deadline)
+            })?;
+            self.prepared_async_revision = Some(async_revision);
             self.prepared = true;
             Ok(metadata)
         })();
@@ -800,7 +855,10 @@ impl RenderBackend for StrictBackend {
         );
         let result = (|| {
             self.ready()?;
-            self.read_metadata(false)
+            self.verify_armed_async_state()?;
+            let metadata = self.read_metadata(false)?;
+            self.verify_armed_async_state()?;
+            Ok(metadata)
         })();
         #[cfg(test)]
         {

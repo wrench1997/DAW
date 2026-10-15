@@ -968,3 +968,122 @@ Patch SHA256: 3b66657084dca6bc2d4428aaa740debbdfa584d80624455c057d1843f4d164d8. 
 The two provenance digest literals in each packaging Python file are refreshed.
 Replay evidence:
 target/backend-reliability-20261014/offline-midi-timing-provenance-01.
+
+
+### Component-handler progress and guarded asynchronous state readiness (2026-10-15; Rust execution pending)
+
+Steinberg specifies IProgress as an interface queried from the component handler,
+with separate AsyncStateRestoration and UIBackgroundTask kinds:
+https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IProgress.html
+The actual ComponentHandler now exposes that COM interface and shares a bounded
+typed ProgressRegistry with HostApplication and the actual processor runtime.
+The old ComponentHandler constructor remains usable with an independent registry.
+
+Active IDs/types and the asynchronous-start revision are separate from the
+bounded legacy notification FIFO. Notification drains, including the explicit
+progress-only discard used by a disposable Strict clone, never complete tasks.
+A non-consuming AsyncStateSnapshot reports version, revision, active async/UI/
+unknown counts and a readiness-integrity fault. Accepted unknown kinds and
+untrackable non-UI starts fail closed. In particular, a notification-capacity
+refusal for an unknown kind latches the fault before returning kResultFalse;
+draining that FIFO cannot admit an untracked unknown task. Capacity-refused
+recognized UI work alone does not block readiness. Existing bounded backpressure,
+failed-finish active state, old drains, ID ownership and thread checks remain.
+
+Three additive helper operations carry the snapshot, clone-owned progress drain
+and ArmOfflineStateReadiness through both helper dispatchers, ordinary isolation,
+the bounded closed codec, current owner and original total deadline/cancellation.
+Ordinary isolation sends each operation once without respawn/recovery. The arm
+checks the revision, active state and integrity and installs its token under one
+registry lock. No registry lock crosses foreign plug-in code. Only an unarmed
+Offline clone opts in; realtime and unarmed processing keep their prerequisites
+and do not acquire this registry lock on their DSP path.
+
+Strict observes readiness after LoadState and StartProcessing, before generic
+bases, using its original owner/deadline/cancellation and only its own clone's
+notification queue. It arms after generic bases, readback and metadata. Every
+actual SDK process validates the token before and after the foreign call, and
+metadata reads validate on both sides. Async start+finish within one call still
+invalidates the candidate; output from that call is not copied, and the existing
+terminal/retained-child cleanup prevents publishing a partial WAV. UI-only tasks
+do not block DSP. No fixed sleep, new deadline, LoadState/MIDI/Process retry,
+automatic re-arm, sample compensation or Kontakt-specific behavior is introduced.
+SDK-reported readiness does not infer unreported instrument background state;
+the observed first-note frame differences have not been causally tied to this
+change, and native NOIRE acceptance remains pending.
+
+Nineteen new regression functions cover 6 registry/actual COM QI cases, 5 actual
+processor-boundary cases, 3 closed-codec cases, 1 closed-client owner/reap case,
+and 4 application Strict cases. The existing backpressure case includes a legal
+UI task plus 1023 updates, then a rejected raw kind 42 start, drain and failed
+snapshot/arm, paired with a non-faulting legal UI-only rejection. Existing helper
+no-instance and Unix ordinary-isolation no-respawn cases include all three new
+operations. Strict fault/protocol/death/limit and blocked cancellation/deadline
+matrices and exact command orders include their real readiness exchanges.
+
+Actual static checks passed: vendor/root rustfmt with their respective editions,
+embedded mock Python syntax, private complete 19-source reviewed patch replay,
+and diff whitespace checks. Every new/affected Rust test, compilation, Clippy,
+native Kontakt and audio check is UNRUN at this source checkpoint. The direct
+SDK selector is expected to select 15 tests; Root all-feature tests select the
+4 application tests. The exact Unix no-respawn selector selects 1 on Linux and
+0 on Windows. CI/preview consumers and package source assertions retain the
+previous offline MIDI gate and add direct SDK readiness gates, including a narrow
+Linux readiness/no-respawn lane. Commands frozen for execution:
+
+    cargo +stable-x86_64-pc-windows-msvc test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --features experimental-fresh-helper --lib async_state_readiness --target-dir target -- --test-threads=1
+    cargo +stable test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --features experimental-fresh-helper --lib async_state_readiness --target-dir target -- --test-threads=1
+    cargo +stable test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --features experimental-fresh-helper --lib internal::isolated_plugin_impl::tests::checked_native_operations_never_respawn_a_dead_instance --target-dir target -- --exact --test-threads=1
+
+The complete patch was regenerated from the verified original 41-file
+archive and all 76 current vendor source files, excluding only this
+document/CITRUS.patch and generated vendor/target output. There are 50
+changed paths, 35 additions and 0 deletions. Private git
+apply --check/apply succeeded; the complete file inventory and raw bytes matched.
+Patch SHA256: 447b42ad6c89dd54a12390827ba6f5072169dad1cc72e672a5ecda315ac74be9. Original archive/commit/LICENSE/VCS identities remain.
+The two provenance digest literals in each packaging Python file are refreshed.
+Replay evidence:
+target/backend-reliability-20261014/async-progress-readiness-provenance-01.
+Reviewed source and original application evidence:
+target/backend-reliability-20261014/async-progress-readiness-candidate-01.
+
+
+### Rejected progress arguments also invalidate non-UI readiness (2026-10-15; Rust execution pending)
+
+The readiness admission review found two additional untracked-start paths:
+start returned kInvalidArgument for a null out-ID or a valid 1024-unit description
+without a terminator before decoding the task kind. Neither refusal guaranteed
+that a plug-in stopped its work, so an empty active set could incorrectly arm.
+ProgressRegistry now decodes the kind first and uses a short registry-only lock
+to latch readiness_faulted for these rejected async/unknown starts. The original
+kInvalidArgument is retained, null out-ID is never dereferenced, and a rejected
+recognized UIBackgroundTask does not fault readiness. This adds no lock to the
+non-opt-in DSP path and retains the original bounded admission/COM contracts.
+
+The existing unknown-kind/exhaustion regression now also uses both actual COM
+entry points, AsyncStateRestoration/raw kind 42/UIBackgroundTask, and both invalid
+argument forms. The description is a valid allocated 1024-unit UTF-16 array, not
+an invalid pointer. Assertions check the exact result, untouched valid out-ID,
+empty notification drain, shared non-consuming snapshot, zero active counts and
+revision, and coherent fail-closed arm versus a ready UI-only control. All prior
+capacity, unknown-kind and exhaustion assertions remain; the new test-function
+count remains 19 (15 vendor with experimental-fresh-helper, 4 application).
+
+Actual checks passed: edition-correct rustfmt on all 19 applied source paths,
+embedded Python mock syntax, complete reviewed source patch replay and diff
+whitespace checks. All Rust compilation/tests, Clippy, Linux execution, native
+Kontakt and audio remain UNRUN. Existing Windows quality, preview, Linux and
+offline-MIDI source consumer assertions are retained, including Root's newly
+added exact Windows readiness command. No native first-note timing causality is
+claimed. Source evidence:
+target/backend-reliability-20261014/async-progress-readiness-candidate-01/reviewed-applied-static-freeze-02.json.
+
+The complete patch was regenerated from the verified original 41-file
+archive and all 76 current vendor source files, excluding only this
+document/CITRUS.patch and generated vendor/target output. There are 50
+changed paths, 35 additions and 0 deletions. Private git
+apply --check/apply succeeded; complete file inventory and raw bytes matched.
+Patch SHA256: 3349d66946abdf97244ac72e9d8703093b7c6b3f5d5d367561688d8e5657943a. Original archive/commit/LICENSE/VCS identities remain.
+Both packaging Python files' two provenance digest literals are refreshed.
+Replay evidence:
+target/backend-reliability-20261014/async-progress-readiness-provenance-02.

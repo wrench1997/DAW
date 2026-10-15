@@ -17,8 +17,8 @@ use crate::discovery::{ClassCompatibility, FactoryClassMetadata, FactoryInfo, Fa
 use crate::midi::MidiEvent;
 use crate::parameters::Parameter;
 use crate::plugin::{
-    CheckedAudioBusConfig, CheckedAudioBusLayout, EventBusConfig, EventBusLayout, ProcessMode,
-    ProcessTransport, ResetOriginSupport,
+    AsyncStateSnapshot, CheckedAudioBusConfig, CheckedAudioBusLayout, EventBusConfig,
+    EventBusLayout, ProcessMode, ProcessTransport, ResetOriginSupport,
 };
 use crate::process_isolation::{
     HostCommand, HostResponse, MetadataGetter, SelectedMetadataAdmission, SelectedMetadataPolicy,
@@ -150,6 +150,12 @@ fn check_request(command: &RequestView<'_>, shape: &ReplyShape) -> Result<()> {
         | (RequestView::TailSamples, ReplyShape::TailSamples)
         | (RequestView::StartProcessing | RequestView::StopProcessing, ReplyShape::Success)
         | (RequestView::ResetOriginSupport, ReplyShape::ResetOriginSupport)
+        | (RequestView::AsyncStateSnapshot, ReplyShape::AsyncStateSnapshot)
+        | (
+            RequestView::DiscardProgressNotifications
+            | RequestView::ArmOfflineStateReadiness { .. },
+            ReplyShape::Success,
+        )
         | (RequestView::NativeDirtyRevision, ReplyShape::NativeDirtyRevision)
         | (RequestView::GetAllParameters, ReplyShape::Parameters)
         | (RequestView::CheckedAudioBusLayout, ReplyShape::CheckedAudioBusLayout)
@@ -420,6 +426,15 @@ impl Writer<'_> {
             RequestView::StartProcessing => self.put(b"\"StartProcessing\"")?,
             RequestView::StopProcessing => self.put(b"\"StopProcessing\"")?,
             RequestView::ResetOriginSupport => self.put(b"\"ResetOriginSupport\"")?,
+            RequestView::AsyncStateSnapshot => self.put(b"\"AsyncStateSnapshot\"")?,
+            RequestView::DiscardProgressNotifications => {
+                self.put(b"\"DiscardProgressNotifications\"")?
+            }
+            RequestView::ArmOfflineStateReadiness { expected_revision } => {
+                self.put(b"{\"ArmOfflineStateReadiness\":{\"expected_revision\":")?;
+                self.number(*expected_revision)?;
+                self.put(b"}}")?;
+            }
             RequestView::NativeDirtyRevision => self.put(b"\"NativeDirtyRevision\"")?,
             RequestView::GetAllParameters => self.put(b"\"GetAllParameters\"")?,
             RequestView::CheckedAudioBusLayout => self.put(b"\"CheckedAudioBusLayout\"")?,
@@ -1259,6 +1274,50 @@ impl<'a> Parser<'a, '_> {
         required(seen, 3)?;
         Ok((inputs, outputs))
     }
+    fn async_state_snapshot(&mut self) -> Result<AsyncStateSnapshot> {
+        self.open(b'{')?;
+        let mut first = true;
+        let mut seen = 0;
+        let mut snapshot = AsyncStateSnapshot {
+            contract_version: 0,
+            async_started_revision: 0,
+            active_async: 0,
+            active_ui: 0,
+            active_other: 0,
+            readiness_faulted: false,
+        };
+        while self.next(&mut first, b'}')? {
+            let key = self.key()?;
+            if key.is(b"contract_version") {
+                unique(&mut seen, 1)?;
+                snapshot.contract_version = self.u32()?;
+            } else if key.is(b"async_started_revision") {
+                unique(&mut seen, 2)?;
+                snapshot.async_started_revision = self
+                    .number()?
+                    .parse()
+                    .map_err(|_| ErrorKind::MalformedReply)?;
+            } else if key.is(b"active_async") {
+                unique(&mut seen, 4)?;
+                snapshot.active_async = self.u32()?;
+            } else if key.is(b"active_ui") {
+                unique(&mut seen, 8)?;
+                snapshot.active_ui = self.u32()?;
+            } else if key.is(b"active_other") {
+                unique(&mut seen, 16)?;
+                snapshot.active_other = self.u32()?;
+            } else if key.is(b"readiness_faulted") {
+                unique(&mut seen, 32)?;
+                snapshot.readiness_faulted = self.boolean()?;
+            } else {
+                return Err(ErrorKind::MalformedReply);
+            }
+        }
+        required(seen, 63)?;
+        snapshot.validate().map_err(|_| ErrorKind::MalformedReply)?;
+        Ok(snapshot)
+    }
+
     fn reset_support(&mut self) -> Result<ResetOriginSupport> {
         self.open(b'{')?;
         let mut first = true;
@@ -1919,6 +1978,7 @@ impl<'a> Parser<'a, '_> {
             }
             self.plugin_info()?
         } else if variant.is(b"Parameters")
+            || variant.is(b"AsyncStateSnapshot")
             || variant.is(b"ResetOriginSupport")
             || variant.is(b"NativeDirtyRevision")
             || variant.is(b"CheckedAudioBusLayout")
@@ -1927,6 +1987,7 @@ impl<'a> Parser<'a, '_> {
         {
             let expected = match shape {
                 ReplyShape::Parameters => b"Parameters".as_slice(),
+                ReplyShape::AsyncStateSnapshot => b"AsyncStateSnapshot".as_slice(),
                 ReplyShape::ResetOriginSupport => b"ResetOriginSupport".as_slice(),
                 ReplyShape::NativeDirtyRevision => b"NativeDirtyRevision".as_slice(),
                 ReplyShape::CheckedAudioBusLayout => b"CheckedAudioBusLayout".as_slice(),
@@ -1957,6 +2018,10 @@ impl<'a> Parser<'a, '_> {
                 } else if variant.is(b"ResetOriginSupport") && key.is(b"support") {
                     HostResponse::ResetOriginSupport {
                         support: self.reset_support()?,
+                    }
+                } else if variant.is(b"AsyncStateSnapshot") && key.is(b"snapshot") {
+                    HostResponse::AsyncStateSnapshot {
+                        snapshot: self.async_state_snapshot()?,
                     }
                 } else if variant.is(b"NativeDirtyRevision") && key.is(b"revision") {
                     HostResponse::NativeDirtyRevision {

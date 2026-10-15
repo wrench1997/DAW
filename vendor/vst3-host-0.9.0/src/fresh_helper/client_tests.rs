@@ -879,3 +879,36 @@ fn silent_generator_valid_counts_stop_before_encoding_or_send_when_budget_ends()
         }
     }
 }
+
+#[test]
+fn async_state_readiness_closed_client_uses_same_owner_and_acknowledges_no_mutation_replay() {
+    let _serial = serial();
+    let snapshot = crate::AsyncStateSnapshot {
+        contract_version: 1,
+        async_started_revision: 9_007_199_254_740_993,
+        active_async: 0,
+        active_ui: 1,
+        active_other: 0,
+        readiness_faulted: false,
+    };
+    let pairs = [
+        (HostCommand::DiscardProgressNotifications, success()),
+        (
+            HostCommand::AsyncStateSnapshot,
+            HostResponse::AsyncStateSnapshot { snapshot },
+        ),
+        (
+            HostCommand::ArmOfflineStateReadiness {
+                expected_revision: snapshot.async_started_revision,
+            },
+            success(),
+        ),
+    ];
+    let mut owner = client(&ledger(&pairs, true));
+    owner.discard_progress_notifications(deadline()).unwrap();
+    assert_eq!(owner.async_state_snapshot(deadline()).unwrap(), snapshot);
+    owner
+        .arm_offline_state_readiness(snapshot.async_started_revision, deadline())
+        .unwrap();
+    finish_client(&mut owner);
+}

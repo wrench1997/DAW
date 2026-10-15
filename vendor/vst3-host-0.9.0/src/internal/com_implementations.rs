@@ -3,7 +3,7 @@
 use super::native_edit_transport::{native_edit_channel, NativeEditReceiver, NativeEditSender};
 use crate::midi::{PluginEvent, PluginEventData, MAX_EVENT_PAYLOAD_BYTES, MAX_EVENT_TEXT_UNITS};
 use crate::plugin::StateContext;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
@@ -21,22 +21,246 @@ use vst3::{Class, ComPtr, ComRef, ComWrapper, Interface, Steinberg::Vst::*, Stei
 // (IMessage/IAttributeList), used to pass data between a plugin's component and controller.
 struct ProgressState {
     notifications: Vec<crate::plugin::HostNotification>,
-    active: HashSet<u64>,
+    active: HashMap<u64, crate::plugin::ProgressKind>,
     next_id: u64,
+    async_started_revision: u64,
+    readiness_faulted: bool,
 }
 
 impl Default for ProgressState {
     fn default() -> Self {
         Self {
             notifications: Vec::with_capacity(MAX_HOST_NOTIFICATIONS),
-            active: HashSet::with_capacity(MAX_HOST_NOTIFICATIONS),
+            active: HashMap::with_capacity(MAX_HOST_NOTIFICATIONS),
             next_id: 1,
+            async_started_revision: 0,
+            readiness_faulted: false,
         }
     }
 }
 
+/// One per loaded instance, shared by host-context and component-handler IProgress.
+/// The mutex is never retained across any plug-in call.
+#[derive(Default)]
+pub(crate) struct ProgressRegistry {
+    state: Mutex<ProgressState>,
+}
+
+impl ProgressRegistry {
+    fn snapshot_locked(state: &ProgressState) -> crate::plugin::AsyncStateSnapshot {
+        use crate::plugin::ProgressKind;
+        let mut snapshot = crate::plugin::AsyncStateSnapshot {
+            contract_version: 1,
+            async_started_revision: state.async_started_revision,
+            active_async: 0,
+            active_ui: 0,
+            active_other: 0,
+            readiness_faulted: state.readiness_faulted,
+        };
+        for kind in state.active.values() {
+            match kind {
+                ProgressKind::AsyncStateRestoration => snapshot.active_async += 1,
+                ProgressKind::UiBackgroundTask => snapshot.active_ui += 1,
+                ProgressKind::Other(_) => snapshot.active_other += 1,
+            }
+        }
+        snapshot
+    }
+
+    pub(crate) fn snapshot(&self) -> crate::Result<crate::plugin::AsyncStateSnapshot> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| crate::Error::Other("progress registry poisoned".into()))?;
+        Ok(Self::snapshot_locked(&state))
+    }
+
+    /// This one lock acquisition checks revision, active membership and integrity together.
+    /// A subsequent callback may invalidate the resulting token, never change its meaning.
+    pub(crate) fn verify_ready_revision(&self, expected: u64) -> crate::Result<()> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| crate::Error::Other("progress registry poisoned".into()))?;
+        Self::verify_locked_ready_revision(&state, expected)
+    }
+
+    pub(crate) fn arm_ready_revision(
+        &self,
+        expected: u64,
+        token: &mut Option<u64>,
+    ) -> crate::Result<()> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| crate::Error::Other("progress registry poisoned".into()))?;
+        if token.is_some() {
+            return Err(crate::Error::Other(
+                "offline readiness token is already armed".into(),
+            ));
+        }
+        Self::verify_locked_ready_revision(&state, expected)?;
+        // This assignment and the active/revision observation share the same lock.
+        // A callback after unlock may invalidate the token; it never re-arms it.
+        *token = Some(expected);
+        Ok(())
+    }
+
+    fn verify_locked_ready_revision(state: &ProgressState, expected: u64) -> crate::Result<()> {
+        let snapshot = Self::snapshot_locked(state);
+        snapshot.ensure_ready()?;
+        if snapshot.async_started_revision != expected {
+            return Err(crate::Error::Other(
+                "offline async-state readiness revision changed".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn take_notifications(&self) -> Vec<crate::plugin::HostNotification> {
+        let mut state = self.state.lock().unwrap_or_else(|poison| {
+            let mut state = poison.into_inner();
+            state.readiness_faulted = true;
+            state
+        });
+        state.notifications.drain(..).collect()
+    }
+
+    pub(crate) fn discard_notifications(&self) -> crate::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| crate::Error::Other("progress registry poisoned".into()))?;
+        state.notifications.clear();
+        Ok(())
+    }
+
+    fn fault_rejected_start(&self, kind: crate::plugin::ProgressKind) {
+        if kind == crate::plugin::ProgressKind::UiBackgroundTask {
+            return;
+        }
+        // An invalid start may still precede work in the plug-in. Its refusal
+        // cannot attest that untracked restoration or unknown work is absent.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        state.readiness_faulted = true;
+    }
+
+    unsafe fn start(
+        &self,
+        raw_kind: IProgress_::ProgressType,
+        description: *const tchar,
+        out_id: *mut IProgress_::ID,
+    ) -> tresult {
+        use crate::plugin::{HostNotification, ProgressKind};
+        let kind = match raw_kind {
+            IProgress_::ProgressType_::AsyncStateRestoration => ProgressKind::AsyncStateRestoration,
+            IProgress_::ProgressType_::UIBackgroundTask => ProgressKind::UiBackgroundTask,
+            other => ProgressKind::Other(other),
+        };
+        if out_id.is_null() {
+            self.fault_rejected_start(kind);
+            return kInvalidArgument;
+        }
+        let description = if description.is_null() {
+            None
+        } else {
+            const MAX_UNITS: usize = 1024;
+            let mut units = Vec::with_capacity(64);
+            for index in 0..MAX_UNITS {
+                let unit = *description.add(index);
+                if unit == 0 {
+                    break;
+                }
+                units.push(unit);
+            }
+            if units.len() == MAX_UNITS {
+                self.fault_rejected_start(kind);
+                return kInvalidArgument;
+            }
+            Some(String::from_utf16_lossy(&units))
+        };
+        let mut state = self.state.lock().unwrap_or_else(|poison| {
+            let mut state = poison.into_inner();
+            state.readiness_faulted = true;
+            state
+        });
+        if state.notifications.len() >= MAX_HOST_NOTIFICATIONS
+            || state.active.len() >= MAX_HOST_NOTIFICATIONS
+        {
+            // A plug-in may proceed despite a rejected start. Untracked restoration
+            // or an unknown task cannot become proof after an empty notification drain.
+            state.readiness_faulted |= kind != ProgressKind::UiBackgroundTask;
+            return kResultFalse;
+        }
+        let Some(next_id) = state.next_id.checked_add(1) else {
+            state.readiness_faulted = true;
+            return kResultFalse;
+        };
+        let next_revision = if kind == ProgressKind::AsyncStateRestoration {
+            let Some(revision) = state.async_started_revision.checked_add(1) else {
+                state.readiness_faulted = true;
+                return kResultFalse;
+            };
+            revision
+        } else {
+            state.async_started_revision
+        };
+        let id = state.next_id;
+        state.next_id = next_id;
+        state.async_started_revision = next_revision;
+        // Unknown future task kinds retain their legacy notification behavior,
+        // but cannot establish this closed, versioned offline readiness proof.
+        state.readiness_faulted |= matches!(kind, ProgressKind::Other(_));
+        state.active.insert(id, kind);
+        state.notifications.push(HostNotification::ProgressStarted {
+            id,
+            kind,
+            description,
+        });
+        *out_id = id;
+        kResultOk
+    }
+
+    fn update(&self, id: u64, value: f64) -> tresult {
+        let Some(value) = crate::plugin::ProgressValue::new(value) else {
+            return kInvalidArgument;
+        };
+        let mut state = self.state.lock().unwrap_or_else(|poison| {
+            let mut state = poison.into_inner();
+            state.readiness_faulted = true;
+            state
+        });
+        if !state.active.contains_key(&id) || state.notifications.len() >= MAX_HOST_NOTIFICATIONS {
+            return kResultFalse;
+        }
+        state
+            .notifications
+            .push(crate::plugin::HostNotification::ProgressUpdated { id, value });
+        kResultOk
+    }
+
+    fn finish(&self, id: u64) -> tresult {
+        let mut state = self.state.lock().unwrap_or_else(|poison| {
+            let mut state = poison.into_inner();
+            state.readiness_faulted = true;
+            state
+        });
+        if !state.active.contains_key(&id) || state.notifications.len() >= MAX_HOST_NOTIFICATIONS {
+            return kResultFalse;
+        }
+        state.active.remove(&id);
+        state
+            .notifications
+            .push(crate::plugin::HostNotification::ProgressFinished { id });
+        kResultOk
+    }
+}
+
 pub struct HostApplication {
-    progress: Mutex<ProgressState>,
+    progress: Arc<ProgressRegistry>,
     data_exchange: Arc<super::data_exchange::DataExchangeState>,
     #[cfg(target_os = "linux")]
     run_loop: Arc<Mutex<RunLoopRegistry>>,
@@ -45,7 +269,7 @@ pub struct HostApplication {
 impl Default for HostApplication {
     fn default() -> Self {
         Self {
-            progress: Mutex::new(ProgressState::default()),
+            progress: Arc::new(ProgressRegistry::default()),
             data_exchange: super::data_exchange::DataExchangeState::new(),
             #[cfg(target_os = "linux")]
             run_loop: Arc::new(Mutex::new(RunLoopRegistry::new())),
@@ -77,12 +301,11 @@ impl HostApplication {
         drop(retired);
     }
 
+    pub(crate) fn progress_registry(&self) -> Arc<ProgressRegistry> {
+        self.progress.clone()
+    }
     pub fn take_progress_notifications(&self) -> Vec<crate::plugin::HostNotification> {
-        let mut state = self
-            .progress
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        state.notifications.drain(..).collect()
+        self.progress.take_notifications()
     }
 
     pub fn configure_data_exchange(
@@ -274,93 +497,17 @@ impl IHostApplicationTrait for HostApplication {
 impl IProgressTrait for HostApplication {
     unsafe fn start(
         &self,
-        r#type: IProgress_::ProgressType,
-        optional_description: *const tchar,
+        kind: IProgress_::ProgressType,
+        description: *const tchar,
         out_id: *mut IProgress_::ID,
     ) -> tresult {
-        if out_id.is_null() {
-            return kInvalidArgument;
-        }
-        let description = if optional_description.is_null() {
-            None
-        } else {
-            const MAX_PROGRESS_DESCRIPTION_UNITS: usize = 1024;
-            let mut units = Vec::with_capacity(64);
-            for index in 0..MAX_PROGRESS_DESCRIPTION_UNITS {
-                let unit = *optional_description.add(index);
-                if unit == 0 {
-                    break;
-                }
-                units.push(unit);
-            }
-            if units.len() == MAX_PROGRESS_DESCRIPTION_UNITS {
-                return kInvalidArgument;
-            }
-            Some(String::from_utf16_lossy(&units))
-        };
-        let kind = match r#type {
-            IProgress_::ProgressType_::AsyncStateRestoration => {
-                crate::plugin::ProgressKind::AsyncStateRestoration
-            }
-            IProgress_::ProgressType_::UIBackgroundTask => {
-                crate::plugin::ProgressKind::UiBackgroundTask
-            }
-            other => crate::plugin::ProgressKind::Other(other),
-        };
-
-        let mut state = self
-            .progress
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if state.notifications.len() >= MAX_HOST_NOTIFICATIONS
-            || state.active.len() >= MAX_HOST_NOTIFICATIONS
-        {
-            return kResultFalse;
-        }
-        let id = state.next_id;
-        state.next_id = state.next_id.checked_add(1).unwrap_or(1);
-        state.active.insert(id);
-        state
-            .notifications
-            .push(crate::plugin::HostNotification::ProgressStarted {
-                id,
-                kind,
-                description,
-            });
-        *out_id = id;
-        kResultOk
+        self.progress.start(kind, description, out_id)
     }
-
-    unsafe fn update(&self, id: IProgress_::ID, norm_value: ParamValue) -> tresult {
-        let Some(value) = crate::plugin::ProgressValue::new(norm_value) else {
-            return kInvalidArgument;
-        };
-        let mut state = self
-            .progress
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if !state.active.contains(&id) || state.notifications.len() >= MAX_HOST_NOTIFICATIONS {
-            return kResultFalse;
-        }
-        state
-            .notifications
-            .push(crate::plugin::HostNotification::ProgressUpdated { id, value });
-        kResultOk
+    unsafe fn update(&self, id: IProgress_::ID, value: ParamValue) -> tresult {
+        self.progress.update(id, value)
     }
-
     unsafe fn finish(&self, id: IProgress_::ID) -> tresult {
-        let mut state = self
-            .progress
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if !state.active.contains(&id) || state.notifications.len() >= MAX_HOST_NOTIFICATIONS {
-            return kResultFalse;
-        }
-        state.active.remove(&id);
-        state
-            .notifications
-            .push(crate::plugin::HostNotification::ProgressFinished { id });
-        kResultOk
+        self.progress.finish(id)
     }
 }
 
@@ -1863,10 +2010,17 @@ pub struct ComponentHandler {
     // never drains makes the plugin's own requests start failing.
     notifications: Arc<Mutex<Vec<crate::plugin::HostNotification>>>,
     context_menus: Arc<ContextMenuRegistry>,
+    progress: Arc<ProgressRegistry>,
 }
 
 impl ComponentHandler {
     pub fn new(parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>) -> (Self, NativeEditReceiver) {
+        Self::with_progress_registry(parameter_changes, Arc::new(ProgressRegistry::default()))
+    }
+    pub(crate) fn with_progress_registry(
+        parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>,
+        progress: Arc<ProgressRegistry>,
+    ) -> (Self, NativeEditReceiver) {
         let (native_edits, receiver) = native_edit_channel(MAX_EDITOR_FEEDBACK);
         (
             ComponentHandler {
@@ -1876,6 +2030,7 @@ impl ComponentHandler {
                 restart_flags: AtomicI32::new(0),
                 notifications: Arc::new(Mutex::new(Vec::with_capacity(MAX_HOST_NOTIFICATIONS))),
                 context_menus: Arc::new(ContextMenuRegistry::new()),
+                progress,
             },
             receiver,
         )
@@ -1944,7 +2099,10 @@ impl ComponentHandler {
             .notifications
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        notifications.drain(..).collect()
+        let mut drained: Vec<_> = notifications.drain(..).collect();
+        drop(notifications);
+        drained.extend(self.progress.take_notifications());
+        drained
     }
 
     pub fn execute_context_menu_item(&self, menu_id: u64, item_id: u32) -> crate::Result<()> {
@@ -1982,9 +2140,27 @@ impl Class for ComponentHandler {
         IComponentHandler,
         IComponentHandler2,
         IComponentHandler3,
+        IProgress,
         IUnitHandler,
         IUnitHandler2,
     );
+}
+
+impl IProgressTrait for ComponentHandler {
+    unsafe fn start(
+        &self,
+        kind: IProgress_::ProgressType,
+        description: *const tchar,
+        out_id: *mut IProgress_::ID,
+    ) -> tresult {
+        self.progress.start(kind, description, out_id)
+    }
+    unsafe fn update(&self, id: IProgress_::ID, value: ParamValue) -> tresult {
+        self.progress.update(id, value)
+    }
+    unsafe fn finish(&self, id: IProgress_::ID) -> tresult {
+        self.progress.finish(id)
+    }
 }
 
 impl IComponentHandlerTrait for ComponentHandler {
@@ -6987,5 +7163,370 @@ mod native_parameter_admission_tests {
         }
         assert_eq!(display.lock().unwrap().len(), MAX_EDITOR_FEEDBACK);
         assert!(handler.native_state_capture_revision().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod async_state_readiness_progress_tests {
+    use super::*;
+    use crate::plugin::ProgressKind;
+
+    fn pair() -> (ComWrapper<HostApplication>, ComWrapper<ComponentHandler>) {
+        let host = create_host_application();
+        let (handler, _) = ComponentHandler::with_progress_registry(
+            Arc::new(Mutex::new(Vec::new())),
+            host.progress_registry(),
+        );
+        (host, ComWrapper::new(handler))
+    }
+
+    #[test]
+    fn async_state_readiness_real_component_handler_qi_and_host_context_share_typed_active_registry(
+    ) {
+        let (host, handler) = pair();
+        let component = handler.to_com_ptr::<IComponentHandler>().unwrap();
+        let progress = component
+            .cast::<IProgress>()
+            .expect("SDK QI from the real component-handler pointer");
+        let host_progress = host
+            .to_com_ptr::<IHostApplication>()
+            .unwrap()
+            .cast::<IProgress>()
+            .unwrap();
+        let mut async_id = 0;
+        let mut ui_id = 0;
+        unsafe {
+            assert_eq!(
+                progress.start(
+                    IProgress_::ProgressType_::AsyncStateRestoration,
+                    ptr::null(),
+                    &mut async_id
+                ),
+                kResultOk
+            );
+            assert_eq!(
+                host_progress.start(
+                    IProgress_::ProgressType_::UIBackgroundTask,
+                    ptr::null(),
+                    &mut ui_id
+                ),
+                kResultOk
+            );
+        }
+        assert_ne!(async_id, ui_id);
+        let a = host.progress.snapshot().unwrap();
+        let b = handler.progress.snapshot().unwrap();
+        assert_eq!(a, b);
+        assert_eq!(
+            (
+                a.active_async,
+                a.active_ui,
+                a.active_other,
+                a.async_started_revision
+            ),
+            (1, 1, 0, 1)
+        );
+        assert!(a.ensure_ready().is_err());
+        // Notifications are drained exactly once across either interface, not copied.
+        let notices = handler.take_host_notifications();
+        assert!(matches!(
+            notices[0],
+            crate::HostNotification::ProgressStarted {
+                kind: ProgressKind::AsyncStateRestoration,
+                ..
+            }
+        ));
+        assert_eq!(notices.len(), 2);
+        assert!(host.take_progress_notifications().is_empty());
+        assert_eq!(
+            host.progress.snapshot().unwrap(),
+            a,
+            "drain is not completion"
+        );
+        unsafe {
+            assert_eq!(host_progress.finish(async_id), kResultOk);
+        }
+        let ready = handler.progress.snapshot().unwrap();
+        assert_eq!(
+            (
+                ready.active_async,
+                ready.active_ui,
+                ready.async_started_revision
+            ),
+            (0, 1, 1)
+        );
+        ready.ensure_ready().unwrap();
+        unsafe {
+            assert_eq!(progress.finish(ui_id), kResultOk);
+        }
+        assert_eq!(host.progress.snapshot().unwrap().active_ui, 0);
+    }
+
+    #[test]
+    fn async_state_readiness_legacy_constructor_gets_its_own_registry_and_progress_drain() {
+        let (handler, _) = ComponentHandler::new(Arc::new(Mutex::new(Vec::new())));
+        let handler = ComWrapper::new(handler);
+        let progress = handler
+            .to_com_ptr::<IComponentHandler>()
+            .unwrap()
+            .cast::<IProgress>()
+            .unwrap();
+        let mut id = 0;
+        unsafe {
+            assert_eq!(
+                progress.start(
+                    IProgress_::ProgressType_::UIBackgroundTask,
+                    ptr::null(),
+                    &mut id
+                ),
+                kResultOk
+            );
+        }
+        assert_eq!(handler.take_host_notifications().len(), 1);
+        assert_eq!(handler.progress.snapshot().unwrap().active_ui, 1);
+        assert_eq!(
+            create_host_application()
+                .progress
+                .snapshot()
+                .unwrap()
+                .active_ui,
+            0
+        );
+    }
+
+    #[test]
+    fn async_state_readiness_snapshot_and_arm_are_one_consistent_registry_observation() {
+        let (host, handler) = pair();
+        host.progress.verify_ready_revision(0).unwrap();
+        let progress = handler.to_com_ptr::<IProgress>().unwrap();
+        let mut id = 0;
+        unsafe {
+            assert_eq!(
+                progress.start(
+                    IProgress_::ProgressType_::AsyncStateRestoration,
+                    ptr::null(),
+                    &mut id
+                ),
+                kResultOk
+            );
+        }
+        assert!(host.progress.verify_ready_revision(0).is_err());
+        assert!(host.progress.verify_ready_revision(1).is_err());
+        host.progress.discard_notifications().unwrap();
+        assert_eq!(host.progress.snapshot().unwrap().active_async, 1);
+        unsafe {
+            assert_eq!(progress.finish(id), kResultOk);
+        }
+        assert!(
+            host.progress.verify_ready_revision(0).is_err(),
+            "start+finish must retain invalidation"
+        );
+        host.progress.verify_ready_revision(1).unwrap();
+    }
+
+    #[test]
+    fn async_state_readiness_backpressure_cannot_create_false_ready_or_clear_active_tasks() {
+        let (host, handler) = pair();
+        let progress = handler.to_com_ptr::<IProgress>().unwrap();
+        let mut id = 0;
+        unsafe {
+            assert_eq!(
+                progress.start(
+                    IProgress_::ProgressType_::AsyncStateRestoration,
+                    ptr::null(),
+                    &mut id
+                ),
+                kResultOk
+            );
+            for _ in 1..MAX_HOST_NOTIFICATIONS {
+                assert_eq!(progress.update(id, 0.5), kResultOk);
+            }
+            assert_eq!(progress.finish(id), kResultFalse);
+        }
+        assert_eq!(host.progress.snapshot().unwrap().active_async, 1);
+        assert_eq!(
+            host.take_progress_notifications().len(),
+            MAX_HOST_NOTIFICATIONS
+        );
+        assert_eq!(host.progress.snapshot().unwrap().active_async, 1);
+        unsafe {
+            assert_eq!(progress.finish(id), kResultOk);
+        }
+        host.progress.verify_ready_revision(1).unwrap();
+        host.progress.discard_notifications().unwrap();
+        unsafe {
+            for _ in 0..MAX_HOST_NOTIFICATIONS {
+                let mut task = 0;
+                assert_eq!(
+                    progress.start(
+                        IProgress_::ProgressType_::UIBackgroundTask,
+                        ptr::null(),
+                        &mut task
+                    ),
+                    kResultOk
+                );
+            }
+            let mut rejected = 999;
+            assert_eq!(
+                progress.start(
+                    IProgress_::ProgressType_::AsyncStateRestoration,
+                    ptr::null(),
+                    &mut rejected
+                ),
+                kResultFalse
+            );
+            assert_eq!(rejected, 999);
+        }
+        host.progress.discard_notifications().unwrap();
+        let snapshot = host.progress.snapshot().unwrap();
+        assert!(
+            snapshot.readiness_faulted,
+            "a lost async start cannot be repaired by drain"
+        );
+        assert_eq!(snapshot.active_async, 0);
+        assert!(snapshot.ensure_ready().is_err());
+
+        // A single legal UI task can fill the notification FIFO without filling
+        // active slots. An unknown rejected start must still latch loss; a
+        // recognized UI-only rejected start must not block the audio guard.
+        for (raw_kind, faulted) in [
+            (42, true),
+            (IProgress_::ProgressType_::UIBackgroundTask, false),
+        ] {
+            let (host, handler) = pair();
+            let progress = handler.to_com_ptr::<IProgress>().unwrap();
+            let mut ui_id = 0;
+            unsafe {
+                assert_eq!(
+                    progress.start(
+                        IProgress_::ProgressType_::UIBackgroundTask,
+                        ptr::null(),
+                        &mut ui_id,
+                    ),
+                    kResultOk,
+                );
+                for _ in 1..MAX_HOST_NOTIFICATIONS {
+                    assert_eq!(progress.update(ui_id, 0.5), kResultOk);
+                }
+                let mut rejected = 999;
+                assert_eq!(
+                    progress.start(raw_kind, ptr::null(), &mut rejected),
+                    kResultFalse,
+                );
+                assert_eq!(rejected, 999);
+            }
+            host.progress.discard_notifications().unwrap();
+            let snapshot = host.progress.snapshot().unwrap();
+            assert_eq!((snapshot.active_async, snapshot.active_other), (0, 0));
+            assert_eq!(snapshot.active_ui, 1);
+            assert_eq!(snapshot.readiness_faulted, faulted);
+            assert_eq!(snapshot.ensure_ready().is_err(), faulted);
+            let mut token = None;
+            assert_eq!(
+                host.progress.arm_ready_revision(0, &mut token).is_err(),
+                faulted,
+            );
+            assert_eq!(token, if faulted { None } else { Some(0) });
+        }
+    }
+
+    #[test]
+    fn async_state_readiness_unknown_type_and_identity_exhaustion_refuse_attestation() {
+        // Invalid start arguments must not become an untracked non-UI work
+        // admission after a drain. Both actual COM entry points share the latch.
+        // The unterminated description is a valid 1024-unit allocation, not an
+        // invalid-memory fixture, and a rejected start never changes its out ID.
+        let unterminated = [b'x' as tchar; 1024];
+        for host_context in [false, true] {
+            for (raw_kind, faulted) in [
+                (IProgress_::ProgressType_::AsyncStateRestoration, true),
+                (42, true),
+                (IProgress_::ProgressType_::UIBackgroundTask, false),
+            ] {
+                for invalid_out_id in [true, false] {
+                    let (host, handler) = pair();
+                    let progress = if host_context {
+                        host.to_com_ptr::<IHostApplication>()
+                            .unwrap()
+                            .cast::<IProgress>()
+                            .unwrap()
+                    } else {
+                        handler
+                            .to_com_ptr::<IComponentHandler>()
+                            .unwrap()
+                            .cast::<IProgress>()
+                            .unwrap()
+                    };
+                    let mut out_id: IProgress_::ID = 999;
+                    let (description, out_ptr) = if invalid_out_id {
+                        (ptr::null(), ptr::null_mut())
+                    } else {
+                        (unterminated.as_ptr(), &mut out_id as *mut IProgress_::ID)
+                    };
+                    unsafe {
+                        assert_eq!(
+                            progress.start(raw_kind, description, out_ptr),
+                            kInvalidArgument,
+                        );
+                    }
+                    assert_eq!(out_id, 999);
+                    assert!(handler.take_host_notifications().is_empty());
+                    host.progress.discard_notifications().unwrap();
+                    let snapshot = host.progress.snapshot().unwrap();
+                    assert_eq!(snapshot, handler.progress.snapshot().unwrap());
+                    assert_eq!(snapshot.async_started_revision, 0);
+                    assert_eq!(
+                        (
+                            snapshot.active_async,
+                            snapshot.active_ui,
+                            snapshot.active_other
+                        ),
+                        (0, 0, 0),
+                    );
+                    assert_eq!(snapshot.readiness_faulted, faulted);
+                    assert_eq!(snapshot.ensure_ready().is_err(), faulted);
+                    let mut token = None;
+                    assert_eq!(
+                        host.progress.arm_ready_revision(0, &mut token).is_err(),
+                        faulted,
+                    );
+                    assert_eq!(token, if faulted { None } else { Some(0) });
+                }
+            }
+        }
+
+        let (host, handler) = pair();
+        let progress = handler.to_com_ptr::<IProgress>().unwrap();
+        let mut id = 0;
+        unsafe {
+            assert_eq!(progress.start(42, ptr::null(), &mut id), kResultOk);
+        }
+        let snapshot = host.progress.snapshot().unwrap();
+        assert_eq!(snapshot.active_other, 1);
+        assert!(snapshot.ensure_ready().is_err());
+        unsafe {
+            assert_eq!(progress.finish(id), kResultOk);
+        }
+        assert!(host.progress.snapshot().unwrap().readiness_faulted);
+        host.progress.state.lock().unwrap().next_id = u64::MAX;
+        unsafe {
+            assert_eq!(progress.start(0, ptr::null(), &mut id), kResultFalse);
+        }
+        assert!(host.progress.snapshot().unwrap().readiness_faulted);
+    }
+
+    #[test]
+    fn async_state_readiness_poison_is_an_error_and_a_legacy_drain_cannot_repair_proof() {
+        let (host, _) = pair();
+        let progress = host.progress.clone();
+        assert!(std::panic::catch_unwind(|| {
+            let _state = progress.state.lock().unwrap();
+            panic!("Rust-only registry poison fixture");
+        })
+        .is_err());
+        assert!(host.progress.snapshot().is_err());
+        assert!(host.progress.verify_ready_revision(0).is_err());
+        assert!(host.take_progress_notifications().is_empty());
+        assert!(host.progress.snapshot().is_err());
     }
 }

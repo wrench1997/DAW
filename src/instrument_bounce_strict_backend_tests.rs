@@ -46,6 +46,52 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 const UID: &str = "ABCDEF019182FAEB566D624153675854";
 const SENTINEL: &[u8] = b"unchanged destination";
 
+fn with_async_readiness_commands(commands: Vec<String>) -> Vec<String> {
+    let selected = commands
+        .iter()
+        .any(|command| command.starts_with("StrictMetadataSnapshot:"));
+    let mut result = Vec::new();
+    let mut snapshot = 2;
+    for command in commands {
+        let metadata_number = command
+            .split_once(':')
+            .and_then(|(_, count)| count.parse::<usize>().ok());
+        let metadata_start = (command.starts_with("StrictMetadataSnapshot:")
+            || (!selected && command.starts_with("CheckedAudioBusLayout:")))
+            && metadata_number.is_some_and(|number| number > 1);
+        let metadata_end = (command.starts_with("StrictMetadataSnapshot:")
+            || (!selected && command.starts_with("TailSamples:")))
+            && metadata_number.is_some_and(|number| number > 1);
+        if metadata_start {
+            snapshot += 1;
+            result.push(format!("AsyncStateSnapshot:{snapshot}"));
+        }
+        result.push(command.clone());
+        if command == "LoadState:1" {
+            result.extend([
+                "DiscardProgressNotifications:1".into(),
+                "AsyncStateSnapshot:1".into(),
+            ]);
+        }
+        if (!selected && command == "StartProcessing:1")
+            || (selected && command == "CheckedAudioBusLayout:5")
+        {
+            result.extend([
+                "DiscardProgressNotifications:2".into(),
+                "AsyncStateSnapshot:2".into(),
+            ]);
+        }
+        if command == "StrictMetadataSnapshot:1" || (!selected && command == "TailSamples:1") {
+            result.push("ArmOfflineStateReadiness:1".into());
+        }
+        if metadata_end {
+            snapshot += 1;
+            result.push(format!("AsyncStateSnapshot:{snapshot}"));
+        }
+    }
+    result
+}
+
 fn serial() -> MutexGuard<'static, ()> {
     crate::plugins::helper_transport_test_lock()
 }
@@ -71,6 +117,8 @@ processed = 0
 sets = []
 reads = []
 audio_activation = {}
+progress_revision = 0
+progress_armed = None
 
 if os.name == 'nt':
     import ctypes, msvcrt
@@ -268,6 +316,31 @@ while True:
         response = success
     elif name in ('StartProcessing', 'StopProcessing'):
         response = success
+    elif name == 'DiscardProgressNotifications':
+        response = success
+    elif name == 'AsyncStateSnapshot':
+        scenario = cfg.get('progress_scenario', '')
+        active = 0
+        if scenario == 'wait_then_ready' and counts[name] <= 2:
+            progress_revision = 1
+            active = 1
+        if scenario == 'never_ready':
+            progress_revision = 1
+            active = 1
+        response = {'AsyncStateSnapshot': {'snapshot': dict(
+            contract_version=1, async_started_revision=progress_revision,
+            active_async=active, active_ui=1 if scenario == 'ui_only' else 0,
+            active_other=1 if scenario == 'unknown' else 0,
+            readiness_faulted=scenario == 'faulted')}}
+    elif name == 'ArmOfflineStateReadiness':
+        assert set(args) == {'expected_revision'}, args
+        if cfg.get('progress_scenario') == 'change_before_arm':
+            progress_revision += 1
+        if args['expected_revision'] != progress_revision:
+            response = {'Error': {'message': 'offline async-state readiness revision changed'}}
+        else:
+            progress_armed = progress_revision
+            response = success
     elif name == 'NativeDirtyRevision':
         response = {'NativeDirtyRevision': {'revision': 77}}
     elif name == 'GetAllParameters':
@@ -350,6 +423,12 @@ while True:
         assert len(event) == 1 and next(iter(event)) in ('NoteOn', 'NoteOff'), event
         response = success
     elif name == 'Process':
+        assert progress_armed == progress_revision, 'DSP before readiness arm'
+        if (cfg.get('progress_scenario') == 'change_during_first_process' and processed == 0) or (cfg.get('progress_scenario') == 'change_during_second_process' and processed == 128):
+            progress_revision += 1
+            response = {'Error': {'message': 'offline async-state readiness revision changed during SDK Process'}}
+            reply(response)
+            continue
         assert reads == [base[0] for base in cfg['bases']], reads
         assert args['frames'] == 128, args
         input_channels = sum(bus['channel_count'] for bus in cfg.get('inputs', []) if bus['active'])
@@ -1107,7 +1186,8 @@ fn strict_clone_selected_stereo_reselects_after_state_and_preserves_complete_dec
         "Shutdown:1".to_owned(),
     ]);
     assert_eq!(
-        commands, expected,
+        commands,
+        with_async_readiness_commands(expected),
         "selected clone must retain complete layout checks around Start, each Q128 Process, and after Stop before Shutdown"
     );
     assert!(
@@ -1269,6 +1349,15 @@ fn ordinary_owner_stage(stage: &str) -> (&'static str, &'static str) {
         ("ResetOriginSupport", _) => ("prepare.reset_origin_support", "ResetOriginSupport"),
         ("LoadState", _) => ("prepare.load_state", "LoadState"),
         ("StartProcessing", _) => ("prepare.start_processing", "StartProcessing"),
+        ("DiscardProgressNotifications", _) => (
+            "prepare.discard_progress_notifications",
+            "DiscardProgressNotifications",
+        ),
+        ("AsyncStateSnapshot", "1") => ("prepare.post_state_async_snapshot", "AsyncStateSnapshot"),
+        ("ArmOfflineStateReadiness", _) => (
+            "prepare.arm_async_state_readiness",
+            "ArmOfflineStateReadiness",
+        ),
         ("NativeDirtyRevision", _) => ("prepare.native_dirty_revision", "NativeDirtyRevision"),
         ("GetAllParameters", _) => ("prepare.parameters", "GetAllParameters"),
         ("SetParameter", _) => ("prepare.set_parameter", "SetParameter"),
@@ -1357,7 +1446,7 @@ fn strict_clone_success_exact_order_source_identity_and_reap_before_wav() {
             }
         }
         expected.extend(["StopProcessing:1".into(), "Shutdown:1".into()]);
-        assert_eq!(mock.commands(), expected);
+        assert_eq!(mock.commands(), with_async_readiness_commands(expected));
         let actual_notes: Vec<Value> = mock
             .ledger()
             .into_iter()
@@ -1391,6 +1480,9 @@ fn strict_clone_every_reply_stage_error_wrong_malformed_or_death_seals_without_r
         "SetProcessMode:1",
         "ResetOriginSupport:1",
         "LoadState:1",
+        "DiscardProgressNotifications:1",
+        "AsyncStateSnapshot:1",
+        "ArmOfflineStateReadiness:1",
         "StartProcessing:1",
         "NativeDirtyRevision:1",
         "GetAllParameters:1",
@@ -2092,6 +2184,9 @@ fn strict_clone_cancel_and_original_deadline_interrupt_blocked_stages_without_la
     for stage in [
         "LoadPlugin:1",
         "LoadState:1",
+        "DiscardProgressNotifications:1",
+        "AsyncStateSnapshot:1",
+        "ArmOfflineStateReadiness:1",
         "GetAllParameters:1",
         "SetParameter:2",
         "GetParameter:2",
@@ -2973,4 +3068,148 @@ fn strict_selected_bundle_actual_held_getter_completes_after_cancel_or_deadline_
         assert_eq!(selected_source_project_snapshot(&project), original);
         assert_eq!(capture.state, state);
     }
+}
+
+fn progress_scenario(mock: &Mock, scenario: &str) {
+    let path = mock.root.join("config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    config["progress_scenario"] = json!(scenario);
+    fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+}
+
+#[test]
+fn strict_clone_async_state_readiness_waits_before_start_and_ui_tasks_do_not_block_publication() {
+    let _serial = serial();
+    for scenario in ["wait_then_ready", "ui_only"] {
+        let mock = Mock::new("", "");
+        progress_scenario(&mock, scenario);
+        let RenderOutcome::Complete(_) = normal_job(&mock).finish() else {
+            panic!("ready scenario {scenario}");
+        };
+        let commands = mock.commands();
+        let load = commands
+            .iter()
+            .position(|stage| stage == "LoadState:1")
+            .unwrap();
+        let start = commands
+            .iter()
+            .position(|stage| stage == "StartProcessing:1")
+            .unwrap();
+        let arm = commands
+            .iter()
+            .position(|stage| stage == "ArmOfflineStateReadiness:1")
+            .unwrap();
+        let process = commands
+            .iter()
+            .position(|stage| stage == "Process:1")
+            .unwrap();
+        assert!(load < start && start < arm && arm < process);
+        if scenario == "wait_then_ready" {
+            assert!(
+                commands
+                    .iter()
+                    .position(|stage| stage == "AsyncStateSnapshot:3")
+                    .unwrap()
+                    < start
+            );
+        }
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|stage| stage.starts_with("LoadState:"))
+                .count(),
+            1
+        );
+        mock.assert_cooperative(true);
+    }
+}
+
+#[test]
+fn strict_clone_async_state_readiness_unattestable_or_changed_candidates_never_publish_audio() {
+    let _serial = serial();
+    for scenario in [
+        "unknown",
+        "faulted",
+        "change_before_arm",
+        "change_during_first_process",
+    ] {
+        let mock = Mock::new("", "");
+        progress_scenario(&mock, scenario);
+        let _failure = failed(normal_job(&mock).finish());
+        mock.assert_unchanged();
+        let commands = mock.commands();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|stage| stage.starts_with("LoadState:"))
+                .count(),
+            1
+        );
+        assert!(
+            commands
+                .iter()
+                .filter(|stage| stage.starts_with("Process:"))
+                .count()
+                <= 1
+        );
+        if scenario != "change_during_first_process" {
+            assert!(
+                !commands
+                    .iter()
+                    .any(|stage| stage.starts_with("SendMidiAt:") || stage.starts_with("Process:"))
+            );
+        }
+    }
+}
+
+#[test]
+fn strict_clone_async_state_readiness_continuous_unready_polls_do_not_extend_the_job_deadline() {
+    let _serial = serial();
+    let mock = Mock::new("", "");
+    progress_scenario(&mock, "never_ready");
+    let job = Job::start(&mock, Hook::None, Duration::from_secs(2));
+    let failure = failed(job.finish());
+    assert_eq!(failure.kind, FailureKind::Deadline);
+    mock.assert_unchanged();
+    let commands = mock.commands();
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|stage| stage.starts_with("LoadState:"))
+            .count(),
+        1
+    );
+    assert!(
+        commands
+            .iter()
+            .filter(|stage| stage.starts_with("AsyncStateSnapshot:"))
+            .count()
+            > 1
+    );
+    assert!(
+        !commands
+            .iter()
+            .any(|stage| stage.starts_with("StartProcessing:")
+                || stage.starts_with("SendMidiAt:")
+                || stage.starts_with("Process:"))
+    );
+    assert!(mock.audit().iter().any(concrete_child_reap_evidence));
+}
+
+#[test]
+fn strict_clone_async_state_readiness_change_in_later_sdk_block_discards_the_entire_staged_render()
+{
+    let _serial = serial();
+    let mock = Mock::new("", "");
+    progress_scenario(&mock, "change_during_second_process");
+    let _failure = failed(normal_job(&mock).finish());
+    mock.assert_unchanged();
+    assert_eq!(
+        mock.commands()
+            .iter()
+            .filter(|stage| stage.starts_with("Process:"))
+            .count(),
+        2
+    );
+    assert!(mock.audit().iter().any(concrete_child_reap_evidence));
 }

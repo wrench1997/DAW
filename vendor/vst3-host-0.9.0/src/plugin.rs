@@ -470,6 +470,53 @@ pub enum ProgressKind {
     Other(u32),
 }
 
+/// Non-consuming, instance-local observation of the shared IProgress registry.
+/// It describes SDK-reported work, not unreported plug-in background activity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AsyncStateSnapshot {
+    /// Version of this bounded contract; currently 1.
+    pub contract_version: u32,
+    /// Increments on each accepted async-state start, even if it already finished.
+    pub async_started_revision: u64,
+    /// Active AsyncStateRestoration tasks.
+    pub active_async: u32,
+    /// Active UIBackgroundTask tasks; these do not block offline processing.
+    pub active_ui: u32,
+    /// Active tasks whose SDK type this host does not understand.
+    pub active_other: u32,
+    /// A lost async start, unknown task kind, exhausted identity or poisoned registry prevents proof.
+    pub readiness_faulted: bool,
+}
+
+impl AsyncStateSnapshot {
+    /// Validate the complete versioned, bounded wire observation.
+    pub fn validate(self) -> Result<()> {
+        if self.contract_version != 1
+            || self
+                .active_async
+                .checked_add(self.active_ui)
+                .and_then(|count| count.checked_add(self.active_other))
+                .is_none_or(|count| count > 1024)
+        {
+            return Err(Error::Other(
+                "invalid async-state snapshot contract/counts".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Readiness for one observed revision. UI-only work is deliberately ignored.
+    pub fn ensure_ready(self) -> Result<()> {
+        self.validate()?;
+        if self.readiness_faulted || self.active_async != 0 || self.active_other != 0 {
+            return Err(Error::Other(
+                "async-state restoration is not ready or cannot be attested".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// An equality-safe normalized progress value.
 ///
 /// Construction rejects NaN, infinities, and values outside `0.0..=1.0`, allowing progress
@@ -1430,6 +1477,19 @@ impl MainThreadPlugin {
     pub fn try_take_parameter_edits(&mut self) -> Result<Vec<ParameterEdit>> {
         self.plugin.try_take_parameter_edits()
     }
+    /// Main-thread equivalent of [`Plugin::async_state_snapshot`].
+    pub fn async_state_snapshot(&mut self) -> Result<AsyncStateSnapshot> {
+        self.plugin.async_state_snapshot()
+    }
+    /// Main-thread equivalent of [`Plugin::discard_progress_notifications`].
+    pub fn discard_progress_notifications(&mut self) -> Result<()> {
+        self.plugin.discard_progress_notifications()
+    }
+    /// Main-thread equivalent of [`Plugin::arm_offline_state_readiness`].
+    pub fn arm_offline_state_readiness(&mut self, expected_revision: u64) -> Result<()> {
+        self.plugin.arm_offline_state_readiness(expected_revision)
+    }
+
     /// Main-thread equivalent of [`Plugin::try_take_host_notifications`].
     pub fn try_take_host_notifications(&mut self) -> Result<Vec<HostNotification>> {
         self.plugin.try_take_host_notifications()
@@ -1813,6 +1873,22 @@ pub(crate) trait PluginInternal: Send {
     /// Checked host-notification drain; preserves errors across the isolation boundary.
     fn try_take_host_notifications(&mut self) -> Result<Vec<HostNotification>> {
         Ok(self.take_host_notifications())
+    }
+    /// Non-consuming SDK progress observation. Unsupported implementations fail explicitly.
+    fn async_state_snapshot(&mut self) -> Result<AsyncStateSnapshot> {
+        Err(Error::Other("async-state snapshot is unavailable".into()))
+    }
+    /// Explicitly drain only progress notifications, never active tasks or other requests.
+    fn discard_progress_notifications(&mut self) -> Result<()> {
+        Err(Error::Other(
+            "progress notification drain is unavailable".into(),
+        ))
+    }
+    /// Opt in this offline instance to a token checked before and after every SDK process.
+    fn arm_offline_state_readiness(&mut self, _expected_revision: u64) -> Result<()> {
+        Err(Error::Other(
+            "offline async-state readiness guard is unavailable".into(),
+        ))
     }
     /// Non-draining native-state change revision; unsupported backends fail explicitly.
     fn native_dirty_revision(&mut self) -> Result<u64> {
@@ -3147,6 +3223,35 @@ impl Plugin {
             .as_mut()
             .ok_or_else(|| Error::Other("Plugin not initialized".to_string()))?
             .try_take_parameter_edits()
+    }
+
+    /// Observe shared SDK-reported restoration without draining notifications.
+    pub fn async_state_snapshot(&mut self) -> Result<AsyncStateSnapshot> {
+        let snapshot = self
+            .internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .async_state_snapshot()?;
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+    /// Explicit owner action for a disposable clone that has no UI notification consumer.
+    /// Active task membership and revisions survive this bounded notification drain.
+    pub fn discard_progress_notifications(&mut self) -> Result<()> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .discard_progress_notifications()
+    }
+    /// Arm only Offline processing after checking active tasks and the expected revision
+    /// together under the registry lock. The token is an observation, not a lock held
+    /// across foreign code. A later async start invalidates the token; the actual SDK
+    /// process boundary checks it before and after rendering and refuses its output.
+    pub fn arm_offline_state_readiness(&mut self, expected_revision: u64) -> Result<()> {
+        self.internal
+            .as_mut()
+            .ok_or_else(|| Error::Other("Plugin not initialized".into()))?
+            .arm_offline_state_readiness(expected_revision)
     }
 
     /// Drain host notifications while surfacing transport/protocol failure. Hosts should retain
