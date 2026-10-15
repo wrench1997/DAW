@@ -1087,3 +1087,47 @@ Patch SHA256: 3349d66946abdf97244ac72e9d8703093b7c6b3f5d5d367561688d8e5657943a. 
 Both packaging Python files' two provenance digest literals are refreshed.
 Replay evidence:
 target/backend-reliability-20261014/async-progress-readiness-provenance-02.
+
+
+### Align exact Strict fixtures with readiness boundaries; preserve legacy construction (2026-10-15)
+
+Source93 (63bf538de4274471d708fbead97fa8963336fdfc) cloud Linux readiness
+15 and Unix no-respawn 1 tests passed; Windows SDK readiness/offline/factory
+steps passed. Local legacy progress 2 passed. The local application Strict gate
+finished with 32 passed and 3 failed, each an exact command expectation left
+before the required readiness snapshot/arm additions. Original failure evidence:
+target/backend-reliability-20261014/source93-local-gates-01-strict-backend-stdout.log.
+Clippy and matching-bin build were not reached by that runner.
+
+The application fixtures now assert the actual full protocol boundary rather
+than omitting readiness operations: CancelBeforeDispose ends with TailSamples:5
+then AsyncStateSnapshot:10; supported dry-topology drift completes the original
+audio/event/latency/tail getter order and its post-read snapshot before checked
+cleanup; expired disposal starts after the complete preparation getters and
+ArmOfflineStateReadiness:1. Raw-policy rejection still has no later metadata or
+snapshot suffix. Typed Cancelled/NotSent, exact command suffixes, no publication,
+same reservation, retained cleanup and concrete reap assertions are retained.
+These are fixture corrections; the production readiness/DSP contract is unchanged.
+The constructor now has a function-scoped allow(dead_code) and compatibility
+note because production injects the shared registry while the old standalone
+ComponentHandler::new entry point remains supported and covered by tests.
+No other warnings, APIs or calling prerequisites are changed.
+
+Edition-correct rustfmt, private source replay and diff checks passed. The changed
+application fixtures and the warning-only source change have not been compiled
+or executed at this new source checkpoint. Existing Source93 cloud SDK15/Unix1
+results remain evidence for the unchanged semantic readiness implementation;
+they are not represented as reruns of this fixture candidate. Next execution is
+the affected application Strict gate, strict Clippy and matching-bin build.
+No native Kontakt/audio timing acceptance is established by these changes.
+
+The complete patch was regenerated from the verified original 41-file
+archive and all 76 current vendor source files, excluding only this
+document/CITRUS.patch and generated vendor/target output. There are 50
+changed paths, 35 additions and 0 deletions. Private git
+apply --check/apply succeeded; complete file inventory and raw bytes matched.
+Patch SHA256: 09ea5d0b14587eba9b2358b5463264599894a6a8da0e521c55097d74d389846c. Original archive/commit/LICENSE/VCS identities remain.
+Both packaging Python files' two provenance digest literals are refreshed; all
+Root Windows/preview/Linux and original offline-MIDI consumer assertions remain.
+Replay evidence:
+target/backend-reliability-20261014/strict-readiness-fixture-provenance-01.

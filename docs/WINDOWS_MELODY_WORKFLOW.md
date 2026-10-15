@@ -649,16 +649,49 @@ could bypass the fault latch when the notification FIFO was full, and async/
 unknown kinds could bypass it on null out-ID or an unterminated 1024-unit
 description. Both now latch a non-UI fault while preserving the original error
 return and legal UI-only behavior. The existing test functions add deterministic
-COM-interface and UI-only counterexamples; none of these Rust tests has run yet.
+COM-interface and UI-only counterexamples.
 
 Static checks passed for 19 source files, two Python provenance/consumer contracts
 and the four-file vendor bundle. The complete patch replays all 76 vendor files
 from the original 41-file archive; notes and both pins are synchronized. Windows
 quality/preview are wired to run the dependency's 15 new readiness cases. A narrow
-Linux SDK job is wired for those cases and the changed Unix-only ordinary no-respawn
-case without running the DAW, a desktop, a plug-in or an audio device. Root's four
-new Strict cases and affected failure/cancel/deadline matrices remain unrun,
-as do all Rust compilation, Clippy, Linux execution and NI on SDK-B.
+Linux SDK job runs those cases and the changed Unix-only ordinary no-respawn
+case without running the DAW, a desktop, a plug-in or an audio device.
+
+Source93 (`63bf538`) has now reached actual cloud terminal results. Linux passed
+all15 SDK readiness cases and the one exact Unix ordinary no-respawn case.
+Windows quality passed32 factory,4 SDK offline-MIDI and15 SDK readiness cases,
+then App2330 passed/3 failed/12 ignored. Preview passed344 harness, the same4+15
+SDK cases, then App2329 passed/4 failed/12 ignored. All four new Root readiness
+cases passed. Three shared failures are stale exact fixture suffixes: the
+cancel-before-dispose and metadata-drift boundaries now include a snapshot;
+pending disposal now follows arm. Preview additionally failed a held-prior-reset
+case when it re-read an instantaneous settlement observation after a successful
+Ready wait and received Waiting. The held-reset production contract remains
+intact; the fixture repair below removes that second-sample race.
+
+Locally, legacy progress2 passed and Strict32 passed/3 failed with the same
+three boundary mismatches (Cargo101). Clippy and matching-bin build were not
+reached, and SDK-B has not entered NI acceptance. The diagnostic runner actually
+exited1 after all observed work terminated; its aggregate result is not a pass.
+Preserve `ci-63bf538-{windows-quality,windows-preview,linux-helper-readiness}-01.log`,
+Source93 cloud actual-terminal JSON and `source93-local-gates-01-terminal.json`.
+Source92 and Native07 results do not qualify the newer candidate.
+
+Source94 aligns the three exact Strict fixtures with the complete getter,
+snapshot/arm and cleanup boundaries. The Whole test helper returns the actual
+Ready observation that completed its wait; both direct callers consume that
+sample instead of requiring another instantaneous read to remain Ready. Original
+held-reset, epoch, zero-capture, Project-byte, no-publication, retained-owner and
+concrete-reap assertions remain. Production readiness, cancellation and cleanup
+behavior is unchanged. The legacy constructor receives only a function-scoped
+compatibility dead-code annotation. Formatting, diff checks, complete76-file
+vendor replay, four-file bundle validation and two Python contracts passed.
+The five affected exact cases, strict Clippy and matching bins have not yet run
+on these changed inputs; unchanged SDK15/Unix1/legacy2 and Strict32 evidence is
+reused. Preserve `strict-cancel-readiness-candidate-01/applied-handoff-01.json`,
+`strict-readiness-fixture-provenance-01/` and
+`whole-review-settlement-success-sample-fix-01.json`.
 
 Preserve `async-progress-readiness-candidate-01/applied-handoff-02.json` and
 `async-progress-readiness-provenance-02/`. This guard tracks work reported through

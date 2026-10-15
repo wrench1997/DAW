@@ -2341,7 +2341,14 @@ fn strict_clone_cancellation_boundary_matrix_preserves_typed_cleanup_and_final_f
             }
             Hook::CancelBeforeDispose => {
                 assert_typed(&failure, StrictKind::Cancelled, BackendDelivery::NotSent);
-                assert_eq!(mock.commands().last().unwrap(), "TailSamples:5");
+                // Cancellation begins at disposal, after the final metadata
+                // getter AND its required post-read readiness attestation.
+                let commands = mock.commands();
+                assert_eq!(
+                    commands[commands.len() - 2..],
+                    ["TailSamples:5", "AsyncStateSnapshot:10"],
+                    "cancel-before-dispose must follow the complete final metadata boundary",
+                );
             }
             Hook::CancelAfterStop => {
                 assert_typed(&failure, StrictKind::Cancelled, BackendDelivery::NotSent);
@@ -2587,7 +2594,19 @@ fn strict_clone_pending_retains_same_reservation_until_force_and_concrete_reap()
             .iter()
             .any(|s| s.contains("forced termination"))
     );
-    mock.assert_terminal_at("TailSamples:1");
+    let commands = mock.commands();
+    assert_eq!(
+        commands[commands.len() - 5..],
+        [
+            "CheckedAudioBusLayout:1",
+            "EventBusLayout:1",
+            "LatencySamples:1",
+            "TailSamples:1",
+            "ArmOfflineStateReadiness:1",
+        ],
+        "expired disposal must follow the complete prepared-and-armed boundary",
+    );
+    mock.assert_terminal_at("ArmOfflineStateReadiness:1");
     let next = Mock::new("", "");
     assert!(matches!(
         normal_job(&next).finish(),
@@ -2865,12 +2884,13 @@ fn strict_clone_full_dry_topology_drift_refuses_before_and_after_each_process() 
                     .expect("injected request was dispatched");
                 let mut exact_suffix = vec![stage];
                 if supported_drift {
-                    // Supported shapes reach complete metadata equality; policy failures stop
-                    // at the raw audio policy before any later metadata request.
+                    // Supported shapes finish metadata and its post-read readiness check;
+                    // policy failures stop at the raw audio policy without either suffix.
                     exact_suffix.extend([
                         format!("EventBusLayout:{occurrence}"),
                         format!("LatencySamples:{occurrence}"),
                         format!("TailSamples:{occurrence}"),
+                        format!("AsyncStateSnapshot:{}", occurrence * 2),
                     ]);
                 }
                 exact_suffix.extend(["StopProcessing:1".into(), "Shutdown:1".into()]);

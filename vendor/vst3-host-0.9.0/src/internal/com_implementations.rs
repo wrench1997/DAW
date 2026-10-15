@@ -2014,6 +2014,8 @@ pub struct ComponentHandler {
 }
 
 impl ComponentHandler {
+    /// Legacy standalone construction; loaded instances inject their shared registry.
+    #[allow(dead_code)]
     pub fn new(parameter_changes: Arc<Mutex<Vec<(u32, f64)>>>) -> (Self, NativeEditReceiver) {
         Self::with_progress_registry(parameter_changes, Arc::new(ProgressRegistry::default()))
     }

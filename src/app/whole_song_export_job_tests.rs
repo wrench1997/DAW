@@ -398,15 +398,31 @@ fn reviewed_source_settlement(
             instance_id: binding.stamp.instance_id,
         })
 }
-fn settle_reviewed_source(fixture: &mut Fixture, review: &WholeSongExportReview) {
+fn settle_reviewed_source(
+    fixture: &mut Fixture,
+    review: &WholeSongExportReview,
+) -> BounceSourceSettlementObservation {
+    let settled = std::cell::Cell::new(None);
     fixture.until(|fixture| {
-        fixture
+        if !fixture
             .app()
             .stopped_bounce_observe(review.initial.stamp.channel_id)
             .is_ok_and(|current| current == review.initial)
-            && reviewed_source_settlement(fixture, review.initial).settlement
-                == BounceSourceSettlement::Ready
+        {
+            return false;
+        }
+        let observed = reviewed_source_settlement(fixture, review.initial);
+        let ready = observed.settlement == BounceSourceSettlement::Ready;
+        if ready {
+            settled.set(Some(observed));
+        }
+        ready
     });
+    // Ready attests this actual observation, not a lease over later worker
+    // admin/feedback publications. Return the sample that completed the wait.
+    settled
+        .get()
+        .expect("the successful wait retained its source settlement")
 }
 fn tick(fixture: &mut Fixture) {
     fixture.tick();
@@ -1238,8 +1254,7 @@ fn actual_whole_review_callback_ack_does_not_complete_a_held_prior_worker_reset(
     assert_eq!(fixture.bytes(), before);
 
     fixture.source_handle().release_reset();
-    settle_reviewed_source(&mut fixture, &current_review);
-    let settled = reviewed_source_settlement(&fixture, current_review.initial);
+    let settled = settle_reviewed_source(&mut fixture, &current_review);
     assert_eq!(settled.settlement, BounceSourceSettlement::Ready);
     assert_eq!(
         settled.reset_completed_epoch,
@@ -1381,8 +1396,7 @@ fn actual_whole_frozen_destination_review_refuses_a_real_parameter_receipt_befor
     // Review binds callback/Project/native identity, but does not attest the
     // worker's asynchronous epoch reset. Finish the accepted edit's real prior
     // work before measuring whether rejecting the old review issues any more.
-    settle_reviewed_source(&mut fixture, &fresh_review);
-    let settlement = reviewed_source_settlement(&fixture, fresh_review.initial);
+    let settlement = settle_reviewed_source(&mut fixture, &fresh_review);
     assert_eq!(settlement.settlement, BounceSourceSettlement::Ready);
     assert_eq!(
         settlement.reset_completed_epoch,
