@@ -3105,7 +3105,7 @@ fn progress_scenario(mock: &Mock, scenario: &str) {
 fn strict_clone_async_state_readiness_existing_exchanges_feed_fixed_summary_without_new_io() {
     use crate::genuine_app_observer::{InstanceObserver, InstancePhase, ObservationRun, Stage};
     let _serial = serial();
-    let mut observer = ObservationRun::install().unwrap();
+    let observer = ObservationRun::install().unwrap();
     observer.set_stage(Stage::InitialSource).unwrap();
     // Synthetic observer phase only. This mock test has no real source/plugin.
     let _source = InstanceObserver::new(InstancePhase::InitialSource);

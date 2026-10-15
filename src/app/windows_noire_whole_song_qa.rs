@@ -369,6 +369,7 @@ pub(super) fn actual_strict_process_timing(
 // Diagnostic-only: explicit white-list summaries of already-owned operands.
 // Never Debug a RecordKind: StateLoad/Capture/StrictPcm contain private payloads.
 const INITIAL_DRIVER_RECORD_LIMIT: usize = 64;
+const INITIAL_DRIVER_FAILURE_LIMIT: usize = 8;
 const INITIAL_DRIVER_OWNER_LIMIT: usize = 4;
 
 fn initial_driver_text(value: &str) -> Value {
@@ -569,6 +570,41 @@ fn initial_driver_trace(records: &[Arc<observe::Record>], total_eligible: usize)
     json!({"read_only":true,"matched_records":total_eligible,"row_limit":INITIAL_DRIVER_RECORD_LIMIT,
         "copied_scope_records":records.len(),"truncated":total_eligible>rows.len(),"records":rows,"raw_state_or_pcm_serialized":false,
         "scope":"InitialSource incarnation plus driver/worker control records; StrictClone and UndoSource excluded"})
+}
+
+/// Reuse the bounded initial-source whitelist without querying or pumping a backend.
+pub(super) fn initial_source_diagnostics(records: &[Arc<observe::Record>]) -> Value {
+    let eligible = |record: &&Arc<observe::Record>| {
+        record
+            .instance
+            .is_none_or(|identity| identity.phase == InstancePhase::InitialSource)
+    };
+    let total = records.iter().filter(eligible).count();
+    let selected = records
+        .iter()
+        .filter(eligible)
+        .take(INITIAL_DRIVER_RECORD_LIMIT)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut diagnostics = initial_driver_trace(&selected, total);
+    let is_failure = |record: &&Arc<observe::Record>| {
+        eligible(record) && super::windows_noire_full_source_qa::actual_failure(record)
+    };
+    let total_failures = records.iter().filter(is_failure).count();
+    let mut failures = records
+        .iter()
+        .rev()
+        .filter(is_failure)
+        .take(INITIAL_DRIVER_FAILURE_LIMIT)
+        .collect::<Vec<_>>();
+    // Select the most recent failures, then restore their original record order.
+    failures.reverse();
+    diagnostics["latest_actual_failures"] = json!({
+        "matched_records":total_failures,"row_limit":INITIAL_DRIVER_FAILURE_LIMIT,
+        "truncated":total_failures>failures.len(),
+        "order":"original record order within the most recent bounded failures",
+        "records":failures.into_iter().map(|record|initial_driver_record(record)).collect::<Vec<_>>()});
+    diagnostics
 }
 
 struct WholeOwner {

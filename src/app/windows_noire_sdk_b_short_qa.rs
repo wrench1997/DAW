@@ -7,7 +7,8 @@ use super::windows_noire_full_source_qa::{
     actual_source_identity, validate_metadata, validate_state_operands,
 };
 use super::windows_noire_whole_song_qa::{
-    actual_strict_process_timing, audit_short_whole, persist_generated_raw_pcm, whole_scratch,
+    actual_strict_process_timing, audit_short_whole, initial_source_diagnostics,
+    persist_generated_raw_pcm, whole_scratch,
 };
 use super::*;
 use crate::export_options::{WavExportOptions, WavLevelPolicy, WavSampleFormat};
@@ -127,6 +128,29 @@ fn onset_metrics(bits: &[u32]) -> Check<Value> {
         "first_nonzero_frame":first(0.0),"frame_origin":"unaltered published WAV frame zero",
         "alignment_fitted":false,"extra_trim_or_delay":false,"repeatability_claim":false}),
     )
+}
+
+fn checked_short_phase<T>(stage: &str, action: impl FnOnce() -> Check<T>) -> Check<T> {
+    catch_unwind(AssertUnwindSafe(action)).unwrap_or_else(|panic| Err(panic_error(panic, stage)))
+}
+
+fn retain_receipt_failure(
+    directory: &Path,
+    body: &Check,
+    cleanup: &Check,
+    receipt: &Check,
+    initial_source_diagnostics: &Value,
+    write: impl FnOnce(&Path, &Value) -> Check,
+) -> Check {
+    let evidence = json!({"schema":1,"stage":"short-receipt-failure","success":false,
+        "actual_body_error":body.as_ref().err(),"actual_cleanup_error":cleanup.as_ref().err(),
+        "actual_receipt_error":receipt.as_ref().err(),"partial_evidence_preserved":true,
+        "actual_initial_source_diagnostics":initial_source_diagnostics,
+        "owners_retained":true});
+    write(&directory.join("short-receipt-failure.json"), &evidence).map_err(|write_error| {
+        format!("short fallback receipt could not be written: {write_error}; actual body={:?}; actual cleanup={:?}; actual receipt={:?}; initial source diagnostics={initial_source_diagnostics}",
+            body.as_ref().err(), cleanup.as_ref().err(), receipt.as_ref().err())
+    })
 }
 
 struct ShortPins {
@@ -396,6 +420,7 @@ impl ShortRun {
         let (records, failure) = self
             .observer
             .with_snapshot(|state| (state.records.clone(), state.failure));
+        self.evidence["actual_initial_source_diagnostics"] = initial_source_diagnostics(&records);
         let terminal = TerminalFacts::from_records(&records);
         let terminal_result: Check = (|| {
             terminal.qualify(false)?;
@@ -518,12 +543,27 @@ fn windows_noire_saved_state_source_capture_strict_short_whole() {
         let _=new_json(&directory.join("short-result.json"),&json!({"success":false,"stage":"preflight","actual_error":reason,"source_owner_started":false}));
         panic!("short NI preflight failed; preserve {}",directory.display());
     }));
-    let body = catch_unwind(AssertUnwindSafe(|| run.exercise()))
-        .unwrap_or_else(|p| Err(panic_error(p, "short NI body")));
-    let cleanup = catch_unwind(AssertUnwindSafe(|| run.cleanup()))
-        .unwrap_or_else(|p| Err(panic_error(p, "short NI cleanup")));
-    let receipt = catch_unwind(AssertUnwindSafe(|| run.receipt(&body, &cleanup)))
-        .unwrap_or_else(|p| Err(panic_error(p, "short NI receipt")));
+    let body = checked_short_phase("short NI body", || run.exercise());
+    let cleanup = checked_short_phase("short NI cleanup", || run.cleanup());
+    let receipt = checked_short_phase("short NI receipt", || run.receipt(&body, &cleanup));
+    if receipt.is_err() {
+        if let Err(fallback_error) = retain_receipt_failure(
+            &directory,
+            &body,
+            &cleanup,
+            &receipt,
+            &run.evidence["actual_initial_source_diagnostics"],
+            new_json,
+        ) {
+            eprintln!("{fallback_error}");
+        }
+        eprintln!(
+            "short NI terminal failure: body={:?}; cleanup={:?}; receipt={:?}",
+            body.as_ref().err(),
+            cleanup.as_ref().err(),
+            receipt.as_ref().err(),
+        );
+    }
     let success = body.is_ok() && cleanup.is_ok() && receipt.is_ok();
     if success {
         unsafe { ManuallyDrop::drop(&mut run) };

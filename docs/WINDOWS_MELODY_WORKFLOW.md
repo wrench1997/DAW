@@ -800,14 +800,37 @@ ArmedVerify snapshot returns. Missing observations and observed zeros stay
 separate; no new SDK query, warmup, sleep or timeline/PCM stream record is added.
 
 Static rustfmt/diff checks passed for11 source files. Fifteen new nonignored
-regressions and one ignored NI selector are prepared; Rust compilation, Clippy
-and actual NI rounds are unrun. The candidate and exact recipe are retained in
+regressions and one ignored NI selector are prepared. Frozen `dd204d9` actually
+compiled locally: observer8 and FullOwner16 passed; short-model finished3 passed/
+1 failed because the synthetic valid-metadata fixture failed the actual validator.
+The validator was not relaxed. One unused-mut warning also needs correction.
+Independent review found missing preservation of initial source errors and receipt-
+write errors; the original owner is repairing bounded diagnostics/fallback and
+adding regressions before NI. Runner130088/exec42591 actually exited101; every
+held child terminated and fresh heavy count was zero before peer handback. Peak
+owned-private/global-physical used were5.002/23.165GiB, below the existing budgets.
+Strict36, Clippy, cohort construction and NI rounds were not reached. Preserve
+`source98-local-gates-01-*` and `source98-local-resource-handback-01.json`.
+The candidate and exact recipe are retained in
 `target/backend-reliability-20261014/noire-sdk-b-short-source-candidate-01/`.
 It preserves original-frame PCM/onset and exact MIDI Q/offset for two independent
 same-source rounds. Source worker thread join is distinct from helper OS exit;
 unavailable PID/exit fields remain null and need Root's actual process handles.
 This does not qualify ordinary GUI Save/cold Open, hardware listening, complete
 internal parameters or Felt.
+
+The subsequent frozen repair corrects only the synthetic fixture's declared
+input main/aux flag, retaining the real metadata policy and adding an aux-input
+refusal control. Initial diagnostics retain head64 plus a separate latest8 actual
+failure tail with counts/truncation and original order. The regression puts75
+successes before Load/Prepare/Metadata/SlotFault failures, then checks overflow
+with13 failures. Receipt Err/panic/write failure gets an independent createNew
+fallback, with original causes sent to stderr if that write also fails. The
+unused-mut warning is removed. The short suite now contains7 cases; five-file
+rustfmt, complete patch replay and diff checks passed. New Rust/Strict36/Clippy,
+cohort construction and NI execution remain unrun. Reuse unchanged observer8 /
+FullOwner16 passing evidence. Keep `noire-sdk-b-short-source-repair-02/`; the first
+repair and failed Source98 execution are preserved.
 
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 

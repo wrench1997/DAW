@@ -215,7 +215,7 @@ pub(super) fn validate_metadata(
     final_metadata.validate(sample_rate)?;
     Ok(())
 }
-fn actual_failure(record: &observe::Record) -> bool {
+pub(super) fn actual_failure(record: &observe::Record) -> bool {
     match &record.kind {
         RecordKind::Call {
             outcome: Some(observe::CallOutcome::Error(_) | observe::CallOutcome::StrictError(_)),
