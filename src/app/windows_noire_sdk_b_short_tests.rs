@@ -163,6 +163,12 @@ mod tests {
         assert_eq!(onset["first_above_threshold_frame"], 18);
         assert_eq!(onset["alignment_fitted"], false);
         assert_eq!(onset["extra_trim_or_delay"], false);
+        for frame_zero in [[2.0e-5_f32, 0.0], [0.0, -2.0e-5_f32]] {
+            let onset = onset_metrics(&frame_zero.map(f32::to_bits)).unwrap();
+            assert_eq!(onset["first_nonzero_frame"], 0);
+            assert_eq!(onset["first_above_threshold_frame"], 0);
+            assert_eq!(onset["frames"], 1);
+        }
         assert_eq!(
             onset_metrics(&[0; 256]).unwrap()["first_above_threshold_frame"],
             Value::Null
@@ -174,6 +180,7 @@ mod tests {
         for bits in [
             vec![],
             vec![0],
+            vec![0, 0, 1.0_f32.to_bits()], // A complete frame plus an odd tail is not truncated.
             vec![f32::NAN.to_bits(), 0],
             vec![0, f32::INFINITY.to_bits()],
         ] {

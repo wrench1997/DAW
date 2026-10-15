@@ -116,7 +116,7 @@ fn onset_metrics(bits: &[u32]) -> Check<Value> {
         "short onset contains nonfinite PCM",
     )?;
     let first = |threshold: f32| {
-        bits.chunks_exact(2).position(|frame| {
+        bits.as_chunks::<2>().0.iter().position(|frame| {
             frame
                 .iter()
                 .any(|bits| f32::from_bits(*bits).abs() > threshold)

@@ -848,8 +848,19 @@ Primary request/stage/delivery/limit fields remain separate from cleanup. A
 new deterministic LoadPlugin refusal before the planned Discard stage requires
 concrete same-child reap, released admission and no later I/O. Only this new
 exact and the original matrix use the local wait; the other35 passing Strict
-cases keep their existing wait. Formatting/replay/diff passed; both exact runs,
-Clippy/artifacts and NI are unrun. Keep
+cases keep their existing wait. Frozen `bbd4c3a` actually compiled in Source100:
+the new diagnostic and original matrix each passed1 (0.35s/24.42s). Strict
+Clippy then exited101: short QA's constant `chunks_exact(2)` triggers1.98's
+`chunks_exact_to_as_chunks`. A local repair uses the project's existing
+`as_chunks::<2>().0.iter()` style without raising MSRV or suppressing the lint.
+Complete-stereo/finite admission stays intact; the two existing onset tests add
+left/right frame0 and complete-frame-plus-odd-tail refusal controls. Those two
+changed tests and strict Clippy are not yet run; keep
+`short-onset-as-chunks-lint-repair-01/`.
+Artifacts/build and NI were not reached. Runner114200/exec42942 actually exited1;
+all19 held children terminated, with fresh heavy count0 at10:13:21Z before peer
+handback. Peak private/global physical used were4.017/23.549GiB, below budget.
+Keep `source100-local-gates-01-*`, `source100-local-resource-handback-01.json` and
 `strict-blocked-stage-terminal-evidence-01/`. The original fixture15 has no
 startup ledger witness, so neither slow startup nor SDK-B causality is proven.
 
