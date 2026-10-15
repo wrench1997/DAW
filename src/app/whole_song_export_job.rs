@@ -23,7 +23,7 @@ use crate::{
 
 const RENDER_BUDGET: Duration = Duration::from_secs(300);
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WholeExportPhase {
     Stopping,
     Capturing,
@@ -34,6 +34,17 @@ enum WholeExportPhase {
     Cancelled,
 }
 impl WholeExportPhase {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Stopping => "Stopping",
+            Self::Capturing => "Capturing",
+            Self::RenderingDisposing => "RenderingDisposing",
+            Self::JoiningLostSource => "JoiningLostSource",
+            Self::Complete => "Complete",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
     fn terminal(self) -> bool {
         matches!(self, Self::Complete | Self::Failed | Self::Cancelled)
     }
@@ -50,6 +61,49 @@ impl WholeExportPhase {
     }
 }
 
+/// Control-plane call sites, not inferred keyboard state or plug-in contents.
+/// The first accepted request belongs to this job's frozen actor identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WholeExportCancelSource {
+    Programmatic,
+    EscapeKey,
+    TransportStop,
+    CancelButton,
+    WindowCloseRequest,
+    ArmedWindowClose,
+    LateParameterReceipt,
+    LateAudioAssetResult,
+    AppDrop,
+    JobDrop,
+}
+impl WholeExportCancelSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Programmatic => "programmatic cancellation",
+            Self::EscapeKey => "Escape key",
+            Self::TransportStop => "transport Stop",
+            Self::CancelButton => "Cancel export button",
+            Self::WindowCloseRequest => "window close request",
+            Self::ArmedWindowClose => "armed window close dispatch",
+            Self::LateParameterReceipt => "late parameter receipt",
+            Self::LateAudioAssetResult => "late audio asset result",
+            Self::AppDrop => "App destruction",
+            Self::JobDrop => "export job destruction",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WholeExportCancellation {
+    source: WholeExportCancelSource,
+    phase: WholeExportPhase,
+}
+impl WholeExportCancellation {
+    fn summary(self) -> String {
+        format!("{} during {}", self.source.label(), self.phase.name())
+    }
+}
+
 /// Forced App destruction is an exceptional control-owner transfer. It cannot
 /// drop a private capture receiver or source guard and call that termination.
 struct WholeShutdownOwners {
@@ -63,7 +117,7 @@ struct WholeShutdownOwners {
 }
 impl Drop for WholeSongExportJob {
     fn drop(&mut self) {
-        self.cancel();
+        self.cancel(WholeExportCancelSource::JobDrop);
         let empty_actor = StoppedBounceCapture::new(
             Arc::clone(&self.actor.snapshot),
             self.actor.initial,
@@ -231,6 +285,7 @@ pub(super) struct WholeSongExportJob {
     render: Option<MasterSongRenderReceipt>,
     phase: WholeExportPhase,
     cancel_requested: bool,
+    first_cancellation: Option<WholeExportCancellation>,
     failure_pause_requested: bool,
     failure: Option<String>,
     #[allow(dead_code)]
@@ -300,8 +355,36 @@ impl WholeSongExportJob {
                 .observe_stop_activation_confirmed(request_id, generation, epoch, frame);
         }
     }
-    fn cancel(&mut self) -> bool {
+    fn cancel(&mut self, source: WholeExportCancelSource) -> bool {
         let accepted = self.export.cancel();
+        if accepted && self.first_cancellation.is_none() {
+            let cancellation = WholeExportCancellation {
+                source,
+                phase: self.phase,
+            };
+            self.first_cancellation = Some(cancellation);
+            if std::env::var_os("CITRUS_STUDIO_PLUGIN_DIAGNOSTICS")
+                .is_some_and(|value| value == "1")
+            {
+                use std::io::Write as _;
+                let stamp = self.actor.initial.stamp;
+                // One event per job. No file path, state bytes, parameter value
+                // or display name is exposed; a closed stderr is non-fatal.
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "WHOLE_EXPORT_CANCEL source={source:?} phase={} job_started={:?} project_session={} engine_session={} channel={} endpoint={} instance={} initial_epoch={} stop_request={:?}",
+                    self.phase.name(),
+                    self.actor.started_at,
+                    stamp.project_session,
+                    stamp.engine_session,
+                    stamp.channel_id,
+                    stamp.endpoint_id,
+                    stamp.instance_id,
+                    stamp.epoch,
+                    self.actor.stop_transport_request,
+                );
+            }
+        }
         self.cancel_requested |= accepted;
         self.actor.cancel_capture();
         if let Some(render) = &self.render {
@@ -602,6 +685,7 @@ impl CitrusApp {
             render: None,
             phase: WholeExportPhase::Stopping,
             cancel_requested: false,
+            first_cancellation: None,
             failure_pause_requested: false,
             failure: None,
             capture_failure: None,
@@ -631,9 +715,15 @@ impl CitrusApp {
         !self.whole_song_export_fence_active()
     }
     pub(super) fn cancel_whole_song_export(&mut self) -> bool {
+        self.cancel_whole_song_export_from(WholeExportCancelSource::Programmatic)
+    }
+    pub(super) fn cancel_whole_song_export_from(
+        &mut self,
+        source: WholeExportCancelSource,
+    ) -> bool {
         self.whole_song_export_job
             .as_mut()
-            .is_some_and(WholeSongExportJob::cancel)
+            .is_some_and(|job| job.cancel(source))
     }
     #[allow(clippy::result_large_err)]
     pub(super) fn retain_whole_song_source_on_engine_loss(
@@ -677,7 +767,10 @@ impl CitrusApp {
                 Some(MasterSongRenderOutcome::Complete(report)) => self.notify(format!("Exported {}. {}{}", job.path.display(),
                     report.master_output.level_summary(), job.failure.as_ref().map_or(String::new(), |reason| format!(" Source/session warning: {reason}")))),
                 _ if job.publication_unknown => self.export_error = Some("Renderer terminated without a file outcome; destination status is unknown".into()),
-                _ if job.phase == WholeExportPhase::Cancelled => self.notify("Whole-song export cancelled; destination was not changed; playback remains paused".into()),
+                _ if job.phase == WholeExportPhase::Cancelled => self.notify(format!(
+                    "Whole-song export cancelled ({}); destination was not changed; playback remains paused",
+                    job.first_cancellation.map_or_else(|| "source unavailable".into(), WholeExportCancellation::summary),
+                )),
                 _ => self.export_error = Some(job.failure.clone().unwrap_or_else(|| "Whole-song export failed".into())),
             }
         }
@@ -923,11 +1016,23 @@ impl CitrusApp {
                         egui::ProgressBar::new(progress.basis_points as f32 / 10000.0)
                             .text(progress.phase()),
                     );
-                    if ui
-                        .add_enabled(progress.can_cancel, egui::Button::new("Cancel export"))
-                        .clicked()
-                    {
-                        job.cancel();
+                    let cancel =
+                        ui.add_enabled(progress.can_cancel, egui::Button::new("Cancel export"));
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|data| {
+                        data.insert_temp(
+                            egui::Id::new("whole-export-cancel-button-test"),
+                            cancel.rect,
+                        )
+                    });
+                    if cancel.clicked() {
+                        job.cancel(WholeExportCancelSource::CancelButton);
+                    }
+                    if let Some(cancellation) = job.first_cancellation {
+                        ui.label(format!(
+                            "Cancellation requested: {}",
+                            cancellation.summary()
+                        ));
                     }
                     if !progress.can_cancel && !progress.cancelling {
                         ui.label("Finalizing the destination");
@@ -1027,15 +1132,7 @@ impl WholeSongExportJob {
         self.render_starter.is_none()
     }
     pub(in crate::app) fn genuine_whole_phase(&self) -> &'static str {
-        match self.phase {
-            WholeExportPhase::Stopping => "Stopping",
-            WholeExportPhase::Capturing => "Capturing",
-            WholeExportPhase::RenderingDisposing => "RenderingDisposing",
-            WholeExportPhase::JoiningLostSource => "JoiningLostSource",
-            WholeExportPhase::Complete => "Complete",
-            WholeExportPhase::Failed => "Failed",
-            WholeExportPhase::Cancelled => "Cancelled",
-        }
+        self.phase.name()
     }
     pub(in crate::app) fn genuine_whole_terminal_owners_drained(&self) -> bool {
         self.phase.terminal()

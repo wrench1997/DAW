@@ -1,6 +1,8 @@
 //! Real App + identified source worker + callback + Timeline notification path.
 //! Renderer factory alone is a closed mock; actual captured authority, PCM,
 //! checked WAV publication and Project/history images remain production code.
+#[path = "whole_song_export_cancel_tests.rs"]
+mod cancel_origin_tests;
 #[path = "whole_song_export_identity_tests.rs"]
 mod loaded_identity_tests;
 
@@ -555,6 +557,17 @@ fn actual_whole_export_uses_callback_notifications_capture_mock_worker_and_real_
     assert!(
         fixture.app().retained_clip_media.is_empty()
             && fixture.app().clip_render_restorations.is_empty()
+    );
+    assert!(!fixture.app_mut().cancel_whole_song_export());
+    assert!(
+        fixture
+            .app()
+            .whole_song_export_job
+            .as_ref()
+            .unwrap()
+            .first_cancellation
+            .is_none(),
+        "a refused post-publication request must not manufacture a cancellation origin"
     );
 }
 
@@ -1357,23 +1370,26 @@ fn actual_whole_window_close_retains_a_pending_clone_disposal_receipt_until_its_
     ));
     until(&mut fixture, |_| gate.entered.load(Ordering::Acquire));
     let ctx = fixture.ctx();
-    let mut intercepted = false;
-    let output = ctx.run_ui(whole_close_input(), |_| {
-        intercepted = fixture.app_mut().intercept_window_close_request(&ctx);
-    });
-    assert!(intercepted && has_whole_viewport_command(&output, false));
+    let output = cancel_origin_tests::actual_app_frame(&mut fixture, whole_close_input());
+    assert!(has_whole_viewport_command(&output, false));
     assert!(!has_whole_viewport_command(&output, true));
-    let output = ctx.run_ui(egui::RawInput::default(), |_| {
-        fixture.app_mut().dispatch_armed_window_close(&ctx, false);
-    });
+    let output = cancel_origin_tests::actual_app_frame(&mut fixture, egui::RawInput::default());
     assert!(
-        has_whole_viewport_command(&output, false) && !has_whole_viewport_command(&output, true)
+        !has_whole_viewport_command(&output, true),
+        "an ordinary frame may not publish Close while the original clone is retained"
     );
     for _ in 0..3 {
         tick(&mut fixture);
     }
     let job = fixture.app().whole_song_export_job.as_ref().unwrap();
     assert!(job.phase == WholeExportPhase::RenderingDisposing && job.pending());
+    assert_eq!(
+        job.first_cancellation,
+        Some(WholeExportCancellation {
+            source: WholeExportCancelSource::WindowCloseRequest,
+            phase: WholeExportPhase::RenderingDisposing,
+        })
+    );
     assert!(job.render.is_some() && job.admission.is_busy());
     assert!(!job.render.as_ref().unwrap().termination_acknowledged());
     assert!(!gate.dropped.load(Ordering::Acquire));

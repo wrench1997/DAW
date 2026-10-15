@@ -10868,7 +10868,9 @@ impl CitrusApp {
         if self.clip_operation_fence_active() {
             if !matches!(effect, ParameterEditEffect::Ignored) {
                 self.advance_clip_control_revision();
-                self.cancel_clip_render_job();
+                self.cancel_clip_render_job_from(
+                    whole_song_export_job::WholeExportCancelSource::LateParameterReceipt,
+                );
                 self.notify(
                     "A late parameter receipt was refused while the Project was sealed".into(),
                 );
@@ -12902,6 +12904,10 @@ impl CitrusApp {
     }
 
     fn stop(&mut self) {
+        self.stop_with_cancel_source(whole_song_export_job::WholeExportCancelSource::TransportStop);
+    }
+
+    fn stop_with_cancel_source(&mut self, source: whole_song_export_job::WholeExportCancelSource) {
         self.cancel_prepared_playback_start();
         self.loop_restart_wait = None;
         if self.clip_operation_fence_active() {
@@ -12910,7 +12916,7 @@ impl CitrusApp {
             if let Some(audio) = &self.audio {
                 audio.set_playing(false);
             }
-            self.cancel_clip_render_job();
+            self.cancel_clip_render_job_from(source);
             return;
         }
         self.advance_clip_control_revision();
@@ -13505,7 +13511,9 @@ impl CitrusApp {
                 .and_then(resolve_global_shortcut)
                 == Some(ShortcutAction::Stop)
             {
-                self.stop();
+                self.stop_with_cancel_source(
+                    whole_song_export_job::WholeExportCancelSource::EscapeKey,
+                );
             }
             return;
         }
@@ -13516,7 +13524,9 @@ impl CitrusApp {
                 .and_then(resolve_global_shortcut)
                 == Some(ShortcutAction::Stop)
             {
-                self.stop();
+                self.stop_with_cancel_source(
+                    whole_song_export_job::WholeExportCancelSource::EscapeKey,
+                );
             }
             return;
         }
@@ -13535,7 +13545,9 @@ impl CitrusApp {
                 .and_then(resolve_global_shortcut)
                 == Some(ShortcutAction::Stop)
             {
-                self.stop();
+                self.stop_with_cancel_source(
+                    whole_song_export_job::WholeExportCancelSource::EscapeKey,
+                );
                 return;
             }
             if self.playing
@@ -13619,7 +13631,9 @@ impl CitrusApp {
     fn apply_shortcut_action(&mut self, ctx: &egui::Context, action: ShortcutAction) {
         if self.clip_operation_fence_active() {
             if action == ShortcutAction::Stop {
-                self.stop();
+                self.stop_with_cancel_source(
+                    whole_song_export_job::WholeExportCancelSource::EscapeKey,
+                );
             }
             return;
         }
@@ -13672,7 +13686,8 @@ impl CitrusApp {
                     self.show_playlist_fades = !self.show_playlist_fades;
                 }
             }
-            ShortcutAction::Stop => self.stop(),
+            ShortcutAction::Stop => self
+                .stop_with_cancel_source(whole_song_export_job::WholeExportCancelSource::EscapeKey),
             ShortcutAction::Save => self.save_project(),
             ShortcutAction::Open => self.open_project(),
             ShortcutAction::NewProject => self.new_project(),
@@ -15845,7 +15860,9 @@ impl CitrusApp {
             && (self.clip_operation_fence_active() || self.clip_restoration_resources_pending())
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.cancel_clip_render_job();
+            self.cancel_clip_render_job_from(
+                whole_song_export_job::WholeExportCancelSource::WindowCloseRequest,
+            );
             self.notify("Waiting for clip conversion owners to finish before closing".into());
             return true;
         }
@@ -15866,9 +15883,17 @@ impl CitrusApp {
     }
 
     fn dispatch_armed_window_close(&mut self, ctx: &egui::Context, canceled_this_frame: bool) {
+        // This dispatcher also runs at the end of ordinary UI frames. A sealed
+        // export/conversion is not itself an exit request. Real viewport close
+        // requests already cancel through intercept_window_close_request.
+        if !self.project_lifecycle.exit_is_armed() {
+            return;
+        }
         if self.clip_operation_fence_active() || self.clip_restoration_resources_pending() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.cancel_clip_render_job();
+            self.cancel_clip_render_job_from(
+                whole_song_export_job::WholeExportCancelSource::ArmedWindowClose,
+            );
             return;
         }
         if canceled_this_frame && self.project_lifecycle.exit_is_armed() {
@@ -20519,7 +20544,9 @@ impl CitrusApp {
                 if self.audio_asset_receiver.try_recv().is_err() {
                     break;
                 }
-                self.cancel_clip_render_job();
+                self.cancel_clip_render_job_from(
+                    whole_song_export_job::WholeExportCancelSource::LateAudioAssetResult,
+                );
             }
             return;
         }
@@ -21380,7 +21407,7 @@ impl Drop for CitrusApp {
         // Forced shutdown transfers the exact source before generic engine maps
         // are cleared. The whole owner retains capture/render/join resources.
         self.retain_clip_source_before_engine_loss();
-        self.cancel_whole_song_export();
+        self.cancel_whole_song_export_from(whole_song_export_job::WholeExportCancelSource::AppDrop);
         self.export_job.cancel();
         // A prepared/warming candidate owns a second device stream. Destroy it
         // before running shutdown barriers against the committed engine.

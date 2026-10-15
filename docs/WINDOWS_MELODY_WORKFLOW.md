@@ -177,12 +177,55 @@ release/ZIP and native checkbox acceptance have not run. Preserve
 `ci-56e9c89-windows-{quality,preview}-01.log` and Source79 actual-terminal JSON.
 The ordinary Source78 session is not evidence for the new branch.
 
-Source80's candidate shares the existing two-class catalog construction through
+Source80 (`9f3b608`) shares the existing two-class catalog construction through
 the test module's private `fresh_catalog_descriptor`, removing the invalid
 private-module call without exposing production APIs or removing assertions.
-Single-file formatting and diff checks pass; new cloud compilation/regression
-remain pending. The export options/workflow documents now distinguish built-in
-and experimental single-VST paths and the supported ordinary Master automation.
+Local12 targeted cases, strict all-feature/all-target Clippy and matching main/
+helper builds passed. Cloud quality passed32 factory and2370 root tests/12 ignored
+plus all backend gates; only independent native PrintWindow capture failed.
+Preview passed344 harness tests, then2304 App tests passed and one failed:
+`stopped_epoch_safety_discards_inflight_old_output_and_rejects_queued_old_events`
+at `audio_stopped_epoch_safety_tests.rs:1048`, asserting
+`paused_work_quiescent(SAFETY_REVISION,2)`. Its Clippy/release/ZIP did not run.
+All nine fresh/default backend and App-intent cases passed in both lanes. Preserve
+`ci-9f3b608-windows-{quality,preview}-01.log`, Source80 actual-terminal JSON and
+`source80-local-gates-terminal-01.json`.
+
+The matching isolated Source80 binaries normally opened the actual saved
+First-Light project without reloading an NKI. The native1350×680 editor showed
+NOIRE Pure and the previously moved upper-left Color. FIT NOTES showed all eight
+notes; the Channel→FX1 route and Icon48k/XRUN0 remained. Normal Save succeeded;
+an overwrite=false copy preserves the input. All top-level model fields except
+plugin_instances remained equal. Both generic parameter maps are empty and opaque
+state changed591680→591683bytes; this is not byte equality or an all-parameter
+audit. No automation was added and new physical listening/PCM remain pending.
+
+FILE export admitted the experimental Whole Review. Actual settings were48k
+Float32/Preserve level/0ms extra tail, explicitly confirmed. Attempts to set
+song length16 and tail3000 did not apply: the project remains64beats (30seconds)
+and the actual tail is0. After choosing a new WAV path and Alt+S, the host reported
+`Whole-song export cancelled; destination was not changed; playback remains paused`.
+No WAV or clone helper resulted. No Cancel, Escape or Stop was sent after Save.
+Source investigation found that ordinary App update calls
+`dispatch_armed_window_close` each frame, whose original fence branch cancels
+without first checking close/exit intent. The frozen Source81 fix checks exit
+intent before that branch. Seven new real App::ui cases cover ordinary frames
+through held capture and a complete mock WAV, explicit cancellation and late
+receipts; the held-clone close case also uses the production UI entry point.
+First-accepted cancellation source/phase is retained, displayed at cancellation
+and logged once under the existing diagnostics switch with frozen source/session
+identity, without state contents.
+
+After another ordinary SAVED result, held exact App19460/helper93060 handles both
+confirmed natural exit0. Exit observer16196 and resource observer83574 ended0;
+fresh heavy0 preceded explicit peer handback. Preserve
+`cold-open-and-export-attempt-source80-01.json` and
+`normal-close-process-terminal-03-source80.json` in the isolated workflow folder.
+The Source81 stopped-safety test candidate retains the original successful full
+snapshot rather than resampling a worker that can become busy again. A real admin
+gate counterexample is added without changing production predicates or deadlines;
+the original failure's varying field was not logged. Both new repairs await
+compilation/regression and another native export; the full workflow remains open.
 
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,

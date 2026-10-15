@@ -537,11 +537,24 @@ impl CitrusApp {
     }
     pub(super) fn cancel_clip_render_job(&mut self) -> bool {
         let whole = self.cancel_whole_song_export();
-        let clip = self
-            .clip_render_job
-            .as_mut()
-            .is_some_and(ClipRenderJob::cancel);
+        let clip = self.cancel_selected_clip_render_job();
         whole || clip
+    }
+    pub(super) fn cancel_clip_render_job_from(
+        &mut self,
+        source: super::whole_song_export_job::WholeExportCancelSource,
+    ) -> bool {
+        if source == super::whole_song_export_job::WholeExportCancelSource::Programmatic {
+            return self.cancel_clip_render_job();
+        }
+        let whole = self.cancel_whole_song_export_from(source);
+        let clip = self.cancel_selected_clip_render_job();
+        whole || clip
+    }
+    fn cancel_selected_clip_render_job(&mut self) -> bool {
+        self.clip_render_job
+            .as_mut()
+            .is_some_and(ClipRenderJob::cancel)
     }
     pub(super) fn clip_render_unavailable_reason(&self) -> Option<String> {
         if !cfg!(all(

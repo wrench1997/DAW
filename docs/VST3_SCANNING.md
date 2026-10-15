@@ -134,12 +134,19 @@ extracted-helper smoke passed. A real UI trial then found the new catalog's
 explicit experimental fresh-source LOAD still demanded scanned runtime-class
 metadata. Its rescan hint cannot resolve that requirement. Actual None-class
 loading must establish the class before full fresh preparation; a catalog entry
-cannot supply it. The source-only Source79 candidate implements this handoff
-but still needs compilation, regression and native checkbox acceptance.
+cannot supply it. Source79 implements this handoff; Source80 fixes its test
+fixture visibility and actually passes the nine fresh/default App/backend cases
+in both cloud Windows lanes, plus local targeted tests and strict Clippy.
+Native checkbox acceptance is still pending. Quality's2370 root cases and all
+backend gates pass; preview has a separate stopped-epoch safety assertion failure.
 An ordinary Source78 None-class session separately loaded NOIRE Pure, edited it,
 wrote eight notes, normally saved and naturally retired App/helper with exit0.
-That does not qualify the fresh checkbox, cold reopening, automation or audio
-export. See [workflow evidence](WINDOWS_MELODY_WORKFLOW.md).
+Source80 subsequently normally cold-opened that saved project and actually showed
+Pure/Color/eight notes/routing, without an NKI reload. Whole Review was admitted,
+but the export was cancelled with no WAV. Generic maps are empty and opaque bytes
+vary, so full parameter equivalence is not established. Fresh checkbox, automation
+and audio-export acceptance remain pending. See
+[workflow evidence](WINDOWS_MELODY_WORKFLOW.md).
 
 ## Historical loaded-default validation
 

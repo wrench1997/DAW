@@ -161,10 +161,14 @@ impl PluginBackend for SafetyBackend {
         // callback's discard contract, never an assumption about the backend.
         let output = if self.probe.distinct_note_output.load(Ordering::Acquire) {
             if self.note_held {
-                self.probe.note_output_quanta.fetch_add(1, Ordering::Release);
+                self.probe
+                    .note_output_quanta
+                    .fetch_add(1, Ordering::Release);
                 0.25
             } else {
-                self.probe.idle_output_quanta.fetch_add(1, Ordering::Release);
+                self.probe
+                    .idle_output_quanta
+                    .fetch_add(1, Ordering::Release);
                 0.75
             }
         } else {
@@ -601,14 +605,25 @@ impl StoppedSafetyFixture {
             "safety-only consumed output must be exactly zero"
         );
     }
-    fn settle(&self, epoch: u64) {
+    // Return the observation that satisfied the wait. Worker-only metadata/admin
+    // scopes may become busy again without another callback or input quantum;
+    // settlement is an observed sample, not a lease on future worker idleness.
+    fn settle(&self, epoch: u64) -> genuine_observation::GenuineCallbackSnapshot {
+        let mut settled = None;
         wait_until(|| {
-            self.callback()
-                .genuine_snapshot()
+            let snapshot = self.callback().genuine_snapshot();
+            if snapshot
                 .endpoints
                 .iter()
                 .all(|e| e.input_work_quiescent(epoch))
+            {
+                settled = Some(snapshot);
+                true
+            } else {
+                false
+            }
         });
+        settled.expect("wait returned only after observing settled input")
     }
     fn stats(&self) -> [FixedQuantumStats; 2] {
         [self.generator().stats(), self.insert().stats()]
@@ -733,11 +748,10 @@ fn stopped_epoch_safety_four_32_frame_callbacks_deliver_and_restore_live_admissi
             assert!(!observed.paused_work_quiescent(SAFETY_REVISION, 2));
         }
     }
-    f.settle(2);
+    let settled = f.settle(2);
     assert!(
-        f.callback()
-            .genuine_snapshot()
-            .paused_work_quiescent(SAFETY_REVISION, 2)
+        settled.paused_work_quiescent(SAFETY_REVISION, 2),
+        "settled snapshot: {settled:?}"
     );
     for worker in &f.workers {
         assert_eq!(worker.control().stats().submitted, 1);
@@ -804,11 +818,10 @@ fn stopped_epoch_safety_partition_matrix_is_exactly_one_quantum_per_endpoint() {
                 assert_eq!(stats.submitted_quanta, u64::from(serviced == 128));
             }
         }
-        f.settle(2);
+        let settled = f.settle(2);
         assert!(
-            f.callback()
-                .genuine_snapshot()
-                .paused_work_quiescent(SAFETY_REVISION, 2)
+            settled.paused_work_quiescent(SAFETY_REVISION, 2),
+            "settled snapshot: {settled:?}"
         );
         let complete = f.stats();
         for frames in [1, 32, 129, 2048] {
@@ -975,11 +988,10 @@ fn stopped_epoch_safety_worker_gates_remain_nonquiescent_until_read_only_settlem
         let complete = f.stats();
         let device_frame = f.callback().transport.device_frame;
         probe.release_all();
-        f.settle(2); // No callback, adapter process, or extra input to settle.
+        let settled = f.settle(2); // No callback, adapter process, or extra input to settle.
         assert!(
-            f.callback()
-                .genuine_snapshot()
-                .paused_work_quiescent(SAFETY_REVISION, 2)
+            settled.paused_work_quiescent(SAFETY_REVISION, 2),
+            "settled snapshot: {settled:?}"
         );
         assert_eq!(f.stats(), complete);
         assert_eq!(f.callback().transport.device_frame, device_frame);
@@ -1003,6 +1015,57 @@ fn stopped_epoch_safety_worker_gates_remain_nonquiescent_until_read_only_settlem
 }
 
 #[test]
+fn stopped_epoch_safety_settlement_evidence_does_not_assume_future_worker_idleness() {
+    let mut f = StoppedSafetyFixture::new();
+    f.activate(2, false);
+    f.pump(128);
+    let settled = f.settle(2);
+    let complete = f.stats();
+    let device_frame = f.callback().transport.device_frame;
+    let probe = Arc::clone(&f.workers[0].probe);
+
+    // Force the old wait/assert interleaving without sleeps: a genuine worker
+    // admin scope starts after the successful observation, with no new input or
+    // callback. Even idle turns may enter their metadata/admin settlement scope.
+    probe.admin_gate.hold();
+    assert!(f.workers[0].control().request_state(0));
+    probe.admin_gate.wait_entered();
+    let later = f.callback().genuine_snapshot();
+    let generator = later
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.channel_id == Some(SAFETY_CHANNEL))
+        .unwrap();
+    assert_eq!(generator.fixed.bridge.input_pending, 0);
+    assert_eq!(
+        generator.fixed.bridge.input_consumed,
+        generator.fixed.bridge.stats.submitted
+    );
+    assert_eq!(
+        generator.fixed.bridge.operations_completed,
+        generator.fixed.bridge.stats.submitted
+    );
+    assert_ne!(generator.fixed.bridge.worker_busy, 0);
+    assert!(!later.paused_work_quiescent(SAFETY_REVISION, 2));
+    assert!(
+        settled.paused_work_quiescent(SAFETY_REVISION, 2),
+        "the accepted observation must be retained: {settled:?}"
+    );
+    assert_eq!(f.stats(), complete);
+    assert_eq!(f.callback().transport.device_frame, device_frame);
+
+    probe.admin_gate.release();
+    let settled_again = f.settle(2);
+    assert!(
+        settled_again.paused_work_quiescent(SAFETY_REVISION, 2),
+        "settled snapshot after actual admin return: {settled_again:?}"
+    );
+    assert!(probe.trace().contains(&SafetyTrace::SaveReturned));
+    assert_eq!(f.stats(), complete);
+    assert_eq!(f.callback().transport.device_frame, device_frame);
+}
+
+#[test]
 fn stopped_epoch_safety_discards_inflight_old_output_and_rejects_queued_old_events() {
     let mut f = StoppedSafetyFixture::with_old_work(OldWork::ProcessHeld);
     let probe = Arc::clone(&f.workers[0].probe);
@@ -1016,7 +1079,7 @@ fn stopped_epoch_safety_discards_inflight_old_output_and_rejects_queued_old_even
     );
     let callback_stats = f.stats();
     probe.process_gate.release();
-    f.settle(2);
+    let settled = f.settle(2);
     let stats = f.workers[0].control().stats();
     assert_eq!(stats.dropped_old_epoch_outputs, 1);
     assert_eq!(stats.dropped_old_epoch_inputs, 1);
@@ -1046,9 +1109,8 @@ fn stopped_epoch_safety_discards_inflight_old_output_and_rejects_queued_old_even
     );
     assert_callback_batch_follows_reset(&trace);
     assert!(
-        f.callback()
-            .genuine_snapshot()
-            .paused_work_quiescent(SAFETY_REVISION, 2)
+        settled.paused_work_quiescent(SAFETY_REVISION, 2),
+        "settled snapshot: {settled:?}"
     );
 }
 
@@ -1440,11 +1502,10 @@ fn stopped_epoch_safety_shared_midi_epoch_and_parameter_owners_decrement_once() 
                     .is_none()
             );
         }
-        f.settle(2);
+        let settled = f.settle(2);
         assert!(
-            f.callback()
-                .genuine_snapshot()
-                .paused_work_quiescent(SAFETY_REVISION, 2)
+            settled.paused_work_quiescent(SAFETY_REVISION, 2),
+            "settled snapshot: {settled:?}"
         );
         assert!(
             f.engine
@@ -1651,14 +1712,13 @@ fn stopped_epoch_safety_endpoint_lifecycle_retires_exact_obligation_without_slot
         if change.starts_with("replace-") {
             f.activate(3, false);
             f.pump(128);
-            f.settle(3);
+            let settled = f.settle(3);
             assert_eq!(f.workers[2].control().stats().submitted, 1);
             let retired_worker = usize::from(change == "replace-insert");
             assert_eq!(f.workers[retired_worker].control().stats().submitted, 0);
             assert!(
-                f.callback()
-                    .genuine_snapshot()
-                    .paused_work_quiescent(SAFETY_REVISION, 3)
+                settled.paused_work_quiescent(SAFETY_REVISION, 3),
+                "settled snapshot: {settled:?}"
             );
         }
     }
@@ -1704,11 +1764,10 @@ fn stopped_epoch_safety_supersession_and_playing_activation_never_inherit_old_wo
             assert_eq!(f.stats(), complete);
         } else {
             f.pump(128);
-            f.settle(3);
+            let settled = f.settle(3);
             assert!(
-                f.callback()
-                    .genuine_snapshot()
-                    .paused_work_quiescent(SAFETY_REVISION, 3)
+                settled.paused_work_quiescent(SAFETY_REVISION, 3),
+                "settled snapshot: {settled:?}"
             );
             assert!(
                 !f.callback()
@@ -1792,10 +1851,9 @@ fn stopped_epoch_safety_assertion_unwind_releases_gates_joins_exact_workers_and_
     let mut next = StoppedSafetyFixture::new();
     next.activate(2, false);
     next.pump(128);
-    next.settle(2);
+    let settled = next.settle(2);
     assert!(
-        next.callback()
-            .genuine_snapshot()
-            .paused_work_quiescent(SAFETY_REVISION, 2)
+        settled.paused_work_quiescent(SAFETY_REVISION, 2),
+        "settled snapshot: {settled:?}"
     );
 }
