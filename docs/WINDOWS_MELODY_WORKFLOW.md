@@ -1062,6 +1062,41 @@ private/global peaks were3.726/23.088GiB, no budget trigger, fresh heavy empty a
 11:40:01Z. CPU was returned. Keep `source105-local-gates-01-*` and
 `source105-local-resource-handback-01.json`; the original compile failure remains.
 
+Source106 (`73a7068`) actually compiled. Its first runner set the capture env to
+.NET null, which this PowerShell/.NET retained as an empty string:207 UI cases
+failed the absolute-path assertion before any GPU initialization. A separate
+variable reproduced this; only the ignored runner changed to actual Env removal.
+The same product source with the corrected environment then ran215 UI cases:
+214 passed/1 failed (403.19s). Real PAT/SONG compiled notes/Pattern selection,
+the other11 new UI tests and original numeric/navigation/history passed. The
+remaining failure is a0.125-beat Manual clip becoming0.25. Its owner traced the
+next UI frame's Inspector Length DragValue lower bound/default existing-value
+clamp, not the song endpoint or Model's existing0.0625 minimum. A narrow control
+fix will preserve the existing legal value; press/release/idle assertions retain
+the original0.125 expectation. Root102480/exec43510 and all3 held children
+terminated; private/global peaks3.039/24.097GiB, fresh heavy empty11:51:35Z.
+No GPU/CU/NI/audio ran; later software gates are unrun. Keep both Source106 runs,
+`source106-empty-capture-env-reproduction-01.json` and
+`source106-local-resource-handback-02.json`.
+
+The older backend candidate `233f6f0` preview run38725986508 has actually
+succeeded:363 harness=351 PASS/12 conditional SKIP, SDK4+15,2357 App+52 helper+13
+protocol=2422 root/13 ignored, strict Clippy/no-default-feature, static-CRT
+release8m45s, final ZIP integrity and extracted sanitized-PATH helper smoke.
+Upload was disabled. This predates the new factory fixture/Playlist changes;
+quality's actual early factory failure remains. Preserve
+`ci-233f6f0-windows-preview-01.log` and
+`source104-preview-actual-terminal-01.json`.
+
+The Inspector-only short-Clip repair is now static-frozen. TIMING Length uses
+min(existing legal length,0.25) for its display floor; Model/general numeric
+helper/creation span/song range are unchanged. The original0.125 expectation
+remains, with separate endpoint/Clip checks before creation, on press/release
+and three later idle frames. Format/diff passed. The failed exact case, related
+Inspector/numeric regressions and remaining backend gates are next; unaffected
+214 UI passes and factory33 remain reusable. Keep
+`playlist-inspector-short-clip-repair-01/`.
+
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
 The native harness now probes the OS, current process session, WTS connection

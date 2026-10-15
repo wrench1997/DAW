@@ -18623,7 +18623,16 @@ impl CitrusApp {
             inspector_section(ui, "TIMING", |ui| {
                 property_drag(ui, "Track", &mut clip.track, 0..=31, "");
                 property_drag_f32(ui, "Start", &mut clip.start, 0.0..=song_length, " beats");
-                property_drag_f32(ui, "Length", &mut clip.length, 0.25..=song_length, " beats");
+                // A valid inherited/trimmed clip may be shorter than the usual
+                // editing step. Merely showing Inspector must not extend it.
+                let minimum_length = clip.length.min(0.25);
+                property_drag_f32(
+                    ui,
+                    "Length",
+                    &mut clip.length,
+                    minimum_length..=song_length,
+                    " beats",
+                );
                 if clip.kind != ClipKind::Audio {
                     property_drag_f32(
                         ui,

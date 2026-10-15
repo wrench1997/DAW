@@ -444,8 +444,46 @@ fn playlist_automation_creation_entries_share_auto_coordinates_and_short_manual_
         ui.app.snap = 1.0;
         ui.app.beat_position = requested;
         ui.app.sync_history_observer();
+        let original_manual_endpoint = ui.app.project.song_length_beats;
         ui.settle();
-        ui.click("+ AUTOMATION");
+        assert_eq!(
+            ui.app.project.song_length_beats, original_manual_endpoint,
+            "idle before creation must preserve the manual endpoint"
+        );
+        let button = node_rect(ui.button("+ AUTOMATION")).center();
+        ui.run(mixer_pointer_button(button, true));
+        assert!(
+            ui.app.project.clips.is_empty(),
+            "the button creates on release"
+        );
+        assert_eq!(
+            ui.app.project.song_length_beats, original_manual_endpoint,
+            "press must not change the manual endpoint"
+        );
+        ui.run(mixer_pointer_button(button, false));
+        let released = ui.app.project.clips.last().unwrap();
+        assert_eq!(
+            (released.start, released.length),
+            expected,
+            "creation before the next Inspector pass"
+        );
+        assert_eq!(
+            ui.app.project.song_length_beats, original_manual_endpoint,
+            "release must preserve the manual endpoint"
+        );
+        for frame in 0..3 {
+            ui.run(Vec::new());
+            let shown = ui.app.project.clips.last().unwrap();
+            assert_eq!(
+                (shown.start, shown.length),
+                expected,
+                "Inspector idle frame {frame} must preserve the created clip"
+            );
+            assert_eq!(
+                ui.app.project.song_length_beats, original_manual_endpoint,
+                "Inspector idle frame {frame} must preserve the manual endpoint"
+            );
+        }
         let clip = ui.app.project.clips.last().unwrap();
         assert_eq!((clip.start, clip.length), expected);
         ui.app.project.validate_mixer_graph().unwrap();
