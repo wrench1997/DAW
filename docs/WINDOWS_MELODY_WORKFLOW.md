@@ -1050,6 +1050,18 @@ user-preview replacement is authorized by these software checks. Keep
 `playlist-transport-source-candidate-02/` and
 `factory-attempt-seal-fixture-01/`.
 
+Source105 (`a6fc165`) actually passed all33 factory cases (3.32s): the ordinary
+site-hook witness naturally exited77; isolated real protocol and both original
+seal directions completed all phases and naturally exited0 without kill.
+Application test compilation then actually failed101: the new Playlist test's
+line239 called Storage's method without the trait in scope. The source now uses
+fully qualified `eframe::Storage::get_string`, retaining every assertion; format/
+diff passed, execution is next. UI/model/TempoMap/export/Clippy/artifacts/bins/
+render did not run. Root90360/exec22869 and all8 held children terminated;
+private/global peaks were3.726/23.088GiB, no budget trigger, fresh heavy empty at
+11:40:01Z. CPU was returned. Keep `source105-local-gates-01-*` and
+`source105-local-resource-handback-01.json`; the original compile failure remains.
+
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
 The native harness now probes the OS, current process session, WTS connection

@@ -236,7 +236,9 @@ fn transport_mode_recording_guard_keyboard_preference_and_right_click_navigation
     let mut storage = WorkspaceTestStorage::default();
     ui.app.save(&mut storage);
     assert_eq!(
-        decode_transport_mode(storage.get_string(TRANSPORT_MODE_STORAGE_KEY).as_deref()),
+        decode_transport_mode(
+            eframe::Storage::get_string(&storage, TRANSPORT_MODE_STORAGE_KEY).as_deref()
+        ),
         TransportMode::Pattern
     );
 }
