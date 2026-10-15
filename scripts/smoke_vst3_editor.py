@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strict source-built Windows VST3 editor acceptance; exit 77 means NOT VERIFIED."""
+"""Strict Windows editor acceptance; exit 77 means SKIPPED (environment unsupported)."""
 
 import argparse
 import base64
@@ -35,25 +35,52 @@ STDOUT_MARKERS = frozenset(f"CITRUS_FIXTURE_STDOUT_{route}" for route in ("RUST"
 class UnsupportedDesktop(SmokeError):
     """No interactive Windows desktop: explicitly not a passed acceptance gate."""
 
+    def __init__(self, message, facts=None):
+        super().__init__(message)
+        self.facts = facts or {}
+
+
+class NativeSummary:
+    """Write actual stage outcomes, not an exit-zero claim about unexecuted tests."""
+
+    def __init__(self, path=None):
+        self.path = path
+        if path is not None:
+            with path.open("a", encoding="utf-8") as output:
+                output.write("\n### Native Windows editor / PrintWindow\n\n"
+                             "| Result | Check | Details |\n| --- | --- | --- |\n")
+
+    def __call__(self, status, name, reason=""):
+        if self.path is not None:
+            def cell(value):
+                return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+            with self.path.open("a", encoding="utf-8") as output:
+                output.write(f"| {status} | {cell(name)} | {cell(reason)} |\n")
+
 
 class AcceptanceStages:
     """Record bounded independent evidence without converting any failure into a pass."""
 
-    def __init__(self, report=print):
+    def __init__(self, report=print, summary=None):
         self.report = report
+        self.summary = summary
         self.results = {}
+
+    def record(self, status, name, reason=""):
+        self.results[name] = status
+        self.report(f"{status} {name}" + (f": {reason}" if reason else ""))
+        if self.summary is not None:
+            self.summary(status, name, reason)
 
     @contextmanager
     def stage(self, name):
         try:
             yield
         except (SmokeError, OSError) as error:
-            self.results[name] = "FAIL"
-            self.report(f"FAIL {name}: {error}")
+            self.record("FAIL", name, str(error))
             raise
         else:
-            self.results[name] = "PASS"
-            self.report(f"PASS {name}")
+            self.record("PASS", name)
 
     def attempt(self, name, action):
         try:
@@ -64,8 +91,7 @@ class AcceptanceStages:
             return False, None
 
     def skip(self, name, reason):
-        self.results[name] = "SKIP"
-        self.report(f"SKIP {name}: {reason}")
+        self.record("SKIPPED", name, reason)
 
     def finish(self, expected):
         for name in expected:
@@ -312,14 +338,16 @@ class Session:
 class WindowsDesktop:
     """Bounded ctypes calls against only harness/helper-owned HWNDs; no global input injection."""
 
-    def __init__(self):
+    def __init__(self, probe_only=False, verified_environment=None):
         if os.name != "nt":
-            raise UnsupportedDesktop("Windows interactive desktop required")
+            raise UnsupportedDesktop(f"PrintWindow requires Windows; platform is {sys.platform}",
+                                     {"platform": sys.platform})
         from ctypes import wintypes as w
         self.w = w
         self.user = ctypes.WinDLL("user32", use_last_error=True)
         self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
         self.gdi = ctypes.WinDLL("gdi32", use_last_error=True)
+        self.wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
         self.enum_proc = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
         class GuiThreadInfo(ctypes.Structure):
             _fields_ = [("cbSize", w.DWORD), ("flags", w.DWORD),
@@ -361,8 +389,17 @@ class WindowsDesktop:
             function = getattr(self.user, name)
             function.argtypes, function.restype = args, result
         self.kernel.GetCurrentThreadId.restype = w.DWORD
+        self.kernel.ProcessIdToSessionId.argtypes = [w.DWORD, ctypes.POINTER(w.DWORD)]
+        self.kernel.ProcessIdToSessionId.restype = w.BOOL
+        self.kernel.WTSGetActiveConsoleSessionId.argtypes = []
+        self.kernel.WTSGetActiveConsoleSessionId.restype = w.DWORD
         self.kernel.GetModuleHandleW.argtypes = [w.LPCWSTR]
         self.kernel.GetModuleHandleW.restype = w.HMODULE
+        self.wts.WTSQuerySessionInformationW.argtypes = [
+            w.HANDLE, w.DWORD, ctypes.c_int, ctypes.POINTER(w.LPVOID), ctypes.POINTER(w.DWORD)]
+        self.wts.WTSQuerySessionInformationW.restype = w.BOOL
+        self.wts.WTSFreeMemory.argtypes = [w.LPVOID]
+        self.wts.WTSFreeMemory.restype = None
         for name, args, result in (
             ("CreateCompatibleDC", [w.HDC], w.HDC),
             ("CreateCompatibleBitmap", [w.HDC, ctypes.c_int, ctypes.c_int], w.HBITMAP),
@@ -376,7 +413,14 @@ class WindowsDesktop:
             function.argtypes, function.restype = args, result
         self.owners = []
         self.previous_dpi_context = None
-        self.check_interactive()
+        if verified_environment is None:
+            self.check_interactive()
+        else:
+            # main already checked these facts in a kill/reap-bounded child.
+            # Do not repeat a potentially blocking WTS/RPC query in the parent.
+            self.environment = verified_environment.copy()
+        if probe_only:
+            return
         self.set_thread_dpi = getattr(self.user, "SetThreadDpiAwarenessContext", None)
         require(self.set_thread_dpi is not None, "Windows per-monitor DPI API unavailable")
         self.set_thread_dpi.argtypes, self.set_thread_dpi.restype = [w.HANDLE], w.HANDLE
@@ -384,28 +428,85 @@ class WindowsDesktop:
         require(bool(self.previous_dpi_context), "Cannot select physical-pixel DPI context for test thread")
 
     def check_interactive(self):
+        self.environment = {"platform": sys.platform}
+
+        def unsupported(reason):
+            raise UnsupportedDesktop(reason, self.environment.copy())
+
+        session = self.w.DWORD()
+        require(bool(self.kernel.ProcessIdToSessionId(os.getpid(), ctypes.byref(session))),
+                "ProcessIdToSessionId failed; cannot classify desktop support")
+        self.environment["session_id"] = session.value
+        if session.value == 0:
+            unsupported("Process is in non-interactive Windows session 0")
+        buffer = self.w.LPVOID()
+        length = self.w.DWORD()
+        state = None
+        try:
+            ctypes.set_last_error(0)
+            queried = self.wts.WTSQuerySessionInformationW(
+                None, session.value, 8, ctypes.byref(buffer), ctypes.byref(length))
+            if queried:
+                require(bool(buffer) and length.value == ctypes.sizeof(ctypes.c_int),
+                        "WTSConnectState returned malformed session information")
+                state = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_int)).contents.value
+                require(0 <= state <= 9, f"Unknown WTSConnectState: {state}")
+                self.environment["wts_connect_state"] = state
+            else:
+                error = ctypes.get_last_error()
+                # A local physical console does not require the RDS service.
+                # Only these explicit service-unavailable errors permit the
+                # independent console + visible/input-desktop proof below.
+                console = self.kernel.WTSGetActiveConsoleSessionId()
+                require(error in (1062, 1722) and session.value == console,
+                        f"WTSConnectState query failed with Windows error {error}; cannot classify desktop support")
+                self.environment.update(wts_query_error=error, active_console_session_id=console)
+        finally:
+            if buffer:
+                self.wts.WTSFreeMemory(buffer)
+        if state is not None and state != 0:  # WTSActive; RDP is supported, not just the physical console.
+            unsupported(f"Windows session {session.value} is not WTSActive (state {state})")
+
+        # WSF_VISIBLE identifies a window station with visible display surfaces.
+        # A failed API call is an error, not evidence of a headless environment.
+        flags = (self.w.DWORD * 3)()
+        needed = self.w.DWORD()
+        station = self.user.GetProcessWindowStation()
+        require(bool(station), "GetProcessWindowStation failed")
+        require(bool(self.user.GetUserObjectInformationW(
+            station, 1, flags, ctypes.sizeof(flags), ctypes.byref(needed))),
+            "Cannot inspect process window station flags")
+        require(needed.value == ctypes.sizeof(flags), "Malformed window station flags")
+        self.environment["window_station_visible"] = bool(flags[2] & 1)
+        if not self.environment["window_station_visible"]:
+            unsupported("Process window station has no visible display surfaces")
+
+        ctypes.set_last_error(0)
         desktop = self.user.OpenInputDesktop(0, False, 0x101)
         if not desktop:
-            raise UnsupportedDesktop("No accessible interactive input desktop (service/session-0/locked desktop)")
+            error = ctypes.get_last_error()
+            self.environment["open_input_desktop_error"] = error
+            if error == 5:  # ERROR_ACCESS_DENIED, e.g. an inaccessible secure/locked desktop.
+                unsupported("Input desktop is not accessible (Windows error 5)")
+            raise SmokeError(f"OpenInputDesktop failed with Windows error {error}; cannot classify support")
         try:
-            # The process's window station must actually be visible, and its thread must
-            # already be on the input desktop. Never switch desktops or alter permissions.
-            flags = (self.w.DWORD * 3)()
-            needed = self.w.DWORD()
-            station = self.user.GetProcessWindowStation()
-            visible = self.user.GetUserObjectInformationW(station, 1, flags, ctypes.sizeof(flags), ctypes.byref(needed))
-            if not visible or not flags[2] & 1:
-                raise UnsupportedDesktop("Process window station is not visible")
+            # Never switch desktops or alter permissions. Compare this process's
+            # existing thread desktop to the independently opened input desktop.
+            thread_desktop = self.user.GetThreadDesktop(self.kernel.GetCurrentThreadId())
+            require(bool(thread_desktop), "GetThreadDesktop failed")
             names = []
-            for handle in (desktop, self.user.GetThreadDesktop(self.kernel.GetCurrentThreadId())):
+            for handle in (desktop, thread_desktop):
                 name = ctypes.create_unicode_buffer(256)
-                if not self.user.GetUserObjectInformationW(handle, 2, name, ctypes.sizeof(name), ctypes.byref(needed)):
-                    raise UnsupportedDesktop("Cannot inspect input desktop identity")
+                require(bool(self.user.GetUserObjectInformationW(
+                    handle, 2, name, ctypes.sizeof(name), ctypes.byref(needed))),
+                    "Cannot inspect input/thread desktop identity")
+                require(bool(name.value), "Input/thread desktop name is empty")
                 names.append(name.value)
+            self.environment.update(input_desktop=names[0], thread_desktop=names[1])
             if names[0] != names[1]:
-                raise UnsupportedDesktop("Process is not on the active input desktop")
+                unsupported("Process thread is not on the active input desktop")
         finally:
-            self.user.CloseDesktop(desktop)
+            require(bool(self.user.CloseDesktop(desktop)), "CloseDesktop failed")
 
     def owner(self):
         hwnd = self.user.CreateWindowExW(0, "STATIC", "Citrus fixture acceptance owner", 0x10CF0000,
@@ -610,6 +711,62 @@ class WindowsDesktop:
                   "native HWND teardown")
 
 
+def desktop_probe_record():
+    """Read session/desktop facts only; never use PrintWindow to classify support."""
+    desktop = None
+    try:
+        desktop = WindowsDesktop(probe_only=True)
+        return {"status": "PASS", "reason": "Usable interactive Windows desktop",
+                "facts": desktop.environment}
+    except UnsupportedDesktop as error:
+        return {"status": "SKIPPED", "reason": str(error), "facts": error.facts}
+    finally:
+        if desktop is not None:
+            desktop.cleanup()
+
+
+def probe_interactive_desktop():
+    """Bound even preflight Win32 calls; timeout/API/malformed output stay failures."""
+    if os.name != "nt":
+        raise UnsupportedDesktop(f"PrintWindow requires Windows; platform is {sys.platform}",
+                                 {"platform": sys.platform})
+    source = ("import json, sys; sys.path.insert(0, sys.argv[1]); "
+              "from smoke_vst3_editor import desktop_probe_record; "
+              "print(json.dumps(desktop_probe_record()))")
+    try:
+        result = subprocess.run([sys.executable, "-B", "-c", source,
+                                 str(Path(__file__).resolve().parent)],
+                                capture_output=True, text=True, timeout=5.0,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired as error:
+        raise SmokeError("Desktop environment probe timed out after 5 seconds; child terminated") from error
+    require(result.returncode == 0, f"Desktop environment probe failed: {result.stderr[-4000:]}")
+    try:
+        record = json.loads(result.stdout)
+    except ValueError as error:
+        raise SmokeError("Desktop environment probe returned invalid JSON") from error
+    require(type(record) is dict and set(record) == {"status", "reason", "facts"}
+            and record["status"] in ("PASS", "SKIPPED")
+            and type(record["reason"]) is str and bool(record["reason"])
+            and type(record["facts"]) is dict, "Desktop environment probe returned malformed facts")
+    if record["status"] == "SKIPPED":
+        raise UnsupportedDesktop(record["reason"], record["facts"])
+    facts = record["facts"]
+    if "wts_connect_state" in facts:
+        active_session = type(facts["wts_connect_state"]) is int and facts["wts_connect_state"] == 0
+    else:
+        active_session = (type(facts.get("wts_query_error")) is int and facts["wts_query_error"] in (1062, 1722)
+                          and type(facts.get("active_console_session_id")) is int
+                          and facts["active_console_session_id"] == facts.get("session_id"))
+    require(facts.get("platform") == "win32" and type(facts.get("session_id")) is int
+            and facts["session_id"] > 0 and active_session
+            and facts.get("window_station_visible") is True
+            and type(facts.get("input_desktop")) is str and bool(facts["input_desktop"])
+            and facts["input_desktop"] == facts.get("thread_desktop"),
+            "Desktop environment probe returned incomplete/invalid support evidence")
+    return record
+
+
 def capture_native_button(hwnd, expected_pid):
     desktop = WindowsDesktop()
     parent = desktop.user.GetParent(hwnd)
@@ -792,9 +949,9 @@ def assert_modal_ipc(session, desktop, hwnd):
     require(session.editor("Query")["open"], "Modal close lost the native editor")
 
 
-def exercise_lifecycle(command, fixture, no_editor, desktop, timeout=60.0, report=print):
+def exercise_lifecycle(command, fixture, no_editor, desktop, timeout=60.0, report=print, summary=None):
     """Real acceptance with failed paint retained and independent evidence completed."""
-    stages = AcceptanceStages(report)
+    stages = AcceptanceStages(report, summary)
     expected = (
         "protocol stdout isolation (Rust/Win32/CRT)", "native attach/resize/DPI",
         "native paint before edit", "native control interaction/gesture/dirty feedback",
@@ -903,28 +1060,48 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--helper", required=True, type=Path)
     parser.add_argument("--timeout", type=float, default=60.0, help="deadline per helper process, seconds")
+    parser.add_argument("--summary", type=Path, help="append actual outcomes to a GitHub Actions Summary file")
     args = parser.parse_args(argv)
     desktop = None
+    environment_checked = False
+    summary = NativeSummary(args.summary)
     try:
         if not math.isfinite(args.timeout) or args.timeout <= 0:
             raise SmokeError("timeout must be finite and greater than zero")
-        desktop = WindowsDesktop()
-        require(args.helper.is_file(), f"Helper not found: {args.helper}")
-        require(ctypes.sizeof(ctypes.c_void_p) == 8, "Use 64-bit Python for the x86_64 fixture")
-        fixture = verify_fixture(FIXTURE_ROOT, "editor")
-        no_editor = verify_fixture(FIXTURE_ROOT, "no-editor")
-        exercise_lifecycle([str(args.helper.resolve())], fixture, no_editor, desktop, args.timeout)
+        probe = probe_interactive_desktop()
+        environment_checked = True
+        detail = probe["reason"] + "; " + json.dumps(probe["facts"], sort_keys=True)
+        print("PASS desktop environment: " + detail)
+        summary("PASS", "desktop environment", detail)
+        try:
+            desktop = WindowsDesktop(verified_environment=probe["facts"])
+            require(args.helper.is_file(), f"Helper not found: {args.helper}")
+            require(ctypes.sizeof(ctypes.c_void_p) == 8, "Use 64-bit Python for the x86_64 fixture")
+            fixture = verify_fixture(FIXTURE_ROOT, "editor")
+            no_editor = verify_fixture(FIXTURE_ROOT, "no-editor")
+            exercise_lifecycle([str(args.helper.resolve())], fixture, no_editor, desktop, args.timeout,
+                               summary=summary)
+        finally:
+            if desktop is not None:
+                desktop.cleanup()
         print("EDITOR ACCEPTANCE OK: source fixture lifecycle + native Windows drawing/interaction verified")
+        summary("PASS", "native editor acceptance", "All native stages passed")
         return 0
     except UnsupportedDesktop as error:
-        print(f"UNSUPPORTED / NOT VERIFIED: {error}", file=sys.stderr)
+        # Once support was independently confirmed, a later session/desktop loss
+        # invalidates the real run; it must not turn a target failure into a skip.
+        if environment_checked:
+            print(f"EDITOR ACCEPTANCE FAILED: desktop changed after preflight: {error}", file=sys.stderr)
+            summary("FAIL", "native editor acceptance", f"Desktop changed after preflight: {error}")
+            return 1
+        detail = "Environment unsupported: " + str(error) + "; " + json.dumps(error.facts, sort_keys=True)
+        print(f"SKIPPED PrintWindow/native editor acceptance: {detail}", file=sys.stderr)
+        summary("SKIPPED", "PrintWindow/native editor acceptance", detail)
         return 77
     except (SmokeError, OSError) as error:
         print(f"EDITOR ACCEPTANCE FAILED: {error}", file=sys.stderr)
+        summary("FAIL", "native editor acceptance", str(error))
         return 1
-    finally:
-        if desktop is not None:
-            desktop.cleanup()
 
 
 if __name__ == "__main__":

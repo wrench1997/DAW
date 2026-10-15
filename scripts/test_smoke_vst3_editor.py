@@ -1,6 +1,7 @@
 """Fake protocol/build-receipt regressions only; these never claim native Windows GUI QA."""
 
 from contextlib import redirect_stderr, redirect_stdout
+import ctypes
 import hashlib
 import io
 import json
@@ -9,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -324,10 +326,11 @@ class ValidationTests(unittest.TestCase):
                 smoke.number(value)
 
     def test_no_desktop_is_explicit_exit_77_and_does_not_launch(self):
-        with mock.patch.object(smoke, "WindowsDesktop", side_effect=smoke.UnsupportedDesktop("locked")), \
+        with mock.patch.object(smoke, "probe_interactive_desktop", side_effect=smoke.UnsupportedDesktop("locked")), \
              mock.patch.object(smoke.subprocess, "Popen") as popen, redirect_stderr(io.StringIO()) as stderr:
             self.assertEqual(smoke.main(["--helper", "unused"]), 77)
-            self.assertIn("UNSUPPORTED / NOT VERIFIED", stderr.getvalue())
+            self.assertIn("SKIPPED", stderr.getvalue())
+            self.assertIn("Environment unsupported: locked", stderr.getvalue())
             popen.assert_not_called()
 
     def test_bad_timeout_is_failure_not_unsupported(self):
@@ -415,6 +418,255 @@ class ValidationTests(unittest.TestCase):
                 smoke.verify_fixture(Path(temp), "editor")
 
 
+class DesktopEnvironmentTests(unittest.TestCase):
+    """Independent desktop facts decide skips; failed captures never decide support."""
+
+    def desktop(self, session_id=3, state=0, visible=True, input_name="Default", thread_name="Default"):
+        desktop = smoke.WindowsDesktop.__new__(smoke.WindowsDesktop)
+        desktop.w = SimpleNamespace(DWORD=ctypes.c_uint32, LPVOID=ctypes.c_void_p)
+        desktop.user, desktop.kernel, desktop.wts = mock.Mock(), mock.Mock(), mock.Mock()
+        desktop.kernel.ProcessIdToSessionId.side_effect = lambda pid, value: setattr(value._obj, "value", session_id) or 1
+        desktop.kernel.WTSGetActiveConsoleSessionId.return_value = session_id
+        desktop.user.OpenInputDesktop.return_value = 10
+        desktop.user.GetThreadDesktop.return_value = 20
+        desktop.user.GetProcessWindowStation.return_value = 30
+        desktop.user.CloseDesktop.return_value = 1
+        state_buffer = ctypes.c_int(state)
+
+        def query(server, session, info, buffer, length):
+            self.assertEqual((session, info), (session_id, 8))
+            buffer._obj.value = ctypes.addressof(state_buffer)
+            length._obj.value = ctypes.sizeof(state_buffer)
+            return 1
+
+        def object_info(handle, info, buffer, size, needed):
+            if info == 1:
+                buffer[2] = int(visible)
+                needed._obj.value = ctypes.sizeof(buffer)
+            else:
+                self.assertEqual(info, 2)
+                buffer.value = {10: input_name, 20: thread_name}[handle]
+                needed._obj.value = (len(buffer.value) + 1) * ctypes.sizeof(ctypes.c_wchar)
+            return 1
+
+        desktop.wts.WTSQuerySessionInformationW.side_effect = query
+        desktop.user.GetUserObjectInformationW.side_effect = object_info
+        return desktop, state_buffer  # Keep the simulated WTS allocation alive.
+
+    def check(self, desktop, error=0):
+        with mock.patch.object(smoke.ctypes, "set_last_error", create=True), \
+             mock.patch.object(smoke.ctypes, "get_last_error", return_value=error, create=True):
+            desktop.check_interactive()
+
+    def test_linux_and_macos_skip_without_loading_win32_or_starting_children(self):
+        for platform in ("linux", "darwin"):
+            with self.subTest(platform=platform), \
+                 mock.patch.object(smoke, "os", SimpleNamespace(name="posix")), \
+                 mock.patch.object(smoke.sys, "platform", platform), \
+                 mock.patch.object(smoke.subprocess, "run") as run, \
+                 self.assertRaisesRegex(smoke.UnsupportedDesktop, platform):
+                smoke.probe_interactive_desktop()
+            run.assert_not_called()
+
+    def test_current_active_rdp_session_does_not_require_physical_console(self):
+        desktop, keepalive = self.desktop()
+        desktop.kernel.WTSGetActiveConsoleSessionId.return_value = 1
+        self.check(desktop)
+        self.assertEqual(desktop.environment["session_id"], 3)
+        self.assertEqual(desktop.environment["wts_connect_state"], 0)
+        self.assertTrue(desktop.environment["window_station_visible"])
+        self.assertEqual(desktop.environment["input_desktop"], "Default")
+        desktop.wts.WTSFreeMemory.assert_called_once()
+        desktop.user.CloseDesktop.assert_called_once_with(10)
+        desktop.user.PrintWindow.assert_not_called()
+
+    def test_noninteractive_facts_skip_with_reason_and_close_owned_resources(self):
+        cases = (({"session_id": 0}, "session 0"),
+                 ({"state": 4}, "not WTSActive"),
+                 ({"visible": False}, "no visible display surfaces"),
+                 ({"thread_name": "Other"}, "not on the active input desktop"))
+        for options, reason in cases:
+            with self.subTest(options=options):
+                desktop, keepalive = self.desktop(**options)
+                with self.assertRaisesRegex(smoke.UnsupportedDesktop, reason) as caught:
+                    self.check(desktop)
+                self.assertEqual(caught.exception.facts["session_id"], options.get("session_id", 3))
+                desktop.user.PrintWindow.assert_not_called()
+                if "thread_name" in options:
+                    desktop.user.CloseDesktop.assert_called_once_with(10)
+                else:
+                    desktop.user.CloseDesktop.assert_not_called()
+                if options.get("session_id") == 0:
+                    desktop.wts.WTSQuerySessionInformationW.assert_not_called()
+                else:
+                    desktop.wts.WTSFreeMemory.assert_called_once()
+
+    def test_inaccessible_input_desktop_skips_but_unknown_api_errors_fail(self):
+        for error, expected in ((5, smoke.UnsupportedDesktop), (0, smoke.SmokeError), (6, smoke.SmokeError)):
+            with self.subTest(error=error):
+                desktop, keepalive = self.desktop()
+                desktop.user.OpenInputDesktop.return_value = None
+                with self.assertRaises(expected) as caught:
+                    self.check(desktop, error)
+                self.assertEqual(isinstance(caught.exception, smoke.UnsupportedDesktop), error == 5)
+                desktop.user.CloseDesktop.assert_not_called()
+
+    def test_session_station_and_identity_api_failures_are_not_skips(self):
+        for failed in ("session", "wts", "station", "station-flags", "thread", "name", "close"):
+            with self.subTest(failed=failed):
+                desktop, keepalive = self.desktop()
+                if failed == "session":
+                    desktop.kernel.ProcessIdToSessionId.side_effect = None
+                    desktop.kernel.ProcessIdToSessionId.return_value = 0
+                elif failed == "wts":
+                    desktop.wts.WTSQuerySessionInformationW.side_effect = None
+                    desktop.wts.WTSQuerySessionInformationW.return_value = 0
+                elif failed == "station":
+                    desktop.user.GetProcessWindowStation.return_value = None
+                elif failed in ("station-flags", "name"):
+                    original = desktop.user.GetUserObjectInformationW.side_effect
+                    desktop.user.GetUserObjectInformationW.side_effect = lambda handle, info, *args: (
+                        0 if info == (1 if failed == "station-flags" else 2) else original(handle, info, *args))
+                elif failed == "thread":
+                    desktop.user.GetThreadDesktop.return_value = None
+                else:
+                    desktop.user.CloseDesktop.return_value = 0
+                with self.assertRaises(smoke.SmokeError) as caught:
+                    self.check(desktop)
+                self.assertNotIsInstance(caught.exception, smoke.UnsupportedDesktop)
+                if failed in ("thread", "name", "close"):
+                    desktop.user.CloseDesktop.assert_called_once_with(10)
+
+    def test_console_without_rds_uses_independent_visible_input_desktop_proof(self):
+        for error in (1062, 1722):
+            with self.subTest(error=error):
+                desktop, keepalive = self.desktop()
+                desktop.wts.WTSQuerySessionInformationW.side_effect = None
+                desktop.wts.WTSQuerySessionInformationW.return_value = 0
+                self.check(desktop, error)
+                self.assertEqual(desktop.environment["active_console_session_id"], 3)
+                self.assertEqual(desktop.environment["wts_query_error"], error)
+                desktop.user.CloseDesktop.assert_called_once_with(10)
+                desktop.wts.WTSFreeMemory.assert_not_called()
+                desktop.kernel.WTSGetActiveConsoleSessionId.return_value = 1
+                with self.assertRaises(smoke.SmokeError) as caught:
+                    self.check(desktop, error)
+                self.assertNotIsInstance(caught.exception, smoke.UnsupportedDesktop)
+
+    def test_malformed_wts_information_fails_and_frees_buffer(self):
+        for state in (10, -1):
+            desktop, keepalive = self.desktop(state=state)
+            with self.subTest(state=state), self.assertRaisesRegex(smoke.SmokeError, "Unknown WTSConnectState"):
+                self.check(desktop)
+            desktop.wts.WTSFreeMemory.assert_called_once()
+        desktop, keepalive = self.desktop()
+        original = desktop.wts.WTSQuerySessionInformationW.side_effect
+        def malformed(server, session, info, buffer, length):
+            original(server, session, info, buffer, length)
+            length._obj.value = 1
+            return 1
+        desktop.wts.WTSQuerySessionInformationW.side_effect = malformed
+        with self.assertRaisesRegex(smoke.SmokeError, "malformed session information"):
+            self.check(desktop)
+        desktop.wts.WTSFreeMemory.assert_called_once()
+
+    def test_preflight_is_bounded_and_only_explicit_supported_records_proceed(self):
+        supported = {"platform": "win32", "session_id": 3, "wts_connect_state": 0,
+                     "window_station_visible": True, "input_desktop": "Default", "thread_desktop": "Default"}
+        records = (({"status": "PASS", "reason": "interactive", "facts": supported}, None),
+                   ({"status": "PASS", "reason": "interactive", "facts": {"session_id": 3}}, smoke.SmokeError),
+                   ({"status": "SKIPPED", "reason": "session 0", "facts": {"session_id": 0}}, smoke.UnsupportedDesktop),
+                   ({"status": "FAIL", "reason": "API error", "facts": {}}, smoke.SmokeError),
+                   ({"status": "PASS", "reason": "interactive", "facts": []}, smoke.SmokeError))
+        with mock.patch.object(smoke, "os", SimpleNamespace(name="nt")):
+            for record, expected in records:
+                result = subprocess.CompletedProcess([], 0, json.dumps(record), "")
+                with self.subTest(record=record), mock.patch.object(smoke.subprocess, "run", return_value=result) as run:
+                    if expected is None:
+                        self.assertEqual(smoke.probe_interactive_desktop(), record)
+                    else:
+                        with self.assertRaises(expected):
+                            smoke.probe_interactive_desktop()
+                    self.assertEqual(run.call_args.kwargs["timeout"], 5.0)
+                    self.assertNotIn("PrintWindow", " ".join(run.call_args.args[0]))
+            for outcome in (subprocess.TimeoutExpired("probe", 5),
+                            subprocess.CompletedProcess([], 1, "", "API traceback"),
+                            subprocess.CompletedProcess([], 0, "not-json", "")):
+                patch = {"side_effect": outcome} if isinstance(outcome, Exception) else {"return_value": outcome}
+                with mock.patch.object(smoke.subprocess, "run", **patch), self.assertRaises(smoke.SmokeError) as caught:
+                    smoke.probe_interactive_desktop()
+                self.assertNotIsInstance(caught.exception, smoke.UnsupportedDesktop)
+
+    def test_summary_records_pass_fail_skipped_and_exact_reason(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "summary.md"
+            stages = smoke.AcceptanceStages(lambda message: None, smoke.NativeSummary(path))
+            with stages.stage("native attach"):
+                pass
+            stages.attempt("native paint", lambda: smoke.require(False, "real PrintWindow failure"))
+            stages.skip("repaint", "pixels unavailable")
+            summary = path.read_text(encoding="utf-8")
+            self.assertIn("| PASS | native attach |", summary)
+            self.assertIn("| FAIL | native paint | real PrintWindow failure |", summary)
+            self.assertIn("| SKIPPED | repaint | pixels unavailable |", summary)
+
+    def test_main_skips_only_preflight_unsupported_and_reports_failures(self):
+        with tempfile.TemporaryDirectory() as temp:
+            summary = Path(temp) / "summary.md"
+            arguments = ["--helper", "unused", "--summary", str(summary)]
+            for error, expected in ((smoke.UnsupportedDesktop("session 0", {"session_id": 0}), 77),
+                                    (smoke.SmokeError("WTS API error"), 1), (OSError("probe spawn error"), 1)):
+                with self.subTest(error=error), \
+                     mock.patch.object(smoke, "probe_interactive_desktop", side_effect=error), \
+                     mock.patch.object(smoke, "WindowsDesktop") as desktop, redirect_stderr(io.StringIO()):
+                    self.assertEqual(smoke.main(arguments), expected)
+                desktop.assert_not_called()
+            contents = summary.read_text(encoding="utf-8")
+            self.assertIn('| SKIPPED | PrintWindow/native editor acceptance | Environment unsupported: session 0; {"session_id": 0}', contents)
+            self.assertIn("| FAIL | native editor acceptance | WTS API error |", contents)
+            self.assertIn("| FAIL | native editor acceptance | probe spawn error |", contents)
+            with mock.patch.object(smoke, "probe_interactive_desktop", return_value={"reason": "interactive", "facts": {}}), \
+                 mock.patch.object(smoke, "WindowsDesktop", side_effect=smoke.UnsupportedDesktop("lost input desktop")), \
+                 redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                self.assertEqual(smoke.main(arguments), 1)
+            self.assertIn("| FAIL | native editor acceptance | Desktop changed after preflight", summary.read_text(encoding="utf-8"))
+            helper = Path(temp) / "helper"
+            helper.write_bytes(b"owned fixture placeholder")
+            with mock.patch.object(smoke, "probe_interactive_desktop", return_value={"reason": "interactive", "facts": {"session_id": 3}}), \
+                 mock.patch.object(smoke, "WindowsDesktop") as desktop, \
+                 mock.patch.object(smoke, "verify_fixture"), \
+                 mock.patch.object(smoke, "exercise_lifecycle") as exercise, \
+                 redirect_stdout(io.StringIO()):
+                self.assertEqual(smoke.main(["--helper", str(helper), "--summary", str(summary)]), 0)
+            desktop.assert_called_once_with(verified_environment={"session_id": 3})
+            desktop.return_value.cleanup.assert_called_once()
+            exercise.assert_called_once()
+            self.assertIsInstance(exercise.call_args.kwargs["summary"], smoke.NativeSummary)
+            self.assertIn("| PASS | native editor acceptance | All native stages passed |", summary.read_text(encoding="utf-8"))
+
+    def test_ci_maps_only_unsupported_exit_and_retains_other_gates(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        native = workflow.split("      - name: Run native fixture editor", 1)[1].split("\n  linux-helper-readiness:", 1)[0]
+        skipped = native.split("if ($code -eq 77) {", 1)[1].split("}", 1)[0]
+        self.assertIn("SKIPPED", skipped)
+        self.assertIn("exit 0", skipped)
+        self.assertNotIn("exit 77", native)
+        self.assertIn("if ($code -ne 0)", native)
+        self.assertIn("exit $code", native)
+        self.assertIn(' --summary "$env:GITHUB_STEP_SUMMARY"', native)
+        self.assertIn("timeout-minutes: 6", native)
+        self.assertNotIn("continue-on-error", workflow)
+        for gate in ("fmt --all -- --check", "test --locked --all-features --all-targets",
+                     "clippy --locked --all-features --all-targets -- -D warnings",
+                     "build --locked --all-features --bins"):
+            self.assertIn(gate, workflow)
+        preview = (root / ".github/workflows/windows-preview.yml").read_text(encoding="utf-8")
+        self.assertIn("run: ./scripts/build_windows_preview.ps1", preview)
+        self.assertIn("run: ./scripts/smoke_windows_preview.ps1", preview)
+        self.assertNotIn("continue-on-error", preview)
+
+
 class NativeStageAggregationTests(unittest.TestCase):
     def interaction_setup(self):
         session = mock.Mock(spec=smoke.Session)
@@ -458,7 +710,7 @@ class NativeStageAggregationTests(unittest.TestCase):
         self.assertEqual(stages.results["native control"], "PASS")
         self.assertEqual(stages.results["native paint before edit"], "FAIL")
         self.assertEqual(stages.results["native paint after edit"], "FAIL")
-        self.assertEqual(stages.results["native repaint change"], "SKIP")
+        self.assertEqual(stages.results["native repaint change"], "SKIPPED")
         with self.assertRaisesRegex(smoke.SmokeError, "Failed native acceptance stages"):
             stages.finish(())
 
@@ -518,6 +770,7 @@ class NativeStageAggregationTests(unittest.TestCase):
             helper = Path(temp) / "helper"
             helper.write_bytes(b"fixture placeholder")
             with mock.patch.object(smoke, "WindowsDesktop"), \
+                 mock.patch.object(smoke, "probe_interactive_desktop", return_value={"reason": "interactive", "facts": {}}), \
                  mock.patch.object(smoke, "verify_fixture"), \
                  mock.patch.object(smoke, "exercise_lifecycle", side_effect=smoke.SmokeError("Failed native acceptance stages: paint")), \
                  redirect_stderr(io.StringIO()) as stderr, redirect_stdout(io.StringIO()) as stdout:

@@ -779,10 +779,55 @@ harness/fixture and no-default-feature gates passed. Linux SDK15/Unix1 also
 passed. Overall quality still failed only at native paint before/after edit:
 PrintWindow and same-process button probes returned false. Attach/resize/DPI,
 modal IPC, control/gesture/dirty, stopped-edit state and Shutdown/EOF/crash
-cleanup passed independently. SDK-B NI remains untested. Preview is still
-running, so release/ZIP qualification is pending. Preserve
-`ci-1687ec5-windows-quality-01.log`, `ci-1687ec5-linux-helper-readiness-01.log`
-and Source96 actual-terminal JSON.
+cleanup passed independently. SDK-B NI remains untested. Preview subsequently
+completed success: 344 harness cases, the same SDK4+15 and root2398/12 ignored,
+strict Clippy, no-default-feature checks, static-CRT release, final ZIP integrity
+and extracted sanitized-PATH helper smoke all passed. Release took 8m23s; upload
+was skipped. Preserve
+`ci-1687ec5-{windows-quality,windows-preview,linux-helper-readiness}-01.log`
+and Source96 actual-terminal run/jobs JSON.
+
+### PrintWindow environment gate and actual outcomes (2026-10-15)
+
+The native harness now probes the OS, current process session, WTS connection
+state, visible window station and input/thread desktop identity independently
+of capture. Linux/macOS, session0 and explicitly unavailable interactive desktop
+facts return77 with `SKIPPED` and the reason. Active RDP is eligible; a physical
+console with the RDS service stopped still needs the independent visible/input
+desktop proof. Unexpected API failures, malformed facts, probe timeouts and any
+real capture failure remain nonzero. Losing desktop support after preflight also
+fails the real run. Only the workflow's exact exit77 branch becomes success;
+formatting, compilation, tests, Clippy, Windows builds and preview packaging keep
+their existing failure contracts.
+
+Both preflight and each real PrintWindow run have separate five-second disposable
+child deadlines (kill/reap); the native CI step also has a six-minute limit.
+`--summary PATH` appends actual PASS/FAIL/SKIPPED rows and reasons. Dependent stages
+that cannot run after a real failure are explicitly SKIPPED, while the overall
+result remains FAIL. The ordinary local entry remains:
+
+```powershell
+python -B scripts/smoke_vst3_editor.py --helper target/debug/vst3-host-helper.exe --timeout 60 --summary target/native-editor-summary.md
+```
+
+Final affected Python regressions passed72/72; PowerShell parsing and diff checks
+passed. Local real preflight found session1/WTSActive, visible station and matching
+Default desktops. The first attempt correctly rejected a stale source-built
+fixture receipt. Rebuilding both checked-in fixture variants offline exited0;
+the full rerun then exited1 because real PrintWindow returned false before and
+after edit, including the diagnostic same-process button. Interaction, state and
+Shutdown/EOF/crash cleanup passed independently. This remains a real FAIL, not
+environment SKIPPED. Keep `printwindow-local-{native,summary,terminal}-02.*`,
+`printwindow-local-fixture-build-01.log` and
+`printwindow-ci-environment-handoff-01.json` under
+`target/backend-reliability-20261014`. New cloud outcomes are pending publication.
+
+The classification follows Microsoft's [process session API](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-processidtosessionid),
+[WTS connection states](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/ne-wtsapi32-wts_connectstate_class)
+and [visible window station flags](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-userobjectflags).
+[PrintWindow](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-printwindow)
+is synchronous and blocking, so its result is bounded by a child process rather
+than treated as a desktop-availability signal.
 
 Preserve `async-progress-readiness-candidate-01/applied-handoff-02.json` and
 `async-progress-readiness-provenance-02/`. This guard tracks work reported through
