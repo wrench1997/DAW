@@ -1,7 +1,10 @@
 # Drag the playhead; let the arrangement set its end
 
-**Source candidate, 2026-10-15.** Implemented below; new Cargo/input/render gates
-have not run yet. The user's existing standalone preview is unchanged.
+**Source candidate, 2026-10-15.** Source107 passed the scoped CPU input checks and
+12 genuine offscreen UI cases. Its export gate exposed two short-manual-range
+Audio split dependencies; the source-edit clock, stale mode toast and exposed
+Playlist capture refinements below await their next gates. The user's existing
+standalone preview is unchanged.
 
 ## Position and view are separate from music
 
@@ -50,6 +53,13 @@ built-in arrangement WAV and the supported experimental whole-song export path.
 Whole-song plug-in/FX/PDC/fixed-tail restrictions stay in force. This does not
 make realtime recording, selected-clip conversion and whole-song offline export
 interchangeable.
+
+Audio splits may edit a Clip tail outside a MANUAL playback range. Only that
+non-realtime source-geometry query can extend the retained tempo source,
+including later tempo automation; ordinary playback/export queries remain
+strictly bounded. It reuses the 262,144-checkpoint admission limit rather than
+extrapolating a constant boundary tempo. Splitting and saving unplayed tails must
+preserve the manual endpoint and the audible PCM/WAV prefix.
 
 ## PAT and SONG show what will actually play
 

@@ -270,6 +270,22 @@ impl TempoMap {
         Ok(checkpoint.seconds + integrate_seconds(&self.source, checkpoint.beat, beat))
     }
 
+    /// Non-realtime source-edit clock, independent of the playable song end.
+    /// A cut in an unplayed Clip tail still follows the retained tempo source,
+    /// including later automation/placements. The playback map stays bounded.
+    pub(crate) fn geometry_beat_to_seconds(&self, beat: f64) -> Result<f64, TempoMapError> {
+        if !beat.is_finite() || beat < 0.0 {
+            return Err(TempoMapError::BeatOutOfRange(beat));
+        }
+        if beat <= self.max_beat {
+            return self.beat_to_seconds(beat);
+        }
+        // Reuse checkpoint/integration admission rather than extrapolating the
+        // boundary BPM or changing max_beat/duration of the live/export clock.
+        Self::from_source(self.source.clone(), beat, self.sample_rate)
+            .map(|geometry| geometry.duration_seconds())
+    }
+
     pub fn seconds_to_beat(&self, seconds: f64) -> Result<f64, TempoMapError> {
         self.validate_seconds(seconds)?;
         if seconds == self.duration_seconds {
@@ -669,6 +685,61 @@ mod tests {
         let map = TempoMap::from_project(&project, 48_000).unwrap();
         assert_eq!(map.max_beat(), 2.0);
         assert_eq!(map.duration_frames(), 48_000);
+    }
+
+    #[test]
+    fn geometry_clock_uses_tail_tempo_without_extending_manual_playback_or_its_limits() {
+        let mut lane = AutomationLane::new(AutomationTarget::Tempo);
+        lane.set_curve(AutomationCurve::Hold);
+        lane.replace_points([
+            AutomationPoint::new(0.0, 120.0),
+            AutomationPoint::new(0.75, 60.0),
+            AutomationPoint::new(1.25, 240.0),
+        ]);
+        let map = TempoMap::new(120.0, Some(lane), 0.5, 48_000).unwrap();
+        assert_eq!(map.geometry_beat_to_seconds(0.5).unwrap(), 0.25);
+        assert_eq!(map.geometry_beat_to_seconds(1.5).unwrap(), 0.9375);
+        assert_eq!(map.max_beat(), 0.5);
+        assert_eq!(map.duration_seconds(), 0.25);
+        assert_eq!(map.duration_frames(), 12_000);
+        assert!(matches!(
+            map.beat_to_seconds(1.5),
+            Err(TempoMapError::BeatOutOfRange(1.5))
+        ));
+        assert!(map.beat_to_frame(1.5).is_err());
+        assert!(map.geometry_beat_to_seconds(-0.1).is_err());
+        assert!(map.geometry_beat_to_seconds(f64::NAN).is_err());
+        assert!(matches!(
+            map.geometry_beat_to_seconds(MAX_CHECKPOINTS as f64),
+            Err(TempoMapError::TooManyCheckpoints)
+        ));
+    }
+
+    #[test]
+    fn geometry_clock_retains_tempo_placements_beyond_the_manual_song_end() {
+        let mut project = Project::default();
+        project.song_length_beats = 0.5;
+        project.auto_song_length = false;
+        project.tempo = 120.0;
+        let mut lane = AutomationLane::new(AutomationTarget::Tempo);
+        lane.replace_points([AutomationPoint::new(3.0, 60.0)]);
+        project.automation_lanes = vec![crate::model::ProjectAutomation {
+            id: 991,
+            name: "Unplayed tail tempo".into(),
+            lane,
+        }];
+        let mut placement = project.clips[0].clone();
+        placement.kind = ClipKind::Automation;
+        placement.start = 1.0;
+        placement.length = 1.0;
+        placement.source_offset = 3.0;
+        placement.automation_id = Some(991);
+        project.clips = vec![placement];
+        let map = TempoMap::from_project(&project, 48_000).unwrap();
+        assert_eq!(map.geometry_beat_to_seconds(1.5).unwrap(), 1.0);
+        assert_eq!(map.max_beat(), 0.5);
+        assert_eq!(map.duration_frames(), 12_000);
+        assert!(map.beat_to_frame(1.5).is_err());
     }
 
     #[test]

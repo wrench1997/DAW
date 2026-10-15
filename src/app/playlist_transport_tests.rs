@@ -185,6 +185,11 @@ fn transport_pat_song_and_pattern_selection_change_real_compiled_notes_and_visib
     assert_eq!(ui.app.project.active_pattern, 1);
     assert_eq!(playback_notes(&ui.app), vec![(0, 72)]);
     assert_painted(&ui.run(Vec::new()), "PAT · High answer · 1 bar loop");
+    assert_eq!(
+        ui.app.toast.as_ref().unwrap().0,
+        "PAT mode — looping the selected Pattern only",
+        "mode feedback must not retain the previous Pattern name"
+    );
     ui.capture("transport-pattern-mode");
     // Pattern selection is already persisted selection data; only mode is a preference.
     let selection = project_fingerprint(&ui.app.project);
@@ -611,12 +616,23 @@ fn transport_scope_layout_stays_readable_in_minimum_floating_and_wide_workspaces
         (Vec2::new(1920.0, 1080.0), "transport-scope-wide"),
     ] {
         ui.size = size;
+        ui.app.focus_editor(StudioView::Playlist);
         ui.settle();
         for label in ["PAT", "SONG", "AUTO"] {
             let bounds = node_rect(ui.button(label));
             assert!(Rect::from_min_size(Pos2::ZERO, size).contains_rect(bounds));
             assert!(bounds.width() >= 25.0 && bounds.height() >= 16.0);
         }
+        let playlist_layer = ui
+            .ctx
+            .read_response(Id::new("playlist-canvas"))
+            .unwrap()
+            .layer_id;
+        assert_eq!(
+            ui.ctx.layer_id_at(node_rect(ui.button("AUTO")).center()),
+            Some(playlist_layer),
+            "the captured AUTO control must be on the exposed Playlist, not behind another editor"
+        );
         assert_painted(&ui.run(Vec::new()), "SONG · 3 bars · AUTO");
         ui.capture(capture);
     }

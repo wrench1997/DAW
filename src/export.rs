@@ -4340,10 +4340,28 @@ mod tests {
             &ExportControl::default(),
         )
         .unwrap();
+        let audible_child_count = project
+            .clips
+            .iter()
+            .filter(|clip| !clip.muted && f64::from(clip.start) < map.max_beat())
+            .filter(|clip| {
+                let start = map.beat_to_frame(f64::from(clip.start)).unwrap();
+                let end = map
+                    .beat_to_frame(audio_end_beat(clip, true).unwrap().min(map.max_beat()))
+                    .unwrap();
+                end > start
+            })
+            .count();
         assert_eq!(
             clips.len(),
-            project.clips.len(),
-            "a split child was not rendered"
+            audible_child_count,
+            "an in-range split child with fixture audio was not rendered"
+        );
+        assert!(
+            clips
+                .iter()
+                .all(|clip| clip.output_start + clip.frame_count <= output.len()),
+            "a prepared split child extends beyond the exact song frame count"
         );
         mix_prepared_audio(&assets, &clips, &mut output, &ExportControl::default()).unwrap();
         output
@@ -4546,15 +4564,35 @@ mod tests {
             project.clips[0].fade_in = 0.75;
             project.clips[0].fade_out = 1.0;
             set_split_export_tempo(&mut project, Some(AutomationCurve::Linear));
-            // Normalize before the baseline so ordinary project load rules
-            // (minimum song and clip lengths) cannot mask a split regression.
+            // Normalize before the baseline so load-time clip normalization
+            // cannot mask a split regression. The manual song crop stays short.
             project.normalize();
+            assert!(!project.auto_song_length);
+            assert_eq!(project.song_end_beat(), 0.65);
             let expected_pcm = prepared_audio_pcm(&project, output_rate);
             let expected_wav = rendered_wav_bytes(&project, output_rate, &mut files);
+            let song_frames = TempoMap::from_project(&project, output_rate)
+                .unwrap()
+                .duration_frames() as usize;
+            assert_eq!(expected_pcm.len(), song_frames);
+            assert_eq!(expected_wav.len(), 44 + song_frames * 2 * 3);
             let start = project.clips[0].start;
-            let right_id = split_export_clip(&mut project, 70, start + 0.75, 48_000);
+            let first_cut = start + 0.75;
+            assert!(first_cut > project.song_end_beat());
+            let right_id = split_export_clip(&mut project, 70, first_cut, 48_000);
             split_export_clip(&mut project, 70, start + 0.25, 48_000);
             split_export_clip(&mut project, right_id, start + 1.25, 48_000);
+            assert_eq!(project.clips.len(), 4);
+            assert_eq!(project.song_end_beat(), 0.65);
+            assert_eq!(
+                project
+                    .clips
+                    .iter()
+                    .filter(|clip| clip.start >= project.song_end_beat())
+                    .count(),
+                2,
+                "tail edits must keep both out-of-song children in the project"
+            );
             let path = files.path("v11", "citrus");
             project.save(&path).unwrap();
             let restored = Project::load(&path).unwrap();
@@ -4563,6 +4601,8 @@ mod tests {
                 crate::model::CURRENT_PROJECT_FORMAT_VERSION
             );
             assert_eq!(restored.clips.len(), 4);
+            assert!(!restored.auto_song_length);
+            assert_eq!(restored.song_end_beat(), 0.65);
             for (before, after) in project.clips.iter().zip(&restored.clips) {
                 assert_eq!(before.audio_source_reference, after.audio_source_reference);
                 assert_eq!(before.audio_length_reference, after.audio_length_reference);
@@ -4594,6 +4634,14 @@ mod tests {
             set_split_export_tempo(&mut moved, Some(AutomationCurve::Hold));
             let moved_pcm = prepared_audio_pcm(&moved, output_rate);
             let moved_wav = rendered_wav_bytes(&moved, output_rate, &mut files);
+            assert_eq!(moved.song_end_beat(), 0.65);
+            assert_eq!(
+                moved_pcm.len(),
+                TempoMap::from_project(&moved, output_rate)
+                    .unwrap()
+                    .duration_frames() as usize
+            );
+            assert_eq!(moved_wav.len(), 44 + moved_pcm.len() * 2 * 3);
             let moved_cut = moved.clips[0].length * 0.375;
             let moved_right = split_export_clip(&mut moved, moved_id, moved_cut, 48_000);
             let reference = moved
@@ -4608,6 +4656,8 @@ mod tests {
             let moved_path = files.path("v11-moved", "citrus");
             moved.save(&moved_path).unwrap();
             let reloaded = Project::load(&moved_path).unwrap();
+            assert!(!reloaded.auto_song_length);
+            assert_eq!(reloaded.song_end_beat(), 0.65);
             let case = format!("v11 moved/retempo save/load {source_rate}->{output_rate}");
             assert_audio_pcm_bits_equal(
                 &moved_pcm,
@@ -4637,6 +4687,8 @@ mod tests {
                 project.clips[0].fade_in = 0.625;
                 project.clips[0].fade_out = 0.875;
                 project.normalize();
+                assert!(!project.auto_song_length);
+                assert_eq!(project.song_end_beat(), 0.65);
                 let expected_pcm = prepared_audio_pcm(&project, output_rate);
                 let expected_wav = rendered_wav_bytes(&project, output_rate, &mut files);
                 // Independently preserve the v10 endpoint arithmetic and
@@ -4644,12 +4696,25 @@ mod tests {
                 // two invocations of the new reference compiler.
                 let clip = &project.clips[0];
                 let map = TempoMap::from_project(&project, output_rate).unwrap();
+                let song_end = map.max_beat() as f32;
+                assert!(clip.start + clip.length > song_end);
+                assert_eq!(expected_pcm.len(), map.duration_frames() as usize);
+                assert_eq!(expected_wav.len(), 44 + expected_pcm.len() * 2 * 3);
                 let start = tempo_frame(&map, clip.start).unwrap();
-                let end = tempo_frame(&map, clip.start + clip.length).unwrap();
-                let fade_in_end =
-                    tempo_frame(&map, clip.start + clip.length * clip.fade_in).unwrap();
-                let fade_out_start =
-                    tempo_frame(&map, clip.start + clip.length * (1.0 - clip.fade_out)).unwrap();
+                // Retain each original v10 f32 geometry expression, then crop
+                // that endpoint to the explicit manual song window.
+                let end = tempo_frame(&map, (clip.start + clip.length).min(song_end)).unwrap();
+                let fade_in_end = tempo_frame(
+                    &map,
+                    (clip.start + clip.length * clip.fade_in).min(song_end),
+                )
+                .unwrap();
+                let fade_out_start = tempo_frame(
+                    &map,
+                    (clip.start + clip.length * (1.0 - clip.fade_out)).min(song_end),
+                )
+                .unwrap();
+                assert_eq!(end, expected_pcm.len());
                 let source = load_audio_asset(&project.audio_assets[0], output_rate).unwrap();
                 let source_start = ((137_u64 * u64::from(output_rate) + u64::from(source_rate / 2))
                     / u64::from(source_rate)) as usize;
@@ -4685,6 +4750,8 @@ mod tests {
                 let path = files.path("v10", "citrus");
                 std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
                 let restored = Project::load(&path).unwrap();
+                assert!(!restored.auto_song_length);
+                assert_eq!(restored.song_end_beat(), 0.65);
                 assert!(
                     restored
                         .clips

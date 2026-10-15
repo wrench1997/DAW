@@ -45,7 +45,10 @@ pub fn split_audio_clip(
             .filter(|reference| reference.stored_length_beats == clip.length)
             .map(|_| export_end - f64::from(clip.start)),
         end_limit_beats: tempo_map
-            .filter(|map| f64::from(clip.start) + f64::from(clip.length) > map.max_beat())
+            .filter(|map| {
+                f64::from(clip.start) < map.max_beat()
+                    && f64::from(clip.start) + f64::from(clip.length) > map.max_beat()
+            })
             .map(|map| map.max_beat() - f64::from(clip.start)),
     };
     let mut left = clip.clone();
@@ -131,8 +134,13 @@ pub fn beat_seconds(
         return Err("Invalid Audio Clip beat position");
     }
     if let Some(map) = map {
-        map.beat_to_seconds(beat)
-            .map_err(|_| "Audio Clip beat is outside the tempo map")
+        map.geometry_beat_to_seconds(beat)
+            .map_err(|error| match error {
+                crate::tempo_map::TempoMapError::TooManyCheckpoints => {
+                    "Audio Clip geometry exceeds the tempo map checkpoint limit"
+                }
+                _ => "Audio Clip geometry has invalid tempo-map timing",
+            })
     } else if fallback_tempo.is_finite() {
         Ok(beat * 60.0 / f64::from(fallback_tempo.clamp(20.0, 400.0)))
     } else {
@@ -349,6 +357,90 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn source_geometry_cuts_unplayed_tail_with_later_tempo_and_keeps_crop_and_fade_phase() {
+        let mut lane = AutomationLane::new(AutomationTarget::Tempo);
+        lane.set_curve(AutomationCurve::Hold);
+        lane.replace_points([
+            AutomationPoint::new(0.0, 120.0),
+            AutomationPoint::new(0.75, 60.0),
+            AutomationPoint::new(1.25, 240.0),
+        ]);
+        for rate in [44_100, 48_000] {
+            let map = TempoMap::new(120.0, Some(lane.clone()), 0.65, rate).unwrap();
+            let full_geometry = TempoMap::new(120.0, Some(lane.clone()), 4.0, rate).unwrap();
+            let original = clip();
+            let before = serde_json::to_value(&original).unwrap();
+            let (left, right) = split_audio_clip(&original, 0.875, 99, Some(&map), 120.0).unwrap();
+            let (middle, last) = split_audio_clip(&right, 1.625, 100, Some(&map), 120.0).unwrap();
+            let reference = last.audio_source_reference.as_ref().unwrap();
+            assert_eq!(reference.elapsed_spans_seconds.len(), 1);
+            assert_eq!(
+                reference.elapsed_spans_seconds[0].start_seconds,
+                full_geometry.beat_to_seconds(0.125).unwrap()
+            );
+            assert_eq!(
+                reference.elapsed_spans_seconds[0].end_seconds,
+                full_geometry.beat_to_seconds(1.625).unwrap()
+            );
+            assert_eq!(
+                source_elapsed_frames(Some(reference), rate),
+                Some(
+                    (full_geometry.beat_to_frame(1.625).unwrap()
+                        - full_geometry.beat_to_frame(0.125).unwrap()) as i64
+                )
+            );
+            for export in [false, true] {
+                let compiled = |clip: &Clip| {
+                    crate::clip_fade::compile_clip_fades(
+                        clip.start,
+                        clip.length,
+                        clip.audio_length_reference,
+                        clip.fade_in,
+                        clip.fade_out,
+                        clip.fade_in_reference,
+                        clip.fade_out_reference,
+                        &map,
+                        export,
+                    )
+                    .unwrap()
+                };
+                assert_eq!(compiled(&left), compiled(&original));
+                assert_eq!(compiled(&middle), compiled(&original));
+                assert_eq!(compiled(&last), compiled(&original));
+            }
+            assert_eq!(serde_json::to_value(&original).unwrap(), before);
+            assert_eq!(map.max_beat(), 0.65);
+            assert_eq!(
+                map.duration_frames(),
+                (0.325 * f64::from(rate)).round() as u64
+            );
+            assert!(map.beat_to_seconds(0.875).is_err());
+        }
+    }
+
+    #[test]
+    fn source_geometry_can_split_a_wholly_unplayed_clip_without_negative_fade_limit() {
+        let map = TempoMap::new(120.0, None, 0.65, 48_000).unwrap();
+        let mut original = clip();
+        original.start = 1.0;
+        let before = serde_json::to_value(&original).unwrap();
+        let (left, right) = split_audio_clip(&original, 1.5, 99, Some(&map), 120.0).unwrap();
+        for child in [&left, &right] {
+            assert!(audio_metadata_valid(child));
+            assert_eq!(child.fade_in_reference.unwrap().end_limit_beats, None);
+            assert_eq!(child.fade_out_reference.unwrap().end_limit_beats, None);
+        }
+        assert_eq!(
+            source_elapsed_frames(right.audio_source_reference.as_ref(), 48_000),
+            Some(12_000)
+        );
+        assert_eq!(serde_json::to_value(&original).unwrap(), before);
+        assert_eq!(map.max_beat(), 0.65);
+        assert_eq!(map.duration_frames(), 15_600);
+        assert!(map.beat_to_seconds(1.5).is_err());
     }
 
     #[test]

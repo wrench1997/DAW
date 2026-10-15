@@ -1097,6 +1097,46 @@ Inspector/numeric regressions and remaining backend gates are next; unaffected
 214 UI passes and factory33 remain reusable. Keep
 `playlist-inspector-short-clip-repair-01/`.
 
+Source107 (`9cd05eb`) actually passed the repaired short-Clip exact1, existing
+context1/Inspector layout1/numeric2, Model53 (one explicit-input ignored),
+TempoMap10 and native automation6. Export64 had62 passes/two failures; both new
+Auto export cases passed. Old v10/v11 nested Audio split tests query source
+geometry beyond the short Manual map, reporting
+`beat 1.0370312929153442 is outside the tempo map` /
+`Audio Clip beat is outside the tempo map`. Its owner separated production
+geometry mapping from v10's independent untrimmed-tail oracle query; repair must
+not expand actual song scope or reinstate normalize's old forced16. FullOwner/
+Saved13/Clippy/artifacts/bins are unrun. Root74576/exec68330 and all17 held
+children terminated; private/global peaks4.033/22.100GiB. Unaffected214 UI and
+factory33 evidence is reused. Keep `source107-local-gates-01-*` and
+`source107-local-resource-handback-01.json`.
+
+The actually compiled Source107 UI was independently rendered:12 genuine WGPU
+input tests passed in12.91s on RTX3060/Vulkan. Four original PPMs and lossless
+PNGs remain; Root inspected each. Green PAT/orange SONG, selected Pattern,
+scope accent and the minimum-width two-row toolbar are clear and unclipped.
+Remaining visual corrections: PAT toast keeps an obsolete Pattern name after
+selection, and floating minimum/wide fixtures must focus Playlist to inspect
+AUTO instead of accepting bounds hidden behind Piano. Test64052 naturally
+exited0; Root141288/exec68618 exited0, no forced exit, fresh heavy empty11:59:45Z,
+GPU immediately returned. Rendering does not qualify the two failed exports.
+No user preview/CU/NI/audio was touched. Keep `playlist-transport-render-01/`
+and `source107-playlist-render-01-*`. The peer now owns the next CPU window.
+
+The Manual-tail repair is now static-frozen. Only non-realtime Audio split
+geometry extends the retained actual TempoSource, including later placements/
+automation, through the existing262144-checkpoint admission. Normal beat/frame
+queries, max/duration and real output remain bounded. Wholly unplayed clips do
+not acquire a negative new fade crop limit. The v10 independent f32/equal-power
+oracle crops actual output/fade endpoints; v11 retains four children/exact refs/
+PCM-WAV/persistence and Manual0.65 assertions. Four causal regressions were
+added. Call-site inspection confirms geometry is consumed only by split, with
+no callback allocation. PAT toast is now name-neutral; floating captures focus
+Playlist and assert AUTO's exposed layer. These refinements need execution/new
+frames. Keep `playlist-manual-tail-geometry-repair-01/` (six-path patch, format/
+diff passed). The peer has returned CPU; next are affected geometry/fade/export
+split and remaining FullOwner/Saved13/Clippy/artifact/bins gates.
+
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
 The native harness now probes the OS, current process session, WTS connection

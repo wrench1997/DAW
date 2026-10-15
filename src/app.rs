@@ -11922,10 +11922,7 @@ impl CitrusApp {
         self.request_immediate_timeline_compile();
         self.transport_loop_dirty = true;
         self.notify(match mode {
-            TransportMode::Pattern => format!(
-                "PAT mode — looping {} only",
-                self.project.active_pattern().name
-            ),
+            TransportMode::Pattern => "PAT mode — looping the selected Pattern only".into(),
             TransportMode::Song => "SONG mode — playing the Playlist arrangement".into(),
         });
     }
