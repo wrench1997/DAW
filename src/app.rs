@@ -8,8 +8,10 @@ mod clip_render_job;
 mod clip_render_playback;
 mod clip_render_session;
 mod generator_loaded_identity;
+mod plugin_initialization;
 mod stopped_bounce_capture;
 use generator_loaded_identity::GeneratorReadiness;
+use plugin_initialization::{PendingPluginInitialization, PluginInitializationKey};
 mod whole_song_export_job;
 #[cfg(test)]
 use clip_render_glue::RestorationTestFactory;
@@ -5318,6 +5320,7 @@ pub struct CitrusApp {
     plugin_processing_request_error: Option<String>,
     plugin_host: NativePluginHost,
     project_session: u64,
+    plugin_initializations: HashMap<PluginInitializationKey, PendingPluginInitialization>,
     running_insert_chains: HashMap<usize, RunningInsertChain>,
     pending_insert_chains: HashMap<usize, PendingInsertChain>,
     pending_insert_removals: HashMap<usize, PendingInsertRemoval>,
@@ -5694,6 +5697,7 @@ impl CitrusApp {
                 plugin_processing_request_error,
                 plugin_host: NativePluginHost::default(),
                 project_session: 1,
+                plugin_initializations: HashMap::new(),
                 running_insert_chains: HashMap::new(),
                 pending_insert_chains: HashMap::new(),
                 pending_insert_removals: HashMap::new(),
@@ -7006,6 +7010,7 @@ impl CitrusApp {
                 "plug-in parameter edit cancelled because the audio engine restarted".into(),
             );
         }
+        self.plugin_initializations.clear();
         self.running_insert_chains.clear();
         self.pending_insert_chains.clear();
         self.pending_insert_removals.clear();
@@ -9554,6 +9559,10 @@ impl CitrusApp {
         if self.clip_render_reject_control() {
             return;
         }
+        if !close && self.plugin_initialization_failed_for_instance(instance_id) {
+            self.notify("Parameter restoration failed; use RETRY RESTORE in PLUGINS before opening the editor".into());
+            return;
+        }
         if self.save_barrier.is_some()
             || self.pending_plugin_slot_config.is_some()
             || self.plugin_topology_is_settling()
@@ -10550,6 +10559,8 @@ impl CitrusApp {
                     &event,
                 );
             }
+            let initialization_holds_ready =
+                self.observe_plugin_initialization(event_session, endpoint, &instance_ids, &event);
             let guard_project_runtime = self.audio_restart_state.guards_project_runtime()
                 || self.clip_operation_fence_active();
             let restoring_audio_session = self.audio_restart_state.is_restoring();
@@ -10631,6 +10642,7 @@ impl CitrusApp {
                 && !native_state_is_authoritative
                 && !restart_tagged_receipt
                 && !guard_project_runtime
+                && !initialization_holds_ready
                 && let Some(message) = apply_plugin_runtime_event_for_session(
                     &mut self.project,
                     project_session,
@@ -10699,6 +10711,7 @@ impl CitrusApp {
                 }
             }
         }
+        self.drive_plugin_initializations(allow_plugin_runtime_commands);
         self.poll_native_editor_snapshots();
         if !initialization_failures.is_empty() {
             self.notify(format!(
@@ -16183,6 +16196,7 @@ impl CitrusApp {
         self.plugin_parameter_edits.fail_all();
         self.plugin_parameter_edit_draft_desired.clear();
         self.project_media.close();
+        self.plugin_initializations.clear();
         self.project_session = next_project_session(self.project_session);
         if let Some(audio) = &mut self.audio {
             assert!(audio.set_project_session(self.project_session));
@@ -16404,7 +16418,8 @@ impl CitrusApp {
     }
 
     fn plugin_topology_is_settling(&self) -> bool {
-        !self.pending_clip_restorations.is_empty()
+        self.plugin_initializations_pending()
+            || !self.pending_clip_restorations.is_empty()
             || !self.pending_insert_chains.is_empty()
             || !self.pending_insert_removals.is_empty()
             || !self.deferred_insert_rebuilds.is_empty()
@@ -16415,18 +16430,19 @@ impl CitrusApp {
     }
 
     fn plugin_runtime_is_ready_for_transport(&self) -> bool {
-        plugin_runtime_transport_ready(
-            self.project_session,
-            self.plugin_topology_is_settling(),
-            self.running_insert_chains
-                .values()
-                .map(|chain| chain.project_session)
-                .chain(
-                    self.running_generator_chains
-                        .values()
-                        .map(|chain| chain.project_session),
-                ),
-        )
+        !self.plugin_initialization_failed()
+            && plugin_runtime_transport_ready(
+                self.project_session,
+                self.plugin_topology_is_settling(),
+                self.running_insert_chains
+                    .values()
+                    .map(|chain| chain.project_session)
+                    .chain(
+                        self.running_generator_chains
+                            .values()
+                            .map(|chain| chain.project_session),
+                    ),
+            )
     }
 
     fn current_plugin_state_probes(&self) -> Vec<PluginStateProbe> {
@@ -16578,6 +16594,13 @@ impl CitrusApp {
             return;
         };
 
+        if self.plugin_initialization_failed() {
+            self.abort_project_save(
+                barrier,
+                "plug-in parameter restoration failed; retry restoration before saving",
+            );
+            return;
+        }
         let now = Instant::now();
         let transport_busy = self.plugin_state_save_transport_busy();
         if transport_busy && !barrier.requests_initialized {
@@ -26625,6 +26648,7 @@ impl CitrusApp {
                         if ui.add_enabled(!scanning, egui::Button::new(if scanning { "SCANNING…" } else { "↻ SCAN PLUGINS" })).clicked() { self.start_plugin_scan(); }
                     });
                 });
+                self.plugin_initialization_status_ui(ui);
                 ui.label(RichText::new("Native VST2 + isolated VST3 host · scanning never touches the audio thread").size(9.0).color(theme::MUTED));
                 if self.plugin_cache_needs_rescan {
                     ui.label(RichText::new("VST3 index needs a rescan: old filename-based classifications were discarded.").size(9.0).color(theme::ORANGE));
@@ -29817,12 +29841,14 @@ fn initialize_ready_plugin_slot(
     audio_restart_verification: bool,
 ) -> ReadyInitializationFailures {
     let mut failures = ReadyInitializationFailures::default();
-    if let Some(instance_id) = instance_ids.get(slot) {
-        for (parameter, value) in plugin_parameter_replay_values(project, *instance_id) {
-            if !control.set_parameter(slot, parameter, value) {
-                failures.parameter_commands = failures.parameter_commands.saturating_add(1);
-            }
-        }
+    if instance_ids.get(slot).is_some_and(|instance_id| {
+        project
+            .plugin_instances
+            .iter()
+            .any(|instance| instance.id == *instance_id && !instance.parameters.is_empty())
+    }) {
+        // Nonempty bases are retained and acknowledged by plugin_initialization.
+        return failures;
     }
     let needs_initial_state = audio_restart_verification
         || instance_ids.get(slot).is_some_and(|instance_id| {

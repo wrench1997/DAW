@@ -137,6 +137,10 @@ impl LoadedGeneratorIdentity {
             && current.identity == self.identity
             && stats.faults == 0
             && !stats.stopped
+            && app.project.plugin_instances.iter().any(|instance| {
+                instance.id == self.instance_id
+                    && instance.runtime_status == PluginRuntimeStatus::Loaded
+            })
             && project_assignment_matches(
                 &app.project,
                 self.channel_id,

@@ -60,6 +60,12 @@ fn loaded_generator_identity_rejects_wrong_session_channel_endpoint_instance_pat
     let mut fixture = Fixture::new_with_loaded_identity_for_test("Instrument", true, true);
     let channel = fixture.app().project.channels[0].id;
     let proof = fixture.app().loaded_generator_identity(channel).unwrap();
+    fixture.app_mut().project.plugin_instances[0].runtime_status = PluginRuntimeStatus::Unloaded;
+    assert!(
+        !proof.matches_current(fixture.app()),
+        "prepared identity alone cannot bypass persisted-base restoration"
+    );
+    fixture.app_mut().project.plugin_instances[0].runtime_status = PluginRuntimeStatus::Loaded;
     for case in 0..6 {
         let mut changed = proof.clone();
         match case {

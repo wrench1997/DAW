@@ -5,6 +5,18 @@ Updated: 2026-10-15 (Asia/Shanghai). Development branch:
 Citrus Studio remains a development DAW. The complete melody workflow is not yet qualified.
 This document separates implemented behavior, actual local acceptance, failures and untested work.
 
+The current generic-base restore candidate is not yet compiled or tested.
+Ordinary Open formerly sent saved bases once through a 64-entry untagged admin
+queue; rejected enqueues were not retained, yet SlotReady could publish Loaded.
+The candidate retains exact project/session/endpoint/slot/control ownership,
+uses existing tagged parameter acknowledgments, and withholds readiness for
+nonempty maps until replay completes. Backpressure retries the retained base;
+rejection or the existing 30-second inactivity budget latches an explicit retry.
+Transport, save and export gates cover the Installed-before-Ready interval.
+Empty maps keep the old Ready/request-zero State contract. Eight real-worker/
+bounded-queue tests and a Loaded-identity guard assertion are written; only
+formatting and diff checks have run. Native05/06 use the previous frozen bins.
+
 Latest backend qualification: Source87 (`769525d`) quality actually passed 32
 factory and 2321 App + 52 helper + 13 protocol = 2386 root cases/12 ignored, including
 both numeric-entry cases and three new failure-evidence regressions. Strict
@@ -17,14 +29,19 @@ cause or repair. Preview actually completed success: 344 harness cases, the same
 release, final ZIP verification and extracted sanitized-PATH helper smoke passed.
 No build artifact was uploaded. Preserve both
 `ci-769525d-windows-{quality,preview}-01.log` and Source87 actual terminal JSON.
+The docs-only Source88 (`25567fb`) quality repeat also completed: 32 factory,
+2386 root/12 ignored, strict Clippy and all backend gates passed; only independent
+native paint PrintWindow failed. It triggered no preview. Its logs and Source88
+actual terminal JSON do not qualify the new restore candidate.
 
 Native05 subsequently completed an ordinary GUI cold-open and Whole offline WAV
 export from the saved NOIRE Pure validation project. Independent PCM decoding
 confirms 10.500s of stereo 48k/24-bit audio, nonzero signal in all eight onset
 windows, no clipped samples and digital zero in the last 20ms. Clone, source
-helper and App all exited 0. Native04's preceding cleanup failure remains open;
-this success used the exact timing diagnostic. Details and the next single-axis
-no-exact-timing comparison are recorded below.
+helper and App all exited 0. Native06 repeated that cold path without exact
+timing and also completed, but its first note is exactly 384 frames/8ms later
+over the first 400ms. Later audio is identical. Native04's preceding warm-path
+cleanup failure and the new onset difference remain open. Details follow below.
 
 ## Current implementation and export boundaries
 
@@ -32,7 +49,7 @@ no-exact-timing comparison are recorded below.
 | --- | --- | --- |
 | Real-time Master recording | Records the Master audio produced during live playback | Pure was heard and captured locally; not an offline export |
 | Selected MIDI occurrence to audio | Experimental Linux/Windows strict clone, capture validation, native publication and history fences | Actual recapture mismatch refuses replacement; original MIDI is retained |
-| Whole-song offline WAV | Built-in sources; experimental single-VST full arrangement/static routing/Master automation | Native05 ordinary GUI saved-Pure cold-open→10.5s PCM24 WAV passed once; earlier short/405-note device-free evidence remains separate; intermittent cleanup, listening and full state/automation qualification remain open |
+| Whole-song offline WAV | Built-in sources; experimental single-VST full arrangement/static routing/Master automation | Native05/06 ordinary GUI cold-open→10.5s PCM24 WAV completed with/without exact timing; first-note offset, warm-path cleanup, listening and full state/automation remain open; earlier short/405-note evidence is separate |
 
 These paths must retain their own receipts and must not be substituted for each other.
 The ordinary build explicitly refuses unsupported active-VST offline export.
@@ -439,11 +456,9 @@ heavy=[] preceded explicit resource handback.
 Native04→05 also changed the play/Save prelude, cold-start state and diagnostic
 source. Source87 changed failure evidence, not cleanup order or budgets.
 Neither diagnostic timing nor Save is established as the failure's cause.
-The next coordinated native check must reuse the same bins, saved input,
-no-play/no-Save cold sequence and options, write into a new empty destination,
-and change only the exact timing switch to off. Test the warm play/Save branch
-separately after that comparison; do not extend deadlines or make
-forced termination count as successful export.
+Native06 below reused those bins/input/cold sequence/options with exact timing
+off. Warm play/Save still needs a separate comparison; do not extend deadlines
+or make forced termination count as successful export.
 
 Evidence in `target/backend-reliability-20261014/normal-noire-workflow-20261015-01/`:
 `launch-05.json`, `cold-open-and-export-native05-01.json`, `stderr-05.log`,
@@ -452,6 +467,44 @@ Evidence in `target/backend-reliability-20261014/normal-noire-workflow-20261015-
 terminal receipt, `native05-resource-handback-01.json` and
 `source87-continuation-checkpoint-02.json`. Audio, opaque project state and raw
 runtime evidence stay outside Git.
+
+### Native06: cold export does not require exact timing; first onset differs
+
+This session reused the exact frozen Native05 main/helper, the same validation02
+file and isolated App data, without a rebuild, playback, editor opening or new
+project Save. The starting App preference files were retained. Exact timing was
+absent at process creation, plugin diagnostics remained1, and message-pass was
+absent. Normal Open showed Saved/16beats, Kontakt Loaded, Channel→FX1,
+2304samples and Icon48k/XRUN0.
+
+The actual ordinary Whole review was48k/stereo/24-bit PCM, attenuation above0.95
+and accepted3000ms fixed tail. The native Save address bar was navigated with
+Ctrl+L, indexed address SetValue and Return; the actual new folder was verified,
+while the default Untitled filename was unchanged. The destination did not
+exist before Save. No Stop/Escape/Cancel followed. The UI and actual output
+reported10.500s/504000frames,7.500s music plus3.000s tail, unity gain and peak0.046039.
+
+Independent decoding confirms complete3,024,044B PCM24, nonzero signal in all
+eight onset windows, no clipped samples, peak−26.74dBFS, the same quiet tail and
+last20ms exact zero. Clone40840, original helper89188 and App110476 had held
+actual exit0. Normal Alt+F4 completed observer62451/30376 exit0, no binding errors,
+fresh process/window0, then explicit peer handback. No new listening occurred.
+
+Direct sample comparison with Native05 found66023 differing samples in33019
+frames, confined to frame129..33147. Over the first400ms, shifting Native06
+back384frames (8ms, three Q128 blocks) gives exactly zero sample difference;
+all later audio is identical. This establishes a first-note timing difference,
+not its cause. Neither NI readiness, PDC nor the trace switch is yet established
+as responsible. Follow the actual clone prepare/reset/MIDI/latency path before
+choosing a repair; two successful publications do not qualify onset consistency
+or fix Native04's warm-state teardown failure.
+
+Evidence in the same isolated workflow directory:
+`launch-06.json`, `cold-open-and-export-native06-01.json`, `stderr-06.log`,
+`normal-close-process-terminal-06.json`, `native05-native06-pcm-comparison-01.json`
+and `native06-no-exact-timing/ordinary-whole-native06-pcm-audit-01.json`.
+The parent contains `native06-resource-handback-01.json`. The parameter-restore
+candidate is separate, unbuilt source and did not enter this native comparison.
 
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,

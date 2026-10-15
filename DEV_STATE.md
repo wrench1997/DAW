@@ -5,13 +5,21 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
+当前后台候选：普通Open恢复generic bases原先向容量64的admin队列无回执地逐项发送，满队列后可能漏参却显示Loaded。新候选保留exact session/endpoint/slot/control owner，以tagged ACK完成非空参数恢复后才就绪；背压保留重试，拒绝/丢回执/既有30秒无进展预算失败明确，PLUGINS提供显式恢复重试，空参数表保留原合同。8项新worker/有界队列回归及Loaded身份门补充已写入；仅rustfmt/diff通过，编译/测试/Clippy尚未运行，不把Native05/06旧冻结bin的成功归给此候选。
+
+Native06已完成关闭exact timing的普通GUI冷开整曲导出，未重建：复用Native05冻结双bin、同一验证02、无播放/无新Save、相同48k/24-bit/3000ms固定尾音，实际新目录 `native06-no-exact-timing/Untitled.wav` 输出10.500秒/504000帧。独立PCM检查8个音符窗口非静音、无削波、峰值−26.74dBFS、末20ms为0；clone40840、原helper89188、App110476和observer62451均实际exit0，fresh进程/窗口0后已交还peer。`PLUGIN_DIAGNOSTICS=1`保留，message-pass未启用；这证明一次成功不依赖精确时序开关，不解决Native04暖态播放/Save后的间歇退出失败。
+
+两份真实WAV的逐样本比较发现新缺口：Native06第一音前400ms比Native05精确晚384帧（8ms），位移后差0；差异仅frame129..33147，其后音频完全相同。首音位置一致性尚未验收，原因正在沿clone准备/首MIDI/延迟补偿路径调查，不能归因为日志开关或宣布PDC完成。证据：同独立目录 `cold-open-and-export-native06-01.json`、`native06-no-exact-timing/ordinary-whole-native06-pcm-audit-01.json`、`native05-native06-pcm-comparison-01.json`、`normal-close-process-terminal-06.json`；上级 `native06-resource-handback-01.json`。本机暂由peer运行其GVN v2，DAW只做轻量源码/文件检查。
+
 后台最新实证：Source87（`769525d`）quality实际32 factory、2321 App+52 helper+13 protocol＝2386 root /12 ignored全部通过，含2项数字输入和3项新失败证据回归；严格all-feature/all-target Clippy、匹配双bin、协议/harness、fixture及无默认feature门通过。quality仅独立native paint的前后PrintWindow失败，不把云截图失败当本机Kontakt损坏。preview已实际success：344 harness、同一2386 root /12 ignored、严格Clippy、无默认feature、静态CRT release、最终ZIP及提取后sanitized-PATH helper smoke全部通过；未上传构建附件。factory两条真实子进程路径均实际输出完整阶段，本次未复现旧Deadline，根因仍未证明。证据：`ci-769525d-windows-{quality,preview}-01.log`、`source87-*-ci-*-terminal-01.json`。
+
+Source88文档提交（`25567fb`，生产源码仍Source87）的quality随后实际终态：32 factory与同一2386 root/12 ignored、严格Clippy及全部后台门通过，仍只独立native paint前后PrintWindow失败。保留 `ci-25567fb-windows-quality-01.log` 与 `source88-quality-ci-*-terminal-01.json`；本轮没有触发preview，不冒充新恢复候选已被编译。
 
 Native05已完成一次普通GUI冷重开→NOIRE整曲离线WAV：相同Source87匹配双bin，正常Open Native04保存的独立验证副本，无NKI重载；实见4小节/16拍、8音/1clip、Kontakt Loaded、Channel→FX1、Icon48k/XRUN0。本次不播放、不重新保存，导出48k立体声24-bit、7.5秒旋律＋明确接受的3秒固定尾音。原生Save前确认默认目标不存在，实际新建 `Untitled.wav`；原文件保留，另以overwrite=false复制为 `First-Light-NOIRE-Pure-ordinary-whole-native05.wav`。这是真实普通GUI整曲导出，不是实时录制或片段转换。
 
 实际独立PCM解码：504000帧/10.500秒、3,024,044B完整RIFF，8个音符起始窗口均非静音，无削波；峰值0.046038747（−26.74dBFS），末500ms峰值约−119.39dBFS，末20ms及最后一帧均为0。最大相邻样本差0.002964仅作线索，尚未试听这份WAV，不能据此宣布无爆音；未知/无界插件尾音警告保留，不把3秒固定窗推广成任意自然尾音已验收。
 
-Native05 clone112960实际Shutdown/teardown/ExitDll均返回（ExitDll约751ms），准确held handle确认clone、原helper84196及App69668均exit0；正常Alt+F4后observer66907实际exit0、fresh heavy=[]，资源已交回peer。该次启现有exact timing诊断，未启message-pass；与Native04相比还改变了播放/Save前置和冷开状态，不能称间歇清理失败已修。下一次实机只关闭exact timing，复用同双bin/同工程/同冷开无播放保存步骤及选项，写新空目录，先验证无精确时序诊断的路径；暖态播放/保存另作单轴验证。完整参数/自动化/Felt恢复、片段转换的177字节recapture差异、效果器/PDC和编辑手感仍待完成。证据在 `target/backend-reliability-20261014/normal-noire-workflow-20261015-01/`：`cold-open-and-export-native05-01.json`、`ordinary-whole-native05-pcm-audit-01.json`、`normal-close-process-terminal-05.json`；资源收据为上级 `native05-resource-handback-01.json`。
+Native05 clone112960实际Shutdown/teardown/ExitDll均返回（ExitDll约751ms），准确held handle确认clone、原helper84196及App69668均exit0；正常Alt+F4后observer66907实际exit0、fresh heavy=[]，资源已交回peer。该次启现有exact timing诊断，未启message-pass；与Native04相比还改变了播放/Save前置和冷开状态，不能称间歇清理失败已修。关闭exact timing的对照已由Native06实际完成；暖态播放/保存仍待单轴验证。完整参数/自动化/Felt恢复、片段转换的177字节recapture差异、效果器/PDC和编辑手感仍待完成。证据在 `target/backend-reliability-20261014/normal-noire-workflow-20261015-01/`：`cold-open-and-export-native05-01.json`、`ordinary-whole-native05-pcm-audit-01.json`、`normal-close-process-terminal-05.json`；资源收据为上级 `native05-resource-handback-01.json`。
 
 Native04实际普通GUI导出已越过自动取消故障：匹配all-feature主程序/helper在唯一jobs1构建exit0后，从实际Source80普通Save复制的独立 `First-Light-NOIRE-Pure-validation-02.citrus` 冷Open，无手动NKI重载；Kontakt Loaded、Channel→FX1、2304spl、Icon48k/XRUN0。SONG游标经过8音片段，普通Ctrl+S显示Saved且精确保存副本路径；本轮无新监听回复。实际Song Length从64改成16（只输入首位1后clamp，不能称逐位16输入已验收）；尾音通过真实文本输入3000/Return，Review实见3000ms。保存审计仅song_length/plugin_instances变化，8音/1clip/所有路由不变；generic参数仍0，opaque591683→591681不等，不称全参数一致。该新副本随后在Native05实际冷开。
 
