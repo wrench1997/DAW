@@ -864,6 +864,29 @@ Keep `source100-local-gates-01-*`, `source100-local-resource-handback-01.json` a
 `strict-blocked-stage-terminal-evidence-01/`. The original fixture15 has no
 startup ledger witness, so neither slow startup nor SDK-B causality is proven.
 
+Source101 (`16f7ff5`) actually passed the changed onset2, strict all-feature/
+all-target Clippy, actual test artifact and matching main/helper build. Runner
+70624/exec75399 exited0 and all15 held children terminated. Reuse Source100's
+two exact passes and unchanged observer8/FullOwner16/other short5/Strict35;
+this was not a rerun of the complete suite. The actual compiler-artifact test
+executable and helper were frozen in `bin-source101-sdk-b-short-01`.
+
+The first actual NI attempt then failed, test101/56.70s, with
+`complete source initialization deadline: complete actual callback has not reached its exact paused Timeline epoch`.
+There was no capture, clone or WAV. One128-frame OrdinaryProcess Attempt is
+recorded without a capture/epoch binding; it does not establish zero DSP or a
+successful Process return. Worker Join completed, while the outer observer
+independently retained helper97680 through natural OS exit0. Test47092,
+runner110816/exec21772 and all observed descendants actually terminated without
+forced kill or budget violation. No second round began after this failure.
+Fresh heavy count was0 at10:19:36Z before peer handback. The source owner is
+investigating the actual callback/Timeline epoch dependency without enlarging
+the40s initialization budget or removing its exact gate. SDK-B onset and
+two-phase async reports remain unqualified. Preserve `source101-local-gates-01-*`,
+`source99-noire-short-native-round01/`, its stdout/stderr/terminal files and
+`source101-native-short-resource-handback-01.json`; source99 is the old runner
+label, not the actual source revision.
+
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
 The native harness now probes the OS, current process session, WTS connection
