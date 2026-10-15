@@ -6,6 +6,7 @@
 
 #[path = "domain_tests/explicit_bus_preferences.rs"]
 mod explicit_bus_preferences;
+mod offline_midi_timing;
 
 use super::*;
 use std::{
@@ -147,6 +148,7 @@ where
 struct OriginCall {
     frames: i32,
     events: Vec<(u16, i32, i16)>,
+    event_headers: Vec<(i32, i32, f64, u16)>,
     transport: Option<(u32, i64, f64, i64, i64)>,
     silent_input: bool,
 }
@@ -643,10 +645,17 @@ impl<const S: bool, const C: bool> IAudioProcessorTrait for MockPlugin<S, C> {
         }
         if self.state.capture_origin.load(Ordering::Acquire) {
             let mut events = Vec::new();
+            let mut event_headers = Vec::new();
             if let Some(list) = vst3::ComRef::from_raw(data.inputEvents) {
                 for index in 0..list.getEventCount() {
                     let mut event: Event = std::mem::zeroed();
                     assert_eq!(list.getEvent(index, &mut event), kResultOk);
+                    event_headers.push((
+                        event.busIndex,
+                        event.sampleOffset,
+                        event.ppqPosition,
+                        event.flags,
+                    ));
                     let pitch = if event.r#type == kNoteOnEvent as u16 {
                         event.__field0.noteOn.pitch
                     } else if event.r#type == kNoteOffEvent as u16 {
@@ -686,6 +695,7 @@ impl<const S: bool, const C: bool> IAudioProcessorTrait for MockPlugin<S, C> {
             self.state.origin_calls.lock().unwrap().push(OriginCall {
                 frames: data.numSamples,
                 events,
+                event_headers,
                 transport: context,
                 silent_input,
             });

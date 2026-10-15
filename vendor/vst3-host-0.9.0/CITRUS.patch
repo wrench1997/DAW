@@ -14680,7 +14680,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
          log::debug!("Host: Plugin marked state as dirty (state: {})", state);
          if self.push_notification(crate::plugin::HostNotification::DirtyChanged(state != 0)) {
              kResultOk
-@@ -1912,9 +2160,19 @@
+@@ -1912,9 +2160,58 @@
  pub const MAX_QUEUED_EVENTS: usize = 4096;
  const MAX_QUEUED_EVENT_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
  
@@ -14693,14 +14693,54 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
 +    Poisoned,
 +}
 +
++/// Queue-local provenance, never serialized or exposed as a VST3 event flag. Only the
++/// ordinary MIDI convenience API defers musical timing to its actual process block;
++/// callers of the owned PluginEvent API retain their explicit flags and PPQ.
++#[derive(Debug)]
++pub(crate) struct QueuedEvent {
++    event: PluginEvent,
++    ordinary_midi: bool,
++}
++
++impl From<PluginEvent> for QueuedEvent {
++    fn from(event: PluginEvent) -> Self {
++        Self {
++            event,
++            ordinary_midi: false,
++        }
++    }
++}
++
++impl std::ops::Deref for QueuedEvent {
++    type Target = PluginEvent;
++
++    fn deref(&self) -> &Self::Target {
++        &self.event
++    }
++}
++
++impl std::ops::DerefMut for QueuedEvent {
++    fn deref_mut(&mut self) -> &mut Self::Target {
++        &mut self.event
++    }
++}
++
++#[cfg(test)]
++impl PartialEq<PluginEvent> for QueuedEvent {
++    fn eq(&self, other: &PluginEvent) -> bool {
++        self.event == *other
++    }
++}
++
  pub struct HostEventList {
-     pub events: Mutex<Vec<PluginEvent>>,
+-    pub events: Mutex<Vec<PluginEvent>>,
++    pub(crate) events: Mutex<Vec<QueuedEvent>>,
      payload_bytes: AtomicUsize,
 +    lost: AtomicBool,
  }
  
  impl HostEventList {
-@@ -1922,7 +2180,13 @@
+@@ -1922,7 +2219,13 @@
          Self {
              events: Mutex::new(Vec::with_capacity(MAX_QUEUED_EVENTS)),
              payload_bytes: AtomicUsize::new(0),
@@ -14715,7 +14755,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
      }
  
      pub fn clear(&self) {
-@@ -1933,6 +2197,7 @@
+@@ -1933,13 +2236,14 @@
                  log::trace!("HostEventList: Cleared all events");
              }
              Err(_) => {
@@ -14723,15 +14763,26 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
                  log::error!("HostEventList: Failed to lock events for clear");
              }
          }
-@@ -1951,6 +2216,7 @@
+     }
+ 
+     /// Move queued events into reusable optional slots for allocation-free chunk routing.
+-    pub fn take_into_slots(&self, out: &mut Vec<Option<PluginEvent>>) {
++    pub(crate) fn take_into_slots(&self, out: &mut Vec<Option<QueuedEvent>>) {
+         out.clear();
+         if let Ok(mut events) = self.events.lock() {
+             out.extend(events.drain(..).map(Some));
+@@ -1949,8 +2253,9 @@
+ 
+     /// Replace the queued events with `events`, reusing the existing allocation. Capped like
      /// every other path into the list; the excess is dropped with a warning.
-     pub fn reset_with(&self, events: impl IntoIterator<Item = PluginEvent>) {
+-    pub fn reset_with(&self, events: impl IntoIterator<Item = PluginEvent>) {
++    pub(crate) fn reset_with(&self, events: impl IntoIterator<Item = QueuedEvent>) {
          let Ok(mut queued) = self.events.lock() else {
 +            self.lost.store(true, Ordering::Release);
              log::error!("HostEventList: Failed to lock events for reset_with");
              return;
          };
-@@ -1958,11 +2224,13 @@
+@@ -1958,11 +2263,13 @@
          let mut payload_bytes = 0usize;
          for event in events {
              if queued.len() >= MAX_QUEUED_EVENTS {
@@ -14745,7 +14796,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
                  log::warn!(
                      "HostEventList: dropping event, payload budget exceeds \
                       {MAX_QUEUED_EVENT_PAYLOAD_BYTES} bytes"
-@@ -1980,7 +2248,10 @@
+@@ -1980,7 +2287,10 @@
          self.events
              .lock()
              .map(|events| events.is_empty())
@@ -14757,8 +14808,12 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
      }
  
      /// Move each queued event into `f`, leaving the list empty while retaining its backing
-@@ -1992,52 +2263,80 @@
-                 f(event);
+@@ -1989,55 +2299,126 @@
+     pub fn drain_each(&self, mut f: impl FnMut(PluginEvent)) {
+         if let Ok(mut events) = self.events.lock() {
+             for event in events.drain(..) {
+-                f(event);
++                f(event.event);
              }
              self.payload_bytes.store(0, Ordering::Relaxed);
 -        }
@@ -14841,7 +14896,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
 +        let next_payload_bytes = self
 +            .admitted_payload_total(payload_bytes)
 +            .map_err(|error| self.reject_admission(error))?;
-+        events.push(event);
++        events.push(event.into());
 +        self.payload_bytes
 +            .store(next_payload_bytes, Ordering::Relaxed);
 +        Ok(())
@@ -14863,6 +14918,26 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
 +        &self,
 +        event: &Event,
 +    ) -> Result<(), EventAdmissionError> {
++        unsafe { self.try_add_raw_event_with_timing(event, false) }
++    }
++
++    /// Same checked admission/budgets as raw events, with private timing provenance.
++    /// The caller supplies an ordinary note-on/off or poly-pressure event.
++    ///
++    /// # Safety
++    /// The raw event must satisfy the same requirements as `try_add_raw_event`.
++    pub(crate) unsafe fn try_add_ordinary_midi_event(
++        &self,
++        event: &Event,
++    ) -> Result<(), EventAdmissionError> {
++        unsafe { self.try_add_raw_event_with_timing(event, true) }
++    }
++
++    unsafe fn try_add_raw_event_with_timing(
++        &self,
++        event: &Event,
++        ordinary_midi: bool,
++    ) -> Result<(), EventAdmissionError> {
 +        let mut events = self
 +            .events
 +            .lock()
@@ -14877,14 +14952,37 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
 +            .map_err(|error| self.reject_admission(error))?;
 +        let owned = unsafe { raw_event_to_plugin_event(event) }
 +            .map_err(|()| self.reject_admission(EventAdmissionError::InvalidEvent))?;
-+        events.push(owned);
++        events.push(QueuedEvent {
++            event: owned,
++            ordinary_midi,
++        });
 +        self.payload_bytes
 +            .store(next_payload_bytes, Ordering::Relaxed);
++        Ok(())
++    }
++
++    /// Resolve only host-generated ordinary MIDI after chunk offsets and this block's
++    /// authoritative transport are known. No payload, order, offset or explicit event
++    /// metadata is changed. Realtime processing never calls this method.
++    pub(crate) fn resolve_offline_midi_timing(
++        &self,
++        quarter_note_position: f64,
++        quarter_notes_per_sample: f64,
++    ) -> Result<(), EventAdmissionError> {
++        let mut events = self
++            .events
++            .lock()
++            .map_err(|_| self.reject_admission(EventAdmissionError::Poisoned))?;
++        for queued in events.iter_mut().filter(|queued| queued.ordinary_midi) {
++            queued.event.flags &= !(Event_::EventFlags_::kIsLive as u16);
++            queued.event.ppq_position = quarter_note_position
++                + f64::from(queued.event.sample_offset) * quarter_notes_per_sample;
++        }
 +        Ok(())
      }
  }
  
-@@ -2103,47 +2402,14 @@
+@@ -2103,47 +2484,14 @@
      }
  
      unsafe fn addEvent(&self, event: *mut Event) -> i32 {
@@ -14937,7 +15035,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
          }
      }
  }
-@@ -2296,14 +2562,109 @@
+@@ -2296,14 +2644,109 @@
      Ok(raw)
  }
  
@@ -15050,7 +15148,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
          Ok(if len == 0 {
              Vec::new()
          } else {
-@@ -2312,9 +2673,7 @@
+@@ -2312,9 +2755,7 @@
      }
  
      unsafe fn copy_text(ptr: *const u16, len: usize) -> std::result::Result<Vec<u16>, ()> {
@@ -15061,7 +15159,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
          Ok(if len == 0 {
              Vec::new()
          } else {
-@@ -2428,75 +2787,649 @@
+@@ -2428,75 +2869,649 @@
  }
  
  // Parameter Changes implementation
@@ -15771,7 +15869,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
      }
  }
  
-@@ -2506,174 +3439,80 @@
+@@ -2506,174 +3521,80 @@
  
  impl IParameterChangesTrait for ParameterChanges {
      unsafe fn getParameterCount(&self) -> i32 {
@@ -16006,7 +16104,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
  }
  
  impl Class for ParameterValueQueue {
-@@ -2682,50 +3521,57 @@
+@@ -2682,50 +3603,57 @@
  
  impl IParamValueQueueTrait for ParameterValueQueue {
      unsafe fn getParameterId(&self) -> u32 {
@@ -16097,7 +16195,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
      }
  }
  
-@@ -2753,6 +3599,108 @@
+@@ -2753,6 +3681,108 @@
  mod component_handler_tests {
      use super::*;
      use crate::plugin::{ContextMenuItem, HostNotification, ParameterEdit, ParameterEditKind};
@@ -16206,7 +16304,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
  
      struct TestContextMenuTarget {
          calls: Arc<Mutex<Vec<i32>>>,
-@@ -2786,7 +3734,7 @@
+@@ -2786,7 +3816,7 @@
  
      #[test]
      fn captures_begin_perform_end_in_order_and_drains() {
@@ -16215,7 +16313,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
  
          // Drive a full gesture: mouse-down, two drag values, mouse-up.
          unsafe {
-@@ -2836,7 +3784,7 @@
+@@ -2836,7 +3866,7 @@
      /// `performEdit` (and one gesture event) per UI frame, for as long as the editor is open.
      #[test]
      fn editor_feedback_is_capped_when_the_host_never_polls() {
@@ -16224,7 +16322,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
  
          // Simulate a very long drag: far more edits than the cap, never polled.
          unsafe {
-@@ -2865,7 +3813,7 @@
+@@ -2865,7 +3895,7 @@
  
      #[test]
      fn handler2_requests_are_ordered_and_report_backpressure() {
@@ -16233,7 +16331,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
          unsafe {
              assert_eq!(handler.setDirty(1), kResultOk);
              assert_eq!(handler.requestOpenEditor(c"editor".as_ptr()), kResultOk);
-@@ -2899,7 +3847,7 @@
+@@ -2899,7 +3929,7 @@
  
      #[test]
      fn handler3_context_menu_preserves_items_and_executes_plugin_target() {
@@ -16242,7 +16340,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
          let handler_wrapper = ComWrapper::new(handler);
          assert!(
              handler_wrapper.as_com_ref::<IComponentHandler3>().is_some(),
-@@ -2986,7 +3934,7 @@
+@@ -2986,7 +4016,7 @@
  
      #[test]
      fn handler3_rejects_invalid_views_and_releases_dismissed_targets() {
@@ -16251,7 +16349,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
          assert!(unsafe { handler.createContextMenu(ptr::null_mut(), ptr::null()) }.is_null());
  
          let menu = unsafe {
-@@ -3011,7 +3959,7 @@
+@@ -3011,7 +4041,7 @@
  
      #[test]
      fn unit_handler_requests_are_ordered_and_preserve_whole_list_changes() {
@@ -16260,7 +16358,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
          unsafe {
              assert_eq!(handler.notifyUnitSelection(7), kResultOk);
              assert_eq!(handler.notifyProgramListChange(11, 3), kResultOk);
-@@ -3046,7 +3994,7 @@
+@@ -3046,7 +4076,7 @@
      #[test]
      fn restart_flags_accumulate_until_drained() {
          use vst3::Steinberg::Vst::RestartFlags_ as Flags;
@@ -16269,7 +16367,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
          assert!(handler.take_restart_flags().is_empty());
  
          // Two separate restarts, e.g. a preset load followed by a mode switch.
-@@ -3329,6 +4277,499 @@
+@@ -3329,6 +4359,499 @@
  #[cfg(test)]
  mod host_event_list_tests {
      use super::*;
@@ -16769,7 +16867,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
  
      /// `process()` is the input list's only drain and it returns early while the plugin isn't
      /// processing, so queueing MIDI at a stopped plugin must not grow the list forever.
-@@ -3338,7 +4779,7 @@
+@@ -3338,7 +4861,7 @@
          let event: Event = unsafe { std::mem::zeroed() };
  
          for _ in 0..(MAX_QUEUED_EVENTS + 500) {
@@ -16778,7 +16876,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
          }
          assert_eq!(unsafe { list.getEventCount() }, MAX_QUEUED_EVENTS as i32);
  
-@@ -3353,7 +4794,7 @@
+@@ -3353,7 +4876,7 @@
          list.clear();
          assert_eq!(unsafe { list.getEventCount() }, 0);
          assert!(list.events.lock().unwrap().capacity() >= MAX_QUEUED_EVENTS);
@@ -16787,7 +16885,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
          assert_eq!(unsafe { list.getEventCount() }, 1);
      }
  
-@@ -3366,7 +4807,7 @@
+@@ -3366,7 +4889,7 @@
          raw.r#type = Event_::EventTypes_::kDataEvent as u16;
          raw.__field0.data = DataEvent {
              size: source.len() as u32,
@@ -16796,7 +16894,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
              bytes: source_ptr,
          };
  
-@@ -3397,7 +4838,7 @@
+@@ -3397,7 +4920,7 @@
          raw.r#type = Event_::EventTypes_::kDataEvent as u16;
          raw.__field0.data = DataEvent {
              size: 1,
@@ -16805,7 +16903,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
              bytes: ptr::null(),
          };
          assert_eq!(unsafe { list.addEvent(&mut raw) }, kResultFalse);
-@@ -3637,129 +5078,1292 @@
+@@ -3637,129 +5160,1292 @@
  #[cfg(test)]
  mod parameter_changes_tests {
      use super::*;
@@ -18217,7 +18315,7 @@ diff --git a/src/internal/com_implementations.rs b/src/internal/com_implementati
      }
  }
  
-@@ -3958,3 +6562,348 @@
+@@ -3958,3 +6644,348 @@
          assert_eq!(read_attribute(&project, c"FilePathString"), None);
      }
  }
@@ -22034,8 +22132,8 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          create_state_restore_stream, ComponentHandler, ConnectionPair, HostApplication,
 -        HostEventList, HostPlugFrame, ParameterChanges, StreamStateType, MAX_EDITOR_FEEDBACK,
 -        MAX_QUEUED_EVENTS,
-+        HostEventList, HostPlugFrame, ParameterChanges, ParameterQueueLimits, StreamStateType,
-+        MAX_EDITOR_FEEDBACK, MAX_QUEUED_EVENTS,
++        HostEventList, HostPlugFrame, ParameterChanges, ParameterQueueLimits, QueuedEvent,
++        StreamStateType, MAX_EDITOR_FEEDBACK, MAX_QUEUED_EVENTS,
      },
      module_loader::{load_module, VstModule},
  };
@@ -22214,7 +22312,14 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
  
      // Event handling
      input_events: ComWrapper<HostEventList>,
-@@ -235,34 +299,13 @@
+@@ -229,40 +293,19 @@
+     // chunks: each chunk is staged into `input_events` with only the events that fall inside it.
+     // Pre-reserved to MAX_QUEUED_EVENTS (the input list's own cap), so splitting a block never
+     // allocates on the audio thread.
+-    chunk_events: Vec<Option<PluginEvent>>,
++    chunk_events: Vec<Option<QueuedEvent>>,
+     // MIDI the plugin has emitted (captured from output_events after each process block,
+     // converted to MidiEvent), buffered for the host to poll. A lock-free bounded queue so the
      // audio thread can push without locking and a UI thread can drain concurrently; when full
      // the oldest event is dropped (bounded memory if the host never polls).
      output_events_owned: Arc<ArrayQueue<PluginEvent>>,
@@ -22256,7 +22361,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
  }
  
  // Processing data structure
-@@ -271,6 +314,10 @@
+@@ -271,9 +314,15 @@
      sample_buffers: HostSampleBuffers,
      input_bus_buffers: Vec<AudioBusBuffers>,
      output_bus_buffers: Vec<AudioBusBuffers>,
@@ -22267,7 +22372,12 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      process_context: ProcessContext,
      process_context_requirements: Option<u32>,
      transport_tempo: f64,
-@@ -284,6 +331,48 @@
++    // Event timing is authoritative even when IProcessContextRequirements omits music.
++    event_quarter_note_position: f64,
+     input_param_changes: ComWrapper<ParameterChanges>,
+     output_param_changes: ComWrapper<ParameterChanges>,
+     // Preallocated channel-pointer arrays, built once in prepare_buffers. The audio buffers'
+@@ -284,6 +333,48 @@
  enum CallerAudioBuffers<'a> {
      Flat(&'a mut AudioBuffers),
      Buses(&'a mut BusAudioBuffers),
@@ -22316,7 +22426,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
  }
  
  impl CallerAudioBuffers<'_> {
-@@ -335,9 +424,9 @@
+@@ -335,9 +426,9 @@
  
  /// Per-bus channel pointers into the (audio-thread-owned) audio buffers.
  ///
@@ -22329,7 +22439,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
  struct SendChannelPtrs<T>(Vec<Vec<*mut T>>);
  unsafe impl<T: Send> Send for SendChannelPtrs<T> {}
  
-@@ -905,7 +994,7 @@
+@@ -905,7 +996,7 @@
  
  impl PluginImpl {
      fn ensure_control_thread(&self, operation: &str) -> Result<()> {
@@ -22338,7 +22448,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              Ok(())
          } else {
              Err(Error::Other(format!(
-@@ -945,89 +1034,53 @@
+@@ -945,89 +1036,53 @@
          time_sig_numerator: i32,
          time_sig_denominator: i32,
      ) {
@@ -22443,7 +22553,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              }
          }
          changes
-@@ -1042,7 +1095,7 @@
+@@ -1042,7 +1097,7 @@
      /// automation on real plugins. Log it and carry on; `log` skips the formatting entirely when
      /// the level is disabled.
      fn apply_controller_parameter(&self, id: u32, value: f64) {
@@ -22452,7 +22562,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              return;
          };
          let result = unsafe { controller.setParamNormalized(id, value) };
-@@ -1061,20 +1114,22 @@
+@@ -1061,20 +1116,22 @@
      /// service call. The queue drops its oldest entry when full: the newest value for a
      /// parameter is the one worth showing.
      fn mirror_parameter_to_controller(&self, id: u32, value: f64) {
@@ -22479,7 +22589,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              self.apply_controller_parameter(id, value);
          }
      }
-@@ -1083,32 +1138,37 @@
+@@ -1083,32 +1140,37 @@
      /// and apply parameter values queued for the controller from the same place. A no-op
      /// anywhere but the control thread; both halves are `IEditController` traffic.
      fn service_control_thread_caches(&mut self) {
@@ -22522,7 +22632,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              return;
          };
          unsafe {
-@@ -1132,12 +1192,12 @@
+@@ -1132,12 +1194,12 @@
                  }
              }
          }
@@ -22538,7 +22648,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              return;
          };
          let Some(unit_info) = controller.cast::<IUnitInfo>() else {
-@@ -1176,18 +1236,21 @@
+@@ -1176,18 +1238,21 @@
                      continue;
                  };
                  if *program_count > 0 {
@@ -22566,7 +22676,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .iter()
              .copied()
              .find(|mapping| mapping.unit_id == unit_id)
-@@ -1227,6 +1290,9 @@
+@@ -1227,6 +1292,9 @@
              // (whether via `InitializedComponent` or `Drop for PluginImpl`) must complete before
              // the module unmaps.
              log::debug!("Step 1: Loading VST3 module...");
@@ -22576,7 +22686,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              let module = load_module(path)?;
              log::debug!("VST3 module loaded successfully");
  
-@@ -1248,7 +1314,8 @@
+@@ -1248,7 +1316,8 @@
  
              // Factory3 must receive the host context before any class is instantiated. Keep the
              // same context alive for the complete component/controller lifetime.
@@ -22586,7 +22696,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              let host_ctx = host_app.to_com_ptr::<IHostApplication>();
              let context = host_ctx
                  .as_ref()
-@@ -1290,13 +1357,17 @@
+@@ -1290,13 +1359,17 @@
              // Find and create the audio component
              log::debug!("Step 4: Creating audio component...");
              let (component, class_index) =
@@ -22605,7 +22715,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              if init_result != kResultOk {
                  // A component that failed to initialize must NOT be terminated (terminate pairs
                  // with a *successful* initialize), and must certainly not be driven on through
-@@ -1322,30 +1393,40 @@
+@@ -1322,30 +1395,40 @@
  
              // Establish the component's declared default bus state while it is inactive.
              log::debug!("Step 6: Activating default buses...");
@@ -22652,7 +22762,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              initialized.attach_controller(controller.clone(), single_component);
              log::debug!(
                  "Controller obtained: {} (single_component: {single_component})",
-@@ -1355,14 +1436,19 @@
+@@ -1355,14 +1438,19 @@
              // Connect component and controller if they are separate
              if let Some(ref ctrl) = controller {
                  log::debug!("Step 10: Connecting component and controller...");
@@ -22673,7 +22783,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      if result == kResultOk {
                          log::debug!("Component handler set on controller successfully");
                      } else {
-@@ -1387,7 +1473,13 @@
+@@ -1387,7 +1475,13 @@
                                  "failed to create initial component-state stream".to_string(),
                              )
                          })?;
@@ -22687,7 +22797,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      if get_state_result == kResultOk || get_state_result == kResultTrue {
                          let controller_state = create_memory_stream_from_with_metadata(
                              component_state.to_vec(),
-@@ -1400,8 +1492,14 @@
+@@ -1400,8 +1494,14 @@
                                      "failed to create initial controller-state stream".to_string(),
                                  )
                              })?;
@@ -22702,7 +22812,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                          if set_state_result != kResultOk
                              && set_state_result != kResultTrue
                              && set_state_result != kNotImplemented
-@@ -1441,17 +1539,23 @@
+@@ -1441,17 +1541,23 @@
              // Extract plugin info from the factory and component. Keyed on the class that was
              // actually instantiated, so a multi-class factory reports the uid the host can
              // reload (or respawn under isolation) to get this same component back.
@@ -22727,7 +22837,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                          true
                      } else {
                          false
-@@ -1478,70 +1582,87 @@
+@@ -1478,70 +1584,87 @@
              );
  
              let mut plugin = Self {
@@ -22867,7 +22977,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
  
              // VST3 lifecycle: `setupProcessing` and bus activation require an INACTIVE
              // component, and a plugin sizes its DSP buffers when it goes active, from the
-@@ -1565,10 +1686,47 @@
+@@ -1565,10 +1688,47 @@
              log::info!(
                  "Has GUI: {}, Active: {}",
                  plugin.info.has_gui,
@@ -22916,7 +23026,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      }
  
      /// Put the component into the active state (`IComponent::setActive(true)`).
-@@ -1582,23 +1740,25 @@
+@@ -1582,23 +1742,25 @@
                  "Failed to activate component: {result:#x}"
              )));
          }
@@ -22949,7 +23059,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          }
          result
      }
-@@ -1720,11 +1880,13 @@
+@@ -1720,11 +1882,13 @@
                  if category.contains("Audio Module Class") && is_target {
                      let mut component_ptr: *mut IComponent = ptr::null_mut();
  
@@ -22963,7 +23073,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
  
                      if result == kResultOk && !component_ptr.is_null() {
                          let component = ComPtr::from_raw(component_ptr).ok_or_else(|| {
-@@ -1744,7 +1906,7 @@
+@@ -1744,7 +1908,7 @@
  
      /// Map the configured [`ProcessMode`](crate::plugin::ProcessMode) to the VST3 enum value.
      fn vst_process_mode(&self) -> i32 {
@@ -22972,7 +23082,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              crate::plugin::ProcessMode::Offline => ProcessModes_::kOffline as i32,
              crate::plugin::ProcessMode::Prefetch => ProcessModes_::kPrefetch as i32,
              crate::plugin::ProcessMode::Realtime => ProcessModes_::kRealtime as i32,
-@@ -1775,22 +1937,31 @@
+@@ -1775,22 +1939,31 @@
          ))
      }
  
@@ -23007,7 +23117,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              Err(Error::InterfaceError(format!(
                  "default setBusArrangements failed: {result:#x}"
              )))
-@@ -1800,27 +1971,39 @@
+@@ -1800,27 +1973,39 @@
      /// The configuration currently baked into the plugin via `setupProcessing`.
      fn current_setup(&self) -> AppliedSetup {
          AppliedSetup {
@@ -23054,7 +23164,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                  return Err(Error::InterfaceError(format!(
                      "Failed to setup processing: {:#x}",
                      result
-@@ -1829,7 +2012,7 @@
+@@ -1829,7 +2014,7 @@
  
              // Create process data
              self.create_process_data()?;
@@ -23063,7 +23173,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
  
              Ok(())
          }
-@@ -1843,7 +2026,7 @@
+@@ -1843,7 +2028,7 @@
          unsafe {
              let mut data = Box::new(HostProcessData {
                  process_data: std::mem::zeroed(),
@@ -23072,7 +23182,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      ProcessingSampleSize::F32 => HostSampleBuffers::F32(TypedSampleBuffers {
                          inputs: Vec::new(),
                          outputs: Vec::new(),
-@@ -1859,51 +2042,69 @@
+@@ -1859,51 +2044,73 @@
                  },
                  input_bus_buffers: Vec::new(),
                  output_bus_buffers: Vec::new(),
@@ -23085,6 +23195,10 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
 -                output_param_changes: ComWrapper::new(ParameterChanges::default()),
 +                process_context_requirements: self.runtime.process_context_requirements,
 +                transport_tempo: self.runtime.tempo,
++                event_quarter_note_position: self
++                    .runtime
++                    .process_transport
++                    .map_or(0.0, |transport| transport.quarter_note_position),
 +                input_param_changes: ComWrapper::new(ParameterChanges::new(
 +                    ParameterQueueLimits::INPUT,
 +                )),
@@ -23159,7 +23273,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                  .output_events
                  .as_com_ref::<IEventList>()
                  .map(|ptr| ptr.as_ptr())
-@@ -1922,65 +2123,162 @@
+@@ -1922,65 +2129,162 @@
                  .unwrap_or(ptr::null_mut());
  
              // Prepare buffers
@@ -23335,7 +23449,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                  );
                  for (bus, pointers) in data
                      .input_bus_buffers
-@@ -2007,11 +2305,11 @@
+@@ -2007,11 +2311,11 @@
              }
              HostSampleBuffers::F64(samples) => {
                  *samples = build_typed_sample_buffers(
@@ -23350,7 +23464,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                  );
                  for (bus, pointers) in data
                      .input_bus_buffers
-@@ -2061,7 +2359,15 @@
+@@ -2061,7 +2365,15 @@
      }
  }
  
@@ -23367,7 +23481,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      /// Process exactly `frames` samples starting at `frame_offset` within the caller's
      /// buffers. `frames` is always <= the configured `block_size`, which is what the plugin
      /// was set up to accept; `process` splits a larger caller block into successive chunks.
-@@ -2070,14 +2376,18 @@
+@@ -2070,15 +2382,32 @@
      /// [`stage_chunk_events`]); queued parameter changes are selected the same way here, by the
      /// chunk their offset falls in. `is_last` marks the chunk that absorbs anything scheduled
      /// past the end of the caller's block.
@@ -23385,9 +23499,23 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
 -        let result = if let Some(ref mut data) = self.process_data {
 +        if let Some(ref mut data) = self.process_data {
              unsafe {
++                if self.process_mode == crate::plugin::ProcessMode::Offline {
++                    let quarter_notes_per_sample = if self.playing && self.sample_rate > 0.0 {
++                        data.transport_tempo / (60.0 * self.sample_rate)
++                    } else {
++                        0.0
++                    };
++                    self.input_events
++                        .resolve_offline_midi_timing(
++                            data.event_quarter_note_position,
++                            quarter_notes_per_sample,
++                        )
++                        .map_err(|_| Error::EventInputRejected)?;
++                }
                  // Clear output events only - input events should be preserved for processing
                  self.output_events.clear();
-@@ -2089,7 +2399,14 @@
+ 
+@@ -2089,7 +2418,14 @@
                  // Without this, addParameterData()/addPoint() would keep appending to queues
                  // from prior blocks, mixing stale points into new ones, growing point storage
                  // unbounded, and risking a reallocation on the audio thread long after warm-up.
@@ -23403,7 +23531,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
  
                  // VST3 allows numSamples to vary up to the maximum given to setupProcessing; the
                  // caller's block may be shorter (BufferSize::Default gives variable sizes) or, if
-@@ -2103,43 +2420,43 @@
+@@ -2103,43 +2439,43 @@
                  // got in `stage_chunk_events`, so automation and MIDI stay aligned across a
                  // split block.
                  for pc in &self.pending_param_changes {
@@ -23482,7 +23610,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                  }
  
                  match buffers {
-@@ -2175,10 +2492,15 @@
+@@ -2175,10 +2511,15 @@
                  // A zero-sample flush carries events/parameter queues only. The VST3 process
                  // contract requires no audio buses or pointers for that call.
                  let saved_audio_io = hide_audio_io_for_zero_sample(&mut data.process_data, frames);
@@ -23501,13 +23629,18 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
  
                  // Everything from here to the output copy is per-block cleanup and MUST run even
                  // when the plugin reported failure. Returning early instead would leave this
-@@ -2194,25 +2516,41 @@
+@@ -2194,25 +2535,46 @@
                      &mut data.process_context,
                      data.process_context_requirements,
                      data.transport_tempo,
 +                    self.playing,
                      frames as i64,
                  );
++
++                if self.playing && self.sample_rate > 0.0 {
++                    data.event_quarter_note_position +=
++                        frames as f64 / self.sample_rate * (data.transport_tempo / 60.0);
++                }
 +
 +                if let Some(transport) = &mut self.process_transport {
 +                    transport.advance(frames as i64, self.sample_rate);
@@ -23548,7 +23681,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
  
                  // Capture any MIDI the plugin emitted this block (arpeggiators, MPE, etc.).
                  // Drain the event list in place (no `mem::take`) and push each converted event
-@@ -2221,11 +2559,24 @@
+@@ -2221,11 +2583,24 @@
                  if !self.output_events.is_empty() {
                      let out = &self.output_events_owned;
                      self.output_events.drain_each(|event| {
@@ -23575,7 +23708,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      // Leave the caller's buffers as they were (the playback bridges pre-fill them
                      // with silence) rather than copying out whatever the failed call left behind.
                      Err(Error::ProcessFailed(process_result))
-@@ -2258,9 +2609,7 @@
+@@ -2258,9 +2633,7 @@
              }
          } else {
              Err(Error::Other("Process data not initialized".to_string()))
@@ -23586,7 +23719,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      }
  
      /// Distribute the block's queued input events over its chunks and process each one.
-@@ -2268,7 +2617,13 @@
+@@ -2268,7 +2641,13 @@
      /// `total` is the caller's block length, already known non-zero by the caller; the empty
      /// block is handled separately (some plugins use a zero-sample call to flush pending
      /// parameter changes).
@@ -23601,7 +23734,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          // `.max(1)`: a zero block size would make every chunk empty and never advance `offset`,
          // spinning forever on the audio thread. `Vst3HostBuilder::build` rejects 0, but
          // `block_size` is plain state and this loop must terminate regardless.
-@@ -2284,10 +2639,90 @@
+@@ -2284,10 +2663,90 @@
                  frames,
                  is_last,
              );
@@ -23693,7 +23826,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      }
  
      fn current_audio_bus_layout(&self) -> Result<AudioBusLayout> {
-@@ -2360,8 +2795,32 @@
+@@ -2360,8 +2819,32 @@
          )
      }
  
@@ -23728,7 +23861,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              return Err(Error::NotProcessing);
          }
  
-@@ -2371,9 +2830,9 @@
+@@ -2371,9 +2854,9 @@
  
          let result = if total == 0 {
              stage_chunk_events(&mut self.chunk_events, &self.input_events, 0, 0, true);
@@ -23740,7 +23873,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          };
  
          self.chunk_events.clear();
-@@ -2382,13 +2841,36 @@
+@@ -2382,13 +2865,36 @@
      }
  }
  
@@ -23778,7 +23911,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              return Err(Error::InterfaceError("No controller available".to_string()));
          }
          // VST3 requires both halves: the controller (for GUI/display/formatting) and the
-@@ -2403,26 +2885,12 @@
+@@ -2403,26 +2909,12 @@
          value: f64,
          sample_offset: i32,
      ) -> Result<()> {
@@ -23810,7 +23943,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              id,
              value,
              sample_offset,
-@@ -2430,6 +2898,10 @@
+@@ -2430,6 +2922,10 @@
          Ok(())
      }
  
@@ -23821,7 +23954,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      fn set_tempo(&mut self, bpm: f64) -> Result<()> {
          self.update_tempo(bpm);
          Ok(())
-@@ -2447,7 +2919,7 @@
+@@ -2447,7 +2943,7 @@
  
      fn get_parameter(&self, id: u32) -> Result<f64> {
          self.drain_deferred_controller_sync();
@@ -23830,7 +23963,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              unsafe { Ok(controller.getParamNormalized(id)) }
          } else {
              Err(Error::InterfaceError("No controller available".to_string()))
-@@ -2458,7 +2930,7 @@
+@@ -2458,7 +2954,7 @@
          self.drain_deferred_controller_sync();
          let mut params = Vec::new();
  
@@ -23839,7 +23972,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              unsafe {
                  let count = controller.getParameterCount();
  
-@@ -2495,7 +2967,7 @@
+@@ -2495,7 +2991,7 @@
  
      fn format_parameter(&self, id: u32, normalized: f64) -> Result<String> {
          self.drain_deferred_controller_sync();
@@ -23848,7 +23981,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              unsafe {
                  let mut buf: String128 = std::mem::zeroed();
                  if controller.getParamStringByValue(id, normalized, &mut buf) == kResultOk {
-@@ -2514,39 +2986,274 @@
+@@ -2514,39 +3010,274 @@
          self.process_buffer_view(&mut CallerAudioBuffers::Flat(buffers))
      }
  
@@ -24139,7 +24272,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              return Err(e);
          }
  
-@@ -2558,20 +3265,20 @@
+@@ -2558,20 +3289,20 @@
                      result
                  )));
              }
@@ -24163,7 +24296,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                  Some(value)
                      if value == ePrefetchableSupport_::kIsNeverPrefetchable as u32
                          || value == ePrefetchableSupport_::kIsNotYetPrefetchable as u32 =>
-@@ -2587,19 +3294,18 @@
+@@ -2587,19 +3318,18 @@
              }
          }
          // VST3 requires the component inactive for setupProcessing; mirror reconfigure.
@@ -24188,7 +24321,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              return Err(e);
          }
  
-@@ -2611,7 +3317,7 @@
+@@ -2611,7 +3341,7 @@
                      result
                  )));
              }
@@ -24197,7 +24330,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          }
          Ok(())
      }
-@@ -2620,11 +3326,11 @@
+@@ -2620,11 +3350,11 @@
          use crate::audio::SpeakerArrangement;
          unsafe {
              let read = |dir: i32| -> Vec<SpeakerArrangement> {
@@ -24211,7 +24344,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                          SpeakerArrangement::from_raw(arr)
                      })
                      .collect()
-@@ -2641,7 +3347,7 @@
+@@ -2641,7 +3371,7 @@
          inputs: &[crate::audio::SpeakerArrangement],
          outputs: &[crate::audio::SpeakerArrangement],
      ) -> Result<()> {
@@ -24220,7 +24353,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              return Err(Error::Other(
                  "cannot set bus arrangements while processing".to_string(),
              ));
-@@ -2650,32 +3356,31 @@
+@@ -2650,32 +3380,31 @@
          let mut out_raw: Vec<u64> = outputs.iter().map(|a| a.raw()).collect();
          unsafe {
              // VST3 requires the component inactive for setBusArrangements + setupProcessing.
@@ -24263,7 +24396,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                  return Err(Error::InterfaceError(format!(
                      "setBusArrangements failed: {arrangement_result:#x}"
                  )));
-@@ -2691,7 +3396,7 @@
+@@ -2691,7 +3420,7 @@
                          result
                      )));
                  }
@@ -24272,7 +24405,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              }
          }
          Ok(())
-@@ -2705,7 +3410,7 @@
+@@ -2705,7 +3434,7 @@
          active: bool,
      ) -> Result<()> {
          use crate::audio::{BusDirection, MediaType};
@@ -24281,7 +24414,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              return Err(Error::Other(
                  "cannot activate a bus while processing".to_string(),
              ));
-@@ -2720,7 +3425,7 @@
+@@ -2720,7 +3449,7 @@
              BusDirection::Output => kOutput as i32,
          };
          unsafe {
@@ -24290,7 +24423,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              if bus_index < 0 || bus_index >= count {
                  return Err(Error::InvalidParameter(format!(
                      "bus index {bus_index} out of range for {media_type:?} {direction:?} \
-@@ -2728,35 +3433,78 @@
+@@ -2728,35 +3457,78 @@
                  )));
              }
  
@@ -24379,7 +24512,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      self.create_process_data()
                  } else {
                      Ok(())
-@@ -2771,14 +3519,33 @@
+@@ -2771,14 +3543,33 @@
              if was_active {
                  let reactivate = self.set_component_active(true);
                  if reactivate != kResultOk {
@@ -24417,7 +24550,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          }
          Ok(())
      }
-@@ -2788,171 +3555,79 @@
+@@ -2788,171 +3579,79 @@
      }
  
      fn send_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {
@@ -24653,7 +24786,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      }
  
      fn has_editor(&self) -> bool {
-@@ -2963,12 +3638,12 @@
+@@ -2963,12 +3662,12 @@
  
          // An open editor is proof enough, and probing for a second view while one is attached
          // upsets plugins that assume a single live view.
@@ -24668,7 +24801,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              unsafe {
                  // Check if controller can create an editor view
                  let view_type = c"editor".as_ptr();
-@@ -2989,7 +3664,7 @@
+@@ -2989,7 +3688,7 @@
      }
  
      fn open_editor(&mut self, parent: *mut std::ffi::c_void) -> Result<()> {
@@ -24677,7 +24810,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              return Err(Error::Other("Editor already open".to_string()));
          }
          if parent.is_null() {
-@@ -2998,7 +3673,22 @@
+@@ -2998,7 +3697,22 @@
              ));
          }
  
@@ -24701,7 +24834,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              unsafe {
                  // Create editor view
                  let view_type = c"editor".as_ptr();
-@@ -3010,24 +3700,39 @@
+@@ -3010,24 +3724,39 @@
                  let view = ComPtr::<IPlugView>::from_raw(view_ptr)
                      .ok_or_else(|| Error::Other("Failed to wrap view".to_string()))?;
  
@@ -24756,7 +24889,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                  let frame_result = view.setFrame(frame.as_ptr());
                  if frame_result != kResultOk && frame_result != kResultTrue {
                      return Err(Error::Other(format!(
-@@ -3037,7 +3742,7 @@
+@@ -3037,7 +3766,7 @@
  
                  // Offer the current scale factor, but never let the answer decide whether the
                  // editor opens: a view that declines simply renders at its own scale.
@@ -24765,7 +24898,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
  
                  // Platform-specific attachment
                  #[cfg(target_os = "macos")]
-@@ -3075,7 +3780,7 @@
+@@ -3075,7 +3804,7 @@
  
                  #[cfg(not(target_os = "android"))]
                  {
@@ -24774,7 +24907,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      Ok(())
                  }
              }
-@@ -3086,7 +3791,7 @@
+@@ -3086,7 +3815,7 @@
  
      fn close_editor(&mut self) -> Result<()> {
          let mut close_error = None;
@@ -24783,7 +24916,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              unsafe {
                  let removed_result = view.removed();
                  // Break the view -> host-frame reference before releasing the view. The frame
-@@ -3109,63 +3814,29 @@
+@@ -3109,63 +3838,29 @@
          // `Plugin::service_run_loop` is public with no editor-open guard, a host driving it from
          // its frame loop would then dispatch straight into the removed view.
          #[cfg(target_os = "linux")]
@@ -24861,7 +24994,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              unsafe {
                  let mut view_rect = ViewRect {
                      left: 0,
-@@ -3180,7 +3851,7 @@
+@@ -3180,7 +3875,7 @@
              }
          }
  
@@ -24870,7 +25003,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              unsafe {
                  // Create a temporary view to get size
                  let view_type = c"editor".as_ptr();
-@@ -3220,11 +3891,11 @@
+@@ -3220,11 +3915,11 @@
  
      fn editor_can_resize(&self) -> bool {
          unsafe {
@@ -24884,7 +25017,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                  return false;
              };
              let view_ptr = controller.createView(c"editor".as_ptr());
-@@ -3236,76 +3907,7 @@
+@@ -3236,76 +3931,7 @@
      }
  
      fn resize_editor(&mut self, width: i32, height: i32) -> Result<(i32, i32)> {
@@ -24962,7 +25095,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      }
  
      fn set_editor_scale_factor(&mut self, factor: f32) -> Result<bool> {
-@@ -3314,11 +3916,11 @@
+@@ -3314,11 +3940,11 @@
                  "editor scale factor must be finite and greater than zero".to_string(),
              ));
          }
@@ -24976,7 +25109,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          Ok(supported)
      }
  
-@@ -3328,49 +3930,62 @@
+@@ -3328,49 +3954,62 @@
  
      fn take_parameter_edits(&mut self) -> Vec<crate::plugin::ParameterEdit> {
          self.service_control_thread_caches();
@@ -25045,7 +25178,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .as_ref()
              .ok_or_else(|| Error::Other("component handler is unavailable".to_string()))?
              .dismiss_context_menu(menu_id)
-@@ -3378,28 +3993,34 @@
+@@ -3378,28 +4017,34 @@
  
      fn take_restart_flags(&mut self) -> crate::plugin::RestartFlags {
          let flags = self
@@ -25084,7 +25217,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              return Err(Error::Other(
                  "restart requests must be serviced on the plugin control thread".to_string(),
              ));
-@@ -3411,39 +4032,51 @@
+@@ -3411,39 +4056,51 @@
          }
  
          unsafe {
@@ -25146,7 +25279,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      }
                      Err(error) => Err(error),
                  }
-@@ -3451,12 +4084,18 @@
+@@ -3451,12 +4108,18 @@
                  Ok(())
              };
  
@@ -25167,7 +25300,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      Ok(())
                  } else {
                      Err(Error::Other(format!(
-@@ -3467,48 +4106,66 @@
+@@ -3467,48 +4130,66 @@
                  Ok(())
              };
  
@@ -25248,7 +25381,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      }
  
      fn note_on(
-@@ -3518,58 +4175,11 @@
+@@ -3518,58 +4199,11 @@
          velocity: u8,
          sample_offset: i32,
      ) -> Result<crate::midi::NoteId> {
@@ -25309,7 +25442,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      }
  
      fn send_note_expression(
-@@ -3579,18 +4189,8 @@
+@@ -3579,18 +4213,8 @@
          value: f64,
          sample_offset: i32,
      ) -> Result<()> {
@@ -25330,7 +25463,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      }
  
      fn note_expressions(
-@@ -3600,6 +4200,7 @@
+@@ -3600,6 +4224,7 @@
      ) -> Result<Vec<crate::midi::NoteExpressionInfo>> {
          use crate::midi::{NoteExpressionInfo, NoteExpressionType};
          let Some(ctrl) = self
@@ -25338,7 +25471,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .controller
              .as_ref()
              .and_then(|c| c.cast::<INoteExpressionController>())
-@@ -3635,12 +4236,13 @@
+@@ -3635,12 +4260,13 @@
  
      fn get_units(&self) -> Result<Vec<crate::plugin::PluginUnit>> {
          use crate::plugin::PluginUnit;
@@ -25353,7 +25486,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .unit_cache
              .lock()
              .unwrap_or_else(|poison| poison.into_inner())
-@@ -3649,7 +4251,7 @@
+@@ -3649,7 +4275,7 @@
          {
              return Ok(units);
          }
@@ -25362,7 +25495,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              return Ok(Vec::new());
          };
          // IUnitInfo is optional; plugins without it (no units/program lists) return empty.
-@@ -3696,6 +4298,7 @@
+@@ -3696,6 +4322,7 @@
                  });
              }
              *self
@@ -25370,7 +25503,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                  .unit_cache
                  .lock()
                  .unwrap_or_else(|poison| poison.into_inner()) = Some(units.clone());
-@@ -3706,7 +4309,7 @@
+@@ -3706,7 +4333,7 @@
      fn select_program(&mut self, unit_id: i32, program_index: i32) -> Result<()> {
          self.service_control_thread_caches();
          if self.cached_program_change(unit_id).is_none()
@@ -25379,7 +25512,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          {
              self.refresh_program_change_cache();
          }
-@@ -3736,12 +4339,13 @@
+@@ -3736,12 +4363,13 @@
      }
  
      fn selected_unit(&self) -> Result<Option<i32>> {
@@ -25394,7 +25527,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3753,12 +4357,13 @@
+@@ -3753,12 +4381,13 @@
      }
  
      fn select_unit(&mut self, unit_id: i32) -> Result<()> {
@@ -25409,7 +25542,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3783,12 +4388,13 @@
+@@ -3783,12 +4412,13 @@
                  "program index must be non-negative, got {program_index}"
              )));
          }
@@ -25424,7 +25557,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitInfo>())
-@@ -3831,6 +4437,7 @@
+@@ -3831,6 +4461,7 @@
          }
          self.ensure_control_thread("program data read")?;
          let Some(data_interface) = self
@@ -25432,7 +25565,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IProgramListData>())
-@@ -3871,6 +4478,7 @@
+@@ -3871,6 +4502,7 @@
          self.ensure_stream_size(data)?;
          self.ensure_control_thread("program data restore")?;
          let data_interface = self
@@ -25440,7 +25573,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IProgramListData>())
-@@ -3895,6 +4503,7 @@
+@@ -3895,6 +4527,7 @@
                  data_interface.setProgramData(program_list_id, program_index, stream_ptr.as_ptr());
              if result == kResultOk {
                  *self
@@ -25448,7 +25581,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -3911,6 +4520,7 @@
+@@ -3911,6 +4544,7 @@
      fn get_unit_data(&self, unit_id: i32) -> Result<Option<Vec<u8>>> {
          self.ensure_control_thread("unit data read")?;
          let Some(data_interface) = self
@@ -25456,7 +25589,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitData>())
-@@ -3940,6 +4550,7 @@
+@@ -3940,6 +4574,7 @@
          self.ensure_stream_size(data)?;
          self.ensure_control_thread("unit data restore")?;
          let data_interface = self
@@ -25464,7 +25597,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IUnitData>())
-@@ -3961,6 +4572,7 @@
+@@ -3961,6 +4596,7 @@
              let result = data_interface.setUnitData(unit_id, stream_ptr.as_ptr());
              if result == kResultOk {
                  *self
@@ -25472,7 +25605,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -3977,6 +4589,7 @@
+@@ -3977,6 +4613,7 @@
      fn begin_host_edit(&mut self, parameter_id: u32) -> Result<()> {
          self.ensure_control_thread("host edit begin")?;
          let editing = self
@@ -25480,7 +25613,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
-@@ -3992,6 +4605,7 @@
+@@ -3992,6 +4629,7 @@
      fn end_host_edit(&mut self, parameter_id: u32) -> Result<()> {
          self.ensure_control_thread("host edit end")?;
          let editing = self
@@ -25488,7 +25621,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IEditControllerHostEditing>())
-@@ -4012,6 +4626,7 @@
+@@ -4012,6 +4650,7 @@
          }
          self.ensure_control_thread("MIDI learn notification")?;
          let midi_learn = self
@@ -25496,7 +25629,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .controller
              .as_ref()
              .and_then(|edit_controller| edit_controller.cast::<IMidiLearn>())
-@@ -4026,6 +4641,7 @@
+@@ -4026,6 +4665,7 @@
          use crate::plugin::AutomationState;
          self.ensure_control_thread("automation state update")?;
          let automation = self
@@ -25504,7 +25637,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IAutomationState>())
-@@ -4052,6 +4668,7 @@
+@@ -4052,6 +4692,7 @@
          })?;
          self.ensure_control_thread("parameter id remapping")?;
          let Some(remapper) = self
@@ -25512,7 +25645,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              .controller
              .as_ref()
              .and_then(|controller| controller.cast::<IRemapParamID>())
-@@ -4075,8 +4692,11 @@
+@@ -4075,8 +4716,11 @@
      }
  
      fn midi_panic(&mut self) -> Result<()> {
@@ -25526,7 +25659,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              unsafe {
                  let mut event: Event = std::mem::zeroed();
                  event.busIndex = 0;
-@@ -4086,30 +4706,46 @@
+@@ -4086,30 +4730,46 @@
                  event.__field0.noteOff.noteId = note_id;
                  event.__field0.noteOff.channel = channel;
                  event.__field0.noteOff.pitch = pitch;
@@ -25597,7 +25730,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          }
  
          // Also route the standard panic controllers through IMidiMapping for plugins that
-@@ -4126,11 +4762,20 @@
+@@ -4126,11 +4786,20 @@
      }
  
      fn output_channel_count(&self) -> usize {
@@ -25619,7 +25752,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      .bus_activation
                      .audio_outputs
                      .get(i as usize)
-@@ -4141,6 +4786,7 @@
+@@ -4141,6 +4810,7 @@
                  }
                  let mut info: BusInfo = std::mem::zeroed();
                  if self
@@ -25627,7 +25760,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      .component
                      .getBusInfo(kAudio as i32, kOutput as i32, i, &mut info)
                      == kResultOk
-@@ -4149,6 +4795,7 @@
+@@ -4149,6 +4819,7 @@
                  } else {
                      let mut arrangement = 0u64;
                      if self
@@ -25635,7 +25768,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                          .processor
                          .getBusArrangement(kOutput as i32, i, &mut arrangement)
                          == kResultOk
-@@ -4162,14 +4809,23 @@
+@@ -4162,14 +4833,23 @@
      }
  
      fn save_state(&self) -> Result<Vec<u8>> {
@@ -25660,7 +25793,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              if result != kResultOk {
                  return Err(Error::Other(format!(
                      "Plugin does not provide state (getState: {result:#x})"
-@@ -4180,8 +4836,11 @@
+@@ -4180,8 +4860,11 @@
              // its state returns the blob above a second time: the envelope would carry the same
              // bytes twice, the combined size cap would effectively halve, and `load_state` would
              // apply `setState` twice. `load_state` has the matching guard.
@@ -25674,7 +25807,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              {
                  let stream = create_memory_stream_with_metadata(None, StreamStateType::Project);
                  let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
-@@ -4201,56 +4860,83 @@
+@@ -4201,56 +4884,83 @@
                  None
              };
  
@@ -25773,7 +25906,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                          let stream =
                              create_state_restore_stream(snapshot.component.clone(), context);
                          let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
-@@ -4268,9 +4954,13 @@
+@@ -4268,9 +4978,13 @@
                      }
                  }
  
@@ -25790,7 +25923,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      let stream = create_state_restore_stream(controller_state.clone(), context);
                      let stream_ptr = stream.to_com_ptr::<IBStream>().ok_or_else(|| {
                          Error::InterfaceError("Failed to create controller state stream".into())
-@@ -4283,11 +4973,27 @@
+@@ -4283,11 +4997,27 @@
                      }
                  }
  
@@ -25821,7 +25954,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
                      .unit_cache
                      .lock()
                      .unwrap_or_else(|poison| poison.into_inner()) = None;
-@@ -4297,21 +5003,35 @@
+@@ -4297,21 +5027,35 @@
              })();
  
              let restore_result = (|| -> Result<()> {
@@ -25859,7 +25992,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
              match (apply_result, restore_result) {
                  (Ok(()), Ok(())) => Ok(()),
                  (Err(apply), Ok(())) => Err(apply),
-@@ -4405,43 +5125,247 @@
+@@ -4405,43 +5149,247 @@
          // Rebuild the table here if a restart invalidated it off-thread; a no-op on the audio
          // thread, which must never make controller calls.
          self.service_control_thread_caches();
@@ -26123,7 +26256,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          })
      }
  
-@@ -4469,10 +5393,16 @@
+@@ -4469,10 +5417,16 @@
  
          log::debug!("Got controller class ID, creating controller...");
          let mut controller_ptr: *mut IEditController = ptr::null_mut();
@@ -26140,7 +26273,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          );
  
          if create_result != kResultOk || controller_ptr.is_null() {
-@@ -4489,7 +5419,9 @@
+@@ -4489,7 +5443,9 @@
  
          // Initialize controller with the same host context as the component.
          log::debug!("Initializing controller...");
@@ -26150,7 +26283,16 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          if init_result != kResultOk {
              log::warn!("Failed to initialize controller: {:#x}", init_result);
              return Ok(None);
-@@ -4576,7 +5508,7 @@
+@@ -4554,7 +5510,7 @@
+ /// offset to the chunk start (see [`chunk_offset`]). Replaces whatever the list held, so each
+ /// chunk of a split block sees exactly its own events, in order and with their spacing intact.
+ fn stage_chunk_events(
+-    queued: &mut [Option<PluginEvent>],
++    queued: &mut [Option<QueuedEvent>],
+     list: &HostEventList,
+     chunk_start: usize,
+     frames: usize,
+@@ -4576,7 +5532,7 @@
  /// still fail — and by then the plugin may have spawned threads and registered callbacks.
  /// Releasing its interfaces and unloading the module without `terminate()` leaves that code
  /// running inside memory the unload is about to unmap. This guard runs the same sequence
@@ -26159,7 +26301,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
  ///
  /// It holds its own references (COM refcounts), so `load` keeps using the originals as it
  /// builds; the extra references are released when the guard drops either way.
-@@ -4617,8 +5549,10 @@
+@@ -4617,8 +5573,10 @@
          self.connection.take()
      }
  
@@ -26172,7 +26314,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          self.armed = false;
      }
  }
-@@ -4629,6 +5563,7 @@
+@@ -4629,6 +5587,7 @@
              return;
          }
          log::debug!("Plugin load failed after initialize; terminating the component");
@@ -26180,7 +26322,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          unsafe {
              terminate_component(
                  &self.component,
-@@ -4637,6 +5572,7 @@
+@@ -4637,6 +5596,7 @@
                  self.connection.as_ref(),
              );
          }
@@ -26188,7 +26330,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      }
  }
  
-@@ -4654,18 +5590,25 @@
+@@ -4654,18 +5614,25 @@
      connection: Option<&ConnectionPair>,
  ) {
      if let Some(connection) = connection {
@@ -26218,7 +26360,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          // VST3 teardown order: detach the editor, stop processing, deactivate the component,
          // disconnect the component/controller connection points, terminate the controller and the
          // component, then drop the COM references. Many plugins (dual-component ones especially)
-@@ -4681,21 +5624,26 @@
+@@ -4681,21 +5648,26 @@
          let _ = PluginInternal::close_editor(self);
  
          let _ = self.stop_processing();
@@ -26252,7 +26394,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      }
  }
  
-@@ -4776,18 +5724,53 @@
+@@ -4776,18 +5748,53 @@
          .unwrap_or_default()
  }
  
@@ -26309,7 +26451,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
      if process_context_needs(requirements, R::kNeedContinousTimeSamples as u32) {
          ctx.continousTimeSamples = ctx.continousTimeSamples.wrapping_add(frames);
      }
-@@ -4798,17 +5781,79 @@
+@@ -4798,17 +5805,79 @@
          let nanos = (frames as f64 * 1_000_000_000.0 / ctx.sampleRate).round() as i64;
          ctx.systemTime = ctx.systemTime.saturating_add(nanos);
      }
@@ -26393,7 +26535,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
  
      fn buses(channels: &[i32]) -> Vec<AudioBusBuffers> {
          channels
-@@ -5053,7 +6098,7 @@
+@@ -5053,7 +6122,7 @@
          // One second of audio at 48 kHz in 512-sample blocks.
          let blocks = 48_000 / 512;
          for _ in 0..blocks {
@@ -26402,7 +26544,24 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
          }
          let advanced = (blocks * 512) as i64;
          assert_eq!(ctx.projectTimeSamples, advanced);
-@@ -5448,3 +6493,317 @@
+@@ -5082,7 +6151,7 @@
+     use super::*;
+     use crate::internal::com_implementations::create_event_list;
+ 
+-    fn note_on_at(offset: i32, pitch: i16) -> PluginEvent {
++    fn note_on_at(offset: i32, pitch: i16) -> QueuedEvent {
+         PluginEvent {
+             bus_index: 0,
+             sample_offset: offset,
+@@ -5097,6 +6166,7 @@
+                 note_id: -1,
+             },
+         }
++        .into()
+     }
+ 
+     /// Read back what the plugin would see: `(sampleOffset, pitch)` per staged event.
+@@ -5448,3 +6518,318 @@
          assert_eq!(calls.load(Ordering::SeqCst), 0);
      }
  }
@@ -26526,7 +26685,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
 +                _ => return Err(Error::MidiError("mapped MIDI requires the owner".into())),
 +            }
 +            self.input_events
-+                .try_add_raw_event(&vst_event)
++                .try_add_ordinary_midi_event(&vst_event)
 +                .map_err(|_| Error::EventInputRejected)?;
 +        }
 +        if let Some((index, count)) = note_count_commit {
@@ -26589,6 +26748,7 @@ diff --git a/src/internal/plugin_impl.rs b/src/internal/plugin_impl.rs
 +        self.update_playing(transport.playing);
 +        self.process_transport = Some(transport);
 +        if let Some(data) = &mut self.process_data {
++            data.event_quarter_note_position = transport.quarter_note_position;
 +            apply_process_transport(
 +                &mut data.process_context,
 +                data.process_context_requirements,
@@ -28205,7 +28365,7 @@ diff --git a/src/internal/plugin_impl/domain_tests.rs b/src/internal/plugin_impl
 new file mode 100644
 --- /dev/null
 +++ b/src/internal/plugin_impl/domain_tests.rs
-@@ -0,0 +1,3622 @@
+@@ -0,0 +1,3632 @@
 +//! Synchronous ownership/lifecycle regression tests using real VST3 COM interfaces.
 +//! These mocks intentionally allocate and lock; these are not real-time-safety tests.
 +
@@ -28214,6 +28374,7 @@ new file mode 100644
 +
 +#[path = "domain_tests/explicit_bus_preferences.rs"]
 +mod explicit_bus_preferences;
++mod offline_midi_timing;
 +
 +use super::*;
 +use std::{
@@ -28355,6 +28516,7 @@ new file mode 100644
 +struct OriginCall {
 +    frames: i32,
 +    events: Vec<(u16, i32, i16)>,
++    event_headers: Vec<(i32, i32, f64, u16)>,
 +    transport: Option<(u32, i64, f64, i64, i64)>,
 +    silent_input: bool,
 +}
@@ -28851,10 +29013,17 @@ new file mode 100644
 +        }
 +        if self.state.capture_origin.load(Ordering::Acquire) {
 +            let mut events = Vec::new();
++            let mut event_headers = Vec::new();
 +            if let Some(list) = vst3::ComRef::from_raw(data.inputEvents) {
 +                for index in 0..list.getEventCount() {
 +                    let mut event: Event = std::mem::zeroed();
 +                    assert_eq!(list.getEvent(index, &mut event), kResultOk);
++                    event_headers.push((
++                        event.busIndex,
++                        event.sampleOffset,
++                        event.ppqPosition,
++                        event.flags,
++                    ));
 +                    let pitch = if event.r#type == kNoteOnEvent as u16 {
 +                        event.__field0.noteOn.pitch
 +                    } else if event.r#type == kNoteOffEvent as u16 {
@@ -28894,6 +29063,7 @@ new file mode 100644
 +            self.state.origin_calls.lock().unwrap().push(OriginCall {
 +                frames: data.numSamples,
 +                events,
++                event_headers,
 +                transport: context,
 +                silent_input,
 +            });
@@ -32731,6 +32901,275 @@ new file mode 100644
 +        1
 +    );
 +    state.fail_deactivate.store(false, Ordering::Relaxed);
++}
+diff --git a/src/internal/plugin_impl/domain_tests/offline_midi_timing.rs b/src/internal/plugin_impl/domain_tests/offline_midi_timing.rs
+new file mode 100644
+--- /dev/null
++++ b/src/internal/plugin_impl/domain_tests/offline_midi_timing.rs
+@@ -0,0 +1,264 @@
++//! Inspect the actual COM IEventList handed to IAudioProcessor::process, not a
++//! separate timing helper. In particular SendMidiAt precedes Process transport.
++
++use super::*;
++
++fn fixture(
++    mode: crate::plugin::ProcessMode,
++    requirements: Option<u32>,
++) -> (PluginImpl, Arc<MockState>, Trace) {
++    let trace = Trace::default();
++    let state = Arc::new(MockState::default());
++    state.capture_origin.store(true, Ordering::Release);
++    let mut plugin = plugin_fixture(&trace, &state);
++    plugin.runtime.process_context_requirements = requirements;
++    plugin.set_process_mode(mode).unwrap();
++    plugin.start_processing().unwrap();
++    (plugin, state, trace)
++}
++
++fn transport(ppq: f64, tempo: f64, sample: i64, playing: bool) -> crate::ProcessTransport {
++    crate::ProcessTransport {
++        sample_position: sample,
++        quarter_note_position: ppq,
++        tempo,
++        playing,
++        time_sig_numerator: 4,
++        time_sig_denominator: 4,
++    }
++}
++
++fn on(note: u8) -> MidiEvent {
++    MidiEvent::NoteOn {
++        channel: MidiChannel::Ch2,
++        note,
++        velocity: 93,
++    }
++}
++
++fn explicit_event(offset: i32) -> PluginEvent {
++    PluginEvent {
++        bus_index: 0,
++        sample_offset: offset,
++        ppq_position: 123.75,
++        flags: Event_::EventFlags_::kIsLive as u16 | Event_::EventFlags_::kUserReserved1 as u16,
++        data: crate::midi::PluginEventData::NoteOn {
++            channel: 3,
++            pitch: 79,
++            tuning: 0.0,
++            velocity: 0.625,
++            length: 0,
++            note_id: 42,
++        },
++    }
++}
++
++fn assert_header(actual: (i32, i32, f64, u16), offset: i32, ppq: f64, flags: u16) {
++    assert_eq!((actual.0, actual.1, actual.3), (0, offset, flags));
++    assert!(
++        (actual.2 - ppq).abs() < 1e-12,
++        "{actual:?}; expected PPQ {ppq}"
++    );
++}
++
++#[test]
++fn offline_midi_uses_current_block_transport_after_admission_across_chunks_and_tempo_change() {
++    // Event PPQ remains valid even when the processor does not request the optional
++    // ProcessContext musical fields. A sample position must never reconstruct PPQ.
++    for requirements in [None, Some(0)] {
++        let (mut plugin, state, trace) = fixture(crate::ProcessMode::Offline, requirements);
++        plugin.send_midi_event_at(on(60), 3).unwrap();
++        plugin
++            .send_midi_event_at(
++                MidiEvent::PolyAftertouch {
++                    channel: MidiChannel::Ch2,
++                    note: 60,
++                    pressure: 71,
++                },
++                5,
++            )
++            .unwrap();
++        plugin
++            .send_midi_event_at(
++                MidiEvent::NoteOff {
++                    channel: MidiChannel::Ch2,
++                    note: 60,
++                    velocity: 27,
++                },
++                29,
++            )
++            .unwrap();
++        let explicit = explicit_event(20);
++        plugin.send_plugin_event(explicit.clone()).unwrap();
++        plugin.set_parameter_at(77, 0.375, 21).unwrap();
++        // Exactly the helper ordering: MIDI first, then transport on Process.
++        plugin
++            .set_process_transport(transport(9.25, 150.0, 7_000, true))
++            .unwrap();
++        trace.clear();
++        plugin
++            .process(&mut AudioBuffers::new(1, 1, 32, 48_000.0))
++            .unwrap();
++        // The configured maximum is 16: both SDK calls must see rebased offsets,
++        // an advanced musical origin and the unchanged FIFO/payload kinds.
++        let calls = state.origin_calls.lock().unwrap();
++        assert_eq!(calls.len(), 2);
++        assert_eq!(
++            calls[0].events,
++            [
++                (kNoteOnEvent as u16, 3, 60),
++                (kPolyPressureEvent as u16, 5, -1)
++            ]
++        );
++        assert_eq!(
++            calls[1].events,
++            [(kNoteOffEvent as u16, 13, 60), (kNoteOnEvent as u16, 4, 79)]
++        );
++        let ppq = |offset: f64| 9.25 + offset / 48_000.0 * (150.0 / 60.0);
++        assert_header(calls[0].event_headers[0], 3, ppq(3.0), 0);
++        assert_header(calls[0].event_headers[1], 5, ppq(5.0), 0);
++        assert_header(calls[1].event_headers[0], 13, ppq(29.0), 0);
++        assert_header(
++            calls[1].event_headers[1],
++            4,
++            explicit.ppq_position,
++            explicit.flags,
++        );
++        drop(calls);
++        assert_eq!(
++            *state.processed_parameters.lock().unwrap(),
++            [vec![], vec![(77, 5, 0.375)]]
++        );
++        assert_eq!(
++            trace.methods(),
++            [("component", "process"), ("component", "process")]
++        );
++
++        // Non-contiguous sample and PPQ positions plus a different tempo invalidate
++        // any attempt to stamp the event at admission using the preceding block.
++        plugin.send_midi_event_at(on(62), 7).unwrap();
++        plugin
++            .set_process_transport(transport(12.75, 81.0, -177, true))
++            .unwrap();
++        plugin
++            .process(&mut AudioBuffers::new(1, 1, 16, 48_000.0))
++            .unwrap();
++        let calls = state.origin_calls.lock().unwrap();
++        assert_header(
++            calls[2].event_headers[0],
++            7,
++            12.75 + 7.0 / 48_000.0 * (81.0 / 60.0),
++            0,
++        );
++        drop(calls);
++
++        // Without a fresh update the existing playing transport advances. It does
++        // so independently of whether ProcessContext music was requested.
++        plugin.send_midi_event_at(on(64), 2).unwrap();
++        plugin
++            .process(&mut AudioBuffers::new(1, 1, 16, 48_000.0))
++            .unwrap();
++        assert_header(
++            state.origin_calls.lock().unwrap()[3].event_headers[0],
++            2,
++            12.75 + 18.0 / 48_000.0 * (81.0 / 60.0),
++            0,
++        );
++    }
++}
++
++#[test]
++fn offline_midi_stopped_and_zero_sample_flush_keep_project_position_and_final_offsets() {
++    let (mut plugin, state, _) = fixture(crate::ProcessMode::Offline, Some(0));
++    plugin.send_midi_event_at(on(60), 5).unwrap();
++    plugin
++        .set_process_transport(transport(4.5, 73.0, 1_234, false))
++        .unwrap();
++    plugin
++        .process(&mut AudioBuffers::new(1, 1, 16, 48_000.0))
++        .unwrap();
++    plugin.send_midi_event_at(on(62), 9_000).unwrap();
++    plugin
++        .process(&mut AudioBuffers::new(1, 1, 0, 48_000.0))
++        .unwrap();
++    let calls = state.origin_calls.lock().unwrap();
++    assert_eq!(calls[0].frames, 16);
++    assert_eq!(calls[1].frames, 0);
++    assert_header(calls[0].event_headers[0], 5, 4.5, 0);
++    assert_header(calls[1].event_headers[0], 0, 4.5, 0);
++}
++
++#[test]
++fn offline_midi_without_explicit_transport_integrates_tempo_from_the_default_origin() {
++    let (mut plugin, state, _) = fixture(crate::ProcessMode::Offline, Some(0));
++    plugin.send_midi_event_at(on(60), 4).unwrap();
++    plugin
++        .process(&mut AudioBuffers::new(1, 1, 16, 48_000.0))
++        .unwrap();
++    plugin.set_tempo(60.0).unwrap();
++    plugin.send_midi_event_at(on(62), 5).unwrap();
++    plugin
++        .process(&mut AudioBuffers::new(1, 1, 16, 48_000.0))
++        .unwrap();
++    assert!(plugin.runtime.process_transport.is_none());
++    let calls = state.origin_calls.lock().unwrap();
++    assert_header(calls[0].event_headers[0], 4, 4.0 / 48_000.0 * 2.0, 0);
++    assert_header(
++        calls[1].event_headers[0],
++        5,
++        (16.0 * 2.0 + 5.0) / 48_000.0,
++        0,
++    );
++}
++
++#[test]
++fn realtime_and_prefetch_midi_keep_live_metadata_and_explicit_event_headers() {
++    for mode in [crate::ProcessMode::Realtime, crate::ProcessMode::Prefetch] {
++        let (mut plugin, state, _) = fixture(mode, None);
++        plugin.send_midi_event_at(on(60), 5).unwrap();
++        plugin
++            .send_midi_event_at(
++                MidiEvent::PolyAftertouch {
++                    channel: MidiChannel::Ch2,
++                    note: 60,
++                    pressure: 71,
++                },
++                7,
++            )
++            .unwrap();
++        plugin
++            .send_midi_event_at(
++                MidiEvent::NoteOff {
++                    channel: MidiChannel::Ch2,
++                    note: 60,
++                    velocity: 27,
++                },
++                11,
++            )
++            .unwrap();
++        let explicit = explicit_event(8);
++        plugin.send_plugin_event(explicit.clone()).unwrap();
++        plugin
++            .set_process_transport(transport(8.5, 135.0, 32_100, true))
++            .unwrap();
++        plugin
++            .process(&mut AudioBuffers::new(1, 1, 16, 48_000.0))
++            .unwrap();
++        let calls = state.origin_calls.lock().unwrap();
++        assert_eq!(calls[0].event_headers.len(), 4);
++        for (index, offset) in [5, 7, 11].into_iter().enumerate() {
++            assert_header(
++                calls[0].event_headers[index],
++                offset,
++                0.0,
++                Event_::EventFlags_::kIsLive as u16,
++            );
++        }
++        assert_header(
++            calls[0].event_headers[3],
++            8,
++            explicit.ppq_position,
++            explicit.flags,
++        );
++    }
 +}
 diff --git a/src/internal/plugin_impl/domain_tests/runtime_loan_tests.rs b/src/internal/plugin_impl/domain_tests/runtime_loan_tests.rs
 new file mode 100644
@@ -37586,7 +38025,19 @@ diff --git a/src/plugin.rs b/src/plugin.rs
      }
  
      /// Resolve a MIDI controller to the parameter it's mapped to, via the plugin's
-@@ -1846,10 +2781,15 @@
+@@ -1698,6 +2633,11 @@
+     /// Works both in-process and across process isolation — the offset is carried across the
+     /// boundary and applied by the helper's in-process plugin. The event's data fields are
+     /// range-checked exactly as in [`send_midi_event`](Self::send_midi_event).
++    /// In [`ProcessMode::Offline`], ordinary note-on/off and poly-pressure events are
++    /// sequenced (not `kIsLive`); their PPQ is resolved from the actual process block's
++    /// transport and final sample offset, even if transport is supplied after admission.
++    /// Realtime/prefetch convenience events retain their live metadata. To supply explicit
++    /// VST3 flags and PPQ in any mode, use [`send_plugin_event`](Self::send_plugin_event).
+     ///
+     /// [`process_audio`]: Self::process_audio
+     pub fn send_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {
+@@ -1846,10 +2786,15 @@
              return Ok(());
          }
  
@@ -37606,7 +38057,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
  
          self.is_processing = false;
          Ok(())
-@@ -1884,12 +2824,68 @@
+@@ -1884,12 +2829,68 @@
          Ok(())
      }
  
@@ -37675,7 +38126,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
      }
  
      /// Allocate a bus-aware silent buffer set matching the plug-in's current configuration.
-@@ -1986,6 +2982,29 @@
+@@ -1986,6 +2987,29 @@
              .as_ref()
              .map(|i| i.has_editor())
              .unwrap_or(false)
@@ -37705,7 +38156,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
      }
  
      /// Open the plugin editor window
-@@ -2115,6 +3134,39 @@
+@@ -2115,6 +3139,39 @@
              .unwrap_or_default()
      }
  
@@ -37745,7 +38196,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
      /// Drain ordered requests the plugin reported through `IComponentHandler2`.
      pub fn take_host_notifications(&mut self) -> Vec<HostNotification> {
          self.internal
-@@ -2176,10 +3228,17 @@
+@@ -2176,10 +3233,17 @@
      /// lifecycle. The returned flags still describe every request; in particular,
      /// [`RestartFlags::reload_component`] means the caller must replace this plugin instance.
      pub fn service_host_requests(&mut self) -> Result<RestartFlags> {
@@ -37767,7 +38218,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
      }
  
      /// Take the MIDI events the plugin has emitted (e.g. from an arpeggiator or MPE
-@@ -2191,7 +3250,8 @@
+@@ -2191,7 +3255,8 @@
      /// marshalled back alongside each processed block.
      ///
      /// The buffer is capped at 4096 events: if you never poll while a chatty plugin keeps
@@ -37777,7 +38228,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
      pub fn take_output_midi(&self) -> Vec<MidiEvent> {
          self.internal
              .as_ref()
-@@ -2209,6 +3269,19 @@
+@@ -2209,6 +3274,19 @@
          self.internal
              .as_ref()
              .map(|i| i.take_output_events())
@@ -37797,7 +38248,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
              .unwrap_or_default()
      }
  
-@@ -2248,6 +3321,15 @@
+@@ -2248,6 +3326,15 @@
              .save_state()
      }
  
@@ -37813,7 +38264,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
      /// Restore plugin state from a blob produced by [`Self::save_state`] on the *same*
      /// plugin. Applies to both the processor and the controller, so parameter values and
      /// the editor reflect the restored state.
-@@ -2258,10 +3340,17 @@
+@@ -2258,10 +3345,17 @@
      /// The plugin is told this is a project/session restore ([`StateContext::Project`]). Use
      /// [`Self::load_state_with_context`] when the bytes came from a preset file instead.
      pub fn load_state(&mut self, data: &[u8]) -> Result<()> {
@@ -37835,7 +38286,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
      }
  
      /// Restore plugin state as [`Self::load_state`] does, and tell the plugin where the bytes
-@@ -2276,10 +3365,17 @@
+@@ -2276,10 +3370,17 @@
      /// Works both in-process and across process isolation — an isolated plugin's `setState`
      /// sees the same attributes.
      pub fn load_state_with_context(&mut self, data: &[u8], context: &StateContext) -> Result<()> {
@@ -37857,7 +38308,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
      }
  
      /// Save this plugin's state to a file as a [`PluginPreset`] (JSON: the plugin's `uid`
-@@ -2454,14 +3550,14 @@
+@@ -2454,14 +3555,14 @@
  /// Highest value a 14-bit MIDI pitch-bend can carry.
  const MIDI_PITCH_BEND_MAX: u16 = 16383;
  
@@ -37874,7 +38325,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
      if velocity > MIDI_DATA_MAX {
          return Err(Error::MidiError(format!("Invalid velocity: {}", velocity)));
      }
-@@ -2505,7 +3601,7 @@
+@@ -2505,7 +3606,7 @@
  ///
  /// The match below has no wildcard arm on purpose: `MidiEvent` is `#[non_exhaustive]` only to
  /// downstream crates, so a variant added here fails to compile until it states its own ranges.
@@ -37883,7 +38334,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
      match *event {
          MidiEvent::NoteOn { note, velocity, .. } | MidiEvent::NoteOff { note, velocity, .. } => {
              validate_note(note)?;
-@@ -2543,7 +3639,7 @@
+@@ -2543,7 +3644,7 @@
      }
  }
  
@@ -37892,7 +38343,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
      if event.bus_index < 0 {
          return Err(Error::MidiError(format!(
              "Invalid event bus index: {}",
-@@ -2669,6 +3765,59 @@
+@@ -2669,6 +3770,59 @@
              "Legacy MIDI CC events are plugin output only".to_string(),
          )),
      }
@@ -37952,7 +38403,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
  }
  
  /// Platform-specific window handle
-@@ -2950,6 +4099,29 @@
+@@ -2950,6 +4104,29 @@
  #[cfg(test)]
  mod public_surface_tests {
      use super::*;
@@ -37982,7 +38433,7 @@ diff --git a/src/plugin.rs b/src/plugin.rs
  
      /// A `Plugin` with no backing implementation. Enough to exercise the checks the public
      /// surface performs *before* it reaches into `internal`.
-@@ -3327,3 +4499,68 @@
+@@ -3327,3 +4504,68 @@
          assert!(decode_state_snapshot(&bytes).is_err());
      }
  }

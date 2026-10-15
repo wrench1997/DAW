@@ -2633,6 +2633,11 @@ impl Plugin {
     /// Works both in-process and across process isolation — the offset is carried across the
     /// boundary and applied by the helper's in-process plugin. The event's data fields are
     /// range-checked exactly as in [`send_midi_event`](Self::send_midi_event).
+    /// In [`ProcessMode::Offline`], ordinary note-on/off and poly-pressure events are
+    /// sequenced (not `kIsLive`); their PPQ is resolved from the actual process block's
+    /// transport and final sample offset, even if transport is supplied after admission.
+    /// Realtime/prefetch convenience events retain their live metadata. To supply explicit
+    /// VST3 flags and PPQ in any mode, use [`send_plugin_event`](Self::send_plugin_event).
     ///
     /// [`process_audio`]: Self::process_audio
     pub fn send_midi_event_at(&mut self, event: MidiEvent, sample_offset: i32) -> Result<()> {

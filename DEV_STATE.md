@@ -5,6 +5,8 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
+离线事件候选另修正确证SDK语义：普通MIDI原先在Offline也标kIsLive、PPQ恒0；现在只对host-generated普通MIDI，在实际DSP块/chunk、当前transport与最终offset确定后去live并计算PPQ，Realtime/Prefetch及显式PluginEvent字段保持。4项真实COM process观察回归、完整75文件vendor patch重放/显式pins及两条CI直接consumer已接线；目前仅格式/diff、完整性与Python合同检查通过，Rust/Clippy/NI未跑。此候选不冒充384帧首音差异已修。另确认IProgress只暴露在HostApplication、未暴露在实际ComponentHandler，且现有通知仅drain增量、无typed active恢复快照；该接口与Strict消费闭环尚未实现，不与App generic ACK恢复混为一谈。
+
 当前后台候选：普通Open恢复generic bases原先向容量64的admin队列无回执地逐项发送，满队列后可能漏参却显示Loaded。新候选保留exact session/endpoint/slot/control owner，以tagged ACK完成非空参数恢复后才就绪；背压保留重试，拒绝/丢回执/既有30秒无进展预算失败明确，PLUGINS提供显式恢复重试，空参数表保留原合同。8项新worker/有界队列回归及Loaded身份门补充已写入；仅rustfmt/diff通过，编译/测试/Clippy尚未运行，不把Native05/06旧冻结bin的成功归给此候选。
 
 Native06已完成关闭exact timing的普通GUI冷开整曲导出，未重建：复用Native05冻结双bin、同一验证02、无播放/无新Save、相同48k/24-bit/3000ms固定尾音，实际新目录 `native06-no-exact-timing/Untitled.wav` 输出10.500秒/504000帧。独立PCM检查8个音符窗口非静音、无削波、峰值−26.74dBFS、末20ms为0；clone40840、原helper89188、App110476和observer62451均实际exit0，fresh进程/窗口0后已交还peer。`PLUGIN_DIAGNOSTICS=1`保留，message-pass未启用；这证明一次成功不依赖精确时序开关，不解决Native04暖态播放/Save后的间歇退出失败。

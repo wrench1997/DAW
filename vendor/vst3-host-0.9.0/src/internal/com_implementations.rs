@@ -2169,8 +2169,47 @@ pub(crate) enum EventAdmissionError {
     Poisoned,
 }
 
+/// Queue-local provenance, never serialized or exposed as a VST3 event flag. Only the
+/// ordinary MIDI convenience API defers musical timing to its actual process block;
+/// callers of the owned PluginEvent API retain their explicit flags and PPQ.
+#[derive(Debug)]
+pub(crate) struct QueuedEvent {
+    event: PluginEvent,
+    ordinary_midi: bool,
+}
+
+impl From<PluginEvent> for QueuedEvent {
+    fn from(event: PluginEvent) -> Self {
+        Self {
+            event,
+            ordinary_midi: false,
+        }
+    }
+}
+
+impl std::ops::Deref for QueuedEvent {
+    type Target = PluginEvent;
+
+    fn deref(&self) -> &Self::Target {
+        &self.event
+    }
+}
+
+impl std::ops::DerefMut for QueuedEvent {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.event
+    }
+}
+
+#[cfg(test)]
+impl PartialEq<PluginEvent> for QueuedEvent {
+    fn eq(&self, other: &PluginEvent) -> bool {
+        self.event == *other
+    }
+}
+
 pub struct HostEventList {
-    pub events: Mutex<Vec<PluginEvent>>,
+    pub(crate) events: Mutex<Vec<QueuedEvent>>,
     payload_bytes: AtomicUsize,
     lost: AtomicBool,
 }
@@ -2204,7 +2243,7 @@ impl HostEventList {
     }
 
     /// Move queued events into reusable optional slots for allocation-free chunk routing.
-    pub fn take_into_slots(&self, out: &mut Vec<Option<PluginEvent>>) {
+    pub(crate) fn take_into_slots(&self, out: &mut Vec<Option<QueuedEvent>>) {
         out.clear();
         if let Ok(mut events) = self.events.lock() {
             out.extend(events.drain(..).map(Some));
@@ -2214,7 +2253,7 @@ impl HostEventList {
 
     /// Replace the queued events with `events`, reusing the existing allocation. Capped like
     /// every other path into the list; the excess is dropped with a warning.
-    pub fn reset_with(&self, events: impl IntoIterator<Item = PluginEvent>) {
+    pub(crate) fn reset_with(&self, events: impl IntoIterator<Item = QueuedEvent>) {
         let Ok(mut queued) = self.events.lock() else {
             self.lost.store(true, Ordering::Release);
             log::error!("HostEventList: Failed to lock events for reset_with");
@@ -2260,7 +2299,7 @@ impl HostEventList {
     pub fn drain_each(&self, mut f: impl FnMut(PluginEvent)) {
         if let Ok(mut events) = self.events.lock() {
             for event in events.drain(..) {
-                f(event);
+                f(event.event);
             }
             self.payload_bytes.store(0, Ordering::Relaxed);
         } else {
@@ -2297,7 +2336,7 @@ impl HostEventList {
         let next_payload_bytes = self
             .admitted_payload_total(payload_bytes)
             .map_err(|error| self.reject_admission(error))?;
-        events.push(event);
+        events.push(event.into());
         self.payload_bytes
             .store(next_payload_bytes, Ordering::Relaxed);
         Ok(())
@@ -2319,6 +2358,26 @@ impl HostEventList {
         &self,
         event: &Event,
     ) -> Result<(), EventAdmissionError> {
+        unsafe { self.try_add_raw_event_with_timing(event, false) }
+    }
+
+    /// Same checked admission/budgets as raw events, with private timing provenance.
+    /// The caller supplies an ordinary note-on/off or poly-pressure event.
+    ///
+    /// # Safety
+    /// The raw event must satisfy the same requirements as `try_add_raw_event`.
+    pub(crate) unsafe fn try_add_ordinary_midi_event(
+        &self,
+        event: &Event,
+    ) -> Result<(), EventAdmissionError> {
+        unsafe { self.try_add_raw_event_with_timing(event, true) }
+    }
+
+    unsafe fn try_add_raw_event_with_timing(
+        &self,
+        event: &Event,
+        ordinary_midi: bool,
+    ) -> Result<(), EventAdmissionError> {
         let mut events = self
             .events
             .lock()
@@ -2333,9 +2392,32 @@ impl HostEventList {
             .map_err(|error| self.reject_admission(error))?;
         let owned = unsafe { raw_event_to_plugin_event(event) }
             .map_err(|()| self.reject_admission(EventAdmissionError::InvalidEvent))?;
-        events.push(owned);
+        events.push(QueuedEvent {
+            event: owned,
+            ordinary_midi,
+        });
         self.payload_bytes
             .store(next_payload_bytes, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Resolve only host-generated ordinary MIDI after chunk offsets and this block's
+    /// authoritative transport are known. No payload, order, offset or explicit event
+    /// metadata is changed. Realtime processing never calls this method.
+    pub(crate) fn resolve_offline_midi_timing(
+        &self,
+        quarter_note_position: f64,
+        quarter_notes_per_sample: f64,
+    ) -> Result<(), EventAdmissionError> {
+        let mut events = self
+            .events
+            .lock()
+            .map_err(|_| self.reject_admission(EventAdmissionError::Poisoned))?;
+        for queued in events.iter_mut().filter(|queued| queued.ordinary_midi) {
+            queued.event.flags &= !(Event_::EventFlags_::kIsLive as u16);
+            queued.event.ppq_position = quarter_note_position
+                + f64::from(queued.event.sample_offset) * quarter_notes_per_sample;
+        }
         Ok(())
     }
 }

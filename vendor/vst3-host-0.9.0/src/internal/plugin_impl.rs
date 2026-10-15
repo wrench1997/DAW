@@ -40,8 +40,8 @@ use super::{
         create_event_list, create_host_application, create_host_plug_frame,
         create_memory_stream_from_with_metadata, create_memory_stream_with_metadata,
         create_state_restore_stream, ComponentHandler, ConnectionPair, HostApplication,
-        HostEventList, HostPlugFrame, ParameterChanges, ParameterQueueLimits, StreamStateType,
-        MAX_EDITOR_FEEDBACK, MAX_QUEUED_EVENTS,
+        HostEventList, HostPlugFrame, ParameterChanges, ParameterQueueLimits, QueuedEvent,
+        StreamStateType, MAX_EDITOR_FEEDBACK, MAX_QUEUED_EVENTS,
     },
     module_loader::{load_module, VstModule},
 };
@@ -293,7 +293,7 @@ struct ProcessorRuntime {
     // chunks: each chunk is staged into `input_events` with only the events that fall inside it.
     // Pre-reserved to MAX_QUEUED_EVENTS (the input list's own cap), so splitting a block never
     // allocates on the audio thread.
-    chunk_events: Vec<Option<PluginEvent>>,
+    chunk_events: Vec<Option<QueuedEvent>>,
     // MIDI the plugin has emitted (captured from output_events after each process block,
     // converted to MidiEvent), buffered for the host to poll. A lock-free bounded queue so the
     // audio thread can push without locking and a UI thread can drain concurrently; when full
@@ -321,6 +321,8 @@ struct HostProcessData {
     process_context: ProcessContext,
     process_context_requirements: Option<u32>,
     transport_tempo: f64,
+    // Event timing is authoritative even when IProcessContextRequirements omits music.
+    event_quarter_note_position: f64,
     input_param_changes: ComWrapper<ParameterChanges>,
     output_param_changes: ComWrapper<ParameterChanges>,
     // Preallocated channel-pointer arrays, built once in prepare_buffers. The audio buffers'
@@ -2047,6 +2049,10 @@ impl PluginImpl {
                 process_context: std::mem::zeroed(),
                 process_context_requirements: self.runtime.process_context_requirements,
                 transport_tempo: self.runtime.tempo,
+                event_quarter_note_position: self
+                    .runtime
+                    .process_transport
+                    .map_or(0.0, |transport| transport.quarter_note_position),
                 input_param_changes: ComWrapper::new(ParameterChanges::new(
                     ParameterQueueLimits::INPUT,
                 )),
@@ -2389,6 +2395,19 @@ impl ProcessorRuntime {
     ) -> Result<()> {
         if let Some(ref mut data) = self.process_data {
             unsafe {
+                if self.process_mode == crate::plugin::ProcessMode::Offline {
+                    let quarter_notes_per_sample = if self.playing && self.sample_rate > 0.0 {
+                        data.transport_tempo / (60.0 * self.sample_rate)
+                    } else {
+                        0.0
+                    };
+                    self.input_events
+                        .resolve_offline_midi_timing(
+                            data.event_quarter_note_position,
+                            quarter_notes_per_sample,
+                        )
+                        .map_err(|_| Error::EventInputRejected)?;
+                }
                 // Clear output events only - input events should be preserved for processing
                 self.output_events.clear();
 
@@ -2519,6 +2538,11 @@ impl ProcessorRuntime {
                     self.playing,
                     frames as i64,
                 );
+
+                if self.playing && self.sample_rate > 0.0 {
+                    data.event_quarter_note_position +=
+                        frames as f64 / self.sample_rate * (data.transport_tempo / 60.0);
+                }
 
                 if let Some(transport) = &mut self.process_transport {
                     transport.advance(frames as i64, self.sample_rate);
@@ -5486,7 +5510,7 @@ fn chunk_offset(
 /// offset to the chunk start (see [`chunk_offset`]). Replaces whatever the list held, so each
 /// chunk of a split block sees exactly its own events, in order and with their spacing intact.
 fn stage_chunk_events(
-    queued: &mut [Option<PluginEvent>],
+    queued: &mut [Option<QueuedEvent>],
     list: &HostEventList,
     chunk_start: usize,
     frames: usize,
@@ -6127,7 +6151,7 @@ mod chunked_block_tests {
     use super::*;
     use crate::internal::com_implementations::create_event_list;
 
-    fn note_on_at(offset: i32, pitch: i16) -> PluginEvent {
+    fn note_on_at(offset: i32, pitch: i16) -> QueuedEvent {
         PluginEvent {
             bus_index: 0,
             sample_offset: offset,
@@ -6142,6 +6166,7 @@ mod chunked_block_tests {
                 note_id: -1,
             },
         }
+        .into()
     }
 
     /// Read back what the plugin would see: `(sampleOffset, pitch)` per staged event.
@@ -6613,7 +6638,7 @@ impl ProcessorRuntime {
                 _ => return Err(Error::MidiError("mapped MIDI requires the owner".into())),
             }
             self.input_events
-                .try_add_raw_event(&vst_event)
+                .try_add_ordinary_midi_event(&vst_event)
                 .map_err(|_| Error::EventInputRejected)?;
         }
         if let Some((index, count)) = note_count_commit {
@@ -6676,6 +6701,7 @@ impl ProcessorRuntime {
         self.update_playing(transport.playing);
         self.process_transport = Some(transport);
         if let Some(data) = &mut self.process_data {
+            data.event_quarter_note_position = transport.quarter_note_position;
             apply_process_transport(
                 &mut data.process_context,
                 data.process_context_requirements,

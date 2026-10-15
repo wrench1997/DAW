@@ -46,6 +46,10 @@ jobs:
         timeout-minutes: 10
         run: cargo +stable-x86_64-pc-windows-msvc test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --lib factory --target-dir target -- --test-threads=1
 
+      - name: Run offline MIDI process-boundary regressions
+        timeout-minutes: 5
+        run: cargo +stable-x86_64-pc-windows-msvc test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --lib offline_midi --target-dir target -- --test-threads=1
+
       - name: Run locked all-feature tests
         run: cargo +stable-x86_64-pc-windows-msvc test --locked --all-features --all-targets
 

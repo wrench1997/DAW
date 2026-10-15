@@ -506,6 +506,36 @@ and `native06-no-exact-timing/ordinary-whole-native06-pcm-audit-01.json`.
 The parent contains `native06-resource-handback-01.json`. The parameter-restore
 candidate is separate, unbuilt source and did not enter this native comparison.
 
+### Offline event metadata candidate and unimplemented async-state gap
+
+The ordinary MIDI convenience path previously marked every event `kIsLive` and
+set event PPQ to zero, including Whole offline rendering. The SDK defines the
+flag as directly played keyboard input and PPQ as the event's project position.
+[Official event fields](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/structSteinberg_1_1Vst_1_1Event.html).
+
+The candidate tags only internally generated ordinary MIDI and resolves its
+Offline headers at the actual DSP chunk boundary, after current transport and
+final offsets are known. It clears live and computes event PPQ independently
+of optional ProcessContext musical-field requests. Realtime/Prefetch and explicit
+PluginEvent headers remain unchanged. Four real COM process-boundary cases cover
+chunking, the next block, changed tempo/nonzero PPQ, stopped/zero-frame handling
+and existing entry points. Both CI consumers explicitly run `--lib offline_midi`;
+root Cargo tests alone do not execute dependency unit tests. Formatting, complete
+75-file patch replay, explicit vendor pins and two packaging/consumer contracts
+passed; Rust, Clippy and native checks have not run. This corrects a demonstrated
+event contract, not a demonstrated cause of the 384-frame difference.
+
+A second confirmed gap is still unimplemented: IProgress extends the actual
+IComponentHandler, but that COM object does not expose it. The existing separate
+HostApplication progress registry retains active IDs without types and exposes
+only drained incremental notifications. An empty drain cannot prove restoration
+complete. [Official IProgress interface and controller example](https://steinbergmedia.github.io/vst3_doc/vstinterfaces/classSteinberg_1_1Vst_1_1IProgress.html).
+Strict's closed protocol also lacks a typed active-restoration query. A future
+complete repair needs shared typed progress ownership plus a deadline/cancel-aware
+Strict consumer; generic parameter ACK replay does not establish opaque async
+completion. There is no evidence yet that Kontakt used this interface during
+Native05/06. Do not add a fixed wait, silent warmup or 384-frame PDC correction.
+
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,
 ordinary debug binaries and root/vendor formatting. The actual locked inventory

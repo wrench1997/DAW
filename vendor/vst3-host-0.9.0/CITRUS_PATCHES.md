@@ -916,3 +916,55 @@ Patch SHA256: e4daaf77db4dcc90ead5487b44d51dddb7d027ea021649e6cb66542026f7ee95. 
 unchanged. The two provenance digest literals in each packaging Python file are
 refreshed. Replay evidence is retained in
 target/backend-reliability-20261014/factory-attempt-seal-provenance-01.
+
+
+### Offline ordinary MIDI flags and event PPQ (2026-10-15; Rust execution pending)
+
+The ordinary MIDI convenience API previously published every note-on/off and
+poly-pressure event with kIsLive and PPQ zero, including offline Whole/Strict
+SendMidiAt. Steinberg defines kIsLive for direct keyboard events and event PPQ as
+the project position:
+https://steinbergmedia.github.io/vst3_doc/vstinterfaces/structSteinberg_1_1Vst_1_1Event.html
+
+HostEventList now retains private per-entry ordinary-MIDI provenance under its
+existing admission lock and budgets. It survives the existing chunk transfer
+without any public PluginEvent or wire-format addition. At the actual process
+chunk, Offline convenience events clear only kIsLive and receive the block's
+authoritative quarter-note origin plus their final, rebased sample offset at
+the current tempo/sample rate. A stopped project retains its musical position.
+Transport may arrive after MIDI admission, as it does on the helper Process
+command. Event musical position advances independently of optional projected
+ProcessContext music fields; an explicit transport replaces the origin without
+reconstructing it from sample time. Legacy calls without explicit transport
+retain their existing zero-origin, tempo-integrated processing path.
+
+Realtime/Prefetch metadata and caller-supplied PluginEvent flags/PPQ are unchanged.
+Note payloads, event FIFO, offsets/clamping, mapped parameters, process mode,
+lifecycle and the public protocol remain unchanged. The internal queue wrapper
+adds bounded header metadata, not another queue, lock, payload allocation or
+cross-thread owner. Existing input/output loss and budget handling is retained.
+No sample compensation, delay, warmup, retry or Kontakt-specific behavior is added.
+
+Four regressions inspect headers returned by the actual COM IEventList inside
+the fixture's IAudioProcessor::process. They cover two SDK chunks, nonzero note/
+poly-pressure/release offsets and PPQ, admission before transport, a second block
+with an independent sample/PPQ origin and changed tempo, automatic advancement,
+omitted ProcessContext music requirements, stopped and zero-sample processing,
+the no-explicit-transport entry point, preserved parameter offsets, unchanged
+Realtime/Prefetch live events and explicit event headers. Rustfmt and diff checks
+passed. Compilation, these Rust tests, Clippy, native Kontakt behavior and any
+relationship to the observed 384-frame audio drift remain untested at this
+source checkpoint. Root cargo test does not run dependency unit tests; run:
+
+    cargo +stable-x86_64-pc-windows-msvc test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --lib offline_midi --target-dir target -- --test-threads=1
+    cargo +stable-x86_64-pc-windows-msvc test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --lib host_event_list_tests --target-dir target -- --test-threads=1
+
+The complete patch was regenerated from the verified original 41-file
+archive and all 75 current vendor source files, excluding only this
+document/CITRUS.patch and generated vendor/target output. There are 49
+changed paths, 34 additions and 0 deletions. Private git
+apply --check/apply succeeded; the complete file inventory and raw bytes matched.
+Patch SHA256: 3b66657084dca6bc2d4428aaa740debbdfa584d80624455c057d1843f4d164d8. Original archive/commit/LICENSE/VCS identities remain.
+The two provenance digest literals in each packaging Python file are refreshed.
+Replay evidence:
+target/backend-reliability-20261014/offline-midi-timing-provenance-01.
