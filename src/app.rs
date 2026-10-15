@@ -5390,8 +5390,10 @@ impl CitrusApp {
         external_services: bool,
     ) -> Box<Self> {
         theme::install(&cc.egui_ctx);
-        let mut project = Project::default();
-        project.auto_song_length = true;
+        let project = Project {
+            auto_song_length: true,
+            ..Project::default()
+        };
         let project_fingerprint = project_fingerprint(&project);
         let history_snapshot = project.clone();
         let (autosave_path, plugin_cache_path, recordings_dir) = if external_services {

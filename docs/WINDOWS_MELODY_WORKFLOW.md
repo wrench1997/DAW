@@ -1165,6 +1165,20 @@ test is next. Production and five split/26 geometry-fade passes remain reusable.
 Keep `playlist-inherited-fade-silence-fixture-01/`. The peer currently owns CPU;
 Root only commits/prepares until its actual handback.
 
+Source109 (`ae6175e`) actually passed v11 exact1 (1.36s, exact silence and strong
+same-source fade-reset audible controls), FullOwner20 (3.25s) and explicit
+Saved13 read-only/private-copy exact1 (1.28s). The original is1,298,729B with
+591772 opaque bytes, five clips/one automation: format12/Manual160 stays;
+the private Auto copy derives128. Both complete persisted music payloads match
+and original bytes remain unchanged. Generic parameters=0; this is serialization
+evidence, not NI sound/full-parameter restoration. Strict Clippy actually failed101
+only at app.rs5394 field_reassign_with_default. A minimal struct initializer now
+preserves construction semantics, with no allow/MSRV change; format/diff passed,
+execution is next. Artifacts/bins and two new render refinements remain unrun.
+Root122096/exec27249 and all14 held children terminated, private/global peaks
+3.728/22.936GiB, fresh heavy empty12:22Z. Keep `source109-local-gates-01-*` and
+`source109-local-resource-handback-01.json`.
+
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
 The native harness now probes the OS, current process session, WTS connection
