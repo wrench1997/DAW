@@ -111,6 +111,8 @@ DSP count 0, the original guard joined and natural clone reap; its new non-f32 s
 initialization/restoration assertion is locally UNRUN. The current `effect_`
 gate selects 29 cases (two new f64 cases), rather than the earlier 27.
 
+The first combined candidate `689e0af` ran all29 Effect cases successfully in both Windows jobs; the preview root suite also passed2496/15 ignored. It then failed Root strict Clippy on the newly added admin-counter `fetch_update` deprecation, so Windows SDK targets and release/ZIP acceptance were not reached. The checked-CAS repair and new overflow case await their own cloud run; the source/clone precision SDK evidence remains separately required.
+
 Local Windows: all four fixture tests passed; the x86_64 MSVC release bundle and
 matching all-feature production helper built successfully. The first fixture
 test compile found ambiguous integer inference in the analytical expectation

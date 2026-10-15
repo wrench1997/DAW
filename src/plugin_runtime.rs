@@ -2647,15 +2647,23 @@ impl AdminCommandSender {
     fn try_send(&self, command: AdminCommand) -> Result<(), TrySendError<AdminCommand>> {
         // Observe all admitted intent, even if a bounded queue later refuses it. Exhaustion
         // disables only private Effect capture, never legacy admin commands.
-        if self
-            .metrics
-            .effect_admin_revision
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
-            .is_err()
-        {
-            self.metrics
-                .effect_admin_exhausted
-                .store(true, Ordering::Release);
+        let mut revision = self.metrics.effect_admin_revision.load(Ordering::Acquire);
+        loop {
+            let Some(next) = revision.checked_add(1) else {
+                self.metrics
+                    .effect_admin_exhausted
+                    .store(true, Ordering::Release);
+                break;
+            };
+            match self.metrics.effect_admin_revision.compare_exchange_weak(
+                revision,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(current) => revision = current,
+            }
         }
         let Some(lease) = AdminWorkLease::acquire(&self.metrics) else {
             return Err(TrySendError::Full(command));

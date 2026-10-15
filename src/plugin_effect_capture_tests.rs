@@ -938,6 +938,119 @@ fn effect_epoch_ticket_exhaustion_is_sticky_without_blocking_legacy_epoch_or_ins
 }
 
 #[test]
+fn effect_admin_ticket_exhaustion_is_sticky_without_blocking_legacy_admin_or_instrument_capture() {
+    let fixture = Fixture::new(vec![SlotConfig::default()]);
+    fixture
+        .chain()
+        .control
+        .metrics
+        .effect_admin_revision
+        .store(u64::MAX - 2, Ordering::Release);
+    let receipt = receive(&fixture.request()).unwrap();
+    assert_eq!(receipt.admin_revision, u64::MAX - 1);
+    assert!(
+        fixture
+            .chain()
+            .control
+            .effect_chain_receipt_current(&receipt)
+    );
+    let saves = fixture.handle.probes[0].saves.load(Ordering::Acquire);
+    assert!(fixture.chain().control.request_state(0));
+    wait_until(|| {
+        fixture.settled() && fixture.handle.probes[0].saves.load(Ordering::Acquire) == saves + 1
+    });
+    assert_eq!(
+        fixture
+            .chain()
+            .control
+            .metrics
+            .effect_admin_revision
+            .load(Ordering::Acquire),
+        u64::MAX
+    );
+    assert!(
+        !fixture
+            .chain()
+            .control
+            .effect_chain_receipt_current(&receipt)
+    );
+    assert!(fixture.chain().control.request_state(0));
+    wait_until(|| {
+        fixture.settled() && fixture.handle.probes[0].saves.load(Ordering::Acquire) == saves + 2
+    });
+    assert!(
+        fixture
+            .chain()
+            .control
+            .metrics
+            .effect_admin_exhausted
+            .load(Ordering::Acquire)
+    );
+    assert_eq!(
+        fixture
+            .chain()
+            .control
+            .metrics
+            .effect_admin_revision
+            .load(Ordering::Acquire),
+        u64::MAX
+    );
+    assert!(
+        fixture
+            .chain()
+            .control
+            .request_effect_chain_state(
+                EPOCH,
+                fixture.chain().control.plugin_endpoint_snapshot().unwrap(),
+                fixture.handle.requests(),
+                Instant::now() + WAIT
+            )
+            .is_err()
+    );
+    let instrument = fixture
+        .chain()
+        .control
+        .request_instrument_bounce_state(91, EPOCH, vec![3])
+        .expect("Effect-only admin exhaustion cannot gate legacy Instrument capture");
+    let deadline = Instant::now() + WAIT;
+    let result = loop {
+        match instrument.try_recv() {
+            Ok(result) => break result,
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => panic!("Original Instrument reply was lost"),
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Original Instrument command did not terminate"
+        );
+        thread::sleep(Duration::from_millis(1));
+    };
+    assert!(instrument.termination_acknowledged());
+    assert!(
+        matches!(result, Err(BounceCaptureError::Rejected(ref message)) if message == "This backend does not support instrument bounce capture")
+    );
+    assert_eq!(fixture.chain().control.stats().faults, 0);
+    assert_eq!(fixture.handle.capture_count(0), 1);
+    assert!(
+        fixture
+            .chain()
+            .control
+            .metrics
+            .effect_admin_exhausted
+            .load(Ordering::Acquire)
+    );
+    assert_eq!(
+        fixture
+            .chain()
+            .control
+            .metrics
+            .effect_admin_revision
+            .load(Ordering::Acquire),
+        u64::MAX
+    );
+}
+
+#[test]
 fn later_slot_revision_drift_refuses_the_entire_chain_at_backend_verification() {
     let fixture = Fixture::new(vec![SlotConfig::default(); 2]);
     *fixture.handle.probes[1].drift_target.lock().unwrap() =

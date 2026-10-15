@@ -6,6 +6,8 @@
 2026-10-16 Effect后台`0c4872c`已取得实际新云终态：quality38813369205与preview38813369197均SUCCESS。Win/Linux各27项Effect及真实无GUI SDK4+生产helper1通过；根2481PASS/14ignored、严格Clippy/双bin/no-default及eligible session2真实PrintWindow通过。preview的368Python=356PASS/12条件SKIP、27 Effect、同2481 root、静态CRT release8m18s、最终ZIP/PE/import/provenance及提取后helper通过，无上传；源码夹具/测试DLL不进入发布白名单。额外本机vendor全test-target Clippy实际101（75条既有glue lint）保留；新私有Insert capture开发不由该SHA验收。详[实现与验收边界](WINDOWS_MELODY_WORKFLOW.md#stereo-effect-helper-foundation-2026-10-16)。
 
 当前源码候选已实现真实停止/epoch/admin fence下的Effect整链私有捕获及reset ABA防护。本机前快照15项新回归、显式Gain0.375源→clone SDK、旧Instrument/停止/settlement组和Root严格Clippy/no-default/helper构建通过；随后补入的exact-f64 setter、2项新回归和非f32源/clone SDK断言尚未本机运行。新云端预期执行29项Effect；Windows App私有source SDK exact target加入同一既有10分钟无GUI质量步骤，Linux仍执行foundation helper目标。新候选云端结果待定，不能沿用上段成功；Whole Insert/通用PDC/路由/FX自动化/尾音仍未实现，03副本保持不变，用户测试期间只做代码工作。
+首个候选`689e0af`的quality38821625393/preview38821625349实际FAIL：Windows29 Effect、2496 root/15ignored通过后，Root严格Clippy因新增`fetch_update`的deprecated报错停止。Windows源SDK与PrintWindow、preview release/ZIP未执行。修补使用checked weak-CAS兼容旧工具链，并补near-MAX真实worker回归；新云结果待定，失败规则没有放宽。
+
 目标系统：Windows 10/11 x64  
 目标三元组：x86_64-pc-windows-gnullvm
 

@@ -246,6 +246,8 @@ the `private-effect-capture-source-candidate-01` / `strict-effect-f64-source-can
 handoffs; the post-native source SDK delta is separately recorded in
 `target/private-effect-capture-source-candidate-01/post-native-f64-sdk-delta.json`.
 
+The first combined candidate `689e0af` actually failed quality38821625393 and preview38821625349. Both Windows jobs passed29 Effect cases (including the two new f64 cases) and2496 root tests/15 ignored. Preview also passed its369 Python checks with12 conditional skips. Root strict Clippy then rejected the new `fetch_update` at `src/plugin_runtime.rs:2653` as deprecated. Windows source SDK, no-default and PrintWindow checks were not reached; preview release/ZIP checks were not reached. The repair uses a checked weak-CAS loop with the original AcqRel/Acquire ordering and Effect-only sticky overflow, preserving older toolchains and legacy admin commands. A new real-worker near-MAX/legacy Save/Instrument regression is locally UNRUN; corrected cloud acceptance remains pending. No lint or failure gate was disabled.
+
 Whole still rejects Insert slots. The later consumer must implement serial PCM
 stages and actual strict-child reap between them, wet/bypass/routing/FX automation,
 general DSP PDC, tail/crop handling and one final publication. Real NOIRE cold
