@@ -16887,6 +16887,7 @@ mod tests {
             color: [3, 2, 1],
             kind: ClipKind::Pattern,
             group_id: None,
+            pattern_length_policy: None,
             pattern_id,
             automation_id: None,
             audio_asset_id: None,

@@ -337,6 +337,10 @@ fn initial_rect(view: StudioView, bounds: Rect) -> Rect {
 }
 
 impl CitrusApp {
+    pub(super) fn cancel_editor_pointer_until_release(&mut self) {
+        self.workspace.cancel_pointer_gesture = true;
+    }
+
     pub(super) fn focus_editor(&mut self, view: StudioView) {
         if self.workspace.focused != view {
             self.finish_editor_interaction();

@@ -425,7 +425,7 @@ impl OccurrencePlan {
             .beat_to_frame(f64::from(clip.start))
             .map_err(|e| failure(OccurrenceErrorKind::Range, e.to_string()))?;
         let end_frame = tempo_map
-            .beat_to_frame(f64::from(clip.start) + f64::from(clip.length))
+            .beat_to_frame(f64::from(clip.start) + f64::from(project.clip_length_beats(clip)))
             .map_err(|e| failure(OccurrenceErrorKind::Range, e.to_string()))?;
         let length = end_frame
             .checked_sub(start_frame)
@@ -492,7 +492,7 @@ impl OccurrencePlan {
             channel_id,
             instance_id,
             start_beat: clip.start,
-            length_beats: clip.length,
+            length_beats: project.clip_length_beats(clip),
             row: clip.track,
             start_frame,
             end_frame,

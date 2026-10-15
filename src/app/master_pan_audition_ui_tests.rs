@@ -134,6 +134,7 @@ fn paused_owned_audition_uses_manual_pan(manual_pan: f32) {
         color: [255, 142, 82],
         kind: ClipKind::Pattern,
         group_id: None,
+        pattern_length_policy: None,
         pattern_id,
         automation_id: None,
         audio_asset_id: None,

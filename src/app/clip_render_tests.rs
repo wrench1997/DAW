@@ -122,6 +122,88 @@ fn on_frames(plan: &OccurrencePlan) -> Vec<u64> {
 }
 
 #[test]
+fn occurrence_follow_extent_grows_and_shrinks_without_materializing_or_losing_source_events() {
+    let mut p = project();
+    p.clips[0].pattern_length_policy = Some(crate::model::PatternLengthPolicy::Follow);
+    p.patterns[0].channel_steps.fill([false; 16]);
+    p.patterns[0].notes = vec![PianoNote {
+        id: 91,
+        channel_id: Some(p.channels[0].id),
+        group_id: None,
+        note: 64,
+        start: 0.5,
+        length: 0.25,
+        velocity: 0.8,
+        selected: false,
+        muted: false,
+    }];
+    let initial = plan(&p, 0);
+    assert_eq!(
+        (
+            initial.length_beats,
+            initial.end_frame - initial.start_frame
+        ),
+        (4.0, 16_000)
+    );
+    let mut later = p.patterns[0].notes[0].clone();
+    later.id = 92;
+    later.start = 6.0;
+    p.patterns[0].notes.push(later);
+    let before = project_snapshot(&p).unwrap();
+    let grown = plan(&p, 7);
+    assert_eq!(
+        (grown.length_beats, grown.end_frame - grown.start_frame),
+        (8.0, 32_000)
+    );
+    assert_eq!(on_frames(&grown), vec![2_000, 24_000]);
+    assert_eq!(
+        p.clips[0].length, 1.0,
+        "Follow is resolved, not a new cache-writing edit"
+    );
+    assert_eq!(project_snapshot(&p).unwrap(), before);
+    p.patterns[0].notes.pop();
+    let shrunk = plan(&p, 0);
+    assert_eq!(
+        (shrunk.length_beats, shrunk.end_frame - shrunk.start_frame),
+        (4.0, 16_000)
+    );
+    assert_eq!(on_frames(&shrunk), vec![2_000]);
+}
+
+#[test]
+fn occurrence_policy_only_clock_change_invalidates_callback_fingerprint_and_tail_acknowledgment() {
+    let mut p = project();
+    p.clips[0].length = 9.0;
+    p.patterns[0].channel_steps.fill([false; 16]);
+    p.patterns[0].notes = vec![PianoNote {
+        id: 91,
+        channel_id: Some(p.channels[0].id),
+        group_id: None,
+        note: 64,
+        start: 0.5,
+        length: 0.25,
+        velocity: 0.8,
+        selected: false,
+        muted: false,
+    }];
+    let old = plan(&p, 0);
+    let old_ack = acknowledgment(&p, context(), p.clips[0].id, 8_000, 0);
+    let fingerprint = timeline_compile_fingerprint(&p, 8_000);
+    p.clips[0].pattern_length_policy = Some(crate::model::PatternLengthPolicy::Manual);
+    assert_ne!(timeline_compile_fingerprint(&p, 8_000), fingerprint);
+    assert_eq!(on_frames(&old), vec![2_000]);
+    assert_eq!(on_frames(&plan(&p, 0)), vec![2_000, 18_000, 34_000]);
+    assert_eq!(
+        old.check_current(&p, context()).unwrap_err().kind,
+        OccurrenceErrorKind::Stale
+    );
+    let rejected = OccurrencePlan::prepare(&p, context(), p.clips[0].id, 8_000, 0, Some(old_ack))
+        .err()
+        .expect("old policy acknowledgment must be rejected");
+    assert_eq!(rejected.kind, OccurrenceErrorKind::Unsupported);
+}
+
+#[test]
 fn occurrence_plan_preserves_compiler_identity_and_nonquantum_local_boundaries() {
     for start in [0, 1, 127, 128, 129] {
         for frames in [1, 127, 128, 129, 257] {

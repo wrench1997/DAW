@@ -789,7 +789,7 @@ impl CitrusApp {
                 pattern_name: pattern.name.clone(),
                 instrument_name: instance.name.clone(),
                 start_beat: clip.start,
-                length_beats: clip.length,
+                length_beats: self.project.clip_length_beats(clip),
                 channel_gain: channel.volume,
                 directory,
                 tail_seconds: 0.0,

@@ -377,6 +377,7 @@ mod tests {
             source_offset: 2.0,
             automation_id: Some(1),
             kind: ClipKind::Automation,
+            pattern_length_policy: None,
             pattern_id: project.patterns[0].id,
             name: "Pan".into(),
             color: [1, 2, 3],

@@ -10,6 +10,13 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[path = "model/pattern_placement.rs"]
+mod pattern_placement;
+#[cfg(test)]
+#[path = "model/pattern_placement_tests.rs"]
+mod pattern_placement_tests;
+pub use pattern_placement::PatternLengthPolicy;
+
 use crate::automation::{AutomationLane, AutomationPoint, AutomationTarget};
 use crate::mixer_graph::{
     MASTER_MIXER_TRACK_ID, MIXER_GRAPH_MAX_NODES, MixerRoute, MixerRouteDestination, MixerRouteTap,
@@ -21,7 +28,7 @@ const PROJECT_SAVE_TEMP_ATTEMPTS: usize = 128;
 static PROJECT_SAVE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Current on-disk project schema written by Citrus Studio.
-pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 13;
+pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 14;
 
 const LEGACY_PROJECT_FORMAT_VERSION: u32 = 1;
 
@@ -282,6 +289,10 @@ pub struct Clip {
     pub name: String,
     pub color: [u8; 3],
     pub kind: ClipKind,
+    /// Absent is the existing Manual/legacy-clock contract. Explicit v14
+    /// policies share the source Pattern clock; Follow derives its extent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern_length_policy: Option<PatternLengthPolicy>,
     /// Stable Playlist-local Clip group identity. Zero is reserved and a
     /// group with fewer than two surviving members is normalized away.
     #[serde(default)]
@@ -894,7 +905,7 @@ impl Project {
 
     /// Exclusive musical endpoint shared by playback and offline export.
     /// Auto follows placements rather than extending a deliberately trimmed
-    /// Pattern clip when its source notes grow. The retained manual value is
+    /// Manual Pattern clip when its source notes grow. The retained manual value is
     /// independent from both this derived endpoint and editor zoom.
     #[must_use]
     pub fn song_end_beat(&self) -> f32 {
@@ -906,17 +917,18 @@ impl Project {
             .iter()
             .filter(|clip| !clip.muted)
             .filter_map(|clip| {
+                let length = self.clip_length_beats(clip);
                 if !clip.start.is_finite()
                     || clip.start < 0.0
-                    || !clip.length.is_finite()
-                    || clip.length <= 0.0
+                    || !length.is_finite()
+                    || length <= 0.0
                 {
                     return None;
                 }
                 let end = if clip.kind == ClipKind::Audio {
                     crate::audio_clip::audio_end_beat(clip, false)?
                 } else {
-                    f64::from(clip.start) + f64::from(clip.length)
+                    f64::from(clip.start) + f64::from(length)
                 };
                 (end.is_finite() && end > f64::from(clip.start)).then_some(end)
             })
@@ -1056,6 +1068,7 @@ impl Project {
             !self.auto_song_length || self.format_version >= 13,
             "Automatic song length requires project format 13; normalize the project before saving"
         );
+        self.validate_pattern_length_policies()?;
         self.validate_persisted_numbers()
             .context("Refusing to save non-finite project data")?;
         self.validate_audio_references()
@@ -1121,6 +1134,7 @@ impl Project {
             project.format_version,
             CURRENT_PROJECT_FORMAT_VERSION
         );
+        project.validate_pattern_length_policies()?;
         project
             .validate_audio_references()
             .context("The project audio split metadata is invalid")?;
@@ -2090,6 +2104,7 @@ fn clip(
         color,
         kind,
         group_id: None,
+        pattern_length_policy: None,
         pattern_id: default_pattern_id(),
         automation_id: (kind == ClipKind::Automation).then_some(1),
         audio_asset_id: None,
@@ -2340,7 +2355,7 @@ mod tests {
         project.save(&path).unwrap();
         let restored = Project::load(&path).unwrap();
         assert!(restored.auto_song_length);
-        assert_eq!(restored.format_version, 13);
+        assert_eq!(restored.format_version, CURRENT_PROJECT_FORMAT_VERSION);
         assert_eq!(restored.song_length_beats, 2.25);
         assert_eq!(restored.song_end_beat(), 4.0);
         assert_eq!(
@@ -2453,7 +2468,7 @@ mod tests {
         loaded.save(&manual_path).unwrap();
         let reopened = Project::load(&manual_path).unwrap();
         assert!(!reopened.auto_song_length);
-        assert_eq!(reopened.format_version, 13);
+        assert_eq!(reopened.format_version, CURRENT_PROJECT_FORMAT_VERSION);
         assert_eq!(reopened.song_end_beat(), original_end);
         assert!(
             musical_payload(&reopened) == original_payload,
@@ -2469,7 +2484,7 @@ mod tests {
         automatic.save(&auto_path).unwrap();
         let auto_reopened = Project::load(&auto_path).unwrap();
         assert!(auto_reopened.auto_song_length);
-        assert_eq!(auto_reopened.format_version, 13);
+        assert_eq!(auto_reopened.format_version, CURRENT_PROJECT_FORMAT_VERSION);
         assert_eq!(auto_reopened.song_length_beats, original_end);
         assert_eq!(auto_reopened.song_end_beat(), derived_end);
         // Serialized payload comparison includes all channel, pattern, clip,

@@ -1,6 +1,6 @@
 # Drag the playhead; let the arrangement set its end
 
-**Locally verified, 2026-10-15; current source `81b2572`.** Transport/range source
+**Locally verified, 2026-10-15; delivered source `81b2572`.** Transport/range source
 `885306f` passed input, persistence, Timeline/WAV and audio-split checks. The
 current linking source passed all225 affected UI/callback cases, strict Clippy,
 matching main/helper build and9 genuine WGPU cases; all four frames were inspected.
@@ -31,9 +31,9 @@ placements contribute their own edges; inherited exact Audio split geometry is
 used. Enabled legacy automation without any placement contributes its last
 point. A muted placement prevents that lane becoming globally active again.
 
-Deleting or moving the final placement changes the derived endpoint. Growing
-notes does not resize an already placed or trimmed Clip. The prior Piano period
-rules, including the default Timeline minimum, remain unchanged.
+Deleting or moving the final placement changes the derived endpoint. In
+delivered03 and legacy Manual placements, growing notes does not resize the Clip;
+their prior Piano period rules, including the Timeline minimum, stay unchanged.
 
 Older files and existing `Project::blank()` / `Project::default()` callers retain
 their explicit `song_length_beats` with `auto_song_length = false`. The UI labels
@@ -65,6 +65,45 @@ strictly bounded. It reuses the 262,144-checkpoint admission limit rather than
 extrapolating a constant boundary tempo. Splitting and saving unplayed tails must
 preserve the manual endpoint and the audible PCM/WAV prefix.
 
+## Let an untrimmed Pattern clip follow its source
+
+**v14 candidate implemented; execution and new captures are pending. Delivered03
+does not include this policy.** New Draw/Paint Pattern placements default to
+**Follow Pattern**. Their width comes from the source Pattern's actual cycle,
+using the existing whole-bar/four-bar-block growth rules. Editing or importing
+source notes can grow or shrink every following reference without an extra
+history entry or a separate length-sync action.
+
+Change a clip's Length or resize its edge to keep a manual window. A click with
+no value change does not detach Follow. In the Pattern Inspector, turn
+**Follow Pattern** back on to restore a complete source cycle in one Undo step.
+The policy does not change the whole-song AUTO/MANUAL choice: an explicit manual
+song endpoint still crops playback and export, even when the clip is longer.
+
+Copies, movement and Slip preserve the source clip's policy. Splitting a Follow
+clip creates two fixed windows; subsequent source edits must not untrim them.
+Existing projects, demo trims and legacy Rust constructors remain fixed. MIDI
+Take currently creates a new Pattern with an exact stop window, so recording
+keeps that window; the Inspector can explicitly opt it into Follow. Audio and
+Automation placements keep their existing geometry contracts.
+
+The candidate uses one read-only Project extent resolver for UI geometry,
+automatic song end, Timeline and supported exports. Old manual placements keep
+their legacy source clock; following clips and later manual trims retain the
+actual Pattern clock. Persistence therefore needs format14 rather than letting
+older readers silently ignore that distinction. Older works remain readable
+with fixed placement boundaries; save a new-version copy rather than overwriting.
+
+The independent consumer review found one raw-length use in automation track
+placement: a grown Follow clip could be mistaken for an empty lane at a later
+beat. That path now uses the same resolver; a real context-menu creation regression
+covers both growth and shrink plus Undo. The new25-case set has not yet run.
+
+The reference is Image-Line's [Pattern workflow](https://www.image-line.com/fl-studio-learning-content/fl-studio-online-manual/html/basics_workflow.htm)
+and [Channel Rack Auto length](https://www.image-line.com/fl-studio-learning-content/fl-studio-online-manual/html/channelrack.htm):
+source data determines the Pattern span. The preserved manual-window policy is
+also required by this project's existing trim/recording contracts.
+
 ## PAT and SONG show what will actually play
 
 The selected mode has a high-contrast face: PAT is green, SONG is orange. The
@@ -92,9 +131,9 @@ Rack Channel context menu also opens that Channel's Piano roll.
 
 Piano edits change the shared Pattern, so every Playlist reference updates its
 note preview and compiled playback; Undo/Redo uses the existing shared history.
-Placements retain their individual start, offset and trimmed length. There is
-currently no per-placement follow-length policy: adding later source notes does
-not automatically extend every existing placement.
+Placements retain their individual start, offset and trimmed length. Delivered03
+has fixed placement lengths; the v14 candidate above adds explicit Follow only,
+without unconditionally extending every existing placement.
 
 In SONG, the Piano cursor follows the active placement's source-local position,
 not the absolute song beat. An explicitly opened active occurrence takes
@@ -109,7 +148,7 @@ The interaction reference is Image-Line's [Playlist manual](https://www.image-li
 
 ## Format and verification
 
-Project **v13** persists the range policy. Files through v12 load with MANUAL;
+Delivered03's Project **v13** persists the range policy. Files through v12 load with MANUAL;
 new saves require a v13-capable build so older software cannot ignore AUTO and
 silently truncate. Raw pre-v13 objects opting into AUTO must normalize before
 saving; existing manual callers retain their entry-point contract. Original

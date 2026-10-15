@@ -87,6 +87,7 @@ fn clip(id: u32, kind: ClipKind, start: f32, length: f32) -> Clip {
         name: format!("workflow clip {id}"),
         color: [180, 120, 40],
         group_id: None,
+        pattern_length_policy: None,
         pattern_id: 1,
         automation_id: None,
         audio_asset_id: None,

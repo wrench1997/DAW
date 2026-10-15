@@ -1098,6 +1098,46 @@ fn master_song_prepare_retains_five_patterns_master_fade_and_exact_original_fing
 }
 
 #[test]
+fn master_song_follow_extent_uses_the_same_timeline_and_full_source_binding_when_notes_grow_and_shrink()
+ {
+    let mut project = master_song_project();
+    project.auto_song_length = true;
+    project.clips[4].pattern_length_policy = Some(crate::model::PatternLengthPolicy::Follow);
+    let baseline = project.song_end_beat();
+    let mut later = project.patterns[4].notes[0].clone();
+    later.id = 901;
+    later.start = 17.0;
+    project.patterns[4].notes.push(later);
+    let original = serde_json::to_vec(&project).unwrap();
+    assert_eq!(project.song_end_beat(), 48.0);
+    let grown =
+        InstrumentBouncePlan::prepare_master_song(&project, project.channels[0].id, 48_000, 7)
+            .unwrap();
+    assert_eq!(grown.timeline(), &master_song_timeline(&project));
+    assert_eq!(grown.timeline().duration_frames(), 1_152_000);
+    assert_eq!(serde_json::to_vec(&project).unwrap(), original);
+    project.patterns[4].notes.pop();
+    let shrunk =
+        InstrumentBouncePlan::prepare_master_song(&project, project.channels[0].id, 48_000, 7)
+            .unwrap();
+    assert_eq!(project.song_end_beat(), baseline);
+    assert_eq!(shrunk.timeline(), &master_song_timeline(&project));
+    assert!(shrunk.timeline().duration_frames() < grown.timeline().duration_frames());
+    assert_ne!(shrunk.project_fingerprint(), grown.project_fingerprint());
+    let previous = shrunk.project_fingerprint();
+    project.clips[4].pattern_length_policy = Some(crate::model::PatternLengthPolicy::Manual);
+    let manual =
+        InstrumentBouncePlan::prepare_master_song(&project, project.channels[0].id, 48_000, 7)
+            .unwrap();
+    assert_eq!(manual.timeline(), shrunk.timeline());
+    assert_ne!(
+        manual.project_fingerprint(),
+        previous,
+        "the policy is source binding even at the same extent"
+    );
+}
+
+#[test]
 fn master_song_prepare_refuses_legacy_piano_sources_absent_from_timeline_and_fingerprint() {
     let original = master_song_project();
     let mut legacy = original.clone();

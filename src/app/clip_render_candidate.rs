@@ -186,6 +186,7 @@ fn prepare_candidate(
         color: project.clips[source_index].color,
         kind: ClipKind::Audio,
         group_id: None,
+        pattern_length_policy: None,
         pattern_id: plan.pattern_id,
         automation_id: None,
         audio_asset_id: Some(asset_id),
@@ -853,6 +854,7 @@ mod tests {
             color: [71, 89, 103],
             kind: ClipKind::Pattern,
             group_id: Some(13),
+            pattern_length_policy: None,
             pattern_id: project.patterns[0].id,
             automation_id: None,
             audio_asset_id: None,
@@ -1017,6 +1019,36 @@ mod tests {
 
     fn bytes(project: &Project) -> Vec<u8> {
         serde_json::to_vec(project).unwrap()
+    }
+
+    #[test]
+    fn candidate_follow_conversion_keeps_original_midi_policy_and_exact_derived_audio_span() {
+        let mut project = fixture();
+        project.auto_song_length = true;
+        project.clips[0].pattern_length_policy = Some(crate::model::PatternLengthPolicy::Follow);
+        project.patterns[0].notes[0].start = 6.0;
+        let before = bytes(&project);
+        let plan = admitted_plan(&project, 11, 7);
+        assert_eq!(plan.length_beats, 8.0);
+        let prepared = prepare(&project, 7);
+        let source = &prepared.project.clips[0];
+        assert!(source.muted);
+        assert_eq!(
+            source.pattern_length_policy,
+            project.clips[0].pattern_length_policy
+        );
+        assert_eq!(source.length, project.clips[0].length);
+        assert_eq!(source.source_offset, project.clips[0].source_offset);
+        let audio = prepared.project.clips.last().unwrap();
+        assert_eq!(audio.pattern_length_policy, None);
+        let timeline = compile_candidate_timeline(&prepared.project, &plan.tempo_map).unwrap();
+        let audio = timeline.audio_clips().last().unwrap();
+        assert_eq!(audio.start_frame, plan.start_frame);
+        assert_eq!(
+            audio.stop_frame,
+            plan.end_frame + u64::from(plan.tail_frames)
+        );
+        assert_eq!(bytes(&project), before);
     }
 
     fn history_bytes(

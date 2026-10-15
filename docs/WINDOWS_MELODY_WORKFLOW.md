@@ -30,6 +30,14 @@ The user used01 and reported Playlist/PAT/SONG issues;02 contains those locally
 verified repairs.03 adds Playlist/Piano/Rack linking without a new format change.
 Build-Info/README/Helper-Smoke records accompany each copy.
 
+The next source candidate implements explicit Pattern Follow length in format14.
+New Draw/Paint follows source growth; a real trim fixes the window and Inspector
+can restore Follow. Legacy placements and exact MIDI Take windows stay fixed.
+Executable, persistence/WAV and genuine offscreen gates for this candidate are
+pending;03 does not contain it. Old03/02 cannot read new14 saves, so preserve old
+works with Save As. The user is still testing03 and requested code-only work: no
+main GUI, soundcard or Kontakt operations during that test.
+
 The first generic-base restore candidate compiled but failed existing history checks.
 Ordinary Open formerly sent saved bases once through a 64-entry untagged admin
 queue; rejected enqueues were not retained, yet SlotReady could publish Loaded.

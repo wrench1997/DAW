@@ -52,6 +52,7 @@ fn placement(id: u32, automation: u64, start: f32, length: f32, slip: f32, muted
         color: [200, 140, 40],
         kind: ClipKind::Automation,
         group_id: None,
+        pattern_length_policy: None,
         pattern_id: 0,
         automation_id: Some(automation),
         audio_asset_id: None,

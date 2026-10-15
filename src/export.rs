@@ -844,8 +844,9 @@ fn collect_events_controlled(
             project,
             pattern,
             clip.start,
-            clip.length,
+            project.clip_length_beats(clip),
             clip.source_offset,
+            clip.piano_period_beats(pattern, LEGACY_PIANO_MINIMUM_BEATS) as f32,
             clip.gain,
             mixer_plan,
             tempo_map,
@@ -863,6 +864,7 @@ fn collect_pattern_events(
     clip_start: f32,
     clip_length: f32,
     source_offset: f32,
+    piano_period: f32,
     clip_gain: f32,
     mixer_plan: &OfflineMixerPlan,
     tempo_map: &TempoMap,
@@ -940,7 +942,6 @@ fn collect_pattern_events(
         }
     }
 
-    let piano_period = pattern.piano_period_beats(LEGACY_PIANO_MINIMUM_BEATS) as f32;
     let mut cycle = -source_offset.rem_euclid(piano_period);
     while clip_start + cycle < clip_end {
         control.check_cancelled()?;
@@ -2410,6 +2411,7 @@ mod tests {
             color: [255, 142, 82],
             kind: ClipKind::Pattern,
             group_id: None,
+            pattern_length_policy: None,
             pattern_id: 42,
             automation_id: None,
             audio_asset_id: None,
@@ -2464,6 +2466,7 @@ mod tests {
             color: [255, 207, 99],
             kind: ClipKind::Audio,
             group_id: None,
+            pattern_length_policy: None,
             pattern_id: 1,
             automation_id: None,
             audio_asset_id: Some(700),
@@ -4017,6 +4020,76 @@ mod tests {
             36 + data_size
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn follow_pattern_wav_uses_derived_growth_shrink_and_modern_manual_clock_without_rewriting_midi()
+     {
+        let directory = workflow_test_directory("follow-pattern-wav");
+        let mut project = arrangement_project();
+        project.auto_song_length = true;
+        project.clips[0] = pattern_clip(0.0, 1.0, 1.0, false);
+        project.clips[0].pattern_length_policy = Some(crate::model::PatternLengthPolicy::Follow);
+        project.patterns[0].channel_steps.fill([false; 16]);
+        project.patterns[0].length_steps = 16;
+        project.patterns[0].notes = vec![PianoNote {
+            id: 901,
+            channel_id: Some(project.channels[0].id),
+            group_id: None,
+            note: 64,
+            start: 0.5,
+            length: 0.25,
+            velocity: 0.8,
+            selected: false,
+            muted: false,
+        }];
+        let short = render_and_decode(&project, &directory.join("short.wav"));
+        assert_eq!(short.len(), 16_000);
+        let mut later = project.patterns[0].notes[0].clone();
+        later.id = 902;
+        later.start = 6.0;
+        project.patterns[0].notes.push(later);
+        let before = serde_json::to_vec(&project).unwrap();
+        let grown = render_and_decode(&project, &directory.join("grown.wav"));
+        assert_eq!(grown.len(), 32_000);
+        assert!(grown[24_000..26_000].iter().any(|s| s.left.abs() > 1.0e-5));
+        assert!(
+            grown
+                .iter()
+                .all(|s| s.left.is_finite() && s.right.is_finite())
+        );
+        assert_eq!(serde_json::to_vec(&project).unwrap(), before);
+        let cancelled = ExportControl::default();
+        assert!(cancelled.cancel());
+        let protected = directory.join("keep.wav");
+        std::fs::write(&protected, b"existing user export").unwrap();
+        assert!(render_project_wav_controlled(&project, &protected, 8_000, &cancelled).is_err());
+        assert_eq!(std::fs::read(&protected).unwrap(), b"existing user export");
+        assert_eq!(serde_json::to_vec(&project).unwrap(), before);
+        project.patterns[0].notes.pop();
+        assert_eq!(
+            render_and_decode(&project, &directory.join("shrunk.wav")).len(),
+            16_000
+        );
+        project.clips[0].set_manual_pattern_length(8.0);
+        assert_eq!(
+            collected_events(&project, 8_000)
+                .iter()
+                .map(|e| e.sample)
+                .collect::<Vec<_>>(),
+            vec![2_000, 18_000],
+            "a new manual trim retains the actual four-beat Pattern clock"
+        );
+        project.clips[0].pattern_length_policy = None;
+        assert_eq!(
+            collected_events(&project, 8_000)
+                .iter()
+                .map(|e| e.sample)
+                .collect::<Vec<_>>(),
+            vec![2_000],
+            "an old Manual caller keeps the sixteen-beat legacy clock"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

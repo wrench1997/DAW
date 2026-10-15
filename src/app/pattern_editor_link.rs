@@ -108,8 +108,10 @@ impl CitrusApp {
         let open_piano = !pattern.notes.is_empty() ^ alternate;
         // The Playlist thumbnail uses the SONG compiler's Piano period, even
         // when PAT is selected. Opening is navigation, not a mode/seek command.
-        let period =
-            pattern.piano_period_beats(TimelineCompileOptions::default().legacy_piano_period_beats);
+        let period = clip.piano_period_beats(
+            pattern,
+            TimelineCompileOptions::default().legacy_piano_period_beats,
+        );
         let source_beat =
             (f64::from(clip.source_offset) + song_beat - f64::from(clip.start)).rem_euclid(period);
         if self.project.active_pattern != index {
@@ -173,7 +175,7 @@ impl CitrusApp {
     /// A single editor follows the explicitly opened occurrence while it is
     /// active. Otherwise use the latest-starting active occurrence (ID tie-break),
     /// so repeated placements follow naturally and overlaps stay deterministic.
-    fn pattern_editor_source_beat(&self) -> Option<f64> {
+    fn pattern_editor_source_position(&self) -> Option<(f64, f64)> {
         let beat = f64::from(self.beat_position);
         if !beat.is_finite() || beat < 0.0 {
             return None;
@@ -185,22 +187,23 @@ impl CitrusApp {
             return None;
         }
         if self.transport_mode == TransportMode::Pattern {
-            return Some(beat);
+            return Some((beat, pattern_playback_length_beats(&self.project).into()));
         }
         if beat >= f64::from(self.project.song_end_beat()) {
             return None;
         }
         let pattern_id = self.project.active_pattern().id;
         let active = |clip: &&Clip| {
+            let length = self.project.clip_length_beats(clip);
             clip.kind == ClipKind::Pattern
                 && clip.pattern_id == pattern_id
                 && !clip.muted
                 && clip.start.is_finite()
-                && clip.length.is_finite()
+                && length.is_finite()
                 && clip.source_offset.is_finite()
                 && clip.source_offset >= 0.0
                 && beat >= f64::from(clip.start)
-                && beat < f64::from(clip.start) + f64::from(clip.length)
+                && beat < f64::from(clip.start) + f64::from(length)
         };
         let preferred = self.pattern_editor_origin.filter(|origin| {
             origin.project_session == self.project_session && origin.pattern_id == pattern_id
@@ -212,16 +215,17 @@ impl CitrusApp {
                 .then_with(|| a.start.total_cmp(&b.start))
                 .then_with(|| a.id.cmp(&b.id))
         })?;
-        Some(f64::from(clip.source_offset) + beat - f64::from(clip.start))
+        Some((
+            f64::from(clip.source_offset) + beat - f64::from(clip.start),
+            clip.piano_period_beats(
+                self.project.active_pattern(),
+                TimelineCompileOptions::default().legacy_piano_period_beats,
+            ),
+        ))
     }
 
     pub(super) fn piano_editor_playhead(&self) -> Option<f32> {
-        let source = self.pattern_editor_source_beat()?;
-        let options = transport_timeline_compile_options(&self.project, self.transport_mode);
-        let period = self
-            .project
-            .active_pattern()
-            .piano_period_beats(options.legacy_piano_period_beats);
+        let (source, period) = self.pattern_editor_source_position()?;
         Some(source.rem_euclid(period) as f32)
     }
 
@@ -229,7 +233,7 @@ impl CitrusApp {
         if !self.playing || !self.transport_clock_playing {
             return None;
         }
-        let source = self.pattern_editor_source_beat()?;
+        let (source, _) = self.pattern_editor_source_position()?;
         let steps = self.project.active_pattern().length_steps.clamp(1, 16);
         let phase = source.rem_euclid(steps as f64 / 4.0);
         // Timeline samples Swing at the start of the local two-step pair, not

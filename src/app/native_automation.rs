@@ -178,11 +178,12 @@ fn native_automation_candidate(
         .chain(0..first)
         .find(|track| {
             !project.clips.iter().any(|clip| {
+                let clip_length = project.clip_length_beats(clip);
                 clip.track == *track
                     && (!clip.start.is_finite()
-                        || !clip.length.is_finite()
-                        || clip.length < 0.0
-                        || (clip.start < start + length && clip.start + clip.length > start))
+                        || !clip_length.is_finite()
+                        || clip_length < 0.0
+                        || (clip.start < start + length && clip.start + clip_length > start))
             })
         })
         .ok_or(
@@ -217,6 +218,7 @@ fn native_automation_candidate(
         color,
         kind: ClipKind::Automation,
         group_id: None,
+        pattern_length_policy: None,
         pattern_id,
         automation_id: Some(automation_id),
         audio_asset_id: None,

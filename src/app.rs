@@ -24,6 +24,7 @@ mod headless_ui_tests;
 mod keyboard_audition;
 mod native_automation;
 mod pattern_editor_link;
+mod pattern_length;
 mod piano_clipboard;
 mod piano_expression;
 mod piano_keyboard;
@@ -98,9 +99,10 @@ use crate::{
     },
     model::{
         AudioAsset, AudioClipMixerDestination, Channel, Clip, ClipKind, MIXER_INSERT_SLOT_COUNT,
-        MixerInsertSlotRef, Pattern, PianoNote, PluginFormat as ProjectPluginFormat,
-        PluginInstance, PluginRole, PluginRuntimeStatus, Project, ProjectAutomation, StudioView,
-        normalize_piano_note_groups, normalize_playlist_clip_groups,
+        MixerInsertSlotRef, Pattern, PatternLengthPolicy, PianoNote,
+        PluginFormat as ProjectPluginFormat, PluginInstance, PluginRole, PluginRuntimeStatus,
+        Project, ProjectAutomation, StudioView, normalize_piano_note_groups,
+        normalize_playlist_clip_groups,
     },
     piano_roll::{
         ArpeggioDirection, ArpeggioSync, ArticulateSettings, ArticulationPreset, PianoChordStamp,
@@ -233,8 +235,7 @@ fn pattern_playback_length_beats(project: &Project) -> f32 {
 }
 
 fn pattern_content_length_beats(pattern: &Pattern) -> f32 {
-    let minimum = (pattern.length_steps.max(1) as f64 / 4.0).max(4.0);
-    pattern.piano_period_beats(minimum) as f32
+    pattern.content_period_beats() as f32
 }
 
 /// Creates the immutable musical projection compiled by the callback timeline.
@@ -271,6 +272,7 @@ fn transport_playback_project(project: &Project, mode: TransportMode) -> Project
                 color: [255, 142, 82],
                 kind: ClipKind::Pattern,
                 group_id: None,
+                pattern_length_policy: None,
                 pattern_id: pattern.id,
                 automation_id: None,
                 audio_asset_id: None,
@@ -299,6 +301,8 @@ struct TransportPatternSlice {
     pattern_id: u32,
     start: f32,
     length: f32,
+    source_offset: f32,
+    piano_period: f32,
 }
 
 fn transport_pattern_slices(project: &Project, mode: TransportMode) -> Vec<TransportPatternSlice> {
@@ -315,6 +319,8 @@ fn transport_pattern_slices(project: &Project, mode: TransportMode) -> Vec<Trans
                     pattern_id: pattern.id,
                     start: 0.0,
                     length: pattern_playback_length_beats(project),
+                    source_offset: 0.0,
+                    piano_period: pattern_playback_length_beats(project),
                 }]
             })
             .unwrap_or_default(),
@@ -325,7 +331,15 @@ fn transport_pattern_slices(project: &Project, mode: TransportMode) -> Vec<Trans
             .map(|clip| TransportPatternSlice {
                 pattern_id: clip.pattern_id,
                 start: clip.start,
-                length: clip.length,
+                length: project.clip_length_beats(clip),
+                source_offset: clip.source_offset,
+                piano_period: project
+                    .patterns
+                    .iter()
+                    .find(|p| p.id == clip.pattern_id)
+                    .map_or(LOOP_LENGTH, |pattern| {
+                        clip.piano_period_beats(pattern, f64::from(LOOP_LENGTH)) as f32
+                    }),
             })
             .collect(),
     }
@@ -4419,6 +4433,7 @@ fn build_new_pattern_midi_take(
         color: target.target.color,
         kind: ClipKind::Pattern,
         group_id: None,
+        pattern_length_policy: None,
         pattern_id,
         automation_id: None,
         audio_asset_id: None,
@@ -11782,6 +11797,7 @@ impl CitrusApp {
             color,
             kind: ClipKind::Automation,
             group_id: None,
+            pattern_length_policy: None,
             pattern_id: self.project.active_pattern().id,
             automation_id: Some(automation_id),
             audio_asset_id: None,
@@ -12132,7 +12148,7 @@ impl CitrusApp {
                     .unwrap_or(0.0);
                 let maximum_end = origins
                     .iter()
-                    .map(|clip| clip.start + clip.length)
+                    .map(|clip| clip.start + self.project.clip_length_beats(clip))
                     .reduce(f32::max)
                     .unwrap_or(minimum_start);
                 let shift = (maximum_end - minimum_start).max(self.snap.max(0.0625));
@@ -13460,6 +13476,7 @@ impl CitrusApp {
             color: [255, 207, 99],
             kind: ClipKind::Audio,
             group_id: None,
+            pattern_length_policy: None,
             pattern_id: self.project.active_pattern().id,
             automation_id: None,
             audio_asset_id: Some(asset_id),
@@ -13991,7 +14008,7 @@ impl CitrusApp {
                 else {
                     continue;
                 };
-                let relative_beat = (scheduled_beat - slice.start).max(0.0);
+                let relative_beat = slice.source_offset + (scheduled_beat - slice.start).max(0.0);
                 let pattern_step = swung_step_index(relative_beat, self.effective_swing)
                     % pattern.length_steps.max(1);
                 if scheduled_steps.insert((pattern.id, pattern_step)) {
@@ -14021,11 +14038,7 @@ impl CitrusApp {
                     }
                 }
 
-                let piano_period = if self.transport_mode == TransportMode::Pattern {
-                    slice.length.max(0.25)
-                } else {
-                    pattern.piano_period_beats(f64::from(LOOP_LENGTH)) as f32
-                };
+                let piano_period = slice.piano_period.max(0.25);
                 let piano_step =
                     swung_step_index(relative_beat % piano_period, self.effective_swing);
                 for note in pattern.notes.iter().filter(|note| {
@@ -18597,6 +18610,9 @@ impl CitrusApp {
             });
             return;
         }
+        let displayed_length = self.project.clip_length_beats(&self.project.clips[index]);
+        let mut pattern_length_request = None;
+        let mut follow_request = None;
         let (
             kind,
             automation_id,
@@ -18631,14 +18647,44 @@ impl CitrusApp {
                 property_drag_f32(ui, "Start", &mut clip.start, 0.0..=song_length, " beats");
                 // A valid inherited/trimmed clip may be shorter than the usual
                 // editing step. Merely showing Inspector must not extend it.
-                let minimum_length = clip.length.min(0.25);
-                property_drag_f32(
-                    ui,
-                    "Length",
-                    &mut clip.length,
-                    minimum_length..=song_length,
-                    " beats",
-                );
+                let minimum_length = displayed_length.min(0.25);
+                if clip.kind == ClipKind::Pattern {
+                    let mut length = displayed_length;
+                    let response = ui
+                        .horizontal(|ui| {
+                            ui.label(RichText::new("Length").size(9.0).color(theme::MUTED));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.add(
+                                    egui::DragValue::new(&mut length)
+                                        .range(minimum_length..=song_length)
+                                        .clamp_existing_to_range(false)
+                                        .update_while_editing(false)
+                                        .speed(0.05)
+                                        .max_decimals(2)
+                                        .suffix(" beats"),
+                                )
+                            })
+                            .inner
+                        })
+                        .inner;
+                    if response.changed() && length != displayed_length {
+                        pattern_length_request = Some(length);
+                    }
+                    let mut follow = clip.follows_pattern();
+                    if ui.checkbox(&mut follow, "Follow Pattern")
+                        .on_hover_text("Use this source Pattern's full length. Editing Length or resizing creates a manual trim.")
+                        .changed() {
+                        follow_request = Some(follow);
+                    }
+                } else {
+                    property_drag_f32(
+                        ui,
+                        "Length",
+                        &mut clip.length,
+                        minimum_length..=song_length,
+                        " beats",
+                    );
+                }
                 if clip.kind != ClipKind::Audio {
                     property_drag_f32(
                         ui,
@@ -18680,6 +18726,12 @@ impl CitrusApp {
             )
         };
 
+        if let Some(length) = pattern_length_request {
+            self.edit_pattern_clip_length(id, length);
+        }
+        if let Some(follow) = follow_request {
+            self.set_pattern_follow(id, follow);
+        }
         if kind == ClipKind::Pattern {
             self.selected_clip_render_button(ui);
         }
@@ -21209,6 +21261,7 @@ impl eframe::App for CitrusApp {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
         self.sync_generator_routes();
+        self.cancel_pattern_length_gesture(&ctx);
         self.refresh_transport_clock();
         self.poll_timeline_compile(&ctx);
         self.poll_audio_asset_events();
@@ -22274,12 +22327,31 @@ impl CitrusApp {
         let grouping_enabled = self.piano_roll_state.grouping_enabled;
         let bypass_snap = ui.input(|input| input.modifiers.alt);
         let gesture_snapshot = PlaylistGestureSnapshot::capture(&self.project);
-        let clip_snapshot = &gesture_snapshot.clips;
+        let clip_geometry = gesture_snapshot
+            .clips
+            .iter()
+            .map(|clip| self.project.resolved_clip_geometry(clip))
+            .collect::<Vec<_>>();
+        let clip_snapshot = &clip_geometry;
         let pattern_periods = self
             .project
-            .patterns
+            .clips
             .iter()
-            .map(|pattern| (pattern.id, pattern_content_length_beats(pattern)))
+            .filter(|clip| clip.kind == ClipKind::Pattern)
+            .filter_map(|clip| {
+                let pattern = self
+                    .project
+                    .patterns
+                    .iter()
+                    .find(|p| p.id == clip.pattern_id)?;
+                Some((
+                    clip.id,
+                    clip.piano_period_beats(
+                        pattern,
+                        TimelineCompileOptions::default().legacy_piano_period_beats,
+                    ) as f32,
+                ))
+            })
             .collect::<HashMap<_, _>>();
         let mut clip_consumed_click = false;
         let mut split_request: Option<(u32, f32)> = None;
@@ -22298,6 +22370,12 @@ impl CitrusApp {
         let mut automation_point_action = None;
         let mut open_pattern_request = None;
         for clip in &mut self.project.clips {
+            let clip_length = clip.resolved_length_beats(
+                self.project
+                    .patterns
+                    .iter()
+                    .find(|pattern| pattern.id == clip.pattern_id),
+            );
             if clip.track >= PLAYLIST_TRACK_COUNT
                 || !content_span_is_visible(
                     self.playlist_viewport.y,
@@ -22307,13 +22385,13 @@ impl CitrusApp {
                 || !content_span_is_visible(
                     self.playlist_viewport.x,
                     f64::from(clip.start),
-                    f64::from(clip.start + clip.length),
+                    f64::from(clip.start + clip_length),
                 )
             {
                 continue;
             }
             let visible_start = clip.start.max(view_start);
-            let visible_end = (clip.start + clip.length).min(view_end);
+            let visible_end = (clip.start + clip_length).min(view_end);
             let clip_rect = Rect::from_min_size(
                 Pos2::new(
                     canvas.left()
@@ -22346,7 +22424,7 @@ impl CitrusApp {
                 + self
                     .playlist_viewport
                     .x
-                    .pixel_for_content(f64::from(clip.start + clip.length))
+                    .pixel_for_content(f64::from(clip.start + clip_length))
                     as f32;
             let show_fade_controls = self.show_playlist_fades && clip.kind == ClipKind::Audio;
             let resize_width = clip_rect.width().min(8.0);
@@ -22403,8 +22481,8 @@ impl CitrusApp {
                 ui.interact(resize_rect, id.with("resize-disabled"), Sense::hover())
             };
             let fade_handle_y = clip_rect.top() + 7.0;
-            let fade_in_x = clip_left + fade_handle_fraction(clip, true) * clip.length * beat_w;
-            let fade_out_x = clip_right - fade_handle_fraction(clip, false) * clip.length * beat_w;
+            let fade_in_x = clip_left + fade_handle_fraction(clip, true) * clip_length * beat_w;
+            let fade_out_x = clip_right - fade_handle_fraction(clip, false) * clip_length * beat_w;
             let fade_in_response = (show_fade_controls
                 && fade_in_x >= canvas.left() - 7.0
                 && fade_in_x <= canvas.right() + 7.0)
@@ -22652,7 +22730,7 @@ impl CitrusApp {
                                         curve_rect.height(),
                                         clip.source_offset,
                                         clip.start,
-                                        clip.length,
+                                        clip_length,
                                         self.snap,
                                         ui.input(|i| i.modifiers),
                                     )
@@ -22850,7 +22928,7 @@ impl CitrusApp {
                                     right: pair[1],
                                     clip_start: clip.start,
                                     source_offset: clip.source_offset,
-                                    length: clip.length,
+                                    length: clip_length,
                                 };
                                 canvas_painter.add(egui::Shape::convex_polygon(
                                     vec![
@@ -22946,7 +23024,7 @@ impl CitrusApp {
                                 }
                                 source_position = source_position.clamp(
                                     f64::from(clip.source_offset),
-                                    f64::from(clip.source_offset + clip.length),
+                                    f64::from(clip.source_offset + clip_length),
                                 );
                                 let normalized = f64::from(
                                     (curve_rect.bottom() - pointer.y) / curve_rect.height(),
@@ -22976,6 +23054,7 @@ impl CitrusApp {
                         .iter()
                         .find(|pattern| pattern.id == clip.pattern_id),
                     clip.source_offset,
+                    clip.pattern_length_policy.is_some(),
                 ),
             }
             if show_fade_controls {
@@ -23168,7 +23247,7 @@ impl CitrusApp {
                                 .round()
                                 * self.snap;
                             if beat > clip.start + self.snap * 0.5
-                                && beat < clip.start + clip.length - self.snap * 0.5
+                                && beat < clip.start + clip_length - self.snap * 0.5
                             {
                                 split_request = Some((clip.id, beat));
                             }
@@ -23342,13 +23421,27 @@ impl CitrusApp {
         }
         if let Some((origins, length_delta)) = group_resize_request {
             for origin in origins {
+                let before_timing = self.playlist_gesture_before.as_ref().and_then(|before| {
+                    before
+                        .clips
+                        .iter()
+                        .find(|clip| clip.id == origin.id)
+                        .map(|clip| (clip.length, clip.pattern_length_policy))
+                });
                 if let Some(clip) = self
                     .project
                     .clips
                     .iter_mut()
                     .find(|clip| clip.id == origin.id)
                 {
-                    clip.length = origin.length + length_delta;
+                    if length_delta != 0.0 {
+                        clip.set_manual_pattern_length(origin.length + length_delta);
+                    } else if let Some((length, policy)) = before_timing {
+                        // Returning the pointer to its initial extent is a
+                        // no-op, including an unmaterialized Follow before-image.
+                        clip.length = length;
+                        clip.pattern_length_policy = policy;
+                    }
                 }
             }
         }
@@ -23364,7 +23457,7 @@ impl CitrusApp {
                 };
                 match origin.kind {
                     ClipKind::Pattern => {
-                        if let Some(period) = pattern_periods.get(&origin.pattern_id)
+                        if let Some(period) = pattern_periods.get(&origin.id)
                             && let Ok(offset) = slipped_looping_source_offset(
                                 origin.source_offset,
                                 pointer_delta_beats,
@@ -23487,10 +23580,12 @@ impl CitrusApp {
                 .max()
                 .unwrap_or(0)
                 + 1;
-            let original = &self.project.clips[index];
+            let original = self
+                .project
+                .resolved_clip_geometry(&self.project.clips[index]);
             let split = if original.kind == ClipKind::Audio {
                 split_audio_clip(
-                    original,
+                    &original,
                     beat,
                     next_id,
                     self.tempo_map.as_ref(),
@@ -23502,15 +23597,12 @@ impl CitrusApp {
                 let original_start = original.start;
                 right.id = next_id;
                 right.start = beat;
-                right.length = original.start + original.length - beat;
-                left.length = beat - original.start;
+                right.set_manual_pattern_length(original.start + original.length - beat);
+                left.set_manual_pattern_length(beat - original.start);
                 match right.kind {
                     ClipKind::Automation => right.source_offset += beat - original_start,
                     ClipKind::Pattern => {
-                        let period = pattern_periods
-                            .get(&right.pattern_id)
-                            .copied()
-                            .unwrap_or(4.0);
+                        let period = pattern_periods.get(&original.id).copied().unwrap_or(4.0);
                         right.source_offset =
                             (right.source_offset + beat - original_start).rem_euclid(period);
                     }
@@ -23666,7 +23758,11 @@ impl CitrusApp {
                         return;
                     };
                     let pattern = self.project.active_pattern();
-                    let length = pattern_content_length_beats(pattern).min(4096.0 - beat);
+                    let length = pattern_content_length_beats(pattern);
+                    if beat + length > 4096.0 {
+                        self.notify("This Follow Pattern placement would exceed the 4096-beat editing range".into());
+                        return;
+                    }
                     let name = pattern.name.clone();
                     let color = self
                         .project
@@ -23683,6 +23779,7 @@ impl CitrusApp {
                         color,
                         kind: ClipKind::Pattern,
                         group_id: None,
+                        pattern_length_policy: Some(PatternLengthPolicy::Follow),
                         pattern_id: self.project.active_pattern().id,
                         automation_id: None,
                         audio_asset_id: None,
@@ -29776,6 +29873,7 @@ fn ensure_plugin_parameter_automation(
         color: [184, 106, 255],
         kind: ClipKind::Automation,
         group_id: None,
+        pattern_length_policy: None,
         pattern_id,
         automation_id: Some(automation_id),
         audio_asset_id: None,
@@ -30707,6 +30805,7 @@ fn timeline_compile_fingerprint(project: &Project, sample_rate: u32) -> u64 {
         clip.track.hash(&mut hasher);
         clip.start.to_bits().hash(&mut hasher);
         clip.length.to_bits().hash(&mut hasher);
+        clip.pattern_length_policy.hash(&mut hasher);
         (clip.kind as u8).hash(&mut hasher);
         clip.pattern_id.hash(&mut hasher);
         clip.automation_id.hash(&mut hasher);
@@ -31309,6 +31408,7 @@ fn draw_pattern_preview(
     beat_width: f32,
     pattern: Option<&Pattern>,
     clip_source_offset: f32,
+    modern_pattern_clock: bool,
 ) {
     if !source_start_beat.is_finite() || !beat_width.is_finite() || beat_width <= 0.0 {
         return;
@@ -31351,7 +31451,11 @@ fn draw_pattern_preview(
     // notes retain their legacy minimum and share the extended phrase period
     // with callback playback and builtin export.
     let minimum_period = TimelineCompileOptions::default().legacy_piano_period_beats;
-    let note_period = pattern.piano_period_beats(minimum_period) as f32;
+    let note_period = if modern_pattern_clock {
+        pattern.content_period_beats()
+    } else {
+        pattern.piano_period_beats(minimum_period)
+    } as f32;
     let step_period = step_count as f32 / 4.0;
     let end = source_start_beat + rect.width() / beat_width;
     let first_cycle = (source_start_beat / note_period).floor() as i64;
@@ -31904,6 +32008,7 @@ mod playback_tests {
                     20.0,
                     pattern,
                     start,
+                    false,
                 );
             });
             output.shapes.iter().filter(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == event_color)).count()
@@ -32465,6 +32570,7 @@ mod playback_tests {
             color: [1, 2, 3],
             kind: ClipKind::Pattern,
             group_id: None,
+            pattern_length_policy: None,
             pattern_id: project.patterns[0].id,
             automation_id: None,
             audio_asset_id: None,
@@ -32939,6 +33045,14 @@ mod playback_tests {
         assert_eq!(committed.project.patterns[1].notes[0].id, 2);
         assert_eq!(committed.project.clips[1].track, 6);
         assert_eq!(committed.project.clips[1].pattern_id, 2);
+        assert_eq!(committed.project.clips[1].pattern_length_policy, None);
+        assert_eq!(
+            committed
+                .project
+                .clip_length_beats(&committed.project.clips[1]),
+            committed.project.clips[1].length,
+            "recording keeps its exact stop-window contract instead of a new full-bar Follow extent"
+        );
         assert!(f64::from(committed.project.clips[1].start) <= 2.0);
         assert!(f64::from(committed.project.clips[1].length) >= 1.5);
 
@@ -33538,6 +33652,7 @@ mod playback_tests {
             color: [255, 142, 82],
             kind: ClipKind::Pattern,
             group_id: None,
+            pattern_length_policy: None,
             pattern_id,
             automation_id: None,
             audio_asset_id: None,
@@ -33620,6 +33735,8 @@ mod playback_tests {
                 pattern_id: 91,
                 start: 0.0,
                 length: LOOP_LENGTH,
+                source_offset: 0.0,
+                piano_period: LOOP_LENGTH,
             }]
         );
         let expected_song_count = project
@@ -33630,6 +33747,50 @@ mod playback_tests {
         let song = transport_pattern_slices(&project, TransportMode::Song);
         assert_eq!(song.len(), expected_song_count);
         assert!(song.iter().all(|slice| slice.pattern_id == 1));
+    }
+
+    #[test]
+    fn transport_pattern_slices_resolve_follow_extent_and_each_placements_source_clock() {
+        let mut project = Project::blank();
+        let mut clip = Project::default().clips[0].clone();
+        clip.id = 1;
+        clip.start = 2.0;
+        clip.length = 9.0;
+        clip.source_offset = 1.25;
+        project.clips = vec![clip.clone()];
+        clip.id = 2;
+        clip.pattern_length_policy = Some(PatternLengthPolicy::Manual);
+        project.clips.push(clip.clone());
+        clip.id = 3;
+        clip.pattern_length_policy = Some(PatternLengthPolicy::Follow);
+        project.clips.push(clip);
+        let song = transport_pattern_slices(&project, TransportMode::Song);
+        assert_eq!(
+            song.iter()
+                .map(|s| (s.length, s.piano_period, s.source_offset))
+                .collect::<Vec<_>>(),
+            vec![(9.0, 16.0, 1.25), (9.0, 4.0, 1.25), (4.0, 4.0, 1.25)]
+        );
+        project.patterns[0].notes.push(PianoNote {
+            id: 91,
+            channel_id: Some(project.channels[0].id),
+            group_id: None,
+            note: 64,
+            start: 6.0,
+            length: 0.25,
+            velocity: 0.8,
+            selected: false,
+            muted: false,
+        });
+        let grown = transport_pattern_slices(&project, TransportMode::Song);
+        assert_eq!(
+            grown
+                .iter()
+                .map(|s| (s.length, s.piano_period))
+                .collect::<Vec<_>>(),
+            vec![(9.0, 16.0), (9.0, 8.0), (8.0, 8.0)]
+        );
+        assert_eq!(project.clips[2].length, 9.0);
     }
 
     #[test]
@@ -34552,6 +34713,7 @@ mod playback_tests {
             color: [255, 207, 99],
             kind: ClipKind::Audio,
             group_id: None,
+            pattern_length_policy: None,
             pattern_id: 1,
             automation_id: None,
             audio_asset_id: Some(3),
@@ -34875,6 +35037,7 @@ mod playback_tests {
             color: [1, 2, 3],
             kind: ClipKind::Automation,
             group_id: None,
+            pattern_length_policy: None,
             pattern_id: 1,
             automation_id: Some(700),
             audio_asset_id: None,
@@ -34982,6 +35145,7 @@ mod playback_tests {
             color: [1, 2, 3],
             kind: ClipKind::Automation,
             group_id: None,
+            pattern_length_policy: None,
             pattern_id: 1,
             automation_id: Some(9),
             audio_asset_id: None,

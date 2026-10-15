@@ -118,6 +118,7 @@ pub(super) fn prepare_audio_import(
         color: [255, 207, 99],
         kind: ClipKind::Audio,
         group_id: None,
+        pattern_length_policy: None,
         pattern_id: project.active_pattern().id,
         automation_id: None,
         audio_asset_id: Some(asset_id),

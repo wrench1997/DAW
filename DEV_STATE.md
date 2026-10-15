@@ -7,6 +7,8 @@
 
 当前可用副本：桌面“Citrus Studio 新版测试03”，`D:\DAW-Preview\Citrus-Studio-20261015-03\Start-Citrus.cmd`。PAT/SONG、拖播放头、AUTO范围及Playlist/Piano/Rack联动已通过本机定向回归/真实离屏/Clippy；新v13工程请另存副本，旧01/02保留。见`docs/PLAYLIST_TRANSPORT.md`；本轮63d2f99云quality和preview均实际SUCCESS。
 
+接续Follow长度候选已实现，尚未Cargo/新渲染验收：新Draw/Paint默认Follow真实Pattern周期；实际resize/Length编辑转固定窗口，Inspector可一键恢复Follow。Project只读extent统一驱动几何、AUTO终点、Timeline和支持导出，不在每次note动作额外同步/多记Undo。旧缺省Manual保留legacy source clock；新Follow裁成Manual后保留现代clock，以显式policy及格式14持久化。复制/移动/Slip保留policy，split固定两片；原精确MIDI Take窗口/旧demo及旧Rust入口保持原合同。独立消费者审查发现自动化创建空轨判断仍读raw长度；原owner已修为统一resolver并补实际菜单增/缩/Undo回归。新增共25项，执行待跑。用户明确仍测试03、这里只改代码；不操作桌面/NI/声卡，软件门与peer资源交回协调。现有01/02/03及作品不改。
+
 用户新增Playlist↔钢琴卷帘联动：共享Pattern数据/所有placement预览本来已有；现补Pattern双击自动打开对应Piano/Rack、主Pattern切换时一次性定位含notes通道、SONG位置按placement/offset映射本地游标，以及真实callback模式下Rack活动步。已有手动trim不自动拉长；Source114/81b2572实际225 UI/无设备callback全PASS（含新增9联动+1基线正反控制），严格Clippy/test artifact/匹配双bin exit0；9真实WGPU用例PASS，Root逐张检查4帧目标/共享预览/局部cursor/Rack活动步。Source115云quality38746810086与preview38746809594实际均SUCCESS：2391 App+52 helper+13协议=2456 root/14 ignored；factory33、367 Python=355PASS/12条件SKIP、Clippy、静态CRT release8分50秒、ZIP/提取后helper通过，云session2真实PrintWindow PASS。未上传附件。完整source115原始日志/终态保留。已独立交付03，主68,087,808B/helper5,054,464B，helper smoke exit0/reaped；未打开GUI/NI/声卡，格式仍13与02兼容。
 
 `4102953`新云quality38740984624实际SUCCESS（factory33、2446 root/14 ignored、Clippy/build、Linux15+1及session2真实PrintWindow PASS）；preview38740984829的367 Python=355PASS/12条件SKIP、SDK4+15通过，App2380PASS/1FAIL/14ignored，标尺用例126行`!dirty`失败，release/ZIP未跑。同SHA质量该例通过不覆盖此失败。已定位fixture换掉startup demo后只同步history指纹、未同步保存基线，跨750ms检查便合法dirty；已只修fixture并加确定计时/真实编辑dirty对照，Source114实际通过，生产规则不动。原日志/终态保留source113记录。

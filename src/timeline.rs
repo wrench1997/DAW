@@ -1074,6 +1074,7 @@ struct ClipView {
     length: f32,
     kind: ClipKind,
     pattern_id: u32,
+    pattern_length_policy: Option<crate::model::PatternLengthPolicy>,
     automation_id: Option<u64>,
     audio_asset_id: Option<u64>,
     source_offset: f32,
@@ -1096,6 +1097,7 @@ impl From<&Clip> for ClipView {
             length: clip.length,
             kind: clip.kind,
             pattern_id: clip.pattern_id,
+            pattern_length_policy: clip.pattern_length_policy,
             automation_id: clip.automation_id,
             audio_asset_id: clip.audio_asset_id,
             source_offset: clip.source_offset,
@@ -1109,6 +1111,14 @@ impl From<&Clip> for ClipView {
             fade_out: clip.fade_out,
             muted: clip.muted,
         }
+    }
+}
+
+impl ClipView {
+    fn from_project(clip: &Clip, project: &Project) -> Self {
+        let mut view = Self::from(clip);
+        view.length = project.clip_length_beats(clip);
+        view
     }
 }
 
@@ -1291,7 +1301,7 @@ impl<'a> Compiler<'a> {
     fn compile(mut self) -> Result<CompiledTimeline, TimelineCompileError> {
         for clip_index in 0..self.project.clips.len() {
             self.charge_work(1)?;
-            let clip = ClipView::from(&self.project.clips[clip_index]);
+            let clip = ClipView::from_project(&self.project.clips[clip_index], self.project);
             if !self.valid_clip_ids.contains(&clip.id) {
                 continue;
             }
@@ -1705,7 +1715,7 @@ impl<'a> Compiler<'a> {
             let mut has_placement = false;
             let mut placements = Vec::new();
             for project_clip in &self.project.clips {
-                let clip = ClipView::from(project_clip);
+                let clip = ClipView::from_project(project_clip, self.project);
                 if clip.kind != ClipKind::Automation || clip.automation_id != Some(automation.id) {
                     continue;
                 }
@@ -1998,8 +2008,12 @@ impl<'a> Compiler<'a> {
         if note_count == 0 {
             return Ok(());
         }
-        let period = self.project.patterns[pattern_index]
-            .piano_period_beats(self.options.legacy_piano_period_beats);
+        let pattern = &self.project.patterns[pattern_index];
+        let period = if clip.pattern_length_policy.is_some() {
+            pattern.content_period_beats()
+        } else {
+            pattern.piano_period_beats(self.options.legacy_piano_period_beats)
+        };
         let source_phase = f64::from(clip.source_offset).rem_euclid(period);
         let first_repetition_start = clip_start - source_phase;
         let repetitions = ((clip_end - first_repetition_start) / period)
@@ -2655,7 +2669,7 @@ impl<'a> Compiler<'a> {
         let mut has_placement = false;
         let mut placements = Vec::new();
         for clip_index in 0..self.project.clips.len() {
-            let clip = ClipView::from(&self.project.clips[clip_index]);
+            let clip = ClipView::from_project(&self.project.clips[clip_index], self.project);
             if clip.kind != ClipKind::Automation || clip.automation_id != Some(automation_id) {
                 continue;
             }
@@ -3259,6 +3273,7 @@ mod tests {
             color: [3, 2, 1],
             kind: ClipKind::Pattern,
             group_id: None,
+            pattern_length_policy: None,
             pattern_id,
             automation_id: None,
             audio_asset_id: None,

@@ -141,6 +141,7 @@ fn two_native_channels(source: Source) -> Project {
         color: [200, 130, 60],
         kind: ClipKind::Pattern,
         group_id: None,
+        pattern_length_policy: None,
         pattern_id: 1,
         automation_id: None,
         audio_asset_id: None,
