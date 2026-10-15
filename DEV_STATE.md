@@ -1,17 +1,17 @@
 # 当前开发状态
 
-更新：2026-10-15（Asia/Shanghai）。Citrus Studio 0.5.0-alpha.1 仍为开发版。
+更新：2026-10-16（Asia/Shanghai）。Citrus Studio 0.5.0-alpha.1 仍为开发版。
 开发分支：`ci/windows-reliability-20261009`；本轮起点：`b0d8d5c0`。
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
 当前可用副本：桌面“Citrus Studio 新版测试03”，`D:\DAW-Preview\Citrus-Studio-20261015-03\Start-Citrus.cmd`。PAT/SONG、拖播放头、AUTO范围及Playlist/Piano/Rack联动已通过本机定向回归/真实离屏/Clippy；新v13工程请另存副本，旧01/02保留。见`docs/PLAYLIST_TRANSPORT.md`；本轮63d2f99云quality和preview均实际SUCCESS。
 
-接续Follow长度候选已实现，首次Cargo有一项取消缺陷、新渲染未跑：新Draw/Paint默认Follow真实Pattern周期；实际resize/Length编辑转固定窗口，Inspector可一键恢复Follow。Project只读extent统一驱动几何、AUTO终点、Timeline和支持导出，不在每次note动作额外同步/多记Undo。旧缺省Manual保留legacy source clock；新Follow裁成Manual后保留现代clock，以显式policy及格式14持久化。复制/移动/Slip保留policy，split固定两片；原精确MIDI Take窗口/旧demo及旧Rust入口保持原合同。独立消费者审查发现自动化创建空轨判断仍读raw长度；原owner已修为统一resolver并补实际菜单增/缩/Undo回归。新增共25项，首跑24通过、1取消断言失败（详下）。用户明确仍测试03、这里只改代码；不操作桌面/NI/声卡，软件门与peer资源交回协调。现有01/02/03及作品不改。
+Follow长度源码`b2e56dc`本机验收通过：新Draw/Paint默认Follow真实Pattern周期；实际resize/Length编辑转固定窗口，Inspector可恢复Follow。Project只读extent统一驱动几何、AUTO终点、Timeline及支持导出；复制/移动/Slip保留policy，split固定两片；旧工程/旧Rust调用和精确MIDI Take窗口保留。格式14写入、旧文件读取；03/02不能读新14，另存副本。用户仍测试03、这里只改代码；没有替换副本或启动主GUI/声卡/NI。
 
-Source116/af28a1e首次执行：App2415PASS/1FAIL/14ignored，678.99s；新增24/25通过，Length输入6后Esc的Project不变性失败（pattern_length_tests.rs436）。原owner已定位egui0.35双帧lost_focus保留draft，修为只清当前Length widget的取消草稿；原测试逐press/release/idle强断言、Enter及实际点击失焦提交/一次Undo均保留，当时静态通过、执行待续门。串行全套峰值14.14GiB private/32.80GiB global触发12GiB软预算，后续门未启动；root115388/exec34118 actual101、观察子进程全部terminal，fresh heavy空，资源已交回peer。下一门只跑受影响12 UI/明确Saved13/Clippy/构建与新渲染，复用未变核心证据；03不变。
+首跑`af28a1e`实际App2415PASS/1FAIL/14ignored（678.99s），新增24/25通过。Length输入6后Esc的完整Project不变性失败；egui双帧lost_focus令release帧提交取消草稿，修为只清该widget草稿。`b65e14a`实际12输入/focus全部PASS，含逐press/release/idle不变性、Enter/真实点击失焦提交与单步Undo；原Saved13只读/私有copy完整payload+源字节保留门1PASS/0.75s。随后Clippy真实101报预览参数8/7；改传既有Clip、复用同一clock helper，未放宽lint。
 
-Source116续门02/b65e14a实际12 UI全部PASS：Follow8/9.91s、数字2、Piano数字Esc1、文本剪贴板focus1；原Saved13只读/私有copy穿过v14的完整payload+源字节保留门1PASS/0.75s。严格Clippy101报draw_pattern_preview参数8/7，原owner已把预览offset/clock改传既有Clip并复用同一clock helper，参数8→7，静态通过，不放宽lint；no-default/双bin/test artifact/GPU未开始。52832/93776实际101、全部观察workterminal、无budget guard、fresh heavy空。03/声卡/NI均未操作。
+最终`b2e56dc`实际fmt/严格all-feature all-target Clippy/preview unit1/no-default all-target/test artifact/匹配双bin全部exit0；主68,142,080B/helper5,054,464B。8真实WGPU/无设备callback用例15.58s全部PASS、自然exit0，Root检查9张1498×936实际帧，增长/缩短、手动窗、Follow恢复和局部cursor均正确。首跑全suite峰值14.14GiB private/32.80GiB global触发软预算，后续未启动；定向续门复用未变通过证据，最终CPU峰值3.95/22.42GiB、guard=false。原失败日志保留；所有观察工作实际terminal，资源交回peer。云quality/preview待本次push后新验收；NI/完整原目标仍未完成。详`docs/PLAYLIST_TRANSPORT.md`与target内source116/117记录。
 
 用户新增Playlist↔钢琴卷帘联动：共享Pattern数据/所有placement预览本来已有；现补Pattern双击自动打开对应Piano/Rack、主Pattern切换时一次性定位含notes通道、SONG位置按placement/offset映射本地游标，以及真实callback模式下Rack活动步。已有手动trim不自动拉长；Source114/81b2572实际225 UI/无设备callback全PASS（含新增9联动+1基线正反控制），严格Clippy/test artifact/匹配双bin exit0；9真实WGPU用例PASS，Root逐张检查4帧目标/共享预览/局部cursor/Rack活动步。Source115云quality38746810086与preview38746809594实际均SUCCESS：2391 App+52 helper+13协议=2456 root/14 ignored；factory33、367 Python=355PASS/12条件SKIP、Clippy、静态CRT release8分50秒、ZIP/提取后helper通过，云session2真实PrintWindow PASS。未上传附件。完整source115原始日志/终态保留。已独立交付03，主68,087,808B/helper5,054,464B，helper smoke exit0/reaped；未打开GUI/NI/声卡，格式仍13与02兼容。
 

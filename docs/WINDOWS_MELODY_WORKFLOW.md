@@ -1,6 +1,6 @@
 # Windows melody workflow — support and verification
 
-Updated: 2026-10-15 (Asia/Shanghai). Development branch:
+Updated: 2026-10-16 (Asia/Shanghai). Development branch:
 `ci/windows-reliability-20261009`; this effort started from `b0d8d5c0`.
 Citrus Studio remains a development DAW. The complete melody workflow is not yet qualified.
 This document separates implemented behavior, actual local acceptance, failures and untested work.
@@ -30,13 +30,15 @@ The user used01 and reported Playlist/PAT/SONG issues;02 contains those locally
 verified repairs.03 adds Playlist/Piano/Rack linking without a new format change.
 Build-Info/README/Helper-Smoke records accompany each copy.
 
-The next source candidate implements explicit Pattern Follow length in format14.
-New Draw/Paint follows source growth; a real trim fixes the window and Inspector
-can restore Follow. Legacy placements and exact MIDI Take windows stay fixed.
-Executable, persistence/WAV and genuine offscreen gates for this candidate are
-pending;03 does not contain it. Old03/02 cannot read new14 saves, so preserve old
-works with Save As. The user is still testing03 and requested code-only work: no
-main GUI, soundcard or Kontakt operations during that test.
+Follow source `b2e56dc` writes format14: new Draw/Paint follows source growth,
+a real trim fixes the window, and Inspector can restore Follow. Legacy placements
+and exact MIDI Take windows stay fixed. Local12 focused input cases, explicit
+Saved13 private-copy/payload preservation, strict Clippy/no-default/build and8
+real WGPU cases passed;9 frames inspected. The original cancel/Clippy failures
+and valid reused model/WAV evidence are in [Playlist transport](PLAYLIST_TRANSPORT.md).
+New cloud gates are pending.03 does not contain Follow, and03/02 cannot read new14
+saves: use Save As. The user is still testing03 and requested code-only work;
+Root has not operated main GUI, soundcard or Kontakt. Full NI acceptance waits.
 
 The first generic-base restore candidate compiled but failed existing history checks.
 Ordinary Open formerly sent saved bases once through a 64-entry untagged admin

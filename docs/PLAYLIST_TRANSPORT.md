@@ -1,14 +1,20 @@
 # Drag the playhead; let the arrangement set its end
 
-**Locally verified, 2026-10-15; delivered source `81b2572`.** Transport/range source
-`885306f` passed input, persistence, Timeline/WAV and audio-split checks. The
-current linking source passed all225 affected UI/callback cases, strict Clippy,
-matching main/helper build and9 genuine WGPU cases; all four frames were inspected.
-Desktop **Citrus Studio 新版测试03** starts the separate copy at
-`D:\DAW-Preview\Citrus-Studio-20261015-03\Start-Citrus.cmd`;01/02 and user works
-are unchanged. Cloud [quality](https://github.com/wrench1997/DAW/actions/runs/38746810086)
+**Follow-length source `b2e56dc` locally verified, 2026-10-16. Cloud gates pending.**
+Twelve affected input/focus cases, the explicit Saved13 private-copy round-trip,
+strict Clippy, no-default check, preview unit and matching main/helper builds
+passed. Eight genuine WGPU cases passed; all nine 1498×936 frames were inspected.
+Unchanged model/WAV/Timeline evidence from `af28a1e` remains applicable; the two
+actual first-gate failures and their repairs are recorded below.
+
+Desktop **Citrus Studio 新版测试03** still runs delivered `81b2572` at
+`D:\DAW-Preview\Citrus-Studio-20261015-03\Start-Citrus.cmd`. It remains format 13
+and does not include Follow. The new source writes format 14: save old works as
+copies, because 03/02 cannot read new v14 files. 01/02/03 and their profiles are unchanged.
+Earlier linked-editor [quality](https://github.com/wrench1997/DAW/actions/runs/38746810086)
 and [preview packaging](https://github.com/wrench1997/DAW/actions/runs/38746809594)
-passed at `63d2f99`; native03/NOIRE acceptance remains separate.
+passed at `63d2f99`; these are not the pending Follow cloud gates.
+Native NOIRE/device acceptance remains deferred while the user tests 03.
 
 ## Position and view are separate from music
 
@@ -67,8 +73,8 @@ preserve the manual endpoint and the audible PCM/WAV prefix.
 
 ## Let an untrimmed Pattern clip follow its source
 
-**v14 candidate implemented; numeric-cancel repair passed, Clippy repair pending.
-Delivered03 does not include this policy.** New Draw/Paint Pattern placements default to
+**Implemented and locally verified at `b2e56dc`; not included in delivered03.**
+New Draw/Paint Pattern placements default to
 **Follow Pattern**. Their width comes from the source Pattern's actual cycle,
 using the existing whole-bar/four-bar-block growth rules. Editing or importing
 source notes can grow or shrink every following reference without an extra
@@ -90,7 +96,7 @@ Automation placements keep their existing geometry contracts.
 The candidate uses one read-only Project extent resolver for UI geometry,
 automatic song end, Timeline and supported exports. Old manual placements keep
 their legacy source clock; following clips and later manual trims retain the
-actual Pattern clock. Persistence therefore needs format14 rather than letting
+actual Pattern clock. Persistence therefore needs format 14 rather than letting
 older readers silently ignore that distinction. Older works remain readable
 with fixed placement boundaries; save a new-version copy rather than overwriting.
 
@@ -99,35 +105,48 @@ placement: a grown Follow clip could be mistaken for an empty lane at a later
 beat. That path now uses the same resolver; a real context-menu creation regression
 covers both growth and shrink plus Undo. That regression passed in the first run.
 
-### First executable gate: cancel must leave the project unchanged
+### Actual failures, repairs and acceptance
 
-Source `af28a1e` ran the all-feature App suite:2415 passed,1 failed,14 ignored
-in678.99s. Twenty-four of the25 added cases passed, including real device-free
-callback growth/shrink, mixed source clocks, Slice/Slip WAV equivalence and
-format14/legacy persistence. The failing input sequence selects a Follow clip,
-enters its unchanged Length and presses Enter, then types6 and presses Escape.
-The last step changed the Project fingerprint at `pattern_length_tests.rs:436`.
-The narrow repair clears only that Length widget's draft on focused Escape.
-egui0.35 retains lost-focus for two frames; without clearing the draft, the
-release frame parsed the canceled text. The same regression now checks Escape
-press, release and idle separately, and retains Enter and actual click-away
-commit plus exact Undo. Its repaired source has passed static checks; executable
-reruns passed all12 affected Follow/numeric/text-focus cases at `b65e14a`.
-The explicit original Saved13 read-only/private-copy round-trip also passed
-through format14 with source bytes and complete music/state payload preserved;
-it does not establish NOIRE sound restoration. Strict Clippy then failed because
-`draw_pattern_preview` had8 arguments (limit7). The preview now takes the existing Clip reference instead of two related
-placement scalars, reusing its source-clock helper without relaxing the lint.
-The repair has passed static checks; no-default, matching builds and new captures
-have not run.
+The first all-feature App run at `af28a1e` returned 101: 2415 passed, 1 failed,
+14 ignored in 678.99 s. Twenty-four of the 25 added cases passed, including
+callback growth/shrink, mixed clocks, Slice/Slip WAV equivalence and format 14/
+legacy persistence. Reproduction of the failing case: select a Follow clip,
+enter unchanged Length and press Enter, then type 6 and press Escape. The Project
+fingerprint changed at `pattern_length_tests.rs:436`.
 
-The serial whole-suite process peaked at14.14GiB private memory/32.80GiB global
-used RAM and triggered the
-local12GiB soft budget; no later phase started. It exited naturally with101 and
-all observed work retired. The next local gate will reuse unaffected passing
-evidence and run12 affected Follow/numeric/text-focus cases in fresh processes rather than repeating
-the accumulated whole-suite process. Original logs remain under
-`target/backend-reliability-20261014/source116-local-gates-01-*`.
+The cause was egui 0.35's two-frame lost-focus window: the release frame parsed
+the canceled draft. The repair clears only this focused Length widget's String
+draft on Escape. At `b65e14a`, all 12 affected input/focus cases passed. The same
+regression checks press/release/idle with unchanged full Project/raw length/
+policy/history, and verifies both Enter and actual click-away still commit one
+reversible Manual trim. The explicit original Saved13 read-only/private-copy
+round-trip passed through format 14 with complete music/state payload preserved
+and source bytes unchanged. Actual NOIRE sound restoration remains untested here.
+
+Strict Clippy then returned 101 because `draw_pattern_preview` had 8 arguments
+(limit 7). Passing the existing Clip rather than offset/clock scalars removed the
+duplicated source-clock branch. At `b2e56dc`, formatting, strict all-feature/
+all-target Clippy, the adapted preview unit, no-default all-target check, current
+test artifact and matching main/helper build all exited 0. The main is 68,142,080 B;
+helper 5,054,464 B. No new independent user copy or main GUI was launched.
+
+The same current test artifact passed 8 genuine WGPU/Vulkan cases in 15.58 s,
+naturally exited 0, and produced 9 full 1498×936 readbacks on RTX 3060. Inspection
+confirmed shared growth, retained manual trims, Follow restoration, readable
+Inspector controls, occurrence-local cursor and active callback growth/shrink.
+This is production App::ui with device-free callback input, not desktop/device
+or NOIRE listening acceptance. Use the existing capture entry with selector
+`app::headless_ui_tests::pattern_length_tests` for these frames.
+
+The first serial whole-suite process peaked at 14.14 GiB private / 32.80 GiB global
+used RAM, triggering the local 12 GiB soft budget; later phases did not start.
+It exited naturally with 101 and all observed work retired. The focused continuation
+reused unchanged passing evidence instead of rerunning that accumulated process.
+The final CPU batch peaked at 3.95 GiB private / 22.42 GiB global, guard=false. CPU
+and WGPU work actually exited and resources were handed back to the peer.
+Original failures, outputs, exact source bindings and readbacks remain under
+`target/backend-reliability-20261014/source116-*` and
+`pattern-follow-length-render-01/`. Cloud quality and preview are the next gates.
 
 The reference is Image-Line's [Pattern workflow](https://www.image-line.com/fl-studio-learning-content/fl-studio-online-manual/html/basics_workflow.htm)
 and [Channel Rack Auto length](https://www.image-line.com/fl-studio-learning-content/fl-studio-online-manual/html/channelrack.htm):
@@ -179,12 +198,12 @@ The interaction reference is Image-Line's [Playlist manual](https://www.image-li
 ## Format and verification
 
 Delivered03's Project **v13** persists the range policy. Files through v12 load with MANUAL;
-new saves require a v13-capable build so older software cannot ignore AUTO and
+That delivered build requires a v13-capable reader so older software cannot ignore AUTO and
 silently truncate. Raw pre-v13 objects opting into AUTO must normalize before
 saving; existing manual callers retain their entry-point contract. Original
 works are never rewritten merely by loading them.
 
-New regressions cover held ruler ownership, playing seek, actual PAT/SONG and
+The earlier transport regressions cover held ruler ownership, playing seek, actual PAT/SONG and
 Pattern chooser inputs plus compiled note differences, recording/keyboard/
 right-click behavior, zoom isolation, range undo, movement/resize past the old
 end, cache invalidation, wide/narrow layout, range persistence and real built-in
@@ -199,7 +218,7 @@ it creates no native window or audio device. GPU availability must be coordinate
 The renderer writes genuine PPM readbacks; Pillow can convert those pixels
 losslessly to PNG for inspection without changing the renderer.
 Without that environment variable the same tests exercise actual egui input on
-CPU. The24 new nonignored regressions, explicit Saved13 read-only/private-copy
+CPU. At `885306f`, the24 transport regressions, explicit Saved13 read-only/private-copy
 round-trip,12 actual offscreen inputs and final mode/layout frame refinements
 passed. Root inspected the four final frames. The copied preview's no-plugin
 helper smoke passed; its main GUI/native desktop/soundcard/NOIRE remain untested
@@ -207,7 +226,7 @@ by the agent. Current sources preserve original failure evidence in the workflow
 
 For the linked-editor frames, run
 `app::headless_ui_tests::pattern_editor_link_tests` with the same capture setting.
-The225-case current UI gate includes nine new linking cases and a deterministic
+The earlier225-case linked-editor UI gate includes nine new linking cases and a deterministic
 saved-baseline control for ruler navigation. The latter forces the750ms dirty
 check, reproduces the old mismatched fixture baseline and confirms a real step
 edit still marks the saved project dirty. Production dirty tracking is unchanged.
