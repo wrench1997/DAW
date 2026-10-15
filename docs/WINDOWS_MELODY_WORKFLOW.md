@@ -1059,16 +1059,16 @@ Actual Source111 matching main68,053,504B/helper5,054,464B were ordinary indepen
 copies; copied helper no-plugin smoke exited0/reaped. Root did not launch main.
 UserData/Projects are isolated from01 and user works. This is same-machine MSVC
 debug, not the static-CRT release. New saves are13 and cannot open in01; use
-Save As on old works. Native02 use/NOIRE listening remains untested. This feature
-candidate still awaits its own pushed cloud quality/preview terminal results.
+Save As on old works. Native02 use/NOIRE listening remains untested. This feature's
+quality result is recorded below; repaired preview acceptance remains pending.
 
 The earlier backend233f6f0 preview succeeded:363 harness=351 PASS/12 conditional
 SKIP, SDK4+15,2422 root/13 ignored, strict Clippy/no-default-feature, static-CRT
 release8m45s, final ZIP/extracted helper. No upload. Its quality actually failed
 at factory31PASS/1FAIL, original3s Deadline; the historical cause stays unknown.
 The later fixture-only isolated startup/bounded-phase repair passed factory33
-locally without changing production/seal/cleanup/deadline rules. It has not yet
-run in cloud. Source104's earlier changed catalog5 passed its direct-exit versus
+locally without changing production/seal/cleanup/deadline rules, then passed
+the cloud quality run below. Source104's changed catalog5 passed its direct-exit versus
 real interpreter-finalizer kill/reap controls.
 
 Evidence under `target/backend-reliability-20261014`:
@@ -1077,6 +1077,28 @@ Evidence under `target/backend-reliability-20261014`:
 `playlist-transport-render-02-{mode,layout}/`,
 `user-offline-preview-20261015-02.json`, the four Playlist candidate/repair folders
 and `factory-attempt-seal-fixture-01/`. Earlier cloud raw logs/terminal JSON remain.
+
+Cloud preview `431af5d`, run38737463544, actually failed its first Python gate:
+363 cases,350 passed/one error/12 conditional skips. The package document list
+omitted `PLAYLIST_TRANSPORT.md`, leaving published guide links unresolved. Rust,
+release build and ZIP smoke did not run. The failure was reproduced locally;
+the narrow two-script repair includes the guide in the reviewed package list,
+checks its exact ZIP/extracted bytes and provenance, and still rejects a linked
+missing guide before creating output. All179 directly related package tests
+passed locally; no link/closure assertion or workflow failure rule was removed.
+Keep `ci-431af5d-windows-preview-01.log`,
+`source112-preview-actual-terminal-01.json` and
+`playlist-package-document-closure-repair-01/`. New cloud acceptance is pending.
+
+The same `431af5d` [quality run38737463353](https://github.com/wrench1997/DAW/actions/runs/38737463353)
+actually succeeded at13:08:24Z: Windows and Linux jobs passed. Factory33, SDK
+offline MIDI4/readiness15,2381 App+52 helper+13 protocol=2446 root cases passed
+with14 explicitly ignored. Strict Clippy, matching bins, helper14/editor80,
+no-default-feature and native fixture gates passed. The cloud Windows session2
+had an eligible interactive Default desktop; actual PrintWindow before/after
+paint and repaint-change checks passed, rather than SKIPPED. This result does
+not replace the separate preview's document-closure failure. Raw run/jobs and
+both complete job logs are retained as `source112-quality-*-01.*`.
 
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 

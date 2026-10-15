@@ -145,6 +145,7 @@ class RepositoryDocumentTests(unittest.TestCase):
         names = (set(pkg.SOURCE_FILES) | pkg.VENDOR_FILES |
                  {name for name in pkg.OPTIONAL_SOURCE_FILES if (source / name).exists()})
         self.assertIn("docs/WINDOWS_MELODY_WORKFLOW.md", pkg.SOURCE_FILES)
+        self.assertIn("docs/PLAYLIST_TRANSPORT.md", names)
         payload = {name: pkg.read_input(pkg.repository_file(source, name)) for name in names}
         # Exercise the current published docs, not the link-free synthetic
         # placeholders used by package policy tests. No executable or SDK runs.
@@ -331,6 +332,31 @@ class PackageTests(unittest.TestCase):
     def test_windows_melody_workflow_is_required_even_without_a_parent_link(self):
         (self.repo / "docs/WINDOWS_MELODY_WORKFLOW.md").unlink()
         with self.assertRaisesRegex(pkg.PackageError, "Missing|non-regular"):
+            self.create()
+        self.assertFalse((self.root / "out").exists())
+
+    def test_playlist_transport_guide_is_copied_and_extracted_with_roadmap_link(self):
+        source = Path(__file__).resolve().parents[1]
+        guide = "docs/PLAYLIST_TRANSPORT.md"
+        guide_bytes = (source / guide).read_bytes()
+        (self.repo / guide).write_bytes(guide_bytes)
+        (self.repo / "docs/DEVELOPMENT_ROADMAP.md").write_text(
+            "[Playlist transport](PLAYLIST_TRANSPORT.md#pat-and-song-show-what-will-actually-play)\n",
+            encoding="utf-8")
+        archive = self.create()
+        extracted = self.root / "playlist-extracted"
+        info = pkg.verify_package(archive, extracted)
+        self.assertIn(guide, info["source_documents"])
+        with zipfile.ZipFile(archive) as handle:
+            self.assertEqual(handle.read(f"{archive.stem}/{guide}"), guide_bytes)
+        self.assertEqual((extracted / guide).read_bytes(), guide_bytes)
+
+    def test_missing_linked_playlist_transport_guide_still_rejects_package(self):
+        (self.repo / "docs/DEVELOPMENT_ROADMAP.md").write_text(
+            "[Playlist transport](PLAYLIST_TRANSPORT.md)\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+                pkg.PackageError,
+                r"Broken package document link: docs/DEVELOPMENT_ROADMAP\.md -> PLAYLIST_TRANSPORT\.md"):
             self.create()
         self.assertFalse((self.root / "out").exists())
 

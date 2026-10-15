@@ -5,7 +5,7 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
-当前可用副本：桌面“Citrus Studio 新版测试02”，`D:\DAW-Preview\Citrus-Studio-20261015-02\Start-Citrus.cmd`。PAT/SONG、拖播放头、AUTO范围已通过本机定向回归/真实离屏/Clippy；新v13工程请另存副本，旧01保留。见`docs/PLAYLIST_TRANSPORT.md`；本轮云端检查待push后实际终态。
+当前可用副本：桌面“Citrus Studio 新版测试02”，`D:\DAW-Preview\Citrus-Studio-20261015-02\Start-Citrus.cmd`。PAT/SONG、拖播放头、AUTO范围已通过本机定向回归/真实离屏/Clippy；新v13工程请另存副本，旧01保留。见`docs/PLAYLIST_TRANSPORT.md`；本轮云端验收尚未完成。
 
 历史01独立测试副本在`D:\DAW-Preview\Citrus-Studio-20261015-01`，桌面快捷方式`Citrus Studio 独立测试版.lnk`指向`Start-Citrus.cmd`。复制Source102实际匹配主/helper为普通独立文件，不占target/debug；既有`CITRUS_STUDIO_DATA_DIR`把布局/音频偏好/缓存/自动保存/录音隔离到该目录UserData，测试作品建议存Projects。副本helper无插件协议smoke实际exit0；未替用户打开GUI/声卡/NI。用户已实际使用并反馈Playlist不能连续拖播放头、歌曲长度不应受视图限制、SONG/PAT当前Pattern及范围反馈不足，这些反馈已在02修复并完成本机软件/离屏验收。它是本机MSVC调试版，不是正式发行包，不随附插件/音色/作品/系统DLL。Root保持不做CU/NI/声卡自动验证，不修改或停止用户副本；peer目前按用户在另一聊天的授权操作其VK3D界面，后台CPU单独协调。来源/说明/检查随副本保存在Build-Info.json、README和Helper-Smoke.log。
 
@@ -43,11 +43,13 @@ Saved13原文件1,298,729B/opaque591772B、5 clips/1 automation，format12/Manua
 
 修补保留的反例：Source105缺Storage trait导致编译失败；Source106首轮runner的.NET null保留空env（207个capture绝对路径assert），只修runner；后续真实215项唯一失败为Inspector把合法0.125 Clip夹到0.25，已窄修并逐press/release/idle保留精确值。短Manual Audio tail编辑越播放map的问题用独立非实时几何时钟解决，沿真实后续tempo源、保留262144 checkpoint准入，不扩大歌曲；v10独立oracle按真实输出裁剪。v11移动继承淡出尾片的合法静音有exact-zero PCM/WAV及同source仅关淡出的强非静音对照，未降低原阈值。Source109/110的两个initializer Clippy错误已按原值修复，无allow/MSRV变更。完整失败/原报错/复现selector与资源记录保留于`playlist-transport-progress-history-01.md`及`source105`至`source111`对应原日志，不以新成功抹掉。
 
-独立测试02已交付桌面“Citrus Studio 新版测试02”，目录`D:\DAW-Preview\Citrus-Studio-20261015-02`，Source111实际匹配68,053,504B主程序/5,054,464B helper普通独立复制，无插件helper smoke exit0/已reap；未替用户打开主GUI。独立UserData/Projects与旧01/作品互不覆盖，仍是本机MSVC调试版。新v13保存旧01不能打开，已有作品先另存副本。用户原生02实际操作/NOIRE试听仍未测。当前仅待本轮push后的云端质量/preview实际终态。
+独立测试02已交付桌面“Citrus Studio 新版测试02”，目录`D:\DAW-Preview\Citrus-Studio-20261015-02`，Source111实际匹配68,053,504B主程序/5,054,464B helper普通独立复制，无插件helper smoke exit0/已reap；未替用户打开主GUI。独立UserData/Projects与旧01/作品互不覆盖，仍是本机MSVC调试版。新v13保存旧01不能打开，已有作品先另存副本。用户原生02实际操作/NOIRE试听仍未测。质量431af5d已通过；待文档闭包修补后preview的新实际终态。
 
-前置catalog修补Source104本机5项通过，受控direct exit自然0/健康、普通exit真实finalizer后强杀/reap/不健康且保留原错误。旧后端`233f6f0`preview已实际SUCCESS：363 harness=351PASS/12条件SKIP、SDK4+15、2422 root/13 ignored、严格Clippy/无默认feature、静态CRT release8分45秒、ZIP/提取后helper全部通过，未上传附件；同候选quality早期factory31PASS/1FAIL的原3秒Deadline仍保留，根因未知。后续纯factory fixture隔离站点启动并保留有界phase，原生产/3秒/封印/清理规则不变，factory33本机通过；新云端尚未运行。
+前置catalog修补Source104本机5项通过，受控direct exit自然0/健康、普通exit真实finalizer后强杀/reap/不健康且保留原错误。旧后端`233f6f0`preview已实际SUCCESS：363 harness=351PASS/12条件SKIP、SDK4+15、2422 root/13 ignored、严格Clippy/无默认feature、静态CRT release8分45秒、ZIP/提取后helper全部通过，未上传附件；同候选quality早期factory31PASS/1FAIL的原3秒Deadline仍保留，根因未知。后续纯factory fixture隔离站点启动并保留有界phase，原生产/3秒/封印/清理规则不变，factory33本机通过，随后431af5d云quality也实际通过。
 
 本轮证据均在`target/backend-reliability-20261014`：`source111-local-gates-01-*`、`source111-local-resource-handback-01.json`、`source111-playlist-{mode,layout}-render-01-*`、`playlist-transport-render-02-{mode,layout}/`、`user-offline-preview-20261015-02.json`。修补来源与精准测试见`playlist-transport-source-candidate-02/`、`playlist-inspector-short-clip-repair-01/`、`playlist-manual-tail-geometry-repair-01/`、`playlist-inherited-fade-silence-fixture-01/`及`factory-attempt-seal-fixture-01/`。CI原始结果见`ci-233f6f0-windows-{quality,preview}-01.log`及对应Source104终态JSON。
+
+本轮首个云preview（`431af5d`/38737463544）实际FAIL：363 Python中350PASS/1error/12条件SKIP，打包清单漏掉`PLAYLIST_TRANSPORT.md`导致说明文档链接闭包失败；Rust/release/ZIP后续门未跑。本机先复现，再窄修两脚本纳入指南，增加真实ZIP/提取字节及provenance正例、缺失仍拒绝且无output反例，完整相关package179项实际PASS。未删链接或放松闭包/CI规则；原始日志/终态及`playlist-package-document-closure-repair-01/`保留。同SHA质量run38737463353已于13:08:24Z实际SUCCESS：factory33、SDK4+15、2381 App+52 helper+13协议=2446 root/14 ignored、严格Clippy、匹配双bin、helper14/editor80及无默认feature全部通过；Linux SDK15/Unix1通过。云Windows实际session2/Default/WTSActive/visible，真实PrintWindow前后paint及repaint change通过，非SKIPPED。完整source112-quality原始run/jobs/双job日志保留。现统一push文档闭包修补，再验新preview终态。
 
 Source91（`2853db2`）已修复普通Open恢复门引入的撤销/重做回归：保留exact current-owner Ready/Completed证据，包括空表实际SlotReady；历史Project的session-only Unloaded不再抹掉同一worker的完成证据，真正pending/failed、新owner和clip restoration合同保持独立。原4项失败断言未改。本机实际generic8、startup history11、identity5全部通过，严格all-feature/all-target Clippy与匹配主程序/helper构建均exit0；格式/diff通过。Source92文档提交（`2bb9f80`）已推送，新双bin已在Native07实际普通冷Open→Whole成功；首音一致性仍待同源码重复验证。原始日志及实际Cargo终态在 `source91-local-gates-01-*-{stdout,stderr}.log`、`source91-local-gates-01-terminal-recovery.json`。
 
