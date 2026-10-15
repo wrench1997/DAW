@@ -818,9 +818,44 @@ impl NativePluginHost {
     pub(crate) fn spawn_fresh_bounce_source(
         &self,
         instance_id: u64,
+        spec: plugin_runtime::PluginLoadSpec,
+        sample_rate: f32,
+        max_block_frames: u32,
+    ) -> Result<plugin_runtime::PluginChain, String> {
+        self.spawn_fresh_bounce_source_selected(
+            instance_id,
+            spec,
+            sample_rate,
+            max_block_frames,
+            false,
+        )
+    }
+
+    /// Catalog new-load intent: qualify the actual default component without
+    /// replacing the ordinary request or the existing exact-class entry point.
+    pub(crate) fn spawn_fresh_default_bounce_source(
+        &self,
+        instance_id: u64,
+        spec: plugin_runtime::PluginLoadSpec,
+        sample_rate: f32,
+        max_block_frames: u32,
+    ) -> Result<plugin_runtime::PluginChain, String> {
+        self.spawn_fresh_bounce_source_selected(
+            instance_id,
+            spec,
+            sample_rate,
+            max_block_frames,
+            true,
+        )
+    }
+
+    fn spawn_fresh_bounce_source_selected(
+        &self,
+        instance_id: u64,
         mut spec: plugin_runtime::PluginLoadSpec,
         sample_rate: f32,
         max_block_frames: u32,
+        load_default: bool,
     ) -> Result<plugin_runtime::PluginChain, String> {
         prepare_runtime_spec(&mut spec)?;
         #[cfg(all(
@@ -828,7 +863,12 @@ impl NativePluginHost {
             feature = "experimental-fresh-helper"
         ))]
         {
-            plugin_runtime::PluginChain::spawn_fresh_bounce_source(
+            let spawn = if load_default {
+                plugin_runtime::PluginChain::spawn_fresh_default_bounce_source
+            } else {
+                plugin_runtime::PluginChain::spawn_fresh_bounce_source
+            };
+            spawn(
                 instance_id,
                 spec,
                 plugin_runtime::PluginPrepareConfig {
@@ -842,7 +882,13 @@ impl NativePluginHost {
             feature = "experimental-fresh-helper"
         )))]
         {
-            let _ = (instance_id, spec, sample_rate, max_block_frames);
+            let _ = (
+                instance_id,
+                spec,
+                sample_rate,
+                max_block_frames,
+                load_default,
+            );
             Err(
                 "Experimental fresh-source loading requires Linux or Windows and experimental-fresh-helper"
                     .into(),

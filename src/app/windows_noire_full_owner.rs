@@ -233,8 +233,11 @@ fn register_and_enqueue_complete_source(
     let previous = snapshot_channel_generator(&app.project, source.channel_id)
         .ok_or("complete source channel disappeared before initialization")?;
     let candidate = app.project.clone();
-    app.fresh_bounce_sources
-        .insert(source.plugin_instance_id, intent);
+    let (descriptor_id, path, class_uid) = intent;
+    app.fresh_bounce_sources.insert(
+        source.plugin_instance_id,
+        (descriptor_id, path, FreshSourceClass::Exact(class_uid)),
+    );
     // A failed queue may already own a spawned worker in retirement storage.
     // Keep the session intent; never discard its guard or call failure joined.
     enqueue(app, source.channel_id, candidate, Some(previous))

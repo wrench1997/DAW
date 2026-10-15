@@ -113,8 +113,11 @@ native paint check still fails PrintWindow on the cloud runner; that result
 does not determine local Kontakt visibility.
 
 Source74's actual factory-only Kontakt 8.4.1 query returned two declarations and
-retired its helper naturally. The later ordinary production-catalog NI route is
-not yet qualified. Earlier component-scanning ExitDll failure remains separate.
+retired its helper naturally. Source78 later completed a real ordinary GUI scan
+with nine published entries. Kontakt retained Unknown/unverified/no runtime
+metadata and the two real declarations. The separate ignored production-catalog
+QA selector was not executed; the older component-scanning ExitDll failure
+remains separate from this UI catalog result.
 Source77's initial Windows build passed 17 new App/Whole/restoration/eligibility
 cases. All three migrated Windows/Unix backend cases subsequently passed in both
 cloud jobs. The Source77 preview completed 2364 root passes with 12 ignored, then
@@ -123,6 +126,20 @@ failed first on the fresh-source guard's exact retained-worker assertion and
 finished with 2162 passed, 137 failed and 12 ignored, including later sticky
 fixture refusals. These failures remain open pending the repair candidate's
 actual checks; there is no Source77 release/ZIP or new NI qualification.
+
+Source78 subsequently passed 2364 root tests/12 ignored and strict Clippy in both
+cloud lanes; quality also passed 32 factory and all backend/build gates, failing
+only independent native PrintWindow capture. Its preview release/ZIP and
+extracted-helper smoke passed. A real UI trial then found the new catalog's
+explicit experimental fresh-source LOAD still demanded scanned runtime-class
+metadata. Its rescan hint cannot resolve that requirement. Actual None-class
+loading must establish the class before full fresh preparation; a catalog entry
+cannot supply it. The source-only Source79 candidate implements this handoff
+but still needs compilation, regression and native checkbox acceptance.
+An ordinary Source78 None-class session separately loaded NOIRE Pure, edited it,
+wrote eight notes, normally saved and naturally retired App/helper with exit0.
+That does not qualify the fresh checkbox, cold reopening, automation or audio
+export. See [workflow evidence](WINDOWS_MELODY_WORKFLOW.md).
 
 ## Historical loaded-default validation
 

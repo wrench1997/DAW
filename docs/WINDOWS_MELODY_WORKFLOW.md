@@ -106,9 +106,71 @@ progress and the original worker's actual is_finished/Join/observer-call progres
 before the unchanged five-second assertion. No additional poll, Join, owner or
 deadline is introduced; production builds exclude the runtime observations.
 Healthy and injected-panic successes check that the diagnostic terminal stage
-matches the actual Join outcome. Source formatting, diff and local document links
-passed; compilation, regression and strict Clippy remain unexecuted for this
-candidate. Do not treat these diagnostics as a shutdown fix or NI acceptance.
+matches the actual Join outcome. Local Windows actually passed 21 targeted
+regressions, strict root all-feature/all-target Clippy and matching main/helper
+builds. Cloud quality passed 32 factory and 2364 root tests with 12 ignored,
+strict Clippy and every backend/build/protocol gate. Only independent native
+paint before/after capture failed PrintWindow. Preview completed success: 344
+packaging/protocol harness cases, 2364 root passes/12 ignored, strict Clippy,
+no-default-feature check, static-CRT release, final ZIP verification and extracted
+helper smoke. Upload was skipped. Preserve `ci-78d5986-windows-{quality,preview}-01.log`
+and Source78 actual terminal run/jobs JSON. The original guard timeout did not
+reproduce; its cause is still unproved, not fixed by the diagnostic.
+
+The coordinated Source78 native session used matching all-feature binaries and a
+new isolated data directory, without copying a user project. GUI New project and
+ordinary Plugin Manager Scan completed with nine published entries. The cached
+Kontakt catalog reports version8.4.1, expected Instrument declaration UID and the
+Compatibility class while retaining Unknown/unverified/no loaded-default metadata.
+This is actual production UI catalog evidence, not execution of the separate
+ignored catalog QA selector or proof of component retirement. The effective
+output displayed `扬声器 (2- CB4ND HW 1/2)`,48000Hz/480frames/XRUN0; no notes were played.
+
+Selecting Channel01 and checking experimental dry-bounce source then clicking
+Kontakt LOAD failed with `Rescan this VST3 to obtain its actual factory class
+before fresh-source preparation`. Catalog discovery cannot supply that runtime
+default class, so this old preflight blocks the new explicitly opted-in path.
+The repair must obtain/validate the actual default class after the real None-class
+LOAD and retain full fresh preparation and cleanup, not select a catalog class
+or remove the class guard. This first session did not load NOIRE or qualify
+save/cold-open/export. Normal
+Alt+F4 ended the independent blank App; its actual PID disappeared with no direct
+children. Evidence is in `normal-noire-workflow-20261015-01/catalog-after-real-ui-scan-01.json`
+and `native-observation-and-close-01.json`.
+
+The second session used ordinary None-class LOAD without the fresh checkbox.
+Actual Kontakt opened at a usable full size; the registered library's Pure
+preset showed `NOIRE PURE` and about315.4MB instrument memory. Color was moved
+from noon to upper-left and the editor closed without removing the source.
+Eight Piano Roll notes span four bars and one16-beat Playlist Pattern. SONG
+playback crossed it and Escape returned to zero. Listening confirmation and
+digital PCM are still pending; a moving transport is not sound proof.
+
+Ordinary Save showed SAVED without a stale warning. The file contains all eight
+notes, one clip, Unknown role,591680 opaque-state bytes and Channel→FX1 routing.
+It remains128BPM/64beats with zero automation lanes; the attempted range input
+did not apply. Native save coordinates were rejected as15×15. UIA filename
+set_value displayed the intended name, but Alt+S created
+`desktop-song-14/Untitled.citrus` instead. That new test file overwrote neither
+existing native13 nor native14 and was copied unchanged with overwrite=false
+to the isolated `First-Light-NOIRE-Pure.citrus`. The actual result path, not the
+edit display, determines the artifact. See `normal-save-model-audit-01.json`.
+
+Both exact process handles were held before normal Alt+F4: App13528 and
+helper36632 actually exited0, the exit observer ended, and fresh heavy0 preceded
+explicit peer handback. Preserve `normal-close-process-terminal-02.json` and
+`source78-resource-handback-01.json`. This runtime result does not replace the
+old component-scan ExitDll failure. New cold-open, automation and audio-export
+acceptance remain open.
+
+Source79's source-only candidate registers catalog intent as LoadedDefault,
+validates the real None-class LOAD's actual UID/version, then enters unchanged
+full fresh preparation. Exact callers, complete bus/initial timing checks,
+original owners/restoration and captured-CID strict clone remain guarded. Five
+new cross-platform backend tests and an App no-fallback matrix are present;
+formatting/source review passed. Compilation, regression, strict Clippy and
+native checkbox acceptance remain unexecuted. The ordinary Source78 session is
+not evidence for the new branch.
 
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,

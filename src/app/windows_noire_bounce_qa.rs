@@ -2261,7 +2261,7 @@ mod tests {
                 &app.fresh_bounce_sources[&candidate_instance.id];
             assert_eq!(intent_descriptor, &production_spec.descriptor.id);
             assert_eq!(intent_path, &production_spec.descriptor.path);
-            assert_eq!(intent_class.as_str(), KONTAKT_UID);
+            assert_eq!(intent_class, &FreshSourceClass::Exact(KONTAKT_UID.into()));
             assert_eq!(descriptor.id, saved.plugin_instances[0].uid);
             assert_eq!(descriptor.path, saved.plugin_instances[0].path);
             assert_eq!(descriptor.format, production_spec.descriptor.format);

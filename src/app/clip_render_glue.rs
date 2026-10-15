@@ -24,6 +24,14 @@ pub(super) struct ClipRenderRestorationBinding {
     fresh_load: bool,
 }
 
+/// New-load request only. A catalog declaration never supplies the default
+/// component's class; the LoadedDefault branch binds it after the actual LOAD.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum FreshSourceClass {
+    Exact(String),
+    LoadedDefault,
+}
+
 impl ClipRenderRestorationBinding {
     pub(super) fn project_session(&self) -> u64 {
         self.project_session
@@ -163,9 +171,14 @@ impl CitrusApp {
         {
             return Err("Fresh-source opt-in requires a new, unbound instance identity".into());
         }
-        let uid = descriptor.vst3_metadata.as_ref().map(|metadata| metadata.class_uid.as_str())
-            .filter(|uid| uid.len() == 32 && uid.bytes().all(|byte| byte.is_ascii_hexdigit()))
-            .ok_or("Rescan this VST3 to obtain its actual factory class before fresh-source preparation")?;
+        let class = match &descriptor.vst3_metadata {
+            Some(metadata) if metadata.class_uid.len() == 32
+                && metadata.class_uid.bytes().all(|byte| byte.is_ascii_hexdigit()) => {
+                    FreshSourceClass::Exact(metadata.class_uid.clone())
+                }
+            None if descriptor.is_catalog_only() => FreshSourceClass::LoadedDefault,
+            _ => return Err("Fresh-source preparation requires a valid module catalog or actual loaded-default class metadata".into()),
+        };
         if descriptor.id.is_empty()
             || descriptor.id.len() > 4096
             || descriptor.path.as_os_str().len() > 4096
@@ -180,11 +193,7 @@ impl CitrusApp {
             .map_err(|_| "Unable to reserve fresh-source intent")?;
         self.fresh_bounce_sources.insert(
             instance_id,
-            (
-                descriptor.id.clone(),
-                descriptor.path.clone(),
-                uid.to_owned(),
-            ),
+            (descriptor.id.clone(), descriptor.path.clone(), class),
         );
         Ok(())
     }
@@ -512,12 +521,34 @@ impl CitrusApp {
                 )
                 .map(|chain| (chain, Some(timing)));
         }
-        if let Some((descriptor_id, path, class_uid)) = self.fresh_bounce_sources.get(&instance_id)
-        {
+        if let Some((descriptor_id, path, class)) = self.fresh_bounce_sources.get(&instance_id) {
             if spec.descriptor.id != *descriptor_id || spec.descriptor.path != *path {
                 return Err("Fresh-source intent belongs to a different descriptor/path".into());
             }
-            spec.class_uid = Some(class_uid.clone());
+            match class {
+                FreshSourceClass::Exact(class_uid) => spec.class_uid = Some(class_uid.clone()),
+                FreshSourceClass::LoadedDefault if spec.class_uid.is_none() => {}
+                FreshSourceClass::LoadedDefault => {
+                    return Err(
+                        "Fresh default-source intent cannot replace an explicit class request"
+                            .into(),
+                    );
+                }
+            }
+            if matches!(class, FreshSourceClass::LoadedDefault) {
+                if !spec.enabled || spec.bypassed || spec.wet.to_bits() != 1.0f32.to_bits() {
+                    return Err("Fresh default-source preparation requires an enabled, unbypassed, fully wet new generator; it cannot fall back to ordinary loading".into());
+                }
+                return self
+                    .plugin_host
+                    .spawn_fresh_default_bounce_source(
+                        instance_id,
+                        spec,
+                        sample_rate,
+                        MAX_MIXER_BLOCK_FRAMES as u32,
+                    )
+                    .map(|chain| (chain, None));
+            }
             if spec.enabled && !spec.bypassed && spec.wet.to_bits() == 1.0f32.to_bits() {
                 return self
                     .plugin_host

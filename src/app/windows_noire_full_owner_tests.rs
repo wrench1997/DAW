@@ -371,7 +371,10 @@ mod tests {
             Err("actual test hook refuses before any worker construction".into())
         );
         before.unchanged(&app, 17).unwrap();
-        assert_eq!(app.fresh_bounce_sources[&17].2, KONTAKT_UID);
+        assert_eq!(
+            app.fresh_bounce_sources[&17].2,
+            FreshSourceClass::Exact(KONTAKT_UID.into())
+        );
         assert!(app.running_generator_chains.is_empty());
         assert!(app.pending_generator_chains.is_empty());
     }

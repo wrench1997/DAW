@@ -590,7 +590,7 @@ fn fresh_source_opt_in_is_explicit_scanned_and_limited_to_a_new_source_identity(
             Some(&(
                 descriptor.id.clone(),
                 descriptor.path.clone(),
-                source_state().metadata.class_uid,
+                FreshSourceClass::Exact(source_state().metadata.class_uid),
             ))
         );
         let mut changed = descriptor.clone();
@@ -644,7 +644,7 @@ fn fresh_source_opt_in_refuses_unattested_class_and_wrong_format_before_recordin
 }
 
 #[test]
-fn fresh_source_opt_in_refuses_factory_catalog_without_loaded_default_metadata() {
+fn fresh_source_opt_in_catalog_records_default_request_without_choosing_a_declared_class() {
     let mut app = bare_app();
     app.project = source_project();
     let mut descriptor = descriptor(&app.project);
@@ -671,13 +671,93 @@ fn fresh_source_opt_in_refuses_factory_catalog_without_loaded_default_metadata()
             class_flags: None,
         }],
     });
+    let mut second = descriptor.vst3_catalog.as_ref().unwrap().classes[0].clone();
+    second.class_id = "00112233445566778899AABBCCDDEEFF".into();
+    descriptor
+        .vst3_catalog
+        .as_mut()
+        .unwrap()
+        .classes
+        .push(second);
     assert!(descriptor.is_catalog_only());
-    assert!(
+    let before = project_and_history(&app);
+    let declared = serde_json::to_value(&descriptor).unwrap();
+    if cfg!(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    )) {
         app.record_fresh_clip_source_for_new_load(42, &descriptor)
-            .is_err()
-    );
-    assert!(app.fresh_bounce_sources.is_empty());
+            .unwrap();
+        assert_eq!(
+            app.fresh_bounce_sources[&42],
+            (
+                descriptor.id.clone(),
+                descriptor.path.clone(),
+                FreshSourceClass::LoadedDefault
+            )
+        );
+        // This is a new-load request, never a class selection or Ready proof.
+        assert!(
+            !app.fresh_bounce_sources
+                .values()
+                .any(|(_, _, class)| matches!(class, FreshSourceClass::Exact(_)))
+        );
+    } else {
+        assert!(
+            app.record_fresh_clip_source_for_new_load(42, &descriptor)
+                .is_err()
+        );
+        assert!(app.fresh_bounce_sources.is_empty());
+    }
+    assert_eq!(project_and_history(&app), before);
+    assert_eq!(serde_json::to_value(&descriptor).unwrap(), declared);
     assert!(app.pending_generator_chains.is_empty() && app.running_generator_chains.is_empty());
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[test]
+fn fresh_source_catalog_default_intent_refuses_explicit_class_or_non_dry_fallback() {
+    let mut app = bare_app();
+    app.project = source_project();
+    let mut catalog = descriptor(&app.project);
+    catalog.vst3_metadata = None;
+    catalog.verified = false;
+    catalog.category = "Unknown".into();
+    catalog.is_instrument = false;
+    catalog.vst3_catalog = Some(plugins::catalog_tests::catalog());
+    app.record_fresh_clip_source_for_new_load(42, &catalog)
+        .unwrap();
+    let before = project_and_history(&app);
+    let intent = app.fresh_bounce_sources[&42].clone();
+    // Pure pre-spawn refusal matrix: the fixture path is never opened. A
+    // fallback to ordinary loading would produce a missing-file error instead.
+    for case in 0..4 {
+        let mut spec = PluginLoadSpec::from_descriptor(catalog.clone());
+        match case {
+            0 => spec.class_uid = Some(source_state().metadata.class_uid),
+            1 => spec.enabled = false,
+            2 => spec.bypassed = true,
+            _ => spec.wet = 0.5,
+        }
+        let reason = app
+            .spawn_clip_bound_source(42, spec, &app.project, 48_000.0)
+            .err()
+            .expect("explicit fresh intent cannot be silently downgraded");
+        assert!(
+            reason.contains(if case == 0 {
+                "explicit class request"
+            } else {
+                "cannot fall back to ordinary loading"
+            }),
+            "{reason}"
+        );
+        assert_eq!(app.fresh_bounce_sources[&42], intent);
+        assert_eq!(project_and_history(&app), before);
+        assert!(app.pending_generator_chains.is_empty() && app.running_generator_chains.is_empty());
+    }
 }
 
 /// The only fixture that creates an extra restoration worker owns every location

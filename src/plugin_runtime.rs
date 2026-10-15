@@ -3917,26 +3917,63 @@ impl PluginChain {
         spec: PluginLoadSpec,
         config: PluginPrepareConfig,
     ) -> Result<Self, String> {
+        Self::spawn_fresh_bounce_source_selected(instance_id, spec, config, false)
+    }
+
+    /// Explicit new module-default request. Only the actual LOAD selects its
+    /// class; the same unpublished first-prepare qualification remains required.
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn spawn_fresh_default_bounce_source(
+        instance_id: u64,
+        spec: PluginLoadSpec,
+        config: PluginPrepareConfig,
+    ) -> Result<Self, String> {
+        Self::spawn_fresh_bounce_source_selected(instance_id, spec, config, true)
+    }
+
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    fn spawn_fresh_bounce_source_selected(
+        instance_id: u64,
+        spec: PluginLoadSpec,
+        config: PluginPrepareConfig,
+        load_default: bool,
+    ) -> Result<Self, String> {
         let config = config.validate()?;
         let manifest = PluginEndpointManifest::identified(&[instance_id])?;
         if spec.descriptor.format != super::PluginFormat::Vst3
             || !spec.enabled
             || spec.bypassed
             || spec.wet != 1.0
-            || !spec
-                .class_uid
-                .as_deref()
-                .is_some_and(|uid| uid.len() == 32 && uid.bytes().all(|c| c.is_ascii_hexdigit()))
+            || if load_default {
+                spec.class_uid.is_some()
+            } else {
+                !spec.class_uid.as_deref().is_some_and(|uid| {
+                    uid.len() == 32 && uid.bytes().all(|c| c.is_ascii_hexdigit())
+                })
+            }
         {
-            return Err(
-                "Fresh bounce source requires an enabled, dry, identified VST3 instrument".into(),
-            );
+            return Err(if load_default {
+                "Fresh module-default source requires an enabled, dry VST3 with no explicit class"
+                    .into()
+            } else {
+                "Fresh bounce source requires an enabled, dry, identified VST3 instrument".into()
+            });
         }
         let mut chain = Self::spawn_loader(config, manifest, move || {
             let result = (|| {
                 let mut spec = spec;
                 super::prepare_runtime_spec(&mut spec)?;
-                let backend = Vst3Backend::load_fresh_bounce_source(spec, config)?;
+                let backend = if load_default {
+                    Vst3Backend::load_fresh_default_bounce_source(spec, config)?
+                } else {
+                    Vst3Backend::load_fresh_bounce_source(spec, config)?
+                };
                 Ok(BackendSlot::new(Box::new(backend)))
             })();
             vec![result]
@@ -6835,6 +6872,35 @@ impl Vst3Backend {
                 "Fresh bounce source factory class differs from the requested identity".into(),
             );
         }
+        candidate.fresh_bounce_setup = Some(FreshBounceSourceSetup::Pending);
+        Ok(candidate)
+    }
+
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    fn load_fresh_default_bounce_source(
+        spec: PluginLoadSpec,
+        config: PluginPrepareConfig,
+    ) -> Result<Self, String> {
+        if spec.class_uid.is_some() {
+            return Err("Fresh default source requires an unselected module request".into());
+        }
+        let mut candidate = Self::load(spec, config)?;
+        let actual = candidate.plugin.info();
+        if actual.uid.len() != 32
+            || !actual.uid.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !actual.uid.bytes().any(|byte| byte != b'0')
+            || actual.version.is_empty()
+        {
+            return Err(
+                "Fresh default source LOAD did not return an actual class UID and version".into(),
+            );
+        }
+        // This is still intent, not Ready. The actual class/version/category,
+        // all buses and first-Start timing must pass the unchanged qualification
+        // before this unpublished candidate can emit SlotReady.
         candidate.fresh_bounce_setup = Some(FreshBounceSourceSetup::Pending);
         Ok(candidate)
     }
@@ -11693,6 +11759,14 @@ mod backend_protocol_test_helper;
 #[cfg(all(test, any(unix, windows), feature = "vst3"))]
 #[path = "plugin_loaded_identity_backend_tests.rs"]
 mod loaded_identity_backend_tests;
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[path = "plugin_fresh_default_backend_tests.rs"]
+mod fresh_default_backend_tests;
 
 #[cfg(all(test, unix, feature = "vst3"))]
 #[path = "plugin_reset_origin_tests.rs"]

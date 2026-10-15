@@ -9,6 +9,7 @@ pub(super) struct ResetHelper {
     log: PathBuf,
     mode: PathBuf,
     identity: PathBuf,
+    identity_traits: PathBuf,
     maximum: PathBuf,
     pub(super) layout: PathBuf,
 }
@@ -28,6 +29,12 @@ impl ResetHelper {
         std::fs::write(&mode, "ok").unwrap();
         let identity = root.join("identity.json");
         std::fs::write(&identity, r#"["00000000000000000000000000000001","1"]"#).unwrap();
+        let identity_traits = root.join("identity-traits.json");
+        std::fs::write(
+            &identity_traits,
+            r#"{"category":"Instrument","midi_input":true,"midi_output":false}"#,
+        )
+        .unwrap();
         let maximum = root.join("maximum");
         std::fs::write(&maximum, "2048").unwrap();
         let layout = root.join("layout.json");
@@ -38,14 +45,20 @@ impl ResetHelper {
         .unwrap();
         let source = format!(
             r#"#!/usr/bin/python3
-import json,sys,pathlib,os
+import json,sys,pathlib,os,time
 log=pathlib.Path({log:?})
 mode=pathlib.Path({mode:?})
 identity=pathlib.Path({identity:?})
+identity_traits=pathlib.Path({identity_traits:?})
 maximum=pathlib.Path({maximum:?})
 layout=pathlib.Path({layout:?})
-log.with_name('child.json').write_text(json.dumps({{'pid':os.getpid()}}))
+child_record=log.with_name('child-pending.json')
+child_record.write_text(json.dumps({{'pid':os.getpid()}}))
+child_record.replace(log.with_name('child.json'))
+if log.with_name('hold-child-start').exists():
+    while not log.with_name('release-child-start').exists(): time.sleep(0.001)
 shutdown=False
+started=False
 for line in sys.stdin:
     command=json.loads(line)
     with log.open('a') as f: f.write(json.dumps(command)+'\n')
@@ -58,7 +71,8 @@ for line in sys.stdin:
         response={{'Error':{{'message':'deliberate LoadPlugin refusal'}}}}
     elif kind=='LoadPlugin':
         uid,version=json.loads(identity.read_text())
-        response={{'PluginInfo':{{'vendor':'Citrus tests','name':'Reset probe','version':version,'category':'Instrument','uid':uid,'has_gui':False,'audio_inputs':0,'audio_outputs':1,'output_channels':2,'has_midi_input':True,'has_midi_output':False}}}}
+        traits=json.loads(identity_traits.read_text())
+        response={{'PluginInfo':{{'vendor':'Citrus tests','name':'Reset probe','version':version,'category':traits['category'],'uid':uid,'has_gui':False,'audio_inputs':0,'audio_outputs':1,'output_channels':2,'has_midi_input':traits['midi_input'],'has_midi_output':traits['midi_output']}}}}
     elif kind=='ResetOriginSupport':
         response=({{'Error':{{'message':'old helper unsupported'}}}} if selected=='old' else {{'ResetOriginSupport':{{'support':{{'contract_version':1,'max_block_frames':int(maximum.read_text()),'processing':True}}}}}})
     elif selected==kind:
@@ -68,9 +82,18 @@ for line in sys.stdin:
     elif kind=='AudioBusLayout':
         if selected=='layout-exit': sys.exit(9)
         response=({{'Success':{{'message':'wrong layout response'}}}} if selected=='layout-wrong' else {{'AudioBusLayout':{{'layout':json.loads(layout.read_text())}}}})
-    elif kind=='EventBusLayout': response={{'EventBusLayout':{{'layout':{{'inputs':[{{'channel_count':16,'is_main':True,'active':selected!='inactive-event'}}],'outputs':[]}}}}}}
+    elif kind=='CheckedAudioBusLayout':
+        current=json.loads(layout.read_text())
+        checked={{direction:[{{'channel_count':bus['channel_count'],'is_main':index==0,'active':bus['active']}} for index,bus in enumerate(current[direction])] for direction in ['inputs','outputs']}}
+        response={{'CheckedAudioBusLayout':{{'layout':checked}}}}
+    elif kind=='EventBusLayout':
+        traits=json.loads(identity_traits.read_text())
+        response={{'EventBusLayout':{{'layout':{{'inputs':[{{'channel_count':16,'is_main':True,'active':selected!='inactive-event'}}] if traits['midi_input'] else [],'outputs':[{{'channel_count':16,'is_main':True,'active':True}}] if traits['midi_output'] else []}}}}}}
     elif kind=='LatencySamples': response={{'LatencySamples':{{'samples':37}}}}
-    elif kind=='TailSamples': response={{'TailSamples':{{'samples':511}}}}
+    elif kind=='TailSamples': response=({{'Error':{{'message':'deliberate post-Start tail refusal'}}}} if selected=='post-start-tail' and started else {{'TailSamples':{{'samples':511}}}})
+    elif kind=='StartProcessing':
+        started=True
+        response={{'Success':{{'message':'ok'}}}}
     elif kind=='NativeDirtyRevision': response={{'NativeDirtyRevision':{{'revision':0}}}}
     elif kind=='Editor': response={{'EditorState':{{'state':{{'supported':False,'has_editor':False,'open':False,'width':0,'height':0,'generation':0}}}}}}
     elif kind=='TakeParameterEdits': response={{'ParameterEdits':{{'edits':[]}}}}
@@ -83,6 +106,7 @@ log.with_name('child-exit.json').write_text(json.dumps({{'pid':os.getpid(),'shut
             log = log.to_string_lossy(),
             mode = mode.to_string_lossy(),
             identity = identity.to_string_lossy(),
+            identity_traits = identity_traits.to_string_lossy(),
             maximum = maximum.to_string_lossy(),
             layout = layout.to_string_lossy()
         );
@@ -97,12 +121,35 @@ log.with_name('child-exit.json').write_text(json.dumps({{'pid':os.getpid(),'shut
             log,
             mode,
             identity,
+            identity_traits,
             maximum,
             layout,
         }
     }
     pub(super) fn set_identity(&self, uid: &str, version: &str) {
         std::fs::write(&self.identity, serde_json::to_vec(&(uid, version)).unwrap()).unwrap();
+    }
+    pub(super) fn set_identity_traits(&self, category: &str, midi_input: bool, midi_output: bool) {
+        std::fs::write(
+            &self.identity_traits,
+            serde_json::to_vec(&serde_json::json!({
+                "category":category,"midi_input":midi_input,"midi_output":midi_output,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    /// Hold the helper before its first request so Windows can retain the exact
+    /// Python handle even when LOAD qualification immediately disposes it.
+    pub(super) fn hold_child_start(&self) -> ProtocolChildStartGate {
+        std::fs::write(
+            self.root.join("hold-child-start"),
+            b"hold before first request",
+        )
+        .unwrap();
+        ProtocolChildStartGate {
+            root: self.root.clone(),
+        }
     }
     pub(super) fn set_maximum(&self, frames: usize) {
         std::fs::write(&self.maximum, frames.to_string()).unwrap();
@@ -180,6 +227,32 @@ log.with_name('child-exit.json').write_text(json.dumps({{'pid':os.getpid(),'shut
             #[cfg(windows)]
             process,
         })
+    }
+}
+
+pub(super) struct ProtocolChildStartGate {
+    root: PathBuf,
+}
+
+impl ProtocolChildStartGate {
+    pub(super) fn observe_and_release(self, helper: &ResetHelper) -> Result<ProtocolChild, String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !self.root.join("child.json").is_file() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let child = helper.observe_child();
+        // Drop always releases, including failed observation and test unwind.
+        drop(self);
+        child
+    }
+}
+
+impl Drop for ProtocolChildStartGate {
+    fn drop(&mut self) {
+        let _ = std::fs::write(
+            self.root.join("release-child-start"),
+            b"release original child",
+        );
     }
 }
 impl Drop for ResetHelper {

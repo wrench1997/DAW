@@ -13,7 +13,7 @@ use generator_loaded_identity::GeneratorReadiness;
 mod whole_song_export_job;
 #[cfg(test)]
 use clip_render_glue::RestorationTestFactory;
-use clip_render_glue::{ClipRenderRestorationBinding, PendingClipRestoration};
+use clip_render_glue::{ClipRenderRestorationBinding, FreshSourceClass, PendingClipRestoration};
 mod editor_navigation;
 #[cfg(test)]
 mod headless_ui_capture;
@@ -5226,7 +5226,7 @@ pub struct CitrusApp {
     plugin_picker_target: Option<PluginPickerTarget>,
     plugin_picker_show_all: bool,
     plugin_picker_fresh_bounce: bool,
-    fresh_bounce_sources: HashMap<u64, (String, PathBuf, String)>,
+    fresh_bounce_sources: HashMap<u64, (String, PathBuf, FreshSourceClass)>,
     clip_render_restorations: HashMap<u64, ClipRenderRestorationBinding>,
     clip_timeline_projection_revision: u64,
     retained_clip_media: HashMap<u64, clip_render_cache::RetainedVerifiedClipMedia>,
@@ -26629,7 +26629,7 @@ impl CitrusApp {
                     if cfg!(all(any(target_os = "linux", windows), feature = "experimental-fresh-helper"))
                         && matches!(target, PluginPickerTarget::ChannelDevice { .. }) {
                         ui.checkbox(&mut self.plugin_picker_fresh_bounce, "Experimental dry-bounce source (new VST3 load only)")
-                            .on_hover_text("Prepares the newly loaded generator for selected-clip rendering. Existing sources are never silently reconfigured.");
+                            .on_hover_text("Qualifies this new generator for dry capture/export before first playback. Existing sources are never silently reconfigured.");
                     }
                     ui.checkbox(
                         &mut self.plugin_picker_show_all,
