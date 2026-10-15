@@ -488,8 +488,14 @@ Native04→05 also changed the play/Save prelude, cold-start state and diagnosti
 source. Source87 changed failure evidence, not cleanup order or budgets.
 Neither diagnostic timing nor Save is established as the failure's cause.
 Native06 below reused those bins/input/cold sequence/options with exact timing
-off. Warm play/Save still needs a separate comparison; do not extend deadlines
-or make forced termination count as successful export.
+off. Native04's cleanup-only primary places the failure after render checks but
+does not show whether Shutdown was consumed or which teardown boundary stalled;
+its AppDrop marker follows export failure. The next discriminating run reuses
+Native05's frozen bins, validation02, exact timing on and message-pass off, adds
+only Play/Escape, and exports to a fresh directory without Ctrl+S or editor use.
+Keep clone reader/main/dispatcher/component/ExitDll boundaries and actual exit
+handles. This separates playback from Save and SDK-A/B changes. Do not extend
+deadlines or make forced termination count as successful export.
 
 Evidence in `target/backend-reliability-20261014/normal-noire-workflow-20261015-01/`:
 `launch-05.json`, `cold-open-and-export-native05-01.json`, `stderr-05.log`,
@@ -695,8 +701,14 @@ before a post-snapshot or arm. The prior repair incorrectly applied the armed
 metadata suffix to that first occurrence. Runner exec90217 actually exited1
 (Cargo101); the separate remaining-check runner exec46212 actually exited0.
 Keep both `source94-local-gates-{01,02}-terminal.json` records rather than calling
-the aggregate a pass. Cloud Linux passed SDK15/Unix1; both Windows jobs remain
-in progress. SDK-B has not entered NI acceptance. Preserve
+the aggregate a pass. Both cloud runs now actually completed failure: Linux
+passed SDK15/Unix1; quality passed32 factory,4 SDK offline-MIDI and15 SDK readiness;
+preview passed344 harness and the same4+15 SDK cases. Each App run finished2332
+passed/1 failed/12 ignored, only the initial-prepare boundary mismatch. Neither
+Whole second-sample case failed. Later cloud Clippy, bins, release and ZIP were
+not reached; local passes do not substitute for them. Keep
+`ci-e50f92f-{windows-quality,windows-preview,linux-helper-readiness}-01.log` and
+Source94 actual-terminal run/jobs JSON. SDK-B has not entered NI acceptance. Preserve
 `strict-cancel-readiness-candidate-01/applied-handoff-01.json`,
 `strict-readiness-fixture-provenance-01/` and
 `whole-review-settlement-success-sample-fix-01.json`.
@@ -705,9 +717,20 @@ Source95 corrects only that exact dry-topology fixture: occurrence1 retains the
 complete getters then cleanup without a post-snapshot/arm; occurrences2..5 retain
 Snapshot(2*n) before cleanup. Raw-policy early rejection is unchanged. Production,
 vendor sources and pins do not change. Scratch formatting/apply-check and the
-applied diff passed; the affected case and changed-input Clippy remain unrun.
-Source94's unchanged four passing cases, matching bins and SDK evidence remain
-applicable. Preserve `strict-dry-topology-prepare-boundary-candidate-01/`.
+applied diff passed. Source95 (`92e9d3b`) actually passed the complete affected
+matrix case and changed-input strict all-feature/all-target Clippy; both Cargo
+phases and runner exec76910 exited0. Source94's unchanged four passing cases,
+matching bins and SDK evidence remain applicable, so all five affected cases
+now have actual passing evidence. The Source94 SDK-B bins are separately frozen
+with actual Cargo artifact sizes/times at
+`normal-noire-workflow-20261015-01/bin-source94-sdk-b/freeze-receipt.json`; NI is
+still untested. All observed work terminated and fresh heavy/owned-root counts
+were zero before peer handback. Peak owned private/global physical used were
+3.826/23.161GiB. Full-cloud qualification of the new source remains pending;
+Source94's actual terminal evidence was retained before the next publication.
+Keep `source95-local-gates-01-*`,
+`source95-local-resource-handback-01.json` and
+`strict-dry-topology-prepare-boundary-candidate-01/`.
 
 Preserve `async-progress-readiness-candidate-01/applied-handoff-02.json` and
 `async-progress-readiness-provenance-02/`. This guard tracks work reported through
