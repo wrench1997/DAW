@@ -7,6 +7,10 @@
 
 当前可用副本：桌面“Citrus Studio 新版测试02”，`D:\DAW-Preview\Citrus-Studio-20261015-02\Start-Citrus.cmd`。PAT/SONG、拖播放头、AUTO范围已通过本机定向回归/真实离屏/Clippy；新v13工程请另存副本，旧01保留。见`docs/PLAYLIST_TRANSPORT.md`；本轮云端验收尚未完成。
 
+用户新增Playlist↔钢琴卷帘联动：共享Pattern数据/所有placement预览本来已有；现补Pattern双击自动打开对应Piano/Rack、主Pattern切换时一次性定位含notes通道、SONG位置按placement/offset映射本地游标，以及真实callback模式下Rack活动步。已有手动trim不自动拉长；本候选已实现/格式检查，新增输入/时钟/真实离屏门尚未执行。离线02仍为此前已交付版本，未替换。
+
+`4102953`新云quality38740984624实际SUCCESS（factory33、2446 root/14 ignored、Clippy/build、Linux15+1及session2真实PrintWindow PASS）；preview38740984829的367 Python=355PASS/12条件SKIP、SDK4+15通过，App2380PASS/1FAIL/14ignored，标尺用例126行`!dirty`失败，release/ZIP未跑。同SHA质量该例通过不覆盖此失败。已定位fixture换掉startup demo后只同步history指纹、未同步保存基线，跨750ms检查便合法dirty；正只修fixture并加确定计时/真实编辑dirty对照，生产规则不动。原日志/终态保留source113记录。
+
 历史01独立测试副本在`D:\DAW-Preview\Citrus-Studio-20261015-01`，桌面快捷方式`Citrus Studio 独立测试版.lnk`指向`Start-Citrus.cmd`。复制Source102实际匹配主/helper为普通独立文件，不占target/debug；既有`CITRUS_STUDIO_DATA_DIR`把布局/音频偏好/缓存/自动保存/录音隔离到该目录UserData，测试作品建议存Projects。副本helper无插件协议smoke实际exit0；未替用户打开GUI/声卡/NI。用户已实际使用并反馈Playlist不能连续拖播放头、歌曲长度不应受视图限制、SONG/PAT当前Pattern及范围反馈不足，这些反馈已在02修复并完成本机软件/离屏验收。它是本机MSVC调试版，不是正式发行包，不随附插件/音色/作品/系统DLL。Root保持不做CU/NI/声卡自动验证，不修改或停止用户副本；peer目前按用户在另一聊天的授权操作其VK3D界面，后台CPU单独协调。来源/说明/检查随副本保存在Build-Info.json、README和Helper-Smoke.log。
 
 PrintWindow CI 修补已实现（首版`8f4f35c`）：独立检测OS、当前进程session、WTSActive、可见window station及input/thread desktop；Linux/macOS、session0或明确无交互桌面才退出77，CI只将该码映射为成功SKIPPED。API异常、坏数据、真实截图失败及检测后桌面丢失仍FAIL。环境检测和每次PrintWindow均在5秒子进程超时内kill/reap，native step另有6分钟上限；Summary逐项记录PASS/FAIL/SKIPPED与原因。未改代码检查、Rust测试、Windows构建和preview打包门。

@@ -2612,6 +2612,8 @@ mod keyboard_audition_ui_tests;
 mod master_pan_audition_ui_tests;
 #[path = "numeric_input_ui_tests.rs"]
 mod numeric_input_ui_tests;
+#[path = "pattern_editor_link_tests.rs"]
+mod pattern_editor_link_tests;
 #[path = "piano_expression_tests.rs"]
 mod piano_expression_tests;
 #[path = "piano_keyboard_playback_tests.rs"]

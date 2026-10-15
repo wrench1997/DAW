@@ -91,7 +91,24 @@ fn two_patterns(ui: &mut UiHarness) {
     ui.app.project = project;
     ui.app.transport_mode = TransportMode::Song;
     ui.app.sync_history_observer();
+    // This replacement is the test's saved starting project, not an unsaved
+    // edit of the startup demo. History and the saved baseline are independent.
+    ui.app.project_fingerprint = project_fingerprint(&ui.app.project);
     ui.settle();
+}
+
+fn assert_clean_after_due_dirty_check(ui: &mut UiHarness, expected: u64) {
+    ui.app.last_dirty_check = Instant::now() - Duration::from_secs(1);
+    ui.run(Vec::new());
+    assert_eq!(project_fingerprint(&ui.app.project), expected);
+    assert!(
+        !ui.app.dirty,
+        "navigation changed dirty state: saved={}, history={}, actual={}, payload={:?}",
+        ui.app.project_fingerprint,
+        ui.app.history_fingerprint,
+        project_fingerprint(&ui.app.project),
+        serde_json::to_value(&ui.app.project).unwrap()
+    );
 }
 
 #[test]
@@ -99,6 +116,7 @@ fn playlist_ruler_drag_continuously_seeks_without_drawing_when_pointer_crosses_l
     let mut ui = UiHarness::new();
     two_patterns(&mut ui);
     let before = project_fingerprint(&ui.app.project);
+    assert_clean_after_due_dirty_check(&mut ui, before);
     let count = ui.app.project.clips.len();
     let origin = ruler_point(&ui, 1.0);
     ui.run(mixer_pointer_button(origin, true));
@@ -121,6 +139,7 @@ fn playlist_ruler_drag_continuously_seeks_without_drawing_when_pointer_crosses_l
     assert_eq!(ui.app.project.clips.len(), count);
     ui.run(mixer_pointer_button(lane, false));
     ui.settle();
+    assert_clean_after_due_dirty_check(&mut ui, before);
     assert_eq!(project_fingerprint(&ui.app.project), before);
     assert!(ui.app.undo_stack.is_empty());
     assert!(!ui.app.dirty);
@@ -129,6 +148,62 @@ fn playlist_ruler_drag_continuously_seeks_without_drawing_when_pointer_crosses_l
     ui.click_pos(lane);
     assert_eq!(ui.app.project.clips.len(), count + 1);
     assert_eq!(ui.app.undo_stack.len(), 1);
+}
+
+#[test]
+fn playlist_clean_fixture_adopts_its_saved_baseline_and_real_music_edit_still_becomes_dirty() {
+    let mut ui = UiHarness::new();
+    let startup_fingerprint = ui.app.project_fingerprint;
+    let startup = serde_json::to_value(&ui.app.project).unwrap();
+    two_patterns(&mut ui);
+    let clean = project_fingerprint(&ui.app.project);
+    assert_ne!(startup_fingerprint, clean);
+    eprintln!(
+        "startup_name={} patterns={} clips={} saved_fingerprint={}; fixture_name={} patterns={} clips={} fingerprint={}",
+        startup["name"],
+        startup["patterns"].as_array().unwrap().len(),
+        startup["clips"].as_array().unwrap().len(),
+        startup_fingerprint,
+        ui.app.project.name,
+        ui.app.project.patterns.len(),
+        ui.app.project.clips.len(),
+        clean
+    );
+    assert_clean_after_due_dirty_check(&mut ui, clean);
+    // Reproduce the old fixture exactly: its music/history belonged to the new
+    // project, while the saved baseline still belonged to the startup demo.
+    ui.app.project_fingerprint = startup_fingerprint;
+    ui.app.last_dirty_check = Instant::now() - Duration::from_secs(1);
+    ui.run(Vec::new());
+    assert!(
+        ui.app.dirty,
+        "the old mismatched baseline dirties on idle, without any navigation"
+    );
+    assert_eq!(project_fingerprint(&ui.app.project), clean);
+    assert!(ui.app.undo_stack.is_empty());
+    drop(ui);
+
+    let mut edited = UiHarness::new();
+    two_patterns(&mut edited);
+    let clean = project_fingerprint(&edited.app.project);
+    assert_clean_after_due_dirty_check(&mut edited, clean);
+    edited.key(egui::Key::F6, egui::Modifiers::NONE);
+    let name = edited.app.project.channels[0].name.clone();
+    edited.click(&format!("{name} step 1"));
+    assert!(edited.app.project.active_pattern().channel_steps[0][0]);
+    edited.key(egui::Key::F5, egui::Modifiers::NONE);
+    edited.app.last_dirty_check = Instant::now() - Duration::from_secs(1);
+    edited.run(Vec::new());
+    assert!(
+        edited.app.dirty,
+        "an actual step edit must still dirty the saved project"
+    );
+    assert_ne!(project_fingerprint(&edited.app.project), clean);
+    assert_eq!(
+        edited.app.project_fingerprint, clean,
+        "editing must not overwrite the saved baseline"
+    );
+    assert!(!edited.app.undo_stack.is_empty());
 }
 
 #[test]

@@ -1100,6 +1100,27 @@ paint and repaint-change checks passed, rather than SKIPPED. This result does
 not replace the separate preview's document-closure failure. Raw run/jobs and
 both complete job logs are retained as `source112-quality-*-01.*`.
 
+After the package repair, `4102953` preview run38740984829 passed all367 Python
+cases except12 explicit conditional skips, plus SDK4/15. Its Rust App gate
+actually failed:2380 passed/one failed/14 ignored,497.59s. The ruler-drag test's
+line126 `!ui.app.dirty` assertion failed; release/ZIP did not run. The same SHA's
+quality run38740984624 succeeded with2381 App/2446 total, strict Clippy/build and
+real session2 PrintWindow. That pass does not override preview's failure.
+The UI owner traced a deterministic fixture issue: replacing the startup demo
+updated the history fingerprint but not the saved Project baseline; crossing
+the750ms dirty check correctly detected that setup change. A fixture-only repair
+establishes the saved baseline, forces checks before/after navigation and retains
+a real music-edit dirty control. New execution remains pending. Preserve
+`ci-4102953-windows-preview-01.log`, `source113-preview-actual-terminal-01.json`
+and `source113-quality-*-01.*`.
+
+The user's next issue is Playlist/Piano linking. Shared Pattern data/previews
+already existed; missing double-click entry, global instead of source-local
+Piano cursor and callback mode's inactive Rack cursor are the actual gaps. A
+single editor-linking candidate now implements the [documented interaction](PLAYLIST_TRANSPORT.md#open-and-edit-the-pattern-used-by-a-playlist-clip),
+keeping existing trims and callback scheduling. Source/input/render acceptance
+for that new candidate is recorded separately from the passed transport build.
+
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
 The native harness now probes the OS, current process session, WTS connection

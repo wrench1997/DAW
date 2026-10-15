@@ -74,6 +74,35 @@ Right-click PAT opens the Rack; right-click SONG opens the Playlist. Recording
 still blocks mode changes. Mode preference remains independent of the Project
 and music history.
 
+## Open and edit the Pattern used by a Playlist clip
+
+**New linking candidate: implemented and formatted; input/render gates pending.**
+Double-click a Pattern clip with Piano notes to open its Piano roll. A step-only
+Pattern opens the Rack; hold Alt to open the other editor. Opening locates the
+clicked source bar, including source offset, without starting playback, seeking
+the song or changing PAT/SONG. Audio and Automation keep their own editing paths.
+
+Changing the main Pattern selects its first Channel with Piano notes. Choosing
+a Channel manually in the Rack remains your choice on later frames or F7. The
+Rack Channel context menu also opens that Channel's Piano roll.
+
+Piano edits change the shared Pattern, so every Playlist reference updates its
+note preview and compiled playback; Undo/Redo uses the existing shared history.
+Placements retain their individual start, offset and trimmed length. There is
+currently no per-placement follow-length policy: adding later source notes does
+not automatically extend every existing placement.
+
+In SONG, the Piano cursor follows the active placement's source-local position,
+not the absolute song beat. An explicitly opened active occurrence takes
+precedence; otherwise the latest-starting active occurrence wins, with Clip ID
+as a tie-break. Muted placements, gaps and the song end do not show a playing
+cursor. PAT uses its actual local loop. Rack steps follow the real transport
+clock and their own step period, including Swing sampled at the pair start.
+
+The interaction reference is Image-Line's [Playlist manual](https://www.image-line.com/fl-studio-learning-content/fl-studio-online-manual/html/playlist.htm)
+(Automatic/Alt editor entry and click-position navigation) and [Piano roll manual](https://www.image-line.com/fl-studio-learning/fl-studio-online-manual/html/pianoroll.htm)
+(Pattern auto-locate and occurrence context).
+
 ## Format and verification
 
 Project **v13** persists the range policy. Files through v12 load with MANUAL;

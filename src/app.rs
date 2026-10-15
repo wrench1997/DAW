@@ -23,6 +23,7 @@ mod headless_ui_capture;
 mod headless_ui_tests;
 mod keyboard_audition;
 mod native_automation;
+mod pattern_editor_link;
 mod piano_clipboard;
 mod piano_expression;
 mod piano_keyboard;
@@ -5192,6 +5193,7 @@ pub struct CitrusApp {
     /// Fixed callback/runtime mixer slot, never `Project::mixer_tracks` display index.
     selected_mixer: usize,
     selected_clip: Option<u32>,
+    pattern_editor_origin: Option<pattern_editor_link::PatternEditorOrigin>,
     playlist_selection_ids: HashSet<u32>,
     playlist_gesture_before: Option<Project>,
     playlist_viewport: Viewport2D,
@@ -5574,6 +5576,7 @@ impl CitrusApp {
                 selected_channel,
                 selected_mixer: 0,
                 selected_clip: None,
+                pattern_editor_origin: None,
                 playlist_selection_ids: HashSet::new(),
                 playlist_gesture_before: None,
                 playlist_viewport,
@@ -11859,6 +11862,7 @@ impl CitrusApp {
     }
 
     fn sync_history_observer(&mut self) {
+        self.retain_pattern_editor_origin();
         self.history_fingerprint = project_fingerprint(&self.project);
         if transport_tempo_map_fingerprint(&self.project, self.transport_mode)
             != self.tempo_map_fingerprint
@@ -11935,6 +11939,7 @@ impl CitrusApp {
 
     fn active_pattern_selection_changed(&mut self) {
         self.cancel_prepared_playback_start();
+        self.pattern_editor_selection_changed();
         if self.transport_mode != TransportMode::Pattern {
             return;
         }
@@ -12467,6 +12472,7 @@ impl CitrusApp {
     }
 
     fn retain_playlist_selection(&mut self) {
+        self.retain_pattern_editor_origin();
         self.playlist_selection_ids
             .retain(|id| self.project.clips.iter().any(|clip| clip.id == *id));
         if self
@@ -16225,6 +16231,7 @@ impl CitrusApp {
         self.selected_mixer = 0;
         self.clear_playlist_selection();
         self.playlist_gesture_before = None;
+        self.pattern_editor_origin = None;
         self.playlist_viewport = default_playlist_viewport(self.project.song_end_beat());
         self.piano_viewport = default_piano_viewport();
         self.piano_roll_state.clear_selection();
@@ -22289,6 +22296,7 @@ impl CitrusApp {
         let audio_assets = self.project.audio_assets.clone();
         let mut automation_update_request = None;
         let mut automation_point_action = None;
+        let mut open_pattern_request = None;
         for clip in &mut self.project.clips {
             if clip.track >= PLAYLIST_TRACK_COUNT
                 || !content_span_is_visible(
@@ -22382,6 +22390,8 @@ impl CitrusApp {
                 })
                 .on_hover_text(if self.tool_mode == ToolMode::Slip {
                     "Slip Clip contents without moving its start or end · Alt bypasses snap"
+                } else if clip.kind == ClipKind::Pattern {
+                    "Click to select · Shift adds · Ctrl toggles · drag to move\nDouble-click: Piano notes / Channel Rack · Alt+double-click: other editor"
                 } else {
                     "Click to select · Shift adds · Ctrl toggles · drag to move"
                 });
@@ -23084,6 +23094,22 @@ impl CitrusApp {
                     });
                 }
             }
+            if clip.kind == ClipKind::Pattern
+                && response.double_clicked_by(egui::PointerButton::Primary)
+                && matches!(
+                    self.tool_mode,
+                    ToolMode::Select | ToolMode::Draw | ToolMode::Paint
+                )
+                && !ui.input(|i| i.modifiers.ctrl || i.modifiers.command || i.modifiers.shift)
+                && !clip_consumed_click
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                let beat = self
+                    .playlist_viewport
+                    .x
+                    .content_at_pixel(f64::from(pointer.x - canvas.left()));
+                open_pattern_request = Some((clip.id, beat, ui.input(|i| i.modifiers.alt)));
+            }
             if response.clicked() && !clip_consumed_click {
                 clip_consumed_click = true;
                 match self.tool_mode {
@@ -23278,6 +23304,9 @@ impl CitrusApp {
                 project_gesture_stopped = true;
             }
         }
+        if let Some((clip_id, beat, alternate)) = open_pattern_request {
+            self.open_playlist_pattern(clip_id, beat, alternate);
+        }
         // Discrete edits are complete transactions, just like drag gestures.
         // Otherwise fast consecutive deletes/splits can merge in timed history capture.
         if split_request.is_some() || delete_clip_ids.is_some() || group_mute_request.is_some() {
@@ -23429,6 +23458,7 @@ impl CitrusApp {
             self.playlist_selection_ids
                 .retain(|clip_id| !clip_ids.contains(clip_id));
             self.selected_clip = self.playlist_selection_ids.iter().copied().min();
+            self.retain_pattern_editor_origin();
         }
         if let Some((automation_id, point_index, point)) = automation_update_request
             && let Some(automation) = self
@@ -23750,13 +23780,11 @@ impl CitrusApp {
             self.project.active_pattern().length_steps
         );
         self.workspace_header(ui, StudioView::ChannelRack, "CHANNEL RACK", &pattern_label);
-        let active_step = if self.playing {
-            self.last_step
-        } else {
-            usize::MAX
-        };
+        let active_step = self.rack_editor_playing_step();
         let mut audition = Vec::new();
         let mut automation_request = None;
+        let mut channel_selection_changed = false;
+        let mut open_piano_channel = None;
         let notes = [36_u8, 39, 54, 43, 64];
         let mixer_track_ids_by_runtime_slot = (0..crate::mixer_graph::MIXER_GRAPH_MAX_NODES)
             .map(|runtime_slot| self.project.mixer_track_id_at_runtime_slot(runtime_slot))
@@ -23800,16 +23828,23 @@ impl CitrusApp {
                                     theme::color(channel.color),
                                 );
                                 let selected = self.selected_channel == channel_index;
-                                if ui
+                                let channel_button = ui
                                     .add_sized(
                                         [104.0, 24.0],
                                         theme::Button::new(RichText::new(&channel.name).size(10.0))
                                             .selected(selected)
                                             .truncate(),
                                     )
-                                    .on_hover_text(&channel.name)
-                                    .clicked()
-                                {
+                                    .on_hover_text(&channel.name);
+                                channel_button.context_menu(|ui| {
+                                    if ui.studio_button("Piano roll").clicked() {
+                                        open_piano_channel = Some(channel_index);
+                                        ui.close();
+                                    }
+                                });
+                                if channel_button.clicked() {
+                                    channel_selection_changed |=
+                                        self.selected_channel != channel_index;
                                     self.selected_channel = channel_index;
                                     audition.push((
                                         channel.id,
@@ -23955,7 +23990,7 @@ impl CitrusApp {
                                     };
                                     ui.painter().add(theme::button_face(
                                         rect,
-                                        fill.gamma_multiply(if active_step == step {
+                                        fill.gamma_multiply(if active_step == Some(step) {
                                             1.25
                                         } else {
                                             1.0
@@ -23968,7 +24003,7 @@ impl CitrusApp {
                                         3.0,
                                         Stroke::new(
                                             1.0,
-                                            if active_step == step {
+                                            if active_step == Some(step) {
                                                 Color32::WHITE
                                             } else {
                                                 theme::GRID
@@ -24002,6 +24037,17 @@ impl CitrusApp {
                     ui.add(egui::Slider::new(&mut self.project.swing, 0.0..=1.0).show_value(false));
                 });
             });
+        if let Some(index) = open_piano_channel {
+            self.selected_channel = index;
+            channel_selection_changed = true;
+        }
+        if channel_selection_changed {
+            self.piano_roll_state.clear_selection();
+            self.sync_piano_range_owner();
+        }
+        if open_piano_channel.is_some() {
+            self.focus_editor(StudioView::PianoRoll);
+        }
         if let Some(target) = automation_request {
             self.create_or_open_native_automation(target);
         }
@@ -25260,12 +25306,14 @@ impl CitrusApp {
                 .map(|slot| (channel_id, slot))
         });
         self.update_keyboard_held_audition(held_keyboard_pitch, keyboard_route);
-        if (beat_start..=beat_end).contains(&self.beat_position) {
+        if let Some(local_beat) = self.piano_editor_playhead()
+            && (beat_start..=beat_end).contains(&local_beat)
+        {
             let play_x = grid.left()
                 + self
                     .piano_viewport
                     .x
-                    .pixel_for_content(f64::from(self.beat_position)) as f32;
+                    .pixel_for_content(f64::from(local_beat)) as f32;
             note_grid_painter.line_segment(
                 [
                     Pos2::new(play_x, grid.top()),
