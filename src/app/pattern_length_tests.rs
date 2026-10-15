@@ -432,9 +432,33 @@ fn inspector_length_typing_only_commits_manual_on_a_real_numeric_change() {
     assert!(ui.app.undo_stack.is_empty());
     type_length(&mut ui, egui::Key::Num6, "6");
     assert_eq!(project_fingerprint(&ui.app.project), before);
-    ui.key(egui::Key::Escape, egui::Modifiers::NONE);
-    assert_eq!(project_fingerprint(&ui.app.project), before);
-    assert!(ui.app.undo_stack.is_empty());
+    for (stage, event) in [
+        ("Escape press", Some(true)),
+        ("Escape release", Some(false)),
+        ("idle after deferred lost-focus", None),
+    ] {
+        let events = event.map_or_else(Vec::new, |pressed| {
+            vec![egui::Event::Key {
+                key: egui::Key::Escape,
+                physical_key: Some(egui::Key::Escape),
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }]
+        });
+        ui.run(events);
+        assert_eq!(
+            project_fingerprint(&ui.app.project),
+            before,
+            "{stage} committed canceled Inspector text: {:?}",
+            serde_json::to_value(&ui.app.project.clips).unwrap()
+        );
+        assert_eq!(clip(&ui, 1).length, 1.0, "{stage}");
+        assert!(clip(&ui, 1).follows_pattern(), "{stage}");
+        assert!(ui.app.undo_stack.is_empty(), "{stage}");
+        assert!(!ui.app.dirty, "{stage}");
+    }
+    assert!(!ui.ctx.text_edit_focused());
     type_length(&mut ui, egui::Key::Num6, "6");
     assert!(clip(&ui, 1).follows_pattern());
     ui.key(egui::Key::Enter, egui::Modifiers::NONE);
@@ -445,7 +469,34 @@ fn inspector_length_typing_only_commits_manual_on_a_real_numeric_change() {
     );
     assert_eq!(clip(&ui, 1).length, 6.0);
     assert_eq!(ui.app.undo_stack.len(), 1);
+    let entered = project_fingerprint(&ui.app.project);
     ui.capture("pattern-length-inspector-numeric-trim");
+    ui.key(egui::Key::Z, piano_clipboard_command());
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    assert_eq!(clip(&ui, 1).length, 1.0);
+    assert!(clip(&ui, 1).follows_pattern());
+
+    // Ordinary pointer focus loss must still commit the text, unlike Escape.
+    type_length(&mut ui, egui::Key::Num6, "6");
+    assert_eq!(project_fingerprint(&ui.app.project), before);
+    let length_label = ui
+        .nodes
+        .iter()
+        .find(|node| node.role() == Role::Label && node.value() == Some("Length"))
+        .expect("the actual Inspector Length label provides a neutral click-away target");
+    ui.click_pos(node_rect(length_label).center());
+    assert!(!ui.ctx.text_edit_focused());
+    assert_eq!(
+        project_fingerprint(&ui.app.project),
+        entered,
+        "click-away commits exactly the same six-beat Manual trim as Enter"
+    );
+    assert_eq!(
+        clip(&ui, 1).pattern_length_policy,
+        Some(PatternLengthPolicy::Manual)
+    );
+    assert_eq!(clip(&ui, 1).length, 6.0);
+    assert_eq!(ui.app.undo_stack.len(), 1);
     ui.key(egui::Key::Z, piano_clipboard_command());
     assert_eq!(project_fingerprint(&ui.app.project), before);
     assert_eq!(clip(&ui, 1).length, 1.0);

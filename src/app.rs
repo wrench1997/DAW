@@ -18654,7 +18654,7 @@ impl CitrusApp {
                         .horizontal(|ui| {
                             ui.label(RichText::new("Length").size(9.0).color(theme::MUTED));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                ui.add(
+                                let response = ui.add(
                                     egui::DragValue::new(&mut length)
                                         .range(minimum_length..=song_length)
                                         .clamp_existing_to_range(false)
@@ -18662,7 +18662,18 @@ impl CitrusApp {
                                         .speed(0.05)
                                         .max_decimals(2)
                                         .suffix(" beats"),
-                                )
+                                );
+                                if ui.input(|input| {
+                                    !input.modifiers.any() && input.key_pressed(egui::Key::Escape)
+                                }) && ui
+                                    .memory(|memory| memory.had_focus_last_frame(response.id))
+                                {
+                                    // egui keeps lost_focus true for two frames. Its
+                                    // DragValue skips Escape's commit but retains the
+                                    // draft, which would commit on the release frame.
+                                    ui.data_mut(|data| data.remove::<String>(response.id));
+                                }
+                                response
                             })
                             .inner
                         })

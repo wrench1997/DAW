@@ -67,8 +67,8 @@ preserve the manual endpoint and the audible PCM/WAV prefix.
 
 ## Let an untrimmed Pattern clip follow its source
 
-**v14 candidate implemented; execution and new captures are pending. Delivered03
-does not include this policy.** New Draw/Paint Pattern placements default to
+**v14 candidate implemented; first execution found a numeric-cancel defect.
+Delivered03 does not include this policy.** New Draw/Paint Pattern placements default to
 **Follow Pattern**. Their width comes from the source Pattern's actual cycle,
 using the existing whole-bar/four-bar-block growth rules. Editing or importing
 source notes can grow or shrink every following reference without an extra
@@ -97,7 +97,30 @@ with fixed placement boundaries; save a new-version copy rather than overwriting
 The independent consumer review found one raw-length use in automation track
 placement: a grown Follow clip could be mistaken for an empty lane at a later
 beat. That path now uses the same resolver; a real context-menu creation regression
-covers both growth and shrink plus Undo. The new25-case set has not yet run.
+covers both growth and shrink plus Undo. That regression passed in the first run.
+
+### First executable gate: cancel must leave the project unchanged
+
+Source `af28a1e` ran the all-feature App suite:2415 passed,1 failed,14 ignored
+in678.99s. Twenty-four of the25 added cases passed, including real device-free
+callback growth/shrink, mixed source clocks, Slice/Slip WAV equivalence and
+format14/legacy persistence. The failing input sequence selects a Follow clip,
+enters its unchanged Length and presses Enter, then types6 and presses Escape.
+The last step changed the Project fingerprint at `pattern_length_tests.rs:436`.
+The narrow repair clears only that Length widget's draft on focused Escape.
+egui0.35 retains lost-focus for two frames; without clearing the draft, the
+release frame parsed the canceled text. The same regression now checks Escape
+press, release and idle separately, and retains Enter and actual click-away
+commit plus exact Undo. Its repaired source has passed static checks; executable
+reruns, new captures and subsequent build/Clippy gates have not run.
+
+The serial whole-suite process peaked at14.14GiB private memory/32.80GiB global
+used RAM and triggered the
+local12GiB soft budget; no later phase started. It exited naturally with101 and
+all observed work retired. The next local gate will reuse unaffected passing
+evidence and run12 affected Follow/numeric/text-focus cases in fresh processes rather than repeating
+the accumulated whole-suite process. Original logs remain under
+`target/backend-reliability-20261014/source116-local-gates-01-*`.
 
 The reference is Image-Line's [Pattern workflow](https://www.image-line.com/fl-studio-learning-content/fl-studio-online-manual/html/basics_workflow.htm)
 and [Channel Rack Auto length](https://www.image-line.com/fl-studio-learning-content/fl-studio-online-manual/html/channelrack.htm):
