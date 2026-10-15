@@ -999,6 +999,23 @@ Formatting/diff passed; the changed catalog and Clippy are unrun. Keep
 `catalog-retirement-fixture-exit-repair-01/`. This removes the mock's unnecessary
 interpreter-finalization dependency; the historical CI receipt remains missing.
 
+Source104 (`c7290a5`) actually passed changed catalog5 (3.96s), strict all-feature/
+all-target Clippy, test artifact and matching bins. The direct-exit child retired
+healthy with OS exit0 at57ms; ordinary exit emitted its real EOF-finalizer marker
+then was killed/reaped at160ms with exit1, UncleanRetirement and the original
+OperationRejected. All five original scenario assertions passed. Runner6612/
+exec93717 exited0 and all18 held children terminated; private/global memory
+peaked at3.809/25.517GiB. The user's independent preview was never adopted or
+stopped. NI/CU/audio were not run. Keep `source104-local-gates-01-*` and
+`source104-local-resource-handback-01.json`.
+
+New user acceptance issues are assigned to a separate Playlist/transport owner:
+continuous ruler/playhead dragging, content-derived SONG end distinct from view
+zoom, and visible PAT/current-Pattern versus SONG-arrangement feedback backed by
+actual playback semantics. Existing trimmed Clips and explicit loop/export
+ranges must remain usable. Implementation/acceptance is pending; the user's
+running independent copy is not overwritten.
+
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
 The native harness now probes the OS, current process session, WTS connection
