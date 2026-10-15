@@ -116,6 +116,45 @@ fn factory_failure(result: Result<FactoryMetadata, Failure>) -> Failure {
     }
 }
 
+// Keep phase evidence off the protocol pipe. Spawn returning only proves that
+// the child and owned pipes exist, not that Python has entered this script.
+fn attempt_seal_ledger(request: HostCommand, reply: HostResponse, ending: &str) -> String {
+    let expected = serde_json::to_string(&request).unwrap();
+    let response = serde_json::to_string(&reply).unwrap();
+    let operation = match request {
+        HostCommand::ProbeFactory { .. } => "factory",
+        HostCommand::LoadPlugin { .. } => "default-load",
+        _ => panic!("attempt-seal fixture only permits its two original requests"),
+    };
+    format!(
+        "import sys,time\n_trace_started=time.monotonic()\ndef _trace(stage): print('attempt-seal {operation} '+stage+' child_elapsed='+str(time.monotonic()-_trace_started),file=sys.stderr,flush=True)\n_trace('script-entered')\nimport json\n_trace('json-ready')\n_request=sys.stdin.readline()\n_trace('request-read')\nassert json.loads(_request)==json.loads({expected:?})\n_trace('request-validated')\nprint({response:?},flush=True)\n_trace('reply-flushed')\n{ending}\n"
+    )
+}
+
+fn attempt_seal_exchange<T>(
+    result: Result<T, Failure>,
+    probe: &mut Probe,
+    operation: &str,
+    spawn_elapsed: Duration,
+    exchange_started: Instant,
+    exchange_deadline: Instant,
+) -> T {
+    match result {
+        Ok(value) => value,
+        Err(failure) => {
+            let pid = probe.helper_pid();
+            let exchange_elapsed = exchange_started.elapsed();
+            // Preserve the original failure, deadline and child owner. This is
+            // checked disposal, never a second exchange or a fresh child.
+            let cleanup = probe.dispose(exchange_deadline, deadline());
+            panic!(
+                "attempt-seal {operation} failed: pid={pid:?}, spawn_elapsed={spawn_elapsed:?}, exchange_elapsed={exchange_elapsed:?}, original_budget={:?}, failure={failure:?}, cleanup={cleanup:?}",
+                exchange_deadline.saturating_duration_since(exchange_started),
+            );
+        }
+    }
+}
+
 #[test]
 fn factory_probe_sends_only_factory_request_preserves_unknowns_and_reaps_shutdown() {
     let _serial = serial();
@@ -147,16 +186,29 @@ fn factory_probe_sends_only_factory_request_preserves_unknowns_and_reaps_shutdow
 fn factory_and_default_load_share_one_attempt_seal_in_both_directions() {
     let _serial = serial();
     let ending = "assert json.loads(sys.stdin.readline())=='Shutdown'\nassert sys.stdin.read()==''";
-    let mut factory = probe(&factory_ledger(
+    let factory_script = attempt_seal_ledger(
+        HostCommand::ProbeFactory {
+            path: "fixture-factory.vst3".into(),
+        },
         HostResponse::FactoryMetadata {
             metadata: factory_metadata(),
         },
         ending,
-    ));
+    );
+    let spawn_started = Instant::now();
+    let mut factory = probe(&factory_script);
+    let spawn_elapsed = spawn_started.elapsed();
+    let exchange_started = Instant::now();
     let exchange_deadline = deadline();
-    factory
-        .probe_factory("fixture-factory.vst3", exchange_deadline)
-        .unwrap();
+    let first = factory.probe_factory("fixture-factory.vst3", exchange_deadline);
+    attempt_seal_exchange(
+        first,
+        &mut factory,
+        "factory",
+        spawn_elapsed,
+        exchange_started,
+        exchange_deadline,
+    );
     for rejected in [
         factory_failure(factory.probe_factory("never-probed.vst3", deadline())),
         failure(factory.load_default_class("never-loaded.vst3", deadline())),
@@ -166,11 +218,21 @@ fn factory_and_default_load_share_one_attempt_seal_in_both_directions() {
         assert!(rejected.request_context.is_none());
     }
     clean_finish(&mut factory, exchange_deadline);
-    let mut loaded = probe(&ledger(info(), ending));
+    let loaded_script = attempt_seal_ledger(default_load(), info(), ending);
+    let spawn_started = Instant::now();
+    let mut loaded = probe(&loaded_script);
+    let spawn_elapsed = spawn_started.elapsed();
+    let exchange_started = Instant::now();
     let exchange_deadline = deadline();
-    loaded
-        .load_default_class("fixture-default.vst3", exchange_deadline)
-        .unwrap();
+    let first = loaded.load_default_class("fixture-default.vst3", exchange_deadline);
+    attempt_seal_exchange(
+        first,
+        &mut loaded,
+        "default-load",
+        spawn_elapsed,
+        exchange_started,
+        exchange_deadline,
+    );
     let rejected = factory_failure(loaded.probe_factory("never-probed.vst3", deadline()));
     assert_eq!(rejected.kind, FailureKind::Terminal);
     assert_eq!(rejected.delivery, Delivery::NotSent);

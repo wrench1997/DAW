@@ -2404,6 +2404,10 @@ fn strict_clone_owner_panic_disposal_panic_and_nonzero_or_forced_exit_never_publ
             "{failure:?}"
         );
         if fault == "hold_exit" {
+            assert_eq!(
+                failure.backend.as_deref().unwrap().strict_stage,
+                Some("dispose.wait_for_exit"),
+            );
             assert!(
                 failure
                     .cleanup

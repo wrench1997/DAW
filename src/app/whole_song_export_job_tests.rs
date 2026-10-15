@@ -27,6 +27,8 @@ struct WholeMockBackend {
     disposed: bool,
     next: u64,
     midi: MidiLedger,
+    prepare_failure: Option<BackendFailure>,
+    disposal_failure: Option<BackendFailure>,
 }
 impl RenderBackend for WholeMockBackend {
     fn prepare(
@@ -37,6 +39,9 @@ impl RenderBackend for WholeMockBackend {
         assert!(capture.plan().is_master_song());
         assert_eq!(capture.state.opaque_state, vec![7, 8, 9]);
         assert_eq!(capture.state.parameter_bases.get(&17), Some(&0.75));
+        if let Some(failure) = &self.prepare_failure {
+            return Err(failure.clone());
+        }
         Ok(self.metadata.clone())
     }
     fn metadata(&mut self) -> Result<BouncePluginMetadata, BackendFailure> {
@@ -69,8 +74,10 @@ impl RenderBackend for WholeMockBackend {
         self.disposed = true;
         DisposalObservation {
             terminated: true,
-            error: None,
-            diagnostics: vec![],
+            error: self.disposal_failure.clone(),
+            diagnostics: self.disposal_failure.as_ref().map_or_else(Vec::new, |_| {
+                vec!["Strict clone required forced termination".into()]
+            }),
         }
     }
 }
@@ -166,6 +173,8 @@ fn begin_with_options(
                         disposed: false,
                         next: 0,
                         midi: worker_midi,
+                        prepare_failure: None,
+                        disposal_failure: None,
                     }
                 },
             )
@@ -173,6 +182,131 @@ fn begin_with_options(
     ));
     (path, started, midi)
 }
+
+#[test]
+fn actual_whole_render_failure_shows_primary_and_cleanup_without_publishing_or_changing_source() {
+    use crate::instrument_bounce::render::{BackendFailureKind, FailureKind};
+    for fail_prepare in [false, true] {
+        let mut fixture = Fixture::new();
+        settle_initial_source(&mut fixture);
+        let before = fixture.bytes();
+        let source = exact_source(&fixture);
+        let selected = options(&fixture);
+        let (path, started, midi) = begin_with_options(&mut fixture, selected);
+        std::fs::write(&path, b"existing destination marker").unwrap();
+        let observed = Arc::clone(&started);
+        let preparation = fail_prepare.then(|| {
+            BackendFailure::new(BackendFailureKind::Backend, "original state-load failure")
+                .with_strict_context("prepare.load_state")
+        });
+        let cleanup = BackendFailure::new(
+            BackendFailureKind::Backend,
+            "Strict clone did not terminate gracefully",
+        )
+        .with_strict_context("dispose.wait_for_exit");
+        let expected_primary = preparation
+            .as_ref()
+            .unwrap_or(&cleanup)
+            .diagnostic()
+            .to_owned();
+        fixture
+            .app_mut()
+            .whole_song_export_job
+            .as_mut()
+            .unwrap()
+            .render_starter = Some(Box::new(
+            move |admission, project, capture, options, path, control, confirmed| {
+                let metadata = capture.metadata().clone();
+                admission.start_master_song_mock(
+                    project,
+                    capture,
+                    options,
+                    path,
+                    control,
+                    confirmed,
+                    move || {
+                        observed.store(true, Ordering::Release);
+                        WholeMockBackend {
+                            metadata,
+                            disposed: false,
+                            next: 0,
+                            midi,
+                            prepare_failure: preparation,
+                            disposal_failure: Some(cleanup),
+                        }
+                    },
+                )
+            },
+        ));
+        until(&mut fixture, |fixture| {
+            !fixture.app().whole_song_export_fence_active()
+        });
+        let job = fixture.app().whole_song_export_job.as_ref().unwrap();
+        let Some(MasterSongRenderOutcome::Failed(failure)) = &job.outcome else {
+            panic!("failed clone disposal must not publish");
+        };
+        assert_eq!(failure.kind, FailureKind::Backend);
+        assert_eq!(failure.primary, expected_primary);
+        assert_eq!(job.phase, WholeExportPhase::Failed);
+        assert!(!job.cancel_requested && job.first_cancellation.is_none());
+        assert!(job.render.is_none() && !job.admission.is_busy());
+        let message = fixture.app().export_error.as_ref().unwrap();
+        assert_eq!(message.lines().next(), Some(expected_primary.as_str()));
+        assert!(message.contains("dispose.wait_for_exit"));
+        assert!(message.contains("Strict clone required forced termination"));
+        if fail_prepare {
+            assert!(message.contains("prepare.load_state"));
+            assert!(message.contains("Strict clone did not terminate gracefully"));
+        }
+        assert!(started.load(Ordering::Acquire));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"existing destination marker"
+        );
+        assert_eq!(fixture.bytes(), before);
+        assert_eq!(exact_source(&fixture), source);
+    }
+}
+
+#[test]
+fn whole_render_failure_diagnostic_keeps_typed_context_without_plugin_text_or_false_delivery() {
+    use crate::instrument_bounce::render::{BackendDelivery, BackendFailureKind};
+    use vst3_host::strict_offline::FailureKind as StrictKind;
+    let primary = BackendFailure::new(BackendFailureKind::Backend, "private plug-in primary text")
+        .with_delivery(BackendDelivery::MayHaveApplied)
+        .with_strict_context("prepare.load_state");
+    let mut cleanup = BackendFailure::new(BackendFailureKind::Deadline, "private cleanup text")
+        .with_delivery(BackendDelivery::NotSent)
+        .with_strict_context("dispose.shutdown");
+    cleanup.strict_kind = Some(StrictKind::Deadline);
+    cleanup.last_wire_request = None;
+    let mut failure = RenderFailure::from(primary);
+    failure.cleanup_backend = Some(Box::new(cleanup));
+    failure.cleanup_grace_elapsed = true;
+    failure.cleanup = vec![
+        "private cleanup text".into(),
+        "private path/state detail".into(),
+    ];
+    let original = failure.clone();
+    let message = whole_render_failure_message(&failure);
+    assert_eq!(message.lines().next(), Some("private plug-in primary text"));
+    assert!(message.contains("private cleanup text"));
+    assert!(message.contains("private path/state detail"));
+    assert_eq!(message.matches("private cleanup text").count(), 1);
+    let mut output = Vec::new();
+    write_whole_render_failure_diagnostic(&mut output, &failure).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("WHOLE_EXPORT_RENDER_FAILED kind=Backend"));
+    assert!(output.contains("delivery=Some(MayHaveApplied), stage=Some(\"prepare.load_state\")"));
+    assert!(output.contains("delivery=Some(NotSent), stage=Some(\"dispose.shutdown\")"));
+    assert!(output.contains("wire_request=None"));
+    assert!(output.contains("cleanup_grace_elapsed=true cleanup_details=2"));
+    assert!(!output.contains("private"));
+    // A cleanup Shutdown write failure has no reply/request receipt. Formatting
+    // must not invent one from the stage label, nor mutate the retained failure.
+    assert_eq!(failure, original);
+}
+
 fn settle_initial_source(fixture: &mut Fixture) {
     fixture.until(|fixture| {
         let app = fixture.app();
@@ -1407,6 +1541,8 @@ fn actual_whole_window_close_retains_a_pending_clone_disposal_receipt_until_its_
                             disposed: false,
                             next: 0,
                             midi,
+                            prepare_failure: None,
+                            disposal_failure: None,
                         },
                         open,
                         entered,

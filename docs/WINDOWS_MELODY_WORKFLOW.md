@@ -300,6 +300,75 @@ production input control changed and no ordinary-keyboard defect is established.
 Formatting/diff pass; Cargo, Clippy and native entry remain untested. Source84's
 preview actually ended before pushing this candidate for cloud execution.
 
+Source86 (`1200196`, including those tests) quality stopped before root tests:
+31 factory cases passed and `factory_and_default_load_share_one_attempt_seal_in_both_directions`
+failed at `default_class_probe_tests.rs:159`. Its first ProbeFactory returned
+`Failure { kind: Deadline, delivery: MayHaveApplied }`; root, Clippy and build
+did not run. Preview passed344 harness cases and2317 App cases/12 ignored, but
+the tail test failed its Review text observation. Song Length passed. Helper/
+protocol tests, Clippy, release and ZIP did not run. Preserve both
+`ci-1200196-windows-{quality,preview}-01.log` and Source86 actual terminal JSON.
+
+The Source87 test candidates retain the real failures. Factory diagnostics add
+child script/import/read/validation/flush phases and parent PID, elapsed time,
+original Failure and actual same-owner cleanup, without changing the three-second
+deadline, single attempt or failure. The old log cannot distinguish those phases.
+The complete vendor patch was replayed from41 upstream to74 current sources:
+48 changed paths,33 additions and0 deletions; explicit bundle integrity and the
+one existing provenance-constants test passed. Rust tests have not run. The tail
+test read the wrong AccessKit field: egui Role::Label text uses value(), not
+label(). Its candidate checks the actual role/value and retains independent
+digits, focus, Enter and real destination options==3000 assertions; it is unrun.
+
+### Native04: ordinary GUI rendering reaches clone cleanup, then fails
+
+Actual Cargo all-feature main/helper artifacts built successfully with one jobs1
+owner; pending changes were docs, package provenance and a cfg(test) vendor test,
+not production Rust. Normal Open loaded the independent First-Light validation
+copy without an NKI reload. Kontakt was Loaded, Channel→FX1,2304 samples latency,
+Icon48k/XRUN0. SONG playback moved through the eight-note clip; no new listening
+confirmation was received. Ordinary Ctrl+S showed Saved at the exact copy path.
+Song length actually became16 after typing only1 and clamping from64; this does
+not qualify two-digit native entry. Tail text entry3000/Return reached Review.
+The saved model retains eight notes, one clip and all routing; only song length
+and opaque state changed. Generic parameters remain empty and opaque bytes differ
+(591683→591681). No new cold reopen or automation qualification follows.
+
+The actual Whole review used48k,24-bit PCM, peak attenuation and an explicitly
+accepted fixed3000ms tail. After native Save, clone41712 started and the UI entered
+`Rendering full master / disposing clone`, with no subsequent Escape/Stop/Cancel.
+Cleanup then reported retained ownership, required forced termination and grace
+expiry before acknowledgement. The final modal was `Strict clone did not terminate
+gracefully`. No WAV was published, so PCM duration, tail and click checks cannot
+run. The filename control showed the requested new full WAV path, but the host's
+progress path was `Untitled.wav` in the same isolated folder; keep this as a
+tool/native-dialog submission discrepancy, not an established product defect.
+
+Normal saved Alt+F4 ended App23408 and original helper112504 with actual exit0;
+clone41712 actually exited1. Passive observer4724 exited0 and fresh heavy0 preceded
+explicit peer handback. The observer issued no kill; the product reported forced
+clone cleanup. Receipts: `cold-open-and-export-attempt-native04-01.json`,
+`normal-save-model-audit-04.json`, `normal-close-process-terminal-04.json` in the
+isolated workflow directory, and `native04-resource-handback-01.json` at its parent.
+Next investigate strict-clone shutdown with the existing exact exit-timing opt-in;
+do not extend cleanup budgets or accept forced termination as successful export.
+
+Source87 retains the original primary first line in the Whole terminal error and
+adds the existing backend/cleanup typed context and cleanup details. The existing
+diagnostics switch emits one `WHOLE_EXPORT_RENDER_FAILED` containing typed facts,
+not plug-in text, paths, state or PCM. Shutdown failure receives `dispose.shutdown`;
+the first forced-exit failure receives `dispose.wait_for_exit`. Render-first-error,
+cancellation, ownership, fences and budgets are unchanged. Three new tests cover
+actual App/mock-renderer preparation and cleanup failure, payload-free diagnostics
+without invented delivery, and retained cleanup-first-error; the existing held-exit
+test also checks its stage. Formatting/diff pass; Cargo/Clippy/native are unrun.
+Source inspection places the observed cleanup-only primary after successful render
+checks, but no WAV was published. For the next matching native test, enable only
+the existing exact `CITRUS_VST3_HELPER_LOAD_DIAGNOSTIC=windows-load-response-timing-v1`
+alongside the current diagnostics switch. Do not enable `SHUTDOWN_MESSAGE_PASS`,
+which changes cleanup behavior. Use the actual clone PID's last returned reader/
+main/slot-clear/SDK teardown boundary to choose the repair.
+
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,
 ordinary debug binaries and root/vendor formatting. The actual locked inventory

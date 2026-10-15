@@ -119,10 +119,18 @@ fn numeric_input_release_tail_individual_digits_reach_export_review() {
         "numeric Enter must keep settings open"
     );
     ui.click("Review…");
+    // egui 0.35 exposes static Label text as an AccessKit value, not a label.
+    let review_labels: Vec<_> = ui
+        .nodes
+        .iter()
+        .filter(|node| node.role() == Role::Label)
+        .map(|node| (node.value(), node.label()))
+        .collect();
     assert!(
-        ui.nodes
+        review_labels
             .iter()
-            .any(|node| { node.label() == Some("Release tail: 3000 ms after the arrangement") })
+            .any(|(value, _)| *value == Some("Release tail: 3000 ms after the arrangement")),
+        "expected the keyboard-entered tail in Review; actual Label (value, label) nodes: {review_labels:?}"
     );
     let session = ui.app.project_session;
     let options = ui

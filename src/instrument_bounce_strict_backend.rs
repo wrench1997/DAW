@@ -463,7 +463,9 @@ impl StrictBackend {
     }
     fn observe_cleanup(&mut self, observation: strict_offline::CleanupObservation) {
         if let Some(error) = observation.shutdown_failure {
-            self.record_cleanup_error(error.into());
+            self.record_cleanup_error(
+                BackendFailure::from(error).with_strict_context("dispose.shutdown"),
+            );
         }
         if let Some(errno) = observation.kill_error {
             self.record_diagnostic(format!("Strict clone kill failed with errno {errno}"));
@@ -490,8 +492,10 @@ impl StrictBackend {
         if observation.kill_requested {
             self.record_diagnostic("Strict clone required forced termination");
             if self.cleanup_error.is_none() {
-                self.cleanup_error =
-                    Some(Self::admission("Strict clone did not terminate gracefully"));
+                self.cleanup_error = Some(
+                    Self::admission("Strict clone did not terminate gracefully")
+                        .with_strict_context("dispose.wait_for_exit"),
+                );
             }
         }
         match observation.state {
@@ -989,5 +993,56 @@ impl Drop for StrictBackend {
     fn drop(&mut self) {
         self.observation
             .lifecycle("StrictBackend destructor entered; fields still owned");
+    }
+}
+
+#[cfg(test)]
+mod cleanup_context_tests {
+    use super::*;
+
+    #[test]
+    fn strict_cleanup_shutdown_context_retains_original_failure_across_forced_exit_observation() {
+        let mut backend = StrictBackend::new();
+        backend.observe_cleanup(strict_offline::CleanupObservation {
+            state: CleanupState::Pending,
+            shutdown_failure: Some(strict_offline::Failure {
+                kind: strict_offline::FailureKind::Deadline,
+                delivery: strict_offline::Delivery::MayHaveApplied,
+                diagnostic: None,
+                diagnostic_unavailable: None,
+                request_context: None,
+                metadata_getter: None,
+                limit_evidence: None,
+            }),
+            kill_error: None,
+            wait_error: None,
+            pipe_error: None,
+            kill_requested: false,
+        });
+        let first = backend.cleanup_error.clone().unwrap();
+        assert_eq!(first.strict_stage, Some("dispose.shutdown"));
+        assert_eq!(
+            first.strict_kind,
+            Some(strict_offline::FailureKind::Deadline)
+        );
+        assert_eq!(
+            first.delivery,
+            Some(crate::instrument_bounce::render::BackendDelivery::MayHaveApplied)
+        );
+        assert!(first.last_wire_request.is_none());
+        backend.observe_cleanup(strict_offline::CleanupObservation {
+            state: CleanupState::Pending,
+            shutdown_failure: None,
+            kill_error: None,
+            wait_error: None,
+            pipe_error: None,
+            kill_requested: true,
+        });
+        assert_eq!(backend.cleanup_error.as_ref(), Some(&first));
+        assert!(!backend.terminated);
+        assert_eq!(
+            backend.cleanup_diagnostics,
+            ["Strict clone required forced termination"]
+        );
     }
 }

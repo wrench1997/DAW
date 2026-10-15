@@ -14,14 +14,83 @@ use crate::{
         BounceSourceIdentity, BounceSourceStatus, CapturePollError, InstrumentBounceCapture,
         InstrumentBouncePlan,
         render::{
-            MasterSongRenderOutcome, MasterSongRenderReceipt, RenderAdmission, RenderControl,
-            RenderStatus,
+            BackendFailure, MasterSongRenderOutcome, MasterSongRenderReceipt, RenderAdmission,
+            RenderControl, RenderFailure, RenderStatus,
         },
     },
     plugins::plugin_runtime::{LoadedVst3Identity, RetainedShutdownPoll},
 };
 
 const RENDER_BUDGET: Duration = Duration::from_secs(300);
+
+/// Project the retained typed evidence without replacing the primary failure.
+/// These fields are fixed host vocabulary; plug-in diagnostics belong in the
+/// visible error message, never in the opt-in control-plane stderr event.
+fn render_backend_context(failure: &BackendFailure) -> String {
+    let context = format!("kind={:?}, delivery={:?}", failure.kind, failure.delivery);
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    let context = format!(
+        "{context}, stage={:?}, strict_kind={:?}, wire_request={:?}, diagnostic_unavailable={:?}",
+        failure.strict_stage,
+        failure.strict_kind,
+        failure.last_wire_request,
+        failure.strict_diagnostic_unavailable,
+    );
+    context
+}
+
+fn whole_render_failure_message(failure: &RenderFailure) -> String {
+    let mut lines = vec![failure.primary.clone()];
+    if let Some(backend) = &failure.backend {
+        lines.push(format!(
+            "Primary backend: {}",
+            render_backend_context(backend)
+        ));
+    }
+    if let Some(cleanup) = &failure.cleanup_backend {
+        if !lines.iter().any(|line| line == cleanup.diagnostic()) {
+            lines.push(cleanup.diagnostic().to_owned());
+        }
+        lines.push(format!(
+            "Clone cleanup: {}",
+            render_backend_context(cleanup)
+        ));
+    }
+    for diagnostic in &failure.cleanup {
+        if !lines.contains(diagnostic) {
+            lines.push(diagnostic.clone());
+        }
+    }
+    lines.join("\n")
+}
+
+fn write_whole_render_failure_diagnostic(
+    sink: &mut impl std::io::Write,
+    failure: &RenderFailure,
+) -> std::io::Result<()> {
+    // Only typed context and counts: no path, plug-in error text, state, PCM,
+    // parameter values or inferred delivery/exit success are logged here.
+    writeln!(
+        sink,
+        "WHOLE_EXPORT_RENDER_FAILED kind={:?} primary_backend=[{}] cleanup_backend=[{}] cleanup_grace_elapsed={} cleanup_details={}",
+        failure.kind,
+        failure
+            .backend
+            .as_deref()
+            .map(render_backend_context)
+            .unwrap_or_else(|| "none".into()),
+        failure
+            .cleanup_backend
+            .as_deref()
+            .map(render_backend_context)
+            .unwrap_or_else(|| "none".into()),
+        failure.cleanup_grace_elapsed,
+        failure.cleanup.len(),
+    )
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WholeExportPhase {
@@ -958,12 +1027,21 @@ impl CitrusApp {
                         job.fail("Terminated renderer returned no file outcome");
                     }
                     Ok(outcome) => {
-                        if let MasterSongRenderOutcome::Failed(failure) = &outcome
-                            && (failure.kind
+                        if let MasterSongRenderOutcome::Failed(failure) = &outcome {
+                            if std::env::var_os("CITRUS_STUDIO_PLUGIN_DIAGNOSTICS")
+                                .is_some_and(|value| value == "1")
+                            {
+                                let _ = write_whole_render_failure_diagnostic(
+                                    &mut std::io::stderr().lock(),
+                                    failure,
+                                );
+                            }
+                            if failure.kind
                                 != crate::instrument_bounce::render::FailureKind::Cancelled
-                                || job.failure.is_none() && !job.cancel_requested)
-                        {
-                            job.failure = Some(failure.primary.clone());
+                                || job.failure.is_none() && !job.cancel_requested
+                            {
+                                job.failure = Some(whole_render_failure_message(failure));
+                            }
                         }
                         job.outcome = Some(outcome);
                     }

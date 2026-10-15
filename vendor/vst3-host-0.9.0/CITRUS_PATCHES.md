@@ -886,3 +886,33 @@ Private git apply --check/apply succeeded; complete inventory and raw bytes
 matched. Patch SHA256: 256a299ccafb7450ed89aaa8ac8d8780982e6539b90000561ab59bc1ecbd53f9. Original archive/commit/LICENSE/VCS pins are
 unchanged; only the two provenance digest literals in each packaging Python file
 are refreshed. Evidence remains in target/backend-reliability-20261014/source74-provenance-01.
+
+
+### Factory attempt-seal failure diagnostics (2026-10-15; Rust execution pending)
+
+Source86's Windows factory gate failed its first real mock-child exchange in
+factory_and_default_load_share_one_attempt_seal_in_both_directions: ProbeFactory
+returned Deadline with MayHaveApplied delivery. The other 31 factory cases
+passed. Spawn establishes the owned child and pipes, not Python script readiness;
+the retained log cannot locate the delay within startup, request/reply or decode.
+
+Only src/default_class_probe_tests.rs changes. Its original two child paths now
+write bounded script-entered, JSON-ready, request-read/validated and reply-flushed
+phase markers with child elapsed time to inherited stderr, never protocol stdout.
+A failed exchange still fails the test and reports its original Failure, owned
+PID, spawn/exchange elapsed time, absolute exchange budget and actual disposal
+receipt. The same requests, one-attempt assertions, Shutdown/EOF checks and
+three-second exchange deadlines remain; there is no readiness wait or retry.
+Production transport, seal, cancellation, cleanup policy and budgets are unchanged.
+Formatting and diff checks passed. Rust compilation/tests, Clippy and new native
+NI behavior have not been run for this diagnostic change.
+
+The full patch was rebuilt against the verified original 41-file
+archive and all 74 current vendor source files, excluding only this
+document/CITRUS.patch and generated vendor/target output. There are 48
+changed paths, 33 additions and 0 deletions. Private git
+apply --check/apply succeeded; the complete file inventory and raw bytes matched.
+Patch SHA256: e4daaf77db4dcc90ead5487b44d51dddb7d027ea021649e6cb66542026f7ee95. Original archive/commit/LICENSE/VCS identities are
+unchanged. The two provenance digest literals in each packaging Python file are
+refreshed. Replay evidence is retained in
+target/backend-reliability-20261014/factory-attempt-seal-provenance-01.
