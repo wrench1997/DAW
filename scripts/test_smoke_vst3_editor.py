@@ -725,6 +725,17 @@ class NativeStageAggregationTests(unittest.TestCase):
             smoke.assert_interaction(session, desktop, 10, stages)
         desktop.post.assert_not_called()
 
+    def test_unchanged_button_crop_remains_failed_even_when_both_captures_succeed(self):
+        session, desktop = self.interaction_setup()
+        desktop.painted_pixels.side_effect = ["a" * 64, "a" * 64]
+        stages = smoke.AcceptanceStages(lambda message: None)
+        smoke.assert_interaction(session, desktop, 10, stages)
+        self.assertEqual(stages.results["native paint before edit"], "PASS")
+        self.assertEqual(stages.results["native paint after edit"], "PASS")
+        self.assertEqual(stages.results["native repaint change"], "FAIL")
+        with self.assertRaisesRegex(smoke.SmokeError, "Failed native acceptance stages"):
+            stages.finish(())
+
     def test_missing_or_duplicate_native_revision_advances_are_rejected(self):
         for after in (0, 1, 3, 4):
             with self.subTest(after=after):
@@ -851,6 +862,157 @@ class NativeStageAggregationTests(unittest.TestCase):
             self.assertIn(f"PASS process cleanup {ending}", reports)
 
 
+class NativeCaptureRegionTests(unittest.TestCase):
+    """Print the real helper top-level, but accept only its original Button pixels."""
+
+    def desktop(self):
+        class Point(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_int32), ("y", ctypes.c_int32)]
+        desktop = mock.Mock(spec=smoke.WindowsDesktop)
+        desktop.w = SimpleNamespace(POINT=Point)
+        desktop.user = mock.Mock()
+        desktop.user.GetParent.side_effect = {30: 20, 20: 10, 10: 99}.__getitem__
+        desktop.user.GetAncestor.return_value = 10
+        desktop.user.GetDlgItem.return_value = 30
+        desktop.pid.side_effect = {30: 123, 20: 123, 10: 123, 99: 999}.__getitem__
+        desktop.class_name.side_effect = {30: "Button", 20: smoke.PANEL_CLASS, 10: smoke.CONTAINER_CLASS}.__getitem__
+        desktop.size.side_effect = {30: (256, 48), 20: (560, 400), 10: (560, 400)}.__getitem__
+        def mapping(button, container, points, count):
+            self.assertEqual((button, container, count), (30, 10, 2))
+            self.assertEqual([(point.x, point.y) for point in points], [(0, 0), (256, 48)])
+            for point in points:
+                point.x += 24
+                point.y += 24
+            return 24 | (24 << 16)
+        desktop.user.MapWindowPoints.side_effect = mapping
+        desktop._paint_in_capture_process.return_value = "a" * 64
+        return desktop
+
+    def capture(self, desktop, error=0):
+        with mock.patch.object(smoke, "WindowsDesktop", return_value=desktop), \
+             mock.patch.object(smoke.ctypes, "set_last_error", create=True), \
+             mock.patch.object(smoke.ctypes, "get_last_error", return_value=error, create=True):
+            return smoke.capture_native_button(30, 123)
+
+    def test_only_actual_helper_container_is_printed_and_hierarchy_revalidated(self):
+        desktop = self.desktop()
+        self.assertEqual(self.capture(desktop), "a" * 64)
+        desktop._paint_in_capture_process.assert_called_once_with(10, (24, 24, 256, 48))
+        self.assertEqual(desktop.user.MapWindowPoints.call_count, 2)
+        desktop.user.GetAncestor.assert_has_calls([mock.call(10, 2), mock.call(10, 2)])
+        desktop.cleanup.assert_called_once()
+        desktop.owner.assert_not_called()  # Neither the logical owner 99 nor a diagnostic target qualifies.
+
+    def test_foreign_owner_class_parent_geometry_or_hidden_target_never_prints(self):
+        for changed in ("button-pid", "panel-pid", "container-pid", "class", "control-id", "not-top-level",
+                        "button-size", "panel-size", "container-size", "hidden", "destroyed"):
+            with self.subTest(changed=changed):
+                desktop = self.desktop()
+                if changed.endswith("-pid"):
+                    wrong = {"button-pid": 30, "panel-pid": 20, "container-pid": 10}[changed]
+                    desktop.pid.side_effect = lambda hwnd: 999 if hwnd == wrong else 123
+                elif changed == "class":
+                    desktop.class_name.side_effect = {30: "Button", 20: smoke.PANEL_CLASS, 10: "Unrelated owner"}.__getitem__
+                elif changed == "control-id":
+                    desktop.user.GetDlgItem.return_value = 31
+                elif changed == "not-top-level":
+                    desktop.user.GetAncestor.return_value = 99
+                elif changed.endswith("-size"):
+                    wrong = {"button-size": 30, "panel-size": 20, "container-size": 10}[changed]
+                    desktop.size.side_effect = lambda hwnd: (1, 1) if hwnd == wrong else (256, 48) if hwnd == 30 else (560, 400)
+                elif changed == "hidden":
+                    desktop.user.IsWindowVisible.return_value = False
+                else:
+                    desktop.user.IsWindow.return_value = False
+                with self.assertRaisesRegex(smoke.SmokeError, "not the verified fixture"):
+                    self.capture(desktop)
+                desktop._paint_in_capture_process.assert_not_called()
+                desktop.cleanup.assert_called_once()
+
+    def test_mapping_error_or_crop_outside_container_never_prints(self):
+        for x, y, dx, error in ((-1, 24, 256, 0), (400, 24, 256, 0), (24, 390, 256, 0),
+                                (24, 24, 255, 0), (24, 24, 256, 5)):
+            with self.subTest(x=x, y=y, dx=dx, error=error):
+                desktop = self.desktop()
+                def mapping(button, container, points, count):
+                    points[0].x, points[0].y = x, y
+                    points[1].x, points[1].y = x + dx, y + 48
+                    return 0
+                desktop.user.MapWindowPoints.side_effect = mapping
+                with self.assertRaises(smoke.SmokeError) as caught:
+                    self.capture(desktop, error)
+                self.assertNotIsInstance(caught.exception, smoke.UnsupportedDesktop)
+                desktop._paint_in_capture_process.assert_not_called()
+                desktop.cleanup.assert_called_once()
+
+    def test_lost_owner_or_moved_button_after_print_is_failure_and_cleans_up(self):
+        for changed in ("owner", "geometry"):
+            with self.subTest(changed=changed):
+                desktop = self.desktop()
+                def print_then_change(container, crop):
+                    if changed == "owner":
+                        desktop.pid.side_effect = lambda hwnd: 999
+                    else:
+                        original = desktop.user.MapWindowPoints.side_effect
+                        def moved(*args):
+                            returned = original(*args)
+                            for point in args[2]: point.x += 1
+                            return returned
+                        desktop.user.MapWindowPoints.side_effect = moved
+                    return "a" * 64
+                desktop._paint_in_capture_process.side_effect = print_then_change
+                with self.assertRaises(smoke.SmokeError):
+                    self.capture(desktop)
+                desktop.cleanup.assert_called_once()
+
+    def test_print_failure_is_not_replaced_with_any_other_target(self):
+        desktop = self.desktop()
+        desktop._paint_in_capture_process.side_effect = smoke.SmokeError("PrintWindow failed")
+        with self.assertRaisesRegex(smoke.SmokeError, "PrintWindow failed"):
+            self.capture(desktop)
+        desktop._paint_in_capture_process.assert_called_once_with(10, (24, 24, 256, 48))
+        desktop.cleanup.assert_called_once()
+
+    def test_crop_is_top_down_real_rectangle_and_ignores_alpha_and_outside_pixels(self):
+        data = bytes(range(48))  # A 4 by 3 BGRA bitmap, each pixel independently identifiable.
+        expected = data[20:23] + data[24:27]
+        self.assertEqual(smoke.crop_native_rgb(data, 4, 3, (1, 1, 2, 1)), expected)
+        changed = bytearray(data)
+        changed[0:4] = b"zzzz"  # Outside the Button; cannot change its digest.
+        changed[23] = 255       # Undefined alpha inside the Button; also excluded.
+        self.assertEqual(smoke.crop_native_rgb(changed, 4, 3, (1, 1, 2, 1)), expected)
+        for crop in ((-1, 1, 2, 1), (3, 1, 2, 1), (1, 3, 2, 1), (1, 1, 0, 1),
+                     (True, 1, 2, 1), [1, 1, 2, 1], (1, 1, 2)):
+            with self.subTest(crop=crop), self.assertRaises(smoke.SmokeError):
+                smoke.crop_native_rgb(data, 4, 3, crop)
+        with self.assertRaisesRegex(smoke.SmokeError, "Incomplete"):
+            smoke.crop_native_rgb(data[:-1], 4, 3, (1, 1, 2, 1))
+
+    def test_real_capture_digest_and_nonuniform_assertion_use_cropped_button_only(self):
+        desktop = smoke.WindowsDesktop.__new__(smoke.WindowsDesktop)
+        desktop.size = lambda hwnd: (4, 3)
+        desktop.user, desktop.gdi = mock.Mock(), mock.Mock()
+        desktop.user.GetDC.return_value = 11
+        desktop.gdi.CreateCompatibleDC.return_value = 22
+        desktop.gdi.CreateCompatibleBitmap.return_value = 33
+        desktop.gdi.SelectObject.return_value = 44
+        desktop._print_window_probe = mock.Mock(return_value={"flags": 1, "succeeded": True, "last_error_advisory": 0})
+        data = bytearray(range(48))
+        def dib(memory, bitmap, start, height, pixels, info, usage):
+            ctypes.memmove(pixels, bytes(data), len(data))
+            return height
+        desktop.gdi.GetDIBits.side_effect = dib
+        self.assertEqual(desktop._paint_in_capture_process(10, (1, 1, 2, 1)),
+                         hashlib.sha256(bytes(data[20:23] + data[24:27])).hexdigest())
+        desktop._print_window_probe.assert_called_once_with(10, 22, 1)
+        desktop.gdi.CreateCompatibleBitmap.assert_called_once_with(11, 4, 3)
+        data[24:27] = data[20:23]  # Container remains colorful; the actual Button crop is uniform.
+        with self.assertRaisesRegex(smoke.SmokeError, "blank/uniform"):
+            desktop._paint_in_capture_process(10, (1, 1, 2, 1))
+        desktop.gdi.DeleteObject.assert_has_calls([mock.call(33), mock.call(33)])
+        desktop.user.ReleaseDC.assert_has_calls([mock.call(None, 11), mock.call(None, 11)])
+
+
 class PaintDiagnosticTests(unittest.TestCase):
     """Failure diagnostics do not turn a rejected capture into an acceptance pass."""
 
@@ -887,7 +1049,7 @@ class PaintDiagnosticTests(unittest.TestCase):
         desktop._diagnose_print_failure = mock.Mock(return_value=True)
         with redirect_stderr(io.StringIO()) as stderr, \
              self.assertRaisesRegex(smoke.SmokeError, "PrintWindow failed; diagnostic probes cannot"):
-            desktop._paint_in_capture_process(123)
+            desktop._paint_in_capture_process(123, (0, 0, 256, 48))
         desktop._print_window_probe.assert_called_once_with(123, 22, 1)
         desktop._diagnose_print_failure.assert_called_once_with(123, 22)
         self.assertIn("PRINTWINDOW_ACCEPTANCE_FAILURE", stderr.getvalue())

@@ -373,6 +373,8 @@ class WindowsDesktop:
             "GetDlgItem": ([w.HWND, ctypes.c_int], w.HWND),
             "GetClientRect": ([w.HWND, ctypes.POINTER(w.RECT)], w.BOOL),
             "GetParent": ([w.HWND], w.HWND),
+            "GetAncestor": ([w.HWND, w.UINT], w.HWND),
+            "MapWindowPoints": ([w.HWND, w.HWND, ctypes.POINTER(w.POINT), w.UINT], ctypes.c_int),
             "IsChild": ([w.HWND, w.HWND], w.BOOL),
             "GetGUIThreadInfo": ([w.DWORD, ctypes.POINTER(self.gui_info)], w.BOOL),
             "PrintWindow": ([w.HWND, w.HDC, w.UINT], w.BOOL),
@@ -659,9 +661,10 @@ class WindowsDesktop:
                 record("same-process-button", **self._print_window_probe(button, memory, flags))
         record("target-whole-window", **self._print_window_probe(hwnd, memory, 0))
 
-    def _paint_in_capture_process(self, hwnd):
+    def _paint_in_capture_process(self, hwnd, crop):
         width, height = self.size(hwnd)
-        require(0 < width <= 1024 and 0 < height <= 1024, "Unbounded control bitmap dimensions")
+        require(0 < width <= 1024 and 0 < height <= 1024, "Unbounded container bitmap dimensions")
+        validate_capture_crop(width, height, crop)
         screen = self.user.GetDC(None)
         memory = self.gdi.CreateCompatibleDC(screen)
         bitmap = self.gdi.CreateCompatibleBitmap(screen, width, height)
@@ -687,11 +690,12 @@ class WindowsDesktop:
             pixels = ctypes.create_string_buffer(width * height * 4)
             rows = self.gdi.GetDIBits(memory, bitmap, 0, height, pixels, info, 0)
             require(rows == height, "Could not read native painted pixels")
-            data = pixels.raw
-            colors = {data[i:i + 3] for i in range(0, len(data), 4)}
+            # PrintWindow targets the verified top-level helper container. Only
+            # the original Button's mapped client rectangle can satisfy its
+            # paint/edit assertion; unrelated container pixels are excluded.
+            rgb = crop_native_rgb(pixels.raw, width, height, crop)
+            colors = {rgb[i:i + 3] for i in range(0, len(rgb), 3)}
             require(len(colors) >= 2, "Native fixture control painted a blank/uniform bitmap")
-            # The 32-bit DIB alpha byte is unspecified for ordinary GDI painting.
-            rgb = b"".join(data[i:i + 3] for i in range(0, len(data), 4))
             return hashlib.sha256(rgb).hexdigest()
         finally:
             if previous:
@@ -767,17 +771,63 @@ def probe_interactive_desktop():
     return record
 
 
+def validate_capture_crop(width, height, crop):
+    require(type(crop) is tuple and len(crop) == 4 and all(type(value) is int for value in crop),
+            "Malformed native Button capture rectangle")
+    x, y, crop_width, crop_height = crop
+    require(x >= 0 and y >= 0 and crop_width > 0 and crop_height > 0
+            and x + crop_width <= width and y + crop_height <= height,
+            "Native Button capture rectangle is outside the container")
+
+
+def crop_native_rgb(data, width, height, crop):
+    """Crop a top-down BGRA DIB using real mapped coordinates; ignore undefined alpha."""
+    validate_capture_crop(width, height, crop)
+    require(len(data) == width * height * 4, "Incomplete native container bitmap")
+    x, y, crop_width, crop_height = crop
+    return b"".join(data[offset:offset + 3]
+                    for row in range(y, y + crop_height)
+                    for offset in range((row * width + x) * 4, (row * width + x + crop_width) * 4, 4))
+
+
+def fixture_button_capture_region(desktop, hwnd, expected_pid):
+    """Resolve only this helper's exact live Button/panel/top-level hierarchy."""
+    panel = desktop.user.GetParent(hwnd)
+    container = desktop.user.GetParent(panel)
+    require(expected_pid > 0 and expected_pid != os.getpid()
+            and all(window and desktop.user.IsWindow(window) and desktop.user.IsWindowVisible(window)
+                    and desktop.pid(window) == expected_pid for window in (hwnd, panel, container))
+            and desktop.class_name(hwnd).lower() == "button"
+            and desktop.class_name(panel) == PANEL_CLASS
+            and desktop.class_name(container) == CONTAINER_CLASS
+            and desktop.user.GetDlgItem(panel, 4101) == hwnd
+            and desktop.user.GetAncestor(container, 2) == container  # GA_ROOT, not its logical owner.
+            and desktop.user.IsChild(container, hwnd)
+            and desktop.size(hwnd) == (256, 48)
+            and desktop.size(panel) == desktop.size(container) == (560, 400),
+            "Capture target is not the verified fixture Button/panel/top-level container")
+    points = (desktop.w.POINT * 2)(desktop.w.POINT(0, 0), desktop.w.POINT(256, 48))
+    ctypes.set_last_error(0)
+    mapped = desktop.user.MapWindowPoints(hwnd, container, points, 2)
+    error = ctypes.get_last_error()
+    require(bool(mapped) or error == 0, f"Cannot map native Button capture rectangle: Windows error {error}")
+    crop = (points[0].x, points[0].y, points[1].x - points[0].x, points[1].y - points[0].y)
+    require(crop[2:] == (256, 48), "Mapped native Button dimensions changed")
+    validate_capture_crop(560, 400, crop)
+    return container, panel, crop
+
+
 def capture_native_button(hwnd, expected_pid):
     desktop = WindowsDesktop()
-    parent = desktop.user.GetParent(hwnd)
-    require(expected_pid != os.getpid() and desktop.pid(hwnd) == expected_pid
-            and desktop.pid(parent) == expected_pid
-            and desktop.class_name(hwnd).lower() == "button"
-            and desktop.class_name(parent) == PANEL_CLASS
-            and desktop.user.GetDlgItem(parent, 4101) == hwnd,
-            "Capture target is not the verified fixture button")
     try:
-        return desktop._paint_in_capture_process(hwnd)
+        container, panel, crop = fixture_button_capture_region(desktop, hwnd, expected_pid)
+        # Direct PrintWindow on the standard child Button fails even when an
+        # independently verified top-level window paints correctly. Capture the
+        # actual helper container, not a diagnostic/owner window or another API.
+        digest = desktop._paint_in_capture_process(container, crop)
+        require(fixture_button_capture_region(desktop, hwnd, expected_pid) == (container, panel, crop),
+                "Native Button/panel/container identity or geometry changed during capture")
+        return digest
     finally:
         desktop.cleanup()
 

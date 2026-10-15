@@ -810,17 +810,41 @@ result remains FAIL. The ordinary local entry remains:
 python -B scripts/smoke_vst3_editor.py --helper target/debug/vst3-host-helper.exe --timeout 60 --summary target/native-editor-summary.md
 ```
 
-Final affected Python regressions passed72/72; PowerShell parsing and diff checks
-passed. Local real preflight found session1/WTSActive, visible station and matching
+Local real preflight found session1/WTSActive, visible station and matching
 Default desktops. The first attempt correctly rejected a stale source-built
 fixture receipt. Rebuilding both checked-in fixture variants offline exited0;
-the full rerun then exited1 because real PrintWindow returned false before and
-after edit, including the diagnostic same-process button. Interaction, state and
-Shutdown/EOF/crash cleanup passed independently. This remains a real FAIL, not
-environment SKIPPED. Keep `printwindow-local-{native,summary,terminal}-02.*`,
-`printwindow-local-fixture-build-01.log` and
+the next full run exited1 because direct PrintWindow on the standard child
+Button returned false before/after edit. Those actual failures remain in
+`printwindow-local-{native,summary,terminal}-02.*`.
+
+An owned five-second diagnostic then isolated the target choice: the same
+process's STATIC top-level returned success for flags0/1 with614/14 real colors,
+while its standard child Button returned false and a uniform bitmap for both.
+Both classes reported CS_PARENTDC, so class style itself is not an environment
+skip rule. Microsoft documents [parent DC use by standard push buttons](https://learn.microsoft.com/en-us/windows/win32/gdi/parent-display-device-contexts)
+and [PrintWindow's interaction with class DC styles](https://devblogs.microsoft.com/oldnewthing/20120604-00/?p=7463).
+No class styles or system settings are changed.
+
+The corrected harness calls the same PrintWindow API on the actual helper's
+verified top-level container, then crops the original Button's actual mapped
+client rectangle. PID, class, visibility, control ID, parent chain, GA_ROOT and
+fixed geometry are checked before and after capture; container/panel identities
+and mapped crop must stay identical. Only the cropped RGB pixels can satisfy
+nonuniform drawing and before/after edit change. Other container pixels, an owner
+or diagnostic window, or a different screenshot API cannot substitute for them.
+
+The final complete Python suite passed359 with4 existing Unix-condition skips
+(363 total, including80 editor cases); AST, PowerShell parsing and diff checks
+passed. The final full local native harness actually exited0 in6.14s: both paint
+stages, repaint change, interaction, state and Shutdown/EOF/crash cleanup all
+passed. Fresh heavy processes were zero before handback. Keep
+`printwindow-local-{native,summary,terminal}-03.*`,
+`printwindow-owned-target-probe-01.*`, `printwindow-local-fixture-build-01.log`,
+`printwindow-container-crop-handoff-01.json` and
 `printwindow-ci-environment-handoff-01.json` under
-`target/backend-reliability-20261014`. New cloud outcomes are pending publication.
+`target/backend-reliability-20261014`. New cloud outcomes are pending final
+publication; the first environment-only candidate is superseded by this real
+capture-target correction.
 
 The classification follows Microsoft's [process session API](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-processidtosessionid),
 [WTS connection states](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/ne-wtsapi32-wts_connectstate_class)
