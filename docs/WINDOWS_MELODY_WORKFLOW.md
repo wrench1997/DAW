@@ -163,14 +163,26 @@ explicit peer handback. Preserve `normal-close-process-terminal-02.json` and
 old component-scan ExitDll failure. New cold-open, automation and audio-export
 acceptance remain open.
 
-Source79's source-only candidate registers catalog intent as LoadedDefault,
+Source79 (`56e9c89`) registers catalog intent as LoadedDefault,
 validates the real None-class LOAD's actual UID/version, then enters unchanged
 full fresh preparation. Exact callers, complete bus/initial timing checks,
 original owners/restoration and captured-CID strict clone remain guarded. Five
 new cross-platform backend tests and an App no-fallback matrix are present;
-formatting/source review passed. Compilation, regression, strict Clippy and
-native checkbox acceptance remain unexecuted. The ordinary Source78 session is
-not evidence for the new branch.
+formatting/source review passed. Its actual cloud quality passed32 factory tests
+and preview passed344 packaging/protocol harness tests. Both then failed root
+test compilation with
+`E0603: module catalog_tests is private` at
+`src/app/clip_render_glue_tests.rs:730`. Root regression, strict Clippy,
+release/ZIP and native checkbox acceptance have not run. Preserve
+`ci-56e9c89-windows-{quality,preview}-01.log` and Source79 actual-terminal JSON.
+The ordinary Source78 session is not evidence for the new branch.
+
+Source80's candidate shares the existing two-class catalog construction through
+the test module's private `fresh_catalog_descriptor`, removing the invalid
+private-module call without exposing production APIs or removing assertions.
+Single-file formatting and diff checks pass; new cloud compilation/regression
+remain pending. The export options/workflow documents now distinguish built-in
+and experimental single-VST paths and the supported ordinary Master automation.
 
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,

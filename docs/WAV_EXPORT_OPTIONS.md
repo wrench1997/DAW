@@ -50,11 +50,22 @@ Cancel is disabled once final publication begins; failure still reports an error
 
 ## Offline processing limits
 
-Active VST instruments/effects, plug-in sidechains, and non-Tempo automation
-remain rejected. The review explains these limits; shared preflight runs before
-choosing a destination and again in the renderer. Realtime Master Capture is the
-existing route for the live result. No mastering gain, project/Clip schema,
-plug-in rendering, licensing, or import-decoder policy is changed here.
+The ordinary built-in/WAV renderer supports Tempo and Master Volume/Pan/Mute
+automation. Active VST instruments/effects, sidechains and other active automation
+are rejected before choosing a destination and again in the renderer.
+
+With `experimental-fresh-helper`, eligible Linux/Windows projects can instead
+enter the experimental whole-song path: exactly one active VST instrument at the
+current sample rate, static routing, no mixer insert slots, no other music/audio
+source, and only Master Volume/Pan/Mute automation. Unsupported projects are
+refused, not rendered with missing sources or effects.
+
+The VST review requires acceptance of the chosen fixed tail window. Unknown or
+longer plugin tails may be truncated; export does not detect acoustic silence.
+See [Windows melody workflow](WINDOWS_MELODY_WORKFLOW.md) for the capture, identity
+and actual NOIRE acceptance boundaries. Realtime Master Capture records the live
+Master output; selected MIDI-to-audio conversion is a separate operation. Neither
+substitutes for whole-song offline export.
 
 ## Regression scope and fixture
 

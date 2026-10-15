@@ -1,10 +1,28 @@
 # Offline WAV export workflow contract
 
-This change improves the existing built-in renderer's safety and controls. It does not add VST offline bounce, sidechain rendering, stems, tail detection, or complete live/offline parity. The existing whole-song peak gain reduction above 0.95 remains unchanged.
+FILE → Export WAV uses the ordinary built-in/WAV renderer or, for eligible
+projects with `experimental-fresh-helper`, the experimental single-VST whole-song
+path. This document describes the ordinary renderer's fidelity and background-job
+contract. The shared settings and level choices are in
+[WAV export options](WAV_EXPORT_OPTIONS.md).
+
+The experimental Linux/Windows path requires one active VST instrument at the
+current sample rate, static routing, no mixer insert slots, no other music/audio
+source and only Master Volume/Pan/Mute automation. It captures the stopped source
+and validates a separate strict clone before rendering. The review requires
+explicit acceptance of a fixed tail window; it does not detect silence or
+guarantee an arbitrary plugin's full natural release. See
+[Windows melody workflow](WINDOWS_MELODY_WORKFLOW.md) for supported scope and actual
+NOIRE evidence. Effects, general plugin-aware graph PDC, stems and complete
+live/offline parity remain outside that qualified scope.
 
 ## Fidelity preflight
 
-Both the File menu and the rendering entry point reject enabled, nonempty, active non-Tempo automation. The error identifies the lane name, stable ID, and target, and remains visible until dismissed. Realtime Master Capture is offered as the existing route for recording the live result.
+For the ordinary renderer, both the File menu and the rendering entry point
+support Tempo and Master Volume/Pan/Mute automation and reject other enabled,
+nonempty, active targets. The error identifies the lane name, stable ID, and
+target, and remains visible until dismissed. Realtime Master Capture is offered
+for recording the live result, not as an offline-export substitute.
 
 Activity follows the existing automation placement convention:
 
@@ -12,7 +30,9 @@ Activity follows the existing automation placement convention:
 - A lane with placements is active only in its unmuted half-open clip windows that overlap the exported song.
 - Disabled/empty lanes and placements that are entirely outside the song do not block export. Unrelated clips cannot disable a global lane.
 
-Tempo automation remains supported by TempoMap. Active plug-ins and unsupported sidechains continue to fail explicitly.
+Tempo automation uses TempoMap. Active plug-ins and unsupported sidechains fail
+the ordinary renderer's preflight; admission to the separate experimental VST
+path does not remove those guards.
 
 ## Background control and destination safety
 
@@ -26,6 +46,6 @@ Installing another project requests cancellation and suppresses any old-session 
 
 ## Regression coverage
 
-Production-source tests cover all non-Tempo target variants, placement/legacy gating, early and ten in-pipeline cancellation checkpoints, destination preservation and staging cleanup, the final cancellation/commit boundary, monotonic progress, repeated starts, stale project-session results, worker disconnects, normal export output, and a headless egui pass through progress/cancelling/error surfaces.
+Production-source tests cover unsupported automation targets, placement/legacy gating, early and ten in-pipeline cancellation checkpoints, destination preservation and staging cleanup, the final cancellation/commit boundary, monotonic progress, repeated starts, stale project-session results, worker disconnects, normal export output, and a headless egui pass through progress/cancelling/error surfaces.
 
 The focused source-only harness can compile exporter, job state, and egui surfaces without an audio device. It is not a complete application build or a Windows GUI/audio-device acceptance test. The normal Windows all-feature test/Clippy/build gates still apply to the integrated commit.

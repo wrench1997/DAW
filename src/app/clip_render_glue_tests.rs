@@ -643,11 +643,8 @@ fn fresh_source_opt_in_refuses_unattested_class_and_wrong_format_before_recordin
     assert!(app.fresh_bounce_sources.is_empty());
 }
 
-#[test]
-fn fresh_source_opt_in_catalog_records_default_request_without_choosing_a_declared_class() {
-    let mut app = bare_app();
-    app.project = source_project();
-    let mut descriptor = descriptor(&app.project);
+fn fresh_catalog_descriptor(project: &Project) -> PluginDescriptor {
+    let mut descriptor = descriptor(project);
     let uid = descriptor.vst3_metadata.take().unwrap().class_uid;
     descriptor.verified = false;
     descriptor.is_instrument = false;
@@ -679,6 +676,14 @@ fn fresh_source_opt_in_catalog_records_default_request_without_choosing_a_declar
         .unwrap()
         .classes
         .push(second);
+    descriptor
+}
+
+#[test]
+fn fresh_source_opt_in_catalog_records_default_request_without_choosing_a_declared_class() {
+    let mut app = bare_app();
+    app.project = source_project();
+    let descriptor = fresh_catalog_descriptor(&app.project);
     assert!(descriptor.is_catalog_only());
     let before = project_and_history(&app);
     let declared = serde_json::to_value(&descriptor).unwrap();
@@ -722,12 +727,7 @@ fn fresh_source_opt_in_catalog_records_default_request_without_choosing_a_declar
 fn fresh_source_catalog_default_intent_refuses_explicit_class_or_non_dry_fallback() {
     let mut app = bare_app();
     app.project = source_project();
-    let mut catalog = descriptor(&app.project);
-    catalog.vst3_metadata = None;
-    catalog.verified = false;
-    catalog.category = "Unknown".into();
-    catalog.is_instrument = false;
-    catalog.vst3_catalog = Some(plugins::catalog_tests::catalog());
+    let catalog = fresh_catalog_descriptor(&app.project);
     app.record_fresh_clip_source_for_new_load(42, &catalog)
         .unwrap();
     let before = project_and_history(&app);

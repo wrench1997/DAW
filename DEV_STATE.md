@@ -15,7 +15,9 @@ Source78 第二会话未勾 fresh，普通 None-class LOAD 实际打开完整 Ko
 
 原生保存对话框坐标误报15×15，UIA set_value 显示目标完整路径，但 Alt+S 实际在旧对话框目录新建了 `desktop-song-14/Untitled.citrus`，未覆盖现有 native13/native14。该真实普通保存文件已无改动、overwrite=false 复制到新独立目录的 `normal-noire-workflow-20261015-01/First-Light-NOIRE-Pure.citrus`；审计见 `normal-save-model-audit-01.json`。事先持有准确句柄再正常 Alt+F4，App13528/helper36632 均实际 exit0，观察器结束且 fresh heavy0 后交还对等聊天。这个 runtime 退场结果不替代旧 component-scan ExitDll 失败。冷开、自动化及离线导出仍待验收。
 
-Source79 源码候选只把 catalog 新实例登记为 LoadedDefault 意图：实际 None-class LOAD 校验真实 UID/version 后，再进入原完整 fresh prepare；旧 Exact、总线/首次Start timing、owner/restoration 和 captured CID strict clone 合同保留。新增5项跨平台 backend 测试及 App 无降级矩阵，格式/静态审查通过；尚未编译、回归、复验 Clippy 或实测 checkbox。Source78 普通 Pure 会话不能当作该修复验收。
+Source79（`56e9c89`）只把 catalog 新实例登记为 LoadedDefault 意图：实际 None-class LOAD 校验真实 UID/version 后，再进入原完整 fresh prepare；旧 Exact、总线/首次Start timing、owner/restoration 和 captured CID strict clone 合同保留。新增5项跨平台 backend 测试及 App 无降级矩阵，格式/静态审查通过。实际云端 quality 通过32项 factory、preview 通过344项打包/协议 harness，随后两者均在 root 测试编译报 `E0603: module catalog_tests is private`，定位 `src/app/clip_render_glue_tests.rs:730` 的跨模块测试夹具调用；root 回归、Clippy、release/ZIP和实测 checkbox未执行。完整日志和终态收据为 `ci-56e9c89-windows-{quality,preview}-01.log` 与 `source79-*-actual-terminal-01.json`。Source78 普通 Pure 会话不能当作该修复验收。
+
+Source80 候选只把双类 catalog 构造提取成本测试模块私有的 `fresh_catalog_descriptor`，两个用例复用，移除非法私有模块调用；不扩大生产API、不删测试或断言。单文件格式和 diff 检查通过，待新的云端编译/回归。两份导出说明同步区分普通内置/WAV与实验 single-VST 路径，并更正普通 renderer 已支持的 Master Volume/Pan/Mute 自动化；不把实时录音或片段转换当作整曲离线导出。
 
 Source76（`389f9af`）最新云端 quality：独立 factory 回归 32 passed；完整 root 套件主程序 2279、helper 52、协议 13，共 2344 passed / 12 ignored。严格 Clippy、双 bin 构建、helper 协议 smoke、无默认 feature 检查和独立 fixture 构建通过。原产品期限、状态、历史和 ownership 断言保留；Rust 1.97.1 发布工具链不变。
 quality 整体仍为 failure：最后的 native paint 前/后捕获失败，同进程按钮的 PrintWindow 诊断也返回 false；control/state/lifecycle/cleanup 独立通过。这不证明 Kontakt 界面故障，也不是 GUI 验收通过。
