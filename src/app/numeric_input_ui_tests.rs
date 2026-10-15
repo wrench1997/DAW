@@ -65,6 +65,8 @@ fn enter_digits(ui: &mut UiHarness, position: Pos2, digits: &[(egui::Key, &str)]
 #[test]
 fn numeric_input_song_length_individual_digits_commit_through_app_ui() {
     let mut ui = UiHarness::new();
+    ui.click("AUTO");
+    assert!(!ui.app.project.auto_song_length);
     ui.app.project.clips.truncate(1);
     assert_eq!(ui.app.project.clips.len(), 1);
     ui.app.project.clips[0].start = 0.0;
@@ -74,7 +76,7 @@ fn numeric_input_song_length_individual_digits_commit_through_app_ui() {
     ui.settle();
     let mut expected = ui.app.project.clone();
     expected.song_length_beats = 16.0;
-    let position = numeric_position(&ui, 16.0, 4096.0);
+    let position = numeric_position(&ui, 0.25, 4096.0);
 
     enter_digits(
         &mut ui,

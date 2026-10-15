@@ -30,6 +30,7 @@ mod piano_mouse;
 mod piano_range;
 mod piano_shortcuts;
 mod play_startup;
+mod playlist_transport;
 mod project_media_ui;
 mod sample_browser_ui;
 mod workspace;
@@ -215,7 +216,7 @@ impl TransportMode {
 fn transport_loop_end_beat(project: &Project, mode: TransportMode) -> f32 {
     match mode {
         TransportMode::Pattern => pattern_playback_length_beats(project),
-        TransportMode::Song => project.song_length_beats.max(4.0),
+        TransportMode::Song => project.song_end_beat(),
     }
 }
 
@@ -255,6 +256,7 @@ fn transport_playback_project(project: &Project, mode: TransportMode) -> Project
         .cloned();
     let pattern_length = pattern_playback_length_beats(project);
     playback.song_length_beats = pattern_length;
+    playback.auto_song_length = false;
     playback.patterns = active_pattern.iter().cloned().collect();
     playback.active_pattern = 0;
     playback.clips = active_pattern
@@ -5388,7 +5390,8 @@ impl CitrusApp {
         external_services: bool,
     ) -> Box<Self> {
         theme::install(&cc.egui_ctx);
-        let project = Project::default();
+        let mut project = Project::default();
+        project.auto_song_length = true;
         let project_fingerprint = project_fingerprint(&project);
         let history_snapshot = project.clone();
         let (autosave_path, plugin_cache_path, recordings_dir) = if external_services {
@@ -5512,7 +5515,7 @@ impl CitrusApp {
             .iter()
             .map(|channel| channel.muted)
             .collect();
-        let playlist_viewport = default_playlist_viewport(project.song_length_beats);
+        let playlist_viewport = default_playlist_viewport(project.song_end_beat());
         let piano_viewport = default_piano_viewport();
         let (audio_asset_sender, audio_asset_receiver) = mpsc::channel();
         let (audio_device_catalog_sender, audio_device_catalog_receiver) = mpsc::channel();
@@ -11687,6 +11690,7 @@ impl CitrusApp {
             notes: Vec::new(),
         });
         self.project.active_pattern = self.project.patterns.len() - 1;
+        self.active_pattern_selection_changed();
         self.notify(format!("Created Pattern {id}"));
     }
 
@@ -11710,9 +11714,14 @@ impl CitrusApp {
             .max()
             .unwrap_or(0)
             + 1;
-        let start = ((self.beat_position / self.snap).floor() * self.snap)
-            .clamp(0.0, self.project.song_length_beats - self.snap);
-        let length = 4.0_f32.min(self.project.song_length_beats - start);
+        let Some((start, length)) = playlist_transport::automation_creation_span(
+            &self.project,
+            self.beat_position,
+            self.snap,
+        ) else {
+            self.notify("Automation unavailable: the Playlist timing or snap is invalid".into());
+            return;
+        };
         let (target, value, name, color) = if self.selected_mixer == 0 {
             let value = self
                 .project
@@ -11782,17 +11791,6 @@ impl CitrusApp {
             fade_out: 0.0,
             muted: false,
         });
-        if let Some(mixer_track_id) = self
-            .project
-            .mixer_track_id_at_runtime_slot(self.recording_track.saturating_add(1).min(31))
-        {
-            self.project
-                .audio_clip_mixer_destinations
-                .push(AudioClipMixerDestination {
-                    clip_id,
-                    mixer_track_id,
-                });
-        }
         self.select_playlist_clip_only(clip_id);
         self.focus_editor(StudioView::Playlist);
         self.notify("Created an editable automation clip".into());
@@ -16090,7 +16088,9 @@ impl CitrusApp {
         };
         match intent {
             ProjectIntent::New => {
-                if !self.install_project(Project::blank(), None, false) {
+                let mut project = Project::blank();
+                project.auto_song_length = true;
+                if !self.install_project(project, None, false) {
                     return;
                 }
                 self.project_lifecycle = ProjectLifecycle::Idle;
@@ -16226,7 +16226,7 @@ impl CitrusApp {
         self.selected_mixer = 0;
         self.clear_playlist_selection();
         self.playlist_gesture_before = None;
-        self.playlist_viewport = default_playlist_viewport(self.project.song_length_beats);
+        self.playlist_viewport = default_playlist_viewport(self.project.song_end_beat());
         self.piano_viewport = default_piano_viewport();
         self.piano_roll_state.clear_selection();
         self.piano_roll_state.repeat_range = None;
@@ -17231,7 +17231,7 @@ impl CitrusApp {
     fn toolbar(&mut self, root: &mut egui::Ui) {
         // Keep every transport and navigation action visible at the supported minimum size.
         // A second explicit row is preferable to right-aligned controls painting over siblings.
-        let compact = root.available_width() < 1320.0;
+        let compact = root.available_width() < 1380.0;
         egui::Panel::top("toolbar")
             .exact_size(if compact { 96.0 } else { 58.0 })
             .frame(
@@ -17265,65 +17265,38 @@ impl CitrusApp {
                     }
                     ui.separator();
 
-                    let mut requested_transport_mode = None;
-                    let mut requested_transport_view = None;
-                    ui.vertical(|ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.spacing_mut().interact_size.y = 18.0;
-                        let pat = ui
-                            .selectable_label(
-                                self.transport_mode == TransportMode::Pattern,
-                                RichText::new("PAT").strong().size(9.0),
-                            )
-                            .on_hover_text(
-                                "Pattern mode — play only the current Pattern (L)\nRight-click: Channel Rack",
-                            );
-                        if pat.clicked() {
-                            requested_transport_mode = Some(TransportMode::Pattern);
-                        }
-                        if pat.secondary_clicked() {
-                            requested_transport_view = Some(StudioView::ChannelRack);
-                        }
-                        let song = ui
-                            .selectable_label(
-                                self.transport_mode == TransportMode::Song,
-                                RichText::new("SONG").strong().size(9.0),
-                            )
-                            .on_hover_text(
-                                "Song mode — play the Playlist arrangement (L)\nRight-click: Playlist",
-                            );
-                        if song.clicked() {
-                            requested_transport_mode = Some(TransportMode::Song);
-                        }
-                        if song.secondary_clicked() {
-                            requested_transport_view = Some(StudioView::Playlist);
-                        }
-                    });
-                    if let Some(mode) = requested_transport_mode {
-                        self.set_transport_mode(mode);
-                    }
-                    if let Some(view) = requested_transport_view {
-                        self.focus_editor(view);
-                    }
-                    let active_pattern_name = self
-                        .project
-                        .patterns
-                        .get(self.project.active_pattern)
-                        .map(|pattern| pattern.name.clone())
-                        .unwrap_or_else(|| "Pattern".into());
+                    self.transport_mode_controls(ui);
                     let previous_active_pattern = self.project.active_pattern;
-                    egui::ComboBox::from_id_salt("main-pattern-selector")
-                        .selected_text(active_pattern_name)
-                        .width(84.0)
-                        .show_ui(ui, |ui| {
-                            for (index, pattern) in self.project.patterns.iter().enumerate() {
-                                ui.selectable_value(
-                                    &mut self.project.active_pattern,
-                                    index,
-                                    &pattern.name,
-                                );
-                            }
-                        });
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        egui::ComboBox::from_id_salt("main-pattern-selector")
+                            .selected_text(self.project.active_pattern().name.clone())
+                            .width(122.0)
+                            .truncate()
+                            .show_ui(ui, |ui| {
+                                for (index, pattern) in self.project.patterns.iter().enumerate() {
+                                    ui.selectable_value(
+                                        &mut self.project.active_pattern,
+                                        index,
+                                        &pattern.name,
+                                    );
+                                }
+                            })
+                            .response
+                            .on_hover_text("PAT: Pattern to play. SONG: Pattern to draw into the Playlist.");
+                        ui.add_sized(
+                            [122.0, 12.0],
+                            egui::Label::new(
+                                RichText::new(self.transport_scope_caption())
+                                    .size(8.0)
+                                    .color(if self.transport_mode == TransportMode::Pattern {
+                                        theme::GREEN
+                                    } else {
+                                        theme::ORANGE
+                                    }),
+                            ).truncate(),
+                        );
+                    });
                     if self.project.active_pattern != previous_active_pattern {
                         self.active_pattern_selection_changed();
                     }
@@ -18590,7 +18563,7 @@ impl CitrusApp {
     }
 
     fn clip_inspector(&mut self, ui: &mut egui::Ui) {
-        let song_length = self.project.song_length_beats;
+        let song_length = 4096.0;
         let Some(id) = self.selected_clip else {
             empty_inspector(
                 ui,
@@ -21960,13 +21933,6 @@ impl CitrusApp {
     }
 
     fn playlist_navigation(&mut self, ui: &mut egui::Ui) {
-        let minimum_length = self
-            .project
-            .clips
-            .iter()
-            .map(|clip| clip.start + clip.length)
-            .fold(4.0_f32, f32::max)
-            .ceil();
         let (view_start, view_end) = self.playlist_viewport.x.visible_range();
         let visible_beats = view_end - view_start;
         let mut normalized_scroll = self.playlist_viewport.x.normalized_scroll();
@@ -22036,19 +22002,16 @@ impl CitrusApp {
                         ),
                         Layout::right_to_left(Align::Center),
                         |ui| {
-                            ui.add(
-                                egui::DragValue::new(&mut self.project.song_length_beats)
-                                    .range(minimum_length..=4096.0)
-                                    .speed(4.0)
-                                    .suffix(" beats"),
-                            );
-                            ui.label(RichText::new("SONG LENGTH").size(8.0).color(theme::MUTED));
+                            self.playlist_song_range_controls(ui);
                         },
                     );
                 });
             });
-        let content_end = finite_content_end(self.project.song_length_beats, 4.0);
-        let _ = self.playlist_viewport.x.set_content_range(0.0, content_end);
+        let content_end = finite_content_end(self.project.song_end_beat(), 4.0);
+        let _ = self
+            .playlist_viewport
+            .x
+            .set_content_range(0.0, playlist_edit_content_end(self.project.song_end_beat()));
         if scroll_changed {
             let _ = self
                 .playlist_viewport
@@ -22065,11 +22028,7 @@ impl CitrusApp {
     }
 
     fn playlist(&mut self, ui: &mut egui::Ui) {
-        let playlist_subtitle = format!(
-            "Arrangement — {} bars — {}",
-            (self.project.song_length_beats / 4.0).ceil() as usize,
-            self.project.active_pattern().name
-        );
+        let playlist_subtitle = self.playlist_scope_caption();
         self.workspace_header(ui, StudioView::Playlist, "PLAYLIST", &playlist_subtitle);
         self.playlist_navigation(ui);
         let available = ui.available_rect_before_wrap();
@@ -22090,10 +22049,10 @@ impl CitrusApp {
             .playlist_viewport
             .y
             .set_viewport_pixels(f64::from(canvas.height()).max(EDITOR_MIN_VIEWPORT_PIXELS));
-        let _ = self.playlist_viewport.x.set_content_range(
-            0.0,
-            playlist_edit_content_end(self.project.song_length_beats),
-        );
+        let _ = self
+            .playlist_viewport
+            .x
+            .set_content_range(0.0, playlist_edit_content_end(self.project.song_end_beat()));
         let _ = self
             .playlist_viewport
             .y
@@ -22119,13 +22078,16 @@ impl CitrusApp {
             canvas.right_top(),
         );
         let ruler_response = ui
-            .interact(ruler, Id::new("playlist-time-ruler"), Sense::click())
+            .interact(ruler, Id::new("playlist-time-ruler"), Sense::click_and_drag())
+            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal)
             .on_hover_text(
-                "Click to set the playback position. Place the active Pattern in the lanes below.",
+                "Click or drag to set the playback position. Draw the selected Pattern in the lanes below.",
             );
         if ui.is_enabled()
-            && ui.input(|input| input.pointer.primary_pressed())
-            && piano_mouse::owns_primary_press(&ruler_response)
+            && ((ui.input(|input| input.pointer.primary_pressed())
+                && piano_mouse::owns_primary_press(&ruler_response))
+                || ruler_response.dragged_by(egui::PointerButton::Primary)
+                || ruler_response.drag_stopped_by(egui::PointerButton::Primary))
             && let Some(pointer) = ruler_response.interact_pointer_pos()
         {
             self.seek_playlist_pointer(pointer, canvas);
@@ -22164,6 +22126,26 @@ impl CitrusApp {
             0.0,
             theme::PANEL_ALT,
         );
+        let scope_end_x = canvas.left()
+            + self
+                .playlist_viewport
+                .x
+                .pixel_for_content(f64::from(self.transport_loop_end_beat())) as f32;
+        let scope_start_x = canvas.left() + self.playlist_viewport.x.pixel_for_content(0.0) as f32;
+        if scope_end_x > canvas.left() && scope_start_x < canvas.right() {
+            painter.rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(scope_start_x.max(canvas.left()), canvas.top() - 3.0),
+                    Pos2::new(scope_end_x.min(canvas.right()), canvas.top()),
+                ),
+                0.0,
+                if self.transport_mode == TransportMode::Pattern {
+                    theme::GREEN
+                } else {
+                    theme::ORANGE
+                },
+            );
+        }
 
         for track in first_track..last_track {
             let y = canvas.top() + self.playlist_viewport.y.pixel_for_content(track as f64) as f32;
@@ -23221,7 +23203,7 @@ impl CitrusApp {
                     &origins,
                     requested_time_delta,
                     track_delta,
-                    self.project.song_length_beats,
+                    4096.0,
                     PLAYLIST_TRACK_COUNT,
                 ) {
                     group_move_request = Some((origins, time_delta, track_delta));
@@ -23277,7 +23259,7 @@ impl CitrusApp {
                     &origins,
                     target_length - anchor.length,
                     self.snap.clamp(0.0625, 0.25),
-                    self.project.song_length_beats,
+                    4096.0,
                 ) {
                     group_resize_request = Some((origins, delta));
                 }
@@ -29688,22 +29670,19 @@ fn ensure_plugin_parameter_automation(
 
     let clip_id = next_available_clip_id(project)
         .ok_or_else(|| "no Playlist clip identity is available".to_owned())?;
-    let song_length = project.song_length_beats;
     let grid = if snap.is_finite() && snap > 0.0 {
         snap
     } else {
         0.25
     };
-    let max_start = (song_length - grid.min(song_length)).max(0.0);
-    let start = if requested_start.is_finite() {
-        ((requested_start / grid).floor() * grid).clamp(0.0, max_start)
+    let requested_start = if requested_start.is_finite() {
+        requested_start
     } else {
         0.0
     };
-    let length = 4.0_f32.min(song_length - start);
-    if !length.is_finite() || length <= 0.0 {
-        return Err("the project has no room for an automation clip".into());
-    }
+    let (start, length) =
+        playlist_transport::automation_creation_span(project, requested_start, grid)
+            .ok_or_else(|| "the project has no room for an automation clip".to_owned())?;
     let name = if let Some(name) = new_lane_name {
         name
     } else {
@@ -30634,6 +30613,8 @@ fn timeline_compile_fingerprint(project: &Project, sample_rate: u32) -> u64 {
     project.tempo.to_bits().hash(&mut hasher);
     project.swing.to_bits().hash(&mut hasher);
     project.song_length_beats.to_bits().hash(&mut hasher);
+    project.auto_song_length.hash(&mut hasher);
+    project.song_end_beat().to_bits().hash(&mut hasher);
 
     project.channels.len().hash(&mut hasher);
     for channel in &project.channels {
@@ -30923,6 +30904,8 @@ fn tempo_map_fingerprint(project: &Project) -> u64 {
     let mut hasher = DefaultHasher::new();
     project.tempo.to_bits().hash(&mut hasher);
     project.song_length_beats.to_bits().hash(&mut hasher);
+    project.auto_song_length.hash(&mut hasher);
+    project.song_end_beat().to_bits().hash(&mut hasher);
     let tempo_ids = project
         .automation_lanes
         .iter()

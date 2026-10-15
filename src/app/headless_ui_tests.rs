@@ -2622,6 +2622,8 @@ mod piano_keyboard_ui_tests;
 mod piano_mouse_tests;
 #[path = "play_startup_ui_tests.rs"]
 mod play_startup_ui_tests;
+#[path = "playlist_transport_tests.rs"]
+mod playlist_transport_tests;
 #[path = "project_save_name_tests.rs"]
 mod project_save_name_tests;
 #[path = "startup_state_history_tests.rs"]

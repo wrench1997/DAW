@@ -5,7 +5,7 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
-用户独立测试副本已准备在`D:\DAW-Preview\Citrus-Studio-20261015-01`，桌面快捷方式`Citrus Studio 独立测试版.lnk`指向`Start-Citrus.cmd`。复制Source102实际匹配主/helper为普通独立文件，不占target/debug；既有`CITRUS_STUDIO_DATA_DIR`把布局/音频偏好/缓存/自动保存/录音隔离到该目录UserData，测试作品建议存Projects。副本helper无插件协议smoke实际exit0；未替用户打开GUI/声卡/NI。它是本机MSVC调试版，不是正式发行包，不随附插件/音色/作品/系统DLL。已通知peer用户将手工测试，暂停两边CU/NI/声卡自动验证，源码和可承受的后台编译可继续；用户尚未反馈实际使用结果。来源/说明/检查随副本保存在Build-Info.json、README和Helper-Smoke.log。
+用户独立测试副本已交付在`D:\DAW-Preview\Citrus-Studio-20261015-01`，桌面快捷方式`Citrus Studio 独立测试版.lnk`指向`Start-Citrus.cmd`。复制Source102实际匹配主/helper为普通独立文件，不占target/debug；既有`CITRUS_STUDIO_DATA_DIR`把布局/音频偏好/缓存/自动保存/录音隔离到该目录UserData，测试作品建议存Projects。副本helper无插件协议smoke实际exit0；未替用户打开GUI/声卡/NI。用户已实际使用并反馈Playlist不能连续拖播放头、歌曲长度不应受视图限制、SONG/PAT当前Pattern及范围反馈不足，已进入对应实现。它是本机MSVC调试版，不是正式发行包，不随附插件/音色/作品/系统DLL。Root保持不做CU/NI/声卡自动验证，不修改或停止用户副本；peer目前按用户在另一聊天的授权操作其VK3D界面，后台CPU单独协调。来源/说明/检查随副本保存在Build-Info.json、README和Helper-Smoke.log。
 
 PrintWindow CI 修补已实现（首版`8f4f35c`）：独立检测OS、当前进程session、WTSActive、可见window station及input/thread desktop；Linux/macOS、session0或明确无交互桌面才退出77，CI只将该码映射为成功SKIPPED。API异常、坏数据、真实截图失败及检测后桌面丢失仍FAIL。环境检测和每次PrintWindow均在5秒子进程超时内kill/reap，native step另有6分钟上限；Summary逐项记录PASS/FAIL/SKIPPED与原因。未改代码检查、Rust测试、Windows构建和preview打包门。
 
@@ -34,6 +34,10 @@ Source103（`3e711cc`）软件门已实际全PASS：FullOwner20（3.07秒，含�
 catalog fixture修补已静态完成：仅原0/1/4场景在完整真实请求/回复/EOF断言与flush之后明确`os._exit(0)`，不再把Python完整finalization塞进terminal的100ms自然退出窗。健康Shutdown、exit9、sleep30、原健康断言与生产/vendor期限保持。新受控真实child对照给两条路径注册同一30秒atexit finalizer：协议完成直接退出必须健康，普通解释器退出必须保留原错误并实际kill/reap、不得健康，且stderr标记已进入EOF后finalizer。catalog仍5项。rustfmt/diff通过，改后catalog/Clippy未执行；材料`catalog-retirement-fixture-exit-repair-01/`。这是fixture不必要teardown依赖的修正，历史CI具体不健康字段仍未知，不称生产故障根因已证。
 
 Source104（`c7290a5`）实际通过changed catalog5（3.96秒）、严格all-feature/all-target Clippy、test artifact与匹配双bin。受控direct exit自然0/健康57ms；普通exit实际打印EOF后finalizer标记、160ms强杀exit1/reap、不健康且保留原OperationRejected。原五场景拒绝/exit9/强杀断言全过，Root6612/exec93717 actual0，18 held全终止，峰值private3.809/global25.517GiB。用户独立副本可并存且未采用/停止，软件门完成；NI/CU/声卡仍未执行。完整`source104-local-gates-01-*`与`source104-local-resource-handback-01.json`保留。用户新增Playlist连续拖播放头、SONG内容派生长度及PAT/SONG当前Pattern可见反馈，由独立前端owner实施；不覆盖用户副本，不把视图1/4/8 bars当成歌曲终点，保护旧手动Clip/loop/export范围。新交互尚未实现验收。
+
+`233f6f0`云quality run38725986812实际FAIL：早期factory门31通过/1失败，同一attempt-seal首次ProbeFactory在原3秒预算触发Deadline/MayHaveApplied（spawn11.7158ms、exchange3.0066879s），真实cleanup强杀/reap exit1，无pipe/wait/kill错误。原有stderr阶段标记未出现在失败诊断，根因尚未知；独立fixture owner正沿真实启动/运输/诊断保留路径调查，不增期限、不忽略失败。后续root/catalog/Clippy/build/截图门未运行，不能以本机Source104通过代替；Linux readiness实际SUCCESS。preview run38725986508仍在执行。保留`ci-233f6f0-windows-quality-01.log`及`source104-quality-{run,jobs}-actual-terminal-01.json`。
+
+Playlist候选02已静态冻结：连续标尺拖动与Draw隔离；新UI工程AUTO按有效内容末端整小节推导，播放/Timeline/支持的导出共用；PAT绿/SONG橙、当前Pattern和真实范围反馈；旧工程MANUAL短范围保留、格式13防旧版静默忽略Auto。补齐三个自动化创建入口的Auto迟位置/短Manual边界，并移除+AUTOMATION错误的非Audio路由，新增20项非ignored及1项显式Saved13只读/私有复制往返回归。原逐键64→16回归与旧producer入口合同保留，4096编辑资源边界不是4/8小节创作限制。格式/diff通过；Cargo/Clippy/输入及真实offscreen渲染尚未执行。factory纯fixture修补也已静态冻结：仅本夹具-I -S、私有有界phase及实际sitecustomize witness对照，原3秒/生产/封印/清理规则不变，完整vendor replay/pins检查通过。等待统一jobs1 CPU门；GPU需peer另行交还，不做CU/NI/声卡，不覆盖独立副本。材料`playlist-transport-source-candidate-02/`及`factory-attempt-seal-fixture-01/`。
 
 Source91（`2853db2`）已修复普通Open恢复门引入的撤销/重做回归：保留exact current-owner Ready/Completed证据，包括空表实际SlotReady；历史Project的session-only Unloaded不再抹掉同一worker的完成证据，真正pending/failed、新owner和clip restoration合同保持独立。原4项失败断言未改。本机实际generic8、startup history11、identity5全部通过，严格all-feature/all-target Clippy与匹配主程序/helper构建均exit0；格式/diff通过。Source92文档提交（`2bb9f80`）已推送，新双bin已在Native07实际普通冷Open→Whole成功；首音一致性仍待同源码重复验证。原始日志及实际Cargo终态在 `source91-local-gates-01-*-{stdout,stderr}.log`、`source91-local-gates-01-terminal-recovery.json`。
 

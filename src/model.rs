@@ -21,7 +21,7 @@ const PROJECT_SAVE_TEMP_ATTEMPTS: usize = 128;
 static PROJECT_SAVE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Current on-disk project schema written by Citrus Studio.
-pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 12;
+pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 13;
 
 const LEGACY_PROJECT_FORMAT_VERSION: u32 = 1;
 
@@ -564,6 +564,10 @@ pub struct Project {
     pub swing: f32,
     #[serde(default = "default_song_length")]
     pub song_length_beats: f32,
+    /// Derive the SONG endpoint from arrangement content. Missing fields keep
+    /// older projects' explicit `song_length_beats` range.
+    #[serde(default)]
+    pub auto_song_length: bool,
     pub channels: Vec<Channel>,
     #[serde(default)]
     pub patterns: Vec<Pattern>,
@@ -793,6 +797,7 @@ impl Default for Project {
             tempo: 128.0,
             swing: 0.12,
             song_length_beats: default_song_length(),
+            auto_song_length: false,
             channels,
             patterns: vec![pattern],
             active_pattern: 0,
@@ -870,6 +875,7 @@ impl Project {
             tempo: 128.0,
             swing: 0.0,
             song_length_beats: default_song_length(),
+            auto_song_length: false,
             channels: vec![channel],
             patterns: vec![pattern],
             active_pattern: 0,
@@ -884,6 +890,60 @@ impl Project {
             mixer_routes: default_mixer_routes(),
             migration_diagnostics: Vec::new(),
         }
+    }
+
+    /// Exclusive musical endpoint shared by playback and offline export.
+    /// Auto follows placements rather than extending a deliberately trimmed
+    /// Pattern clip when its source notes grow. The retained manual value is
+    /// independent from both this derived endpoint and editor zoom.
+    #[must_use]
+    pub fn song_end_beat(&self) -> f32 {
+        if !self.auto_song_length {
+            return self.song_length_beats;
+        }
+        let mut end = self
+            .clips
+            .iter()
+            .filter(|clip| !clip.muted)
+            .filter_map(|clip| {
+                if !clip.start.is_finite()
+                    || clip.start < 0.0
+                    || !clip.length.is_finite()
+                    || clip.length <= 0.0
+                {
+                    return None;
+                }
+                let end = if clip.kind == ClipKind::Audio {
+                    crate::audio_clip::audio_end_beat(clip, false)?
+                } else {
+                    f64::from(clip.start) + f64::from(clip.length)
+                };
+                (end.is_finite() && end > f64::from(clip.start)).then_some(end)
+            })
+            .fold(0.0_f64, f64::max);
+        let placed_automation = self
+            .clips
+            .iter()
+            .filter(|clip| clip.kind == ClipKind::Automation)
+            .filter_map(|clip| clip.automation_id)
+            .collect::<BTreeSet<_>>();
+        for automation in &self.automation_lanes {
+            if !automation.lane.is_enabled() || placed_automation.contains(&automation.id) {
+                continue;
+            }
+            // Legacy lanes without placements remain project-global. A muted
+            // placement still prevents this fallback, matching the Timeline.
+            end = automation
+                .lane
+                .points()
+                .iter()
+                .map(|point| point.position)
+                .filter(|position| position.is_finite() && *position >= 0.0)
+                .fold(end, f64::max);
+        }
+        // Coordinate/resource admission remains with the editor and renderer;
+        // clamping here would silently omit content beyond the old song bound.
+        ((end / 4.0).ceil() * 4.0).max(4.0) as f32
     }
 
     /// JSON encodes non-finite floats as `null`, which cannot be loaded into
@@ -992,6 +1052,10 @@ impl Project {
     where
         Commit: FnOnce(&Path, &Path) -> io::Result<()>,
     {
+        anyhow::ensure!(
+            !self.auto_song_length || self.format_version >= 13,
+            "Automatic song length requires project format 13; normalize the project before saving"
+        );
         self.validate_persisted_numbers()
             .context("Refusing to save non-finite project data")?;
         self.validate_audio_references()
@@ -1217,15 +1281,14 @@ impl Project {
             }
             self.migrate_legacy_audio_source_offsets(&invalid_legacy_audio_offsets);
         }
-        let required_length = self
-            .clips
-            .iter()
-            .map(|clip| clip.start + clip.length)
-            .fold(16.0_f32, f32::max);
-        self.song_length_beats = self
-            .song_length_beats
-            .max(required_length)
-            .clamp(4.0, 4096.0);
+        // A manual range may deliberately trim placements, including a short
+        // two-beat QA score. Loading must not extend it to all clip edges.
+        self.song_length_beats =
+            if self.song_length_beats.is_finite() && self.song_length_beats > 0.0 {
+                self.song_length_beats.min(4096.0)
+            } else {
+                default_song_length()
+            };
         for clip in self
             .clips
             .iter()
@@ -2162,6 +2225,287 @@ mod tests {
         assert!(
             staged_files.is_empty(),
             "staging files were not cleaned up: {staged_files:?}"
+        );
+    }
+
+    fn song_range_clip(kind: ClipKind, start: f32, length: f32) -> Clip {
+        let mut clip = Project::default().clips.remove(0);
+        clip.id = 1;
+        clip.pattern_id = 1;
+        clip.kind = kind;
+        clip.start = start;
+        clip.length = length;
+        clip
+    }
+
+    #[test]
+    fn auto_song_end_grows_and_shrinks_with_arrangement_not_the_cached_length() {
+        let mut project = Project::blank();
+        project.auto_song_length = true;
+        project.song_length_beats = 2.0;
+        assert_eq!(project.song_end_beat(), 4.0);
+        for kind in [ClipKind::Pattern, ClipKind::Audio, ClipKind::Automation] {
+            project.clips = vec![song_range_clip(kind, 17.0, 0.25)];
+            assert_eq!(project.song_end_beat(), 20.0, "{kind:?}");
+            project.clips[0].muted = true;
+            assert_eq!(project.song_end_beat(), 4.0, "{kind:?}");
+        }
+        project.clips = vec![song_range_clip(ClipKind::Pattern, 4096.0, 4.0)];
+        assert_eq!(project.song_end_beat(), 4100.0);
+        project.clips.clear();
+        assert_eq!(project.song_end_beat(), 4.0);
+        project.clips = vec![song_range_clip(ClipKind::Pattern, f32::NAN, 4.0)];
+        assert_eq!(project.song_end_beat(), 4.0);
+        assert_eq!(project.song_length_beats, 2.0);
+    }
+
+    #[test]
+    fn auto_song_end_keeps_exact_audio_split_extent_at_a_bar_boundary() {
+        let mut project = Project::blank();
+        project.auto_song_length = true;
+        let mut clip = song_range_clip(ClipKind::Audio, 0.0, 4.0);
+        clip.audio_length_reference = Some(AudioLengthReference {
+            stored_length_beats: 4.0,
+            length_beats: 4.0 + 1.0e-8,
+            export_length_beats: 4.0 - 1.0e-8,
+        });
+        project.clips.push(clip);
+        assert_eq!(project.song_end_beat(), 8.0);
+        assert_eq!(project.clips[0].length, 4.0);
+        assert_eq!(
+            project.clips[0]
+                .audio_length_reference
+                .unwrap()
+                .length_beats,
+            4.0 + 1.0e-8
+        );
+        project.clips[0].length = 2.0;
+        assert_eq!(project.song_end_beat(), 4.0);
+    }
+
+    #[test]
+    fn auto_song_end_uses_only_enabled_unplaced_legacy_lane_points_as_global_content() {
+        let mut project = Project::blank();
+        project.auto_song_length = true;
+        let mut lane = AutomationLane::new(AutomationTarget::MasterVolume);
+        lane.replace_points([AutomationPoint::new(17.25, 0.5)]);
+        project.automation_lanes.push(ProjectAutomation {
+            id: 9,
+            name: "Legacy master".into(),
+            lane,
+        });
+        assert_eq!(project.song_end_beat(), 20.0);
+        project.automation_lanes[0].lane.set_enabled(false);
+        assert_eq!(project.song_end_beat(), 4.0);
+        project.automation_lanes[0].lane.set_enabled(true);
+        let mut placement = song_range_clip(ClipKind::Automation, 48.0, 4.0);
+        placement.automation_id = Some(9);
+        placement.muted = true;
+        project.clips.push(placement);
+        assert_eq!(project.song_end_beat(), 4.0);
+        project.clips[0].muted = false;
+        assert_eq!(project.song_end_beat(), 52.0);
+        project.clips.clear();
+        project.automation_lanes[0].lane.replace_points([]);
+        assert_eq!(project.song_end_beat(), 4.0);
+    }
+
+    #[test]
+    fn auto_song_range_save_reopen_preserves_trimmed_clip_source_and_opaque_state() {
+        let directory = TestDirectory::new("auto-song-range");
+        let path = directory.path().join("auto.citrus");
+        let mut project = Project::blank();
+        project.auto_song_length = true;
+        project.song_length_beats = 2.25;
+        project
+            .clips
+            .push(song_range_clip(ClipKind::Pattern, 0.0, 4.0));
+        project.patterns[0].notes.push(PianoNote {
+            id: 1,
+            channel_id: Some(1),
+            group_id: None,
+            note: 60,
+            start: 17.0,
+            length: 1.0,
+            velocity: 0.8,
+            selected: false,
+            muted: false,
+        });
+        let mut plugin = test_plugin(42, PluginFormat::Vst3, "range-test.vst3");
+        plugin.role = PluginRole::Instrument;
+        plugin.opaque_state = vec![0, 1, 0x80, 0xff];
+        project.channels[0].instrument_plugin_instance_id = Some(42);
+        project.plugin_instances.push(plugin);
+        let original_clip = serde_json::to_value(&project.clips[0]).unwrap();
+        project.save(&path).unwrap();
+        let restored = Project::load(&path).unwrap();
+        assert!(restored.auto_song_length);
+        assert_eq!(restored.format_version, 13);
+        assert_eq!(restored.song_length_beats, 2.25);
+        assert_eq!(restored.song_end_beat(), 4.0);
+        assert_eq!(
+            serde_json::to_value(&restored.clips[0]).unwrap(),
+            original_clip
+        );
+        assert_eq!(restored.patterns[0].notes[0].start, 17.0);
+        assert_eq!(
+            restored.plugin_instances[0].opaque_state,
+            [0, 1, 0x80, 0xff]
+        );
+        let saved = std::fs::read(&path).unwrap();
+        project.format_version = 12;
+        assert!(
+            project
+                .save(&path)
+                .unwrap_err()
+                .to_string()
+                .contains("format 13")
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
+    }
+
+    #[test]
+    fn manual_song_range_and_legacy_missing_auto_field_survive_normalize_and_cold_load() {
+        let directory = TestDirectory::new("manual-song-range");
+        for length in [2.0, 2.25, 64.0] {
+            let mut project = Project::blank();
+            project.song_length_beats = length;
+            project
+                .clips
+                .push(song_range_clip(ClipKind::Pattern, 0.0, 100.0));
+            project.normalize();
+            assert!(!project.auto_song_length);
+            assert_eq!(project.song_length_beats, length);
+            assert_eq!(project.song_end_beat(), length);
+            assert_eq!(project.clips[0].length, 100.0);
+            let mut legacy = serde_json::to_value(&project).unwrap();
+            legacy.as_object_mut().unwrap().remove("auto_song_length");
+            legacy["format_version"] = serde_json::json!(12);
+            let path = directory.path().join(format!("manual-{length}.citrus"));
+            std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+            let restored = Project::load(&path).unwrap();
+            assert!(!restored.auto_song_length);
+            assert_eq!(restored.format_version, CURRENT_PROJECT_FORMAT_VERSION);
+            assert_eq!(restored.song_end_beat(), length);
+            assert_eq!(restored.clips[0].length, 100.0);
+        }
+        for auto in [false, true] {
+            for invalid in [f32::NAN, f32::INFINITY, -1.0, 0.0] {
+                let mut project = Project::blank();
+                project.auto_song_length = auto;
+                project.song_length_beats = invalid;
+                project.normalize();
+                assert_eq!(project.song_length_beats, 64.0);
+                assert_eq!(project.song_end_beat(), if auto { 4.0 } else { 64.0 });
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an explicit absolute CITRUS_SONG_RANGE_REOPEN_PROJECT with nonempty saved plug-in state"]
+    fn saved_song_range_read_only_input_and_private_copy_round_trip_preserve_persisted_content() {
+        fn musical_payload(project: &Project) -> serde_json::Value {
+            let mut value = serde_json::to_value(project).unwrap();
+            let object = value.as_object_mut().unwrap();
+            object.remove("format_version");
+            object.remove("auto_song_length");
+            value
+        }
+
+        let source_path = PathBuf::from(
+            std::env::var_os("CITRUS_SONG_RANGE_REOPEN_PROJECT")
+                .expect("set CITRUS_SONG_RANGE_REOPEN_PROJECT to the existing saved project"),
+        );
+        assert!(
+            source_path.is_absolute(),
+            "the source project path must be absolute"
+        );
+        let source_bytes = std::fs::read(&source_path).unwrap();
+        let persisted: Project = serde_json::from_slice(&source_bytes).unwrap();
+        assert!(
+            !persisted.auto_song_length,
+            "the existing source must retain its manual range"
+        );
+        let original_end = persisted.song_length_beats;
+        assert!(original_end.is_finite() && original_end > 0.0);
+        let opaque_bytes = persisted
+            .plugin_instances
+            .iter()
+            .map(|plugin| plugin.opaque_state.len())
+            .sum::<usize>();
+        assert!(
+            opaque_bytes > 0,
+            "an empty plug-in instance is not saved sound-state evidence"
+        );
+        let original_payload = musical_payload(&persisted);
+
+        // The only source-path operations are reads. Both saves target a new,
+        // run-owned temporary directory, never the user's original project.
+        let loaded = Project::load(&source_path).unwrap();
+        assert!(!loaded.auto_song_length);
+        assert_eq!(loaded.song_end_beat(), original_end);
+        assert!(
+            musical_payload(&loaded) == original_payload,
+            "loading the original changed persisted content"
+        );
+        let directory = TestDirectory::new("saved-song-range-read-only-input");
+        let manual_path = directory.path().join("manual-copy.citrus");
+        loaded.save(&manual_path).unwrap();
+        let reopened = Project::load(&manual_path).unwrap();
+        assert!(!reopened.auto_song_length);
+        assert_eq!(reopened.format_version, 13);
+        assert_eq!(reopened.song_end_beat(), original_end);
+        assert!(
+            musical_payload(&reopened) == original_payload,
+            "the manual private copy changed persisted content"
+        );
+
+        let mut automatic = reopened;
+        automatic.auto_song_length = true;
+        let derived_end = automatic.song_end_beat();
+        assert!(derived_end.is_finite() && derived_end >= 4.0);
+        assert_eq!(derived_end % 4.0, 0.0);
+        let auto_path = directory.path().join("auto-copy.citrus");
+        automatic.save(&auto_path).unwrap();
+        let auto_reopened = Project::load(&auto_path).unwrap();
+        assert!(auto_reopened.auto_song_length);
+        assert_eq!(auto_reopened.format_version, 13);
+        assert_eq!(auto_reopened.song_length_beats, original_end);
+        assert_eq!(auto_reopened.song_end_beat(), derived_end);
+        // Serialized payload comparison includes all channel, pattern, clip,
+        // automation, mixer route and plug-in fields. Runtime status, selection
+        // and migration diagnostics are excluded by the project serializer.
+        assert!(
+            musical_payload(&auto_reopened) == original_payload,
+            "the automatic private copy changed persisted content"
+        );
+        assert!(
+            std::fs::read(&source_path).unwrap() == source_bytes,
+            "the original project bytes changed during the read-only check"
+        );
+        eprintln!(
+            "SONG_RANGE_REOPEN_EVIDENCE {}",
+            serde_json::json!({
+                "source": source_path,
+                "source_bytes": source_bytes.len(),
+                "source_format_version": persisted.format_version,
+                "copy_format_version": auto_reopened.format_version,
+                "manual_end_beat": original_end,
+                "auto_end_beat": derived_end,
+                "clips": auto_reopened.clips.len(),
+                "automation_lanes": auto_reopened.automation_lanes.len(),
+                "plugin_instances": auto_reopened.plugin_instances.len(),
+                "opaque_bytes": opaque_bytes,
+                "plugins": auto_reopened.plugin_instances.iter().map(|plugin| serde_json::json!({
+                    "id": plugin.id,
+                    "opaque_bytes": plugin.opaque_state.len(),
+                    "generic_parameters": plugin.parameters.len(),
+                    "midi_ports": plugin.midi_ports,
+                })).collect::<Vec<_>>(),
+                "manual_copy_persisted_content_equal": true,
+                "auto_copy_persisted_content_equal": true,
+                "source_bytes_unchanged": true,
+            })
         );
     }
 
@@ -3956,7 +4300,7 @@ mod tests {
         project.plugin_instances[1].midi_ports.input = Some(0);
         project.save(&path).unwrap();
         let restored = Project::load(&path).unwrap();
-        assert_eq!(restored.format_version, 12);
+        assert_eq!(restored.format_version, CURRENT_PROJECT_FORMAT_VERSION);
         assert_eq!(
             restored.plugin_instances[0].midi_ports,
             project.plugin_instances[0].midi_ports

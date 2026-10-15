@@ -16845,6 +16845,7 @@ mod tests {
             tempo: 120.0,
             swing: 0.0,
             song_length_beats: length_beats,
+            auto_song_length: false,
             channels: Vec::new(),
             patterns: Vec::new(),
             active_pattern: 0,

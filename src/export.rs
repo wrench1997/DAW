@@ -553,6 +553,7 @@ pub fn ensure_supported_project(project: &Project) -> Result<()> {
 /// Playlist placement are globally active, matching live automation/TempoMap.
 /// Once a lane has placements, only their unmuted half-open windows enable it.
 pub fn ensure_supported_automation(project: &Project) -> Result<()> {
+    let song_end = f64::from(project.song_end_beat());
     for automation in &project.automation_lanes {
         let lane = &automation.lane;
         if !lane.is_enabled()
@@ -577,13 +578,13 @@ pub fn ensure_supported_automation(project: &Project) -> Result<()> {
             })
             .peekable();
         let active = if placements.peek().is_none() {
-            project.song_length_beats > 0.0
+            song_end > 0.0
         } else {
             placements.any(|clip| {
                 let start = f64::from(clip.start);
                 let end = start + f64::from(clip.length);
                 let overlap_start = start.max(0.0);
-                let overlap_end = end.min(f64::from(project.song_length_beats));
+                let overlap_end = end.min(song_end);
                 !clip.muted
                     && start.is_finite()
                     && end.is_finite()
@@ -873,11 +874,11 @@ fn collect_pattern_events(
         || !source_offset.is_finite()
         || source_offset < 0.0
         || clip_length <= 0.0
-        || clip_start >= project.song_length_beats
+        || f64::from(clip_start) >= tempo_map.max_beat()
     {
         return Ok(());
     }
-    let clip_end = (clip_start + clip_length).min(project.song_length_beats);
+    let clip_end = (clip_start + clip_length).min(tempo_map.max_beat() as f32);
     let clip_start = clip_start.max(0.0);
     if clip_end <= clip_start {
         return Ok(());
@@ -4016,6 +4017,60 @@ mod tests {
             36 + data_size
         );
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn auto_song_range_exports_late_pattern_audio_and_exact_arrangement_frame_count() {
+        let directory = workflow_test_directory("auto-song-range");
+        let path = directory.join("auto.wav");
+        let mut project = arrangement_project();
+        project.tempo = 120.0;
+        project.song_length_beats = 2.0;
+        project.auto_song_length = true;
+        project.clips = vec![pattern_clip(8.0, 4.0, 1.0, false)];
+        assert_eq!(project.song_end_beat(), 12.0);
+        let rendered = render_and_decode(&project, &path);
+        assert_eq!(rendered.len(), 48_000);
+        assert!(
+            rendered[..32_000]
+                .iter()
+                .all(|sample| sample.left == 0.0 && sample.right == 0.0)
+        );
+        assert!(
+            rendered[32_000..]
+                .iter()
+                .any(|sample| sample.left.abs() > 1.0e-5)
+        );
+        project.auto_song_length = false;
+        let manual_path = directory.join("manual.wav");
+        let manual = render_and_decode(&project, &manual_path);
+        assert_eq!(manual.len(), 8_000);
+        assert!(
+            manual
+                .iter()
+                .all(|sample| sample.left == 0.0 && sample.right == 0.0)
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn auto_song_range_keeps_unsupported_late_automation_as_a_real_export_failure() {
+        let mut project = arrangement_project();
+        project.song_length_beats = 2.0;
+        project
+            .automation_lanes
+            .push(unsupported_lane(AutomationTarget::ChannelVolume {
+                channel: 1,
+            }));
+        project.clips = vec![automation_placement(8.0, 4.0, false)];
+        ensure_supported_automation(&project).unwrap();
+        project.auto_song_length = true;
+        assert_eq!(project.song_end_beat(), 12.0);
+        let error = ensure_supported_automation(&project)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("Audible movement"), "{error}");
+        assert!(error.contains("Realtime Master Capture"), "{error}");
     }
 
     #[test]

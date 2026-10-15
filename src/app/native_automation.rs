@@ -170,23 +170,9 @@ fn native_automation_candidate(
     if !value.is_finite() || f64::from(value) < range.min || f64::from(value) > range.max {
         return Err("The control has an invalid value".into());
     }
-    let song_length = project.song_length_beats;
-    if !song_length.is_finite()
-        || song_length <= 0.0
-        || !requested_start.is_finite()
-        || !snap.is_finite()
-        || snap <= 0.0
-    {
-        return Err("The Playlist timing or snap is invalid".into());
-    }
-    let start = ((f64::from(requested_start) / f64::from(snap)).floor() * f64::from(snap)).clamp(
-        0.0,
-        f64::from((song_length - snap.min(song_length)).max(0.0)),
-    ) as f32;
-    let length = 4.0_f32.min(song_length - start);
-    if length <= 0.0 || start + length <= start {
-        return Err("No representable Playlist duration remains".into());
-    }
+    let (start, length) =
+        playlist_transport::automation_creation_span(project, requested_start, snap)
+            .ok_or_else(|| "The Playlist timing or snap is invalid".to_owned())?;
     let first = first_track.min(PLAYLIST_TRACK_COUNT - 1);
     let track = (first..PLAYLIST_TRACK_COUNT)
         .chain(0..first)

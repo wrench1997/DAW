@@ -625,11 +625,7 @@ impl CitrusApp {
                 .unwrap_or_else(|| initial_rect(view, bounds));
             let mut open = true;
             let context = match view {
-                StudioView::Playlist => format!(
-                    "{} bars · {}",
-                    (self.project.song_length_beats / 4.0).ceil() as usize,
-                    self.project.active_pattern().name
-                ),
+                StudioView::Playlist => self.playlist_scope_caption(),
                 StudioView::ChannelRack => format!(
                     "{} · {} steps",
                     self.project.active_pattern().name,

@@ -168,7 +168,7 @@ impl TempoMap {
                 base_bpm: sanitize_base_bpm(f64::from(project.tempo)),
                 automation,
             },
-            f64::from(project.song_length_beats),
+            f64::from(project.song_end_beat()),
             sample_rate,
         )
     }
@@ -628,6 +628,47 @@ mod tests {
         assert_close(map.beat_to_seconds(4.0).unwrap(), 2.0, 1.0e-12);
         assert_eq!(map.beat_to_frame(4.0).unwrap(), 96_000);
         assert_close(map.frame_to_beat(96_000).unwrap(), 4.0, 1.0e-11);
+    }
+
+    #[test]
+    fn auto_song_range_drives_real_timeline_frames_and_keeps_manual_short_ranges_exact() {
+        use crate::{
+            model::ClipKind,
+            timeline::{CompiledTimeline, TimelineCompileOptions},
+        };
+        let mut project = Project::blank();
+        project.tempo = 120.0;
+        project.auto_song_length = true;
+        project.song_length_beats = 2.0;
+        project.patterns[0].channel_steps[0][0] = true;
+        let mut clip = Project::default().clips.remove(0);
+        clip.id = 1;
+        clip.kind = ClipKind::Pattern;
+        clip.pattern_id = project.patterns[0].id;
+        clip.start = 8.0;
+        clip.length = 4.0;
+        project.clips.push(clip);
+        let map = TempoMap::from_project(&project, 48_000).unwrap();
+        let timeline =
+            CompiledTimeline::from_project(&project, &map, TimelineCompileOptions::default())
+                .unwrap();
+        assert_eq!(map.max_beat(), 12.0);
+        assert_eq!(map.duration_frames(), 288_000);
+        assert_eq!(timeline.duration_frames(), 288_000);
+        assert!(
+            timeline.diagnostics().is_empty(),
+            "{:?}",
+            timeline.diagnostics()
+        );
+        assert!(timeline.events().iter().any(|event| event.frame >= 192_000));
+        project.clips.clear();
+        let map = TempoMap::from_project(&project, 48_000).unwrap();
+        assert_eq!(map.max_beat(), 4.0);
+        assert_eq!(map.duration_frames(), 96_000);
+        project.auto_song_length = false;
+        let map = TempoMap::from_project(&project, 48_000).unwrap();
+        assert_eq!(map.max_beat(), 2.0);
+        assert_eq!(map.duration_frames(), 48_000);
     }
 
     #[test]

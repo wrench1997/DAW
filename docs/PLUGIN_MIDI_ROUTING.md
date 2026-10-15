@@ -110,9 +110,10 @@ order without allocating sort scratch.
 
 ## Project compatibility
 
-Project format is **v12**. v10/v11 projects load with all plugin ports Off and audio
-monitor enabled. New saves require a v12-capable build, preventing older v11 software
-from silently ignoring routing fields. Keep a backup before evaluating this build.
+Current source uses Project format **v13** for [Auto/Manual song range](PLAYLIST_TRANSPORT.md).
+v12 introduced these MIDI routing fields; v10/v11 projects still load with all plugin
+ports Off and audio monitor enabled. New saves require a v13-capable build, preventing
+older software from silently ignoring range or routing fields. Keep a backup before evaluation.
 Ports and independent audio-monitor mute round-trip with stable plugin identities.
 If a saved project has an unsupported/inconsistent port graph, loading disables its
 input ports safely and reports the exact reason; unrelated musical content remains.

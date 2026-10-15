@@ -15,12 +15,15 @@ projects can be saved under `Projects`. Direct EXE launch would instead use the
 default profile, so use the launcher. Actual Source102 main/helper binaries were
 copied as ordinary independent files; later Cargo builds cannot overwrite them.
 The copied helper passed the existing five-second no-plugin protocol smoke with
-actual exit0. The main GUI was not started by automation; user acceptance is
-pending. This is a same-machine MSVC debug preview, not the static-CRT release
+actual exit0. The user has started the GUI and reported missing continuous
+Playlist seeking, content-derived SONG length and clear SONG/PAT feedback;
+these are assigned for implementation, not accepted as finished. Root did not
+launch or stop the user's GUI. This is a same-machine MSVC debug preview, not the static-CRT release
 package; local VC/UCRT is already installed. No plugin, sample library, user work
 or system DLL is included. Shared physical devices and Kontakt settings remain
-shared. Both threads were notified to avoid CU/NI/audio verification while the
-user tests; source work and resource-safe compilation can continue.
+shared. Root continues to avoid CU/NI/audio verification while the user tests.
+The peer currently has its user's authority to operate VK3D's UI; background
+CPU windows remain separately coordinated. Source work can continue.
 
 The first generic-base restore candidate compiled but failed existing history checks.
 Ordinary Open formerly sent saved bases once through a 64-entry untagged admin
@@ -1015,6 +1018,37 @@ zoom, and visible PAT/current-Pattern versus SONG-arrangement feedback backed by
 actual playback semantics. Existing trimmed Clips and explicit loop/export
 ranges must remain usable. Implementation/acceptance is pending; the user's
 running independent copy is not overwritten.
+
+Pushed `233f6f0` quality run38725986812 actually failed at the early retained
+factory gate:31 passed/1 failed. The attempt-seal's first ProbeFactory reached
+its unchanged three-second budget with Deadline/MayHaveApplied (spawn11.7158ms,
+exchange3.0066879s). Cleanup actually killed/reaped exit1, with no pipe/wait/kill
+error. Existing stderr phase markers were absent from the failure diagnostic;
+the cause is unknown. A separate fixture owner is investigating the actual
+startup/transport/diagnostic path without increasing deadlines or suppressing
+failure. Later root/catalog/Clippy/build/PrintWindow gates did not run. Linux
+readiness succeeded; preview run38725986508 is still running. Preserve
+`ci-233f6f0-windows-quality-01.log` and
+`source104-quality-{run,jobs}-actual-terminal-01.json`.
+
+Playlist candidate02 is now source-frozen: continuous ruler seek isolated from
+Draw; content-derived AUTO for new UI projects, one endpoint for playback/
+Timeline/supported export; visible green PAT/orange SONG, selected Pattern and
+actual scope. Older files retain MANUAL/short ranges, with format13 preventing
+older builds silently ignoring AUTO. Three automation creation paths now use
+the Auto editing horizon and safely preserve short Manual ranges; +AUTOMATION
+no longer adds an invalid non-Audio mixer destination.20 new nonignored tests
+and one explicit Saved13 read-only/private-copy round-trip test are prepared.
+Original per-digit64-to16 entry and existing producer contracts remain. The
+4096 editing/resource quota is separate from view buttons and musical extent.
+Formatting/diff passed; Cargo/Clippy/input/offscreen rendering are unrun. The
+separate factory fixture candidate uses -I -S, private bounded phase evidence
+and an actual site-hook witness control, retaining three-second deadlines and
+production/seal/cleanup rules. Complete vendor replay and pins passed. A jobs1
+CPU gate is next; GPU readback waits for the peer's release. No CU/NI/audio or
+user-preview replacement is authorized by these software checks. Keep
+`playlist-transport-source-candidate-02/` and
+`factory-attempt-seal-fixture-01/`.
 
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 

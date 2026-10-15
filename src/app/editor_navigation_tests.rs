@@ -314,6 +314,7 @@ fn creation_playlist_ruler_seeks_and_default_draw_places_the_full_pattern_with_o
     ui.app.project.active_pattern_mut().notes[0].start = 14.0;
     ui.app.project.active_pattern_mut().notes[0].length = 2.0;
     ui.app.project.song_length_beats = 16.0;
+    ui.app.project.auto_song_length = false;
     ui.app.sync_history_observer();
     ui.settle();
     let canvas = ui
