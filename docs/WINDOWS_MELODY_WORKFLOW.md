@@ -24,11 +24,16 @@ Unloaded display status, which the new pre-Ready gate mistakes for current-worke
 initialization despite the same owner having completed ACK replay. The repair
 retains exact owner Ready/Completed evidence, including empty-map SlotReady,
 without admitting truly pending/failed or replacement owners. The four original
-startup assertions are unchanged. This repair is not yet compiled or tested.
+startup assertions are unchanged. Source91 (`2853db2`) actually passed all eight
+generic restore cases, all11 startup history cases and all five loaded-identity
+cases locally. Strict all-feature/all-target Clippy and a matching main/helper
+build each exited0; formatting passed. Full cloud regression and NI on these
+new bins remain unrun. Preserve the Source91 per-phase stdout/stderr logs and
+`source91-local-gates-01-terminal-recovery.json`.
 Preserve `ci-48ea977-windows-{quality,preview}-01.log` and Source89 actual terminal
 JSON. Native05/06 use earlier frozen bins, not this candidate.
 
-Latest backend qualification: Source87 (`769525d`) quality actually passed 32
+Earlier full-cloud backend qualification: Source87 (`769525d`) quality actually passed 32
 factory and 2321 App + 52 helper + 13 protocol = 2386 root cases/12 ignored, including
 both numeric-entry cases and three new failure-evidence regressions. Strict
 all-feature/all-target Clippy, both bins, protocol/harness, fixture and
@@ -514,8 +519,9 @@ Evidence in the same isolated workflow directory:
 `launch-06.json`, `cold-open-and-export-native06-01.json`, `stderr-06.log`,
 `normal-close-process-terminal-06.json`, `native05-native06-pcm-comparison-01.json`
 and `native06-no-exact-timing/ordinary-whole-native06-pcm-audit-01.json`.
-The parent contains `native06-resource-handback-01.json`. The parameter-restore
-candidate is separate, unbuilt source and did not enter this native comparison.
+The parent contains `native06-resource-handback-01.json`. These native sessions
+predate the parameter-restore and offline-MIDI candidates; neither entered this
+comparison.
 
 ### Offline event metadata candidate and unimplemented async-state gap
 
@@ -533,11 +539,14 @@ chunking, the next block, changed tempo/nonzero PPQ, stopped/zero-frame handling
 and existing entry points. Both CI consumers explicitly run `--lib offline_midi`;
 root Cargo tests alone do not execute dependency unit tests. Formatting, complete
 75-file patch replay, explicit vendor pins and two packaging/consumer contracts
-passed. Local Source90 (`8fc027d`, unpushed) subsequently passed all four new
+passed. Local Source90 (`8fc027d`) subsequently passed all four new
 SDK cases and15 original HostEventList regressions. Root generic8 also passed,
 but startup history reproduced7 passes/four failures; identity, strict Clippy
-and matching-bin build did not run. This corrects a demonstrated event contract,
-not a demonstrated cause of the384-frame difference.
+and matching-bin build did not run. The subsequent Source91 App repair passed
+8+11+5 targeted cases, strict Clippy and matching bins; unchanged SDK4+15 evidence
+was reused rather than rerun. Existing vendor dependency warnings remain. This
+corrects a demonstrated event contract, not a demonstrated cause of the384-frame
+difference; neither new candidate has entered NI acceptance.
 
 After all Cargo processes terminated, the diagnostic wrapper incorrectly waited
 on its own conhost infrastructure. Only that wrapper was interrupted; exec77452
@@ -546,6 +555,16 @@ Keep the original script/raw logs plus the independent
 `source90-local-gates-01-terminal-recovery.json`; it does not invent a successful
 aggregate run. The next observer must not wait for a console whose lifetime
 depends on its own wrapper. No NI or user process was terminated.
+
+Source91 excluded console infrastructure but then waited on the observed MSVC
+VCTIP data uploader after all five Cargo phases had actually exited0. Local
+executable metadata identified that infrastructure, and a fresh process check
+showed no Cargo/rustc/test/link/App/helper work. Only the owned diagnostic wrapper
+was interrupted; exec10380 actually exited1. Fresh heavy/root/console counts were
+zero before handback. The recovery receipt records these different outcomes,
+the two actual Cargo artifacts and50 resource samples (peak4.076GiB owned private,
+23.665GiB global physical used). Do not call it an aggregate runner exit0 or
+terminate unrelated processes/change system settings to avoid an observer wait.
 
 A second confirmed gap is still unimplemented: IProgress extends the actual
 IComponentHandler, but that COM object does not expose it. The existing separate
