@@ -544,6 +544,13 @@ fn windows_noire_saved_state_source_capture_strict_short_whole() {
         panic!("short NI preflight failed; preserve {}",directory.display());
     }));
     let body = checked_short_phase("short NI body", || run.exercise());
+    // Observe before cleanup changes the epoch/destroys the callback. A failed
+    // diagnostic is evidence, never permission to skip actual owner cleanup.
+    let readiness = checked_short_phase("short source readiness diagnostic", || {
+        Ok(run.parent.source_readiness_evidence())
+    });
+    run.evidence["source_readiness_before_cleanup"] =
+        readiness.unwrap_or_else(|reason| json!({"actual_diagnostic_error":reason}));
     let cleanup = checked_short_phase("short NI cleanup", || run.cleanup());
     let receipt = checked_short_phase("short NI receipt", || run.receipt(&body, &cleanup));
     if receipt.is_err() {

@@ -873,9 +873,11 @@ executable and helper were frozen in `bin-source101-sdk-b-short-01`.
 
 The first actual NI attempt then failed, test101/56.70s, with
 `complete source initialization deadline: complete actual callback has not reached its exact paused Timeline epoch`.
-There was no capture, clone or WAV. One128-frame OrdinaryProcess Attempt is
-recorded without a capture/epoch binding; it does not establish zero DSP or a
-successful Process return. Worker Join completed, while the outer observer
+There was no capture, clone or WAV. Original records49/50 contain one128-frame
+paused OrdinaryProcess Attempt and its actual Ok return, without a capture/epoch
+binding. The aggregate excludes that unbound pair; its zero cannot establish
+zero DSP, and the successful API return does not prove non-silent audio.
+Worker Join completed, while the outer observer
 independently retained helper97680 through natural OS exit0. Test47092,
 runner110816/exec21772 and all observed descendants actually terminated without
 forced kill or budget violation. No second round began after this failure.
@@ -886,6 +888,18 @@ two-phase async reports remain unqualified. Preserve `source101-local-gates-01-*
 `source99-noire-short-native-round01/`, its stdout/stderr/terminal files and
 `source101-native-short-resource-handback-01.json`; source99 is the old runner
 label, not the actual source revision.
+
+The current attribution checkpoint adds a fixed read-only readiness object before
+cleanup: actual Timeline phase/desired/compiled/confirmed identities and errors,
+callback/command-ring state, and at most4 worker epoch/settlement rows. Null is
+not replaced with zero/false. It adds no pump, SDK, DSP or command; independent
+diagnostic failure cannot skip cleanup. Two new real plugin-free controls cover
+compile-to-exact-paused callback plus a late command with the same legacy barrier,
+and missing identity/original error retention without pumping. Original FullOwner16
+inputs, source-ready/pump predicates and40s/120s/35s budgets stay unchanged.
+Formatting/diff passed; the new2, strict Clippy and native attribution are unrun.
+Keep `source-callback-epoch-attribution-01/`. The actual native cause and its
+correction remain to be established from these operands, not a guessed extra call.
 
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 

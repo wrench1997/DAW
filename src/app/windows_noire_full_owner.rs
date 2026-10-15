@@ -389,6 +389,72 @@ impl FullParent {
             && snapshot.epoch == epoch
             && snapshot.paused_work_quiescent(generation, epoch)
     }
+    /// A fixed read-only boundary snapshot, not another poll, pump or SDK call.
+    /// Keep missing callback/identity distinct from an observed false predicate.
+    pub(super) fn source_readiness_evidence(&self) -> Value {
+        let app = self.app();
+        let state = app.genuine_timeline_app_state();
+        let bounded_text = |text: &str| {
+            let mut end = text.len().min(4096);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            json!({"text":&text[..end],"utf8_bytes":text.len(),"truncated":end<text.len()})
+        };
+        let callback = self.callback.as_ref().map(|callback| {
+            let snapshot = callback.genuine_snapshot();
+            let expected = state.confirmed_identity;
+            let endpoints = snapshot.endpoints.iter().take(4).map(|endpoint| {
+                let bridge = &endpoint.fixed.bridge;
+                json!({"endpoint":endpoint.endpoint_id,"channel":endpoint.channel_id,
+                    "instance":endpoint.plugin_instance_id,"worker":bridge.worker_id,
+                    "callback_work_pending":endpoint.callback_work_pending(),
+                    "input_work_quiescent":expected.map(|(_,epoch)|endpoint.input_work_quiescent(epoch)),
+                    "callback_epoch":endpoint.fixed.epoch,"bridge_epoch":bridge.stats.current_epoch,
+                    "worker_epoch":bridge.worker_epoch,"worker_busy":bridge.worker_busy,
+                    "input_pending":bridge.input_pending,"submitted":bridge.stats.submitted,
+                    "input_consumed":bridge.input_consumed,"operations_completed":bridge.operations_completed})
+            }).collect::<Vec<_>>();
+            json!({"generation":snapshot.generation,"active_epoch":snapshot.active_epoch,
+                "epoch":snapshot.epoch,"frame":snapshot.start_frame,"playing":snapshot.playing,
+                "callback_request_id":snapshot.request_id,
+                "mailbox_request_id":app.audio.as_ref().map(AudioEngine::test_transport_request_id),
+                "callback_work_pending":snapshot.callback_work_pending(),
+                "pending_audio_commands":snapshot.pending_audio_commands,
+                "pending_timeline_commands":snapshot.pending_timeline_commands,
+                "pending_activation":snapshot.pending_timeline_activation,
+                "fault":snapshot.fault.map(|fault|format!("{fault:?}")),"suspended":snapshot.suspended,
+                "graph_binding_exact":snapshot.graph_binding_exact,
+                "channel_binding_revision":snapshot.channel_binding_revision,
+                "channel_binding_epoch":snapshot.channel_binding_epoch,
+                "plugin_topology_replan_pending":snapshot.plugin_topology_replan_pending,
+                "timeline_needs_resync":snapshot.timeline_stats.map(|stats|stats.ownership_needs_resync),
+                "paused_work_quiescent":expected.map(|(generation,epoch)|snapshot.paused_work_quiescent(generation,epoch)),
+                "endpoint_count":snapshot.endpoints.len(),"endpoint_row_limit":4,
+                "endpoints_truncated":snapshot.endpoints.len()>endpoints.len(),"endpoints":endpoints})
+        });
+        json!({"read_only":true,"adds_callback_or_sdk_calls":false,
+            "exact_paused":self.paused(),"app_playing":app.playing,
+            "app_timeline_matches_desired":app.timeline_audio_matches_desired(),
+            "runtime_dispatch_allowed":app.audio_restart_state.allows_runtime_dispatch(),
+            "phase":format!("{:?}",state.phase),"project_session":state.project_session,
+            "engine_session":state.engine_session,"sync_session":state.sync_session,
+            "desired_generation":state.desired_generation,"observed_fingerprint":state.observed_fingerprint,
+            "compiled_generation":state.compiled_generation,"compiled_fingerprint":state.compiled_fingerprint,
+            "source_generation":state.source_generation,"source_fingerprint":state.source_fingerprint,
+            "sync_source_generation":state.sync_source_generation,"confirmed_identity":state.confirmed_identity,
+            "desired_seek_serial":state.desired_seek_serial,"desired_seek_frame":state.desired_seek_frame,
+            "retry_required":state.retry_required,"retry_pending":state.retry_pending,
+            "timeline_worker_available":app.timeline_worker_available,
+            "timeline_pending_generation":app.timeline_pending_generation,
+            "timeline_last_enqueued_generation":app.timeline_last_enqueued_generation,
+            "timeline_deferred_job_present":app.timeline_deferred_job.is_some(),
+            "timeline_compile_error":app.timeline_compile_error.as_deref().map(bounded_text),
+            "timeline_sync_error":app.timeline_audio_sync.last_error.as_deref().map(bounded_text),
+            "pending_generator_count":app.pending_generator_chains.len(),
+            "running_generator_count":app.running_generator_chains.len(),
+            "pumps":self.pumps,"callback":callback})
+    }
     pub(super) fn model_unchanged(&self) -> Check {
         self.original
             .unchanged(self.app(), self.source.plugin_instance_id)

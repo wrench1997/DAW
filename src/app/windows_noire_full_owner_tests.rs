@@ -480,6 +480,112 @@ mod tests {
     }
 
     #[test]
+    fn full_owner_device_free_tick_reaches_real_exact_paused_timeline_and_late_commands() {
+        // No source/native/helper is constructed. Exercise the real App
+        // compiler, Timeline receipt state machine and callback, not a setter
+        // for generation, epoch, compiled graph or paused acceptance.
+        let mut owner = model_owner();
+        owner.app_mut().project = Project::blank();
+        owner.app_mut().transport_mode = TransportMode::Song;
+        let (engine, mut callback) = AudioEngine::test_engine_with_callback();
+        callback.enable_genuine_observation([0x51; 32]).unwrap();
+        owner.app_mut().audio = Some(engine);
+        owner.callback = Some(callback);
+        let session = owner.app().project_session;
+        assert!(
+            owner
+                .app_mut()
+                .audio
+                .as_mut()
+                .unwrap()
+                .set_project_session(session)
+        );
+        owner.app_mut().rebuild_tempo_map();
+        owner.app_mut().request_immediate_timeline_compile();
+        assert!(
+            !owner.paused(),
+            "an empty fallback is not an exact paused Timeline"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !owner.paused() {
+            owner
+                .tick(deadline)
+                .unwrap_or_else(|error| panic!("{error}: {}", owner.source_readiness_evidence()));
+            std::thread::yield_now();
+        }
+        let ready = owner.source_readiness_evidence();
+        assert_eq!(ready["exact_paused"], true);
+        assert!(ready["confirmed_identity"].is_array());
+        assert_eq!(ready["callback"]["paused_work_quiescent"], true);
+        assert_eq!(ready["timeline_compile_error"], Value::Null);
+        assert!(owner.app().running_generator_chains.is_empty());
+        assert!(owner.app().pending_generator_chains.is_empty());
+
+        // A later queued command is visible to the live snapshot even though
+        // no legacy transport barrier changes. Keep the existing pump gate.
+        let barrier = owner
+            .app()
+            .audio
+            .as_ref()
+            .unwrap()
+            .test_transport_request_id();
+        let command = mixer_control_commands(&owner.app().project)
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(owner.app_mut().audio.as_mut().unwrap().command(command));
+        assert_eq!(
+            owner
+                .app()
+                .audio
+                .as_ref()
+                .unwrap()
+                .test_transport_request_id(),
+            barrier
+        );
+        assert!(
+            owner
+                .callback()
+                .unwrap()
+                .genuine_snapshot()
+                .callback_work_pending()
+        );
+        let pumps = owner.pumps;
+        owner.tick(deadline).unwrap();
+        assert_eq!(owner.pumps, pumps + 1);
+        assert!(owner.paused());
+    }
+
+    #[test]
+    fn full_owner_readiness_diagnostics_keep_missing_identity_and_actual_errors_without_pumping() {
+        let mut owner = model_owner();
+        owner.app_mut().timeline_compile_error = Some("original compile failure".into());
+        owner.app_mut().timeline_audio_sync.last_error = Some("original sync failure".into());
+        let before = owner.pumps;
+        let absent = owner.source_readiness_evidence();
+        assert_eq!(absent["callback"], Value::Null);
+        assert_eq!(absent["confirmed_identity"], Value::Null);
+        assert_eq!(
+            absent["timeline_compile_error"]["text"],
+            "original compile failure"
+        );
+        assert_eq!(
+            absent["timeline_sync_error"]["text"],
+            "original sync failure"
+        );
+        let (engine, mut callback) = AudioEngine::test_engine_with_callback();
+        callback.enable_genuine_observation([0x52; 32]).unwrap();
+        owner.app_mut().audio = Some(engine);
+        owner.callback = Some(callback);
+        let observed = owner.source_readiness_evidence();
+        assert!(observed["callback"].is_object());
+        assert_eq!(observed["callback"]["generation"], Value::Null);
+        assert_eq!(observed["callback"]["paused_work_quiescent"], Value::Null);
+        assert_eq!(observed["exact_paused"], false);
+        assert_eq!(owner.pumps, before);
+    }
+
+    #[test]
     fn full_owner_pausing_keeps_user_history_dirty_flag_and_saved_path() {
         let mut owner = model_owner();
         let app = owner.app_mut();
