@@ -67,7 +67,7 @@ preserve the manual endpoint and the audible PCM/WAV prefix.
 
 ## Let an untrimmed Pattern clip follow its source
 
-**v14 candidate implemented; first execution found a numeric-cancel defect.
+**v14 candidate implemented; numeric-cancel repair passed, Clippy repair pending.
 Delivered03 does not include this policy.** New Draw/Paint Pattern placements default to
 **Follow Pattern**. Their width comes from the source Pattern's actual cycle,
 using the existing whole-bar/four-bar-block growth rules. Editing or importing
@@ -112,7 +112,14 @@ egui0.35 retains lost-focus for two frames; without clearing the draft, the
 release frame parsed the canceled text. The same regression now checks Escape
 press, release and idle separately, and retains Enter and actual click-away
 commit plus exact Undo. Its repaired source has passed static checks; executable
-reruns, new captures and subsequent build/Clippy gates have not run.
+reruns passed all12 affected Follow/numeric/text-focus cases at `b65e14a`.
+The explicit original Saved13 read-only/private-copy round-trip also passed
+through format14 with source bytes and complete music/state payload preserved;
+it does not establish NOIRE sound restoration. Strict Clippy then failed because
+`draw_pattern_preview` had8 arguments (limit7). The preview now takes the existing Clip reference instead of two related
+placement scalars, reusing its source-clock helper without relaxing the lint.
+The repair has passed static checks; no-default, matching builds and new captures
+have not run.
 
 The serial whole-suite process peaked at14.14GiB private memory/32.80GiB global
 used RAM and triggered the

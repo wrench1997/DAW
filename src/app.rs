@@ -23064,8 +23064,7 @@ impl CitrusApp {
                         .patterns
                         .iter()
                         .find(|pattern| pattern.id == clip.pattern_id),
-                    clip.source_offset,
-                    clip.pattern_length_policy.is_some(),
+                    clip,
                 ),
             }
             if show_fade_controls {
@@ -31418,8 +31417,7 @@ fn draw_pattern_preview(
     source_start_beat: f32,
     beat_width: f32,
     pattern: Option<&Pattern>,
-    clip_source_offset: f32,
-    modern_pattern_clock: bool,
+    clip: &Clip,
 ) {
     if !source_start_beat.is_finite() || !beat_width.is_finite() || beat_width <= 0.0 {
         return;
@@ -31462,11 +31460,7 @@ fn draw_pattern_preview(
     // notes retain their legacy minimum and share the extended phrase period
     // with callback playback and builtin export.
     let minimum_period = TimelineCompileOptions::default().legacy_piano_period_beats;
-    let note_period = if modern_pattern_clock {
-        pattern.content_period_beats()
-    } else {
-        pattern.piano_period_beats(minimum_period)
-    } as f32;
+    let note_period = clip.piano_period_beats(pattern, minimum_period) as f32;
     let step_period = step_count as f32 / 4.0;
     let end = source_start_beat + rect.width() / beat_width;
     let first_cycle = (source_start_beat / note_period).floor() as i64;
@@ -31492,7 +31486,7 @@ fn draw_pattern_preview(
                 continue;
             }
             let start = offset + note.start;
-            if start < clip_source_offset
+            if start < clip.source_offset
                 || start + note.length <= source_start_beat
                 || start >= end
             {
@@ -31525,7 +31519,7 @@ fn draw_pattern_preview(
                         continue;
                     }
                     let start = offset + step as f32 * 0.25;
-                    if start < source_start_beat || start < clip_source_offset || start >= end {
+                    if start < source_start_beat || start < clip.source_offset || start >= end {
                         continue;
                     }
                     let x = rect.left() + (start - source_start_beat) * beat_width;
@@ -32009,6 +32003,8 @@ mod playback_tests {
         let color = theme::BLUE;
         let event_color = theme::mix(color, Color32::WHITE, 0.54);
         let rectangles = |pattern: Option<&Pattern>, start: f32, width: f32| {
+            let mut clip = Project::default().clips[0].clone();
+            clip.source_offset = start;
             let ctx = egui::Context::default();
             let output = ctx.run_ui(egui::RawInput::default(), |ui| {
                 draw_pattern_preview(
@@ -32018,8 +32014,7 @@ mod playback_tests {
                     start,
                     20.0,
                     pattern,
-                    start,
-                    false,
+                    &clip,
                 );
             });
             output.shapes.iter().filter(|shape| matches!(&shape.shape, egui::Shape::Rect(rect) if rect.fill == event_color)).count()
