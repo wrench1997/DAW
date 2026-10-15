@@ -284,10 +284,12 @@ failure lacks those quantities, so its exact cause remains unproven. Source84
 forced-App-drop test. Strict all-feature/all-target Clippy, both bins, harness/
 protocol, fixture and no-default-feature gates passed. Quality still failed only
 independent native paint's before/after PrintWindow capture, while native control,
-state, lifecycle and cleanup passed. Preview's344 harness cases passed; its
-validate/build/package step is still running, with no final root/release/ZIP
-claim. Preserve `ci-42bbf9e-windows-quality-01.log` and Source84 quality actual
-terminal JSON. No repaired native NOIRE export has run.
+state, lifecycle and cleanup passed. Preview actually succeeded:344 harness
+cases, the same2381 root passes/12 ignored, strict Clippy, no-default-feature
+check, static-CRT release, final ZIP integrity and extracted sanitized-PATH
+helper smoke passed. No build artifact was uploaded. Preserve both
+`ci-42bbf9e-windows-{quality,preview}-01.log` and Source84 actual terminal JSON.
+No repaired native NOIRE export has run.
 
 Source85 adds two test-only actual App::ui keyboard-entry cases: Song Length
 64→16 and Release Tail0→3000. They use the real TextEdit focus, Ctrl+A,
@@ -295,9 +297,8 @@ individual digit key/text events and Enter, then inspect the actual project or
 Review options and retain arrangement/playback side-effect checks. Neither
 AccessKit SetValue nor direct target-field assignment performs the edit. No
 production input control changed and no ordinary-keyboard defect is established.
-Formatting/diff pass; Cargo, Clippy and native entry remain untested. This local
-commit is held until the live Source84 preview ends, avoiding a new push that
-would cancel its evidence.
+Formatting/diff pass; Cargo, Clippy and native entry remain untested. Source84's
+preview actually ended before pushing this candidate for cloud execution.
 
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,
