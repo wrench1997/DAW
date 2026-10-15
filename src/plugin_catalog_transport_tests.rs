@@ -61,7 +61,13 @@ fn production_catalog_sends_only_factory_request_then_actual_healthy_shutdown() 
 #[test]
 fn production_catalog_rejects_wrong_reply_failure_exit_and_forced_kill_without_load_retry() {
     let _guard = super::super::helper_transport_test_lock();
-    for scenario in 0..5 {
+    for (scenario, label) in [
+        (0, "reported-factory-error"),
+        (1, "wrong-reply-shape"),
+        (2, "nonzero-exit-after-shutdown"),
+        (3, "forced-kill-after-shutdown"),
+        (4, "wrong-requested-path"),
+    ] {
         let mut response = factory_response();
         let ending = match scenario {
             0 => {
@@ -85,6 +91,7 @@ fn production_catalog_rejects_wrong_reply_failure_exit_and_forced_kill_without_l
             scenario == 2 || scenario == 3,
             ending,
         ));
+        let started = Instant::now();
         let failure = match probe_command(
             Path::new("fixture-catalog.vst3"),
             &mut command,
@@ -93,24 +100,90 @@ fn production_catalog_rejects_wrong_reply_failure_exit_and_forced_kill_without_l
             ScanRequest::FactoryCatalog,
         ) {
             Err(error) => error,
-            Ok(_) => panic!("invalid catalog helper admitted scenario {scenario}"),
+            Ok(_) => panic!("invalid catalog helper admitted scenario {scenario} ({label})"),
         };
-        let receipt = failure.lifecycle.unwrap();
-        assert!(receipt.reaped);
+        // Keep the actual primary rejection and every independent cleanup field
+        // beside the failing scenario. A reap alone does not identify which
+        // healthy-retirement predicate failed on a loaded CI runner.
+        let evidence = serde_json::json!({
+            "scenario": scenario,
+            "label": label,
+            "elapsed_ms": started.elapsed().as_millis(),
+            "failure": failure.message,
+            "stopped": failure.stopped,
+            "lifecycle": failure.lifecycle,
+        });
+        eprintln!("catalog-retirement-attempt {evidence}");
+        let receipt = failure
+            .lifecycle
+            .as_ref()
+            .unwrap_or_else(|| panic!("catalog failure lost its actual lifecycle: {evidence}"));
+        assert!(receipt.reaped, "{evidence}");
         if scenario == 2 || scenario == 3 {
-            assert!(matches!(
-                failure.stopped.unwrap().kind,
-                ScanStopKind::UncleanRetirement
-            ));
-            assert!(!receipt.healthy_retirement());
+            assert!(
+                matches!(
+                    failure.stopped.as_ref().map(|stopped| &stopped.kind),
+                    Some(ScanStopKind::UncleanRetirement)
+                ),
+                "{evidence}"
+            );
+            assert!(!receipt.healthy_retirement(), "{evidence}");
         } else {
-            assert!(receipt.healthy_retirement());
-            assert!(receipt.load_failure.is_some());
+            assert!(receipt.healthy_retirement(), "{evidence}");
+            assert!(receipt.load_failure.is_some(), "{evidence}");
         }
         if scenario == 3 {
-            assert!(receipt.kill_requested);
+            assert!(receipt.kill_requested, "{evidence}");
         }
     }
+}
+
+#[test]
+fn production_catalog_terminal_reply_with_delayed_exit_stays_failed_and_reaped() {
+    let _guard = super::super::helper_transport_test_lock();
+    let mut command = protocol_child(&factory_script(
+        serde_json::json!({"Error":{"message":"factory refused before delayed exit"}}),
+        false,
+        "time.sleep(30)",
+    ));
+    let started = Instant::now();
+    let failure = match probe_command(
+        Path::new("fixture-catalog.vst3"),
+        &mut command,
+        Duration::from_secs(3),
+        &ScanControl::new(),
+        ScanRequest::FactoryCatalog,
+    ) {
+        Err(failure) => failure,
+        Ok(_) => panic!("terminal reply followed by delayed exit admitted a catalog"),
+    };
+    let evidence = serde_json::json!({
+        "scenario": "reported-factory-error-delayed-exit",
+        "elapsed_ms": started.elapsed().as_millis(),
+        "failure": failure.message,
+        "stopped": failure.stopped,
+        "lifecycle": failure.lifecycle,
+    });
+    eprintln!("catalog-retirement-attempt {evidence}");
+    assert!(
+        matches!(
+            failure.stopped.as_ref().map(|stopped| &stopped.kind),
+            Some(ScanStopKind::UncleanRetirement)
+        ),
+        "{evidence}"
+    );
+    let receipt = failure
+        .lifecycle
+        .as_ref()
+        .unwrap_or_else(|| panic!("terminal failure lost its actual lifecycle: {evidence}"));
+    assert!(receipt.reaped, "{evidence}");
+    assert!(receipt.kill_requested, "{evidence}");
+    assert!(!receipt.healthy_retirement(), "{evidence}");
+    assert_eq!(
+        receipt.load_failure.as_deref(),
+        Some("OperationRejected: factory refused before delayed exit"),
+        "{evidence}"
+    );
 }
 
 #[test]

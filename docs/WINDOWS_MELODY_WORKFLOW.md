@@ -962,6 +962,18 @@ NOIRE, and no extra pump, placeholder owner, fault clearing or larger deadline
 was added. NI/audio verification is deferred while the user tests the independent
 copy; software gates may continue without replacing or stopping that copy.
 
+The user has authorized the separate catalog-retirement repair. Its current
+diagnostic candidate keeps all five original scenario and health/failure/kill/
+reap assertions, adding actual scenario/elapsed/primary/stopped/full-lifecycle
+output. A new real child returns Error, waits for EOF, then delays exit; it must
+be killed and reaped as UncleanRetirement, never healthy. The catalog module has5
+tests. Terminal's100ms natural-exit preference differs from healthy Shutdown's
+two seconds, and the existing Python fixture still performs interpreter teardown;
+the missing historical receipt prevents choosing that as the old failure cause.
+Production/vendor/budgets are unchanged. Formatting/diff passed; one actual
+catalog5 gate is next, followed by repair on its evidence rather than retrying to
+green. Keep `catalog-retirement-diagnostics-01/`.
+
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
 The native harness now probes the OS, current process session, WTS connection
