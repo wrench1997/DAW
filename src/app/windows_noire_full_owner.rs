@@ -524,13 +524,7 @@ impl FullParent {
         )?;
         self.app_mut().rebuild_tempo_map();
         self.app_mut().request_immediate_timeline_compile();
-        for command in mixer_control_commands(&self.app().project) {
-            require(
-                self.app_mut().audio.as_mut().unwrap().command(command),
-                "actual complete mixer command admission failed",
-            )?;
-            self.tick(deadline)?;
-        }
+        self.service_initial_mixer_commands(deadline)?;
         let source = &self.source;
         let app = self.app.as_deref_mut().unwrap();
         register_and_enqueue_source_intent(
@@ -542,6 +536,25 @@ impl FullParent {
             },
         )?;
         self.model_unchanged()
+    }
+    fn service_initial_mixer_commands(&mut self, deadline: Instant) -> Check {
+        // The complete Project already names its generator, but no pending
+        // source exists yet. A full Timeline poll here would permanently fault
+        // that route as absent. Drain only these real mixer commands first:
+        // enqueueing an unprepared source ahead of them can block the 64-slot
+        // callback queue. Native source admission stays AFTER this prelude.
+        for command in mixer_control_commands(&self.app().project) {
+            require(
+                self.app_mut().audio.as_mut().unwrap().command(command),
+                "actual complete mixer command admission failed",
+            )?;
+            require(
+                Instant::now() < deadline && self.pumps < MAX_PUMPS,
+                "complete source polling deadline or callback pump bound exceeded",
+            )?;
+            self.pump_callback_work()?;
+        }
+        Ok(())
     }
     pub(super) fn wait_source_initialization(
         &mut self,
@@ -602,6 +615,11 @@ impl FullParent {
         app.poll_timeline_audio_runtime(&ctx);
         app.drive_clip_render_job();
         app.drive_whole_song_export();
+        self.pump_callback_work()
+    }
+    /// The unchanged live-work pump decision shared by the mixer-only prelude
+    /// and full control polls. Worker-only settlement never grants a new pump.
+    fn pump_callback_work(&mut self) -> Check {
         let callback = self
             .callback
             .as_mut()

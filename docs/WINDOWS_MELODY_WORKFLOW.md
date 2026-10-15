@@ -5,6 +5,23 @@ Updated: 2026-10-15 (Asia/Shanghai). Development branch:
 Citrus Studio remains a development DAW. The complete melody workflow is not yet qualified.
 This document separates implemented behavior, actual local acceptance, failures and untested work.
 
+## Independent local test copy (2026-10-15)
+
+The user's separate local preview is `D:\DAW-Preview\Citrus-Studio-20261015-01`.
+The desktop shortcut **Citrus Studio 独立测试版** runs `Start-Citrus.cmd`, which
+sets the existing absolute `CITRUS_STUDIO_DATA_DIR` to this copy's `UserData`.
+Window/audio preferences, catalog, autosave and recordings are separate; test
+projects can be saved under `Projects`. Direct EXE launch would instead use the
+default profile, so use the launcher. Actual Source102 main/helper binaries were
+copied as ordinary independent files; later Cargo builds cannot overwrite them.
+The copied helper passed the existing five-second no-plugin protocol smoke with
+actual exit0. The main GUI was not started by automation; user acceptance is
+pending. This is a same-machine MSVC debug preview, not the static-CRT release
+package; local VC/UCRT is already installed. No plugin, sample library, user work
+or system DLL is included. Shared physical devices and Kontakt settings remain
+shared. Both threads were notified to avoid CU/NI/audio verification while the
+user tests; source work and resource-safe compilation can continue.
+
 The first generic-base restore candidate compiled but failed existing history checks.
 Ordinary Open formerly sent saved bases once through a 64-entry untagged admin
 queue; rejected enqueues were not retained, yet SlotReady could publish Loaded.
@@ -897,9 +914,53 @@ diagnostic failure cannot skip cleanup. Two new real plugin-free controls cover
 compile-to-exact-paused callback plus a late command with the same legacy barrier,
 and missing identity/original error retention without pumping. Original FullOwner16
 inputs, source-ready/pump predicates and40s/120s/35s budgets stay unchanged.
-Formatting/diff passed; the new2, strict Clippy and native attribution are unrun.
-Keep `source-callback-epoch-attribution-01/`. The actual native cause and its
-correction remain to be established from these operands, not a guessed extra call.
+Frozen `79a32f6` actually passed both new exacts, strict Clippy, test artifact and
+matching bins in Source102 (runner20432/exec93994 exit0; all18 held children
+terminated). The single native attribution attempt then failed101/56.99s before
+any capture, clone or WAV. Its actual phase was Faulted; desired/compiled/source
+generation2 and fingerprints matched, with no compile error. The retained sync
+error was `Compiled generator route is not callback-ready: Generator channel 1 instance 1 has no callback-confirmed Running endpoint`.
+Finally running1/pending0 and worker settlement were observed, but callback
+generation, exact graph and confirmed Timeline identity were still absent.
+FullParent's initial compile/mixer pumping before source-pending admission fits
+this latched early missing-route failure; the owner is repairing that real
+Pending-to-callback-Running order, not clearing all faults or raising budgets.
+Helper143552 naturally exited0; test105916, runner133104/exec95516 and all observed
+work terminated without forced kill or budget violation. Fresh heavy count0 at
+10:41:39Z preceded peer handback. Preserve `source102-local-gates-01-*`,
+`bin-source102-sdk-b-short-01`, `source102-noire-short-native-round01/`,
+`source102-native-short-resource-handback-01.json` and
+`source-callback-epoch-attribution-01/`.
+
+Pushed `7ab716a` quality run38719646323 actually completed success:2352 App +52
+helper +13 protocol =2417 root passes/13 ignored,32 factory, SDK4+15, strict
+Clippy/both bins,14 helper and80 editor harness, fixture/no-default-feature and
+actual native PrintWindow all passed. Linux SDK15/Unix1 passed. The ignored NI
+entry was not run and is not qualified by cloud green. Preserve
+`ci-7ab716a-{windows-quality,linux-helper-readiness}-01.log` and
+`source101-quality-actual-terminal-01.json`. Preview run38719646340 also actually
+completed success:363 harness cases=351 PASS/12 SKIPPED (four Unix conditions and
+eight private Saved13-input exclusions, not a GUI skip), SDK4+15, the same2417
+root/13 ignored, strict Clippy/no-default-feature, static-CRT release8m10s, final
+ZIP validation and extracted sanitized-PATH helper smoke passed. Upload was not
+enabled. Preserve `ci-7ab716a-windows-preview-01.log` and
+`source101-preview-actual-terminal-01.json`. These checks predate79a attribution
+and the pending ordering repair.
+
+The ordering repair is now source-frozen in
+`source-admission-mixer-order-fix-01/`: keep mixer initialization before native
+load, but drain its130 actual commands through the unchanged callback-work
+service without polling Timeline controls before a real Pending source exists.
+Then perform the original one-shot source admission and normal full ticks.
+Successful ordinary GUI Open already registers sources synchronously before
+periodic polling; its strict production route gate is unchanged. Real compiler
+regressions reproduce the old sticky missing-owner fault and exercise a real
+held-prepare worker through Pending, actual callback Installed, exact graph and
+paused acceptance. FullOwner now has20 tests. Replay/format/diff passed; Rust,
+Clippy and corrected NI execution are unrun. No-source mixer pumps cannot warm
+NOIRE, and no extra pump, placeholder owner, fault clearing or larger deadline
+was added. NI/audio verification is deferred while the user tests the independent
+copy; software gates may continue without replacing or stopping that copy.
 
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
@@ -961,7 +1022,8 @@ passed. Fresh heavy processes were zero before handback. Keep
 Final code `9bb3110` cloud outcomes actually completed:
 
 - [Preview](https://github.com/wrench1997/DAW/actions/runs/38703209158): SUCCESS.
-  363 Python cases (four existing platform skips), SDK4+15, App2333+helper52+
+  363 Python cases=351 PASS/12 SKIPPED (four Unix conditions and eight private
+  Saved13-input exclusions), SDK4+15, App2333+helper52+
   protocol13 =2398 root passes/12 ignored, strict Clippy, no-default-feature,
   static-CRT release (8m11s), final ZIP integrity and extracted sanitized-PATH
   helper smoke passed. Upload was skipped; no artifact was published.

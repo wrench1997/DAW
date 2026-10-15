@@ -3,8 +3,12 @@ mod tests {
     use super::*;
     use crate::{
         automation::{AutomationLane, AutomationTarget},
+        instrument_bounce::{BounceAudioBus, BouncePluginMetadata, BouncePluginState},
         mixer_graph::MASTER_MIXER_TRACK_ID,
         model::{Clip, Pattern, PluginInstance, ProjectAutomation},
+        plugins::plugin_runtime::{
+            LoadedVst3Identity, PluginPrepareConfig, test_capture_source::TestCaptureSource,
+        },
     };
 
     fn synthetic_state() -> Vec<u8> {
@@ -479,8 +483,335 @@ mod tests {
         }
     }
 
+    fn compiled_assigned_model_owner(token: [u8; 32]) -> FullParent {
+        let mut owner = model_owner();
+        let (engine, mut callback) = AudioEngine::test_engine_with_callback();
+        callback.enable_genuine_observation(token).unwrap();
+        owner.app_mut().audio = Some(engine);
+        owner.callback = Some(callback);
+        let session = owner.app().project_session;
+        assert!(
+            owner
+                .app_mut()
+                .audio
+                .as_mut()
+                .unwrap()
+                .set_project_session(session)
+        );
+        owner.app_mut().transport_mode = TransportMode::Song;
+        owner.app_mut().rebuild_tempo_map();
+        owner.app_mut().request_immediate_timeline_compile();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // Receive a real compile result without issuing any Timeline/runtime
+        // poll yet. This deterministically exposes the former pre-enqueue race.
+        while owner.app().timeline_compiled_generation
+            != Some(owner.app().timeline_desired_generation)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "{}",
+                owner.source_readiness_evidence()
+            );
+            let ctx = owner.ctx.clone();
+            owner.app_mut().poll_timeline_compile(&ctx);
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            owner.app().timeline_audio_sync.phase,
+            TimelineAudioSyncPhase::InstallReady
+        );
+        assert!(owner.app().pending_generator_chains.is_empty());
+        assert!(owner.app().running_generator_chains.is_empty());
+        owner
+    }
+
+    // Own the actual deterministic worker through assertion unwind as well.
+    // This is the existing FullParent retained-guard shutdown policy, not an
+    // alternate native host or a fake Pending/Running/Join receipt.
+    struct PreparedModelOwner {
+        parent: RetainedFullParent,
+        source: Option<TestCaptureSource>,
+    }
+    impl Drop for PreparedModelOwner {
+        fn drop(&mut self) {
+            if let Some(source) = &self.source {
+                source.release_gates();
+            }
+            self.parent.callback.take();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut failure = None;
+            loop {
+                let app = self.parent.app_mut();
+                let mut pending = false;
+                for chain in app.pending_generator_chains.values_mut() {
+                    pending |= full_poll_guard(&mut chain.guard, &mut failure);
+                }
+                for chain in app.running_generator_chains.values_mut() {
+                    pending |= full_poll_guard(&mut chain.guard, &mut failure);
+                }
+                for guard in &mut app.retired_fresh_source_candidates {
+                    pending |= full_poll_guard(guard, &mut failure);
+                }
+                if !pending {
+                    self.parent.joins_complete = true;
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    // RetainedFullParent::drop keeps the same unjoined owner.
+                    // Do not detach a real worker even during assertion unwind.
+                    eprintln!("model source shutdown remains pending; retaining FullParent");
+                    CitrusApp::mark_fixture_cleanup_failed_for_test();
+                    assert!(
+                        std::thread::panicking(),
+                        "model source did not complete its actual retained join"
+                    );
+                    return;
+                }
+                std::thread::yield_now();
+            }
+            if let Some(reason) = failure {
+                CitrusApp::mark_fixture_cleanup_failed_for_test();
+                assert!(
+                    std::thread::panicking(),
+                    "actual model source shutdown failed: {reason}"
+                );
+                eprintln!("actual model source shutdown failed: {reason}");
+            }
+        }
+    }
+
+    #[test]
+    fn full_owner_timeline_poll_before_source_admission_reproduces_sticky_route_fault() {
+        let _admission = crate::app::clip_render_job::tests::fixture_admission();
+        let mut owner = compiled_assigned_model_owner([0x53; 32]);
+        let generation = owner.app().timeline_desired_generation;
+        // This is the old full mixer tick: a compiled assigned source has no
+        // actual Pending owner yet. The production missing-owner gate MUST fail.
+        owner.tick(Instant::now() + Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            owner.app().timeline_audio_sync.phase,
+            TimelineAudioSyncPhase::Faulted
+        );
+        assert!(
+            owner
+                .app()
+                .timeline_audio_sync
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("has no callback-confirmed Running endpoint")
+        );
+        assert!(
+            owner
+                .app()
+                .audio
+                .as_ref()
+                .unwrap()
+                .confirmed_timeline_identity()
+                .is_none()
+        );
+        // Session status changes are not a musical fingerprint change and
+        // cannot silently retry the already faulted graph.
+        let instance = owner.source.plugin_instance_id;
+        owner
+            .app_mut()
+            .project
+            .plugin_instances
+            .iter_mut()
+            .find(|item| item.id == instance)
+            .unwrap()
+            .runtime_status = PluginRuntimeStatus::Loaded;
+        owner.app_mut().request_immediate_timeline_compile();
+        owner.tick(Instant::now() + Duration::from_secs(5)).unwrap();
+        assert_eq!(owner.app().timeline_desired_generation, generation);
+        assert_eq!(
+            owner.app().timeline_audio_sync.phase,
+            TimelineAudioSyncPhase::Faulted
+        );
+        assert!(!owner.paused());
+    }
+
+    #[test]
+    fn full_owner_mixer_prelude_then_real_pending_source_preserves_delayed_exact_activation() {
+        let _admission = crate::app::clip_render_job::tests::fixture_admission();
+        let mut owner = compiled_assigned_model_owner([0x54; 32]);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let command_count = mixer_control_commands(&owner.app().project).len();
+        assert!(
+            command_count > 64,
+            "the fixture must exceed the callback ring capacity"
+        );
+        let pumps = owner.pumps;
+        // Actual initializer uses this same mixer-only prelude. No source has
+        // been constructed, so these unchanged callback pumps cannot warm it up.
+        owner.service_initial_mixer_commands(deadline).unwrap();
+        assert_eq!(owner.pumps - pumps, command_count);
+        assert_eq!(
+            owner.app().timeline_audio_sync.phase,
+            TimelineAudioSyncPhase::InstallReady
+        );
+        assert_eq!(
+            owner
+                .callback()
+                .unwrap()
+                .genuine_snapshot()
+                .pending_audio_commands,
+            0
+        );
+        assert!(
+            owner
+                .callback()
+                .unwrap()
+                .genuine_snapshot()
+                .endpoints
+                .is_empty()
+        );
+        assert!(!owner.paused());
+        let before = FullHistoryImage::take(owner.app(), owner.source.plugin_instance_id).unwrap();
+        owner.initialization_requested = true;
+        let mut fixture = PreparedModelOwner {
+            parent: RetainedFullParent {
+                owner: Some(ManuallyDrop::new(owner)),
+            },
+            source: None,
+        };
+        let id = fixture.parent.source.plugin_instance_id;
+        let instance = fixture
+            .parent
+            .app()
+            .project
+            .plugin_instances
+            .iter()
+            .find(|item| item.id == id)
+            .unwrap();
+        let state = BouncePluginState {
+            metadata: BouncePluginMetadata {
+                class_uid: KONTAKT_UID.into(),
+                version: "8.4.1".into(),
+                name: "Synthetic held source, never an SDK plug-in".into(),
+                category: "Instrument".into(),
+                event_input_buses: vec![(16, true, Some(true))],
+                event_output_buses: vec![],
+                input_buses: vec![],
+                output_buses: vec![BounceAudioBus::new(2, true, Some(true))],
+                latency_samples: 0,
+                tail_samples: 0,
+            },
+            opaque_state: instance.opaque_state.clone(),
+            parameter_bases: instance.parameters.clone(),
+            native_generation: 2,
+            native_dirty_revision: 0,
+        };
+        let identity = LoadedVst3Identity::test_fixture(
+            instance.path.clone(),
+            KONTAKT_UID,
+            "8.4.1",
+            "Instrument",
+            true,
+            false,
+        );
+        let (chain, source) = TestCaptureSource::new_with_loaded_identity(
+            id,
+            state,
+            PluginPrepareConfig {
+                sample_rate: 48_000.0,
+                max_block_frames: MAX_MIXER_BLOCK_FRAMES,
+            },
+            identity,
+            true,
+        )
+        .unwrap();
+        let worker = chain.guard.genuine_worker_id();
+        fixture.source = Some(source);
+        let intent =
+            requested_saved_source_intent(&fixture.parent.app().project, &fixture.parent.source)
+                .unwrap();
+        let parent = &mut *fixture.parent;
+        register_and_enqueue_source_intent(
+            parent.app.as_deref_mut().unwrap(),
+            &parent.source,
+            intent,
+            |app, channel, candidate, previous| {
+                app.queue_channel_generator_candidate_prepared(
+                    channel,
+                    candidate,
+                    previous,
+                    Some(chain),
+                )
+            },
+        )
+        .unwrap();
+        let channel = fixture.parent.source.channel_id;
+        assert_eq!(
+            fixture.parent.app().pending_generator_chains[&channel]
+                .guard
+                .genuine_worker_id(),
+            worker
+        );
+        let timeline = Arc::clone(
+            &fixture
+                .parent
+                .app()
+                .timeline_audio_source
+                .as_ref()
+                .unwrap()
+                .timeline,
+        );
+        for _ in 0..3 {
+            fixture.parent.tick(deadline).unwrap();
+            assert_eq!(
+                fixture
+                    .parent
+                    .app()
+                    .timeline_generator_routes_state(&timeline),
+                RequiredGeneratorRouteState::Pending {
+                    channel_id: channel,
+                    plugin_instance_id: id
+                }
+            );
+            assert!(fixture.parent.app().running_generator_chains.is_empty());
+            assert_eq!(
+                fixture.parent.app().timeline_audio_sync.phase,
+                TimelineAudioSyncPhase::InstallReady
+            );
+            assert!(!fixture.parent.paused(), "Pending is not ready");
+            assert_eq!(fixture.source.as_ref().unwrap().process_count(), 0);
+        }
+        fixture.source.as_ref().unwrap().release_prepare();
+        while !fixture.parent.paused() {
+            fixture.parent.tick(deadline).unwrap_or_else(|error| {
+                panic!("{error}: {}", fixture.parent.source_readiness_evidence())
+            });
+            std::thread::yield_now();
+        }
+        assert!(fixture.parent.app().pending_generator_chains.is_empty());
+        assert_eq!(
+            fixture.parent.app().running_generator_chains[&channel]
+                .guard
+                .genuine_worker_id(),
+            worker
+        );
+        assert_eq!(
+            fixture
+                .parent
+                .app()
+                .timeline_generator_routes_state(&timeline),
+            RequiredGeneratorRouteState::Ready
+        );
+        assert!(
+            fixture
+                .parent
+                .callback()
+                .unwrap()
+                .genuine_snapshot()
+                .graph_binding_exact
+        );
+        before.unchanged(fixture.parent.app(), id).unwrap();
+    }
+
     #[test]
     fn full_owner_device_free_tick_reaches_real_exact_paused_timeline_and_late_commands() {
+        let _admission = crate::app::clip_render_job::tests::fixture_admission();
         // No source/native/helper is constructed. Exercise the real App
         // compiler, Timeline receipt state machine and callback, not a setter
         // for generation, epoch, compiled graph or paused acceptance.
