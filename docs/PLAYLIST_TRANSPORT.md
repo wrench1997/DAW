@@ -1,10 +1,10 @@
 # Drag the playhead; let the arrangement set its end
 
-**Source candidate, 2026-10-15.** Source107 passed the scoped CPU input checks and
-12 genuine offscreen UI cases. Its export gate exposed two short-manual-range
-Audio split dependencies; the source-edit clock, stale mode toast and exposed
-Playlist capture refinements below await their next gates. The user's existing
-standalone preview is unchanged.
+**Locally verified, 2026-10-15; source `885306f`.** Scoped input, persistence,
+Timeline/WAV, audio-split, strict Clippy and actual WGPU frame checks passed.
+Desktop **Citrus Studio 新版测试02** starts the separate copy at
+`D:\DAW-Preview\Citrus-Studio-20261015-02\Start-Citrus.cmd`;01 and user works are
+unchanged. Cloud checks for this candidate and native02/NOIRE acceptance remain.
 
 ## Position and view are separate from music
 
@@ -97,5 +97,8 @@ it creates no native window or audio device. GPU availability must be coordinate
 The renderer writes genuine PPM readbacks; Pillow can convert those pixels
 losslessly to PNG for inspection without changing the renderer.
 Without that environment variable the same tests exercise actual egui input on
-CPU. Native desktop, soundcard/NOIRE and a newly copied preview remain untested
-for this source candidate.
+CPU. The24 new nonignored regressions, explicit Saved13 read-only/private-copy
+round-trip,12 actual offscreen inputs and final mode/layout frame refinements
+passed. Root inspected the four final frames. The copied preview's no-plugin
+helper smoke passed; its main GUI/native desktop/soundcard/NOIRE remain untested
+by the agent. Current sources preserve original failure evidence in the workflow record.

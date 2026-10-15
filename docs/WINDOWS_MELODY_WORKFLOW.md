@@ -7,23 +7,27 @@ This document separates implemented behavior, actual local acceptance, failures 
 
 ## Independent local test copy (2026-10-15)
 
-The user's separate local preview is `D:\DAW-Preview\Citrus-Studio-20261015-01`.
-The desktop shortcut **Citrus Studio 独立测试版** runs `Start-Citrus.cmd`, which
-sets the existing absolute `CITRUS_STUDIO_DATA_DIR` to this copy's `UserData`.
-Window/audio preferences, catalog, autosave and recordings are separate; test
-projects can be saved under `Projects`. Direct EXE launch would instead use the
-default profile, so use the launcher. Actual Source102 main/helper binaries were
-copied as ordinary independent files; later Cargo builds cannot overwrite them.
-The copied helper passed the existing five-second no-plugin protocol smoke with
-actual exit0. The user has started the GUI and reported missing continuous
-Playlist seeking, content-derived SONG length and clear SONG/PAT feedback;
-these are assigned for implementation, not accepted as finished. Root did not
-launch or stop the user's GUI. This is a same-machine MSVC debug preview, not the static-CRT release
-package; local VC/UCRT is already installed. No plugin, sample library, user work
-or system DLL is included. Shared physical devices and Kontakt settings remain
-shared. Root continues to avoid CU/NI/audio verification while the user tests.
-The peer currently has its user's authority to operate VK3D's UI; background
-CPU windows remain separately coordinated. Source work can continue.
+Current separate preview: `D:\DAW-Preview\Citrus-Studio-20261015-02`.
+Desktop **Citrus Studio 新版测试02** runs `Start-Citrus.cmd`, not the EXE directly.
+The launcher sets the existing `CITRUS_STUDIO_DATA_DIR` to this copy's `UserData`;
+window/audio preferences, catalog, autosave and recordings are separate. Save
+test projects under `Projects`. New saves are Project13, unreadable by01, so use
+Save As on old works. Select the previously heard iCON output
+**扬声器 (2- CB4ND HW 1/2)** in this fresh profile.
+
+Actual Source111/885306f main/helper were copied as independent ordinary files;
+Cargo cannot overwrite them. Copied helper protocol smoke exited0/reaped with
+no plugin. Root did not start main GUI/audio/NI. This is same-machine MSVC debug
+with this PC's installed VC/UCRT, not the static-CRT release; no plugin, library,
+user work or system DLL is included. Physical devices/Kontakt settings still
+share the machine. Native02 use/NOIRE acceptance remains pending. Root continues
+only code/Git/cloud work while the user tests; desktop/GPU operations coordinate
+with the peer.
+
+Historical01/Source102 remains at `D:\DAW-Preview\Citrus-Studio-20261015-01`, with
+its shortcut/profile/projects unchanged. The user used01 and reported the
+Playlist/PAT/SONG issues;02 contains the resulting locally verified repairs.
+Build-Info/README/Helper-Smoke records accompany each copy.
 
 The first generic-base restore candidate compiled but failed existing history checks.
 Ordinary Open formerly sent saved bases once through a 64-entry untagged admin
@@ -1012,181 +1016,67 @@ peaked at3.809/25.517GiB. The user's independent preview was never adopted or
 stopped. NI/CU/audio were not run. Keep `source104-local-gates-01-*` and
 `source104-local-resource-handback-01.json`.
 
-New user acceptance issues are assigned to a separate Playlist/transport owner:
-continuous ruler/playhead dragging, content-derived SONG end distinct from view
-zoom, and visible PAT/current-Pattern versus SONG-arrangement feedback backed by
-actual playback semantics. Existing trimmed Clips and explicit loop/export
-ranges must remain usable. Implementation/acceptance is pending; the user's
-running independent copy is not overwritten.
+### Playlist transport and AUTO end — local acceptance (2026-10-15)
 
-Pushed `233f6f0` quality run38725986812 actually failed at the early retained
-factory gate:31 passed/1 failed. The attempt-seal's first ProbeFactory reached
-its unchanged three-second budget with Deadline/MayHaveApplied (spawn11.7158ms,
-exchange3.0066879s). Cleanup actually killed/reaped exit1, with no pipe/wait/kill
-error. Existing stderr phase markers were absent from the failure diagnostic;
-the cause is unknown. A separate fixture owner is investigating the actual
-startup/transport/diagnostic path without increasing deadlines or suppressing
-failure. Later root/catalog/Clippy/build/PrintWindow gates did not run. Linux
-readiness succeeded; preview run38725986508 is still running. Preserve
-`ci-233f6f0-windows-quality-01.log` and
-`source104-quality-{run,jobs}-actual-terminal-01.json`.
+Source `885306f` completes local scoped acceptance: green PAT/orange SONG, current
+Pattern and actual scope in the chooser/caption/title/ruler; continuous held ruler
+seek isolated from Draw; new UI songs use content-derived AUTO. Playback,
+Timeline and supported export share the endpoint. View1/4/8 bars/FIT does not
+limit duration. Existing Clip trims, Manual ranges and old Draw/import/record
+extension contracts remain;4096 beats is an editing/resource quota. Project13
+prevents older builds silently ignoring AUTO. See [usage](PLAYLIST_TRANSPORT.md).
 
-Playlist candidate02 is now source-frozen: continuous ruler seek isolated from
-Draw; content-derived AUTO for new UI projects, one endpoint for playback/
-Timeline/supported export; visible green PAT/orange SONG, selected Pattern and
-actual scope. Older files retain MANUAL/short ranges, with format13 preventing
-older builds silently ignoring AUTO. Three automation creation paths now use
-the Auto editing horizon and safely preserve short Manual ranges; +AUTOMATION
-no longer adds an invalid non-Audio mixer destination.20 new nonignored tests
-and one explicit Saved13 read-only/private-copy round-trip test are prepared.
-Original per-digit64-to16 entry and existing producer contracts remain. The
-4096 editing/resource quota is separate from view buttons and musical extent.
-Formatting/diff passed; Cargo/Clippy/input/offscreen rendering are unrun. The
-separate factory fixture candidate uses -I -S, private bounded phase evidence
-and an actual site-hook witness control, retaining three-second deadlines and
-production/seal/cleanup rules. Complete vendor replay and pins passed. A jobs1
-CPU gate is next; GPU readback waits for the peer's release. No CU/NI/audio or
-user-preview replacement is authorized by these software checks. Keep
-`playlist-transport-source-candidate-02/` and
-`factory-attempt-seal-fixture-01/`.
+**Actual passes:**24 new nonignored cases and one explicit Saved13 read-only/
+private-copy case;214 unaffected headless passes plus the repaired short-Clip
+exact; Model53, TempoMap12, AudioClip6, ClipFade8, native automation6, all6 Audio
+split cases and unchanged prior export coverage; FullOwner20. Source111 strict
+all-feature/all-target Clippy, actual test artifact and matching main/helper
+build each exited0. Twelve actual WGPU cases and final mode/layout exacts passed.
+Root inspected all four final frames: no stale Pattern toast, foreground Playlist/
+AUTO visible at logical1280/1920 widths and unclipped toolbar. No new native
+CU/NI/soundcard verification occurred.
 
-Source105 (`a6fc165`) actually passed all33 factory cases (3.32s): the ordinary
-site-hook witness naturally exited77; isolated real protocol and both original
-seal directions completed all phases and naturally exited0 without kill.
-Application test compilation then actually failed101: the new Playlist test's
-line239 called Storage's method without the trait in scope. The source now uses
-fully qualified `eframe::Storage::get_string`, retaining every assertion; format/
-diff passed, execution is next. UI/model/TempoMap/export/Clippy/artifacts/bins/
-render did not run. Root90360/exec22869 and all8 held children terminated;
-private/global peaks were3.726/23.088GiB, no budget trigger, fresh heavy empty at
-11:40:01Z. CPU was returned. Keep `source105-local-gates-01-*` and
-`source105-local-resource-handback-01.json`; the original compile failure remains.
+The actual Saved13 source remains1,298,729B/591772 opaque bytes, five clips/one
+automation, format12/Manual160. Both private-copy complete persisted music
+payloads match; Auto derives128 and source bytes are unchanged. Generic maps are
+empty, so this is data round-trip evidence, not full NOIRE sound/parameter restore.
+Growing source notes still does not expand every existing trimmed placement.
 
-Source106 (`73a7068`) actually compiled. Its first runner set the capture env to
-.NET null, which this PowerShell/.NET retained as an empty string:207 UI cases
-failed the absolute-path assertion before any GPU initialization. A separate
-variable reproduced this; only the ignored runner changed to actual Env removal.
-The same product source with the corrected environment then ran215 UI cases:
-214 passed/1 failed (403.19s). Real PAT/SONG compiled notes/Pattern selection,
-the other11 new UI tests and original numeric/navigation/history passed. The
-remaining failure is a0.125-beat Manual clip becoming0.25. Its owner traced the
-next UI frame's Inspector Length DragValue lower bound/default existing-value
-clamp, not the song endpoint or Model's existing0.0625 minimum. A narrow control
-fix will preserve the existing legal value; press/release/idle assertions retain
-the original0.125 expectation. Root102480/exec43510 and all3 held children
-terminated; private/global peaks3.039/24.097GiB, fresh heavy empty11:51:35Z.
-No GPU/CU/NI/audio ran; later software gates are unrun. Keep both Source106 runs,
-`source106-empty-capture-env-reproduction-01.json` and
-`source106-local-resource-handback-02.json`.
+Preserved failures and repairs: Source105's missing Storage trait; Source106's
+runner-only empty capture env (207 failures, independently reproduced) and the
+real Inspector0.125-to0.25 mutation; short-Manual source geometry outside the
+playback map; v10's independent oracle crop; inherited fade silence in the moved
+v11 tail, now exact-zero PCM/WAV plus a same-source fade-reset audible control;
+and Source109/110 initializer lints. Production geometry follows later actual
+tempo automation under262144-checkpoint admission without extending playback.
+Full original errors/selectors and phase/resource records remain in
+`playlist-transport-progress-history-01.md`
+and the Source105–111 original logs.
 
-The older backend candidate `233f6f0` preview run38725986508 has actually
-succeeded:363 harness=351 PASS/12 conditional SKIP, SDK4+15,2357 App+52 helper+13
-protocol=2422 root/13 ignored, strict Clippy/no-default-feature, static-CRT
-release8m45s, final ZIP integrity and extracted sanitized-PATH helper smoke.
-Upload was disabled. This predates the new factory fixture/Playlist changes;
-quality's actual early factory failure remains. Preserve
-`ci-233f6f0-windows-preview-01.log` and
-`source104-preview-actual-terminal-01.json`.
+The separate user preview02 is delivered at
+`D:\DAW-Preview\Citrus-Studio-20261015-02`, desktop **Citrus Studio 新版测试02**.
+Actual Source111 matching main68,053,504B/helper5,054,464B were ordinary independent
+copies; copied helper no-plugin smoke exited0/reaped. Root did not launch main.
+UserData/Projects are isolated from01 and user works. This is same-machine MSVC
+debug, not the static-CRT release. New saves are13 and cannot open in01; use
+Save As on old works. Native02 use/NOIRE listening remains untested. This feature
+candidate still awaits its own pushed cloud quality/preview terminal results.
 
-The Inspector-only short-Clip repair is now static-frozen. TIMING Length uses
-min(existing legal length,0.25) for its display floor; Model/general numeric
-helper/creation span/song range are unchanged. The original0.125 expectation
-remains, with separate endpoint/Clip checks before creation, on press/release
-and three later idle frames. Format/diff passed. The failed exact case, related
-Inspector/numeric regressions and remaining backend gates are next; unaffected
-214 UI passes and factory33 remain reusable. Keep
-`playlist-inspector-short-clip-repair-01/`.
+The earlier backend233f6f0 preview succeeded:363 harness=351 PASS/12 conditional
+SKIP, SDK4+15,2422 root/13 ignored, strict Clippy/no-default-feature, static-CRT
+release8m45s, final ZIP/extracted helper. No upload. Its quality actually failed
+at factory31PASS/1FAIL, original3s Deadline; the historical cause stays unknown.
+The later fixture-only isolated startup/bounded-phase repair passed factory33
+locally without changing production/seal/cleanup/deadline rules. It has not yet
+run in cloud. Source104's earlier changed catalog5 passed its direct-exit versus
+real interpreter-finalizer kill/reap controls.
 
-Source107 (`9cd05eb`) actually passed the repaired short-Clip exact1, existing
-context1/Inspector layout1/numeric2, Model53 (one explicit-input ignored),
-TempoMap10 and native automation6. Export64 had62 passes/two failures; both new
-Auto export cases passed. Old v10/v11 nested Audio split tests query source
-geometry beyond the short Manual map, reporting
-`beat 1.0370312929153442 is outside the tempo map` /
-`Audio Clip beat is outside the tempo map`. Its owner separated production
-geometry mapping from v10's independent untrimmed-tail oracle query; repair must
-not expand actual song scope or reinstate normalize's old forced16. FullOwner/
-Saved13/Clippy/artifacts/bins are unrun. Root74576/exec68330 and all17 held
-children terminated; private/global peaks4.033/22.100GiB. Unaffected214 UI and
-factory33 evidence is reused. Keep `source107-local-gates-01-*` and
-`source107-local-resource-handback-01.json`.
-
-The actually compiled Source107 UI was independently rendered:12 genuine WGPU
-input tests passed in12.91s on RTX3060/Vulkan. Four original PPMs and lossless
-PNGs remain; Root inspected each. Green PAT/orange SONG, selected Pattern,
-scope accent and the minimum-width two-row toolbar are clear and unclipped.
-Remaining visual corrections: PAT toast keeps an obsolete Pattern name after
-selection, and floating minimum/wide fixtures must focus Playlist to inspect
-AUTO instead of accepting bounds hidden behind Piano. Test64052 naturally
-exited0; Root141288/exec68618 exited0, no forced exit, fresh heavy empty11:59:45Z,
-GPU immediately returned. Rendering does not qualify the two failed exports.
-No user preview/CU/NI/audio was touched. Keep `playlist-transport-render-01/`
-and `source107-playlist-render-01-*`. The peer now owns the next CPU window.
-
-The Manual-tail repair is now static-frozen. Only non-realtime Audio split
-geometry extends the retained actual TempoSource, including later placements/
-automation, through the existing262144-checkpoint admission. Normal beat/frame
-queries, max/duration and real output remain bounded. Wholly unplayed clips do
-not acquire a negative new fade crop limit. The v10 independent f32/equal-power
-oracle crops actual output/fade endpoints; v11 retains four children/exact refs/
-PCM-WAV/persistence and Manual0.65 assertions. Four causal regressions were
-added. Call-site inspection confirms geometry is consumed only by split, with
-no callback allocation. PAT toast is now name-neutral; floating captures focus
-Playlist and assert AUTO's exposed layer. These refinements need execution/new
-frames. Keep `playlist-manual-tail-geometry-repair-01/` (six-path patch, format/
-diff passed). The peer has returned CPU; next are affected geometry/fade/export
-split and remaining FullOwner/Saved13/Clippy/artifact/bins gates.
-
-Source108 (`058baf4`) actually passed TempoMap12, AudioClip6 and ClipFade8,
-including the four new causal cases. Audio-split export6 had5 passes/one failure;
-the old v10 PCM/WAV oracle now passed. Only v11's moved_wav hit the generic
-non-silent guard (export.rs4431/4636), after geometry succeeded. Its owner traced
-the actual inherited fade: Manual end~0.65, last child's original start~1.28703
-and relative fade-out end_limit~-0.63703. Moving start to0 while retaining refs
-puts the fade's ending anchor before the playable window, so the intended PCM
-is exactly silent. The proposed fixture-only correction will assert exact
-silence for this branch and a same-source/same-Manual fade-reset non-silent
-control; the generic threshold and production/refs/persistence assertions stay.
-FullOwner/Saved13/Clippy/artifacts/bins remain unrun. Root45304/exec37648 and all13
-held children terminated, no budget trigger, private/global4.013/24.012GiB;
-fresh heavy empty12:14Z and resources returned. Keep `source108-local-gates-01-*`
-and `source108-local-resource-handback-01.json`.
-
-The inherited-fade fixture is now static-frozen, changing only export test code.
-A dedicated helper actually renders/decodes nonempty PCM24 stereo at the expected
-rate and requires every sample exactly0, only for moved/reloaded branches.
-The ordinary>0.01 audible helper stays unchanged. Actual negative limit/compiled
-ending anchor/positive fade duration and original Manual length are checked
-before exact-zero PCM/WAV. A same-source clone resets only fade-out/ref through
-production set_clip_fade, proves the complete other payload unchanged, and must
-pass the original strong audible PCM/WAV control. Four children/refs/nested cut/
-cold-load/full PCM-WAV equality remain. Format/diff passed; the old v11 exact
-test is next. Production and five split/26 geometry-fade passes remain reusable.
-Keep `playlist-inherited-fade-silence-fixture-01/`. The peer currently owns CPU;
-Root only commits/prepares until its actual handback.
-
-Source109 (`ae6175e`) actually passed v11 exact1 (1.36s, exact silence and strong
-same-source fade-reset audible controls), FullOwner20 (3.25s) and explicit
-Saved13 read-only/private-copy exact1 (1.28s). The original is1,298,729B with
-591772 opaque bytes, five clips/one automation: format12/Manual160 stays;
-the private Auto copy derives128. Both complete persisted music payloads match
-and original bytes remain unchanged. Generic parameters=0; this is serialization
-evidence, not NI sound/full-parameter restoration. Strict Clippy actually failed101
-only at app.rs5394 field_reassign_with_default. A minimal struct initializer now
-preserves construction semantics, with no allow/MSRV change; format/diff passed,
-execution is next. Artifacts/bins and two new render refinements remain unrun.
-Root122096/exec27249 and all14 held children terminated, private/global peaks
-3.728/22.936GiB, fresh heavy empty12:22Z. Keep `source109-local-gates-01-*` and
-`source109-local-resource-handback-01.json`.
-
-Source110 (`34254db`) strict Clippy actually failed101 only at the new TempoMap
-test's same initializer lint (tempo_map.rs721); the main initializer passed.
-The fixture now uses a struct initializer with every value/assertion unchanged,
-no allow/MSRV change; format/diff passed. Root94160/exec7502 and all6 held children
-terminated, private/global2.263/22.806GiB, fresh heavy empty12:25Z. No GPU/artifacts/
-bins ran. Keep `source110-local-gates-01-*` and
-`source110-local-resource-handback-01.json`. Only Clippy/artifacts/matching bins
-and the two genuine render refinements remain for this feature candidate.
+Evidence under `target/backend-reliability-20261014`:
+`source111-local-gates-01-*`, `source111-local-resource-handback-01.json`,
+`source111-playlist-{mode,layout}-render-01-*`,
+`playlist-transport-render-02-{mode,layout}/`,
+`user-offline-preview-20261015-02.json`, the four Playlist candidate/repair folders
+and `factory-attempt-seal-fixture-01/`. Earlier cloud raw logs/terminal JSON remain.
 
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
