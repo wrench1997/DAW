@@ -7,7 +7,8 @@
 
 #[cfg(test)]
 use crate::genuine_app_observer::{
-    self as genuine_observer, Boundary, InstanceObserver, InstancePhase, Operation,
+    self as genuine_observer, AsyncObservationPhase, Boundary, InstanceObserver, InstancePhase,
+    Operation,
 };
 use crate::{
     export_job::StrictCancelRegistration,
@@ -219,6 +220,9 @@ impl StrictBackend {
                 Client::discard_progress_notifications,
             )?;
             let snapshot = self.exchange_at(stage, Client::async_state_snapshot)?;
+            #[cfg(test)]
+            self.observation
+                .strict_async_snapshot(AsyncObservationPhase::PrepareWait, snapshot);
             if snapshot.readiness_faulted || snapshot.active_other != 0 {
                 return Err(Self::admission(
                     "Strict clone async-state readiness cannot be attested",
@@ -237,6 +241,9 @@ impl StrictBackend {
             .ok_or_else(|| Self::admission("Strict clone has no async-state readiness token"))?;
         let snapshot =
             self.exchange_at("render.async_state_snapshot", Client::async_state_snapshot)?;
+        #[cfg(test)]
+        self.observation
+            .strict_async_snapshot(AsyncObservationPhase::ArmedVerify, snapshot);
         snapshot
             .ensure_ready()
             .map_err(|error| Self::admission(error.to_string()))?;

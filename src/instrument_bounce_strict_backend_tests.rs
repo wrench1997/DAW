@@ -3102,6 +3102,52 @@ fn progress_scenario(mock: &Mock, scenario: &str) {
 }
 
 #[test]
+fn strict_clone_async_state_readiness_existing_exchanges_feed_fixed_summary_without_new_io() {
+    use crate::genuine_app_observer::{InstanceObserver, InstancePhase, ObservationRun, Stage};
+    let _serial = serial();
+    let mut observer = ObservationRun::install().unwrap();
+    observer.set_stage(Stage::InitialSource).unwrap();
+    // Synthetic observer phase only. This mock test has no real source/plugin.
+    let _source = InstanceObserver::new(InstancePhase::InitialSource);
+    observer.set_stage(Stage::WholeExport).unwrap();
+    let mock = Mock::new("", "");
+    progress_scenario(&mock, "ui_only");
+    assert!(matches!(
+        normal_job(&mock).finish(),
+        RenderOutcome::Complete(_)
+    ));
+    let summary = observer.async_observation_summary();
+    assert_eq!(summary.failure, None);
+    let clone = summary.strict_clone.unwrap();
+    assert_eq!(clone.identity.phase, InstancePhase::StrictClone);
+    let preparing = clone.prepare_wait.unwrap();
+    let armed = clone.armed_verify.unwrap();
+    assert_eq!(preparing.checked_count, 2);
+    assert_eq!(armed.checked_count, 8);
+    assert_eq!(preparing.max_active_ui, 1);
+    assert_eq!(armed.max_active_ui, 1);
+    assert_eq!(preparing.last.async_started_revision, 0);
+    assert!(!armed.saw_fault);
+    let commands = mock.commands();
+    for (prefix, expected) in [
+        ("AsyncStateSnapshot:", 10),
+        ("DiscardProgressNotifications:", 2),
+        ("ArmOfflineStateReadiness:", 1),
+        ("LoadState:", 1),
+        ("Process:", 2),
+    ] {
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.starts_with(prefix))
+                .count(),
+            expected
+        );
+    }
+    mock.assert_cooperative(true);
+}
+
+#[test]
 fn strict_clone_async_state_readiness_waits_before_start_and_ui_tasks_do_not_block_publication() {
     let _serial = serial();
     for scenario in ["wait_then_ready", "ui_only"] {

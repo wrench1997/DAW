@@ -102,13 +102,11 @@ impl FullHistoryImage {
     }
 }
 
-/// Match the persisted source using stable IDs. A scan descriptor is supplied
-/// by the real scanner; its serialized verified flag is not live SDK evidence.
-/// Actual factory/version/bus/worker witnesses must still come from the worker.
-fn complete_source_intent(
+/// Validate a persisted request, not loaded metadata. The short source probe
+/// must obtain factory/version/topology evidence from this run's actual worker.
+fn requested_saved_source_intent(
     project: &Project,
     source: &ValidatedSource,
-    scanned: &PluginDescriptor,
 ) -> Check<(String, PathBuf, String)> {
     require(
         source.plugin_instance_id != 0 && source.channel_id != 0,
@@ -162,6 +160,24 @@ fn complete_source_intent(
         "complete source has no valid mixer destination",
     )?;
     project.validate_mixer_graph().map_err(error)?;
+    require(
+        !persisted.id.is_empty()
+            && persisted.id.len() <= 4096
+            && persisted.path.is_absolute()
+            && persisted.path.as_os_str().len() <= 4096,
+        "complete fresh-source descriptor exceeds its identity bounds",
+    )?;
+    Ok((persisted.id, persisted.path, instance.uid.clone()))
+}
+
+/// Match the persisted source using stable IDs. The original full selector
+/// still requires its separate checked, healthy loaded-default scan descriptor.
+fn complete_source_intent(
+    project: &Project,
+    source: &ValidatedSource,
+    scanned: &PluginDescriptor,
+) -> Check<(String, PathBuf, String)> {
+    let (descriptor_id, path, requested_uid) = requested_saved_source_intent(project, source)?;
     let metadata = scanned
         .vst3_metadata
         .as_ref()
@@ -171,8 +187,8 @@ fn complete_source_intent(
             && scanned.scan_error.is_none()
             && scanned.format == plugins::PluginFormat::Vst3
             && scanned.is_instrument
-            && scanned.path == instance.path
-            && metadata.class_uid == instance.uid
+            && scanned.path == path
+            && metadata.class_uid == requested_uid
             && metadata.class_uid.len() == 32
             && metadata
                 .class_uid
@@ -185,16 +201,7 @@ fn complete_source_intent(
             && metadata.has_midi_input,
         "actual scan descriptor does not match the complete persisted Kontakt source",
     )?;
-    require(
-        !persisted.id.is_empty()
-            && persisted.id.len() <= 4096
-            && persisted.path.is_absolute()
-            && persisted.path.as_os_str().len() <= 4096,
-        "complete fresh-source descriptor exceeds its identity bounds",
-    )?;
-    // Keep the historical persisted descriptor ID. The scanner's independent
-    // cache ID is not written into the Project or substituted for a worker ID.
-    Ok((persisted.id, persisted.path, metadata.class_uid.clone()))
+    Ok((descriptor_id, path, metadata.class_uid.clone()))
 }
 
 fn register_and_enqueue_complete_source(
@@ -203,11 +210,20 @@ fn register_and_enqueue_complete_source(
     scanned: &PluginDescriptor,
     enqueue: impl FnOnce(&mut CitrusApp, u32, Project, Option<ChannelGeneratorState>) -> Check,
 ) -> Check {
+    let intent = complete_source_intent(&app.project, source, scanned)?;
+    register_and_enqueue_source_intent(app, source, intent, enqueue)
+}
+
+fn register_and_enqueue_source_intent(
+    app: &mut CitrusApp,
+    source: &ValidatedSource,
+    intent: (String, PathBuf, String),
+    enqueue: impl FnOnce(&mut CitrusApp, u32, Project, Option<ChannelGeneratorState>) -> Check,
+) -> Check {
     require(
         cfg!(all(windows, feature = "experimental-fresh-helper")),
         "complete source initialization requires the explicit Windows experimental fresh-helper build",
     )?;
-    let intent = complete_source_intent(&app.project, source, scanned)?;
     require(
         !app.fresh_bounce_sources
             .contains_key(&source.plugin_instance_id)
@@ -267,8 +283,9 @@ pub(super) struct FullReadySource {
     pub actual_worker_id: usize,
 }
 
-/// Run-local device-free owner of the entire original saved Project. The
-/// streaming observer is installed and owned by the outer run, never here.
+/// Run-local device-free owner of its admitted Project. The full selector passes
+/// the entire Saved13; the separately named short probe passes its private derivative.
+/// The observer is installed and owned by the outer run, never here.
 pub(super) struct FullParent {
     app: Option<Box<CitrusApp>>,
     callback: Option<audio::TestAudioCallback>,
@@ -397,6 +414,26 @@ impl FullParent {
         observer: &mut ObservationRun,
         deadline: Instant,
     ) -> Check {
+        self.begin_source_initialization_admitted(observer, deadline, |project, source| {
+            complete_source_intent(project, source, scanned)
+        })
+    }
+    /// Separate short-probe admission: the saved class is only a load request.
+    /// No scan metadata is manufactured, and readiness still needs the actual
+    /// source worker, callback, metadata and stopped-source guards below.
+    pub(super) fn begin_saved_source_initialization(
+        &mut self,
+        observer: &mut ObservationRun,
+        deadline: Instant,
+    ) -> Check {
+        self.begin_source_initialization_admitted(observer, deadline, requested_saved_source_intent)
+    }
+    fn begin_source_initialization_admitted(
+        &mut self,
+        observer: &mut ObservationRun,
+        deadline: Instant,
+        admission: impl FnOnce(&Project, &ValidatedSource) -> Check<(String, PathBuf, String)>,
+    ) -> Check {
         require(
             !self.initialization_requested,
             "complete source initialization must not be retried on the same owner",
@@ -407,7 +444,7 @@ impl FullParent {
         )?;
         self.inputs_unchanged()?;
         self.model_unchanged()?;
-        complete_source_intent(&self.app().project, &self.source, scanned)?;
+        let intent = admission(&self.app().project, &self.source)?;
         observer.set_stage(Stage::InitialSource).map_err(error)?;
         self.initialization_requested = true;
         let session = self.app().project_session;
@@ -430,10 +467,10 @@ impl FullParent {
         }
         let source = &self.source;
         let app = self.app.as_deref_mut().unwrap();
-        register_and_enqueue_complete_source(
+        register_and_enqueue_source_intent(
             app,
             source,
-            scanned,
+            intent,
             |app, channel, candidate, previous| {
                 app.queue_channel_generator_candidate(channel, candidate, previous)
             },

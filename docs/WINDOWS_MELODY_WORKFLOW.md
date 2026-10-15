@@ -787,6 +787,28 @@ was skipped. Preserve
 `ci-1687ec5-{windows-quality,windows-preview,linux-helper-readiness}-01.log`
 and Source96 actual-terminal run/jobs JSON.
 
+### SDK-B short source qualification candidate (2026-10-15)
+
+A separately named backend-short-source-load entry is prepared. It reads pinned
+Saved13 state/generic bases into a private two-note/two-placement score, requests
+the saved class, and requires this attempt's actual source worker metadata,
+opaque ACK, callback and stopped-source capture before the production Whole/
+Strict controller. The original full Saved13 entry retains its checked loaded-
+default scan and healthy-retirement contract; no catalog data supplies live
+metadata. Two fixed run-owned clone summaries copy only existing PrepareWait and
+ArmedVerify snapshot returns. Missing observations and observed zeros stay
+separate; no new SDK query, warmup, sleep or timeline/PCM stream record is added.
+
+Static rustfmt/diff checks passed for11 source files. Fifteen new nonignored
+regressions and one ignored NI selector are prepared; Rust compilation, Clippy
+and actual NI rounds are unrun. The candidate and exact recipe are retained in
+`target/backend-reliability-20261014/noire-sdk-b-short-source-candidate-01/`.
+It preserves original-frame PCM/onset and exact MIDI Q/offset for two independent
+same-source rounds. Source worker thread join is distinct from helper OS exit;
+unavailable PID/exit fields remain null and need Root's actual process handles.
+This does not qualify ordinary GUI Save/cold Open, hardware listening, complete
+internal parameters or Felt.
+
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
 The native harness now probes the OS, current process session, WTS connection

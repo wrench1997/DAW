@@ -162,6 +162,179 @@ pub(crate) struct InstanceIdentity {
     pub worker_id: Option<usize>,
     pub source_instance_id: Option<u64>,
 }
+/// Local summary phases, not transcript ordinals or a cross-thread total order.
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AsyncObservationPhase {
+    PrepareWait,
+    ArmedVerify,
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AsyncPhaseObservation {
+    pub first: vst3_host::AsyncStateSnapshot,
+    pub last: vst3_host::AsyncStateSnapshot,
+    pub checked_count: u64,
+    pub max_active_async: u32,
+    pub max_active_ui: u32,
+    pub max_active_other: u32,
+    pub saw_fault: bool,
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+impl AsyncPhaseObservation {
+    fn first(snapshot: vst3_host::AsyncStateSnapshot) -> Self {
+        Self {
+            first: snapshot,
+            last: snapshot,
+            checked_count: 1,
+            max_active_async: snapshot.active_async,
+            max_active_ui: snapshot.active_ui,
+            max_active_other: snapshot.active_other,
+            saw_fault: snapshot.readiness_faulted,
+        }
+    }
+    fn observe(&mut self, snapshot: vst3_host::AsyncStateSnapshot) -> Result<(), &'static str> {
+        let next = self
+            .checked_count
+            .checked_add(1)
+            .ok_or("async observation count overflow")?;
+        self.last = snapshot;
+        self.checked_count = next;
+        self.max_active_async = self.max_active_async.max(snapshot.active_async);
+        self.max_active_ui = self.max_active_ui.max(snapshot.active_ui);
+        self.max_active_other = self.max_active_other.max(snapshot.active_other);
+        self.saw_fault |= snapshot.readiness_faulted;
+        Ok(())
+    }
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AsyncCloneObservation {
+    pub identity: InstanceIdentity,
+    pub prepare_wait: Option<AsyncPhaseObservation>,
+    pub armed_verify: Option<AsyncPhaseObservation>,
+}
+
+/// Fixed storage for one actual clone. This is diagnostic evidence, not an
+/// additional readiness prerequisite or a transcript/PCM record.
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AsyncObservationSummary {
+    pub strict_clone: Option<AsyncCloneObservation>,
+    pub failure: Option<&'static str>,
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+impl AsyncObservationSummary {
+    fn fail(&mut self, failure: &'static str) {
+        self.failure.get_or_insert(failure);
+    }
+    fn bind(&mut self, identity: InstanceIdentity) {
+        if self.failure.is_some() {
+            return;
+        }
+        if identity.phase != InstancePhase::StrictClone || self.strict_clone.is_some() {
+            self.fail("async observation duplicate or non-clone owner");
+            return;
+        }
+        self.strict_clone = Some(AsyncCloneObservation {
+            identity,
+            prepare_wait: None,
+            armed_verify: None,
+        });
+    }
+    fn observe(
+        &mut self,
+        identity: Option<InstanceIdentity>,
+        phase: AsyncObservationPhase,
+        snapshot: vst3_host::AsyncStateSnapshot,
+    ) {
+        if self.failure.is_some() {
+            return;
+        }
+        let Some(clone) = &mut self.strict_clone else {
+            self.fail("async observation has no bound strict clone");
+            return;
+        };
+        if identity != Some(clone.identity) {
+            self.fail("async observation instance identity mismatch");
+            return;
+        }
+        let observations = match phase {
+            AsyncObservationPhase::PrepareWait => &mut clone.prepare_wait,
+            AsyncObservationPhase::ArmedVerify => &mut clone.armed_verify,
+        };
+        let result = match observations {
+            Some(observations) => observations.observe(snapshot),
+            None => {
+                *observations = Some(AsyncPhaseObservation::first(snapshot));
+                Ok(())
+            }
+        };
+        if let Err(failure) = result {
+            self.fail(failure);
+        }
+    }
+    pub(crate) fn evidence(self) -> serde_json::Value {
+        fn phase(value: Option<AsyncPhaseObservation>) -> serde_json::Value {
+            value.map_or(serde_json::Value::Null, |value| {
+                serde_json::json!({
+                    "first": value.first,
+                    "last": value.last,
+                    "checked_count": value.checked_count,
+                    "max_active_async": value.max_active_async,
+                    "max_active_ui": value.max_active_ui,
+                    "max_active_other": value.max_active_other,
+                    "saw_fault": value.saw_fault,
+                })
+            })
+        }
+        let complete = self.failure.is_none()
+            && self
+                .strict_clone
+                .is_some_and(|clone| clone.prepare_wait.is_some() && clone.armed_verify.is_some());
+        let clone = self.strict_clone.map(|clone| {
+            serde_json::json!({
+                "identity": {
+                    "ordinal": clone.identity.ordinal,
+                    "phase": "StrictClone",
+                    "worker_id": clone.identity.worker_id,
+                    "source_instance_id": clone.identity.source_instance_id,
+                },
+                "prepare_wait": phase(clone.prepare_wait),
+                "armed_verify": phase(clone.armed_verify),
+            })
+        });
+        serde_json::json!({
+            "contract_version": 1,
+            "complete": complete,
+            "failure": self.failure,
+            "strict_clone": clone,
+            "interpretation": "Existing SDK-reported snapshots only; zero active counts do not prove absence of unreported asynchronous work. A zero async_started_revision means only that this registry recorded no accepted AsyncStateRestoration start. UI tasks that start and finish between snapshots are not cumulatively observable; this summary does not count arbitrary IProgress calls. First/last are local phase observations, not a transcript or cross-thread total order.",
+        })
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
     not(all(target_os = "linux", feature = "experimental-fresh-helper")),
@@ -469,6 +642,11 @@ pub(crate) struct ObservationSnapshot {
         any(target_os = "linux", windows),
         feature = "experimental-fresh-helper"
     ))]
+    async_observation: AsyncObservationSummary,
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     stream: Option<stream_live::LiveStream>,
     #[cfg(all(
         any(target_os = "linux", windows),
@@ -506,6 +684,11 @@ impl ObservationSnapshot {
                 any(target_os = "linux", windows),
                 feature = "experimental-fresh-helper"
             ))]
+            async_observation: AsyncObservationSummary::default(),
+            #[cfg(all(
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
             stream: None,
             #[cfg(all(
                 any(target_os = "linux", windows),
@@ -527,6 +710,16 @@ impl ObservationSnapshot {
         ))]
         if let Some(stream) = &mut self.stream {
             stream.observer_failed(failure);
+        }
+    }
+    fn mark_poisoned(&mut self) {
+        self.fail("observer mutex poisoned");
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if !self.retired {
+            self.async_observation.fail("observer mutex poisoned");
         }
     }
     #[cfg(all(
@@ -762,7 +955,8 @@ impl ObservationSnapshot {
             ),
             InstancePhase::UndoSource => (2, self.stage == Stage::Undo),
         };
-        if !expected_stage || self.phases[index] || self.next_instance != index as u64 + 1 {
+        let valid = expected_stage && !self.phases[index] && self.next_instance == index as u64 + 1;
+        if !valid {
             self.fail("observer unexpected instance phase, order or duplicate owner");
         }
         self.phases[index] = true;
@@ -773,6 +967,18 @@ impl ObservationSnapshot {
             source_instance_id: worker.and_then(|w| w.manifest.instance_id(0)),
         };
         self.next_instance += 1;
+        #[cfg(all(
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        if phase == InstancePhase::StrictClone {
+            if valid {
+                self.async_observation.bind(identity);
+            } else {
+                self.async_observation
+                    .fail("async observation invalid or duplicate strict clone binding");
+            }
+        }
         identity
     }
     fn stage(&mut self, next: Stage) -> Result<(), &'static str> {
@@ -808,7 +1014,7 @@ fn with_run(run: &Arc<Mutex<ObservationSnapshot>>, f: impl FnOnce(&mut Observati
         Err(poison) => {
             let mut state = poison.into_inner();
             if !state.retired {
-                state.fail("observer mutex poisoned");
+                state.mark_poisoned();
                 f(&mut state);
             }
         }
@@ -969,10 +1175,17 @@ impl ObservationRun {
     pub(crate) fn with_snapshot<T>(&self, inspect: impl FnOnce(&ObservationSnapshot) -> T) -> T {
         let state = self.state.lock().unwrap_or_else(|p| {
             let mut state = p.into_inner();
-            state.fail("observer mutex poisoned");
+            state.mark_poisoned();
             state
         });
         inspect(&state)
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn async_observation_summary(&self) -> AsyncObservationSummary {
+        self.with_snapshot(|state| state.async_observation)
     }
     /// Driver-side alignment with worker taps, outside any callback operation.
     pub(crate) fn monotonic_elapsed_ns(&self) -> u64 {
@@ -984,7 +1197,7 @@ impl ObservationRun {
     pub(crate) fn copy_records_since(&self, start: usize) -> Vec<Arc<Record>> {
         let mut state = self.state.lock().unwrap_or_else(|p| {
             let mut state = p.into_inner();
-            state.fail("observer mutex poisoned");
+            state.mark_poisoned();
             state
         });
         if start > state.records.len() {
@@ -998,7 +1211,11 @@ impl ObservationRun {
     }
     pub(crate) fn finish(self) -> ObservationSnapshot {
         self.detach();
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let mut state = self.state.lock().unwrap_or_else(|p| {
+            let mut state = p.into_inner();
+            state.mark_poisoned();
+            state
+        });
         std::mem::replace(&mut *state, ObservationSnapshot::retired())
     }
     fn detach(&self) {
@@ -1084,6 +1301,19 @@ impl InstanceObserver {
         if let Some(run) = self.run.as_ref().and_then(Weak::upgrade) {
             with_run(&run, |state| f(state, self.identity));
         }
+    }
+    /// Copy a snapshot already returned to this clone's control owner. No SDK
+    /// operation, stream record, transcript sequence or clock sample is added.
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn strict_async_snapshot(
+        &self,
+        phase: AsyncObservationPhase,
+        snapshot: vst3_host::AsyncStateSnapshot,
+    ) {
+        self.with(|state, identity| state.async_observation.observe(identity, phase, snapshot));
     }
     #[cfg(feature = "vst3")]
     pub(crate) fn call(
@@ -2035,6 +2265,13 @@ pub(crate) fn record_runtime_event(
         });
     });
 }
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+mod async_observation_tests;
 
 #[cfg(test)]
 mod tests {

@@ -539,4 +539,58 @@ mod tests {
         });
         FULL_OWNER_QUARANTINED.with(|slot| assert!(slot.borrow().is_none()));
     }
+
+    #[test]
+    fn sdk_b_short_saved_request_does_not_manufacture_scan_or_loaded_metadata() {
+        let (mut app, source, _) = fixture();
+        let before = FullHistoryImage::take(&app, 17).unwrap();
+        assert!(source.descriptor.vst3_metadata.is_none());
+        let intent = requested_saved_source_intent(&app.project, &source).unwrap();
+        assert_eq!(intent.2, KONTAKT_UID);
+        assert!(complete_source_intent(&app.project, &source, &source.descriptor).is_err());
+        register_and_enqueue_source_intent(
+            &mut app,
+            &source,
+            intent,
+            |app, channel, candidate, previous| {
+                assert_eq!(channel, source.channel_id);
+                assert_eq!(previous.unwrap().instance_id, Some(17));
+                let original = app
+                    .project
+                    .plugin_instances
+                    .iter()
+                    .find(|item| item.id == 17)
+                    .unwrap();
+                let queued = candidate
+                    .plugin_instances
+                    .iter()
+                    .find(|item| item.id == 17)
+                    .unwrap();
+                assert_eq!(queued.opaque_state, original.opaque_state);
+                assert_eq!(queued.parameters, original.parameters);
+                assert!(app.running_generator_chains.is_empty());
+                assert_eq!(
+                    app.fresh_bounce_sources[&17].2,
+                    FreshSourceClass::Exact(KONTAKT_UID.into())
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+        before.unchanged(&app, 17).unwrap();
+    }
+
+    #[test]
+    fn sdk_b_short_saved_request_still_refuses_changed_binding_before_enqueue() {
+        for case in 0..3 {
+            let (app, mut source, _) = fixture();
+            match case {
+                0 => source.state_sha256 = "0".repeat(64),
+                1 => source.channel_id = 9,
+                _ => source.descriptor.path = std::env::temp_dir().join("foreign.vst3"),
+            }
+            assert!(requested_saved_source_intent(&app.project, &source).is_err());
+            assert!(app.fresh_bounce_sources.is_empty());
+        }
+    }
 }

@@ -539,6 +539,8 @@ impl FullSongRun {
         )
     }
     fn final_receipt(&mut self, body: &Check, cleanup: &Check) -> Check {
+        self.evidence["reported_async_readiness"] =
+            self.observer.async_observation_summary().evidence();
         let resources_joined = self.parent.resources_joined();
         let retirement = if self.stream_attempted {
             self.verification.retire(

@@ -19,7 +19,7 @@ const WHOLE_OPT_IN: &str = "actual-noire-two-pattern-whole-master-export-v1";
 const WHOLE_RATE: u32 = 48_000;
 const WHOLE_TEMPO: f32 = 84.0;
 
-fn whole_scratch(mut project: Project) -> Check<Project> {
+pub(super) fn whole_scratch(mut project: Project) -> Check<Project> {
     require(
         project.channels[0].volume.is_finite() && project.channels[0].volume >= 0.0,
         "the saved source channel gain must be finite and nonnegative",
@@ -144,7 +144,10 @@ fn model_image(app: &CitrusApp) -> Check<Vec<u8>> {
     .map_err(error)
 }
 
-fn persist_generated_raw_pcm(records: &[Arc<observe::Record>], directory: &Path) -> Check<Value> {
+pub(super) fn persist_generated_raw_pcm(
+    records: &[Arc<observe::Record>],
+    directory: &Path,
+) -> Check<Value> {
     let mut bytes = Vec::new();
     let mut blocks = 0;
     let mut nonfinite = 0;
@@ -205,9 +208,30 @@ fn persist_generated_raw_pcm(records: &[Arc<observe::Record>], directory: &Path)
     )
 }
 
+pub(super) fn audit_short_whole(
+    records: &[Arc<observe::Record>],
+    observer_failure: Option<&str>,
+    strict_instance: observe::InstanceIdentity,
+    metadata: &crate::instrument_bounce::BouncePluginMetadata,
+    report: &MasterSongRenderReport,
+    source_channel_volume: f32,
+    wav_bytes: &[u8],
+) -> Check<(Value, Check)> {
+    let audit = whole_oracle::audit_whole_noire(whole_oracle::WholeNoireAuditInput {
+        records,
+        observer_failure,
+        strict_instance,
+        metadata,
+        report,
+        source_channel_volume,
+        wav_bytes,
+    })?;
+    Ok((audit.evidence(), audit.qualify_acoustics()))
+}
+
 // Driver-only diagnostic fold over already-retained actual worker observations.
 // This does not change a deadline, qualification predicate, SDK call or tap.
-fn actual_strict_process_timing(
+pub(super) fn actual_strict_process_timing(
     records: &[Arc<observe::Record>],
     snapshot_failure: Option<&str>,
 ) -> Value {
