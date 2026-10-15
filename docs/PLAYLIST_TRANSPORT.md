@@ -1,10 +1,12 @@
 # Drag the playhead; let the arrangement set its end
 
-**Locally verified, 2026-10-15; source `885306f`.** Scoped input, persistence,
-Timeline/WAV, audio-split, strict Clippy and actual WGPU frame checks passed.
-Desktop **Citrus Studio 新版测试02** starts the separate copy at
-`D:\DAW-Preview\Citrus-Studio-20261015-02\Start-Citrus.cmd`;01 and user works are
-unchanged. Cloud checks for this candidate and native02/NOIRE acceptance remain.
+**Locally verified, 2026-10-15; current source `81b2572`.** Transport/range source
+`885306f` passed input, persistence, Timeline/WAV and audio-split checks. The
+current linking source passed all225 affected UI/callback cases, strict Clippy,
+matching main/helper build and9 genuine WGPU cases; all four frames were inspected.
+Desktop **Citrus Studio 新版测试03** starts the separate copy at
+`D:\DAW-Preview\Citrus-Studio-20261015-03\Start-Citrus.cmd`;01/02 and user works
+are unchanged. New cloud and native03/NOIRE acceptance remain separate.
 
 ## Position and view are separate from music
 
@@ -76,7 +78,7 @@ and music history.
 
 ## Open and edit the Pattern used by a Playlist clip
 
-**New linking candidate: implemented and formatted; input/render gates pending.**
+**Implemented and locally input/callback/render verified at `81b2572`.**
 Double-click a Pattern clip with Piano notes to open its Piano roll. A step-only
 Pattern opens the Rack; hold Alt to open the other editor. Opening locates the
 clicked source bar, including source offset, without starting playback, seeking
@@ -131,3 +133,10 @@ round-trip,12 actual offscreen inputs and final mode/layout frame refinements
 passed. Root inspected the four final frames. The copied preview's no-plugin
 helper smoke passed; its main GUI/native desktop/soundcard/NOIRE remain untested
 by the agent. Current sources preserve original failure evidence in the workflow record.
+
+For the linked-editor frames, run
+`app::headless_ui_tests::pattern_editor_link_tests` with the same capture setting.
+The225-case current UI gate includes nine new linking cases and a deterministic
+saved-baseline control for ruler navigation. The latter forces the750ms dirty
+check, reproduces the old mismatched fixture baseline and confirms a real step
+edit still marks the saved project dirty. Production dirty tracking is unchanged.

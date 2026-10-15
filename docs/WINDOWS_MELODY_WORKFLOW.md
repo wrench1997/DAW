@@ -7,26 +7,27 @@ This document separates implemented behavior, actual local acceptance, failures 
 
 ## Independent local test copy (2026-10-15)
 
-Current separate preview: `D:\DAW-Preview\Citrus-Studio-20261015-02`.
-Desktop **Citrus Studio 新版测试02** runs `Start-Citrus.cmd`, not the EXE directly.
+Current separate preview: `D:\DAW-Preview\Citrus-Studio-20261015-03`.
+Desktop **Citrus Studio 新版测试03** runs `Start-Citrus.cmd`, not the EXE directly.
 The launcher sets the existing `CITRUS_STUDIO_DATA_DIR` to this copy's `UserData`;
 window/audio preferences, catalog, autosave and recordings are separate. Save
 test projects under `Projects`. New saves are Project13, unreadable by01, so use
 Save As on old works. Select the previously heard iCON output
 **扬声器 (2- CB4ND HW 1/2)** in this fresh profile.
 
-Actual Source111/885306f main/helper were copied as independent ordinary files;
+Actual Source114/81b2572 main/helper were copied as independent ordinary files;
 Cargo cannot overwrite them. Copied helper protocol smoke exited0/reaped with
 no plugin. Root did not start main GUI/audio/NI. This is same-machine MSVC debug
 with this PC's installed VC/UCRT, not the static-CRT release; no plugin, library,
 user work or system DLL is included. Physical devices/Kontakt settings still
-share the machine. Native02 use/NOIRE acceptance remains pending. Root continues
+share the machine. Native03 use/NOIRE acceptance remains pending. Root continues
 only code/Git/cloud work while the user tests; desktop/GPU operations coordinate
 with the peer.
 
 Historical01/Source102 remains at `D:\DAW-Preview\Citrus-Studio-20261015-01`, with
-its shortcut/profile/projects unchanged. The user used01 and reported the
-Playlist/PAT/SONG issues;02 contains the resulting locally verified repairs.
+its shortcut/profile/projects unchanged.02/Source111 also remains unchanged.
+The user used01 and reported Playlist/PAT/SONG issues;02 contains those locally
+verified repairs.03 adds Playlist/Piano/Rack linking without a new format change.
 Build-Info/README/Helper-Smoke records accompany each copy.
 
 The first generic-base restore candidate compiled but failed existing history checks.
@@ -1110,7 +1111,7 @@ The UI owner traced a deterministic fixture issue: replacing the startup demo
 updated the history fingerprint but not the saved Project baseline; crossing
 the750ms dirty check correctly detected that setup change. A fixture-only repair
 establishes the saved baseline, forces checks before/after navigation and retains
-a real music-edit dirty control. New execution remains pending. Preserve
+a real music-edit dirty control. Source114 execution below passed. Preserve
 `ci-4102953-windows-preview-01.log`, `source113-preview-actual-terminal-01.json`
 and `source113-quality-*-01.*`.
 
@@ -1120,6 +1121,38 @@ Piano cursor and callback mode's inactive Rack cursor are the actual gaps. A
 single editor-linking candidate now implements the [documented interaction](PLAYLIST_TRANSPORT.md#open-and-edit-the-pattern-used-by-a-playlist-clip),
 keeping existing trims and callback scheduling. Source/input/render acceptance
 for that new candidate is recorded separately from the passed transport build.
+
+### Linked editors — local acceptance and separate preview03
+
+Source `81b2572` passed all225 actual headless UI/callback cases in403.84s,
+including nine new linking cases, the retained ruler case and its new deterministic
+dirty control. The latter emitted the original startup Night Orchard/one Pattern/
+eight clips saved fingerprint11943620587148262240 versus the Untitled/two Pattern/
+two clip fixture13432136539258871030. Restoring that old mismatch dirtied on idle;
+the corrected baseline stayed clean across forced checks before/after seeking;
+a real Rack step edit still dirtied the project without replacing its saved baseline.
+
+Strict all-feature/all-target Clippy, actual compiler-artifact gate and matching
+main/helper build each exited0. The same frozen binary passed all9 genuine WGPU
+cases in14.19s on RTX3060/Vulkan. Root inspected four actual1498x936 frames: correct
+Piano target/clicked source bar, both shared Playlist references updated, offset-
+mapped SONG cursor and callback-driven Rack active-step borders. No native window,
+physical audio or NI was used. The source clocks preserve Piano/Rack's independent
+compiler periods and f64 Swing pair-start boundaries; callback scheduling is unchanged.
+
+Separate preview03 contains the actual68,087,808B main and5,054,464B helper as
+ordinary independent copies. Its five-second no-plugin helper smoke exited0/reaped;
+Root did not open main. Format13 remains compatible with02;01 cannot read new13
+saves, so preserve original works with Save As. Current shortcut/profile location
+is at the top of this document. Per-placement follow-length remains an explicit
+gap; this change does not expand existing trimmed clips. New cloud terminal
+results and native03/NOIRE listening are not supplied by these local gates.
+
+Evidence under `target/backend-reliability-20261014`:
+`playlist-pattern-editor-link-source-candidate-01/`, `source114-local-gates-01-*`,
+`source114-local-resource-handback-01.json`, `source114-linked-render-01-*`,
+`playlist-pattern-editor-link-render-01/` (raw PPM/PNG and Root visual review),
+and `user-offline-preview-20261015-03.json`.
 
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
