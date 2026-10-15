@@ -54,6 +54,10 @@ jobs:
         timeout-minutes: 5
         run: cargo +stable-x86_64-pc-windows-msvc test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --features experimental-fresh-helper --lib async_state_readiness --target-dir target -- --test-threads=1
 
+      - name: Run strict stereo Effect and borrowed PCM regressions
+        timeout-minutes: 5
+        run: cargo +stable-x86_64-pc-windows-msvc test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --features experimental-fresh-helper --lib effect_ --target-dir target -- --test-threads=1
+
       - name: Run locked all-feature tests
         run: cargo +stable-x86_64-pc-windows-msvc test --locked --all-features --all-targets
 
@@ -62,6 +66,23 @@ jobs:
 
       - name: Build application and VST3 helper
         run: cargo +stable-x86_64-pc-windows-msvc build --locked --all-features --bins
+
+      - name: Verify real no-GUI stereo Effect through production helper
+        timeout-minutes: 10
+        shell: pwsh
+        env:
+          RUSTUP_TOOLCHAIN: stable-x86_64-pc-windows-msvc
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B tests/fixtures/vst3-effect/build_fixture.py --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:CITRUS_EFFECT_FIXTURE = (Resolve-Path tests/fixtures/vst3-effect/target/bundles/CitrusStereoDelayFixture.vst3).Path
+          $env:CITRUS_EFFECT_HELPER = (Resolve-Path target/debug/vst3-host-helper.exe).Path
+          cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/host-check/Cargo.toml --target-dir target --test real_effect real_sdk_effect_pcm_state_transport_delay_tail_and_natural_reap -- --ignored --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Python is supplied by the hosted Windows runner and used only for QA.
       - name: Record smoke harness interpreter
@@ -141,8 +162,8 @@ jobs:
           "Scope: fixture-only automated evidence. Human visual review, real vendor plugins, physical input/audio devices, DPI transitions and release acceptance remain NOT VERIFIED." >> $env:GITHUB_STEP_SUMMARY
 
   linux-helper-readiness:
-    # This narrow SDK lane exercises the existing Unix-only no-respawn contract.
-    # It does not run the DAW, a plug-in, a desktop or an audio device.
+    # Narrow no-GUI SDK lane: readiness/no-respawn and a checked-in test Effect.
+    # No DAW, installed plug-in, desktop or audio device is used.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -160,5 +181,22 @@ jobs:
       - name: Run SDK async-state readiness regressions
         run: cargo +stable test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --features experimental-fresh-helper --lib async_state_readiness --target-dir target -- --test-threads=1
 
+      - name: Run strict stereo Effect and borrowed PCM regressions
+        timeout-minutes: 5
+        run: cargo +stable test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --features experimental-fresh-helper --lib effect_ --target-dir target -- --test-threads=1
+
       - name: Preserve Unix ordinary-isolation no-respawn contract
         run: cargo +stable test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --features experimental-fresh-helper --lib internal::isolated_plugin_impl::tests::checked_native_operations_never_respawn_a_dead_instance --target-dir target -- --exact --test-threads=1
+
+      - name: Verify real no-GUI stereo Effect through production helper
+        timeout-minutes: 10
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          set -euo pipefail
+          cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/Cargo.toml
+          python3 -B tests/fixtures/vst3-effect/build_fixture.py --target x86_64-unknown-linux-gnu
+          cargo build --locked --jobs 1 --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --no-default-features --features experimental-fresh-helper --bin vst3-host-helper --target-dir target
+          export CITRUS_EFFECT_FIXTURE="$(realpath tests/fixtures/vst3-effect/target/bundles/CitrusStereoDelayFixture.vst3)"
+          export CITRUS_EFFECT_HELPER="$(realpath target/debug/vst3-host-helper)"
+          cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/host-check/Cargo.toml --target-dir target --test real_effect real_sdk_effect_pcm_state_transport_delay_tail_and_natural_reap -- --ignored --exact --nocapture

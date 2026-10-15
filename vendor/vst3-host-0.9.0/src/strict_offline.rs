@@ -1,6 +1,6 @@
-//! Disabled-by-default Linux/Windows client for one disposable offline generator.
+//! Disabled-by-default Linux/Windows client for one disposable offline plugin.
 //!
-//! This closed development API has no App caller. One process-wide reservation
+//! This opt-in API exposes no generic command exchange. One process-wide reservation
 //! admits at most one strict child, including abandoned or pending-cleanup owners.
 //! Every exchange uses its caller's original absolute deadline and is never
 //! replayed. Deadlines are cooperative: allocation, spawn, scheduling and reap
@@ -23,6 +23,9 @@ use crate::process_isolation::HostResponse;
 use crate::Parameter;
 use std::process::Command;
 use std::time::Instant;
+
+mod effect;
+pub use effect::{EffectIdentity, StereoEffectMetadata};
 
 pub use crate::fresh_helper::{LimitEvidence, LimitSite};
 use crate::helper_lifecycle::unsent;
@@ -102,6 +105,7 @@ pub struct Client {
     // codec payload, and is never returned as a substitute for a fresh query.
     audio_selection_required: bool,
     selected_audio_layout: Option<CheckedAudioBusLayout>,
+    effect: Option<effect::EffectSession>,
 }
 impl Client {
     /// Spawn exactly once, retaining any post-spawn failure owner. Required stdin
@@ -113,6 +117,7 @@ impl Client {
                 session,
                 audio_selection_required: false,
                 selected_audio_layout: None,
+                effect: None,
             })
             .map_err(|failure| SpawnFailure {
                 failure: unsent(failure.cause),
@@ -121,6 +126,7 @@ impl Client {
                         session: *session,
                         audio_selection_required: false,
                         selected_audio_layout: None,
+                        effect: None,
                     })
                 }),
             })
@@ -167,11 +173,18 @@ impl Client {
         Ok(())
     }
     /// Load the chosen class with configured maximum2048; never retry or recover.
+    /// An owner already bound by load_stereo_effect cannot be replaced here.
     pub fn load_plugin(
         &mut self,
         spec: LoadSpec<'_>,
         deadline: Instant,
     ) -> Result<LoadedPlugin, Failure> {
+        // The role is sticky for this disposable owner. Replacing an admitted
+        // Effect through the generic loader must not reopen generator/MIDI
+        // operations or discard its private admission contract.
+        if self.effect.is_some() {
+            return Err(self.reject(fresh_helper::ErrorKind::UnsupportedRequest, deadline));
+        }
         self.selected_audio_layout = None;
         if spec.path.is_empty()
             || spec.class_id.len() != 32
@@ -205,12 +218,17 @@ impl Client {
     }
     /// Set Offline mode on the helper owner before preparation/start.
     pub fn set_offline(&mut self, deadline: Instant) -> Result<(), Failure> {
+        self.invalidate_effect_admission();
         self.success(
             RequestView::SetProcessMode {
                 mode: ProcessMode::Offline,
             },
             deadline,
-        )
+        )?;
+        if let Some(effect) = &mut self.effect {
+            effect.offline = true;
+        }
+        Ok(())
     }
     /// Query configured reset capability/status; this never processes reset audio.
     pub fn reset_origin_support(
@@ -228,6 +246,7 @@ impl Client {
     }
     /// Borrow opaque project state synchronously without an eager payload copy.
     pub fn load_state(&mut self, data: &[u8], deadline: Instant) -> Result<(), Failure> {
+        self.invalidate_effect_admission();
         self.selected_audio_layout = None;
         self.success(
             RequestView::LoadState {
@@ -235,18 +254,31 @@ impl Client {
                 context: StateContextView::Project,
             },
             deadline,
-        )
+        )?;
+        if let Some(effect) = &mut self.effect {
+            effect.state_bytes = Some(data.len());
+        }
+        Ok(())
     }
     /// Start prepared processing through the helper's existing owner path.
     pub fn start_processing(&mut self, deadline: Instant) -> Result<(), Failure> {
+        self.verify_effect_admission(deadline)?;
         self.verify_selected_audio_layout(deadline)?;
         self.success(RequestView::StartProcessing, deadline)?;
-        self.verify_selected_audio_layout(deadline)
+        if let Some(effect) = &mut self.effect {
+            effect.processing = true;
+        }
+        self.verify_selected_audio_layout(deadline)?;
+        self.verify_effect_admission(deadline)
     }
     /// Stop a healthy clone. A sealed/cancelled session cannot send this request.
     pub fn stop_processing(&mut self, deadline: Instant) -> Result<(), Failure> {
         self.success(RequestView::StopProcessing, deadline)?;
-        self.verify_selected_audio_layout(deadline)
+        if let Some(effect) = &mut self.effect {
+            effect.processing = false;
+        }
+        self.verify_selected_audio_layout(deadline)?;
+        self.verify_effect_admission(deadline)
     }
     /// Non-consuming observation through the same closed client and original budget.
     pub fn async_state_snapshot(
@@ -272,6 +304,7 @@ impl Client {
         expected_revision: u64,
         deadline: Instant,
     ) -> Result<(), Failure> {
+        self.invalidate_effect_admission();
         self.success(
             RequestView::ArmOfflineStateReadiness { expected_revision },
             deadline,
@@ -302,6 +335,7 @@ impl Client {
     }
     /// Set one finite normalized captured f32 base through the existing owner path.
     pub fn set_parameter(&mut self, id: u32, value: f32, deadline: Instant) -> Result<(), Failure> {
+        self.invalidate_effect_admission();
         self.success(
             RequestView::SetParameter {
                 id,
@@ -380,6 +414,7 @@ impl Client {
         expected: &CheckedAudioBusLayout,
         deadline: Instant,
     ) -> Result<CheckedAudioBusLayout, Failure> {
+        self.invalidate_effect_admission();
         self.audio_selection_required = true;
         self.selected_audio_layout = None;
         let supported_inputs = expected.inputs.is_empty()
@@ -486,6 +521,9 @@ impl Client {
         sample_offset: i32,
         deadline: Instant,
     ) -> Result<(), Failure> {
+        if self.effect.is_some() {
+            return Err(self.reject(fresh_helper::ErrorKind::UnsupportedRequest, deadline));
+        }
         self.success(
             RequestView::SendMidiAt {
                 event,
@@ -524,6 +562,9 @@ impl Client {
         transport: ProcessTransport,
         deadline: Instant,
     ) -> Result<AudioBlock, Failure> {
+        if self.effect.is_some() {
+            return Err(self.reject(fresh_helper::ErrorKind::UnsupportedRequest, deadline));
+        }
         // Shape validation remains inside the budgeted session, sealing invalid
         // requests with NotSent and preserving deadline/cancellation precedence.
         if input_channels > 2 || !matches!(output_channels, 1 | 2) {

@@ -1357,6 +1357,14 @@ diff --git a/src/discovery.rs b/src/discovery.rs
  pub struct FactoryInfo {
      /// Vendor / manufacturer name.
      pub vendor: String,
+@@ -1212,6 +1216,7 @@
+ 
+ #[cfg(test)]
+ mod scan_tests {
++    #[cfg(unix)]
+     use super::*;
+ 
+     /// A symlink pointing back at an ancestor makes the recursive scan unbounded, because
 diff --git a/src/discovery_factory.rs b/src/discovery_factory.rs
 new file mode 100644
 --- /dev/null
@@ -2233,8 +2241,10 @@ diff --git a/src/fresh_helper/client_tests.rs b/src/fresh_helper/client_tests.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/fresh_helper/client_tests.rs
-@@ -0,0 +1,914 @@
+@@ -0,0 +1,916 @@
 +//! Actual closed public client against cooperative, ledger-checking mock children.
++#[path = "effect_client_tests.rs"]
++mod effect_client_tests;
 +#[path = "selected_bus_tests.rs"]
 +mod selected_bus_tests;
 +use super::*;
@@ -3152,7 +3162,7 @@ diff --git a/src/fresh_helper/codec.rs b/src/fresh_helper/codec.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/fresh_helper/codec.rs
-@@ -0,0 +1,2432 @@
+@@ -0,0 +1,2441 @@
 +//! Closed, cooperative, allocation-accounted codec for the fresh-helper subset.
 +//!
 +//! No legacy serde audio/state decoder and no generic JSON value tree is used.
@@ -3247,11 +3257,20 @@ new file mode 100644
 +    if matches!(channels, FlatInputView::SilentQ128(count) if count > 2 || frames != 128) {
 +        return Err(ErrorKind::Shape);
 +    }
++    if matches!(channels, FlatInputView::StereoEffectQ128(channels) if channels.len() != 2 || frames != 128)
++    {
++        return Err(ErrorKind::Shape);
++    }
 +    limit(channels.channel_count(), MAX_CHANNELS)?;
 +    for channel in channels.iter() {
 +        limit(channel.len(), MAX_FRAMES)?;
 +        if channel.len() != frames {
 +            return Err(ErrorKind::Shape);
++        }
++        if matches!(channels, FlatInputView::StereoEffectQ128(_))
++            && channel.iter().any(|sample| !sample.is_finite())
++        {
++            return Err(ErrorKind::InvalidRequest);
 +        }
 +    }
 +    Ok(())
@@ -5589,7 +5608,7 @@ diff --git a/src/fresh_helper/codec_tests.rs b/src/fresh_helper/codec_tests.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/fresh_helper/codec_tests.rs
-@@ -0,0 +1,3979 @@
+@@ -0,0 +1,4151 @@
 +//! Plugin-free source fixtures. These tests must not be compiled or executed
 +//! before the source archive, independent review and explicit execution gate.
 +use super::super::{budget_test_hooks, pump, Cancellation, LimitEvidence, LimitSite, MAX_PAYLOAD};
@@ -9093,6 +9112,178 @@ new file mode 100644
 +}
 +
 +#[test]
++fn stereo_effect_borrows_exact_finite_pcm_bits_with_one_charged_wire_allocation() {
++    use crate::internal::native_edit_transport::tests::measure_allocations;
++    let samples: Vec<Vec<f32>> = (0..2)
++        .map(|channel| {
++            (0..128)
++                .map(|frame| match frame {
++                    0 => -0.0,
++                    1 => f32::MIN_POSITIVE,
++                    2 => f32::MAX,
++                    _ => (frame as f32 - 64.0) * (channel + 1) as f32,
++                })
++                .collect()
++        })
++        .collect();
++    let before: Vec<Vec<u32>> = samples
++        .iter()
++        .map(|channel| channel.iter().map(|sample| sample.to_bits()).collect())
++        .collect();
++    let request = allocation_free(|| {
++        let view = RequestView::stereo_effect(&samples, silent_transport());
++        let RequestView::Process { inputs, .. } = view else {
++            panic!("real flat Process")
++        };
++        for (borrowed, original) in inputs.iter().zip(&samples) {
++            assert_eq!(borrowed.as_ptr(), original.as_ptr());
++        }
++        view
++    });
++    let shape = ReplyShape::Audio {
++        channels: 2,
++        frames: 128,
++    };
++    let mut budget = new_budget();
++    let (encoded, allocations) = measure_allocations(|| encode_view(&request, &shape, &mut budget));
++    let encoded = encoded.unwrap();
++    assert_eq!(allocations.allocations, 1);
++    assert_eq!(allocations.allocated_bytes, encoded.capacity());
++    assert_eq!(
++        (budget.live, budget.peak),
++        (encoded.capacity(), encoded.capacity())
++    );
++    let HostCommand::Process {
++        inputs,
++        frames,
++        transport,
++    } = serde_json::from_slice(&encoded).unwrap()
++    else {
++        panic!("existing wire protocol")
++    };
++    assert_eq!(frames, 128);
++    assert_eq!(transport, Some(silent_transport()));
++    for (index, channel) in inputs.iter().enumerate() {
++        assert_eq!(
++            channel
++                .iter()
++                .map(|sample| sample.to_bits())
++                .collect::<Vec<_>>(),
++            before[index]
++        );
++        assert_eq!(
++            samples[index]
++                .iter()
++                .map(|sample| sample.to_bits())
++                .collect::<Vec<_>>(),
++            before[index]
++        );
++    }
++    let charge = encoded.capacity();
++    drop(encoded);
++    budget.release(charge);
++    assert_eq!(budget.live, 0);
++}
++
++#[test]
++fn stereo_effect_shape_finiteness_and_stop_precedence_reject_before_allocation() {
++    let shape = ReplyShape::Audio {
++        channels: 2,
++        frames: 128,
++    };
++    let mut cases = vec![
++        (vec![], ErrorKind::Shape),
++        (vec![vec![0.0; 128]], ErrorKind::Shape),
++        (vec![vec![0.0; 128]; 3], ErrorKind::Shape),
++        (vec![vec![]; 2], ErrorKind::Shape),
++        (vec![vec![0.0; 127], vec![0.0; 128]], ErrorKind::Shape),
++        (vec![vec![0.0; 128], vec![0.0; 129]], ErrorKind::Shape),
++    ];
++    for nonfinite in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
++        let mut input = vec![vec![0.0; 128]; 2];
++        input[1][127] = nonfinite;
++        cases.push((input, ErrorKind::InvalidRequest));
++    }
++    for (samples, invalid) in cases {
++        for stop in 0..4 {
++            let mut budget = new_budget();
++            if stop == 1 || stop == 3 {
++                budget.deadline = Instant::now();
++            }
++            if stop == 2 || stop == 3 {
++                budget.cancel.cancelled.store(true, Ordering::Release);
++            }
++            let expected = match stop {
++                1 => ErrorKind::Deadline,
++                2 | 3 => ErrorKind::Cancelled,
++                _ => invalid,
++            };
++            assert_eq!(
++                allocation_free(|| encode_view(
++                    &RequestView::stereo_effect(&samples, silent_transport()),
++                    &shape,
++                    &mut budget
++                ))
++                .unwrap_err(),
++                expected
++            );
++            assert_eq!((budget.live, budget.peak), (0, 0));
++        }
++    }
++}
++
++#[test]
++fn stereo_effect_all_encoder_checkpoints_and_quota_restore_the_original_charge() {
++    let samples = vec![vec![2.5; 128], vec![-3.0; 128]];
++    let request = RequestView::stereo_effect(&samples, silent_transport());
++    let shape = ReplyShape::Audio {
++        channels: 2,
++        frames: 128,
++    };
++    let checks = {
++        let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
++        encode_view(&request, &shape, &mut new_budget()).unwrap();
++        budget_test_hooks::checks()
++    };
++    assert!(checks >= 6);
++    for at in 1..=checks {
++        for expired in [false, true] {
++            let mut budget = new_budget();
++            budget.reserve(17).unwrap();
++            let _hook = if expired {
++                budget_test_hooks::expire_at_check(at)
++            } else {
++                budget_test_hooks::cancel_at_check(at)
++            };
++            assert_eq!(
++                encode_view(&request, &shape, &mut budget).unwrap_err(),
++                if expired {
++                    ErrorKind::Deadline
++                } else {
++                    ErrorKind::Cancelled
++                }
++            );
++            assert_eq!(budget.live, 17);
++        }
++    }
++    let mut budget = new_budget();
++    budget.live = MAX_PAYLOAD;
++    budget.peak = MAX_PAYLOAD;
++    assert_eq!(
++        allocation_free(|| encode_view(&request, &shape, &mut budget)).unwrap_err(),
++        ErrorKind::Limit
++    );
++    assert_eq!((budget.live, budget.peak), (MAX_PAYLOAD, MAX_PAYLOAD));
++    let mut budget = new_budget();
++    let _hook = budget_test_hooks::fail_next_allocation();
++    assert_eq!(
++        allocation_free(|| encode_view(&request, &shape, &mut budget)).unwrap_err(),
++        ErrorKind::Allocation
++    );
++    assert_eq!(budget.live, 0);
++}
++
++#[test]
 +fn selected_bundle_codec_complete_fields_nullable_activation_and_u32_bounds() {
 +    use crate::process_isolation::{SelectedMetadataPolicy, StrictMetadataSnapshot};
 +    assert_command(
@@ -9568,6 +9759,1374 @@ new file mode 100644
 +        ErrorKind::Cancelled
 +    );
 +    assert_eq!((budget.live, budget.peak), (0, 0));
++}
+diff --git a/src/fresh_helper/effect_client_tests.rs b/src/fresh_helper/effect_client_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/src/fresh_helper/effect_client_tests.rs
+@@ -0,0 +1,1363 @@
++//! Real public Effect clients against ledger-checking Python protocol children.
++//! These exercise transport and admission, not a VST3 SDK DSP implementation.
++use super::*;
++use crate::audio::{BusDirection, MediaType};
++use crate::strict_offline::{Delivery, EffectIdentity, Failure};
++
++type Pair = (HostCommand, HostResponse);
++const CLASS: &str = "0123456789abcdef0123456789abcdef";
++const STATE: &[u8] = &[0, 255, 17, 3];
++
++fn identity() -> EffectIdentity {
++    EffectIdentity {
++        class_id: CLASS.into(),
++        vendor: "ledger vendor".into(),
++        name: "ledger effect".into(),
++        version: "1.2.3".into(),
++        category: "Fx|Dynamics".into(),
++    }
++}
++fn spec() -> strict_offline::LoadSpec<'static> {
++    strict_offline::LoadSpec {
++        path: "ledger-effect.vst3",
++        sample_rate: 48000.0,
++        tempo: 120.0,
++        time_sig_numerator: 4,
++        time_sig_denominator: 4,
++        class_id: CLASS,
++    }
++}
++fn load() -> Pair {
++    (
++        HostCommand::LoadPlugin {
++            path: spec().path.into(),
++            sample_rate: 48000.0,
++            block_size: 2048,
++            tempo: 120.0,
++            time_sig_numerator: 4,
++            time_sig_denominator: 4,
++            class_id: Some(CLASS.into()),
++        },
++        HostResponse::PluginInfo {
++            vendor: identity().vendor,
++            name: identity().name,
++            version: identity().version,
++            category: identity().category,
++            uid: CLASS.into(),
++            has_gui: false,
++            audio_inputs: 1,
++            audio_outputs: 1,
++            output_channels: 2,
++            has_midi_input: false,
++            has_midi_output: false,
++            compatibility: vec![],
++        },
++    )
++}
++fn audio(active: Option<bool>) -> CheckedAudioBusLayout {
++    let bus = CheckedAudioBusConfig {
++        channel_count: 2,
++        is_main: true,
++        active,
++    };
++    CheckedAudioBusLayout {
++        inputs: vec![bus.clone()],
++        outputs: vec![bus],
++    }
++}
++fn query(layout: CheckedAudioBusLayout) -> Pair {
++    (
++        HostCommand::CheckedAudioBusLayout,
++        HostResponse::CheckedAudioBusLayout { layout },
++    )
++}
++fn support() -> Pair {
++    (
++        HostCommand::ResetOriginSupport,
++        HostResponse::ResetOriginSupport {
++            support: ResetOriginSupport {
++                contract_version: 1,
++                max_block_frames: 2048,
++                processing: false,
++            },
++        },
++    )
++}
++fn snapshot() -> crate::AsyncStateSnapshot {
++    crate::AsyncStateSnapshot {
++        contract_version: 1,
++        async_started_revision: 9_007_199_254_740_993,
++        active_async: 0,
++        active_ui: 1,
++        active_other: 0,
++        readiness_faulted: false,
++    }
++}
++fn metadata() -> Vec<Pair> {
++    vec![
++        (
++            HostCommand::AsyncStateSnapshot,
++            HostResponse::AsyncStateSnapshot {
++                snapshot: snapshot(),
++            },
++        ),
++        (
++            HostCommand::NativeDirtyRevision,
++            HostResponse::NativeDirtyRevision { revision: 17 },
++        ),
++        query(audio(Some(true))),
++        (
++            HostCommand::EventBusLayout,
++            HostResponse::EventBusLayout {
++                layout: EventBusLayout {
++                    inputs: vec![],
++                    outputs: vec![],
++                },
++            },
++        ),
++        (
++            HostCommand::LatencySamples,
++            HostResponse::LatencySamples { samples: 32 },
++        ),
++        (
++            HostCommand::TailSamples,
++            HostResponse::TailSamples { samples: 160 },
++        ),
++        (
++            HostCommand::NativeDirtyRevision,
++            HostResponse::NativeDirtyRevision { revision: 17 },
++        ),
++        (
++            HostCommand::AsyncStateSnapshot,
++            HostResponse::AsyncStateSnapshot {
++                snapshot: snapshot(),
++            },
++        ),
++    ]
++}
++fn selection() -> Vec<Pair> {
++    vec![
++        support(),
++        query(audio(None)),
++        (
++            HostCommand::SetBusActive {
++                media_type: MediaType::Audio,
++                direction: BusDirection::Input,
++                bus_index: 0,
++                active: true,
++            },
++            success(),
++        ),
++        (
++            HostCommand::SetBusActive {
++                media_type: MediaType::Audio,
++                direction: BusDirection::Output,
++                bus_index: 0,
++                active: true,
++            },
++            success(),
++        ),
++        query(audio(Some(true))),
++    ]
++}
++fn prepared() -> Vec<Pair> {
++    let mut pairs = vec![
++        load(),
++        (
++            HostCommand::SetProcessMode {
++                mode: ProcessMode::Offline,
++            },
++            success(),
++        ),
++        (
++            HostCommand::LoadState {
++                data: STATE.to_vec(),
++                context: StateContext::Project,
++            },
++            success(),
++        ),
++        (
++            HostCommand::GetAllParameters,
++            HostResponse::Parameters {
++                params: vec![parameter()],
++            },
++        ),
++        (HostCommand::SetParameter { id: 17, value: 0.5 }, success()),
++        (
++            HostCommand::GetParameter { id: 17 },
++            HostResponse::ParameterValue { value: 0.5 },
++        ),
++        query(audio(None)),
++    ];
++    pairs.extend(selection());
++    pairs
++}
++fn admission() -> Vec<Pair> {
++    let mut pairs = vec![support()];
++    pairs.extend(metadata());
++    pairs.push((
++        HostCommand::ArmOfflineStateReadiness {
++            expected_revision: snapshot().async_started_revision,
++        },
++        success(),
++    ));
++    pairs.extend(metadata());
++    pairs
++}
++fn start() -> Vec<Pair> {
++    let mut pairs = metadata();
++    pairs.extend([
++        query(audio(Some(true))),
++        (HostCommand::StartProcessing, success()),
++        query(audio(Some(true))),
++    ]);
++    pairs.extend(metadata());
++    pairs
++}
++fn stop() -> Vec<Pair> {
++    let mut pairs = vec![
++        (HostCommand::StopProcessing, success()),
++        query(audio(Some(true))),
++    ];
++    pairs.extend(metadata());
++    pairs
++}
++fn ready_pairs() -> Vec<Pair> {
++    let mut pairs = prepared();
++    pairs.extend(admission());
++    pairs.extend(start());
++    pairs
++}
++fn prepare(c: &mut Client) {
++    let loaded = c
++        .load_stereo_effect(spec(), &identity(), deadline())
++        .unwrap();
++    assert_eq!(loaded.uid, CLASS);
++    c.set_offline(deadline()).unwrap();
++    c.load_state(STATE, deadline()).unwrap();
++    let params = c.parameters(deadline()).unwrap();
++    assert_eq!(params.len(), 1);
++    assert_eq!(params[0].id, 17);
++    c.set_parameter(17, 0.5, deadline()).unwrap();
++    assert!(strict_offline::captured_base_matches(
++        c.parameter(17, deadline()).unwrap(),
++        0.5
++    ));
++    let before = c.checked_audio_layout(deadline()).unwrap();
++    assert_eq!(before, audio(None));
++    assert_eq!(
++        c.select_main_stereo_output(&before, deadline()).unwrap(),
++        audio(Some(true))
++    );
++}
++fn ready(c: &mut Client) {
++    prepare(c);
++    let receipt = c.admit_stereo_effect(deadline()).unwrap();
++    assert_eq!(receipt.identity, identity());
++    assert_eq!(receipt.path, spec().path);
++    assert_eq!(receipt.sample_rate, 48000.0);
++    assert_eq!(receipt.max_block_frames, 2048);
++    assert_eq!(receipt.tempo, 120.0);
++    assert_eq!(
++        (receipt.time_sig_numerator, receipt.time_sig_denominator),
++        (4, 4)
++    );
++    assert_eq!(receipt.state_bytes, STATE.len());
++    assert_eq!(receipt.audio, audio(Some(true)));
++    assert_eq!(
++        receipt.events.inputs.len() + receipt.events.outputs.len(),
++        0
++    );
++    assert_eq!((receipt.latency_samples, receipt.tail_samples), (32, 160));
++    assert_eq!(
++        receipt.async_started_revision,
++        snapshot().async_started_revision
++    );
++    assert_eq!(receipt.native_dirty_revision, 17);
++    c.start_processing(deadline()).unwrap();
++}
++fn input() -> Vec<Vec<f32>> {
++    let bits = [
++        0,
++        0x8000_0000,
++        1,
++        0x8000_0001,
++        0x3e80_0000,
++        0xbf00_0000,
++        0x4070_0000,
++        0xc010_0000,
++    ];
++    (0..2)
++        .map(|channel| {
++            (0..128)
++                .map(|frame| f32::from_bits(bits[(frame + channel) % bits.len()]))
++                .collect()
++        })
++        .collect()
++}
++fn bits(input: &[Vec<f32>]) -> Vec<Vec<u32>> {
++    input
++        .iter()
++        .map(|channel| channel.iter().map(|v| v.to_bits()).collect())
++        .collect()
++}
++fn process(inputs: &[Vec<f32>], outputs: Vec<Vec<f32>>) -> Pair {
++    (
++        HostCommand::Process {
++            inputs: inputs.to_vec(),
++            frames: 128,
++            transport: Some(transport()),
++        },
++        HostResponse::AudioOutput {
++            outputs,
++            output_events: vec![],
++            output_events_lost: false,
++            transport_applied: true,
++        },
++    )
++}
++fn processing_pairs(inputs: &[Vec<f32>], reply: HostResponse, post: bool) -> Vec<Pair> {
++    let mut pairs = ready_pairs();
++    pairs.extend(metadata());
++    pairs.push((process(inputs, vec![]).0, reply));
++    if post {
++        pairs.extend(metadata());
++    }
++    pairs
++}
++// The child checks exact base64 bytes against the ledger, decodes each input
++// and computes its result from those samples. No canned audio reply is used.
++fn transform_ledger(pairs: &[Pair], half_gain: bool) -> String {
++    let json = serde_json::to_string(pairs).unwrap();
++    format!(
++        r#"import base64,json,math,struct,sys
++pairs=json.loads({json:?})
++for expected,reply in pairs:
++ actual=json.loads(sys.stdin.readline())
++ assert actual==expected,(actual,expected)
++ if isinstance(actual,dict) and 'Process' in actual:
++  request=actual['Process']
++  assert request['frames']==128 and len(request['inputs'])==2,request
++  raw=[base64.b64decode(c,validate=True) for c in request['inputs']]
++  assert all(len(c)==512 for c in raw),raw
++  values=[struct.unpack('<128f',c) for c in raw]
++  assert all(math.isfinite(v) for c in values for v in c),values
++  gain=0.5 if {half_gain} else 1.0
++  output=[struct.pack('<128f',*(v*gain for v in c)) for c in values]
++  reply={{'AudioOutput':{{'outputs':[base64.b64encode(c).decode() for c in output],'output_events':[],'output_events_lost':False,'transport_applied':True}}}}
++ print(json.dumps(reply),flush=True)
++assert json.loads(sys.stdin.readline())=='Shutdown'
++assert sys.stdin.read()==''
++"#,
++        half_gain = if half_gain { "True" } else { "False" }
++    )
++}
++fn unpublished_failure(c: &mut Client, input: &[Vec<f32>], end: Instant) -> Failure {
++    let before = bits(input);
++    let pointers: Vec<_> = input.iter().map(Vec::as_ptr).collect();
++    let mut destination = vec![vec![-19.25; 128]; 2];
++    let sentinel = bits(&destination);
++    let result = c.process_stereo_effect(input, transport(), end);
++    assert_eq!(bits(input), before);
++    assert_eq!(input.iter().map(Vec::as_ptr).collect::<Vec<_>>(), pointers);
++    let failure = match result {
++        Err(failure) => failure,
++        Ok(block) => {
++            destination = block.outputs;
++            panic!("failed Effect published audio: {:?}", bits(&destination));
++        }
++    };
++    assert_eq!(bits(&destination), sentinel);
++    failure
++}
++
++#[test]
++fn effect_client_known_pcm_transform_is_computed_by_child_with_exact_receipt() {
++    let _serial = serial();
++    let input = input();
++    let original = bits(&input);
++    let mut pairs = ready_pairs();
++    pairs.extend(metadata());
++    pairs.push(process(&input, vec![]));
++    pairs.extend(metadata());
++    pairs.extend(stop());
++    let mut c = client(&transform_ledger(&pairs, true));
++    ready(&mut c);
++    let output = c
++        .process_stereo_effect(&input, transport(), deadline())
++        .unwrap();
++    assert_eq!(bits(&input), original);
++    assert_eq!(
++        bits(&output.outputs),
++        bits(
++            &input
++                .iter()
++                .map(|channel| channel.iter().map(|v| v * 0.5).collect())
++                .collect::<Vec<_>>()
++        )
++    );
++    assert_ne!(bits(&output.outputs), original);
++    assert!(output.outputs.iter().flatten().any(|v| v.abs() > 1.0));
++    assert_eq!(output.output_event_count, 0);
++    assert!(!output.output_events_lost && output.transport_applied);
++    c.stop_processing(deadline()).unwrap();
++    finish_client(&mut c);
++}
++
++#[test]
++fn effect_client_finite_pcm_bits_and_explicit_zero_tail_input_are_not_substituted() {
++    let _serial = serial();
++    let mut input = input();
++    input[0][120] = f32::MAX;
++    input[1][120] = f32::MIN;
++    let zeros = vec![vec![0.0; 128]; 2];
++    let mut pairs = ready_pairs();
++    for samples in [&input, &zeros] {
++        pairs.extend(metadata());
++        pairs.push(process(samples, vec![]));
++        pairs.extend(metadata());
++    }
++    pairs.extend(stop());
++    let mut c = client(&transform_ledger(&pairs, false));
++    ready(&mut c);
++    for samples in [&input, &zeros] {
++        let before = bits(samples);
++        let out = c
++            .process_stereo_effect(samples, transport(), deadline())
++            .unwrap();
++        assert_eq!(bits(&out.outputs), before);
++        assert_eq!(bits(samples), before);
++    }
++    c.stop_processing(deadline()).unwrap();
++    finish_client(&mut c);
++}
++
++#[test]
++fn effect_client_wrong_actual_identity_role_and_load_shape_seal_without_fallback() {
++    let _serial = serial();
++    for change in 0..11 {
++        let mut pair = load();
++        if let HostResponse::PluginInfo {
++            uid,
++            vendor,
++            name,
++            version,
++            category,
++            has_midi_input,
++            has_midi_output,
++            audio_inputs,
++            audio_outputs,
++            output_channels,
++            ..
++        } = &mut pair.1
++        {
++            match change {
++                0 => *uid = "fedcba9876543210fedcba9876543210".into(),
++                1 => vendor.push('!'),
++                2 => name.push('!'),
++                3 => version.push('!'),
++                4 => *category = "Instrument".into(),
++                5 => *category = "Fx|Instrument".into(),
++                6 => *has_midi_input = true,
++                7 => *has_midi_output = true,
++                8 => *audio_inputs = 0,
++                9 => *audio_outputs = 2,
++                _ => *output_channels = 1,
++            }
++        }
++        let mut c = client(&ledger(&[pair], false));
++        let failure = c
++            .load_stereo_effect(spec(), &identity(), deadline())
++            .unwrap_err();
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (FailureKind::Shape, Delivery::NotSent)
++        );
++        assert_eq!(failure.request_context, None);
++        let repeated = unpublished_failure(&mut c, &input(), deadline());
++        assert_eq!(
++            (repeated.kind, repeated.delivery),
++            (FailureKind::Shape, Delivery::NotSent)
++        );
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_invalid_expected_role_is_unsent_and_cancellation_precedes_validation() {
++    let _serial = serial();
++    for category in ["Effect", "NotFx", "Fx|Instrument", "FxExtra", ""] {
++        for cancelled in [false, true] {
++            let mut expected = identity();
++            expected.category = category.into();
++            let mut c = client(&ledger(&[], false));
++            if cancelled {
++                c.cancellation().cancel();
++            }
++            let failure = c
++                .load_stereo_effect(spec(), &expected, deadline())
++                .unwrap_err();
++            assert_eq!(failure.delivery, Delivery::NotSent);
++            assert_eq!(
++                failure.kind,
++                if cancelled {
++                    FailureKind::Cancelled
++                } else {
++                    FailureKind::InvalidRequest
++                }
++            );
++            finish_client(&mut c);
++        }
++    }
++    for field in 0..4 {
++        for oversized in [false, true] {
++            let mut expected = identity();
++            let value = if oversized {
++                if field == 3 {
++                    format!("Fx|{}", "x".repeat(65_534))
++                } else {
++                    "x".repeat(65_537)
++                }
++            } else {
++                String::new()
++            };
++            assert_eq!(value.len(), if oversized { 65_537 } else { 0 });
++            match field {
++                0 => expected.vendor = value,
++                1 => expected.name = value,
++                2 => expected.version = value,
++                _ => expected.category = value,
++            }
++            let mut c = client(&ledger(&[], false));
++            let failure = c
++                .load_stereo_effect(spec(), &expected, deadline())
++                .unwrap_err();
++            assert_eq!(
++                (failure.kind, failure.delivery),
++                (FailureKind::InvalidRequest, Delivery::NotSent)
++            );
++            assert_eq!(failure.request_context, None);
++            finish_client(&mut c);
++        }
++    }
++}
++
++#[test]
++fn effect_client_unprepared_and_unstarted_processing_cannot_publish() {
++    let _serial = serial();
++    for state in 0..3 {
++        let pairs = if state == 0 { vec![] } else { prepared() };
++        let mut c = client(&ledger(&pairs, false));
++        if state > 0 {
++            prepare(&mut c);
++        }
++        let failure = if state == 2 {
++            c.start_processing(deadline()).unwrap_err()
++        } else {
++            unpublished_failure(&mut c, &input(), deadline())
++        };
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (FailureKind::InvalidRequest, Delivery::NotSent)
++        );
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_admission_needs_explicit_offline_state_and_selection() {
++    let _serial = serial();
++    for missing in 0..3 {
++        let mut pairs = vec![load()];
++        if missing != 0 {
++            pairs.push((
++                HostCommand::SetProcessMode {
++                    mode: ProcessMode::Offline,
++                },
++                success(),
++            ));
++        }
++        if missing != 1 {
++            pairs.push((
++                HostCommand::LoadState {
++                    data: STATE.to_vec(),
++                    context: StateContext::Project,
++                },
++                success(),
++            ));
++        }
++        if missing != 2 {
++            pairs.extend(selection());
++        }
++        let mut c = client(&ledger(&pairs, false));
++        c.load_stereo_effect(spec(), &identity(), deadline())
++            .unwrap();
++        if missing != 0 {
++            c.set_offline(deadline()).unwrap();
++        }
++        if missing != 1 {
++            c.load_state(STATE, deadline()).unwrap();
++        }
++        if missing != 2 {
++            c.select_main_stereo_output(&audio(None), deadline())
++                .unwrap();
++        }
++        let failure = c.admit_stereo_effect(deadline()).unwrap_err();
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (FailureKind::InvalidRequest, Delivery::NotSent)
++        );
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_admission_requires_stopped_v1_exact_2048_support() {
++    let _serial = serial();
++    for change in 0..4 {
++        let mut pair = support();
++        if let HostResponse::ResetOriginSupport { support } = &mut pair.1 {
++            match change {
++                0 => support.processing = true,
++                1 => support.contract_version = 2,
++                2 => support.max_block_frames = 127,
++                _ => support.max_block_frames = 128,
++            }
++        }
++        let mut pairs = prepared();
++        pairs.push(pair);
++        let mut c = client(&ledger(&pairs, false));
++        prepare(&mut c);
++        let failure = c.admit_stereo_effect(deadline()).unwrap_err();
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (FailureKind::Shape, Delivery::NotSent)
++        );
++        assert!(c.start_processing(deadline()).is_err());
++        finish_client(&mut c);
++    }
++}
++
++fn changed_metadata(change: usize) -> Vec<Pair> {
++    let mut pairs = metadata();
++    match change {
++        0..=3 => {
++            if let HostResponse::AsyncStateSnapshot { snapshot } = &mut pairs[0].1 {
++                match change {
++                    0 => snapshot.active_async = 1,
++                    1 => snapshot.active_other = 1,
++                    2 => snapshot.readiness_faulted = true,
++                    _ => snapshot.contract_version = 2,
++                }
++            }
++        }
++        4 => {
++            if let HostResponse::AsyncStateSnapshot { snapshot } = &mut pairs[7].1 {
++                snapshot.async_started_revision += 1;
++            }
++        }
++        5 => pairs[6].1 = HostResponse::NativeDirtyRevision { revision: 18 },
++        6..=9 => {
++            if let HostResponse::CheckedAudioBusLayout { layout } = &mut pairs[2].1 {
++                match change {
++                    6 => layout.inputs[0].channel_count = 1,
++                    7 => layout.outputs[0].active = None,
++                    8 => layout.inputs.push(layout.inputs[0].clone()),
++                    _ => layout.outputs[0].is_main = false,
++                }
++            }
++        }
++        10 | 11 => {
++            if let HostResponse::EventBusLayout { layout } = &mut pairs[3].1 {
++                let bus = EventBusConfig {
++                    channel_count: 16,
++                    is_main: true,
++                    active: Some(true),
++                };
++                if change == 10 {
++                    layout.inputs.push(bus);
++                } else {
++                    layout.outputs.push(bus);
++                }
++            }
++        }
++        12 => pairs[4].1 = HostResponse::LatencySamples { samples: 33 },
++        _ => pairs[5].1 = HostResponse::TailSamples { samples: 161 },
++    }
++    pairs
++}
++
++#[test]
++fn effect_client_admission_refuses_busy_drifting_or_nonstereo_metadata_before_arm() {
++    let _serial = serial();
++    for change in 0..12 {
++        let mut pairs = prepared();
++        pairs.push(support());
++        let mut changed = changed_metadata(change);
++        // Invalid wire contract is rejected by the first getter's codec;
++        // readiness and descriptor refusals consume the full fresh bundle.
++        if change == 3 {
++            changed.truncate(1);
++        }
++        pairs.extend(changed);
++        let mut c = client(&ledger(&pairs, false));
++        prepare(&mut c);
++        let failure = c.admit_stereo_effect(deadline()).unwrap_err();
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            if change == 3 {
++                (FailureKind::MalformedReply, Delivery::MayHaveApplied)
++            } else {
++                (FailureKind::Shape, Delivery::NotSent)
++            },
++            "change {change}"
++        );
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_arm_brackets_metadata_and_keeps_exact_latency_tail() {
++    let _serial = serial();
++    for change in [4, 5, 6, 10, 12, 13] {
++        let mut pairs = prepared();
++        pairs.push(support());
++        pairs.extend(metadata());
++        pairs.push((
++            HostCommand::ArmOfflineStateReadiness {
++                expected_revision: snapshot().async_started_revision,
++            },
++            success(),
++        ));
++        pairs.extend(changed_metadata(change));
++        let mut c = client(&ledger(&pairs, false));
++        prepare(&mut c);
++        let failure = c.admit_stereo_effect(deadline()).unwrap_err();
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (FailureKind::Shape, Delivery::NotSent)
++        );
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_start_and_process_recheck_metadata_on_both_sides() {
++    let _serial = serial();
++    for boundary in 0..4 {
++        let mut pairs = prepared();
++        pairs.extend(admission());
++        if boundary > 1 {
++            pairs.extend(start());
++        }
++        if boundary % 2 == 1 {
++            pairs.extend(metadata());
++            if boundary == 1 {
++                pairs.extend([
++                    query(audio(Some(true))),
++                    (HostCommand::StartProcessing, success()),
++                    query(audio(Some(true))),
++                ]);
++            } else {
++                pairs.push(process(&input(), vec![vec![0.25; 128]; 2]));
++            }
++        }
++        pairs.extend(changed_metadata(12));
++        let mut c = client(&ledger(&pairs, false));
++        prepare(&mut c);
++        c.admit_stereo_effect(deadline()).unwrap();
++        if boundary > 1 {
++            c.start_processing(deadline()).unwrap();
++        }
++        let failure = if boundary < 2 {
++            c.start_processing(deadline()).unwrap_err()
++        } else {
++            unpublished_failure(&mut c, &input(), deadline())
++        };
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (FailureKind::Shape, Delivery::NotSent),
++            "boundary {boundary}"
++        );
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_start_rechecks_selected_bus_acknowledgment_before_and_after_start() {
++    let _serial = serial();
++    for after_start in [false, true] {
++        let mut pairs = prepared();
++        pairs.extend(admission());
++        pairs.extend(metadata());
++        if after_start {
++            pairs.extend([
++                query(audio(Some(true))),
++                (HostCommand::StartProcessing, success()),
++            ]);
++        }
++        pairs.push(query(audio(Some(false))));
++        let mut c = client(&ledger(&pairs, false));
++        prepare(&mut c);
++        c.admit_stereo_effect(deadline()).unwrap();
++        let failure = c.start_processing(deadline()).unwrap_err();
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (FailureKind::Shape, Delivery::NotSent)
++        );
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_state_parameter_and_selection_changes_invalidate_receipt() {
++    let _serial = serial();
++    for change in 0..5 {
++        let mut pairs = prepared();
++        pairs.extend(admission());
++        match change {
++            0 => pairs.push((
++                HostCommand::LoadState {
++                    data: STATE.to_vec(),
++                    context: StateContext::Project,
++                },
++                success(),
++            )),
++            1 => pairs.push((HostCommand::SetParameter { id: 17, value: 0.5 }, success())),
++            2 => {
++                let mut selected_again = selection();
++                selected_again[1] = query(audio(Some(true)));
++                pairs.extend(selected_again);
++            }
++            3 => pairs.push((
++                HostCommand::SetProcessMode {
++                    mode: ProcessMode::Offline,
++                },
++                success(),
++            )),
++            _ => pairs.push((
++                HostCommand::ArmOfflineStateReadiness {
++                    expected_revision: snapshot().async_started_revision,
++                },
++                success(),
++            )),
++        }
++        let mut c = client(&ledger(&pairs, false));
++        prepare(&mut c);
++        c.admit_stereo_effect(deadline()).unwrap();
++        match change {
++            0 => c.load_state(STATE, deadline()).unwrap(),
++            1 => c.set_parameter(17, 0.5, deadline()).unwrap(),
++            2 => {
++                c.select_main_stereo_output(&audio(Some(true)), deadline())
++                    .unwrap();
++            }
++            3 => c.set_offline(deadline()).unwrap(),
++            _ => c
++                .arm_offline_state_readiness(snapshot().async_started_revision, deadline())
++                .unwrap(),
++        }
++        let failure = c.start_processing(deadline()).unwrap_err();
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (FailureKind::InvalidRequest, Delivery::NotSent)
++        );
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_readonly_layout_query_keeps_receipt_and_tail_max_is_not_zeroed() {
++    let _serial = serial();
++    let mut pairs = prepared();
++    let mut admit = admission();
++    for pair in &mut admit {
++        if matches!(pair.0, HostCommand::TailSamples) {
++            pair.1 = HostResponse::TailSamples { samples: u32::MAX };
++        }
++    }
++    pairs.extend(admit);
++    pairs.push(query(audio(Some(true))));
++    let mut after_query = start();
++    after_query.extend(stop());
++    for pair in &mut after_query {
++        if matches!(pair.0, HostCommand::TailSamples) {
++            pair.1 = HostResponse::TailSamples { samples: u32::MAX };
++        }
++    }
++    pairs.extend(after_query);
++    let mut c = client(&ledger(&pairs, true));
++    prepare(&mut c);
++    let receipt = c.admit_stereo_effect(deadline()).unwrap();
++    assert_eq!(
++        (receipt.latency_samples, receipt.tail_samples),
++        (32, u32::MAX)
++    );
++    assert_eq!(c.checked_audio_layout(deadline()).unwrap(), receipt.audio);
++    c.start_processing(deadline()).unwrap();
++    c.stop_processing(deadline()).unwrap();
++    finish_client(&mut c);
++}
++
++#[test]
++fn effect_client_rejects_empty_wrong_channel_and_frame_input_without_process_bytes() {
++    let _serial = serial();
++    for input in [
++        vec![],
++        vec![vec![0.0; 128]],
++        vec![vec![0.0; 128]; 3],
++        vec![vec![0.0; 127], vec![0.0; 128]],
++        vec![vec![0.0; 128], vec![0.0; 129]],
++    ] {
++        let mut pairs = ready_pairs();
++        pairs.extend(metadata());
++        let mut c = client(&ledger(&pairs, false));
++        ready(&mut c);
++        let failure = unpublished_failure(&mut c, &input, deadline());
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (FailureKind::Shape, Delivery::NotSent)
++        );
++        assert_eq!(failure.request_context.unwrap().operation, "Process");
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_nonfinite_input_is_unsent_and_preserves_every_source_bit() {
++    let _serial = serial();
++    for sample in [
++        f32::from_bits(0x7fc0_0123),
++        f32::INFINITY,
++        f32::NEG_INFINITY,
++    ] {
++        let mut input = input();
++        input[1][127] = sample;
++        let mut pairs = ready_pairs();
++        pairs.extend(metadata());
++        let mut c = client(&ledger(&pairs, false));
++        ready(&mut c);
++        let failure = unpublished_failure(&mut c, &input, deadline());
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (FailureKind::InvalidRequest, Delivery::NotSent)
++        );
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_invalid_transport_is_not_sent_as_a_valid_audio_request() {
++    let _serial = serial();
++    for change in 0..4 {
++        let mut t = transport();
++        match change {
++            0 => t.tempo = 0.0,
++            1 => t.quarter_note_position = f64::NAN,
++            2 => t.time_sig_numerator = 0,
++            _ => t.time_sig_denominator = 3,
++        }
++        let mut pairs = ready_pairs();
++        pairs.extend(metadata());
++        let mut c = client(&ledger(&pairs, false));
++        ready(&mut c);
++        let input = input();
++        let before = bits(&input);
++        let failure = c.process_stereo_effect(&input, t, deadline()).unwrap_err();
++        assert_eq!(bits(&input), before);
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (FailureKind::InvalidRequest, Delivery::NotSent)
++        );
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_wrong_output_shape_and_nonfinite_loss_transport_never_escape() {
++    let _serial = serial();
++    for change in 0..8 {
++        let input = input();
++        let mut reply = process(&input, vec![vec![0.25; 128]; 2]).1;
++        if let HostResponse::AudioOutput {
++            outputs,
++            output_events_lost,
++            transport_applied,
++            ..
++        } = &mut reply
++        {
++            match change {
++                0 => {
++                    outputs.pop();
++                }
++                1 => outputs.push(vec![0.0; 128]),
++                2 => {
++                    outputs[1].pop();
++                }
++                3 => outputs[0].push(0.0),
++                4 => outputs[1][127] = f32::from_bits(0x7fc0_0123),
++                5 => outputs[0][0] = f32::INFINITY,
++                6 => *output_events_lost = true,
++                _ => *transport_applied = false,
++            }
++        }
++        let pairs = processing_pairs(&input, reply, change >= 4);
++        let mut c = client(&ledger(&pairs, false));
++        ready(&mut c);
++        let failure = unpublished_failure(&mut c, &input, deadline());
++        assert_eq!(failure.kind, FailureKind::Shape);
++        assert_eq!(
++            failure.delivery,
++            if change < 4 {
++                Delivery::MayHaveApplied
++            } else {
++                Delivery::NotSent
++            }
++        );
++        assert_eq!(
++            failure.request_context.map(|c| c.operation),
++            if change < 4 { Some("Process") } else { None }
++        );
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_generator_and_midi_entry_points_are_never_sent_on_effect() {
++    let _serial = serial();
++    for operation in 0..3 {
++        let mut c = client(&ledger(&[load()], false));
++        c.load_stereo_effect(spec(), &identity(), deadline())
++            .unwrap();
++        let failure = match operation {
++            0 => c.process(2, transport(), deadline()).unwrap_err(),
++            1 => c
++                .process_silent_generator(2, 2, transport(), deadline())
++                .unwrap_err(),
++            _ => c
++                .send_note(
++                    MidiEvent::NoteOn {
++                        channel: MidiChannel::Ch1,
++                        note: 60,
++                        velocity: 100,
++                    },
++                    0,
++                    deadline(),
++                )
++                .unwrap_err(),
++        };
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (FailureKind::UnsupportedRequest, Delivery::NotSent)
++        );
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_malformed_and_operation_error_keep_failed_process_and_reap() {
++    let _serial = serial();
++    for malformed in [true, false] {
++        let input = input();
++        let mut pairs = ready_pairs();
++        pairs.extend(metadata());
++        let json = serde_json::to_string(&pairs).unwrap();
++        let expected = serde_json::to_string(&process(&input, vec![]).0).unwrap();
++        let response = if malformed {
++            "not-json"
++        } else {
++            "{\"Error\":{\"message\":\"effect process rejected after possible DSP mutation\"}}"
++        };
++        let script = format!("import json,sys\nfor expected,reply in json.loads({json:?}):\n actual=json.loads(sys.stdin.readline())\n assert actual==expected,(actual,expected)\n print(json.dumps(reply),flush=True)\nassert json.loads(sys.stdin.readline())==json.loads({expected:?})\nprint({response:?},flush=True)\nassert sys.stdin.read()==''\n");
++        let mut c = client(&script);
++        ready(&mut c);
++        let failure = unpublished_failure(&mut c, &input, deadline());
++        assert_eq!(
++            failure.kind,
++            if malformed {
++                FailureKind::MalformedReply
++            } else {
++                FailureKind::OperationRejected
++            }
++        );
++        assert_eq!(failure.delivery, Delivery::MayHaveApplied);
++        assert_eq!(failure.request_context.unwrap().operation, "Process");
++        if !malformed {
++            assert_eq!(
++                failure.diagnostic.as_deref(),
++                Some("effect process rejected after possible DSP mutation")
++            );
++        }
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_nonempty_output_events_are_unsupported_not_discarded() {
++    let _serial = serial();
++    let input = input();
++    let mut pairs = ready_pairs();
++    pairs.extend(metadata());
++    let json = serde_json::to_string(&pairs).unwrap();
++    let expected = serde_json::to_string(&process(&input, vec![]).0).unwrap();
++    let mut reply = serde_json::to_value(process(&input, vec![vec![0.25; 128]; 2]).1).unwrap();
++    reply["AudioOutput"]["output_events"] = serde_json::json!([{}]);
++    let reply = serde_json::to_string(&reply).unwrap();
++    let script = format!("import json,sys\nfor expected,reply in json.loads({json:?}):\n actual=json.loads(sys.stdin.readline())\n assert actual==expected,(actual,expected)\n print(json.dumps(reply),flush=True)\nassert json.loads(sys.stdin.readline())==json.loads({expected:?})\nprint({reply:?},flush=True)\nassert sys.stdin.read()==''\n");
++    let mut c = client(&script);
++    ready(&mut c);
++    let failure = unpublished_failure(&mut c, &input, deadline());
++    assert_eq!(
++        (failure.kind, failure.delivery),
++        (FailureKind::UnsupportedReply, Delivery::MayHaveApplied)
++    );
++    assert_eq!(failure.request_context.unwrap().operation, "Process");
++    finish_client(&mut c);
++}
++
++#[test]
++fn effect_client_deadline_and_sticky_cancel_preserve_pcm_without_followup() {
++    let _serial = serial();
++    for cancelled in [false, true] {
++        let mut c = client(&ledger(&ready_pairs(), false));
++        ready(&mut c);
++        if cancelled {
++            c.cancellation().cancel();
++        }
++        let end = if cancelled {
++            deadline()
++        } else {
++            Instant::now()
++        };
++        let failure = unpublished_failure(&mut c, &input(), end);
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (
++                if cancelled {
++                    FailureKind::Cancelled
++                } else {
++                    FailureKind::Deadline
++                },
++                Delivery::NotSent
++            )
++        );
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_sent_process_deadline_and_cancel_keep_delivery_and_pcm() {
++    let _serial = serial();
++    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++    for cancelled in [false, true] {
++        let path = std::env::temp_dir().join(format!(
++            "strict-effect-process-latch-{}-{}",
++            std::process::id(),
++            NEXT.fetch_add(1, Ordering::Relaxed)
++        ));
++        struct Remove(std::path::PathBuf);
++        impl Drop for Remove {
++            fn drop(&mut self) {
++                let _ = std::fs::remove_file(&self.0);
++            }
++        }
++        let _remove = Remove(path.clone());
++        let path_json = serde_json::to_string(path.to_str().unwrap()).unwrap();
++        let input = input();
++        let mut pairs = ready_pairs();
++        pairs.extend(metadata());
++        let json = serde_json::to_string(&pairs).unwrap();
++        let expected = serde_json::to_string(&process(&input, vec![]).0).unwrap();
++        let script = format!("import json,sys\nfor expected,reply in json.loads({json:?}):\n actual=json.loads(sys.stdin.readline())\n assert actual==expected,(actual,expected)\n print(json.dumps(reply),flush=True)\nassert json.loads(sys.stdin.readline())==json.loads({expected:?})\nwith open({path_json},'x') as out: out.write('accepted Effect Process')\nassert sys.stdin.read()==''\n");
++        let mut c = client(&script);
++        ready(&mut c);
++        let cancellation = c.cancellation();
++        let end = deadline();
++        let failure = std::thread::scope(|scope| {
++            let worker = cancelled.then(|| {
++                scope.spawn(|| {
++                    while !path.exists() {
++                        assert!(
++                            Instant::now() < end,
++                            "Effect Process admission latch deadline"
++                        );
++                        std::thread::sleep(Duration::from_millis(1));
++                    }
++                    cancellation.cancel();
++                })
++            });
++            let failure = unpublished_failure(&mut c, &input, end);
++            if let Some(worker) = worker {
++                worker.join().unwrap();
++            }
++            failure
++        });
++        assert_eq!(
++            std::fs::read_to_string(&path).unwrap(),
++            "accepted Effect Process"
++        );
++        assert_eq!(
++            (failure.kind, failure.delivery),
++            (
++                if cancelled {
++                    FailureKind::Cancelled
++                } else {
++                    FailureKind::Deadline
++                },
++                Delivery::MayHaveApplied
++            )
++        );
++        assert_eq!(failure.request_context.unwrap().operation, "Process");
++        finish_client(&mut c);
++    }
++}
++
++#[test]
++fn effect_client_pending_cleanup_retains_reservation_until_actual_reap() {
++    let _serial = serial();
++    let pairs = ready_pairs();
++    let json = serde_json::to_string(&pairs).unwrap();
++    let script = format!("import json,sys,time\nfor expected,reply in json.loads({json:?}):\n actual=json.loads(sys.stdin.readline())\n assert actual==expected,(actual,expected)\n print(json.dumps(reply),flush=True)\nassert sys.stdin.read()==''\ntime.sleep(30)\n");
++    let mut c = client(&script);
++    ready(&mut c);
++    let failure = unpublished_failure(&mut c, &input(), Instant::now());
++    assert_eq!(
++        (failure.kind, failure.delivery),
++        (FailureKind::Deadline, Delivery::NotSent)
++    );
++    let report = c.dispose(Instant::now(), Instant::now());
++    assert!(matches!(
++        report.state,
++        strict_offline::CleanupState::Pending
++    ));
++    std::thread::sleep(Duration::from_millis(110));
++    pump::test_hooks::arm(pump::test_hooks::Fault::Kill);
++    let report = c.continue_cleanup().unwrap();
++    assert_eq!(report.kill_error, Some(libc::EPERM));
++    assert!(matches!(
++        report.state,
++        strict_offline::CleanupState::Pending
++    ));
++    assert!(
++        matches!(Client::spawn(&mut python("raise AssertionError('reserved until reap')"), deadline()), Err(f) if f.failure.kind == FailureKind::Busy && f.cleanup.is_none())
++    );
++    let end = deadline();
++    loop {
++        let report = c.continue_cleanup().unwrap();
++        if matches!(report.state, strict_offline::CleanupState::Reaped(_)) {
++            assert!(report.kill_requested);
++            assert_eq!(report.kill_error, Some(libc::EPERM));
++            break;
++        }
++        assert!(Instant::now() < end, "Effect child actual reap deadline");
++        std::thread::sleep(Duration::from_millis(1));
++    }
++    let mut next = client(&ledger(&[], true));
++    finish_client(&mut next);
++}
++
++#[test]
++fn effect_client_bound_role_cannot_reload_or_reopen_generator_before_actual_reap() {
++    let _serial = serial();
++    for started in [false, true] {
++        for effect_entry in [false, true] {
++            let pairs = if started { ready_pairs() } else { vec![load()] };
++            let json = serde_json::to_string(&pairs).unwrap();
++            // There is deliberately no second LoadPlugin reply. Any attempted
++            // reload or fallback makes this real child assertion fail.
++            let script = format!("import json,sys,time\nfor expected,reply in json.loads({json:?}):\n actual=json.loads(sys.stdin.readline())\n assert actual==expected,(actual,expected)\n print(json.dumps(reply),flush=True)\nassert sys.stdin.read()==''\ntime.sleep(30)\n");
++            let mut c = client(&script);
++            if started {
++                ready(&mut c);
++            } else {
++                c.load_stereo_effect(spec(), &identity(), deadline())
++                    .unwrap();
++            }
++            let failure = if effect_entry {
++                c.load_stereo_effect(spec(), &identity(), deadline())
++                    .unwrap_err()
++            } else {
++                c.load_plugin(spec(), deadline()).unwrap_err()
++            };
++            assert_eq!(
++                (failure.kind, failure.delivery),
++                (FailureKind::UnsupportedRequest, Delivery::NotSent)
++            );
++            assert_eq!(failure.request_context, None);
++            assert_eq!(
++                c.process_silent_generator(2, 2, transport(), deadline())
++                    .unwrap_err()
++                    .kind,
++                FailureKind::UnsupportedRequest
++            );
++            assert_eq!(
++                c.send_note(
++                    MidiEvent::NoteOn {
++                        channel: MidiChannel::Ch1,
++                        note: 60,
++                        velocity: 100
++                    },
++                    0,
++                    deadline()
++                )
++                .unwrap_err()
++                .kind,
++                FailureKind::UnsupportedRequest
++            );
++            assert_eq!(
++                c.start_processing(deadline()).unwrap_err().kind,
++                FailureKind::UnsupportedRequest
++            );
++            assert_eq!(
++                unpublished_failure(&mut c, &input(), deadline()).kind,
++                FailureKind::UnsupportedRequest
++            );
++            let report = c.dispose(Instant::now(), Instant::now());
++            assert!(matches!(
++                report.state,
++                strict_offline::CleanupState::Pending
++            ));
++            assert!(
++                matches!(Client::spawn(&mut python("raise AssertionError('role failure still owns child')"), deadline()), Err(f) if f.failure.kind == FailureKind::Busy && f.cleanup.is_none())
++            );
++            let end = deadline();
++            loop {
++                let report = c.continue_cleanup().unwrap();
++                if matches!(report.state, strict_offline::CleanupState::Reaped(_)) {
++                    assert!(report.kill_requested);
++                    assert!(
++                        report.shutdown_failure.is_none()
++                            && report.kill_error.is_none()
++                            && report.wait_error.is_none()
++                            && report.pipe_error.is_none()
++                    );
++                    break;
++                }
++                assert!(
++                    Instant::now() < end,
++                    "bound Effect role child actual reap deadline"
++                );
++                std::thread::sleep(Duration::from_millis(1));
++            }
++            let mut next = client(&ledger(&[], true));
++            finish_client(&mut next);
++        }
++    }
++    // The sticky-role precondition belongs only to the new Effect path. An old
++    // unbound generic caller still reloads and uses its original silent input.
++    let samples = vec![vec![0.0; 128]; 2];
++    let mut legacy = client(&ledger(
++        &[load(), load(), process(&samples, vec![vec![0.25; 128]; 2])],
++        true,
++    ));
++    legacy.load_plugin(spec(), deadline()).unwrap();
++    legacy.load_plugin(spec(), deadline()).unwrap();
++    assert_eq!(
++        legacy
++            .process_silent_generator(2, 2, transport(), deadline())
++            .unwrap()
++            .outputs,
++        vec![vec![0.25; 128]; 2]
++    );
++    finish_client(&mut legacy);
 +}
 diff --git a/src/fresh_helper/lifecycle.rs b/src/fresh_helper/lifecycle.rs
 new file mode 100644
@@ -11784,7 +13343,7 @@ diff --git a/src/fresh_helper/request.rs b/src/fresh_helper/request.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/fresh_helper/request.rs
-@@ -0,0 +1,232 @@
+@@ -0,0 +1,245 @@
 +//! Synchronous, stack-only view of the deliberately closed request subset.
 +//!
 +//! Caller-owned state, audio and text remain borrowed through validation, size
@@ -11823,12 +13382,14 @@ new file mode 100644
 +pub(crate) enum FlatInputView<'a> {
 +    Borrowed(&'a [Vec<f32>]),
 +    SilentQ128(usize),
++    StereoEffectQ128(&'a [Vec<f32>]),
 +}
 +
 +impl<'a> FlatInputView<'a> {
 +    pub(crate) fn channel_count(self) -> usize {
 +        match self {
 +            Self::Borrowed(channels) => channels.len(),
++            Self::StereoEffectQ128(channels) => channels.len(),
 +            Self::SilentQ128(channels) => channels,
 +        }
 +    }
@@ -11836,6 +13397,7 @@ new file mode 100644
 +    pub(crate) fn iter(self) -> impl ExactSizeIterator<Item = &'a [f32]> {
 +        (0..self.channel_count()).map(move |index| match self {
 +            Self::Borrowed(channels) => channels[index].as_slice(),
++            Self::StereoEffectQ128(channels) => channels[index].as_slice(),
 +            Self::SilentQ128(_) => SILENT_Q128_CHANNEL.as_slice(),
 +        })
 +    }
@@ -11916,6 +13478,16 @@ new file mode 100644
 +    pub(crate) fn silent_generator(input_channels: usize, transport: ProcessTransport) -> Self {
 +        Self::Process {
 +            inputs: FlatInputView::SilentQ128(input_channels),
++            frames: 128,
++            transport: Some(transport),
++        }
++    }
++}
++
++impl<'a> RequestView<'a> {
++    pub(crate) fn stereo_effect(inputs: &'a [Vec<f32>], transport: ProcessTransport) -> Self {
++        Self::Process {
++            inputs: FlatInputView::StereoEffectQ128(inputs),
 +            frames: 128,
 +            transport: Some(transport),
 +        }
@@ -41968,10 +43540,10 @@ diff --git a/src/strict_offline.rs b/src/strict_offline.rs
 new file mode 100644
 --- /dev/null
 +++ b/src/strict_offline.rs
-@@ -0,0 +1,600 @@
-+//! Disabled-by-default Linux/Windows client for one disposable offline generator.
+@@ -0,0 +1,641 @@
++//! Disabled-by-default Linux/Windows client for one disposable offline plugin.
 +//!
-+//! This closed development API has no App caller. One process-wide reservation
++//! This opt-in API exposes no generic command exchange. One process-wide reservation
 +//! admits at most one strict child, including abandoned or pending-cleanup owners.
 +//! Every exchange uses its caller's original absolute deadline and is never
 +//! replayed. Deadlines are cooperative: allocation, spawn, scheduling and reap
@@ -41994,6 +43566,9 @@ new file mode 100644
 +use crate::Parameter;
 +use std::process::Command;
 +use std::time::Instant;
++
++mod effect;
++pub use effect::{EffectIdentity, StereoEffectMetadata};
 +
 +pub use crate::fresh_helper::{LimitEvidence, LimitSite};
 +use crate::helper_lifecycle::unsent;
@@ -42073,6 +43648,7 @@ new file mode 100644
 +    // codec payload, and is never returned as a substitute for a fresh query.
 +    audio_selection_required: bool,
 +    selected_audio_layout: Option<CheckedAudioBusLayout>,
++    effect: Option<effect::EffectSession>,
 +}
 +impl Client {
 +    /// Spawn exactly once, retaining any post-spawn failure owner. Required stdin
@@ -42084,6 +43660,7 @@ new file mode 100644
 +                session,
 +                audio_selection_required: false,
 +                selected_audio_layout: None,
++                effect: None,
 +            })
 +            .map_err(|failure| SpawnFailure {
 +                failure: unsent(failure.cause),
@@ -42092,6 +43669,7 @@ new file mode 100644
 +                        session: *session,
 +                        audio_selection_required: false,
 +                        selected_audio_layout: None,
++                        effect: None,
 +                    })
 +                }),
 +            })
@@ -42138,11 +43716,18 @@ new file mode 100644
 +        Ok(())
 +    }
 +    /// Load the chosen class with configured maximum2048; never retry or recover.
++    /// An owner already bound by load_stereo_effect cannot be replaced here.
 +    pub fn load_plugin(
 +        &mut self,
 +        spec: LoadSpec<'_>,
 +        deadline: Instant,
 +    ) -> Result<LoadedPlugin, Failure> {
++        // The role is sticky for this disposable owner. Replacing an admitted
++        // Effect through the generic loader must not reopen generator/MIDI
++        // operations or discard its private admission contract.
++        if self.effect.is_some() {
++            return Err(self.reject(fresh_helper::ErrorKind::UnsupportedRequest, deadline));
++        }
 +        self.selected_audio_layout = None;
 +        if spec.path.is_empty()
 +            || spec.class_id.len() != 32
@@ -42176,12 +43761,17 @@ new file mode 100644
 +    }
 +    /// Set Offline mode on the helper owner before preparation/start.
 +    pub fn set_offline(&mut self, deadline: Instant) -> Result<(), Failure> {
++        self.invalidate_effect_admission();
 +        self.success(
 +            RequestView::SetProcessMode {
 +                mode: ProcessMode::Offline,
 +            },
 +            deadline,
-+        )
++        )?;
++        if let Some(effect) = &mut self.effect {
++            effect.offline = true;
++        }
++        Ok(())
 +    }
 +    /// Query configured reset capability/status; this never processes reset audio.
 +    pub fn reset_origin_support(
@@ -42199,6 +43789,7 @@ new file mode 100644
 +    }
 +    /// Borrow opaque project state synchronously without an eager payload copy.
 +    pub fn load_state(&mut self, data: &[u8], deadline: Instant) -> Result<(), Failure> {
++        self.invalidate_effect_admission();
 +        self.selected_audio_layout = None;
 +        self.success(
 +            RequestView::LoadState {
@@ -42206,18 +43797,31 @@ new file mode 100644
 +                context: StateContextView::Project,
 +            },
 +            deadline,
-+        )
++        )?;
++        if let Some(effect) = &mut self.effect {
++            effect.state_bytes = Some(data.len());
++        }
++        Ok(())
 +    }
 +    /// Start prepared processing through the helper's existing owner path.
 +    pub fn start_processing(&mut self, deadline: Instant) -> Result<(), Failure> {
++        self.verify_effect_admission(deadline)?;
 +        self.verify_selected_audio_layout(deadline)?;
 +        self.success(RequestView::StartProcessing, deadline)?;
-+        self.verify_selected_audio_layout(deadline)
++        if let Some(effect) = &mut self.effect {
++            effect.processing = true;
++        }
++        self.verify_selected_audio_layout(deadline)?;
++        self.verify_effect_admission(deadline)
 +    }
 +    /// Stop a healthy clone. A sealed/cancelled session cannot send this request.
 +    pub fn stop_processing(&mut self, deadline: Instant) -> Result<(), Failure> {
 +        self.success(RequestView::StopProcessing, deadline)?;
-+        self.verify_selected_audio_layout(deadline)
++        if let Some(effect) = &mut self.effect {
++            effect.processing = false;
++        }
++        self.verify_selected_audio_layout(deadline)?;
++        self.verify_effect_admission(deadline)
 +    }
 +    /// Non-consuming observation through the same closed client and original budget.
 +    pub fn async_state_snapshot(
@@ -42243,6 +43847,7 @@ new file mode 100644
 +        expected_revision: u64,
 +        deadline: Instant,
 +    ) -> Result<(), Failure> {
++        self.invalidate_effect_admission();
 +        self.success(
 +            RequestView::ArmOfflineStateReadiness { expected_revision },
 +            deadline,
@@ -42273,6 +43878,7 @@ new file mode 100644
 +    }
 +    /// Set one finite normalized captured f32 base through the existing owner path.
 +    pub fn set_parameter(&mut self, id: u32, value: f32, deadline: Instant) -> Result<(), Failure> {
++        self.invalidate_effect_admission();
 +        self.success(
 +            RequestView::SetParameter {
 +                id,
@@ -42351,6 +43957,7 @@ new file mode 100644
 +        expected: &CheckedAudioBusLayout,
 +        deadline: Instant,
 +    ) -> Result<CheckedAudioBusLayout, Failure> {
++        self.invalidate_effect_admission();
 +        self.audio_selection_required = true;
 +        self.selected_audio_layout = None;
 +        let supported_inputs = expected.inputs.is_empty()
@@ -42457,6 +44064,9 @@ new file mode 100644
 +        sample_offset: i32,
 +        deadline: Instant,
 +    ) -> Result<(), Failure> {
++        if self.effect.is_some() {
++            return Err(self.reject(fresh_helper::ErrorKind::UnsupportedRequest, deadline));
++        }
 +        self.success(
 +            RequestView::SendMidiAt {
 +                event,
@@ -42495,6 +44105,9 @@ new file mode 100644
 +        transport: ProcessTransport,
 +        deadline: Instant,
 +    ) -> Result<AudioBlock, Failure> {
++        if self.effect.is_some() {
++            return Err(self.reject(fresh_helper::ErrorKind::UnsupportedRequest, deadline));
++        }
 +        // Shape validation remains inside the budgeted session, sealing invalid
 +        // requests with NotSent and preserving deadline/cancellation precedence.
 +        if input_channels > 2 || !matches!(output_channels, 1 | 2) {
@@ -42567,5 +44180,308 @@ new file mode 100644
 +    /// This never sends Shutdown, and blocks any new strict child until reap.
 +    pub fn cleanup_abandoned(deadline: Instant) -> CleanupObservation {
 +        FreshHelperSession::cleanup_abandoned(deadline).into()
++    }
++}
+diff --git a/src/strict_offline/effect.rs b/src/strict_offline/effect.rs
+new file mode 100644
+--- /dev/null
++++ b/src/strict_offline/effect.rs
+@@ -0,0 +1,298 @@
++//! True-PCM stereo Effect admission on the existing retained child.
++
++use super::*;
++
++/// Exact source identity expected by the caller. Category tokens must contain
++/// `Fx` and must not contain `Instrument`; substring matches are not accepted.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct EffectIdentity {
++    /// Exact current class identifier, compared case-insensitively as hex.
++    pub class_id: String,
++    /// Exact SDK-reported vendor.
++    pub vendor: String,
++    /// Exact SDK-reported name.
++    pub name: String,
++    /// Exact nonempty SDK-reported version.
++    pub version: String,
++    /// Complete, exact SDK-reported subcategory string.
++    pub category: String,
++}
++
++impl EffectIdentity {
++    fn is_effect(&self) -> bool {
++        self.class_id.len() == 32
++            && [&self.vendor, &self.name, &self.version, &self.category]
++                .iter()
++                .all(|text| !text.is_empty() && text.len() <= 64 * 1024)
++            && self.class_id.bytes().all(|byte| byte.is_ascii_hexdigit())
++            && self.category.split('|').any(|token| token == "Fx")
++            && !self.category.split('|').any(|token| token == "Instrument")
++    }
++
++    fn matches(&self, actual: &LoadedPlugin) -> bool {
++        self.class_id.eq_ignore_ascii_case(&actual.uid)
++            && self.vendor == actual.vendor
++            && self.name == actual.name
++            && self.version == actual.version
++            && self.category == actual.category
++            && !actual.has_midi_input
++            && !actual.has_midi_output
++            && actual.audio_inputs == 1
++            && actual.audio_outputs == 1
++            && actual.output_channels == 2
++    }
++}
++
++/// Fresh clone receipt, not a source-instance capture or proof of state-byte
++/// equivalence. The client privately retains the corresponding admission.
++#[derive(Debug, Clone, PartialEq)]
++pub struct StereoEffectMetadata {
++    /// Identity checked against this client's actual LoadPlugin reply.
++    pub identity: EffectIdentity,
++    /// Exact requested bundle path.
++    pub path: String,
++    /// Acknowledged load sample rate.
++    pub sample_rate: f64,
++    /// Exact checked configured maximum from the stopped owner.
++    pub max_block_frames: u32,
++    /// Acknowledged load transport tempo.
++    pub tempo: f64,
++    /// Acknowledged load meter numerator.
++    pub time_sig_numerator: i32,
++    /// Acknowledged load meter denominator.
++    pub time_sig_denominator: i32,
++    /// Exact acknowledged opaque input byte count, including zero if supplied.
++    pub state_bytes: usize,
++    /// Complete active main stereo input/output descriptors.
++    pub audio: CheckedAudioBusLayout,
++    /// Complete event layout; both directions must be empty.
++    pub events: EventBusLayout,
++    /// Actual DSP latency, not realtime bridge/lookahead latency.
++    pub latency_samples: u32,
++    /// Actual advertised tail, retaining u32::MAX without interpretation.
++    pub tail_samples: u32,
++    /// Quiet IProgress revision armed at the actual DSP boundary.
++    pub async_started_revision: u64,
++    /// Native edit revision surrounding all metadata getters.
++    pub native_dirty_revision: u64,
++}
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct RuntimeMetadata {
++    audio: CheckedAudioBusLayout,
++    events: EventBusLayout,
++    latency_samples: u32,
++    tail_samples: u32,
++    async_started_revision: u64,
++    native_dirty_revision: u64,
++}
++
++pub(super) struct EffectSession {
++    identity: EffectIdentity,
++    path: String,
++    sample_rate: f64,
++    tempo: f64,
++    numerator: i32,
++    denominator: i32,
++    pub(super) offline: bool,
++    pub(super) state_bytes: Option<usize>,
++    pub(super) processing: bool,
++    admitted: Option<RuntimeMetadata>,
++}
++
++fn stereo(layout: &CheckedAudioBusLayout) -> bool {
++    let side = |buses: &[crate::plugin::CheckedAudioBusConfig]| {
++        buses.len() == 1
++            && buses[0].is_main
++            && buses[0].channel_count == 2
++            && buses[0].active == Some(true)
++    };
++    side(&layout.inputs) && side(&layout.outputs)
++}
++
++impl Client {
++    pub(super) fn invalidate_effect_admission(&mut self) {
++        if let Some(effect) = &mut self.effect {
++            effect.admitted = None;
++        }
++    }
++
++    /// Load an explicitly identified Effect through the same one-child owner.
++    /// Only the actual reply can establish the private role binding. A wrong
++    /// identity/role/layout seals the child, which still requires checked reap.
++    /// The successful role binding is sticky: neither load entry point may
++    /// replace this instance. Dispose/reap it before loading another stage.
++    /// Ordinary load/process and silent-generator entry points are unchanged.
++    pub fn load_stereo_effect(
++        &mut self,
++        spec: LoadSpec<'_>,
++        expected: &EffectIdentity,
++        deadline: Instant,
++    ) -> Result<LoadedPlugin, Failure> {
++        if self.effect.is_some() {
++            return Err(self.reject(fresh_helper::ErrorKind::UnsupportedRequest, deadline));
++        }
++        if !expected.is_effect() || !expected.class_id.eq_ignore_ascii_case(spec.class_id) {
++            return Err(self.reject(fresh_helper::ErrorKind::InvalidRequest, deadline));
++        }
++        let loaded = self.load_plugin(spec, deadline)?;
++        if !expected.matches(&loaded) {
++            return Err(self.reject(fresh_helper::ErrorKind::Shape, deadline));
++        }
++        self.effect = Some(EffectSession {
++            identity: expected.clone(),
++            path: spec.path.to_owned(),
++            sample_rate: spec.sample_rate,
++            tempo: spec.tempo,
++            numerator: spec.time_sig_numerator,
++            denominator: spec.time_sig_denominator,
++            offline: false,
++            state_bytes: None,
++            processing: false,
++            admitted: None,
++        });
++        Ok(loaded)
++    }
++
++    fn effect_runtime_metadata(&mut self, deadline: Instant) -> Result<RuntimeMetadata, Failure> {
++        let before = self.async_state_snapshot(deadline)?;
++        let revision = self.native_dirty_revision(deadline)?;
++        let audio = self.checked_audio_layout(deadline)?;
++        let events = self.event_layout(deadline)?;
++        let latency_samples = self.latency_samples(deadline)?;
++        let tail_samples = self.tail_samples(deadline)?;
++        let after_revision = self.native_dirty_revision(deadline)?;
++        let after = self.async_state_snapshot(deadline)?;
++        // UI-only progress may legitimately change; it does not enter the DSP
++        // readiness identity. Async work that starts and finishes still changes
++        // its revision and therefore cannot slip between these observations.
++        if before.ensure_ready().is_err()
++            || after.ensure_ready().is_err()
++            || before.async_started_revision != after.async_started_revision
++            || revision != after_revision
++            || !stereo(&audio)
++            || !events.inputs.is_empty()
++            || !events.outputs.is_empty()
++            || self.selected_audio_layout.as_ref() != Some(&audio)
++        {
++            return Err(self.reject(fresh_helper::ErrorKind::Shape, deadline));
++        }
++        Ok(RuntimeMetadata {
++            audio,
++            events,
++            latency_samples,
++            tail_samples,
++            async_started_revision: after.async_started_revision,
++            native_dirty_revision: after_revision,
++        })
++    }
++
++    /// After explicit Offline, opaque state, generic bases/readback and stereo
++    /// bus selection, admit the stopped clone and arm actual DSP readiness.
++    /// Call start_processing only after comparing this receipt with the source
++    /// capture. State/parameter/bus-selection changes invalidate admission.
++    /// Exact latency/tail are retained; the renderer owns PDC and tail policy.
++    pub fn admit_stereo_effect(
++        &mut self,
++        deadline: Instant,
++    ) -> Result<StereoEffectMetadata, Failure> {
++        self.invalidate_effect_admission();
++        if !self.effect.as_ref().is_some_and(|effect| {
++            effect.offline && effect.state_bytes.is_some() && !effect.processing
++        }) || !self.audio_selection_required
++            || self.selected_audio_layout.is_none()
++        {
++            return Err(self.reject(fresh_helper::ErrorKind::InvalidRequest, deadline));
++        }
++        let support = self.reset_origin_support(deadline)?;
++        if support.contract_version != 1 || support.max_block_frames != 2048 || support.processing {
++            return Err(self.reject(fresh_helper::ErrorKind::Shape, deadline));
++        }
++        let metadata = self.effect_runtime_metadata(deadline)?;
++        self.arm_offline_state_readiness(metadata.async_started_revision, deadline)?;
++        if self.effect_runtime_metadata(deadline)? != metadata {
++            return Err(self.reject(fresh_helper::ErrorKind::Shape, deadline));
++        }
++        let effect = self.effect.as_mut().expect("checked effect role");
++        let receipt = StereoEffectMetadata {
++            identity: effect.identity.clone(),
++            path: effect.path.clone(),
++            sample_rate: effect.sample_rate,
++            max_block_frames: support.max_block_frames,
++            tempo: effect.tempo,
++            time_sig_numerator: effect.numerator,
++            time_sig_denominator: effect.denominator,
++            state_bytes: effect.state_bytes.expect("acknowledged state"),
++            audio: metadata.audio.clone(),
++            events: metadata.events.clone(),
++            latency_samples: metadata.latency_samples,
++            tail_samples: metadata.tail_samples,
++            async_started_revision: metadata.async_started_revision,
++            native_dirty_revision: metadata.native_dirty_revision,
++        };
++        effect.admitted = Some(metadata);
++        Ok(receipt)
++    }
++
++    pub(super) fn verify_effect_admission(&mut self, deadline: Instant) -> Result<(), Failure> {
++        let Some(effect) = &self.effect else {
++            return Ok(());
++        };
++        let Some(expected) = effect.admitted.clone() else {
++            return Err(self.reject(fresh_helper::ErrorKind::InvalidRequest, deadline));
++        };
++        if self.effect_runtime_metadata(deadline)? != expected {
++            return Err(self.reject(fresh_helper::ErrorKind::Shape, deadline));
++        }
++        Ok(())
++    }
++
++    /// Process borrowed, genuine stereo Q128 PCM on an admitted, started Effect.
++    /// No clipping, padding, dry fallback, MIDI injection or output publication.
++    /// Finite samples outside [-1,1] are legitimate internal audio. Explicit
++    /// 2x128 zero input drains tails; an empty input is a shape error, not silence.
++    /// Every failure seals the same child; dispose it before another stage.
++    pub fn process_stereo_effect(
++        &mut self,
++        inputs: &[Vec<f32>],
++        transport: ProcessTransport,
++        deadline: Instant,
++    ) -> Result<AudioBlock, Failure> {
++        if !self.effect.as_ref().is_some_and(|effect| effect.processing) {
++            return Err(self.reject(fresh_helper::ErrorKind::InvalidRequest, deadline));
++        }
++        self.verify_effect_admission(deadline)?;
++        let reply = self.exchange(
++            RequestView::stereo_effect(inputs, transport),
++            ReplyShape::Audio {
++                channels: 2,
++                frames: 128,
++            },
++            deadline,
++        )?;
++        self.verify_effect_admission(deadline)?;
++        match reply {
++            HostResponse::AudioOutput {
++                outputs,
++                output_events,
++                output_events_lost,
++                transport_applied,
++            } => {
++                if output_events_lost
++                    || !transport_applied
++                    || !output_events.is_empty()
++                    || outputs.iter().flatten().any(|sample| !sample.is_finite())
++                {
++                    return Err(self.reject(fresh_helper::ErrorKind::Shape, deadline));
++                }
++                Ok(AudioBlock {
++                    outputs,
++                    output_event_count: 0,
++                    output_events_lost,
++                    transport_applied,
++                })
++            }
++            _ => unreachable!("strict effect audio shape"),
++        }
 +    }
 +}

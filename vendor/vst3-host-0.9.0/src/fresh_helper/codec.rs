@@ -92,11 +92,20 @@ fn check_channels(channels: FlatInputView<'_>, frames: usize) -> Result<()> {
     if matches!(channels, FlatInputView::SilentQ128(count) if count > 2 || frames != 128) {
         return Err(ErrorKind::Shape);
     }
+    if matches!(channels, FlatInputView::StereoEffectQ128(channels) if channels.len() != 2 || frames != 128)
+    {
+        return Err(ErrorKind::Shape);
+    }
     limit(channels.channel_count(), MAX_CHANNELS)?;
     for channel in channels.iter() {
         limit(channel.len(), MAX_FRAMES)?;
         if channel.len() != frames {
             return Err(ErrorKind::Shape);
+        }
+        if matches!(channels, FlatInputView::StereoEffectQ128(_))
+            && channel.iter().any(|sample| !sample.is_finite())
+        {
+            return Err(ErrorKind::InvalidRequest);
         }
     }
     Ok(())

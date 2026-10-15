@@ -3501,6 +3501,178 @@ fn silent_generator_preserves_every_codec_checkpoint_and_payload_accounting() {
 }
 
 #[test]
+fn stereo_effect_borrows_exact_finite_pcm_bits_with_one_charged_wire_allocation() {
+    use crate::internal::native_edit_transport::tests::measure_allocations;
+    let samples: Vec<Vec<f32>> = (0..2)
+        .map(|channel| {
+            (0..128)
+                .map(|frame| match frame {
+                    0 => -0.0,
+                    1 => f32::MIN_POSITIVE,
+                    2 => f32::MAX,
+                    _ => (frame as f32 - 64.0) * (channel + 1) as f32,
+                })
+                .collect()
+        })
+        .collect();
+    let before: Vec<Vec<u32>> = samples
+        .iter()
+        .map(|channel| channel.iter().map(|sample| sample.to_bits()).collect())
+        .collect();
+    let request = allocation_free(|| {
+        let view = RequestView::stereo_effect(&samples, silent_transport());
+        let RequestView::Process { inputs, .. } = view else {
+            panic!("real flat Process")
+        };
+        for (borrowed, original) in inputs.iter().zip(&samples) {
+            assert_eq!(borrowed.as_ptr(), original.as_ptr());
+        }
+        view
+    });
+    let shape = ReplyShape::Audio {
+        channels: 2,
+        frames: 128,
+    };
+    let mut budget = new_budget();
+    let (encoded, allocations) = measure_allocations(|| encode_view(&request, &shape, &mut budget));
+    let encoded = encoded.unwrap();
+    assert_eq!(allocations.allocations, 1);
+    assert_eq!(allocations.allocated_bytes, encoded.capacity());
+    assert_eq!(
+        (budget.live, budget.peak),
+        (encoded.capacity(), encoded.capacity())
+    );
+    let HostCommand::Process {
+        inputs,
+        frames,
+        transport,
+    } = serde_json::from_slice(&encoded).unwrap()
+    else {
+        panic!("existing wire protocol")
+    };
+    assert_eq!(frames, 128);
+    assert_eq!(transport, Some(silent_transport()));
+    for (index, channel) in inputs.iter().enumerate() {
+        assert_eq!(
+            channel
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            before[index]
+        );
+        assert_eq!(
+            samples[index]
+                .iter()
+                .map(|sample| sample.to_bits())
+                .collect::<Vec<_>>(),
+            before[index]
+        );
+    }
+    let charge = encoded.capacity();
+    drop(encoded);
+    budget.release(charge);
+    assert_eq!(budget.live, 0);
+}
+
+#[test]
+fn stereo_effect_shape_finiteness_and_stop_precedence_reject_before_allocation() {
+    let shape = ReplyShape::Audio {
+        channels: 2,
+        frames: 128,
+    };
+    let mut cases = vec![
+        (vec![], ErrorKind::Shape),
+        (vec![vec![0.0; 128]], ErrorKind::Shape),
+        (vec![vec![0.0; 128]; 3], ErrorKind::Shape),
+        (vec![vec![]; 2], ErrorKind::Shape),
+        (vec![vec![0.0; 127], vec![0.0; 128]], ErrorKind::Shape),
+        (vec![vec![0.0; 128], vec![0.0; 129]], ErrorKind::Shape),
+    ];
+    for nonfinite in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut input = vec![vec![0.0; 128]; 2];
+        input[1][127] = nonfinite;
+        cases.push((input, ErrorKind::InvalidRequest));
+    }
+    for (samples, invalid) in cases {
+        for stop in 0..4 {
+            let mut budget = new_budget();
+            if stop == 1 || stop == 3 {
+                budget.deadline = Instant::now();
+            }
+            if stop == 2 || stop == 3 {
+                budget.cancel.cancelled.store(true, Ordering::Release);
+            }
+            let expected = match stop {
+                1 => ErrorKind::Deadline,
+                2 | 3 => ErrorKind::Cancelled,
+                _ => invalid,
+            };
+            assert_eq!(
+                allocation_free(|| encode_view(
+                    &RequestView::stereo_effect(&samples, silent_transport()),
+                    &shape,
+                    &mut budget
+                ))
+                .unwrap_err(),
+                expected
+            );
+            assert_eq!((budget.live, budget.peak), (0, 0));
+        }
+    }
+}
+
+#[test]
+fn stereo_effect_all_encoder_checkpoints_and_quota_restore_the_original_charge() {
+    let samples = vec![vec![2.5; 128], vec![-3.0; 128]];
+    let request = RequestView::stereo_effect(&samples, silent_transport());
+    let shape = ReplyShape::Audio {
+        channels: 2,
+        frames: 128,
+    };
+    let checks = {
+        let _hook = budget_test_hooks::cancel_at_check(usize::MAX);
+        encode_view(&request, &shape, &mut new_budget()).unwrap();
+        budget_test_hooks::checks()
+    };
+    assert!(checks >= 6);
+    for at in 1..=checks {
+        for expired in [false, true] {
+            let mut budget = new_budget();
+            budget.reserve(17).unwrap();
+            let _hook = if expired {
+                budget_test_hooks::expire_at_check(at)
+            } else {
+                budget_test_hooks::cancel_at_check(at)
+            };
+            assert_eq!(
+                encode_view(&request, &shape, &mut budget).unwrap_err(),
+                if expired {
+                    ErrorKind::Deadline
+                } else {
+                    ErrorKind::Cancelled
+                }
+            );
+            assert_eq!(budget.live, 17);
+        }
+    }
+    let mut budget = new_budget();
+    budget.live = MAX_PAYLOAD;
+    budget.peak = MAX_PAYLOAD;
+    assert_eq!(
+        allocation_free(|| encode_view(&request, &shape, &mut budget)).unwrap_err(),
+        ErrorKind::Limit
+    );
+    assert_eq!((budget.live, budget.peak), (MAX_PAYLOAD, MAX_PAYLOAD));
+    let mut budget = new_budget();
+    let _hook = budget_test_hooks::fail_next_allocation();
+    assert_eq!(
+        allocation_free(|| encode_view(&request, &shape, &mut budget)).unwrap_err(),
+        ErrorKind::Allocation
+    );
+    assert_eq!(budget.live, 0);
+}
+
+#[test]
 fn selected_bundle_codec_complete_fields_nullable_activation_and_u32_bounds() {
     use crate::process_isolation::{SelectedMetadataPolicy, StrictMetadataSnapshot};
     assert_command(

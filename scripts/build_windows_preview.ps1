@@ -73,6 +73,9 @@ Invoke-Checked cargo @("+$Toolchain", "test", "--locked", "--manifest-path", "ve
 # Exercise the dependency's real COM/processor and closed-helper readiness
 # contracts; root package tests do not include these dependency unit tests.
 Invoke-Checked cargo @("+$Toolchain", "test", "--locked", "--manifest-path", "vendor/vst3-host-0.9.0/Cargo.toml", "--features", "experimental-fresh-helper", "--lib", "async_state_readiness", "--target", $Target, "--", "--test-threads=1")
+# Keep true-PCM Effect role, bounded encoding and actual child cleanup gates in
+# the same pinned preview lane. The source fixture DLL is never packaged.
+Invoke-Checked cargo @("+$Toolchain", "test", "--locked", "--manifest-path", "vendor/vst3-host-0.9.0/Cargo.toml", "--features", "experimental-fresh-helper", "--lib", "effect_", "--target", $Target, "--", "--test-threads=1")
 Invoke-Checked cargo @("+$Toolchain", "test", "--locked", "--all-features", "--all-targets", "--target", $Target)
 Invoke-Checked cargo @("+$Toolchain", "clippy", "--locked", "--all-features", "--all-targets", "--target", $Target, "--", "-D", "warnings")
 Invoke-Checked cargo @("+$Toolchain", "check", "--locked", "--no-default-features", "--all-targets", "--target", $Target)

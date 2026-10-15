@@ -101,7 +101,7 @@ fn owner_control(owner: &mut MainThreadPlugin) -> vst3_host::Result<()> {
 FEATURE_COMMON = OWNER_COMMON + '''
 use vst3_host::strict_offline::{self, Client, CancelHandle, SpawnFailure, Failure,
     FailureKind, Delivery, CleanupObservation, CleanupState, LoadSpec, LoadedPlugin,
-    AudioBlock, captured_base_matches};
+    AudioBlock, captured_base_matches, EffectIdentity, StereoEffectMetadata};
 use vst3_host::process_isolation::HostCommand;
 '''
 
@@ -112,6 +112,8 @@ fn public_traits() {
     require_send_sync_clone_static::<CancelHandle>();
     require_owned::<LoadedPlugin>();
     require_owned::<AudioBlock>();
+    require_owned::<EffectIdentity>();
+    require_owned::<StereoEffectMetadata>();
     require_owned::<Failure>();
     require_owned::<CleanupObservation>();
 }
@@ -184,13 +186,39 @@ fn public_cleanup(client: &mut Client, deadline: Instant) -> CleanupObservation 
     let _continued: Result<CleanupObservation, Failure> = client.continue_cleanup();
     Client::cleanup_abandoned(deadline)
 }
+fn effect_operations(client: &mut Client, deadline: Instant)
+    -> Result<(StereoEffectMetadata, AudioBlock), Failure> {
+    let identity = EffectIdentity {
+        class_id: "00112233445566778899AABBCCDDEEFF".into(), vendor: "v".into(),
+        name: "effect".into(), version: "1".into(), category: "Fx|Delay".into(),
+    };
+    let _loaded = client.load_stereo_effect(LoadSpec {
+        path: "/compile-only/Effect.vst3", class_id: &identity.class_id,
+        sample_rate: 48_000.0, tempo: 120.0,
+        time_sig_numerator: 4, time_sig_denominator: 4,
+    }, &identity, deadline)?;
+    client.set_offline(deadline)?;
+    client.load_state(&[1_u8, 2, 3], deadline)?;
+    client.set_parameter(0, 0.5_f32, deadline)?;
+    let layout = client.checked_audio_layout(deadline)?;
+    let _selected = client.select_main_stereo_output(&layout, deadline)?;
+    let metadata = client.admit_stereo_effect(deadline)?;
+    client.start_processing(deadline)?;
+    let audio = {
+        let local = vec![vec![0.0_f32; 128]; 2];
+        client.process_stereo_effect(&local, transport(), deadline)?
+    };
+    client.stop_processing(deadline)?;
+    Ok((metadata, audio))
+}
 fn observation_fields(observation: CleanupObservation) {
     let CleanupObservation {
-        state, shutdown_failure, kill_error, wait_error, kill_requested,
+        state, shutdown_failure, kill_error, wait_error, pipe_error, kill_requested,
     } = observation;
     let _: Option<Failure> = shutdown_failure;
     let _: Option<i32> = kill_error;
     let _: Option<i32> = wait_error;
+    let _: Option<i32> = pipe_error;
     let _: bool = kill_requested;
     match state {
         CleanupState::Reaped(status) => { let _: std::process::ExitStatus = status; },
@@ -198,9 +226,13 @@ fn observation_fields(observation: CleanupObservation) {
     }
 }
 fn failure_fields(failure: Failure) {
-    let Failure { kind, delivery, diagnostic, diagnostic_unavailable } = failure;
+    let Failure { kind, delivery, diagnostic, diagnostic_unavailable,
+        request_context, metadata_getter, limit_evidence } = failure;
     let _: Option<String> = diagnostic;
     let _: Option<FailureKind> = diagnostic_unavailable;
+    let _: Option<strict_offline::RequestContext> = request_context;
+    let _: Option<strict_offline::MetadataGetter> = metadata_getter;
+    let _: Option<strict_offline::LimitEvidence> = limit_evidence;
     match delivery { Delivery::NotSent | Delivery::MayHaveApplied => {} }
     match kind {
         FailureKind::UnsupportedRequest | FailureKind::UnsupportedReply |
@@ -401,6 +433,15 @@ def build_cases():
     let _ = client.dispose(deadline, deadline); // CONTRACT
 }''', 'E0596', ['client', 'mutable'],
          'Disposal requires the owning Client exclusive access.')
+    case('client_effect_admission_private', '''fn contract(client: &Client) {
+    let _ = &client.effect; // CONTRACT
+}''', 'E0616', ['`effect`', 'Client', 'private'],
+         'A caller cannot forge the session-private Effect role and admission.')
+    case('effect_process_requires_exclusive_client', '''fn contract(client: &Client, deadline: Instant) {
+    let input = vec![vec![0.0_f32; 128]; 2];
+    let _ = client.process_stereo_effect(&input, transport(), deadline); // CONTRACT
+}''', 'E0596', ['client', 'mutable'],
+         'Borrowed Effect input still requires exclusive owner-thread exchange.')
 
     if len({spec['name'] for spec in cases}) != len(cases):
         raise ValueError('Duplicate contract names')

@@ -1348,14 +1348,42 @@ class PreviewBuildContractTests(unittest.TestCase):
             'Invoke-Checked cargo @("+$Toolchain", "check", "--locked", "--no-default-features", '
             '"--all-targets", "--target", $Target)', self.lines)
 
+    def test_stereo_effect_quality_runs_real_sdk_and_preview_keeps_role_contract(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        windows, linux = workflow.split("\n  linux-helper-readiness:", 1)
+        command = (
+            'test --locked --manifest-path vendor/vst3-host-0.9.0/Cargo.toml '
+            '--features experimental-fresh-helper --lib effect_ --target-dir target '
+            '-- --test-threads=1')
+        for lane, toolchain in ((windows, "stable-x86_64-pc-windows-msvc"), (linux, "stable")):
+            self.assertIn(f"cargo +{toolchain} {command}", lane)
+            sdk = lane.split("      - name: Verify real no-GUI stereo Effect", 1)[1].split(
+                "\n      - name:", 1)[0]
+            self.assertIn("timeout-minutes: 10", sdk)
+            self.assertIn("tests/fixtures/vst3-effect/build_fixture.py --target ", sdk)
+            self.assertIn("cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/Cargo.toml", sdk)
+            self.assertIn("CITRUS_EFFECT_FIXTURE", sdk)
+            self.assertIn("CITRUS_EFFECT_HELPER", sdk)
+            self.assertIn(
+                "--test real_effect real_sdk_effect_pcm_state_transport_delay_tail_and_natural_reap "
+                "-- --ignored --exact --nocapture", sdk)
+            self.assertNotIn("continue-on-error", sdk)
+        self.assertIn(
+            'Invoke-Checked cargo @("+$Toolchain", "test", "--locked", "--manifest-path", '
+            '"vendor/vst3-host-0.9.0/Cargo.toml", "--features", "experimental-fresh-helper", '
+            '"--lib", "effect_", "--target", $Target, "--", "--test-threads=1")', self.lines)
+        preview = (root / ".github/workflows/windows-preview.yml").read_text(encoding="utf-8")
+        self.assertIn("      - 'tests/fixtures/vst3-effect/**'", preview)
+
 
 class ProvenanceConstantsTests(unittest.TestCase):
     def test_reviewed_provenance_constants_are_pinned(self):
         self.assertEqual(pkg.VENDOR_ARCHIVE_SHA256, "6ec579d54bd13b83c60c1fd8bb756cf234e36ccbfb4833ff756b417e64db7fea")
         self.assertEqual(pkg.VENDOR_COMMIT, "ed054908cfe057694d8cf037d0c39dfb5eb4c2ca")
         self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/LICENSE"], "a65a537295910b776a8b2edb2e7410c3b0e975ca6388994e032c4d1842b4952d")
-        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS.patch"], "8f28c82aaa7d64569145ed7342004c36a42f7f899415469dc143ea2ad62ad1f5")
-        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS_PATCHES.md"], "bceb8d148b6f658127620c26617bcc70773b388bdd0bf52f6fd57ee121aac658")
+        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS.patch"], "0777aa8485c842d58f6cbbb6502ad75399343660814a28278dfeeb2e405d1898")
+        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS_PATCHES.md"], "bca3d86ce228464ad3e0834c40ce1d21cd6e7cd6332317c5d66101a7ecca5aca")
 
 
 

@@ -36,12 +36,14 @@ static SILENT_Q128_CHANNEL: [f32; 128] = [0.0; 128];
 pub(crate) enum FlatInputView<'a> {
     Borrowed(&'a [Vec<f32>]),
     SilentQ128(usize),
+    StereoEffectQ128(&'a [Vec<f32>]),
 }
 
 impl<'a> FlatInputView<'a> {
     pub(crate) fn channel_count(self) -> usize {
         match self {
             Self::Borrowed(channels) => channels.len(),
+            Self::StereoEffectQ128(channels) => channels.len(),
             Self::SilentQ128(channels) => channels,
         }
     }
@@ -49,6 +51,7 @@ impl<'a> FlatInputView<'a> {
     pub(crate) fn iter(self) -> impl ExactSizeIterator<Item = &'a [f32]> {
         (0..self.channel_count()).map(move |index| match self {
             Self::Borrowed(channels) => channels[index].as_slice(),
+            Self::StereoEffectQ128(channels) => channels[index].as_slice(),
             Self::SilentQ128(_) => SILENT_Q128_CHANNEL.as_slice(),
         })
     }
@@ -129,6 +132,16 @@ impl RequestView<'_> {
     pub(crate) fn silent_generator(input_channels: usize, transport: ProcessTransport) -> Self {
         Self::Process {
             inputs: FlatInputView::SilentQ128(input_channels),
+            frames: 128,
+            transport: Some(transport),
+        }
+    }
+}
+
+impl<'a> RequestView<'a> {
+    pub(crate) fn stereo_effect(inputs: &'a [Vec<f32>], transport: ProcessTransport) -> Self {
+        Self::Process {
+            inputs: FlatInputView::StereoEffectQ128(inputs),
             frames: 128,
             transport: Some(transport),
         }

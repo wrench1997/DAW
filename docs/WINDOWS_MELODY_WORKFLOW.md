@@ -144,6 +144,50 @@ source, so that conversion failure does not block the next ordinary Whole test.
 Earlier Whole capture-to-clone byte equality records the LoadState input, not a
 second serialization of either the original source or clone.
 
+## Stereo Effect helper foundation (2026-10-16)
+
+The existing strict Client now accepts borrowed, genuine stereo Q128 PCM through
+`load_stereo_effect` → Offline/state/bases/stereo selection → `admit_stereo_effect`
+→ Start → `process_stereo_effect`. Its private role binding comes from the actual
+Load reply: exact class/vendor/name/version/category, active main stereo input
+and output, and no event buses. State/parameter/configuration mutations invalidate
+admission. Actual latency, tail, async-start and native-edit revisions are checked
+at admission and across DSP. Empty input fails; explicit zero input drains tails;
+finite internal samples above full scale are preserved. Existing generator APIs
+retain their isolation and original entry contracts. Every stage uses the same
+bounded child owner, with the process-wide reservation retained until actual reap.
+
+Local software evidence:169 helper/codec tests passed, including26 Effect/encoding
+cases; the expanded mutation test also passed separately. Four source-built SDK
+tests and the real production-helper target passed. The independent no-GUI Effect
+implements `y[n] = gain × (x[n−32] + 0.5×x[n−160])`: all1280 stereo samples and35
+transport/activation/output-clear observations matched, latency was32, the final
+response was frame415 and frame416 onward was silent. Restore/readback and natural
+Shutdown/exit/reap passed. This uses no installed plugin or audio device. Reproduce
+with the repository's `tests/fixtures/vst3-effect/README.md` instructions.
+
+Independent review then found that generic Load could clear an Effect binding.
+The repair makes that role sticky until disposal/reap: both reload entry points
+refuse before a second Load is sent, while legacy unbound clients retain reload.
+One new real-child regression covers both entry points before/after Start,
+post-refusal operations, Pending/Busy/reap ownership and the legacy reload control.
+This final case is locally unrun; the27-case `effect_` gate will execute in cloud.
+Earlier SDK DSP evidence remains applicable to the unchanged positive path.
+
+The fixture's strict all-target Clippy passed. A separate vendor-wide test-target
+Clippy run failed with75 existing SDK-glue lints; its actual101/log is retained in
+`target/backend-reliability-20261014/strict-effect-input-source-candidate-01/`.
+Initial fixture compile/type and loop-style errors were corrected and rerun.
+Windows/Linux quality now run the real SDK target with explicit binary inputs and
+a10-minute step deadline; preview retains the role/PCM regression gate. New cloud
+acceptance is pending; earlier Follow cloud success does not qualify this candidate.
+
+Whole still rejects Insert slots. Next is dedicated private Insert capture using
+the existing graph-wide stopped settlement, then serial PCM stages, DSP PDC/tail
+handling and the existing single final publication. A clone admission receipt is
+not a source-instance capture. General FX/automation/routing and real NOIRE remain
+open acceptance work.
+
 ## Ordinary scan reliability in this commit
 
 Source75 connects ordinary UI `start_scan` and synchronous `scan_catalog_checked`

@@ -1,0 +1,16 @@
+[package]
+name = "citrus-vst3-effect-fixture"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Source-only, no-GUI stereo delay effect for strict-helper acceptance"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Not an application dependency or a root workspace member.
+[workspace]
+
+[dependencies]
+vst3 = "=0.3.0"

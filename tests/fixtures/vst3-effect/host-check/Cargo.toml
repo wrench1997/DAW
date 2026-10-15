@@ -1,0 +1,12 @@
+[package]
+name = "citrus-vst3-effect-host-check"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace]
+
+[dependencies]
+citrus-vst3-effect-fixture = { path = ".." }
+vst3-host = { path = "../../../../vendor/vst3-host-0.9.0", default-features = false, features = ["experimental-fresh-helper"] }

@@ -1,4 +1,6 @@
 //! Actual closed public client against cooperative, ledger-checking mock children.
+#[path = "effect_client_tests.rs"]
+mod effect_client_tests;
 #[path = "selected_bus_tests.rs"]
 mod selected_bus_tests;
 use super::*;

@@ -1194,3 +1194,78 @@ all existing source quality and packaging consumer checks remain.
 Replay evidence:
 
 target/backend-reliability-20261014/factory-attempt-seal-fixture-provenance-01.
+
+
+### True-PCM stereo Effect admission on the retained strict child (2026-10-16)
+
+The opt-in strict Client now exposes a separate load_stereo_effect /
+admit_stereo_effect / process_stereo_effect path. An actual LoadPlugin reply
+must match exact current class/vendor/name/version/category, the exact Fx token
+and no Instrument token, stereo declarations and no MIDI. Each expected text
+field is nonempty and bounded to 64 KiB. Caller-constructed LoadedPlugin or
+StereoEffectMetadata values cannot establish the private session admission.
+
+Offline, acknowledged opaque state, exact generic bases/readback and explicit
+stereo bus selection precede admission. Fresh stopped owner support must be
+version1/max2048. Two complete metadata reads bracket the actual DSP-readiness
+arm. Process accepts borrowed, finite 2x128 real input, keeps finite levels beyond
+[-1,1], and checks complete bus/event/latency/tail/native/async identity before
+and after processing. Empty input is not silence; explicit stereo zero blocks
+are accepted for tail drainage. Nonfinite/shape/loss/transport faults, metadata
+drift, deadlines and sticky cancellation seal the actual owner without dry
+fallback. State/parameter/selection/Offline/readiness-arm changes invalidate
+admission. Exact DSP latency and u32::MAX tails are retained for renderer policy.
+
+A post-native independent review found that a generic reload could clear the
+private Effect binding. Both load_plugin and load_stereo_effect now refuse a
+second load before any LOAD bytes, retain the sticky role and seal the owner.
+A new real-child regression covers both entries before/after start, subsequent
+MIDI/generator/PCM/start refusal, no publication, pending reservation until actual
+reap and positive old unbound generic reload compatibility. This new case is
+locally UNRUN; Root owns its actual cloud execution. The effect_ filter now
+selects27 (24 client plus3 codec), not26.
+
+The existing bounded borrowed Process codec is reused, not a second renderer
+or wire protocol. Silent-generator entry points retain their immutable positive-
+zero isolation and their original callers; an admitted Effect cannot use them
+or send MIDI. The single process-wide permit remains held through actual reap,
+including failures and quarantine. No audio file or project publication is added.
+The App Whole Insert guard remains closed pending source multi-slot capture,
+serial chain integration, routing/automation, final latency/tail handling and
+single atomic publication.
+
+Actual local Windows evidence: API lib check and external public positive
+compiled successfully. The two new external negative contracts each produced
+only its required E0616/E0596 on the marked harness line. Effect focused tests
+passed26 (23 real protocol children plus3 codec tests). Before the sticky-role repair, the complete fresh_helper
+group subsequently passed169 with zero failures/ignored, including legacy
+silent-generator, full parser/large-payload boundaries, cancellation and actual
+retirement. A later exact test, also before that repair, passed all five admission-invalidating mutations.
+Those results remain scoped to that prior candidate; the final sticky-role
+source/new case have not been compiled or run locally. Root cloud CI must pass.
+The first unit-test compile exposed an existing Windows-only unused import;
+scan_tests now applies the same cfg(unix) to its import as to its sole consumer,
+without changing the Unix test or assertions. That first warning log is retained.
+
+A separate source-only no-GUI Fx|Delay SDK fixture outside the vendor tree passed
+four actual COM/DSP tests and strict all-target Clippy. Its real production-helper
+integration passed one explicitly selected test: 1280 exact stereo samples,
+35 SDK probes, opaque40-byte host state restore with distinct captured generic
+base, actual delay32 and final tap160 across Q128 blocks, final nonzero415 and
+silence from416. The child exited0 naturally and was reaped. No audio device,
+Kontakt, editor/window or user project was used. Fixture compile E0689 and its
+one test-loop Clippy error were repaired without weakened sample assertions;
+the original failures remain in the evidence directory.
+
+The additional vendor-wide strict test-target Clippy invocation failed101 on
+75 existing SDK-glue lint findings (mostly unnecessary_cast, plus collapsible_if,
+drain_collect and missing_transmute_annotations). That gate is not represented
+as passed; no broad allowances or 75-site upstream rewrite was introduced.
+The established App strict-Clippy consumer remains a separate required gate.
+Linux execution, App Whole FX integration and real NOIRE remain unverified at
+this source checkpoint. Commands, actual exits/resources and raw failures:
+
+target/backend-reliability-20261014/strict-effect-input-source-candidate-01/HANDOFF.md.
+
+
+Complete archive replay: 41 upstream files, 78 current source files; 52 changed paths, 37 additions, 0 deletions. Private git apply --check/apply and complete inventory/bytes comparison passed. Patch SHA256: 0777aa8485c842d58f6cbbb6502ad75399343660814a28278dfeeb2e405d1898. Original archive, MIT license and VCS identity remain unchanged; both packaging consumer pins are refreshed.

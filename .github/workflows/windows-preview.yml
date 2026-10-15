@@ -7,6 +7,7 @@ on:
       - 'src/**'
       - 'vendor/**'
       - 'tests/fixtures/vst3-editor/**'
+      - 'tests/fixtures/vst3-effect/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'build.rs'

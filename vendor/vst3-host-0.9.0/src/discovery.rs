@@ -1216,6 +1216,7 @@ mod report_tests {
 
 #[cfg(test)]
 mod scan_tests {
+    #[cfg(unix)]
     use super::*;
 
     /// A symlink pointing back at an ancestor makes the recursive scan unbounded, because

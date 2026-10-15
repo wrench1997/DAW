@@ -2,6 +2,8 @@
 
 当前源码候选：Citrus Studio 0.5.0-alpha.1；下文固定发布流程/示例继承自 0.4.0
 当前源码写 **v14**（[Follow长度、Auto/Manual歌曲范围与编辑器联动](PLAYLIST_TRANSPORT.md)）。`b2e56dc`本机fmt/严格Clippy/no-default/匹配双bin、预览unit及8真实离屏用例通过，12定向输入和Saved13私有copy门已通过；云`f6678ae`quality38804721761与preview38804721840实际均SUCCESS（2481 root/14ignored，25新增全PASS，静态CRT release8m24s/ZIP/提取helper通过，session2真实PrintWindow PASS）。已交付独立测试03仍为v13，03/02不能读新14，请另存副本。03未替换；旧63d2f99云通过只属于此前联动里程碑，NOIRE实机完整流程仍未验收。
+
+2026-10-16 Effect后台候选：quality的Windows/Linux增加真实无GUI SDK Effect/生产helper门，preview增加strict角色/PCM回归；源码夹具及测试DLL不进入发布白名单。当前本机169 helper/codec、4 SDK单元、真实PCM/transport/自然退出及夹具严格Clippy通过；额外vendor全test-target Clippy实际101（75条既有glue lint），根App既有严格Clippy/完整测试/双bin/静态CRT/ZIP和PrintWindow失败规则均保留。新候选云端待跑，不能复用上段旧SHA的完整资格。详[实现与验收边界](WINDOWS_MELODY_WORKFLOW.md#stereo-effect-helper-foundation-2026-10-16)。
 目标系统：Windows 10/11 x64  
 目标三元组：x86_64-pc-windows-gnullvm
 
