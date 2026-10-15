@@ -842,9 +842,29 @@ passed. Fresh heavy processes were zero before handback. Keep
 `printwindow-owned-target-probe-01.*`, `printwindow-local-fixture-build-01.log`,
 `printwindow-container-crop-handoff-01.json` and
 `printwindow-ci-environment-handoff-01.json` under
-`target/backend-reliability-20261014`. New cloud outcomes are pending final
-publication; the first environment-only candidate is superseded by this real
-capture-target correction.
+`target/backend-reliability-20261014`.
+
+Final code `9bb3110` cloud outcomes actually completed:
+
+- [Preview](https://github.com/wrench1997/DAW/actions/runs/38703209158): SUCCESS.
+  363 Python cases (four existing platform skips), SDK4+15, App2333+helper52+
+  protocol13 =2398 root passes/12 ignored, strict Clippy, no-default-feature,
+  static-CRT release (8m11s), final ZIP integrity and extracted sanitized-PATH
+  helper smoke passed. Upload was skipped; no artifact was published.
+- [Quality](https://github.com/wrench1997/DAW/actions/runs/38703209376): FAIL.
+  Linux SDK15/Unix1 passed. Windows App finished2332 passed/1 failed/12 ignored:
+  `plugin_catalog_transport_tests.rs:107` rejected `receipt.healthy_retirement()`.
+  The child was reaped, but the failing receipt field/scenario was not logged.
+  The terminal transport's100ms natural-exit window is a possible mechanism,
+  not an established cause. The same test passed in preview; that does not erase
+  this failure. Later build/native screenshot stages were not reached, so cloud
+  PrintWindow PASS/SKIPPED acceptance remains unverified. No failure rule was
+  relaxed. Permission to diagnose this separate Rust test is pending.
+
+Keep `ci-9bb3110-{windows-quality,windows-preview,linux-helper-readiness}-01.log`
+and `printwindow-final-*-actual-terminal-01.json`. The environment-only `8f4f35c`
+runs actually ended cancelled when the final capture correction superseded them;
+neither is counted as passing evidence.
 
 The classification follows Microsoft's [process session API](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-processidtosessionid),
 [WTS connection states](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/ne-wtsapi32-wts_connectstate_class)
