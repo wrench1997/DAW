@@ -263,6 +263,9 @@ fn actual_whole_nonignored_late_parameter_effects_report_receipt_not_user_cancel
             _ => ParameterEditEffect::Failed(crate::plugin_parameter_edit::ParameterEditFailure {
                 submission,
                 reason: crate::plugin_parameter_edit::ParameterEditFailureReason::TimedOut,
+                // Model a queued edit's late timeout, not an unqueued draft
+                // discarded by fail-all (which would have was_pending=false).
+                was_pending: true,
             }),
         };
         fixture.app_mut().apply_plugin_parameter_edit_effect(effect);
