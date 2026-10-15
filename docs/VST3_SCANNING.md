@@ -1,15 +1,34 @@
-# VST3 metadata scanning
+# VST3 discovery and loaded identity
 
-## Classification and capabilities
+## Ordinary scans collect a module catalog
 
 Citrus probes VST3 modules through its packaged `vst3-host-helper`, located beside the
 application. The background scan does not load third-party code in the application or
-on its audio callback. It loads the same **default audio class** that the current
-project runtime loads, then reads that class's real factory name, vendor, class UID,
-subcategory string and event-bus capabilities. It does not create an editor or start
-processing for a scan. This does execute the candidate plugin's load/initialization
-code in the helper. Process separation is not an OS security sandbox; use trusted
-plugin sources and do not interpret successful metadata loading as a security audit.
+on its audio callback. Ordinary UI `start_scan` and synchronous
+`scan_catalog_checked` query factory declarations without instantiating an audio
+component, controller or editor, or requesting plugin state, MIDI or DSP. Loading
+the module and calling its entry points/getters still executes third-party code;
+process separation is not a security sandbox.
+
+Each module keeps its established path-based descriptor ID and one index entry.
+Its factory/classes are stored separately in `vst3_catalog`. A catalog-only entry
+has `verified=false`, no loaded-default metadata, category `Unknown` and unknown
+runtime MIDI/audio/editor capabilities. Even an `Instrument` declaration cannot
+identify which class the runtime default LOAD will select. No declaration,
+including the first audio class, is promoted into verified runtime metadata.
+
+Catalog-only modules can be chosen in both Channel and Mixer pickers. Browser
+selection opens an explicit target choice instead of interpreting Unknown as an
+effect. A chosen module loads through the original default `class_uid=None` path;
+its persisted Project role remains Unknown. A successful user LOAD does not
+rewrite that role or upgrade the scan cache.
+
+## Loaded-default verification remains explicit
+
+Existing `scan_checked` and `scan` retain their separate default-audio-class
+verification contract for strict consumers. They instantiate that class and read
+its actual factory/class and event-bus metadata. They are not a fallback from a
+failed catalog scan. Classification of this actual metadata retains these rules:
 
 - The exact `Instrument` subcategory token identifies an instrument.
 - Otherwise, the exact `Fx` token identifies an effect.
@@ -23,11 +42,19 @@ plugin sources and do not interpret successful metadata loading as a security au
 reports `Fx` and is correctly shown as an effect despite its filename. Effect plugins
 can have event inputs/outputs without becoming instruments.
 
-A successful load can still have unknown classification. A failed load is explicitly
-unverified and keeps its error (including a missing helper, timeout, or unsupported
-build). The manager's `Unknown` label exposes that error on hover, and scan completion
-reports how many metadata probes were unavailable. It does not turn those failures
-into successful plugin validations.
+A successful default-class verification can still have unknown classification.
+An explicit metadata failure remains unverified with its actual error; Unknown
+alone is not evidence of failure or successful runtime validation.
+
+For the new catalog-to-export path, Source77 retains session-only identity from
+the user's actual default LOAD, full prepare, initial timing and active event-bus
+query. Unknown can enter Whole Review only with a current, callback-installed
+Instrument and MIDI-input identity bound to its original control owner. Query
+failure leaves ordinary loading usable with an export-ineligibility reason.
+Stopped state capture and strict clone validation still determine the actual
+rendered class/state. This bridge does not change selected-conversion gates or
+the existing classified-Instrument export contract. Current execution scope is
+recorded in [Windows melody workflow](WINDOWS_MELODY_WORKFLOW.md).
 
 VST2 filename/export behavior is unchanged by this slice. VST2 MIDI capability discovery
 is not added.
@@ -35,17 +62,18 @@ is not added.
 ## Class identity, bundles and old caches
 
 A `.vst3` bundle is indexed once; nested module binaries are not additional plugins.
-Only the actually probed default audio class is represented. A multi-class module's
-other audio/controller classes are **not** inferred to share its category or MIDI
-capabilities. Additional class selection is not implemented by this change. The
-reported class UID is retained as metadata, rather than replacing the established
-path-based descriptor ID or changing saved project identities.
+The catalog preserves all returned declarations and their order, but exposes no
+new runtime class selector. Explicit loaded-default verification represents only
+the actually loaded audio class; other classes do not inherit its capabilities.
+Actual class UID remains metadata rather than replacing the path-based descriptor
+ID or changing saved project identities.
 
 Old caches used `verified` to mean only a bundle/export was detected. That boolean
-cannot establish current VST3 metadata. Legacy VST3 entries without either new
-metadata or an explicit new scan failure are discarded on cache load, while old VST2
-entries stay unchanged. A startup notice and a persistent manager/settings message
-request a rescan. Completing a scan clears that notice. Current explicit failures
+cannot establish current VST3 metadata. Cache loading accepts valid catalogs,
+actual default-class metadata and explicit scan failures. Other legacy VST3
+entries request a rescan; old VST2 entries stay unchanged. A startup notice and a
+persistent manager/settings message request a rescan. Completing a scan clears
+that notice. Current explicit failures
 remain readable and actionable across restarts.
 
 Serialization defaults permit old descriptor JSON to decode, but do not invent MIDI
@@ -61,16 +89,42 @@ thread. Dropping that handle signals cancellation; the worker discards partial r
 and does not begin another probe after observing cancellation. No UI-thread join is
 performed. This covers owner/application teardown; no separate Cancel button is added.
 
-Each load attempt gets a 5-second response deadline, including the helper client's
-slow-command deadline. The existing client may retry a **crashed** load once; timeouts
-are not retried. Its existing shutdown has a bounded grace period before killing a
-stuck helper, and its stdout reader has a bounded join/detach grace period. Cancellation
-waits for an already-running bounded load/teardown rather than interrupting plugin
-code in the application. A disconnected worker clears the busy state and retains the
-previous index. These are helper bounds, not a promise about latency of arbitrary
-filesystem/network mounts or OS process creation.
+Each probe gets one five-second write/read/decode exchange window after spawn.
+Neither catalog nor explicit default-class probes replay a failed request or
+fall back to another class. Cancellation wakes the owned exchange and then
+retires that same helper. Cleanup retains the original 250ms graceful-exit and
+2250ms cleanup deadlines; Pending keeps ownership of the actual process/pipes.
+A later scan advances that same abandoned cleanup before another spawn.
 
-## Validation and boundaries
+Publication requires natural successful exit, actual reap, completed pipes and
+no cleanup error. A single metadata-query failure with fully healthy retirement
+is retained as Unknown/unverified with `scan_error`, and the walk continues.
+Cancellation, Busy, Pending, kill, abnormal exit or unclean retirement stops the
+scan without replacing the old index, rescan flag or disk cache. The manager
+keeps the actionable stopped reason. Filesystem/network mounts and OS process
+creation have their own latency; the protocol window is not a total scan-time promise.
+
+## Current Windows evidence
+
+Source76 passed 32 factory regressions and 2344 root tests with 12 ignored in
+cloud Windows checks, plus strict Clippy, both binaries, protocol/no-feature
+checks and the complete preview ZIP/extracted-helper smoke path. The independent
+native paint check still fails PrintWindow on the cloud runner; that result
+does not determine local Kontakt visibility.
+
+Source74's actual factory-only Kontakt 8.4.1 query returned two declarations and
+retired its helper naturally. The later ordinary production-catalog NI route is
+not yet qualified. Earlier component-scanning ExitDll failure remains separate.
+Source77's initial Windows build passed 17 new App/Whole/restoration/eligibility
+cases. All three migrated Windows/Unix backend cases subsequently passed in both
+cloud jobs. The Source77 preview completed 2364 root passes with 12 ignored, then
+failed strict Clippy on the large `GeneratorReadiness` variant. Its quality job
+failed first on the fresh-source guard's exact retained-worker assertion and
+finished with 2162 passed, 137 failed and 12 ignored, including later sticky
+fixture refusals. These failures remain open pending the repair candidate's
+actual checks; there is no Source77 release/ZIP or new NI qualification.
+
+## Historical loaded-default validation
 
 On 9 October 2026, the corrected production scanner was run against the genuine
 [official Surge XT 1.3.4 Linux release](https://github.com/surge-synthesizer/releases-xt/releases/tag/1.3.4)

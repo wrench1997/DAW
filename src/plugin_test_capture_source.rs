@@ -18,6 +18,7 @@ struct Shared {
     capture_resume: Condvar,
     capture_failure_after_gate: Mutex<Option<String>>,
     panic_on_backend_drop: AtomicBool,
+    shutdown_drop_observation: AtomicU32,
     prepare_paused: Mutex<bool>,
     prepare_resume: Condvar,
     reset: ProcessingGate,
@@ -123,6 +124,7 @@ impl TestCaptureSource {
             capture_resume: Condvar::new(),
             capture_failure_after_gate: Mutex::new(None),
             panic_on_backend_drop: AtomicBool::new(false),
+            shutdown_drop_observation: AtomicU32::new(0),
             prepare_paused: Mutex::new(prepare_paused),
             prepare_resume: Condvar::new(),
             reset: ProcessingGate::default(),
@@ -173,6 +175,23 @@ impl TestCaptureSource {
         self.shared
             .panic_on_backend_drop
             .store(true, Ordering::Release);
+    }
+
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn shutdown_drop_observation(&self) -> ShutdownDropObservation {
+        match self
+            .shared
+            .shutdown_drop_observation
+            .load(Ordering::Acquire)
+        {
+            0 => ShutdownDropObservation::PanicNotEntered,
+            1 => ShutdownDropObservation::PanicEntered,
+            2 => ShutdownDropObservation::PanicUnwinding,
+            _ => ShutdownDropObservation::DropBodyExitObserved,
+        }
     }
 
     pub(crate) fn pause_reset(&self) {
@@ -232,14 +251,50 @@ struct CaptureBackend {
     shared: Arc<Shared>,
 }
 
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShutdownDropObservation {
+    PanicNotEntered,
+    PanicEntered,
+    PanicUnwinding,
+    DropBodyExitObserved,
+}
+
+// Borrow only the mock's existing atomic. The inner marker runs when panic
+// starts unwinding; the outer marker is the last local at Drop-body exit.
+// Neither owns a worker, handle, observer, gate, or additional Arc lifetime.
+struct ShutdownDropStage<'a> {
+    observation: &'a AtomicU32,
+    stage: u32,
+}
+impl Drop for ShutdownDropStage<'_> {
+    fn drop(&mut self) {
+        self.observation.store(self.stage, Ordering::Release);
+    }
+}
+
 impl Drop for CaptureBackend {
     fn drop(&mut self) {
+        let _body_exit = ShutdownDropStage {
+            observation: &self.shared.shutdown_drop_observation,
+            stage: 3,
+        };
         let armed = self
             .shared
             .panic_on_backend_drop
             .swap(false, Ordering::AcqRel);
         // An existing worker unwind already produces WorkerPanicked; never turn it into abort.
         if armed && !thread::panicking() {
+            self.shared
+                .shutdown_drop_observation
+                .store(1, Ordering::Release);
+            let _unwind = ShutdownDropStage {
+                observation: &self.shared.shutdown_drop_observation,
+                stage: 2,
+            };
             panic!("capture fixture backend shutdown panic");
         }
     }

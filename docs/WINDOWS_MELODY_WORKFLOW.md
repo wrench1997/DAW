@@ -85,12 +85,30 @@ eligibility1. Three backend cases originally used a Unix-only shebang fixture,
 so their two Windows filters ran 0 tests. They have now moved into a Windows/Unix
 module and shared protocol fixture without changing production helper launch.
 Windows holds the exact Python process handle before Shutdown and requires its
-actual exit0 after worker Join, separately from CMD. The migrated three cases
-await CI compilation/execution; these are not 20 executed passes. Formatting and
-independent source review passed.
-Evidence is `source77-loaded-identity-targeted-01.log` and its terminal JSON;
-strict Clippy, full-suite and real NI acceptance remain open. Catalog discovery
-and mock identity tests do not qualify a real NOIRE workflow.
+actual exit0 after worker Join, separately from CMD. All three migrated cases
+subsequently ran and passed in both cloud Windows jobs. Preview completed 2364
+root passes with 12 ignored, then strict Clippy refused the 208-byte Ready
+variant in `GeneratorReadiness`; release and ZIP checks did not run. Quality
+first failed the fresh-source guard's `fresh Guard Drop lost its exact held
+worker` assertion and finished with 2162 passed, 137 failed and 12 ignored,
+including later sticky fixture refusals. The intentionally injected backend
+shutdown panic remains part of the test, not a failure to suppress.
+Evidence is `source77-loaded-identity-targeted-01.log`, its terminal JSON,
+`ci-da68aaf-windows-preview-01.log`, `ci-da68aaf-windows-quality-01.log` and their
+actual terminal run/jobs JSON. The repair candidate requires actual checks;
+Source77 native preparation remains unexecuted. Catalog discovery and mock
+identity tests do not qualify a real NOIRE workflow.
+
+Source78 addresses the Clippy payload size with boxed Ready identity storage,
+preserving the public getter type and current-owner checks. The retained-worker
+timeout remains under investigation. Its test now reports mock Drop/panic-unwind
+progress and the original worker's actual is_finished/Join/observer-call progress
+before the unchanged five-second assertion. No additional poll, Join, owner or
+deadline is introduced; production builds exclude the runtime observations.
+Healthy and injected-panic successes check that the diagnostic terminal stage
+matches the actual Join outcome. Source formatting, diff and local document links
+passed; compilation, regression and strict Clippy remain unexecuted for this
+candidate. Do not treat these diagnostics as a shutdown fix or NI acceptance.
 
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,

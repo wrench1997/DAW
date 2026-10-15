@@ -2834,6 +2834,29 @@ impl PluginChainControl {
         Arc::as_ptr(&self.metrics) as usize
     }
 
+    /// Last evidence from the original guard's existing retained poll; this
+    /// getter does not poll the thread or turn a stopped flag into completion.
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn genuine_retained_join_observation(&self) -> RetainedJoinObservation {
+        match self
+            .metrics
+            .retained_join_observation
+            .load(Ordering::Acquire)
+        {
+            0 => RetainedJoinObservation::NotPolled,
+            1 => RetainedJoinObservation::LastPollSawUnfinished,
+            2 => RetainedJoinObservation::LastPollSawFinished,
+            3 => RetainedJoinObservation::HealthyJoinReturned,
+            4 => RetainedJoinObservation::PanickedJoinReturned,
+            5 => RetainedJoinObservation::HealthyJoinObserverCallReturned,
+            _ => RetainedJoinObservation::PanickedJoinObserverCallReturned,
+        }
+    }
+
     /// One source generator, one private bounded receipt. No normal save/native publication.
     pub fn request_instrument_bounce_state(
         &self,
@@ -3309,6 +3332,28 @@ struct BridgeMetrics {
     detached_workers: AtomicU64,
     shutdown_timeouts: AtomicU64,
     stopped: AtomicBool,
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    retained_join_observation: AtomicU32,
+}
+
+#[cfg(all(
+    test,
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RetainedJoinObservation {
+    NotPolled,
+    LastPollSawUnfinished,
+    LastPollSawFinished,
+    HealthyJoinReturned,
+    PanickedJoinReturned,
+    HealthyJoinObserverCallReturned,
+    PanickedJoinObserverCallReturned,
 }
 
 /// Pins only the observed allocation address, never its metrics or worker lifetime.
@@ -3551,13 +3596,37 @@ impl PluginWorkerGuard {
             .expect("nonterminal retained shutdown owns its worker")
             .is_finished()
         {
+            #[cfg(all(
+                test,
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            self.metrics
+                .retained_join_observation
+                .store(1, Ordering::Release);
             return RetainedShutdownPoll::Pending;
         }
+        #[cfg(all(
+            test,
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        self.metrics
+            .retained_join_observation
+            .store(2, Ordering::Release);
         let joined = self
             .join
             .take()
             .expect("finished retained shutdown owns its worker")
             .join();
+        #[cfg(all(
+            test,
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        self.metrics
+            .retained_join_observation
+            .store(if joined.is_ok() { 3 } else { 4 }, Ordering::Release);
         #[cfg(test)]
         genuine_observer::record_worker_join(
             Arc::as_ptr(&self.metrics) as usize,
@@ -3567,6 +3636,14 @@ impl PluginWorkerGuard {
                 genuine_observer::WorkerJoinOutcome::WorkerPanicked
             },
         );
+        #[cfg(all(
+            test,
+            any(target_os = "linux", windows),
+            feature = "experimental-fresh-helper"
+        ))]
+        self.metrics
+            .retained_join_observation
+            .store(if joined.is_ok() { 5 } else { 6 }, Ordering::Release);
         if joined.is_ok() {
             self.retained_shutdown = RetainedShutdownState::Joined;
             RetainedShutdownPoll::Joined

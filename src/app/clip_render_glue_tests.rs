@@ -1715,6 +1715,53 @@ fn unpublished_qualified_fresh_worker() -> (RestorationFixture, Project) {
     any(target_os = "linux", windows),
     feature = "experimental-fresh-helper"
 ))]
+fn fresh_guard_drop_timeout_diagnostic(
+    observer: &crate::genuine_app_observer::ObservationRun,
+    worker: usize,
+    control: &PluginChainControl,
+    source: &TestCaptureSource,
+    worker_panics: bool,
+) -> String {
+    let join = control.genuine_retained_join_observation();
+    let backend_drop = source.shutdown_drop_observation();
+    let stats = control.stats();
+    observer.with_snapshot(|snapshot| {
+        use crate::genuine_app_observer::{RecordKind, WorkerJoinOutcome};
+        let mut joined = 0;
+        let mut panicked = 0;
+        let mut owner_started = 0;
+        let mut owner_start_failed = 0;
+        for record in &snapshot.records {
+            match &record.kind {
+                RecordKind::WorkerJoin { worker_id, outcome } if *worker_id == worker => {
+                    match outcome {
+                        WorkerJoinOutcome::Joined => joined += 1,
+                        WorkerJoinOutcome::WorkerPanicked => panicked += 1,
+                    }
+                }
+                RecordKind::Lifecycle("fresh guard retained shutdown owner started") => {
+                    owner_started += 1;
+                }
+                RecordKind::Lifecycle(
+                    "fresh guard retained shutdown owner start failed; source retained unjoined",
+                ) => owner_start_failed += 1,
+                _ => {}
+            }
+        }
+        format!(
+            "worker_panics={worker_panics}, exact_worker={worker}, backend_drop={backend_drop:?}, last_actual_retained_join={join:?}, observer(failure,records,exact_healthy_joins,exact_panicked_joins)=({:?},{},{},{}), run_owner_markers(started,start_failed)=({owner_started},{owner_start_failed}), worker_stats={stats:?}; stopped/ShutdownComplete are not thread-finished or Join evidence",
+            snapshot.failure,
+            snapshot.records.len(),
+            joined,
+            panicked,
+        )
+    })
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
 #[test]
 fn actual_fresh_source_guard_drop_retains_late_worker_and_records_healthy_or_panicked_join_once() {
     for worker_panics in [false, true] {
@@ -1752,9 +1799,26 @@ fn actual_fresh_source_guard_drop_retains_late_worker_and_records_healthy_or_pan
         fixture.source.as_ref().unwrap().release_prepare();
         let deadline = Instant::now() + Duration::from_secs(5);
         while source_join_outcomes(&observer, worker).is_empty() {
+            let before_deadline = Instant::now() < deadline;
+            if !before_deadline {
+                let diagnostic = fresh_guard_drop_timeout_diagnostic(
+                    &observer,
+                    worker,
+                    &control,
+                    fixture.source.as_ref().unwrap(),
+                    worker_panics,
+                );
+                // Report before the original assertion/unwind can quarantine
+                // this fixture and generate secondary sticky-admission failures.
+                use std::io::Write;
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "fresh Guard Drop first timeout: {diagnostic}"
+                );
+            }
             assert!(
-                Instant::now() < deadline,
-                "fresh Guard Drop lost its exact held worker"
+                before_deadline,
+                "fresh Guard Drop lost its exact held worker; worker_panics={worker_panics}, exact_worker={worker}"
             );
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -1764,6 +1828,25 @@ fn actual_fresh_source_guard_drop_retains_late_worker_and_records_healthy_or_pan
             crate::genuine_app_observer::WorkerJoinOutcome::Joined
         };
         assert_eq!(source_join_outcomes(&observer, worker), [expected]);
+        assert_eq!(
+            fixture.source.as_ref().unwrap().shutdown_drop_observation(),
+            crate::plugins::plugin_runtime::test_capture_source::ShutdownDropObservation::DropBodyExitObserved,
+        );
+        use crate::plugins::plugin_runtime::RetainedJoinObservation;
+        let join = control.genuine_retained_join_observation();
+        assert!(if worker_panics {
+            matches!(
+                join,
+                RetainedJoinObservation::PanickedJoinReturned
+                    | RetainedJoinObservation::PanickedJoinObserverCallReturned
+            )
+        } else {
+            matches!(
+                join,
+                RetainedJoinObservation::HealthyJoinReturned
+                    | RetainedJoinObservation::HealthyJoinObserverCallReturned
+            )
+        });
         assert_eq!(control.stats().detached_workers, 0);
         assert_eq!(project_and_history(fixture.app()), before);
     }

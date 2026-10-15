@@ -17,7 +17,7 @@ pub(in crate::app) struct LoadedGeneratorIdentity {
 pub(in crate::app) enum GeneratorReadiness {
     #[default]
     Awaiting,
-    Ready(Option<LoadedGeneratorIdentity>, Option<String>),
+    Ready(Option<Box<LoadedGeneratorIdentity>>, Option<String>),
     Faulted,
 }
 
@@ -60,14 +60,16 @@ impl GeneratorReadiness {
                             && stats.faults == 0
                             && !stats.stopped
                     })
-                    .map(|identity| LoadedGeneratorIdentity {
-                        project_session: owner_session,
-                        channel_id,
-                        endpoint_id,
-                        instance_id,
-                        slot: 0,
-                        control: control.owner_identity(),
-                        identity: identity.clone(),
+                    .map(|identity| {
+                        Box::new(LoadedGeneratorIdentity {
+                            project_session: owner_session,
+                            channel_id,
+                            endpoint_id,
+                            instance_id,
+                            slot: 0,
+                            control: control.owner_identity(),
+                            identity: identity.clone(),
+                        })
                     });
                 let reason = loaded_vst3_identity_error.clone().or_else(|| {
                     (loaded_vst3_identity.is_some() && loaded.is_none()).then(|| "Actual VST3 Ready identity no longer matches its source assignment or owner".into())
@@ -157,7 +159,9 @@ impl CitrusApp {
         let GeneratorReadiness::Ready(Some(identity), None) = &chain.readiness else {
             return None;
         };
-        identity.matches_current(self).then(|| identity.clone())
+        identity
+            .matches_current(self)
+            .then(|| identity.as_ref().clone())
     }
 
     pub(in crate::app) fn loaded_generator_identity_unavailable_reason(
