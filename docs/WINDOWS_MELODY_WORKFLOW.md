@@ -5,7 +5,7 @@ Updated: 2026-10-15 (Asia/Shanghai). Development branch:
 Citrus Studio remains a development DAW. The complete melody workflow is not yet qualified.
 This document separates implemented behavior, actual local acceptance, failures and untested work.
 
-The current generic-base restore candidate is not yet compiled or tested.
+The first generic-base restore candidate compiled but failed existing history checks.
 Ordinary Open formerly sent saved bases once through a 64-entry untagged admin
 queue; rejected enqueues were not retained, yet SlotReady could publish Loaded.
 The candidate retains exact project/session/endpoint/slot/control ownership,
@@ -13,9 +13,20 @@ uses existing tagged parameter acknowledgments, and withholds readiness for
 nonempty maps until replay completes. Backpressure retries the retained base;
 rejection or the existing 30-second inactivity budget latches an explicit retry.
 Transport, save and export gates cover the Installed-before-Ready interval.
-Empty maps keep the old Ready/request-zero State contract. Eight real-worker/
-bounded-queue tests and a Loaded-identity guard assertion are written; only
-formatting and diff checks have run. Native05/06 use the previous frozen bins.
+Empty maps keep the old Ready/request-zero State contract. Source89 (`48ea977`)
+actually passed its eight new worker/queue cases in both cloud jobs, but each
+finished with 2325 App passes, four failures and 12 ignored. Quality passed32
+factory cases and preview passed344 harness cases; later helper/protocol,
+Clippy, release and ZIP gates did not run.
+
+All four failures occur on a second Undo/Redo: history restores a session-only
+Unloaded display status, which the new pre-Ready gate mistakes for current-worker
+initialization despite the same owner having completed ACK replay. The repair
+retains exact owner Ready/Completed evidence, including empty-map SlotReady,
+without admitting truly pending/failed or replacement owners. The four original
+startup assertions are unchanged. This repair is not yet compiled or tested.
+Preserve `ci-48ea977-windows-{quality,preview}-01.log` and Source89 actual terminal
+JSON. Native05/06 use earlier frozen bins, not this candidate.
 
 Latest backend qualification: Source87 (`769525d`) quality actually passed 32
 factory and 2321 App + 52 helper + 13 protocol = 2386 root cases/12 ignored, including
@@ -522,8 +533,19 @@ chunking, the next block, changed tempo/nonzero PPQ, stopped/zero-frame handling
 and existing entry points. Both CI consumers explicitly run `--lib offline_midi`;
 root Cargo tests alone do not execute dependency unit tests. Formatting, complete
 75-file patch replay, explicit vendor pins and two packaging/consumer contracts
-passed; Rust, Clippy and native checks have not run. This corrects a demonstrated
-event contract, not a demonstrated cause of the 384-frame difference.
+passed. Local Source90 (`8fc027d`, unpushed) subsequently passed all four new
+SDK cases and15 original HostEventList regressions. Root generic8 also passed,
+but startup history reproduced7 passes/four failures; identity, strict Clippy
+and matching-bin build did not run. This corrects a demonstrated event contract,
+not a demonstrated cause of the384-frame difference.
+
+After all Cargo processes terminated, the diagnostic wrapper incorrectly waited
+on its own conhost infrastructure. Only that wrapper was interrupted; exec77452
+actually exited1 and fresh heavy/root/console absence preceded peer handback.
+Keep the original script/raw logs plus the independent
+`source90-local-gates-01-terminal-recovery.json`; it does not invent a successful
+aggregate run. The next observer must not wait for a console whose lifetime
+depends on its own wrapper. No NI or user process was terminated.
 
 A second confirmed gap is still unimplemented: IProgress extends the actual
 IComponentHandler, but that COM object does not expose it. The existing separate

@@ -20,11 +20,12 @@ pub(super) struct PendingPluginInitialization {
     last_progress: Instant,
     error: Option<String>,
     reported: bool,
+    ready: bool,
 }
 
 impl PendingPluginInitialization {
     fn observe(&mut self, event: &RuntimeEvent) {
-        if self.error.is_some() {
+        if self.ready || self.error.is_some() {
             return;
         }
         match event {
@@ -193,11 +194,9 @@ impl CitrusApp {
         }
         if matches!(event, RuntimeEvent::SlotReady { .. }) {
             let bases = plugin_parameter_replay_values(&self.project, instance_id);
-            if bases.is_empty() {
-                return false;
-            }
+            let ready = bases.is_empty();
             let Some(control) = self.plugin_initialization_control(key) else {
-                return true;
+                return !ready;
             };
             let owner = control.owner_identity();
             if self
@@ -205,15 +204,20 @@ impl CitrusApp {
                 .get(&key)
                 .is_some_and(|pending| pending.owner.matches(control))
             {
-                return true;
+                return !ready;
             }
-            let request_id = self.next_plugin_parameter_request_id.max(1);
-            self.next_plugin_parameter_request_id = request_id.wrapping_add(1).max(1);
-            let needs_initial_state =
-                self.restart_initial_state_waiting.contains(&instance_id)
+            let request_id = if ready {
+                0
+            } else {
+                let request_id = self.next_plugin_parameter_request_id.max(1);
+                self.next_plugin_parameter_request_id = request_id.wrapping_add(1).max(1);
+                request_id
+            };
+            let needs_initial_state = !ready
+                && (self.restart_initial_state_waiting.contains(&instance_id)
                     || self.project.plugin_instances.iter().any(|instance| {
                         instance.id == instance_id && instance.opaque_state.is_empty()
-                    });
+                    }));
             // A replacement owns a fresh replay. Retired endpoints cannot keep a
             // failure latch on the replacement or acknowledge any of its bases.
             self.plugin_initializations
@@ -230,17 +234,19 @@ impl CitrusApp {
                     last_progress: Instant::now(),
                     error: None,
                     reported: false,
+                    ready,
                 },
             );
-            if let Some(instance) = self
-                .project
-                .plugin_instances
-                .iter_mut()
-                .find(|instance| instance.id == instance_id)
+            if !ready
+                && let Some(instance) = self
+                    .project
+                    .plugin_instances
+                    .iter_mut()
+                    .find(|instance| instance.id == instance_id)
             {
                 instance.runtime_status = PluginRuntimeStatus::Unloaded;
             }
-            return true;
+            return !ready;
         }
         let same_owner = self
             .plugin_initialization_control(key)
@@ -264,16 +270,24 @@ impl CitrusApp {
             else {
                 continue;
             };
-            let complete = allow_commands && initialization.poll(key, control);
+            let complete =
+                initialization.ready || (allow_commands && initialization.poll(key, control));
             if complete {
-                if let Some(instance) = self
-                    .project
-                    .plugin_instances
-                    .iter_mut()
-                    .find(|instance| instance.id == key.instance_id)
+                if !initialization.ready
+                    && let Some(instance) = self
+                        .project
+                        .plugin_instances
+                        .iter_mut()
+                        .find(|instance| instance.id == key.instance_id)
                 {
                     instance.runtime_status = PluginRuntimeStatus::Loaded;
                 }
+                // Retain actual Ready/ACK evidence with its exact owner. A history
+                // Project can contain an older display status, but cannot erase this
+                // completed worker preparation or qualify a different allocation.
+                initialization.ready = true;
+                initialization.bases = Vec::new();
+                self.plugin_initializations.insert(key, initialization);
                 continue;
             }
             if let Some(error) = &initialization.error
@@ -304,24 +318,123 @@ impl CitrusApp {
     pub(super) fn plugin_initializations_pending(&self) -> bool {
         self.plugin_initializations
             .values()
-            .any(|pending| pending.error.is_none())
-            || self.project.plugin_instances.iter().any(|instance| {
-                !instance.parameters.is_empty()
-                    && instance.runtime_status == PluginRuntimeStatus::Unloaded
-                    && (self.pending_insert_chains.values().any(|chain| {
-                        chain.project_session == self.project_session
-                            && chain.instance_ids.contains(&instance.id)
-                    }) || self.running_insert_chains.values().any(|chain| {
-                        chain.project_session == self.project_session
-                            && chain.instance_ids.contains(&instance.id)
-                    }) || self.pending_generator_chains.values().any(|chain| {
-                        chain.project_session == self.project_session
-                            && chain.instance_id == instance.id
-                    }) || self.running_generator_chains.values().any(|chain| {
-                        chain.project_session == self.project_session
-                            && chain.instance_id == instance.id
-                    }))
+            .any(|pending| !pending.ready && pending.error.is_none())
+            || self.pending_insert_chains.values().any(|chain| {
+                chain
+                    .instance_ids
+                    .iter()
+                    .enumerate()
+                    .any(|(slot, &instance_id)| {
+                        self.plugin_slot_awaits_initialization(
+                            PluginInitializationKey {
+                                project_session: chain.project_session,
+                                endpoint: ParameterEndpoint {
+                                    kind: ParameterEndpointKind::Insert,
+                                    id: chain.endpoint_id,
+                                },
+                                instance_id,
+                                slot,
+                            },
+                            &chain.control,
+                        )
+                    })
             })
+            || self.running_insert_chains.values().any(|chain| {
+                chain
+                    .instance_ids
+                    .iter()
+                    .enumerate()
+                    .any(|(slot, &instance_id)| {
+                        self.plugin_slot_awaits_initialization(
+                            PluginInitializationKey {
+                                project_session: chain.project_session,
+                                endpoint: ParameterEndpoint {
+                                    kind: ParameterEndpointKind::Insert,
+                                    id: chain.endpoint_id,
+                                },
+                                instance_id,
+                                slot,
+                            },
+                            &chain.control,
+                        )
+                    })
+            })
+            || self.pending_generator_chains.values().any(|chain| {
+                self.plugin_slot_awaits_initialization(
+                    PluginInitializationKey {
+                        project_session: chain.project_session,
+                        endpoint: ParameterEndpoint {
+                            kind: ParameterEndpointKind::Generator,
+                            id: chain.endpoint_id,
+                        },
+                        instance_id: chain.instance_id,
+                        slot: 0,
+                    },
+                    &chain.control,
+                )
+            })
+            || self.running_generator_chains.values().any(|chain| {
+                self.plugin_slot_awaits_initialization(
+                    PluginInitializationKey {
+                        project_session: chain.project_session,
+                        endpoint: ParameterEndpoint {
+                            kind: ParameterEndpointKind::Generator,
+                            id: chain.endpoint_id,
+                        },
+                        instance_id: chain.instance_id,
+                        slot: 0,
+                    },
+                    &chain.control,
+                )
+            })
+    }
+
+    fn plugin_slot_awaits_initialization(
+        &self,
+        key: PluginInitializationKey,
+        control: &PluginChainControl,
+    ) -> bool {
+        if key.project_session != self.project_session
+            || self.clip_render_restorations.contains_key(&key.instance_id)
+        {
+            return false;
+        }
+        if let Some(initialization) = self
+            .plugin_initializations
+            .get(&key)
+            .filter(|initialization| initialization.owner.matches(control))
+        {
+            return !initialization.ready && initialization.error.is_none();
+        }
+        // Installed can precede the worker's first Ready event. Only an owner
+        // without actual Ready evidence may use this pre-Ready fallback.
+        self.project.plugin_instances.iter().any(|instance| {
+            instance.id == key.instance_id
+                && !instance.parameters.is_empty()
+                && instance.runtime_status == PluginRuntimeStatus::Unloaded
+        })
+    }
+
+    pub(super) fn plugin_initialization_blocks_control(
+        &self,
+        endpoint: ParameterEndpoint,
+        instance_id: u64,
+        slot: usize,
+        control: &PluginChainControl,
+    ) -> bool {
+        let key = PluginInitializationKey {
+            project_session: self.project_session,
+            endpoint,
+            instance_id,
+            slot,
+        };
+        self.plugin_initializations
+            .get(&key)
+            .filter(|initialization| initialization.owner.matches(control))
+            .map_or_else(
+                || self.plugin_slot_awaits_initialization(key, control),
+                |initialization| !initialization.ready,
+            )
     }
 
     pub(super) fn plugin_initialization_failed(&self) -> bool {

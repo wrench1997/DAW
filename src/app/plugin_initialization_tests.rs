@@ -1,8 +1,8 @@
 //! Real bounded admin queues and worker receipts through ordinary App polling; no DLL/device.
 use super::*;
 use crate::plugins::plugin_runtime::{
-    AudioThreadEndpoint, BackendSlot, PluginBackend, PluginChain, PluginPrepareConfig,
-    ShutdownOutcome,
+    AudioThreadEndpoint, BackendSlot, LoadedVst3Identity, PluginBackend, PluginChain,
+    PluginPrepareConfig, ShutdownOutcome,
 };
 use std::{
     collections::BTreeMap,
@@ -42,12 +42,16 @@ struct Probe {
     first_set_gate: Gate,
     block_first_set: bool,
     reject: Option<u32>,
+    loaded_identity: Option<LoadedVst3Identity>,
 }
 
 struct RestoreBackend(Arc<Probe>);
 impl PluginBackend for RestoreBackend {
     fn name(&self) -> &str {
         "generic restore fixture"
+    }
+    fn loaded_vst3_identity(&self) -> Result<Option<LoadedVst3Identity>, String> {
+        Ok(self.0.loaded_identity.clone())
     }
     fn prepare(&mut self, _: PluginPrepareConfig) -> Result<(), String> {
         Ok(())
@@ -96,6 +100,7 @@ struct Fixture {
     probes: Vec<Arc<Probe>>,
     channel: u32,
     instance: u64,
+    loaded_identity: Option<LoadedVst3Identity>,
 }
 
 fn wait_until(mut condition: impl FnMut() -> bool) {
@@ -111,6 +116,15 @@ fn wait_until(mut condition: impl FnMut() -> bool) {
 
 impl Fixture {
     fn new(count: u32, block_first_set: bool, reject: Option<u32>) -> Self {
+        Self::new_configured(count, block_first_set, reject, false)
+    }
+
+    fn new_configured(
+        count: u32,
+        block_first_set: bool,
+        reject: Option<u32>,
+        loaded_identity: bool,
+    ) -> Self {
         let cc = eframe::CreationContext::_new_kittest(egui::Context::default());
         let mut app = CitrusApp::new_boxed_with_services(&cc, false);
         assert!(app.audio.is_none());
@@ -123,7 +137,11 @@ impl Fixture {
                 name: "Restore fixture".into(),
                 vendor: "TEST".into(),
                 path: PathBuf::from("/not-a-plugin/restore.so"),
-                format: ScannedPluginFormat::Vst2,
+                format: if loaded_identity {
+                    ScannedPluginFormat::Vst3
+                } else {
+                    ScannedPluginFormat::Vst2
+                },
                 category: "Instrument".into(),
                 is_instrument: true,
                 verified: false,
@@ -146,6 +164,16 @@ impl Fixture {
             probes: Vec::new(),
             channel,
             instance,
+            loaded_identity: loaded_identity.then(|| {
+                LoadedVst3Identity::test_fixture(
+                    PathBuf::from("/not-a-plugin/restore.so"),
+                    "00112233445566778899AABBCCDDEEFF",
+                    "1",
+                    "Instrument",
+                    true,
+                    false,
+                )
+            }),
         };
         fixture.attach(901, block_first_set, reject);
         fixture
@@ -155,6 +183,7 @@ impl Fixture {
         let probe = Arc::new(Probe {
             block_first_set,
             reject,
+            loaded_identity: self.loaded_identity.clone(),
             ..Default::default()
         });
         let backend_probe = probe.clone();
@@ -181,6 +210,7 @@ impl Fixture {
                 ShutdownOutcome::Joined
             );
         }
+        self.app.project.plugin_instances[0].runtime_status = PluginRuntimeStatus::Unloaded;
         self.app.running_generator_chains.insert(
             self.channel,
             RunningGeneratorChain {
@@ -214,7 +244,8 @@ impl Fixture {
     fn finish(&mut self) {
         wait_until(|| {
             self.app.poll_plugin_runtime_events();
-            self.app.plugin_initializations.is_empty()
+            !self.app.plugin_initializations_pending()
+                && !self.app.plugin_initialization_failed()
                 && self.app.project.plugin_instances[0].runtime_status
                     == PluginRuntimeStatus::Loaded
         });
@@ -254,7 +285,7 @@ impl Drop for Fixture {
 #[test]
 fn generic_restore_full_admin_queue_retains_one_and_130_bases_until_exact_acks() {
     for count in [1, 130] {
-        let mut f = Fixture::new(count, false, None);
+        let mut f = Fixture::new_configured(count, false, None, true);
         let before = project_fingerprint(&f.app.project);
         f.saturate();
         assert!(
@@ -263,6 +294,14 @@ fn generic_restore_full_admin_queue_retains_one_and_130_bases_until_exact_acks()
         );
         assert!(!f.app.plugin_runtime_is_ready_for_transport());
         f.start();
+        assert!(matches!(
+            f.app.running_generator_chains[&f.channel].readiness,
+            GeneratorReadiness::Ready(Some(_), None)
+        ));
+        assert!(
+            f.app.loaded_generator_identity(f.channel).is_none(),
+            "actual generic ACKs, not raw Ready metadata, admit export identity"
+        );
         assert_eq!(f.probe().sets.load(Ordering::SeqCst), 0);
         assert_eq!(
             f.app.project.plugin_instances[0].runtime_status,
@@ -286,6 +325,17 @@ fn generic_restore_full_admin_queue_retains_one_and_130_bases_until_exact_acks()
         assert!(f.app.undo_stack.is_empty());
         assert!(f.app.redo_stack.is_empty());
         assert!(f.app.plugin_runtime_is_ready_for_transport());
+        let proof = f
+            .app
+            .loaded_generator_identity(f.channel)
+            .expect("the same real worker completed generic replay");
+        f.app.project.plugin_instances[0].runtime_status = PluginRuntimeStatus::Unloaded;
+        assert!(
+            !f.app.plugin_topology_is_settling(),
+            "a historical display status is not new worker initialization"
+        );
+        assert!(proof.matches_current(&f.app));
+        assert!(f.app.loaded_generator_identity(f.channel).is_some());
     }
 }
 
@@ -417,7 +467,8 @@ fn generic_restore_empty_bases_keep_legacy_ready_and_initial_state_contract() {
         f.app.project.plugin_instances[0].runtime_status,
         PluginRuntimeStatus::Loaded
     );
-    assert!(f.app.plugin_initializations.is_empty());
+    assert!(!f.app.plugin_initializations_pending());
+    assert!(!f.app.plugin_initialization_failed());
     assert_eq!(f.probe().sets.load(Ordering::SeqCst), 0);
     assert_eq!(f.probe().saves.load(Ordering::SeqCst), 0);
     f.probe().query_gate.release();
@@ -558,7 +609,7 @@ fn generic_restore_insert_slots_wait_for_each_slots_own_ack() {
     probes[second].first_set_gate.release();
     wait_until(|| {
         f.app.poll_plugin_runtime_events();
-        f.app.plugin_initializations.is_empty()
+        !f.app.plugin_initializations_pending() && !f.app.plugin_initialization_failed()
     });
     for (instance, probe) in f.app.project.plugin_instances.iter().zip(probes) {
         assert_eq!(instance.runtime_status, PluginRuntimeStatus::Loaded);

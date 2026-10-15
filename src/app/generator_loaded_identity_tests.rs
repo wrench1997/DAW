@@ -62,9 +62,10 @@ fn loaded_generator_identity_rejects_wrong_session_channel_endpoint_instance_pat
     let proof = fixture.app().loaded_generator_identity(channel).unwrap();
     fixture.app_mut().project.plugin_instances[0].runtime_status = PluginRuntimeStatus::Unloaded;
     assert!(
-        !proof.matches_current(fixture.app()),
-        "prepared identity alone cannot bypass persisted-base restoration"
+        proof.matches_current(fixture.app()),
+        "a historical Project display status cannot erase the same owner's actual Ready/ACK evidence"
     );
+    assert!(!fixture.app().plugin_initializations_pending());
     fixture.app_mut().project.plugin_instances[0].runtime_status = PluginRuntimeStatus::Loaded;
     for case in 0..6 {
         let mut changed = proof.clone();
