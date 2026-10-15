@@ -2884,14 +2884,18 @@ fn strict_clone_full_dry_topology_drift_refuses_before_and_after_each_process() 
                     .expect("injected request was dispatched");
                 let mut exact_suffix = vec![stage];
                 if supported_drift {
-                    // Supported shapes finish metadata and its post-read readiness check;
-                    // policy failures stop at the raw audio policy without either suffix.
+                    // Supported shapes finish the original metadata getter sequence.
+                    // Raw-policy rejection stops without any of these later requests.
                     exact_suffix.extend([
                         format!("EventBusLayout:{occurrence}"),
                         format!("LatencySamples:{occurrence}"),
                         format!("TailSamples:{occurrence}"),
-                        format!("AsyncStateSnapshot:{}", occurrence * 2),
                     ]);
+                    if occurrence > 1 {
+                        // Render metadata is bracketed by snapshots. Initial prepare
+                        // compares its complete getters before arm, with no post-read poll.
+                        exact_suffix.push(format!("AsyncStateSnapshot:{}", occurrence * 2));
+                    }
                 }
                 exact_suffix.extend(["StopProcessing:1".into(), "Shutdown:1".into()]);
                 assert_eq!(

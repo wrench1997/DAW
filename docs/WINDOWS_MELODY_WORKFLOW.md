@@ -687,11 +687,27 @@ concrete-reap assertions remain. Production readiness, cancellation and cleanup
 behavior is unchanged. The legacy constructor receives only a function-scoped
 compatibility dead-code annotation. Formatting, diff checks, complete76-file
 vendor replay, four-file bundle validation and two Python contracts passed.
-The five affected exact cases, strict Clippy and matching bins have not yet run
-on these changed inputs; unchanged SDK15/Unix1/legacy2 and Strict32 evidence is
-reused. Preserve `strict-cancel-readiness-candidate-01/applied-handoff-01.json`,
+Source94 (`e50f92f`) locally passed four affected exact cases: cancellation,
+pending owner and both Whole observations. Strict all-feature/all-target Clippy
+and a matching main/helper build each exited0. The dry-topology case still
+failed: its initial prepare rejects capture drift after the complete getters,
+before a post-snapshot or arm. The prior repair incorrectly applied the armed
+metadata suffix to that first occurrence. Runner exec90217 actually exited1
+(Cargo101); the separate remaining-check runner exec46212 actually exited0.
+Keep both `source94-local-gates-{01,02}-terminal.json` records rather than calling
+the aggregate a pass. Cloud Linux passed SDK15/Unix1; both Windows jobs remain
+in progress. SDK-B has not entered NI acceptance. Preserve
+`strict-cancel-readiness-candidate-01/applied-handoff-01.json`,
 `strict-readiness-fixture-provenance-01/` and
 `whole-review-settlement-success-sample-fix-01.json`.
+
+Source95 corrects only that exact dry-topology fixture: occurrence1 retains the
+complete getters then cleanup without a post-snapshot/arm; occurrences2..5 retain
+Snapshot(2*n) before cleanup. Raw-policy early rejection is unchanged. Production,
+vendor sources and pins do not change. Scratch formatting/apply-check and the
+applied diff passed; the affected case and changed-input Clippy remain unrun.
+Source94's unchanged four passing cases, matching bins and SDK evidence remain
+applicable. Preserve `strict-dry-topology-prepare-boundary-candidate-01/`.
 
 Preserve `async-progress-readiness-candidate-01/applied-handoff-02.json` and
 `async-progress-readiness-provenance-02/`. This guard tracks work reported through
