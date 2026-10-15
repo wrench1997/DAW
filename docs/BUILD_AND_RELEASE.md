@@ -1,7 +1,7 @@
 # Windows x64 构建与发布
 
 当前源码候选：Citrus Studio 0.5.0-alpha.1；下文固定发布流程/示例继承自 0.4.0
-当前源码工程格式为 **v13**（[Auto/Manual 歌曲范围与编辑器联动](PLAYLIST_TRANSPORT.md)）；`81b2572`已通过本机225项相关输入/无设备callback、9项真实离屏、严格Clippy和匹配MSVC调试双bin门，独立测试03不是下述正式发行包。旧段落v12证据只属于其历史构建；本轮云端/原生NOIRE验收分别记录。
+当前源码工程格式为 **v13**（[Auto/Manual 歌曲范围与编辑器联动](PLAYLIST_TRANSPORT.md)）；`81b2572`已通过本机225项相关输入/无设备callback、9项真实离屏、严格Clippy和匹配MSVC调试双bin门，独立测试03不是下述正式发行包。旧段落v12证据只属于其历史构建；63d2f99云quality与preview实际均SUCCESS（含静态CRT release/ZIP/提取后helper）；原生03/NOIRE验收仍未完成。
 目标系统：Windows 10/11 x64  
 目标三元组：x86_64-pc-windows-gnullvm
 

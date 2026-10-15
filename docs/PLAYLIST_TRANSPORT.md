@@ -6,7 +6,9 @@ current linking source passed all225 affected UI/callback cases, strict Clippy,
 matching main/helper build and9 genuine WGPU cases; all four frames were inspected.
 Desktop **Citrus Studio 新版测试03** starts the separate copy at
 `D:\DAW-Preview\Citrus-Studio-20261015-03\Start-Citrus.cmd`;01/02 and user works
-are unchanged. New cloud and native03/NOIRE acceptance remain separate.
+are unchanged. Cloud [quality](https://github.com/wrench1997/DAW/actions/runs/38746810086)
+and [preview packaging](https://github.com/wrench1997/DAW/actions/runs/38746809594)
+passed at `63d2f99`; native03/NOIRE acceptance remains separate.
 
 ## Position and view are separate from music
 

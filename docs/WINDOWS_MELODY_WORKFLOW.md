@@ -1145,14 +1145,39 @@ ordinary independent copies. Its five-second no-plugin helper smoke exited0/reap
 Root did not open main. Format13 remains compatible with02;01 cannot read new13
 saves, so preserve original works with Save As. Current shortcut/profile location
 is at the top of this document. Per-placement follow-length remains an explicit
-gap; this change does not expand existing trimmed clips. New cloud terminal
-results and native03/NOIRE listening are not supplied by these local gates.
+gap; this change does not expand existing trimmed clips. Cloud acceptance is
+recorded below; native03/NOIRE listening remains unverified for this build.
 
 Evidence under `target/backend-reliability-20261014`:
 `playlist-pattern-editor-link-source-candidate-01/`, `source114-local-gates-01-*`,
 `source114-local-resource-handback-01.json`, `source114-linked-render-01-*`,
 `playlist-pattern-editor-link-render-01/` (raw PPM/PNG and Root visual review),
 and `user-offline-preview-20261015-03.json`.
+
+### Linked-editor cloud acceptance — both workflows succeeded
+
+Exact source `63d2f99652171b9d4c1e839dd7a3e8ef7a43b19f` completed
+[quality38746810086](https://github.com/wrench1997/DAW/actions/runs/38746810086)
+at14:08:02Z and [preview38746809594](https://github.com/wrench1997/DAW/actions/runs/38746809594)
+at14:23:44Z, both SUCCESS. Each passed2391 App+52 helper+13 protocol=2456 root
+cases/14 explicitly ignored. The nine linking cases, original ruler and new
+saved-baseline/real-edit dirty control passed. Quality also passed factory33,
+SDK4/15, strict Clippy/build, helper14/editor80 and Linux readiness15+Unix1.
+Its Windows session2/Default/WTSActive/visible desktop was eligible: genuine
+PrintWindow before/after paint and repaint-change checks passed, not SKIPPED.
+
+Preview passed367 Python cases=355 PASS/12 SKIPPED: four Unix descriptor cases
+and eight private Saved13 input cases not distributed in Git. These are separate
+from GUI eligibility. SDK4/15, strict Clippy, no-default-feature, static-CRT
+release8m50s, exact ZIP integrity/PE/import allowlist and extracted sanitized-PATH
+helper smoke all passed. Artifact upload was disabled, so no downloadable
+published package is claimed. The local independent03 remains the delivered copy.
+
+Full raw preview log: `ci-63d2f99-windows-preview-01.log`; actual run/jobs/results:
+`source115-preview-actual-terminal-01.json`. Quality's complete Windows/Linux
+logs and run/jobs/index are `source115-quality-*-01.*`. Earlier failures remain
+recorded above. Subsequent acceptance-record edits change documentation only;
+code/build scripts remain identical to this exact validated source.
 
 ### PrintWindow environment gate and actual outcomes (2026-10-15)
 
