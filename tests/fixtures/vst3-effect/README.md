@@ -102,5 +102,12 @@ probe readbacks, opaque 40-byte host state round-trip, actual latency 32/last ta
 all-target Clippy passed after replacing an indexed analytical test loop with
 `iter().enumerate()`; all four tests passed again with unchanged expectations.
 Production DSP was unchanged, so the real-helper result remains applicable.
-Linux has not run locally. Detailed actual terminal logs are under
+Cloud quality run [38813369205](https://github.com/wrench1997/DAW/actions/runs/38813369205)
+at `0c4872c42516a1d6cf7be7f421b1dbb20d7a5589` actually passed on Windows and Linux:
+each ran all four SDK tests and this exact real production-helper host target.
+Both receipts match the response/state/transport/latency/tail and natural-reap
+checks above. The sticky-role reload regression also passed in both 27-case
+Effect gates. Linux has not run locally. Detailed local terminal logs are under
 `target/backend-reliability-20261014/strict-effect-input-source-candidate-01/`.
+Full cloud logs and terminal metadata are under the same parent directory with
+the `source118-quality-` prefix. No audio device or desktop was used by this target.

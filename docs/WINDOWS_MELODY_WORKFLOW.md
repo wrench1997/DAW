@@ -157,12 +157,12 @@ finite internal samples above full scale are preserved. Existing generator APIs
 retain their isolation and original entry contracts. Every stage uses the same
 bounded child owner, with the process-wide reservation retained until actual reap.
 
-Local software evidence:169 helper/codec tests passed, including26 Effect/encoding
+Before the role repair, 169 local helper/codec tests passed, including 26 Effect/encoding
 cases; the expanded mutation test also passed separately. Four source-built SDK
 tests and the real production-helper target passed. The independent no-GUI Effect
-implements `y[n] = gain × (x[n−32] + 0.5×x[n−160])`: all1280 stereo samples and35
-transport/activation/output-clear observations matched, latency was32, the final
-response was frame415 and frame416 onward was silent. Restore/readback and natural
+implements `y[n] = gain × (x[n−32] + 0.5×x[n−160])`: all 1280 stereo samples and 35
+transport/activation/output-clear observations matched, latency was 32, the final
+response was frame 415 and frame 416 onward was silent. Restore/readback and natural
 Shutdown/exit/reap passed. This uses no installed plugin or audio device. Reproduce
 with the repository's `tests/fixtures/vst3-effect/README.md` instructions.
 
@@ -171,18 +171,33 @@ The repair makes that role sticky until disposal/reap: both reload entry points
 refuse before a second Load is sent, while legacy unbound clients retain reload.
 One new real-child regression covers both entry points before/after Start,
 post-refusal operations, Pending/Busy/reap ownership and the legacy reload control.
-This final case is locally unrun; the27-case `effect_` gate will execute in cloud.
-Earlier SDK DSP evidence remains applicable to the unchanged positive path.
+This final case was not rerun locally; both Windows and Linux actually passed the
+complete 27-case `effect_` gate at `0c4872c`, including the new reload regression.
 
 The fixture's strict all-target Clippy passed. A separate vendor-wide test-target
-Clippy run failed with75 existing SDK-glue lints; its actual101/log is retained in
+Clippy run failed with 75 existing SDK-glue lints; its actual exit 101/log is retained in
 `target/backend-reliability-20261014/strict-effect-input-source-candidate-01/`.
 Initial fixture compile/type and loop-style errors were corrected and rerun.
-Windows/Linux quality now run the real SDK target with explicit binary inputs and
-a10-minute step deadline; preview retains the role/PCM regression gate. New cloud
-acceptance is pending; earlier Follow cloud success does not qualify this candidate.
+At exact `0c4872c42516a1d6cf7be7f421b1dbb20d7a5589`,
+[quality38813369205](https://github.com/wrench1997/DAW/actions/runs/38813369205)
+actually completed SUCCESS. Each platform passed 27 Effect tests, 4 real SDK tests
+and 1 production-helper host test, including the full response/transport/state and
+natural-reap checks above. Windows also passed 2481 root tests/14 ignored, factory 33,
+offline MIDI 4, async readiness 15, established strict Clippy, bins and no-default
+checks. Its interactive session 2 was eligible: real PrintWindow paints/repaint and
+native lifecycle passed, rather than being skipped. Summary HTML was not separately
+read; the actual harness/log receipts are retained.
 
-Whole still rejects Insert slots. Next is dedicated private Insert capture using
+[Preview38813369197](https://github.com/wrench1997/DAW/actions/runs/38813369197)
+also actually completed SUCCESS: 368 Python cases = 356 passed/12 conditional skips
+(4 Unix-only and 8 private Saved13 inputs absent from Git), 27 Effect tests and the
+same 2481 root/14 ignored; strict Clippy/no-default, optimized static-CRT release
+(8m 18s), exact ZIP/PE/import/provenance checks and extracted sanitized-PATH helper
+smoke passed. Upload remained false. The real SDK target runs in quality with a
+10-minute outer limit; it is not a preview step. Full metadata/logs are saved under
+`target/backend-reliability-20261014/source118-{quality,preview}-*`.
+
+Whole still rejects Insert slots. Dedicated private Insert capture is being built using
 the existing graph-wide stopped settlement, then serial PCM stages, DSP PDC/tail
 handling and the existing single final publication. A clone admission receipt is
 not a source-instance capture. General FX/automation/routing and real NOIRE remain
