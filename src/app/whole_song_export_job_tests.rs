@@ -197,6 +197,54 @@ fn settle_initial_source(fixture: &mut Fixture) {
                 == BounceSourceSettlement::Ready
     });
 }
+
+#[test]
+fn actual_fixture_wait_asserts_the_success_sample_without_resampling_a_one_shot_condition() {
+    let mut fixture = Fixture::new();
+    let calls = std::cell::Cell::new(0);
+    fixture.until(|_| {
+        calls.set(calls.get() + 1);
+        calls.get() == 1
+    });
+    assert_eq!(calls.get(), 1, "a successful wait is observed once");
+}
+
+#[test]
+fn actual_fixture_wait_keeps_observed_ready_but_later_foreign_request_is_not_ready() {
+    let mut fixture = Fixture::new();
+    settle_initial_source(&mut fixture);
+    let channel_id = fixture.app().project.channels[0].id;
+    let binding = fixture.app().stopped_bounce_observe(channel_id).unwrap();
+    let original_request = fixture.app().audio.as_ref().unwrap().transport_request_id();
+    let saw_ready = std::cell::Cell::new(false);
+    fixture.until(|fixture| {
+        assert!(
+            !saw_ready.get(),
+            "the wait must not sample again after success"
+        );
+        let observed = reviewed_source_settlement(fixture, binding);
+        let ready = observed.settlement == BounceSourceSettlement::Ready;
+        if ready {
+            saw_ready.set(true);
+            // A real control request supersedes the callback identity after
+            // this read. No callback pump or readiness tuple is fabricated.
+            fixture.app().audio.as_ref().unwrap().set_playing(false);
+        }
+        ready
+    });
+    assert!(saw_ready.get());
+    assert_ne!(
+        fixture.app().audio.as_ref().unwrap().transport_request_id(),
+        original_request
+    );
+    assert_ne!(
+        reviewed_source_settlement(&fixture, binding).settlement,
+        BounceSourceSettlement::Ready,
+        "the old successful observation does not authorize a later foreign request"
+    );
+    assert_eq!(fixture.source_handle().capture_count(), 0);
+    assert!(fixture.app().whole_song_export_job.is_none());
+}
 fn reviewed_source_settlement(
     fixture: &Fixture,
     binding: LiveBinding,

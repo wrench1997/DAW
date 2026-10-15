@@ -849,13 +849,24 @@ impl Fixture {
         std::thread::sleep(Duration::from_millis(2));
     }
     pub(in crate::app) fn until(&mut self, condition: impl Fn(&Self) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !condition(self) && Instant::now() < deadline {
+        let started_at = Instant::now();
+        let deadline = started_at + Duration::from_secs(5);
+        let mut condition_checks = 0;
+        let satisfied = loop {
+            condition_checks += 1;
+            let observed = condition(self);
+            if observed || Instant::now() >= deadline {
+                break observed;
+            }
             self.tick();
-        }
+        };
+        // Settlement Ready is a momentary observation, not a lease: a worker
+        // admin/feedback publication can already be Waiting on the next read.
+        // Assert the observation that ended this wait, not a second sample.
         assert!(
-            condition(self),
-            "bounded mock App condition failed; {}",
+            satisfied,
+            "bounded mock App condition failed; elapsed={:?}, condition_checks={condition_checks}; {}",
+            started_at.elapsed(),
             self.timeout_metadata()
         );
     }
@@ -868,6 +879,29 @@ impl Fixture {
             ids
         }
         let job = self.app.clip_render_job.as_ref();
+        let current_source = self.app.project.channels.first().and_then(|channel| {
+            let audio = self.app.audio.as_ref()?;
+            let (generation, epoch) = audio.confirmed_timeline_identity()?;
+            let source = self.app.running_generator_chains.get(&channel.id)?;
+            Some((
+                self.app
+                    .stopped_bounce_observe(channel.id)
+                    .map(|_| ())
+                    .map_err(|reason| bounded_clip_timeline_text(&reason)),
+                source.control.observe_bounce_source_settlement(
+                    crate::plugins::plugin_runtime::BounceSourceCallbackIdentity {
+                        engine_session: audio.engine_session(),
+                        project_session: self.app.project_session,
+                        timeline_generation: generation,
+                        epoch,
+                        transport_request: audio.transport_request_id(),
+                        channel_id: channel.id,
+                        endpoint_id: source.endpoint_id,
+                        instance_id: source.instance_id,
+                    },
+                ),
+            ))
+        });
         let route = self.app.timeline_audio_source.as_ref().map(|source| {
             match self.app.timeline_generator_routes_state(&source.timeline) {
                 RequiredGeneratorRouteState::Ready => "Ready".to_owned(),
@@ -881,7 +915,7 @@ impl Fixture {
             }
         });
         format!(
-            "phase={:?}, error={:?}, asset(queued,ack,operation)={:?}, source_joined={:?}, expected_generation={:?}, desired={}, compiled={:?}, source={:?}, confirmed={:?}, sync={:?}, sync_error={:?}, synchronized={:?}, needs_resync={:?}, route={:?}, loaded(count,ids)={:?}, prepared(count,ids)={:?}, registering(count,ids)={:?}, unregistering(count,ids)={:?}, loading(count,ids)={:?}, clearing={:?}, retry={}",
+            "phase={:?}, error={:?}, asset(queued,ack,operation)={:?}, source_joined={:?}, expected_generation={:?}, desired={}, compiled={:?}, source={:?}, confirmed={:?}, sync={:?}, sync_error={:?}, synchronized={:?}, needs_resync={:?}, route={:?}, loaded(count,ids)={:?}, prepared(count,ids)={:?}, registering(count,ids)={:?}, unregistering(count,ids)={:?}, loading(count,ids)={:?}, clearing={:?}, retry={}, current_source(precondition,settlement)={current_source:?}",
             job.map(|job| job.phase),
             job.and_then(|job| job.failure.as_deref())
                 .map(bounded_clip_timeline_text),

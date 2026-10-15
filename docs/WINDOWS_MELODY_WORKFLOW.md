@@ -241,7 +241,7 @@ Runner89774 exited1/Cargo101, observer35329 exited0 and fresh0 preceded peer CPU
 handback; there was no NI/CU. Preserve `source82-headless-targeted-01.log`,
 `source82-local-gates-terminal-01.json` and its resource handback receipt.
 
-Source83's frozen candidate reuses the original actor's pause only while it is
+Source83 (`857d17b`) reuses the original actor's pause only while it is
 the same engine/project's current mailbox request and App/clock/callback all
 remain stopped. Ordinary Escape/repeated Stop no longer invalidates that exact
 request. A foreign pending Play or real playback still causes a new pause; the
@@ -249,8 +249,30 @@ stop-intent, state, capture and cleanup fences are unchanged. Whole/selected-cli
 tests retain Escape/repeated Stop and assert request identity. A new foreign Play
 case requires an override even before the callback sees playback; a genuinely
 invalidated contract remains Failed with capture ownership retained until ACK.
-The cancel group now has8 cases. Formatting/diff pass; compilation, regression,
-Clippy and the repaired native export still need execution.
+All8 cancellation cases actually passed in both cloud lanes, including ordinary
+App::ui frames publishing a real mock WAV. Quality passed32 factory cases and
+2314 App+52 helper+13 protocol=2379 root cases/12 ignored, strict all-feature/
+all-target Clippy, both bins, protocol/harness, fixture and no-default-feature
+gates. Its only failure was independent native paint: before/after PrintWindow
+and the same-process button diagnostic returned false; native control, state,
+lifecycle and cleanup passed. This does not establish a local Kontakt UI defect.
+Preview passed344 harness cases and2313 App cases/12 ignored, but one old test
+failed: `actual_whole_forced_app_drop_keeps_the_cancelled_capture_and_exact_source_until_worker_join`
+stopped in `settle_initial_source` before starting its export. Preview Clippy,
+release and ZIP did not run. The new same-snapshot admin-gate safety regression
+passed in both lanes. Preserve `ci-857d17b-windows-{quality,preview}-01.log` and
+`source83-*-actual-terminal-01.json`. Repaired native NOIRE export remains untested.
+
+Source84 changes tests only. The shared `Fixture::until` previously sampled its
+condition again after the successful read that ended the loop. Momentary Ready
+is not a lease on the next observation. The fix asserts that same successful
+sample and retains the five-second budget, ticks and cleanup owner. Two new
+deterministic cases cover a one-shot true condition and actual Ready followed by
+a superseding foreign transport request; the latter also verifies that old
+readiness does not authorize the new request. Failure diagnostics add actual
+elapsed time, sample count and settlement operands. The historical Source83
+failure lacks those quantities, so its exact cause remains unproven. Formatting
+and diff checks pass; Source84 compilation/regressions have not run.
 
 Source57 actually passed 306 targeted Rust tests (187+5+12+45+26+31), root strict
 Clippy in default/all-feature/no-feature profiles, exact preview feature checks,
