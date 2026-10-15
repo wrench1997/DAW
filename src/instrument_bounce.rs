@@ -13,6 +13,10 @@ pub(crate) mod render;
 pub(crate) mod occurrence;
 pub(crate) use occurrence::OccurrenceRenderProvenance;
 
+#[path = "effect_bounce.rs"]
+#[allow(dead_code)] // Private source foundation; Whole FX admission remains closed.
+pub(crate) mod effect;
+
 use std::{
     collections::BTreeMap,
     hash::{DefaultHasher, Hash, Hasher},

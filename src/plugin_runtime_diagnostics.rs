@@ -64,6 +64,7 @@ pub enum PluginWorkerAdminCommand {
     SetParameter,
     QueryParameter,
     RequestParameterPage,
+    CaptureEffectChain,
 }
 
 impl PluginWorkerAdminCommand {
@@ -78,6 +79,7 @@ impl PluginWorkerAdminCommand {
             7 => Self::SetParameter,
             8 => Self::QueryParameter,
             9 => Self::RequestParameterPage,
+            10 => Self::CaptureEffectChain,
             _ => Self::None,
         }
     }

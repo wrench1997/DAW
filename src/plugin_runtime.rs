@@ -28,7 +28,15 @@ use crate::genuine_app_observer as genuine_observer;
 #[cfg(all(test, feature = "vst3"))]
 use crate::genuine_app_observer::{Boundary, InstanceObserver, InstancePhase, Operation};
 
+use crate::instrument_bounce::effect::{
+    EffectCaptureSlotRequest, EffectChainStateReceipt, EffectPluginState,
+};
 use crate::instrument_bounce::{BounceCaptureError, BouncePluginState, BounceStateReceipt};
+
+#[path = "plugin_effect_capture.rs"]
+#[allow(dead_code)] // Private stopped-source foundation; no Whole FX admission yet.
+mod effect_capture;
+pub(crate) use effect_capture::EffectChainStateReceiver;
 
 #[cfg(feature = "vst3")]
 use super::installed_vst3_helper_path;
@@ -61,6 +69,14 @@ mod kontakt_realtime_outputs;
 #[cfg(test)]
 #[path = "instrument_bounce_tests.rs"]
 mod instrument_bounce_tests;
+
+#[cfg(test)]
+#[path = "plugin_effect_capture_tests.rs"]
+pub(crate) mod effect_capture_tests;
+
+#[cfg(all(test, feature = "vst3"))]
+#[path = "plugin_effect_capture_sdk_tests.rs"]
+mod effect_capture_sdk_tests;
 
 #[cfg(test)]
 #[path = "plugin_capture_settlement_tests.rs"]
@@ -465,6 +481,28 @@ pub trait PluginBackend: 'static {
         fence.checkpoint()?;
         Err(BounceCaptureError::Rejected(
             "This backend does not support instrument bounce capture".into(),
+        ))
+    }
+    /// Separate role-specific private source path. Legacy/Instrument backends keep their contract.
+    fn capture_effect_bounce_state(
+        &mut self,
+        _parameter_ids: &[u32],
+        fence: &BounceCaptureFence,
+    ) -> Result<EffectPluginState, BounceCaptureError> {
+        fence.checkpoint()?;
+        Err(BounceCaptureError::Rejected(
+            "This backend does not support Effect source capture".into(),
+        ))
+    }
+    /// Recheck an earlier slot after all later slots were captured, without another state save.
+    fn verify_effect_bounce_state(
+        &mut self,
+        _state: &EffectPluginState,
+        fence: &BounceCaptureFence,
+    ) -> Result<(), BounceCaptureError> {
+        fence.checkpoint()?;
+        Err(BounceCaptureError::Rejected(
+            "This backend cannot verify an Effect source receipt".into(),
         ))
     }
     fn load_state(&mut self, state: &[u8]) -> Result<(), String>;
@@ -1532,9 +1570,23 @@ impl AudioThreadEndpoint {
         self.scratch.stopped_output_fence = 0;
         self.scratch.processing_fault = None;
         self.metrics.midi_blocked.store(false, Ordering::Release);
+        // Callback endpoint is the sole reset-request writer. Publish its monotonic history
+        // before the epoch value: E -> E+1 -> E must not revive a private Effect receipt.
+        // Exhaustion disables only that new capture contract; legacy epoch/reset use continues.
+        match self
+            .metrics
+            .epoch_resets
+            .load(Ordering::Relaxed)
+            .checked_add(1)
+        {
+            Some(next) => self.metrics.epoch_resets.store(next, Ordering::Release),
+            None => self
+                .metrics
+                .effect_epoch_exhausted
+                .store(true, Ordering::Release),
+        }
         self.requested_epoch.store(epoch, Ordering::Release);
         self.metrics.current_epoch.store(epoch, Ordering::Release);
-        self.metrics.epoch_resets.fetch_add(1, Ordering::Relaxed);
 
         let staged = u64::from(self.scratch.pending_rt_event_count);
         self.fail_pending_parameter_edits(ParameterEditFailureReason::EpochReset);
@@ -2469,6 +2521,17 @@ pub enum RealtimeOutputSource {
 }
 
 enum AdminCommand {
+    CaptureEffectChain {
+        expected_epoch: u64,
+        endpoint: Box<PluginEndpointSnapshot>,
+        requests: Vec<EffectCaptureSlotRequest>,
+        submitted: u64,
+        admin_revision: u64,
+        epoch_resets: u64,
+        parameter_admission: Arc<AtomicU32>,
+        lease: BounceCaptureLease,
+        reply: SyncSender<Result<EffectChainStateReceipt, BounceCaptureError>>,
+    },
     CaptureInstrumentBounce {
         expected_epoch: u64,
         parameter_ids: Vec<u32>,
@@ -2582,6 +2645,18 @@ impl AdminCommandSender {
     }
 
     fn try_send(&self, command: AdminCommand) -> Result<(), TrySendError<AdminCommand>> {
+        // Observe all admitted intent, even if a bounded queue later refuses it. Exhaustion
+        // disables only private Effect capture, never legacy admin commands.
+        if self
+            .metrics
+            .effect_admin_revision
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_add(1))
+            .is_err()
+        {
+            self.metrics
+                .effect_admin_exhausted
+                .store(true, Ordering::Release);
+        }
         let Some(lease) = AdminWorkLease::acquire(&self.metrics) else {
             return Err(TrySendError::Full(command));
         };
@@ -2700,6 +2775,7 @@ impl PluginControlIdentity {
 /// backends must classify that call's real failure before checking cancellation afterward.
 /// The owner is acknowledged only after the worker has stopped all capture operations.
 pub struct BounceCaptureFence {
+    purpose: &'static str,
     deadline: Instant,
     cancelled: AtomicBool,
     terminated: AtomicBool,
@@ -2710,11 +2786,19 @@ pub struct BounceCaptureFence {
 impl BounceCaptureFence {
     fn new(deadline: Instant) -> Self {
         Self {
+            purpose: "Instrument bounce",
             deadline,
             cancelled: AtomicBool::new(false),
             terminated: AtomicBool::new(false),
             #[cfg(test)]
             before_ack: Mutex::new(None),
+        }
+    }
+
+    fn new_effect(deadline: Instant) -> Self {
+        Self {
+            purpose: "Effect source",
+            ..Self::new(deadline)
         }
     }
 
@@ -2729,14 +2813,16 @@ impl BounceCaptureFence {
     /// Check before and after every bounded IPC operation, never instead of its error result.
     pub fn checkpoint(&self) -> Result<(), BounceCaptureError> {
         if self.cancelled.load(Ordering::Acquire) {
-            return Err(BounceCaptureError::Rejected(
-                "Instrument bounce capture was cancelled".into(),
-            ));
+            return Err(BounceCaptureError::Rejected(format!(
+                "{} capture was cancelled",
+                self.purpose
+            )));
         }
         if Instant::now() >= self.deadline {
-            return Err(BounceCaptureError::Rejected(
-                "Instrument bounce state capture timed out".into(),
-            ));
+            return Err(BounceCaptureError::Rejected(format!(
+                "{} state capture timed out",
+                self.purpose
+            )));
         }
         Ok(())
     }
@@ -3284,6 +3370,9 @@ fn manifest_accepts_slot(manifest: PluginEndpointManifest, slot: usize) -> bool 
 
 #[derive(Default)]
 struct BridgeMetrics {
+    effect_epoch_exhausted: AtomicBool,
+    effect_admin_revision: AtomicU64,
+    effect_admin_exhausted: AtomicBool,
     diagnostics: diagnostics::RuntimeDiagnostics,
     outstanding_admin_work: AtomicU32,
     callback_settlement: CallbackSettlement,
@@ -4383,6 +4472,42 @@ fn run_worker(
                     // A reply alone is not completion. No capture calls remain after this ack.
                     drop(lease);
                 }
+                AdminCommand::CaptureEffectChain {
+                    expected_epoch,
+                    endpoint,
+                    requests,
+                    submitted,
+                    admin_revision,
+                    epoch_resets,
+                    parameter_admission,
+                    lease,
+                    reply,
+                } => {
+                    let _admin_stage = metrics.diagnostics.admin(
+                        PluginWorkerAdminCommand::CaptureEffectChain,
+                        None,
+                        0,
+                        PluginWorkerNativeEditorCommand::None,
+                    );
+                    let result = effect_capture::capture_effect_chain_on_worker(
+                        &lease.fence,
+                        expected_epoch,
+                        active_epoch,
+                        &requested_epoch,
+                        &input,
+                        *endpoint,
+                        &requests,
+                        submitted,
+                        admin_revision,
+                        epoch_resets,
+                        &parameter_admission,
+                        &mut slots,
+                        &mut events,
+                        &metrics,
+                    );
+                    let _ = reply.try_send(result);
+                    drop(lease);
+                }
                 AdminCommand::SaveState {
                     slot,
                     request_id,
@@ -5343,6 +5468,12 @@ fn handle_admin(
             0,
             PluginWorkerNativeEditorCommand::None,
         ),
+        AdminCommand::CaptureEffectChain { .. } => (
+            PluginWorkerAdminCommand::CaptureEffectChain,
+            None,
+            0,
+            PluginWorkerNativeEditorCommand::None,
+        ),
         AdminCommand::Shutdown => (
             PluginWorkerAdminCommand::Shutdown,
             None,
@@ -5532,7 +5663,9 @@ fn handle_admin(
             }
             faulted || slots.get(slot).is_some_and(|slot| slot.fault.is_none())
         }
-        AdminCommand::Shutdown | AdminCommand::CaptureInstrumentBounce { .. } => false,
+        AdminCommand::Shutdown
+        | AdminCommand::CaptureInstrumentBounce { .. }
+        | AdminCommand::CaptureEffectChain { .. } => false,
     }
 }
 
@@ -7711,6 +7844,22 @@ impl PluginBackend for Vst3Backend {
             fence.genuine_hooks_inactive(),
         );
         self.capture_bounce_state(parameter_ids, fence)
+    }
+
+    fn capture_effect_bounce_state(
+        &mut self,
+        parameter_ids: &[u32],
+        fence: &BounceCaptureFence,
+    ) -> Result<EffectPluginState, BounceCaptureError> {
+        self.capture_private_effect_state(parameter_ids, fence)
+    }
+
+    fn verify_effect_bounce_state(
+        &mut self,
+        state: &EffectPluginState,
+        fence: &BounceCaptureFence,
+    ) -> Result<(), BounceCaptureError> {
+        self.verify_private_effect_state(state, fence)
     }
 
     fn load_state(&mut self, state: &[u8]) -> Result<(), String> {

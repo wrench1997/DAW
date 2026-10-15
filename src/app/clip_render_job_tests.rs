@@ -7,6 +7,8 @@
 mod genuine_topology_app_tests;
 #[path = "clip_render_stop_settlement_tests.rs"]
 mod stop_settlement_tests;
+#[path = "stopped_effect_capture_tests.rs"]
+mod stopped_effect_capture_tests;
 use super::*;
 use crate::instrument_bounce::render::{
     BackendFailure, BlockReply, DisposalObservation, RenderBackend,

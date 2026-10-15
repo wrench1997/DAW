@@ -1269,3 +1269,46 @@ target/backend-reliability-20261014/strict-effect-input-source-candidate-01/HAND
 
 
 Complete archive replay: 41 upstream files, 78 current source files; 52 changed paths, 37 additions, 0 deletions. Private git apply --check/apply and complete inventory/bytes comparison passed. Patch SHA256: 0777aa8485c842d58f6cbbb6502ad75399343660814a28278dfeeb2e405d1898. Original archive, MIT license and VCS identity remain unchanged; both packaging consumer pins are refreshed.
+
+
+
+### Preserve captured f64 bases on the strict clone wire (2026-10-16)
+
+Client::set_parameter_f64(id, value, deadline) sends the original normalized f64
+through the existing bounded SetParameter request. The original f32 setter keeps
+its signature and exact f64::from(f32) semantics, then delegates to the same
+exchange. Both invalidate Effect admission before mutation. The original
+normalized finite bounds, sticky cancellation, original deadline, typed delivery,
+sealing and checked child retirement remain on one path. Wire precision is not a
+claim that a plugin cannot quantize: callers still read parameter() and compare
+at their source capture's precision.
+
+Two actual-child regressions were added: one-ULP f64 transport/readback, exact
+endpoints/signed zero/subnormal and an old-f32-entry control; invalid bounds plus
+unsent cancellation/deadline precedence and actual sent setter cancellation/
+timeout with MayHaveApplied, sealed follow-up and natural reap. The existing
+Effect admission-invalidating mutation test additionally covers a successful
+f64 base ACK before refused start. The effect_ filter now selects29 (26 client
+plus3 codec), up from27. Public external positive contracts include the new
+entry point while retaining the original f32 calls.
+
+The real production-helper Effect target now restores opaque gain0.25, applies
+non-f32 base0.75000004 through the f64 setter and compares exact f64 readback
+bits before selection/admission/start. Its independent 1280-sample expectation
+models the unchanged fixture's actual gain-as-f32 DSP multiplication. It still
+requires over-range PCM, all35 SDK probes, latency32/tap160, exact finite-tail
+silence, state restore and natural child exit/reap. No fixture DSP, source
+capture, App Whole admission or renderer is changed by this vendor owner.
+
+This is a source-only candidate: rustfmt, Python AST, scoped diff and canonical
+complete vendor replay/pin checks passed. New tests, the extended compiler
+contract and the revised real SDK precision assertion are UNRUN locally; Root
+owns final Windows/Linux cloud execution. Earlier 0c4872c4 quality/preview and
+27-case/SDK passes belong to that earlier f32-base candidate, not this f64 delta.
+No Cargo/rustc, GPU, editor, audio device, Kontakt or user project was used here.
+Evidence and exact changed paths:
+
+target/backend-reliability-20261014/strict-effect-f64-source-candidate-01/HANDOFF.md.
+
+
+Complete archive replay: 41 upstream files, 78 current source files; 52 changed paths, 37 additions, 0 deletions. Private git apply --check/apply and complete inventory/bytes comparison passed. Patch SHA256: 6d54f058f93183200e4ce0268a84fd6e77d025b614ce8e0c9c542197363250e6. Original archive, MIT license and VCS identity remain unchanged; both packaging consumer pins are refreshed.

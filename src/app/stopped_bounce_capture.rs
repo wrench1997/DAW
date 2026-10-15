@@ -21,6 +21,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "stopped_effect_capture.rs"]
+#[allow(dead_code)] // Internal source interface; Whole Insert admission stays closed.
+mod effect;
+#[allow(unused_imports)]
+pub(in crate::app) use effect::CapturedStoppedEffectChain;
+
 pub(in crate::app) const STOP_BUDGET: Duration = Duration::from_secs(35);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +98,7 @@ pub(in crate::app) struct StoppedBounceCapture {
     pub(in crate::app) stop_settlement: Option<BounceSourceSettlementObservation>,
     pub(in crate::app) binding: Option<LiveBinding>,
     pub(in crate::app) capture: Option<InstrumentBounceCapture>,
+    effect_capture: Option<effect::StoppedEffectChainCapture>,
     stopping: bool,
     ready_binding: Option<LiveBinding>,
     capture_identity: Option<BounceSourceIdentity>,
@@ -112,6 +119,7 @@ impl StoppedBounceCapture {
             stop_settlement: None,
             binding: None,
             capture: None,
+            effect_capture: None,
             stopping: false,
             ready_binding: None,
             capture_identity: None,
@@ -153,7 +161,7 @@ impl StoppedBounceCapture {
     }
 
     pub(in crate::app) fn owns_pending_capture(&self) -> bool {
-        self.capture.is_some()
+        self.capture.is_some() || self.effect_capture.is_some()
     }
 
     /// A cancel/Stop need not republish the exact pause already issued by this
@@ -175,6 +183,9 @@ impl StoppedBounceCapture {
 
     pub(in crate::app) fn cancel_capture(&mut self) {
         if let Some(capture) = &mut self.capture {
+            capture.cancel();
+        }
+        if let Some(capture) = &mut self.effect_capture {
             capture.cancel();
         }
     }
@@ -481,7 +492,7 @@ impl StoppedBounceCapture {
         plan: InstrumentBouncePlan,
     ) -> Result<(), String> {
         let binding = self.live_recheck(app)?;
-        if self.capture.is_some() {
+        if self.owns_pending_capture() {
             return Err("The original private capture owner is still pending".into());
         }
         if self.ready_binding != Some(binding)

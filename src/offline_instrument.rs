@@ -7,6 +7,10 @@
 use crate::instrument_bounce::BounceAudioBus;
 use crate::instrument_bounce::{BouncePluginMetadata, CapturedInstrumentBounce};
 
+#[cfg(feature = "vst3")]
+#[path = "offline_effect_capture.rs"]
+mod effect_capture;
+
 #[cfg(all(
     feature = "vst3",
     any(target_os = "linux", windows),

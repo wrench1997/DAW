@@ -4,6 +4,8 @@
 当前源码写 **v14**（[Follow长度、Auto/Manual歌曲范围与编辑器联动](PLAYLIST_TRANSPORT.md)）。`b2e56dc`本机fmt/严格Clippy/no-default/匹配双bin、预览unit及8真实离屏用例通过，12定向输入和Saved13私有copy门已通过；云`f6678ae`quality38804721761与preview38804721840实际均SUCCESS（2481 root/14ignored，25新增全PASS，静态CRT release8m24s/ZIP/提取helper通过，session2真实PrintWindow PASS）。已交付独立测试03仍为v13，03/02不能读新14，请另存副本。03未替换；旧63d2f99云通过只属于此前联动里程碑，NOIRE实机完整流程仍未验收。
 
 2026-10-16 Effect后台`0c4872c`已取得实际新云终态：quality38813369205与preview38813369197均SUCCESS。Win/Linux各27项Effect及真实无GUI SDK4+生产helper1通过；根2481PASS/14ignored、严格Clippy/双bin/no-default及eligible session2真实PrintWindow通过。preview的368Python=356PASS/12条件SKIP、27 Effect、同2481 root、静态CRT release8m18s、最终ZIP/PE/import/provenance及提取后helper通过，无上传；源码夹具/测试DLL不进入发布白名单。额外本机vendor全test-target Clippy实际101（75条既有glue lint）保留；新私有Insert capture开发不由该SHA验收。详[实现与验收边界](WINDOWS_MELODY_WORKFLOW.md#stereo-effect-helper-foundation-2026-10-16)。
+
+当前源码候选已实现真实停止/epoch/admin fence下的Effect整链私有捕获及reset ABA防护。本机前快照15项新回归、显式Gain0.375源→clone SDK、旧Instrument/停止/settlement组和Root严格Clippy/no-default/helper构建通过；随后补入的exact-f64 setter、2项新回归和非f32源/clone SDK断言尚未本机运行。新云端预期执行29项Effect；Windows App私有source SDK exact target加入同一既有10分钟无GUI质量步骤，Linux仍执行foundation helper目标。新候选云端结果待定，不能沿用上段成功；Whole Insert/通用PDC/路由/FX自动化/尾音仍未实现，03副本保持不变，用户测试期间只做代码工作。
 目标系统：Windows 10/11 x64  
 目标三元组：x86_64-pc-windows-gnullvm
 
@@ -34,6 +36,8 @@
 ## 开发 CI（独立分支验证）
 
 `.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build、独立的 helper harness 回归 / 实际 helper 协议 smoke 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；含 helper 自动 smoke 的运行已在 Rust/Cargo 1.99.0、Python 3.12.10 上全部通过。后续源码候选分别在相同门禁验证，确切提交/结果见 GitHub Actions 和 WORK_LOG。开发 smoke 不替代下述历史固定 gnullvm 发布流程、Release helper smoke、干净 Windows 实机验收与打包校验。
+
+当前Effect质量步骤仅使用仓库源码构建的无GUI夹具与匹配生产helper；Windows还显式运行App私有source捕获目标。它不加载Kontakt/NOIRE，不占声卡，不将测试DLL放入发布白名单，也不替代真实插件或设备验收。f64精度增量等待新提交的实际Windows/Linux终态。
 
 独立的 [MSVC developer preview](WINDOWS_PREVIEW.md) 打包 Release 与配套 Cargo metadata 明确使用 `--no-default-features --features vst2,vst3`，其根 feature 清单必须与构建记录完全一致。preview 的测试/Clippy 及普通开发 CI 继续覆盖 all-features；下文历史 gnullvm 契约不因此改写。Linux 实验性 selected-clip 验收不构成 Windows 插件 runtime、GUI 或设备支持声明。
 

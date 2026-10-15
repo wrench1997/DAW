@@ -137,6 +137,10 @@ fn real_sdk_effect_pcm_state_transport_delay_tail_and_natural_reap() {
     }
 
     with_child(&helper, |client, deadline| {
+        let captured_base = 0.75000004_f64;
+        if f64::from(captured_base as f32).to_bits() == captured_base.to_bits() {
+            return Err("fixture base must exercise genuine f64 restoration".into());
+        }
         let loaded = client.load_stereo_effect(LoadSpec { path: fixture_text, sample_rate: 48_000.0, tempo: 120.0,
             time_sig_numerator: 4, time_sig_denominator: 4, class_id: CLASS_ID }, &identity, deadline).map_err(|e| format!("Load: {e:?}"))?;
         if loaded.has_gui || loaded.has_midi_input || loaded.has_midi_output { return Err(format!("wrong real fixture capabilities: {loaded:?}")); }
@@ -144,8 +148,8 @@ fn real_sdk_effect_pcm_state_transport_delay_tail_and_natural_reap() {
         client.load_state(&saved, deadline).map_err(|e| format!("State: {e:?}"))?;
         if client.parameter(0, deadline).map_err(|e| format!("state readback: {e:?}"))? != 0.25 { return Err("opaque state gain not restored".into()); }
         // Captured bases override opaque state before admission and actual DSP.
-        client.set_parameter(0, 0.75, deadline).map_err(|e| format!("base: {e:?}"))?;
-        if client.parameter(0, deadline).map_err(|e| format!("base readback: {e:?}"))? != 0.75 { return Err("captured gain base not restored".into()); }
+        client.set_parameter_f64(0, captured_base, deadline).map_err(|e| format!("base: {e:?}"))?;
+        if client.parameter(0, deadline).map_err(|e| format!("base readback: {e:?}"))?.to_bits() != captured_base.to_bits() { return Err("captured f64 gain base not restored exactly".into()); }
         let layout = client.checked_audio_layout(deadline).map_err(|e| format!("layout: {e:?}"))?;
         client.select_main_stereo_output(&layout, deadline).map_err(|e| format!("selection: {e:?}"))?;
         let receipt = client.admit_stereo_effect(deadline).map_err(|e| format!("admission: {e:?}"))?;
@@ -178,19 +182,23 @@ fn real_sdk_effect_pcm_state_transport_delay_tail_and_natural_reap() {
                 if actual != expected { return Err(format!("actual SDK probe {id}: {actual} != {expected}, block {start}")); }
             }
         }
+        // This fixture intentionally renders f32 audio with a f32 gain. Its
+        // controller nevertheless retains the exact captured f64 above. Model
+        // that actual DSP conversion, not an early transport-side truncation.
+        let dsp_gain = captured_base as f32;
         for channel in 0..2 {
             for frame in 0usize..640 {
                 let direct = frame.checked_sub(32).map_or(0.0, |i| input[channel][i]);
                 let echo = frame.checked_sub(160).map_or(0.0, |i| input[channel][i]);
-                let expected = 0.75 * (direct + 0.5 * echo);
+                let expected = dsp_gain * (direct + 0.5 * echo);
                 if observed[channel][frame] != expected { return Err(format!("actual PCM differs channel {channel} frame {frame}: {} != {expected}", observed[channel][frame])); }
             }
         }
-        if observed[0][32] != 1.5 || observed[1][287] != -1.125
+        if observed[0][32] != dsp_gain * 2.0 || observed[1][287] != dsp_gain * -1.5
             || observed.iter().any(|channel| channel[416..].iter().any(|value| *value != 0.0))
         { return Err("unclamped PCM or finite tail end differs".into()); }
         client.stop_processing(deadline).map_err(|e| format!("stop: {e:?}"))?;
-        eprintln!("REAL_SDK_EFFECT_PASS metadata={receipt:?}; exact_stereo_samples=1280; cross_q128_delay=32; last_tap=160; source_last_frame=255; final_nonzero_frame=415; silence_after=416; transport_probes=35; opaque_state_bytes={}", saved.len());
+        eprintln!("REAL_SDK_EFFECT_PASS metadata={receipt:?}; exact_stereo_samples=1280; cross_q128_delay=32; last_tap=160; source_last_frame=255; final_nonzero_frame=415; silence_after=416; transport_probes=35; opaque_state_bytes={}; captured_base_f64_bits={}; dsp_gain_f32_bits={}", saved.len(), captured_base.to_bits(), dsp_gain.to_bits());
         Ok(())
     }).unwrap();
 }

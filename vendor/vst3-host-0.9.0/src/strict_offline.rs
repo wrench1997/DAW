@@ -335,14 +335,19 @@ impl Client {
     }
     /// Set one finite normalized captured f32 base through the existing owner path.
     pub fn set_parameter(&mut self, id: u32, value: f32, deadline: Instant) -> Result<(), Failure> {
+        self.set_parameter_f64(id, f64::from(value), deadline)
+    }
+    /// Send a finite normalized captured f64 base without first rounding to f32.
+    /// This preserves wire precision; a plugin may still quantize its parameter.
+    /// Read parameter() back and compare at the source capture's precision.
+    pub fn set_parameter_f64(
+        &mut self,
+        id: u32,
+        value: f64,
+        deadline: Instant,
+    ) -> Result<(), Failure> {
         self.invalidate_effect_admission();
-        self.success(
-            RequestView::SetParameter {
-                id,
-                value: f64::from(value),
-            },
-            deadline,
-        )
+        self.success(RequestView::SetParameter { id, value }, deadline)
     }
     /// Read the raw controller scalar; caller checks captured precision explicitly.
     pub fn parameter(&mut self, id: u32, deadline: Instant) -> Result<f64, Failure> {

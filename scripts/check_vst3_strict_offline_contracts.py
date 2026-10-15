@@ -158,6 +158,7 @@ fn public_operations(client: &mut Client, deadline: Instant) -> Result<AudioBloc
     let _: u64 = client.native_dirty_revision(deadline)?;
     let _: Vec<vst3_host::Parameter> = client.parameters(deadline)?;
     client.set_parameter(0, 0.5_f32, deadline)?;
+    client.set_parameter_f64(0, f64::from_bits(0.5_f64.to_bits() + 1), deadline)?;
     let raw: f64 = client.parameter(0, deadline)?;
     let _: bool = captured_base_matches(raw, 0.5_f32);
     let _: vst3_host::plugin::CheckedAudioBusLayout = client.checked_audio_layout(deadline)?;
@@ -200,6 +201,7 @@ fn effect_operations(client: &mut Client, deadline: Instant)
     client.set_offline(deadline)?;
     client.load_state(&[1_u8, 2, 3], deadline)?;
     client.set_parameter(0, 0.5_f32, deadline)?;
+    client.set_parameter_f64(0, f64::from_bits(0.75_f64.to_bits() + 1), deadline)?;
     let layout = client.checked_audio_layout(deadline)?;
     let _selected = client.select_main_stereo_output(&layout, deadline)?;
     let metadata = client.admit_stereo_effect(deadline)?;

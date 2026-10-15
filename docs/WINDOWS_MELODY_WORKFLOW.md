@@ -197,11 +197,60 @@ smoke passed. Upload remained false. The real SDK target runs in quality with a
 10-minute outer limit; it is not a preview step. Full metadata/logs are saved under
 `target/backend-reliability-20261014/source118-{quality,preview}-*`.
 
-Whole still rejects Insert slots. Dedicated private Insert capture is being built using
-the existing graph-wide stopped settlement, then serial PCM stages, DSP PDC/tail
-handling and the existing single final publication. A clone admission receipt is
-not a source-instance capture. General FX/automation/routing and real NOIRE remain
-open acceptance work.
+### Stopped Effect source capture and exact bases — current candidate
+
+The current source candidate now captures an entire ordered Effect chain for one
+stopped mixer endpoint through its actual source backend. The private receipt
+binds Project/session/endpoint and every slot's placement, enabled/bypass/wet,
+actual Fx identity, complete audio/event layout, opaque state, full bounded
+parameter catalog, writable f64 bases and DSP latency/tail. A refused slot refuses
+the chain. It does not substitute a disposable clone's admission for source capture.
+
+The existing stopped actor waits for actual Stop/Timeline and worker settlement.
+Callback consumed/terminal/submitted evidence and monotonic admin-intent/reset
+history bracket the source binding; a sampled playback token alone is not a
+capture lease. Review exposed public epoch reset E→E+1→E ABA. A non-clearable
+`epoch_resets` ticket now rejects that history, including two actual resets;
+counter exhaustion refuses new Effect capture only, preserving old Instrument
+and epoch entry points. Cancellation retains the original command/source fence
+until acknowledgment, with the original worker guard retained through shutdown.
+
+Before the f64 precision delta, local Windows tests actually passed 15 new cases
+with 1 explicit SDK ignore, then the separately selected source→clone SDK case
+passed. That SDK snapshot used exactly f32-representable Gain0.375: source
+positive-frame DSP count0, original source guard actually joined, opaque40 bytes,
+sample-exact stereo3×Q128 including zero drain, latency32/tap160 and natural strict
+child exit0/reap. Existing Instrument29, stopped actor10 and runtime/callback
+settlement19 passed; Root all-feature/all-target strict Clippy, no-default check
+and matching helper build exited0. Earlier compile, fixture-admission/provenance
+and three Clippy failures are retained with their corrected passes.
+
+The source now adds `Client::set_parameter_f64`, preserving the old f32 entry's
+exact `f64::from(f32)` semantics. Restore opaque state, apply captured f64 bases,
+check raw readback at that precision, then select/admit/start. Both setters
+invalidate the old Effect receipt. The independent helper target now uses
+non-f32 base0.75000004; the private-source target initializes its actual source
+to Gain0.12345678912345678, verifies exact source/opaque/base bits, perturbs the
+clone before restoring every base, and checks exact readback before DSP.
+Independent PCM expectations model the unchanged fixture's deliberate f32 DSP
+gain conversion after verifying f64 controller precision.
+
+These new API/two child tests, the extended receipt/compiler contract and both
+revised SDK precision targets are **UNRUN locally**. The `effect_` gate now
+selects29; the new Windows App private-source SDK exact target is wired into the
+same existing 10-minute no-GUI quality step. Linux retains its real foundation
+helper target. New cloud acceptance is pending; the earlier `0c4872c` passes above
+belong to the earlier candidate. Current evidence is in
+`target/backend-reliability-20261014/source119-integration-progress-01.json` and
+the `private-effect-capture-source-candidate-01` / `strict-effect-f64-source-candidate-01`
+handoffs; the post-native source SDK delta is separately recorded in
+`target/private-effect-capture-source-candidate-01/post-native-f64-sdk-delta.json`.
+
+Whole still rejects Insert slots. The later consumer must implement serial PCM
+stages and actual strict-child reap between them, wet/bypass/routing/FX automation,
+general DSP PDC, tail/crop handling and one final publication. Real NOIRE cold
+restore/export/listening and the original complete workflow remain open. The user
+is still testing03; this candidate has not operated the main GUI, soundcard or NI.
 
 ## Ordinary scan reliability in this commit
 

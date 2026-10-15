@@ -83,6 +83,10 @@ jobs:
           $env:CITRUS_EFFECT_HELPER = (Resolve-Path target/debug/vst3-host-helper.exe).Path
           cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/host-check/Cargo.toml --target-dir target --test real_effect real_sdk_effect_pcm_state_transport_delay_tail_and_natural_reap -- --ignored --exact --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Exercise the application's real private source backend, not just
+          # the strict clone facade. Inputs remain the same no-GUI test fixture.
+          cargo test --locked --all-features --jobs 1 --bin citrus-studio plugins::plugin_runtime::effect_capture_sdk_tests::actual_sdk_private_effect_source_capture_restores_strict_clone_pcm_and_naturally_reaps -- --ignored --exact --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Python is supplied by the hosted Windows runner and used only for QA.
       - name: Record smoke harness interpreter

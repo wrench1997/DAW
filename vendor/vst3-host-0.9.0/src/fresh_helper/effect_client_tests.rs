@@ -812,7 +812,7 @@ fn effect_client_start_rechecks_selected_bus_acknowledgment_before_and_after_sta
 #[test]
 fn effect_client_state_parameter_and_selection_changes_invalidate_receipt() {
     let _serial = serial();
-    for change in 0..5 {
+    for change in 0..6 {
         let mut pairs = prepared();
         pairs.extend(admission());
         match change {
@@ -835,9 +835,16 @@ fn effect_client_state_parameter_and_selection_changes_invalidate_receipt() {
                 },
                 success(),
             )),
-            _ => pairs.push((
+            4 => pairs.push((
                 HostCommand::ArmOfflineStateReadiness {
                     expected_revision: snapshot().async_started_revision,
+                },
+                success(),
+            )),
+            _ => pairs.push((
+                HostCommand::SetParameter {
+                    id: 17,
+                    value: f64::from_bits(0.75_f64.to_bits() + 1),
                 },
                 success(),
             )),
@@ -853,8 +860,11 @@ fn effect_client_state_parameter_and_selection_changes_invalidate_receipt() {
                     .unwrap();
             }
             3 => c.set_offline(deadline()).unwrap(),
-            _ => c
+            4 => c
                 .arm_offline_state_readiness(snapshot().async_started_revision, deadline())
+                .unwrap(),
+            _ => c
+                .set_parameter_f64(17, f64::from_bits(0.75_f64.to_bits() + 1), deadline())
                 .unwrap(),
         }
         let failure = c.start_processing(deadline()).unwrap_err();
@@ -1360,4 +1370,146 @@ fn effect_client_bound_role_cannot_reload_or_reopen_generator_before_actual_reap
         vec![vec![0.25; 128]; 2]
     );
     finish_client(&mut legacy);
+}
+
+#[test]
+fn effect_client_f64_parameter_preserves_one_ulp_and_old_f32_wire_semantics() {
+    let _serial = serial();
+    let precise = f64::from_bits(0.75_f64.to_bits() + 1);
+    assert_ne!(precise.to_bits(), f64::from(precise as f32).to_bits());
+    let values = [0.0, -0.0, f64::from_bits(1), precise, 1.0];
+    let old_f32 = f32::from_bits(0.75_f32.to_bits() + 1);
+    let mut pairs = Vec::new();
+    for value in values.into_iter().chain([f64::from(old_f32)]) {
+        pairs.extend([
+            (HostCommand::SetParameter { id: 17, value }, success()),
+            (
+                HostCommand::GetParameter { id: 17 },
+                HostResponse::ParameterValue { value },
+            ),
+        ]);
+    }
+    let mut c = client(&ledger(&pairs, true));
+    for value in values {
+        c.set_parameter_f64(17, value, deadline()).unwrap();
+        assert_eq!(
+            c.parameter(17, deadline()).unwrap().to_bits(),
+            value.to_bits()
+        );
+    }
+    c.set_parameter(17, old_f32, deadline()).unwrap();
+    assert_eq!(
+        c.parameter(17, deadline()).unwrap().to_bits(),
+        f64::from(old_f32).to_bits()
+    );
+    finish_client(&mut c);
+}
+
+#[test]
+fn effect_client_f64_parameter_bounds_cancel_delivery_and_retirement_are_strict() {
+    let _serial = serial();
+    for value in [
+        -f64::from_bits(1),
+        f64::from_bits(1.0_f64.to_bits() + 1),
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ] {
+        for stop in 0..4 {
+            let mut c = client(&ledger(&[], false));
+            if stop >= 2 {
+                c.cancellation().cancel();
+            }
+            let end = if stop == 1 || stop == 3 {
+                Instant::now()
+            } else {
+                deadline()
+            };
+            let failure = c.set_parameter_f64(17, value, end).unwrap_err();
+            let expected = match stop {
+                1 => FailureKind::Deadline,
+                2 | 3 => FailureKind::Cancelled,
+                _ => FailureKind::InvalidRequest,
+            };
+            assert_eq!(
+                (failure.kind, failure.delivery),
+                (expected, Delivery::NotSent)
+            );
+            assert_eq!(failure.request_context.unwrap().operation, "SetParameter");
+            let repeated = c.set_parameter_f64(17, 0.5, deadline()).unwrap_err();
+            assert_eq!(
+                (repeated.kind, repeated.delivery),
+                (expected, Delivery::NotSent)
+            );
+            finish_client(&mut c);
+        }
+    }
+
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    for cancelled in [false, true] {
+        let path = std::env::temp_dir().join(format!(
+            "strict-effect-f64-setter-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        struct Remove(std::path::PathBuf);
+        impl Drop for Remove {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let _remove = Remove(path.clone());
+        let value = f64::from_bits(0.75_f64.to_bits() + 1);
+        let mut pairs = prepared();
+        pairs.extend(admission());
+        let json = serde_json::to_string(&pairs).unwrap();
+        let expected = serde_json::to_string(&HostCommand::SetParameter { id: 17, value }).unwrap();
+        let path_json = serde_json::to_string(path.to_str().unwrap()).unwrap();
+        let script = format!("import json,sys\nfor expected,reply in json.loads({json:?}):\n actual=json.loads(sys.stdin.readline())\n assert actual==expected,(actual,expected)\n print(json.dumps(reply),flush=True)\nassert json.loads(sys.stdin.readline())==json.loads({expected:?})\nwith open({path_json},'x') as out: out.write('accepted exact f64 parameter')\nassert sys.stdin.read()==''\n");
+        let mut c = client(&script);
+        prepare(&mut c);
+        c.admit_stereo_effect(deadline()).unwrap();
+        let cancellation = c.cancellation();
+        let end = deadline();
+        let failure = std::thread::scope(|scope| {
+            let worker = cancelled.then(|| {
+                scope.spawn(|| {
+                    while !path.exists() {
+                        assert!(
+                            Instant::now() < end,
+                            "f64 SetParameter admission latch deadline"
+                        );
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    cancellation.cancel();
+                })
+            });
+            let failure = c.set_parameter_f64(17, value, end).unwrap_err();
+            if let Some(worker) = worker {
+                worker.join().unwrap();
+            }
+            failure
+        });
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "accepted exact f64 parameter"
+        );
+        assert_eq!(
+            (failure.kind, failure.delivery),
+            (
+                if cancelled {
+                    FailureKind::Cancelled
+                } else {
+                    FailureKind::Deadline
+                },
+                Delivery::MayHaveApplied
+            )
+        );
+        assert_eq!(failure.request_context.unwrap().operation, "SetParameter");
+        assert_eq!(
+            unpublished_failure(&mut c, &input(), deadline()).kind,
+            failure.kind
+        );
+        finish_client(&mut c);
+    }
 }

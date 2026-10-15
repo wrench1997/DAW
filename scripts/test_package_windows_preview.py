@@ -1376,14 +1376,30 @@ class PreviewBuildContractTests(unittest.TestCase):
         preview = (root / ".github/workflows/windows-preview.yml").read_text(encoding="utf-8")
         self.assertIn("      - 'tests/fixtures/vst3-effect/**'", preview)
 
+    def test_private_effect_source_sdk_target_uses_quality_fixture_and_real_helper(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        windows = workflow.split("\n  linux-helper-readiness:", 1)[0]
+        sdk = windows.split("      - name: Verify real no-GUI stereo Effect", 1)[1].split(
+            "\n      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 10", sdk)
+        self.assertIn("$env:CITRUS_EFFECT_FIXTURE = (Resolve-Path tests/fixtures/vst3-effect/target/bundles/CitrusStereoDelayFixture.vst3).Path", sdk)
+        self.assertIn("$env:CITRUS_EFFECT_HELPER = (Resolve-Path target/debug/vst3-host-helper.exe).Path", sdk)
+        self.assertIn(
+            "cargo test --locked --all-features --jobs 1 --bin citrus-studio "
+            "plugins::plugin_runtime::effect_capture_sdk_tests::"
+            "actual_sdk_private_effect_source_capture_restores_strict_clone_pcm_and_naturally_reaps "
+            "-- --ignored --exact --nocapture --test-threads=1", sdk)
+        self.assertNotIn("continue-on-error", sdk)
+
 
 class ProvenanceConstantsTests(unittest.TestCase):
     def test_reviewed_provenance_constants_are_pinned(self):
         self.assertEqual(pkg.VENDOR_ARCHIVE_SHA256, "6ec579d54bd13b83c60c1fd8bb756cf234e36ccbfb4833ff756b417e64db7fea")
         self.assertEqual(pkg.VENDOR_COMMIT, "ed054908cfe057694d8cf037d0c39dfb5eb4c2ca")
         self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/LICENSE"], "a65a537295910b776a8b2edb2e7410c3b0e975ca6388994e032c4d1842b4952d")
-        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS.patch"], "0777aa8485c842d58f6cbbb6502ad75399343660814a28278dfeeb2e405d1898")
-        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS_PATCHES.md"], "bca3d86ce228464ad3e0834c40ce1d21cd6e7cd6332317c5d66101a7ecca5aca")
+        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS.patch"], "6d54f058f93183200e4ce0268a84fd6e77d025b614ce8e0c9c542197363250e6")
+        self.assertEqual(pkg.VENDOR_FILE_HASHES[f"{pkg.VENDOR_PATH}/CITRUS_PATCHES.md"], "04bf2725e68eed567580a41ddac285f0fa2c65eed864ea12326f4e54ce536e69")
 
 
 

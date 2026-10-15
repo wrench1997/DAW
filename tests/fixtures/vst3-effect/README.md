@@ -67,12 +67,24 @@ activation/processing prerequisites, output-clear detection and state validation
 The separate real-helper target captures opaque state through a real source SDK
 instance, drops it, cold-loads another source instance, checks exact state/readback,
 then loads a fresh production helper. It restores opaque state (Gain 0.25), applies
-a captured base (0.75), selects/admits the actual stereo buses and starts processing.
+a non-f32 captured base (`0.75000004_f64`) through `set_parameter_f64`, verifies
+its exact f64 readback bits, selects/admits the actual stereo buses and starts
+processing. The fixture retains f64 controller/state precision but intentionally
+casts gain to f32 in its DSP; the independent PCM expectation models that actual
+conversion after checking transport precision, not before sending the base.
 Five Q128 blocks are checked sample-for-sample against an independent two-tap
 convolution, including nonzero input at frame 127 and values above full scale.
 Three silent blocks flush the finite tail; the last block must remain silent.
 Actual SDK probes verify every supplied block's transport and cleared output
 buffers. Stop and natural helper exit/reap must succeed.
+
+The separate App private-source SDK target additionally captures the actual
+stopped Effect worker chain, requires source positive-frame DSP count0 and joins
+the original source guard before creating the strict clone. Its current source
+uses non-f32 Gain `0.12345678912345678`, exact source/opaque/base readback, a clone
+perturbation before f64 restoration, and three Q128 stereo blocks. This Windows
+exact target is wired into the same existing 10-minute no-GUI quality step; it
+does not replace the independent helper target above, which also runs on Linux.
 
 Read-only probes never send dirty callbacks or modify persisted state:
 
@@ -91,6 +103,14 @@ chains, whole-song PDC, arbitrary plugin tails and NOIRE remain separate work.
 
 ## Verification status
 
+The f64 setter and the revised non-f32 base assertions are source-only changes
+awaiting Root's next Windows/Linux cloud run. The passes below cover the earlier
+f32-base target, not these new precision assertions. The fixture DSP is unchanged.
+The App private-source target previously passed locally with Gain 0.375, source
+DSP count 0, the original guard joined and natural clone reap; its new non-f32 source
+initialization/restoration assertion is locally UNRUN. The current `effect_`
+gate selects 29 cases (two new f64 cases), rather than the earlier 27.
+
 Local Windows: all four fixture tests passed; the x86_64 MSVC release bundle and
 matching all-feature production helper built successfully. The first fixture
 test compile found ambiguous integer inference in the analytical expectation
@@ -101,12 +121,13 @@ probe readbacks, opaque 40-byte host state round-trip, actual latency 32/last ta
 40-byte state wraps this plugin's 12-byte component payload. Strict fixture
 all-target Clippy passed after replacing an indexed analytical test loop with
 `iter().enumerate()`; all four tests passed again with unchanged expectations.
-Production DSP was unchanged, so the real-helper result remains applicable.
+The unchanged DSP retains that earlier f32-base evidence; the revised precision
+assertions still await execution.
 Cloud quality run [38813369205](https://github.com/wrench1997/DAW/actions/runs/38813369205)
 at `0c4872c42516a1d6cf7be7f421b1dbb20d7a5589` actually passed on Windows and Linux:
-each ran all four SDK tests and this exact real production-helper host target.
-Both receipts match the response/state/transport/latency/tail and natural-reap
-checks above. The sticky-role reload regression also passed in both 27-case
+each ran all four SDK tests and the then-current real production-helper host target.
+Both earlier receipts cover the f32-base response/state/transport/latency/tail
+and natural-reap checks. The sticky-role reload regression also passed in both 27-case
 Effect gates. Linux has not run locally. Detailed local terminal logs are under
 `target/backend-reliability-20261014/strict-effect-input-source-candidate-01/`.
 Full cloud logs and terminal metadata are under the same parent directory with

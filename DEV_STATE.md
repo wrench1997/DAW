@@ -15,7 +15,11 @@ Follow长度源码`b2e56dc`本机验收通过：新Draw/Paint默认Follow真实P
 
 后台`0c4872c`已补既有strict helper的真实双声道Q128 Effect输入：独立Fx身份/完整bus与event、私有admission、实际latency/tail/async/native revision复核，修改状态/参数/配置即失效，同一child保留到实际reap。独立审查发现通用reload可清角色绑定，已修成sticky并补真实子进程反例/旧入口正例。云quality38813369205实际SUCCESS：Win/Linux各27项Effect回归及真实SDK4+生产helper1均通过；1280样本/35探针、延迟32/末tap160/自然reap一致；根2481PASS/14ignored、严格Clippy/双bin及session2真实PrintWindow通过。preview38813369197实际SUCCESS：368Python=356PASS/12条件SKIP、27 Effect、同2481 root、静态CRT release8m18s/ZIP/提取helper通过，无上传。额外本机vendor全test-target严格Clippy仍为75条既有glue lint失败101，日志保留；未用根Clippy通过抹去它。
 
-Whole仍拒绝Insert。专用Insert私有capture正基于现有停止/settlement机制开发，尚未编译验收；后续仍需顺序stage/PDC/cleanup及最终单发布，完整FX/自动化/路由/尾音要求保留。源码云证据见`docs/WINDOWS_MELODY_WORKFLOW.md`的Stereo Effect helper foundation与target内source118记录。用户03、主GUI、声卡和NI未操作。
+当前源码候选已实现停止后的指定endpoint整条Effect链私有捕获：保留实际源backend、链顺序/slot及enabled/bypass/wet，取得真实身份、完整bus/event、opaque状态、目录、f64参数及DSP latency/tail。实际Stop/Timeline与worker settlement、callback epoch和admin fence共同约束捕获；审查发现的E→E+1→E重置ABA已用不可清除的`epoch_resets`历史ticket修复，溢出只拒绝新Effect捕获，不改变旧Instrument/epoch入口。
+
+该私有capture的本机前快照实际通过15项新测试/1项SDK默认忽略；随后显式SDK1PASS：源positive-frame DSP为0、原源guard实际Join、state40字节、Gain0.375、双声道3×Q128、latency32/末tap160、strict child自然exit0/reaped。旧Instrument29、stopped10、runtime/callback settlement19及Root严格Clippy/no-default/helper build均通过。原编译、夹具和Clippy失败日志保留；这些结果先于下一段f64精度增量。
+
+现已补`Client::set_parameter_f64`，旧f32入口语义不变；新增2个真实child用例并扩展receipt失效检查，`effect_`预期29项。独立helper目标改用非f32 base0.75000004；私有source SDK目标改用真实源f64 Gain0.12345678912345678，opaque恢复后逐base精确回读再admit/start。新API/回归及这两个SDK精度断言本机未运行，由新云候选验收；Windows私有source SDK exact target已接入既有10分钟无GUI质量步骤。详`docs/WINDOWS_MELODY_WORKFLOW.md`及target内source119记录。Whole仍拒绝Insert；顺序PCM stage、wet/bypass/路由/FX自动化、通用PDC、尾音/裁剪及最终单发布仍待实现。用户仍测试03，本轮只改代码，主GUI、声卡和NI未操作；完整NOIRE验收仍未完成。
 
 用户新增Playlist↔钢琴卷帘联动：共享Pattern数据/所有placement预览本来已有；现补Pattern双击自动打开对应Piano/Rack、主Pattern切换时一次性定位含notes通道、SONG位置按placement/offset映射本地游标，以及真实callback模式下Rack活动步。已有手动trim不自动拉长；Source114/81b2572实际225 UI/无设备callback全PASS（含新增9联动+1基线正反控制），严格Clippy/test artifact/匹配双bin exit0；9真实WGPU用例PASS，Root逐张检查4帧目标/共享预览/局部cursor/Rack活动步。Source115云quality38746810086与preview38746809594实际均SUCCESS：2391 App+52 helper+13协议=2456 root/14 ignored；factory33、367 Python=355PASS/12条件SKIP、Clippy、静态CRT release8分50秒、ZIP/提取后helper通过，云session2真实PrintWindow PASS。未上传附件。完整source115原始日志/终态保留。已独立交付03，主68,087,808B/helper5,054,464B，helper smoke exit0/reaped；未打开GUI/NI/声卡，格式仍13与02兼容。
 
