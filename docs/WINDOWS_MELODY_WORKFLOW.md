@@ -344,39 +344,66 @@ reported `prior App fixture cleanup is unproven`; retained sticky ownership refu
 new fixtures. Release/archive, ZIP and extracted-helper checks did not execute.
 
 Source review established a test-fixture defect: new Serial fixtures used the
-process-global `ACTIVE` collector, which has no source-owner filter, four lifetime
-worker-identity slots and sticky failure from foreign false hooks. Both failed raw
-logs omitted the actual `snapshot.failure` literal, so their precise first failure
-enum cannot be reconstructed. Root adopted a frozen source-only repair in
-`src/app/clip_render_job_tests.rs` and `src/app/whole_serial_app_tests.rs`; production,
-the global observer/limits/sticky semantics, vendor fixtures and CI are unchanged.
+process-global `ACTIVE` collector, with no source-owner filter, four lifetime
+worker-identity slots and sticky failure from foreign false hooks. Both 8d raw logs
+omitted the actual `snapshot.failure` literal, so their precise first failure enum
+cannot be reconstructed. The first repair was source-only and attempted to retain
+three original controls with `.clone()`. That plan was not compilable:
+`PluginChainControl` owns exclusive Consumers and does not implement Clone.
 
-The Serial fixture now retains all three original `PluginChainControl` Arcs and
-unique IDs and reads the existing `genuine_retained_join_observation`. It accepts
-`HealthyJoinReturned` or `HealthyJoinObserverCallReturned` only: those witnesses
-are written after the original `JoinHandle.join()` actually returns (and, for the
-latter, after its observer returns). Panic, detach and shutdown timeout fail;
-NotPolled/unfinished/finished alone are not completed joins. Healthy Cancel also
-asserts NotPolled before and after the original ACK/drain. AppDrop still requires
-all three original actual joins; original budgets, sticky cleanup refusal and
-emergency retained owners are preserved.
+At `eae18b72512ffbfdd98141a940b8ef2e236b416c`,
+[quality38832663475](https://github.com/wrench1997/DAW/actions/runs/38832663475)
+actually failed (updated 2026-10-16T01:08:05Z), Windows job 116754709863.
+[Preview38832663364](https://github.com/wrench1997/DAW/actions/runs/38832663364),
+job 116754708957, also failed (updated 2026-10-16T01:08:15Z). Both reported E0599 at
+`src/app/clip_render_job_tests.rs:791:42` and `:796:50`: no `clone` method on
+`PluginChainControl`. None of the eight new App cases or old observer regressions
+ran; later Clippy/build/SDK/no-default/native gates were not reached. PrintWindow
+was not reached, not an environment SKIP. Preview had passed 371 Python = 359 passed/
+12 conditional skips in 24.295s, offline MIDI4, async15 and Effect29; release/ZIP/
+extracted-helper checks did not execute. Linux job 116754709658 actually succeeded:
+async15/Effect29/Unix1, fixture6 and both real Effect/Instrument host targets passed,
+including the Instrument 768-sample/32-FIFO/state40/natural-cleanup oracle.
 
-The new eighth ordinary App case uses a scoped foreign thread that first owns
-its own temporary `ObservationRun`, then emits a false hook and asserts that
-run's failure. It finishes that run and actually joins before local source checks;
-it never injects into an unknown `ACTIVE`. The case then checks the original
-three controls remain unpolled while held, drops App, releases the source gate
-and waits for three healthy actual joins with no publication. Existing global
-collector failures are neither cleared nor ignored.
+The corrected implementation changes `src/plugin_runtime.rs` and the clip fixture.
+It retains the existing `PluginControlIdentity(Arc<BridgeMetrics>)` returned by each
+original control's `owner_identity()`, checking both `matches(control)` and the
+exact original worker ID. Only cfg(test), supported-feature/target read-only
+identity ID/stats/join methods are added. Identity and control getters share the
+existing join decoder; actual Join write sites/order and the old weak-only
+`WorkerIdentityWitness` contract stay unchanged. No production control Clone,
+command/Consumer ownership, global observer/caps/sticky, vendor or CI change is added.
 
-This repair has only actual rustfmt/diffcheck exit0. All local Cargo/native checks
-for the repair are **UNRUN**; the next exact cloud candidate must execute the normal
-full suite under default parallel scheduling, strict Clippy and no-default checks.
-Earlier local 31/150, SDK02/Clippy02/no-default02/build and b73 quality/preview remain
-valid for their original inputs, not acceptance of the failed SHA or this repair.
-Records under `target/backend-reliability-20261014/`: `source121-quality-acceptance.md`,
-`source121-preview-actual-terminal-01.json` and full raw logs; the frozen repair is
-`whole-serial-effects-source-candidate-01/cloud8d8e94d-repair-01/repair.json`.
+The fixture pins three distinct original identities, accepting only
+`HealthyJoinReturned` or `HealthyJoinObserverCallReturned` after the original
+`JoinHandle.join()` actually returns (and, for the latter, its observer returns).
+Panic, detach and timeout fail; NotPolled/unfinished/finished are not joins.
+Healthy Cancel retains the before/after ACK-drain NotPolled assertions; AppDrop
+still requires all three actual original joins. Budgets, sticky refusal and
+emergency retained ownership remain. The eighth ordinary case first gives a
+scoped foreign thread its own `ObservationRun`, then asserts its false-hook
+failure, finishes that run and actually joins before checking local source
+identities. No false hook targets unknown `ACTIVE`; no existing failure is cleared.
+
+The corrected two files were then actually compiled/tested locally: serial App8
+passed 8 in 2.01s with test-threads8, including healthy Cancel, AppDrop and the foreign
+collector counterexample; unchanged old identity2 passed in 0.26s. Root strict
+all-feature/all-target Clippy and no-default all-target checks both exited0; the
+latter had no App warning. All four phases reached actual exit0/held-handle reap,
+guard=false. Root's 01:18:07Z fresh heavy-process inventory was empty and resources
+were actually handed back to the peer. No new full-suite, SDK, production-bin,
+GUI/device/NI execution was performed for this latest repair.
+
+New exact-cloud full-suite/preview acceptance remains pending.
+Earlier source-only UNRUN status belongs to the rejected eae proposal, not the
+now locally tested identity repair. Earlier local 31/150, SDK02/build and b73
+quality/preview remain valid for their own inputs; they do not override either
+failed cloud SHA or qualify the latest candidate globally. Records under
+`target/backend-reliability-20261014/`: source121/122 quality acceptance and preview
+terminal/full raw logs; first proposal in
+`whole-serial-effects-source-candidate-01/cloud8d8e94d-repair-01/repair.json`;
+authoritative current actual results in
+`whole-serial-effects-source-candidate-01/cloudeae18b7-compile-repair-01/cpu-handback.json`.
 Earlier local evidence remains in `whole-serial-effects-source-candidate-01/`
 (source-ready/review, App/Whole SDK logs, `cpu-handback-02.json`/`cpu-handback-03.json`)
 and `serial-lookahead-instrument-fixture-01/HANDOFF.json`.

@@ -352,7 +352,7 @@ struct RetainedFailedFixture {
         any(target_os = "linux", windows),
         feature = "experimental-fresh-helper"
     ))]
-    _whole_join_controls: Vec<plugins::plugin_runtime::PluginChainControl>,
+    _whole_join_identities: Vec<plugins::plugin_runtime::PluginControlIdentity>,
 }
 thread_local! {
     // At most one failed fixture can occupy this emergency owner. It never
@@ -374,7 +374,7 @@ pub(in crate::app) struct Fixture {
         any(target_os = "linux", windows),
         feature = "experimental-fresh-helper"
     ))]
-    whole_join_controls: Vec<plugins::plugin_runtime::PluginChainControl>,
+    whole_join_identities: Vec<plugins::plugin_runtime::PluginControlIdentity>,
 }
 impl Fixture {
     pub(in crate::app) fn app(&self) -> &CitrusApp {
@@ -570,7 +570,7 @@ impl Fixture {
                 any(target_os = "linux", windows),
                 feature = "experimental-fresh-helper"
             ))]
-            whole_join_controls: Vec::new(),
+            whole_join_identities: Vec::new(),
         };
         if let Some(observer) = whole_drop_observer {
             WHOLE_DROP_OBSERVATION.with(|slot| {
@@ -684,7 +684,7 @@ impl Fixture {
     ))]
     pub(in crate::app) fn force_drop_app_for_whole_test(&mut self) {
         assert!(
-            !self.whole_join_controls.is_empty()
+            !self.whole_join_identities.is_empty()
                 || WHOLE_DROP_OBSERVATION.with(|slot| slot.borrow().is_some())
         );
         assert!(self.app.whole_song_export_fence_active());
@@ -740,32 +740,32 @@ impl Fixture {
     ))]
     pub(in crate::app) fn whole_exact_worker_join_count_for_test(&self, ids: &[usize]) -> usize {
         use plugins::plugin_runtime::RetainedJoinObservation::*;
-        assert_eq!(ids.len(), self.whole_join_controls.len());
+        assert_eq!(ids.len(), self.whole_join_identities.len());
         let observed_ids: std::collections::BTreeSet<_> = self
-            .whole_join_controls
+            .whole_join_identities
             .iter()
-            .map(|control| control.genuine_worker_id())
+            .map(|identity| identity.genuine_worker_id())
             .collect();
-        assert_eq!(observed_ids.len(), self.whole_join_controls.len());
+        assert_eq!(observed_ids.len(), self.whole_join_identities.len());
         assert_eq!(observed_ids, ids.iter().copied().collect());
-        self.whole_join_controls
+        self.whole_join_identities
             .iter()
-            .filter(|control| {
-                let stats = control.stats();
+            .filter(|identity| {
+                let stats = identity.stats();
                 assert_eq!(
                     (stats.detached_workers, stats.shutdown_timeouts),
                     (0, 0),
                     "Actual source {} lost its retained shutdown owner",
-                    control.genuine_worker_id()
+                    identity.genuine_worker_id()
                 );
-                let observation = control.genuine_retained_join_observation();
+                let observation = identity.genuine_retained_join_observation();
                 assert!(
                     !matches!(
                         observation,
                         PanickedJoinReturned | PanickedJoinObserverCallReturned
                     ),
                     "Actual source {} joined with panic: {observation:?}",
-                    control.genuine_worker_id()
+                    identity.genuine_worker_id()
                 );
                 matches!(
                     observation,
@@ -780,27 +780,33 @@ impl Fixture {
     ))]
     pub(in crate::app) fn retain_whole_exact_join_sources_for_test(&mut self) {
         use plugins::plugin_runtime::RetainedJoinObservation;
-        assert!(self.whole_join_controls.is_empty());
+        assert!(self.whole_join_identities.is_empty());
         assert!(WHOLE_DROP_OBSERVATION.with(|slot| slot.borrow().is_none()));
-        // Retain only the original control Arcs, not another worker/backend.
+        // Retain only the original metrics identities, not controls or another backend.
         // The guard writes this witness only after its real JoinHandle returns.
-        self.whole_join_controls = self
+        let retain_identity = |control: &plugins::plugin_runtime::PluginChainControl| {
+            let identity = control.owner_identity();
+            assert!(identity.matches(control));
+            assert_eq!(identity.genuine_worker_id(), control.genuine_worker_id());
+            identity
+        };
+        self.whole_join_identities = self
             .app
             .running_generator_chains
             .values()
-            .map(|source| source.control.clone())
+            .map(|source| retain_identity(&source.control))
             .chain(
                 self.app
                     .running_insert_chains
                     .values()
-                    .map(|source| source.control.clone()),
+                    .map(|source| retain_identity(&source.control)),
             )
             .collect();
-        assert_eq!(self.whole_join_controls.len(), 3);
+        assert_eq!(self.whole_join_identities.len(), 3);
         assert!(
-            self.whole_join_controls
+            self.whole_join_identities
                 .iter()
-                .all(|control| control.genuine_retained_join_observation()
+                .all(|identity| identity.genuine_retained_join_observation()
                     == RetainedJoinObservation::NotPolled)
         );
     }
@@ -809,13 +815,13 @@ impl Fixture {
         feature = "experimental-fresh-helper"
     ))]
     pub(in crate::app) fn assert_whole_exact_source_guards_unpolled_for_test(&self) {
-        assert!(!self.whole_join_controls.is_empty());
-        for control in &self.whole_join_controls {
+        assert!(!self.whole_join_identities.is_empty());
+        for identity in &self.whole_join_identities {
             assert_eq!(
-                control.genuine_retained_join_observation(),
+                identity.genuine_retained_join_observation(),
                 plugins::plugin_runtime::RetainedJoinObservation::NotPolled,
                 "Healthy source {} received a retained shutdown poll",
-                control.genuine_worker_id()
+                identity.genuine_worker_id()
             );
         }
     }
@@ -886,15 +892,15 @@ impl Fixture {
             any(target_os = "linux", windows),
             feature = "experimental-fresh-helper"
         ))]
-        if !self.whole_join_controls.is_empty() {
+        if !self.whole_join_identities.is_empty() {
             use plugins::plugin_runtime::RetainedJoinObservation::*;
             let mut all_joined = true;
-            for control in &self.whole_join_controls {
-                let stats = control.stats();
+            for identity in &self.whole_join_identities {
+                let stats = identity.stats();
                 if stats.detached_workers != 0 || stats.shutdown_timeouts != 0 {
                     return Err("exact Whole source worker was detached or timed out");
                 }
-                match control.genuine_retained_join_observation() {
+                match identity.genuine_retained_join_observation() {
                     HealthyJoinReturned | HealthyJoinObserverCallReturned => {}
                     PanickedJoinReturned | PanickedJoinObserverCallReturned => {
                         return Err("exact Whole source worker joined with panic");
@@ -1250,7 +1256,7 @@ impl Drop for Fixture {
                     any(target_os = "linux", windows),
                     feature = "experimental-fresh-helper"
                 ))]
-                _whole_join_controls: std::mem::take(&mut self.whole_join_controls),
+                _whole_join_identities: std::mem::take(&mut self.whole_join_identities),
             };
             RETAINED_FAILED_FIXTURE.with(|slot| {
                 *slot.borrow_mut() = Some(std::mem::ManuallyDrop::new(retained));

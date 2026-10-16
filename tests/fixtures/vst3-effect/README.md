@@ -150,13 +150,20 @@ Windows App tests failed on a new Whole cancel/join-observation assertion before
 its SDK, Clippy/build/no-default or PrintWindow steps. Preview38829430476 failed
 on the related App-drop observation, then retained-fixture admission failures;
 release/ZIP/helper validation did not execute. The exact candidate is not cloud
-accepted. Full logs are under `target/backend-reliability-20261014/source121-*`;
-the source-only repair now uses the same original controls' existing real
-guard-return Join witnesses instead of installing a full global collector for
-these local lifecycle checks. Production, collector limits and failure rules are
-unchanged. A new scoped foreign-collector failure regression is included. This
-test-only repair passed static checks but has not run locally; the next exact
-cloud run must compile and execute it.
+accepted. Full logs are under `target/backend-reliability-20261014/source121-*`.
+
+The first repair, `eae18b7`, then failed cloud compilation because the fixture
+incorrectly tried to clone `PluginChainControl`; its exclusive consumers are not
+Clone. Linux again passed fixture6/host2, but Windows App tests and later gates
+did not execute. The corrected test-only repair pins the existing
+`PluginControlIdentity`, checks it matches each original control/worker ID, and
+reads the same real guard-return witness through cfg(test) helpers. Production,
+global collector limits, old weak identity witnesses and failure rules are
+unchanged. All8 Serial App cases (including the new scoped foreign-collector
+failure case) passed locally in2.01s; old identity2 passed in0.26s, and strict
+root Clippy/no-default checks exited0. A new exact cloud run is still required.
+Evidence: `whole-serial-effects-source-candidate-01/cloudeae18b7-compile-repair-01/`
+under the same target directory.
 At `b73b57a`, quality38824285643 actually passed: both platforms ran29 Effect
 cases and the real non-f32 helper SDK target. Windows additionally ran the App
 private-source exact target with Gain0.12345678912345678, sourceDSP0, original

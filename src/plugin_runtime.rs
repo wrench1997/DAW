@@ -2780,6 +2780,35 @@ impl PluginControlIdentity {
     pub(crate) fn matches(&self, control: &PluginChainControl) -> bool {
         Arc::ptr_eq(&self.0, &control.metrics)
     }
+
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn genuine_worker_id(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn stats(&self) -> BridgeStats {
+        self.0.snapshot()
+    }
+
+    /// Read the original guard's witness after its control has been retired.
+    /// This identity owns no command channel, event consumer or JoinHandle.
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn genuine_retained_join_observation(&self) -> RetainedJoinObservation {
+        self.0.genuine_retained_join_observation()
+    }
 }
 
 /// Shared cooperative capture fence. One dispatched helper call retains its own timeout;
@@ -2939,19 +2968,7 @@ impl PluginChainControl {
         feature = "experimental-fresh-helper"
     ))]
     pub(crate) fn genuine_retained_join_observation(&self) -> RetainedJoinObservation {
-        match self
-            .metrics
-            .retained_join_observation
-            .load(Ordering::Acquire)
-        {
-            0 => RetainedJoinObservation::NotPolled,
-            1 => RetainedJoinObservation::LastPollSawUnfinished,
-            2 => RetainedJoinObservation::LastPollSawFinished,
-            3 => RetainedJoinObservation::HealthyJoinReturned,
-            4 => RetainedJoinObservation::PanickedJoinReturned,
-            5 => RetainedJoinObservation::HealthyJoinObserverCallReturned,
-            _ => RetainedJoinObservation::PanickedJoinObserverCallReturned,
-        }
+        self.metrics.genuine_retained_join_observation()
     }
 
     /// One source generator, one private bounded receipt. No normal save/native publication.
@@ -3468,6 +3485,23 @@ impl WorkerIdentityWitness {
 }
 
 impl BridgeMetrics {
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    fn genuine_retained_join_observation(&self) -> RetainedJoinObservation {
+        match self.retained_join_observation.load(Ordering::Acquire) {
+            0 => RetainedJoinObservation::NotPolled,
+            1 => RetainedJoinObservation::LastPollSawUnfinished,
+            2 => RetainedJoinObservation::LastPollSawFinished,
+            3 => RetainedJoinObservation::HealthyJoinReturned,
+            4 => RetainedJoinObservation::PanickedJoinReturned,
+            5 => RetainedJoinObservation::HealthyJoinObserverCallReturned,
+            _ => RetainedJoinObservation::PanickedJoinObserverCallReturned,
+        }
+    }
+
     fn snapshot(&self) -> BridgeStats {
         let bridge_frames = u64::from(self.current_bridge_frames.load(Ordering::Relaxed));
         let plugin_latency = u64::from(self.plugin_latency_samples.load(Ordering::Relaxed));
