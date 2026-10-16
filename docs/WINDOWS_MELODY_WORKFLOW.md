@@ -301,7 +301,36 @@ platform/feature caller, preserving identical effective all-feature code.
 No-default02 then passed without that warning. Every phase actually exited and
 its held processes were reaped, with no resource guard triggered. Root consumed
 the actual handback and a fresh empty heavy-process inventory at03:41:35Z, then
-returned resources to the other project. Cloud acceptance is still pending.
+returned resources to the other project.
+
+**Cloud acceptance passed for `89ef2cb32a7b722c16c3672ef6f53a67305cf68f`.**
+[Quality38846965192](https://github.com/wrench1997/DAW/actions/runs/38846965192)
+completed SUCCESS on its first attempt, updated2026-10-16T03:56:10Z. Windows
+job116799572267 passed2551 root cases/17 ignored (App2486 + helper52 +6+5+2),
+including all19 serial App cases and all7 commit-boundary cases. Strict Clippy,
+production bins, no-default and fixture6/real host2 passed. The existing private
+App source SDK1 and both old-static/new-Master Whole SDK targets actually ran
+explicitly and passed, separate from their ordinary-suite ignored entries. The
+new Master target checked the full1280-frame independent PCM oracle described
+above. Original source Join, exact f64 bases, strict natural exit/reap and one
+crop/tanh all retained their actual receipts.
+
+The usable Windows environment was Default/session2/WTSActive with a visible
+station. Real PrintWindow paint before/after, repaint, interaction, state and
+lifecycle/Shutdown/EOF/crash cleanup passed; this was not an environment SKIP.
+Linux job116799572417 newly executed async15/Effect29/Unix1, fixture6 and both
+real Effect/Instrument host targets successfully at this SHA; no earlier run was
+substituted.
+
+[Preview38846965091](https://github.com/wrench1997/DAW/actions/runs/38846965091),
+job116799572116, completed SUCCESS on its first attempt, updated04:13:15Z. Python
+371 =359 passed/12 conditional skips in22.560s; root2551/17 ignored (App2486 in
+514.33s), MIDI4/async15/Effect29, strict Clippy and no-default passed. The
+static-CRT release completed in8m41s; exact ZIP/PE/import/provenance/whitelist and
+the extracted sanitized-PATH helper passed, including three JSON replies,
+invalid-command recovery, Shutdown with stdin open, natural exit0 and reap.
+Upload was requested false, so only artifact upload was SKIPPED. No new user
+binary copy was delivered.
 
 Independent implementation review found no reachable P1/P2. A nonblocking
 diagnostic race remains: host deadline refusal followed by App cancellation can
@@ -309,7 +338,9 @@ report writer `kind=Deadline` or `Cancelled`; App keeps the original deadline te
 and Failed terminal state, with unchanged abort/destination/Join semantics.
 Receipts, full original failure and later executions are retained under
 `target/backend-reliability-20261014/whole-serial-master-automation-source-candidate-01/`
-and `source125-master-integration-progress-01.json`. No ordinary GUI, soundcard or
+and `source125-master-integration-progress-01.json`. Cloud full raw logs and
+actual terminal/API records use the same parent's `source125-quality-*` and
+`source125-preview-*` prefixes. No ordinary GUI, soundcard or
 NI was operated; user test03 and its projects were not replaced.
 
 ### Serial Whole FX: static single-source path (2026-10-16)

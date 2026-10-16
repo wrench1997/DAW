@@ -5,7 +5,7 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
-当前增量：单源串行FX的Whole导出已接入既有Master音量/声像/静音自动化，按最终PDC裁剪后的输出帧计时，尾音保持N−1值；其它自动化/路由边界不变。回归暴露正常metadata查询被误报源变化，现用App在原最终CAS前重新核验完整源Ready，Waiting只等待，保留原取消/超时/Drop及目标发布合同。本机plan12/render8、新提交边界7/受影响App19、静态与Master真实SDK各1、旧Master14/noFX18、双尺寸Whole Review实帧、严格Clippy/no-default/双bin全部通过；新云验收仍待完成。详[当前范围与实证](docs/WINDOWS_MELODY_WORKFLOW.md#master-automation-and-source-checked-publication-2026-10-16)。
+已推`89ef2cb32a7b722c16c3672ef6f53a67305cf68f`：单源串行FX Whole已接入既有Master音量/声像/静音自动化，按最终PDC裁剪后的输出帧计时，尾音保持N−1值；其它自动化/路由边界不变。修复正常metadata查询误报源变化，以App在原最终CAS前核验完整源Ready，Waiting只等待，保留原取消/超时/Drop及发布合同。本机81定向/双尺寸实帧/严格构建通过；云quality38846965192及preview38846965091均首轮实际SUCCESS：2551 root/17ignored、Serial19/边界7、显式旧静态+新Master SDK、strictClippy/no-default/双bin通过；Linux新执行fixture6/host2，Windows真实session2 PrintWindow PASS。preview371Python=359PASS/12条件SKIP、staticCRT release8m41s/ZIP/提取helper通过，upload=false→仅上传SKIPPED。详[当前范围与完整实证](docs/WINDOWS_MELODY_WORKFLOW.md#master-automation-and-source-checked-publication-2026-10-16)。
 
 当前可用副本：桌面“Citrus Studio 新版测试03”，`D:\DAW-Preview\Citrus-Studio-20261015-03\Start-Citrus.cmd`。PAT/SONG、拖播放头、AUTO范围及Playlist/Piano/Rack联动已通过本机定向回归/真实离屏/Clippy；新v13工程请另存副本，旧01/02保留。见`docs/PLAYLIST_TRANSPORT.md`；此前联动63d2f99云quality和preview均实际SUCCESS。
 

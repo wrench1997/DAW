@@ -156,8 +156,14 @@ interval and tail hold at music frame255. Three original sources have DSP0,
 state40 and actual guard joins; three strict clones naturally exit0/reap with
 max live owner1. Exact f64 Effect bases, one latency crop and one final tanh remain
 part of the independent PCM expectation. The same existing10-minute Windows
-no-GUI quality step now explicitly runs both targets; final current cloud
-acceptance is pending. Source/publication and test receipts are under
+no-GUI quality step now explicitly runs both targets. Code89ef2cb passed
+quality38846965192 and preview38846965091 on their first attempts:2551 root/17
+ignored, all19 serial App cases, all7 commit boundaries, strict Clippy/bins and
+no-default passed. Windows explicitly executed the private source target and
+both Whole SDK targets; Linux newly passed fixture6/real host2. Real eligible
+PrintWindow also passed. Preview passed371 Python cases (12 conditional skips),
+static-CRT release8m41s, exact ZIP/PE/import/provenance and the extracted helper;
+artifact upload was disabled. Source/publication and test receipts are under
 `target/backend-reliability-20261014/whole-serial-master-automation-source-candidate-01/`.
 
 ### Previously accepted static consumer
