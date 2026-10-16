@@ -230,8 +230,9 @@ compares all96,768 stereo Whole frames. It passed1/11.81s; retained AfterColdOpe
 11.51s/genuine7.84s/audit7.88s and current strict Clippy/no-default/fmt passed.
 Saved placement1500/restore1536 respects the existing .0625-beat disk minimum;
 the old385/512 case remains separate. First compile/type and disk-normalization
-failures are preserved, repaired only in new test premises. New-code cloud
-qualification remains pending; see [scope and evidence](WINDOWS_MELODY_WORKFLOW.md#sdk-saved-generator-automation-lane-2026-10-16).
+failures are preserved, repaired only in new test premises. Code12ae7f3 passed quality38897277400 and preview38897277409:2574 root/21ignored,
+explicit SDK7/Saved16.60s/full96,768 frames, real PrintWindow and preview
+static-CRT8m24s/ZIP/extracted helper, upload=false. See [scope and evidence](WINDOWS_MELODY_WORKFLOW.md#sdk-saved-generator-automation-lane-2026-10-16).
 
 **Previously accepted joint SDK:** code `bdf6901418f89fe5d0f4ac763a498c432156dacb` passed quality38863519248 and preview38863519233 on their first attempts: 2552 root cases/18 ignored, fixture8/9, builder11, four explicit Windows App SDK targets, strict Clippy/no-default/bins and real eligible-session PrintWindow. The new joint case passed in 12.64 s: normal default Instrument load, audible callback Play/Stop, disk Save, original worker joins, fresh App disk Open/generic ACKs/actual opaque gain acceptance, then all 96,768 stereo Whole frames. Preview passed Python372/12 conditional skips, static-CRT release7m53s, ZIP and extracted helper; upload was disabled. Initial document-link and receipt-current failures, their narrow corrections and valid local evidence remain in [the workflow record](WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16). NOIRE warm Save cleanup, OS program restart, seamless short loops and device listening remain separate work. User03 remains untouched while code-only work continues.
 
@@ -266,7 +267,7 @@ the separate Saved-lane regression below now qualifies local disk persistence;
 real NOIRE remains unqualified. The later84
 quality succeeded but preview failed two old panic waits before release/ZIP;
 boundary diagnostics retain the old deadlines and actual failure rules. See
-[the current candidate and failures](WINDOWS_MELODY_WORKFLOW.md#generator-parameter-q128-candidate-2026-10-16-validation-pending).
+[the current candidate and failures](WINDOWS_MELODY_WORKFLOW.md#generator-parameter-q128-automation-2026-10-16).
 
 **Existing:** background stereo PCM24 WAV arrangement export for Pattern and WAV Audio Clips through the plugin-free MainInput DAG; staged atomic replacement; explicit refusal when enabled plug-ins or active sidechains would be omitted (`export.rs`). Realtime Master Capture records the rendered Master through a bounded queue and background writer (`master_capture.rs`, `audio.rs`, `app.rs`). The final-frame drain fix and invalid export-rate/audio regressions passed in the baseline suite.
 

@@ -213,8 +213,10 @@ the third target retains385/512 and the .25 first point. The Saved case uses a
 base. First E0689 and disk-normalization failures remain recorded; only test
 type/minimum-window premises changed, not production/model/payload assertions.
 All four shared-flow SDK cases and current Root strict Clippy/no-default/fmt
-passed. Existing fixture/helper/UI inputs are unchanged; new cloud qualification
-is pending. The actual Saved Project16309B and WAV774202B are retained under
+passed. Existing fixture/helper/UI inputs are unchanged. Code12ae7f3 passed
+quality38897277400/preview38897277409:2574 root/21ignored, SDK7 with Saved16.60s/
+full96,768 frames, real PrintWindow and preview static-CRT8m24s/ZIP/extracted
+helper; upload=false. The actual Saved Project16309B and WAV774202B are retained under
 `generator-q128-save-cold-open-source-candidate-01/accepted-saved-sdk02-output/`.
 
 All four tests require actual audible callback Play, manual Stop/Save, original worker

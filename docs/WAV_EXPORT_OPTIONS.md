@@ -79,8 +79,8 @@ frames. The earlier after-Open lane case remains separate and passed again.
 The new test uses the legal 0.0625-beat placement; its initial compile/type and
 disk-normalization failures received test-only fixes, with full payload checks
 retained. All four shared-flow SDK cases and this revision's strict Clippy/
-no-default/fmt passed. New saved-case cloud acceptance is pending; unchanged
-production/WGPU evidence is reused.
+no-default/fmt passed. Saved-case code `12ae7f3` also passed both cloud workflows,
+including its genuine full-PCM SDK case; unchanged production/WGPU evidence is reused.
 
 Branches, sends, sidechains, off-path Inserts (even disabled/bypassed), active
 partial-wet Inserts, additional sources, Effect/other-instance parameter

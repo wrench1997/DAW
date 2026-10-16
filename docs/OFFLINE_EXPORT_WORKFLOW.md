@@ -59,7 +59,9 @@ expanded the 385-frame placement to the model's 0.0625-beat minimum. Only the ne
 test was corrected to explicit f32 and a legal window; payload assertions and the
 model were not weakened. Production/UI are unchanged, so their 64-case/two-size
 WGPU evidence is reused. All four shared-flow SDK cases and this revision's
-strict Clippy/no-default/fmt passed; new saved-case cloud acceptance is pending.
+strict Clippy/no-default/fmt passed. Saved-case code `12ae7f3` also passed
+quality38897277400/preview38897277409, including SDK7 (Saved16.60s/full96,768
+frames), real PrintWindow and static-CRT/ZIP/extracted-helper packaging.
 
 The first compile failed with E0046 for missing test-backend latency/tail methods;
 those methods were added before the successful rebuild. The first cursor group

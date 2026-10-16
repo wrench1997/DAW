@@ -447,7 +447,7 @@ adds both feature units and 11 fixture-builder cases on Windows/Linux, and
 explicitly executes both joint ignored App exacts on Windows. It stages the actual
 Cargo JSON-reported test artifact and matching helper as private siblings;
 ordinary helper lookup is unchanged. Missing inputs and real test failures fail
-CI. See the [source-only fixture commands](https://github.com/wrench1997/DAW/blob/820cddb098969b35c98a5d976220feff340e160d/tests/fixtures/vst3-effect/README.md#disk-save-and-cold-app-open-with-the-default-instrument).
+CI. See the [source-only fixture commands](https://github.com/wrench1997/DAW/blob/12ae7f3cbbb4196943642071cfa510b287ac7376/tests/fixtures/vst3-effect/README.md#disk-save-and-cold-app-open-with-the-default-instrument).
 Local full logs, frozen source and actual terminals are under
 `target/backend-reliability-20261014/melody-save-cold-open-source-candidate-01/`;
 Root integration record is `source127-first-flow-direction-01.json` in its parent.
@@ -516,7 +516,7 @@ replaced. Full raw logs and actual API terminals are retained under
 `source128-*-actual-terminal-01.*` in the evidence parent. The original `3b79f14`
 failures remain separate; no assertion, timeout or release whitelist was relaxed.
 
-### Generator parameter Q128 candidate (2026-10-16; validation pending)
+### Generator parameter Q128 automation (2026-10-16)
 
 The source implementation accepts `PluginParameter` automation only for the
 single source Generator's physical slot0. Stopped-source capture supplies the
@@ -663,8 +663,26 @@ helper and UI reuse valid64-case/fixture/two-size WGPU evidence. The actual
 under `target/backend-reliability-20261014/`;16314 bytes belongs to the first
 failed saved-input artifact, not this accepted Project. The original10-minute CI
 step adds this explicit exact with immediate nonzero failure propagation;7 CI
-contracts and actual4722-byte PowerShell parse passed. New-code cloud execution
-is pending. These are source-built SDK/new-App-instance checks; NOIRE warm Save,
+contracts and actual4722-byte PowerShell parse passed.
+
+**Published12ae7f3 cloud acceptance:**
+[Quality38897277400](https://github.com/wrench1997/DAW/actions/runs/38897277400)
+and [preview38897277409](https://github.com/wrench1997/DAW/actions/runs/38897277409)
+both actually completed SUCCESS on attempt1 (12:19:14Z/12:27:16Z). Root2574/
+21ignored, strict Clippy/bins/no-default, fixture8/9/builder11/host2 and all seven
+explicit App SDK cases passed. Saved16.60s checked the same full96,768 stereo
+frames, exact disk/cold lane, no post-Open reconstruction, actual captured.625,
+three initialization ACKs and1500/1536 placement/restore. AfterColdOpen17.32s kept
+its distinct385/512 case; genuine11.55s/audit11.37s passed separately. Eligible
+Default/session2/WTSActive performed real native PrintWindow/paint/repaint/
+interaction/state/lifecycle/cleanup, all PASS rather than SKIPPED. Linux also
+passed. Preview passed360 Python cases/12 conditional skips (eight absent private
+Saved13/four Unix),2574 root/21ignored, static-CRT release8m24s, exact ZIP/PE/
+OS-import/provenance and extracted sanitized-PATH helper. Upload=false and an
+empty Artifacts API mean no downloadable artifact was uploaded. Full original
+raw logs and actual terminal API are `source134-cloud-*` in the evidence parent.
+
+These are source-built SDK/new-App-instance checks; NOIRE warm Save,
 real program restart, vendor parameter/state recovery and hardware remain separate.
 
 ### Master automation and source-checked publication (2026-10-16)
