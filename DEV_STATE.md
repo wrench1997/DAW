@@ -5,7 +5,9 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
-真实SDK后台联合exact05已实际PASS/7.94s：普通catalog/default加载→无设备callback实际发声/停止→磁盘ManualSave→原App/3worker Join→新App磁盘Open/3ACK/实际opaque.625→Whole完整96768帧独立PCM。96帧单次crop、768固定尾音、3strict自然exit0/reap/max1及Effect实际Offline探针通过；fixture8/9、旧SDK3、初始化/Save/catalog10、strict Clippy/no-default/双bundle及builder11通过（31次Rust/23distinct）。首推3b79的preview文档闭环和quality旧near-MAX单测各失败：已修源码README链接，并只修测试ACK≠Ready前提，原5s内等待Waiting、Invalid仍FAIL，11例并行8/.74s及strict门本机通过；新云终态待验证。全部原始失败保留，详[联合流程记录](docs/WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16)。NOIRE暖态Save/真实程序重启及监听仍待验收；不占GUI/NI/声卡，不替换用户03。
+后台联合测试已由代码`bdf6901418f89fe5d0f4ac763a498c432156dacb`实际云验收：普通catalog/default加载→无设备callback实际发声/停止→磁盘ManualSave→原App/3worker Join→新App磁盘Open/3ACK/实际opaque.625→Whole完整96768帧独立PCM。quality38863519248与preview38863519233均首轮SUCCESS：2552 root/18ignored、fixture8/9、builder11、显式App SDK4及strict门通过；新联合SDK云12.64s通过，96帧单次crop/768固定尾音/3strict自然reap/Effect实际Offline保持。Windows真实session2 PrintWindow PASS，非SKIP；preview372Python=360PASS/12条件SKIP、staticCRT release7m53s/ZIP/提取helper通过，upload=false。
+
+首推3b79的文档闭环和旧near-MAX单测失败已窄修：精确源码链接保留发布白名单；测试只在原5s期限等待Waiting→Ready，Invalid仍失败，新增真实heldmetadata反例。原始四次联合失败、编译/lint与云失败均保留，详[完整流程实证](docs/WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16)。本轮是源码SDK/新App实例证据；NOIRE暖态Save、真实程序重启及监听仍待验收。不占GUI/NI/声卡，不替换用户03。
 
 已推`89ef2cb32a7b722c16c3672ef6f53a67305cf68f`：单源串行FX Whole已接入既有Master音量/声像/静音自动化，按最终PDC裁剪后的输出帧计时，尾音保持N−1值；其它自动化/路由边界不变。修复正常metadata查询误报源变化，以App在原最终CAS前核验完整源Ready，Waiting只等待，保留原取消/超时/Drop及发布合同。本机81定向/双尺寸实帧/严格构建通过；云quality38846965192及preview38846965091均首轮实际SUCCESS：2551 root/17ignored、Serial19/边界7、显式旧静态+新Master SDK、strictClippy/no-default/双bin通过；Linux新执行fixture6/host2，Windows真实session2 PrintWindow PASS。preview371Python=359PASS/12条件SKIP、staticCRT release8m41s/ZIP/提取helper通过，upload=false→仅上传SKIPPED。详[当前范围与完整实证](docs/WINDOWS_MELODY_WORKFLOW.md#master-automation-and-source-checked-publication-2026-10-16)。
 
@@ -178,7 +180,7 @@ Source76 只修测试隔离和失败诊断：两个 worker-identity 测试及 ca
 | --- | --- | --- |
 | 实时 Master 录音 | 录制实际播放经过的 Master 输出 | 已有 NOIRE Pure 录音及用户试听确认；不等于离线导出 |
 | 选中 MIDI 片段转音频 | Windows/Linux 实验 helper、状态捕获、无覆盖发布、取消和历史恢复 | NOIRE 实测仍被两次 opaque 捕获差异明确拒绝；原 MIDI 保留 |
-| 整曲离线 WAV | 普通内置音源；实验单VST；单Generator→唯一PostFader主路径→Master有序全wet FX及Master音量/声像/静音自动化 | 89ef代码quality/preview首轮双PASS；新磁盘Save/Open联合SDK本机完整PCM/严格门通过，新云门待验证；通用图PDC/真实NOIRE完整流程未验收 |
+| 整曲离线 WAV | 普通内置音源；实验单VST；单Generator→唯一PostFader主路径→Master有序全wet FX及Master音量/声像/静音自动化 | bdf代码quality/preview双PASS，新磁盘Save/Open联合SDK云端完整PCM通过；通用图PDC/真实NOIRE完整流程未验收 |
 
 普通构建不静默降级导出活动 VST 的错误声音；不支持的图和自动化明确拒绝。
 实验整曲路径要求 `experimental-fresh-helper`。已推b73仍要求单个活动VST、无Insert；本轮串行FX范围及拒绝条件见上文，不属于b73或03副本。

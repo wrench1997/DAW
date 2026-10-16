@@ -254,9 +254,10 @@ worker Join, then a fresh App's `Project::load`/`finish_open_project` and Whole
 export. Cold Open does not copy the old runtime registry, prepared chain or an
 explicit Instrument class override. It checks notes, placement, routing, Master
 automation, actual opaque restoration and acknowledged generic parameter replay.
-The joint exact first passed locally on attempt 05 in 7.94 s, actual exit 0; the
-earlier failed executions below remain failures. Local compatibility and strict
-gates passed. This candidate's cloud run is pending.
+The joint exact first passed locally on attempt 05 in 7.94 s, actual exit 0;
+code `bdf6901418f89fe5d0f4ac763a498c432156dacb` subsequently passed both cloud
+workflows, including the explicit joint SDK run in 12.64 s. Earlier failed
+executions remain recorded below.
 
 The source-built fixture's optional `instrument-first` feature makes its existing
 Instrument the default class in a separate `CitrusLookaheadMIDIFixture.vst3`
@@ -347,8 +348,8 @@ check passed. The first Root Clippy exit 101 on the new oracle's
 The valid PCM run was reused, not rerun for reassurance. Production matching
 bins/helper reuse their actual successful build because later edits affect only
 test code or the independent fixture. All owned native phases actually
-terminated/reaped without a resource guard firing. The candidate's new full-cloud
-qualification remains pending.
+terminated/reaped without a resource guard firing. Exact cloud qualification is
+recorded below.
 
 The existing 10-minute no-GUI quality step retains every old target/failure gate,
 adds both feature units and 11 fixture-builder cases on Windows/Linux, and
@@ -386,11 +387,43 @@ all sticky/MAX, legacy Save and Instrument assertions are unchanged. The affecte
 module actually passed all 11 cases with eight test threads in 0.74 s, including
 the original near-MAX case and the new held-metadata counterexample. Root strict
 Clippy, no-default and formatting also passed. All owned processes actually
-terminated/reaped. The existing SDK PCM evidence remains valid because this
-correction changes only test code; new cloud acceptance is pending. Both complete
+terminated/reaped. The existing local SDK PCM evidence remains valid because this
+correction changes only test code. Both complete
 original logs and terminal metadata are retained as
 `source127-*-actual-terminal-01.*`; the narrow repair is in
 `effect-admin-receipt-settlement-repair-01/` under the same evidence parent.
+
+**Cloud acceptance passed for `bdf6901418f89fe5d0f4ac763a498c432156dacb`.**
+[Quality38863519248](https://github.com/wrench1997/DAW/actions/runs/38863519248)
+completed SUCCESS on attempt 1, updated 2026-10-16T07:12:11Z. Windows
+job116851010093 passed 2552 root cases/18 ignored (App2487 + helper52 +6+5+2),
+including the original near-MAX assertion and new deterministic ACK≠Ready case.
+Strict Clippy, production bins and no-default passed. Fixture8/9, builder11,
+Effect/Instrument helper2 and all four explicit App SDK targets actually ran:
+private Effect source, static Whole, Master-automated Whole and the new joint
+Save/cold-Open/Whole. The joint target passed all 96,768 stereo frames in 12.64 s,
+with actual saved opaque acceptance/generic ACKs, original/cold source joins,
+three natural strict reaps and both actual Offline probes. The two retained
+Whole targets also preserved exact-f64 bases and their full 1280-frame oracles.
+
+The Windows runner had a usable visible Default/session2/WTSActive desktop.
+Real PrintWindow paint before/after, repaint, native interaction/state/lifecycle
+and Shutdown/EOF/crash cleanup all passed; this was not an environment SKIP.
+Linux job116851010395 newly passed async15/Effect29/Unix1, fixture8/9,
+builder11 and both real helper targets at this SHA.
+
+[Preview38863519233](https://github.com/wrench1997/DAW/actions/runs/38863519233),
+job116851010207, completed SUCCESS on attempt 1, updated 07:18:13Z. Document
+closure passed; Python ran 372 cases in 21.941 s: 360 passed and 12 skipped
+(four Unix-only and eight unavailable private Saved13 input cases).
+Root2552/18 ignored, strict Clippy/no-default and the MIDI/async/Effect
+gates passed. Static-CRT release took 7m53s; exact ZIP/PE/import/provenance and
+the extracted sanitized-PATH helper passed, including three JSON replies,
+invalid-command recovery, Shutdown with stdin open and natural exit0/reap.
+Upload was requested false, so only artifact upload was SKIPPED; user03 was not
+replaced. Full raw logs and actual API terminals are retained under
+`source128-*-actual-terminal-01.*` in the evidence parent. The original `3b79f14`
+failures remain separate; no assertion, timeout or release whitelist was relaxed.
 
 ### Master automation and source-checked publication (2026-10-16)
 

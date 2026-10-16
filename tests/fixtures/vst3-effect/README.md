@@ -192,7 +192,15 @@ Initial cloud preview failed a shipped guide's link to this unshipped README;
 the guide now links the exact source instead of adding fixtures to the package.
 Quality failed an old immediate receipt-current assertion; its original-deadline
 ACK→Ready test repair passed all 11 Effect cases locally with eight threads.
-New cloud acceptance is pending. The four original joint workflow failures and
+Code `bdf6901418f89fe5d0f4ac763a498c432156dacb` passed
+[quality38863519248](https://github.com/wrench1997/DAW/actions/runs/38863519248)
+and [preview38863519233](https://github.com/wrench1997/DAW/actions/runs/38863519233)
+on attempt 1. Both platforms ran fixture8/9, builder11 and real helper2;
+Windows explicitly passed all four App SDK targets, including this joint case
+in 12.64 s with the full 96,768-frame oracle. Root2552/18 ignored, strict gates
+and eligible real PrintWindow passed. Preview passed Python372/12 conditional
+skips, static-CRT/ZIP/extracted helper; upload was disabled.
+The four original joint workflow failures and
 queue/mode/one-bar/invalid-probe fixture repairs are retained in the
 [workflow record](../../../docs/WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16).
 
