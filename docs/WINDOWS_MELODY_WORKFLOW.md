@@ -347,21 +347,50 @@ check passed. The first Root Clippy exit 101 on the new oracle's
 The valid PCM run was reused, not rerun for reassurance. Production matching
 bins/helper reuse their actual successful build because later edits affect only
 test code or the independent fixture. All owned native phases actually
-terminated/reaped; Root fresh heavy=[] at 06:12:38Z, then returned resources to
-the peer. The candidate's new full-cloud qualification remains pending.
+terminated/reaped without a resource guard firing. The candidate's new full-cloud
+qualification remains pending.
 
 The existing 10-minute no-GUI quality step retains every old target/failure gate,
 adds both feature units and 11 fixture-builder cases on Windows/Linux, and
 explicitly executes the new ignored App exact on Windows. It stages the actual
 Cargo JSON-reported test artifact and matching helper as private siblings;
 ordinary helper lookup is unchanged. Missing inputs and real test failures fail
-CI. See [fixture commands](../tests/fixtures/vst3-effect/README.md#disk-save-and-cold-app-open-with-the-default-instrument).
+CI. See the [source-only fixture commands](https://github.com/wrench1997/DAW/blob/3b79f14250ef4900e7d50599d998003f00f91942/tests/fixtures/vst3-effect/README.md#disk-save-and-cold-app-open-with-the-default-instrument).
 Local full logs, frozen source and actual terminals are under
 `target/backend-reliability-20261014/melody-save-cold-open-source-candidate-01/`;
 Root integration record is `source127-first-flow-direction-01.json` in its parent.
 User test03 remains in use and unchanged; no main GUI, NI or audio device was
 operated for this slice. Native04's NOIRE warm Save cleanup failure, full NOIRE
 state recovery and hardware listening still require their own acceptance.
+
+The first cloud preview at `3b79f14` failed its document-closure check:
+`Broken package document link` pointed from this shipped guide to the unshipped
+fixture README. Python ran 372 cases: 359 passed, one error, 12 conditional skips;
+Rust/release/ZIP steps did not run. The guide now links the exact GitHub source
+instead of expanding the release whitelist. The existing document-closure
+regression passed locally: one test in 4.959 s. Linux's same-SHA fixture
+8/9, builder11 and real helper2 passed. Windows quality also failed, updated
+06:34:05Z: App 2485 passed/one failed/18 ignored in 526.68 s. The retained
+`effect_admin_ticket_exhaustion_is_sticky_without_blocking_legacy_admin_or_instrument_capture`
+failed its receipt-current assertion at `plugin_effect_capture_tests.rs:1043`.
+The Windows joint SDK, Clippy/build and PrintWindow steps did not run.
+Source inspection established a test-contract gap: capture result/termination ACK
+can precede release of the enclosing admin lease, and unchanged periodic metadata
+can temporarily make settlement Waiting. The captured cloud run did not log its
+actual settlement operands. The test-only repair waits only Waiting→Ready under
+the original capture's absolute five-second deadline; Invalid or expiry fails
+with actual operand diagnostics. A new real-worker held-metadata case requires
+ACK/current=false/Waiting, then Ready after actual release. Failed-path editor
+diagnostics use nonblocking `try_lock`. Production, Ready rules, ownership and
+all sticky/MAX, legacy Save and Instrument assertions are unchanged. The affected
+module actually passed all 11 cases with eight test threads in 0.74 s, including
+the original near-MAX case and the new held-metadata counterexample. Root strict
+Clippy, no-default and formatting also passed. All owned processes actually
+terminated/reaped. The existing SDK PCM evidence remains valid because this
+correction changes only test code; new cloud acceptance is pending. Both complete
+original logs and terminal metadata are retained as
+`source127-*-actual-terminal-01.*`; the narrow repair is in
+`effect-admin-receipt-settlement-repair-01/` under the same evidence parent.
 
 ### Master automation and source-checked publication (2026-10-16)
 

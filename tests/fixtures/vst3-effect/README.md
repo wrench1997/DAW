@@ -188,8 +188,12 @@ modes, both rebuilt bundles and joint App exact 05 passed. The App exact complet
 in 7.94 s with complete 96,768-frame PCM, source joins and three naturally reaped
 strict children; both Effects actually reported Offline 1005=1. Three retained SDK
 cases, initialization8/Save1/catalog1, Root strict Clippy/no-default and builder11 passed.
-This candidate's cloud run is pending. Its four original failed
-attempts and queue/mode/one-bar/invalid-probe fixture repairs are retained in the
+Initial cloud preview failed a shipped guide's link to this unshipped README;
+the guide now links the exact source instead of adding fixtures to the package.
+Quality failed an old immediate receipt-current assertion; its original-deadline
+ACK→Ready test repair passed all 11 Effect cases locally with eight threads.
+New cloud acceptance is pending. The four original joint workflow failures and
+queue/mode/one-bar/invalid-probe fixture repairs are retained in the
 [workflow record](../../../docs/WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16).
 
 ### Current Whole Master-automation consumer

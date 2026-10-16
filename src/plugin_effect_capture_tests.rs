@@ -577,6 +577,55 @@ fn receive(
     }
 }
 
+fn wait_for_effect_receipt_ready(
+    fixture: &Fixture,
+    receipt: &EffectChainStateReceipt,
+    deadline: Instant,
+) {
+    loop {
+        let control = &fixture.chain().control;
+        let settlement = control.effect_chain_receipt_settlement(receipt);
+        if settlement == BounceSourceSettlement::Ready && Instant::now() < deadline {
+            return;
+        }
+        // The capture ACK ends its backend calls, not the enclosing admin turn or a
+        // later metadata poll. Only their unchanged, still-owned work may be waited out.
+        let metrics = &control.metrics;
+        assert!(
+            settlement == BounceSourceSettlement::Waiting && Instant::now() < deadline,
+            "Effect receipt did not become Ready: settlement={settlement:?}; \
+             receipt tickets=(epoch={}, submitted={}, admin={}, resets={}); \
+             current epoch={}, admin={}, admin_exhausted={}, epoch_exhausted={}, resets={}, \
+             outstanding_admin={}, worker_valid={}, worker_terminated={}, \
+             publication_exhausted={}; endpoint={:?}; editors={:?}; bridge={:?}",
+            receipt.epoch,
+            receipt.submitted,
+            receipt.admin_revision,
+            receipt.epoch_resets,
+            metrics.requested_epoch.load(Ordering::Acquire),
+            metrics.effect_admin_revision.load(Ordering::Acquire),
+            metrics.effect_admin_exhausted.load(Ordering::Acquire),
+            metrics.effect_epoch_exhausted.load(Ordering::Acquire),
+            metrics.epoch_resets.load(Ordering::Acquire),
+            metrics.outstanding_admin_work.load(Ordering::Acquire),
+            metrics.worker_settlement.valid.load(Ordering::Acquire),
+            metrics.worker_settlement.terminated.load(Ordering::Acquire),
+            metrics
+                .worker_settlement
+                .publication
+                .exhausted
+                .load(Ordering::Acquire),
+            control.plugin_endpoint_snapshot(),
+            metrics
+                .native_editors
+                .try_lock()
+                .map(|editors| editors[..receipt.slots.len()].to_vec()),
+            fixture.chain().audio.genuine_snapshot(),
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn rejection(result: Result<EffectChainStateReceipt, BounceCaptureError>) -> String {
     match result {
         Err(BounceCaptureError::Rejected(message)) => message,
@@ -1030,6 +1079,55 @@ fn effect_epoch_ticket_exhaustion_is_sticky_without_blocking_legacy_epoch_or_ins
 }
 
 #[test]
+fn effect_capture_ack_does_not_replace_ready_settlement_during_unchanged_metadata() {
+    let fixture = Fixture::new(vec![SlotConfig::default()]);
+    let probe = &fixture.handle.probes[0];
+    fixture.handle.hold_slot(0);
+    let deadline = Instant::now() + WAIT;
+    let receiver = fixture.request_until(deadline);
+    fixture.handle.wait_entered(0);
+    // Capture/verify read state directly. Only the subsequent real metadata poll can
+    // consume this latency gate, after the capture's reply and termination ACK.
+    probe.metadata_held.store(true, Ordering::Release);
+    fixture.handle.release_slot(0);
+    let receipt = receive(&receiver).unwrap();
+    wait_until(|| probe.metadata_entered.load(Ordering::Acquire));
+
+    let control = &fixture.chain().control;
+    let metrics = &control.metrics;
+    assert!(receiver.termination_acknowledged());
+    assert!(!metrics.bounce_capture_busy.load(Ordering::Acquire));
+    assert!(!control.has_outstanding_admin_work());
+    assert_eq!(metrics.worker_settlement.busy.load(Ordering::Acquire), 1);
+    assert_eq!(
+        (
+            metrics.requested_epoch.load(Ordering::Acquire),
+            metrics.submitted.load(Ordering::Acquire),
+            metrics.effect_admin_revision.load(Ordering::Acquire),
+            metrics.epoch_resets.load(Ordering::Acquire),
+        ),
+        (
+            receipt.epoch,
+            receipt.submitted,
+            receipt.admin_revision,
+            receipt.epoch_resets,
+        )
+    );
+    assert_eq!(control.plugin_endpoint_snapshot(), Some(receipt.endpoint));
+    assert_eq!(
+        control.effect_chain_receipt_settlement(&receipt),
+        BounceSourceSettlement::Waiting
+    );
+    assert!(!control.effect_chain_receipt_current(&receipt));
+
+    probe.metadata_release.store(true, Ordering::Release);
+    wait_for_effect_receipt_ready(&fixture, &receipt, deadline);
+    assert_eq!(fixture.handle.capture_count(0), 1);
+    assert_eq!(probe.verifies.load(Ordering::Acquire), 1);
+    assert_eq!(control.stats().faults, 0);
+}
+
+#[test]
 fn effect_admin_ticket_exhaustion_is_sticky_without_blocking_legacy_admin_or_instrument_capture() {
     let fixture = Fixture::new(vec![SlotConfig::default()]);
     fixture
@@ -1038,14 +1136,11 @@ fn effect_admin_ticket_exhaustion_is_sticky_without_blocking_legacy_admin_or_ins
         .metrics
         .effect_admin_revision
         .store(u64::MAX - 2, Ordering::Release);
-    let receipt = receive(&fixture.request()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    let receiver = fixture.request_until(deadline);
+    let receipt = receive(&receiver).unwrap();
     assert_eq!(receipt.admin_revision, u64::MAX - 1);
-    assert!(
-        fixture
-            .chain()
-            .control
-            .effect_chain_receipt_current(&receipt)
-    );
+    wait_for_effect_receipt_ready(&fixture, &receipt, deadline);
     let saves = fixture.handle.probes[0].saves.load(Ordering::Acquire);
     assert!(fixture.chain().control.request_state(0));
     wait_until(|| {
