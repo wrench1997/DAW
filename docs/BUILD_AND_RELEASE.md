@@ -9,11 +9,11 @@
 
 前候选`689e0af`的quality38821625393/preview38821625349实际FAIL保留：Windows29 Effect、2496 root/15ignored及preview369Python=357PASS/12条件SKIP后，新增`fetch_update`在Root Clippy报deprecated；Windows源SDK/PrintWindow及preview release/ZIP未执行。b73 checked weak-CAS修补保留旧工具链和原AcqRel/Acquire，实际quality已通过，未放宽失败门。
 
-本轮Whole集成候选实现单Generator→唯一PostFader主路径→Master有序全wet FX；inactive/bypass跳过DSP，unsupported路径/active FX自动化/partial wet明确拒绝。strict raw保留finite超满幅；Whole端点PCM按实时语义clamp[-8,8]（含全inactive/bypassed端点），再依序控件及一次Master tanh。本机原31普通/150兼容复用有效证据，SDK02/严格Clippy02/no-default02/双bin通过；历史失败完整记录在[串行Whole范围与实证](WINDOWS_MELODY_WORKFLOW.md#serial-whole-fx-static-single-source-path-2026-10-16)。
+已验收代码`b9f27091fbf5dd91e70ee318dcd897434fb5f6cf`实现单Generator→唯一PostFader主路径→Master有序全wet FX；unsupported路由/active FX自动化/partial wet拒绝。strict raw保留finite超满幅，端点PCM按实时语义clamp[-8,8]（含全inactive/bypassed端点），再顺序控件及一次Master tanh。完整范围与失败历史见[串行Whole实证](WINDOWS_MELODY_WORKFLOW.md#serial-whole-fx-static-single-source-path-2026-10-16)。
 
-Windows云`8d8e94d`发生join观察失败；其后`eae18b7`的quality38832663475/preview38832663364因两处不存在的control.clone报E0599，8项新App及旧observer测试、后续Clippy/build/SDK/no-default/PrintWindow未运行，release/ZIP未到达。Linux夹具6/真实host2通过，不能代替Windows App验收。
+quality38834734658 attempt2和preview38834734476现已实际SUCCESS：2529 root/16ignored、Serial8、严格Clippy/no-default/双bin、fixture6+真实host2、Windows显式source/Whole SDK及真实session2 PrintWindow通过。preview static-CRT release8m53s、ZIP/PE/import/provenance、提取后helper协议/Shutdown自然reap通过；upload=false→SKIPPED，无新用户副本。Linux沿用同SHA原成功执行，不称attempt2重跑。
 
-最新修补采用已有`PluginControlIdentity`/`owner_identity`，仅test cfg只读方法与夹具接线变化，生产/全局observer/vendor/CI不变。本机App8+旧identity2共10项通过，严格all-feature/all-target Clippy及no-default all-target exit0、无App warning；四阶段实际终态/reap且guard=false。新exact cloud全suite/preview仍待推送验收，未重跑完整suite/SDK/生产bin。原断言/预算/sticky与8d raw literal未知边界保留；详上述工作流和target内`cloudeae18b7-compile-repair-01/cpu-handback.json`。03不替换，用户作品、主GUI、声卡与NI不操作；通用FX/PDC/自然尾音及完整NOIRE流程仍未完成。
+quality首轮factory32PASS/1FAIL的3s空phase超时仍保留；只单次同SHA重跑失败Windows job，无源码修改，不据此认定调度原因或故障已修。8d/eae云失败、本机10项修补验证及完整门禁记录集中在上述工作流和target内source121–123。验收身份固定为b9代码SHA，后续doc-only提交不需要循环改写其CI编号。03不替换、用户作品/声卡/NI不操作；通用FX/PDC/自然尾音与完整NOIRE流程仍未完成。
 
 目标系统：Windows 10/11 x64  
 目标三元组：x86_64-pc-windows-gnullvm
@@ -46,7 +46,7 @@ Windows云`8d8e94d`发生join观察失败；其后`eae18b7`的quality38832663475
 
 `.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build、独立的 helper harness 回归 / 实际 helper 协议 smoke 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；含 helper 自动 smoke 的运行已在 Rust/Cargo 1.99.0、Python 3.12.10 上全部通过。后续源码候选分别在相同门禁验证，确切提交/结果见 GitHub Actions 和 WORK_LOG。开发 smoke 不替代下述历史固定 gnullvm 发布流程、Release helper smoke、干净 Windows 实机验收与打包校验。
 
-Effect质量步骤只使用仓库源码构建的无GUI夹具和匹配生产helper，保留10分钟外层超时。b73的Win/Linux非f32 helper及Windows显式App私有source SDK已实际通过。本轮接线在同一步新增Windows Whole SDK exact和两平台32-FIFO Instrument host exact，6项CI合同通过；8d/eae Linux真实Instrument host已执行通过，Windows显式App source/Whole SDK均因前序失败未到达；最新identity修补本机定向通过，新exact cloud仍待验收。它不加载Kontakt/NOIRE、不占声卡、不将测试DLL放入发布白名单，也不替代真实插件/设备验收；preview继续执行Effect回归、代码检查、构建和打包，不把SDK步骤搬成发布内容。
+Effect质量步骤只使用仓库源码构建的无GUI夹具和匹配生产helper，保留10分钟外层超时。b73的Win/Linux非f32 helper及Windows显式App私有source SDK已实际通过。本轮接线在同一步新增Windows Whole SDK exact和两平台32-FIFO Instrument host exact，6项CI合同通过；b9的真实Effect/Instrument host与Windows显式App source/Whole SDK均已实际通过quality；此前8d/eae未到达门禁的记录保留。它不加载Kontakt/NOIRE、不占声卡、不将测试DLL放入发布白名单，也不替代真实插件/设备验收；preview继续执行Effect回归、代码检查、构建和打包，不把SDK步骤搬成发布内容。
 
 独立的 [MSVC developer preview](WINDOWS_PREVIEW.md) 打包 Release 与配套 Cargo metadata 明确使用 `--no-default-features --features vst2,vst3`，其根 feature 清单必须与构建记录完全一致。preview 的测试/Clippy 及普通开发 CI 继续覆盖 all-features；下文历史 gnullvm 契约不因此改写。Linux 实验性 selected-clip 验收不构成 Windows 插件 runtime、GUI 或设备支持声明。
 

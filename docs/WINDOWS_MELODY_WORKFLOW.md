@@ -120,13 +120,13 @@ cleanup failure and the new onset difference remain open. Details follow below.
 | --- | --- | --- |
 | Real-time Master recording | Records the Master audio produced during live playback | Pure was heard and captured locally; not an offline export |
 | Selected MIDI occurrence to audio | Experimental Linux/Windows strict clone, capture validation, native publication and history fences | Actual recapture mismatch refuses replacement; original MIDI is retained |
-| Whole-song offline WAV | Built-in sources; published b73 experimental single-VST arrangement/Master automation; current integration candidate adds ordered fully-wet FX on one PostFader path | Native05/06/07 ordinary GUI cold-open→10.5s PCM24 WAV completed; Native07 uses new event semantics and still has a first-note offset. Warm-path cleanup, listening and full state/automation remain open; earlier short/405-note evidence is separate, and new serial fixtures are not NOIRE listening |
+| Whole-song offline WAV | Built-in sources; published b73 experimental single-VST arrangement/Master automation; accepted b9 code adds ordered fully-wet FX on one PostFader path | Native05/06/07 ordinary GUI cold-open→10.5s PCM24 WAV completed; Native07 uses new event semantics and still has a first-note offset. Warm-path cleanup, listening and full state/automation remain open; earlier short/405-note evidence is separate, and new serial fixtures are not NOIRE listening |
 
 These paths must retain their own receipts and must not be substituted for each other.
 The ordinary build explicitly refuses unsupported active-VST offline export.
 Experimental VST whole export requires `experimental-fresh-helper` on Linux or Windows.
-Published b73 admits one active VST source without Insert slots. The integration
-candidate additionally processes one static serial FX path under the restrictions below;
+Published b73 admits one active VST source without Insert slots. Accepted b9
+additionally processes one static serial FX path under the restrictions below;
 additional sources, unsupported automation/graphs are rejected rather than omitted.
 Original no-FX Master volume/pan/mute automation is retained; active automation on the
 new FX path is refused. A fixed tail window requires explicit review; unknown/infinite
@@ -247,7 +247,8 @@ Whole integration candidate and new Instrument fixture.
 
 ### Serial Whole FX: static single-source path (2026-10-16)
 
-The new consumer admits one Generator with a unique PostFader main serial path
+Accepted code `b9f27091fbf5dd91e70ee318dcd897434fb5f6cf` admits one Generator
+with a unique PostFader main serial path
 through Master and its ordered FX. Active FX must be fully wet; inactive/bypassed
 slots skip DSP. Branches, sends, sidechains, off-path FX, additional sources,
 active automation on the FX path and partial wet are rejected early. The original
@@ -391,22 +392,60 @@ collector counterexample; unchanged old identity2 passed in 0.26s. Root strict
 all-feature/all-target Clippy and no-default all-target checks both exited0; the
 latter had no App warning. All four phases reached actual exit0/held-handle reap,
 guard=false. Root's 01:18:07Z fresh heavy-process inventory was empty and resources
-were actually handed back to the peer. No new full-suite, SDK, production-bin,
-GUI/device/NI execution was performed for this latest repair.
+were actually handed back to the peer. Those four local phases did not execute
+the full suite, SDK, production bins or GUI/device/NI checks; cloud coverage follows.
 
-New exact-cloud full-suite/preview acceptance remains pending.
-Earlier source-only UNRUN status belongs to the rejected eae proposal, not the
-now locally tested identity repair. Earlier local 31/150, SDK02/build and b73
-quality/preview remain valid for their own inputs; they do not override either
-failed cloud SHA or qualify the latest candidate globally. Records under
-`target/backend-reliability-20261014/`: source121/122 quality acceptance and preview
-terminal/full raw logs; first proposal in
-`whole-serial-effects-source-candidate-01/cloud8d8e94d-repair-01/repair.json`;
-authoritative current actual results in
-`whole-serial-effects-source-candidate-01/cloudeae18b7-compile-repair-01/cpu-handback.json`.
-Earlier local evidence remains in `whole-serial-effects-source-candidate-01/`
-(source-ready/review, App/Whole SDK logs, `cpu-handback-02.json`/`cpu-handback-03.json`)
-and `serial-lookahead-instrument-fixture-01/HANDOFF.json`.
+**Cloud acceptance is now complete for code `b9f27091fbf5dd91e70ee318dcd897434fb5f6cf`.**
+[Quality38834734658](https://github.com/wrench1997/DAW/actions/runs/38834734658)
+attempt 2 actually completed SUCCESS, updated 2026-10-16T01:55:07Z, Windows
+job 116764894163. It passed 2529 root tests/16 ignored = App2464 + helper52 +6+5+2.
+All eight Serial cases passed, including healthy Cancel, AppDrop and the foreign
+collector regression; old identity2 and `genuine_app_observer` 258 also passed.
+Root strict all-feature/all-target Clippy, production bins and no-default checks
+passed, as did fixture6 and both real host targets.
+
+Windows explicitly executed private App source1 and Whole SDK1 after their ordinary
+suite ignores, with both `REAL_PRIVATE_EFFECT_CAPTURE_PASS` and
+`REAL_SERIAL_WHOLE_SDK_PASS` receipts. The source case confirmed exact non-f32 gain,
+source DSP0, original guard joined and natural strict reap; the Whole oracle confirmed
+three original guards joined, three natural strict exits/reaps, latency96/tail352,
+raw1408→retained1280 and one crop/tanh. These are real selected SDK executions,
+not inferred from an ignored test listing.
+
+PrintWindow/native checks actually passed, not SKIPPED: Default input/thread
+desktops, visible station and usable session2; paint before/after, repaint,
+interaction, state round-trip and cleanup passed with `EDITOR ACCEPTANCE OK`.
+Linux's fixture6/real host2 plus async15/Effect29/Unix1 were carried from the original
+same-SHA 01:22–01:24 successful execution (current API job 116764895810). Linux was
+not rerun when the failed Windows job was retried.
+
+The first quality attempt remains a real failure: Windows job 116761199271 reported
+factory 32 passed/1 failed at `factory_and_default_load_share_one_attempt_seal_in_both_directions`.
+ProbeFactory exceeded its original 3s budget, exchange3.0117158s with empty phase
+trace, Deadline/MayHaveApplied; kill/reap completed. Root changed no source and
+made exactly one same-SHA failed-Windows-job rerun. The original timeout/full raw
+log remains; the later success establishes neither a scheduling cause nor that an
+intermittent defect is fixed. No deadline, assertion or CI failure rule was weakened.
+
+[Preview38834734476](https://github.com/wrench1997/DAW/actions/runs/38834734476),
+job 116761198689, actually completed SUCCESS, updated 2026-10-16T01:50:57Z. Python 371
+= 359 passed/12 conditional skips in 23.380s; root 2529/16 ignored (App2464 in 509.70s,
+including Serial8), offline MIDI4/async15/Effect29, strict Clippy and no-default
+passed. Static-CRT release completed in 8m53s; ZIP/PE/import/provenance and the
+extracted sanitized-PATH helper passed: three JSON replies, invalid-command
+recovery, Shutdown with stdin open, exit0 and natural reap. Upload requested false
+made the upload step SKIPPED. No new user binary copy was delivered.
+
+Earlier 8d/eae failures, 8d's missing original failure literal, the local 10-pass
+identity repair and earlier 31/150/SDK evidence retain their exact inputs and limits.
+Records under `target/backend-reliability-20261014/`: source121/122 failure reports
+and full raw logs; `source123-preview-actual-terminal-01.json`/full raw,
+`source123-quality-attempt2-*` API/raw records and
+`source123-factory-single-rerun-decision-01.json` preserve the final acceptance and
+first-attempt failure. The original proposal and local repair evidence remain in
+`whole-serial-effects-source-candidate-01/cloud8d8e94d-repair-01/repair.json` and
+`cloudeae18b7-compile-repair-01/cpu-handback.json` beneath that candidate directory;
+older local App/SDK/CPU receipts and the Instrument fixture handoff are retained.
 General routing/FX automation/PDC, complete natural tails and real NOIRE cold
 restore/export/listening remain required. The user is still testing03; this work
 has not operated the main GUI, soundcard or NI and has not replaced that copy.

@@ -131,11 +131,25 @@ Read-only probes never send dirty callbacks or modify persisted state:
 
 This is focused backend evidence. The static serial Whole consumer separately
 passed its real-Generator/two-Effect PCM/latency oracle and final local code gates.
-Its Windows full-suite cloud run failed as recorded below. General FX graphs,
+Its final Windows cloud suite and real serial SDK target passed at b9 below.
+General FX graphs,
 automation, arbitrary tails and real NOIRE acceptance remain separate from these
 fixture results.
 
 ## Verification status
+
+Code candidate `b9f27091fbf5dd91e70ee318dcd897434fb5f6cf` passed
+quality38834734658 attempt2 and preview38834734476. Windows passed2529 root
+cases/16 ignored, all8 serial App cases, strict Clippy/build/no-default, fixture6
+and both explicit host targets. The private source and real Whole SDK targets
+also ran explicitly and passed; usable Default/session2 PrintWindow actually
+passed. Linux fixture6/host2 success is the same-SHA original execution, not a
+new attempt2 execution. Preview passed static-CRT release8m53s, ZIP/PE/import
+audits and the extracted helper protocol/natural-reap smoke; upload was disabled.
+The first quality attempt's unchanged factory mock hit its3s deadline and stays
+recorded as FAIL; one same-SHA failed-job rerun passed without changing the
+timeout or assertions. Its precise startup cause remains unproven. Full actual
+receipts/logs are under `target/backend-reliability-20261014/source123-*`.
 
 The current Whole fixture candidate passed all6 local Windows unit
 tests, strict all-target fixture Clippy, the release bundle and matching production
@@ -161,7 +175,7 @@ reads the same real guard-return witness through cfg(test) helpers. Production,
 global collector limits, old weak identity witnesses and failure rules are
 unchanged. All8 Serial App cases (including the new scoped foreign-collector
 failure case) passed locally in2.01s; old identity2 passed in0.26s, and strict
-root Clippy/no-default checks exited0. A new exact cloud run is still required.
+root Clippy/no-default checks exited0. That corrected API is the version accepted at b9 above.
 Evidence: `whole-serial-effects-source-candidate-01/cloudeae18b7-compile-repair-01/`
 under the same target directory.
 At `b73b57a`, quality38824285643 actually passed: both platforms ran29 Effect
