@@ -7034,6 +7034,7 @@ impl CitrusApp {
             );
         }
         self.plugin_initializations.clear();
+        self.retain_clip_source_before_engine_loss();
         self.running_insert_chains.clear();
         self.pending_insert_chains.clear();
         self.pending_insert_removals.clear();
@@ -9003,8 +9004,9 @@ impl CitrusApp {
                                 },
                                 ParameterEditCancelReason::EndpointReplaced,
                             );
-                            let RunningInsertChain { guard, .. } = old;
-                            drop(guard);
+                            if let Err(old) = self.retain_whole_song_insert_on_engine_loss(old) {
+                                drop(old.guard);
+                            }
                         }
                         let PendingInsertChain {
                             project_session,
@@ -9094,7 +9096,9 @@ impl CitrusApp {
                                 },
                                 ParameterEditCancelReason::EndpointReplaced,
                             );
-                            drop(old.guard);
+                            if let Err(old) = self.retain_whole_song_insert_on_engine_loss(old) {
+                                drop(old.guard);
+                            }
                         }
                         if !plugin_runtime_session_is_current(
                             pending.project_session,
@@ -9124,6 +9128,7 @@ impl CitrusApp {
                             ParameterEditCancelReason::EndpointReplaced,
                         );
                     }
+                    self.retain_clip_source_before_engine_loss();
                     self.running_insert_chains.clear();
                     self.pending_insert_chains.clear();
                     self.pending_insert_removals.clear();

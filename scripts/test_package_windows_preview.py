@@ -1393,6 +1393,41 @@ class PreviewBuildContractTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", sdk)
 
 
+    def test_real_lookahead_instrument_gate_keeps_both_platforms_and_failure_rules(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        windows, linux = workflow.split("\n  linux-helper-readiness:", 1)
+        command = (
+            "cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/host-check/Cargo.toml "
+            "--target-dir target --test real_effect "
+            "real_sdk_instrument_midi_has_actual_q128_lookahead_tail_and_natural_reap "
+            "-- --ignored --exact --nocapture"
+        )
+        for platform in (windows, linux):
+            sdk = platform.split("      - name: Verify real no-GUI stereo Effect", 1)[1].split("\n      - name:", 1)[0]
+            self.assertIn("timeout-minutes: 10", sdk)
+            self.assertIn(command, sdk)
+            self.assertNotIn("continue-on-error", sdk)
+        self.assertIn(command + "\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", windows)
+        self.assertIn("set -euo pipefail", linux)
+
+
+    def test_whole_serial_sdk_target_keeps_real_inputs_and_original_outer_limit(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        windows = workflow.split("\n  linux-helper-readiness:", 1)[0]
+        sdk = windows.split("      - name: Verify real no-GUI stereo Effect", 1)[1].split("\n      - name:", 1)[0]
+        command = (
+            "cargo test --locked --all-features --jobs 1 --bin citrus-studio "
+            "plugins::plugin_runtime::whole_serial_sdk_tests::"
+            "actual_sdk_serial_generator_two_effects_preserves_raw_latency_tail_and_natural_reap "
+            "-- --ignored --exact --nocapture --test-threads=1"
+        )
+        self.assertIn("timeout-minutes: 10", sdk)
+        self.assertIn("$env:CITRUS_EFFECT_FIXTURE = (Resolve-Path tests/fixtures/vst3-effect/target/bundles/CitrusStereoDelayFixture.vst3).Path", sdk)
+        self.assertIn("$env:CITRUS_EFFECT_HELPER = (Resolve-Path target/debug/vst3-host-helper.exe).Path", sdk)
+        self.assertIn(command + "\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", sdk)
+        self.assertNotIn("continue-on-error", sdk)
+
+
 class ProvenanceConstantsTests(unittest.TestCase):
     def test_reviewed_provenance_constants_are_pinned(self):
         self.assertEqual(pkg.VENDOR_ARCHIVE_SHA256, "6ec579d54bd13b83c60c1fd8bb756cf234e36ccbfb4833ff756b417e64db7fea")

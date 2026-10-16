@@ -2,10 +2,17 @@
 //! The shared stopped-capture actor owns real callback/worker provenance. This
 //! job owns the frozen master request and the only final file-publication CAS.
 //! Normal completion never removes/reloads a source or changes Project/history.
+use super::stopped_bounce_capture::{
+    CapturedStoppedEffectChain, StoppedEffectChainCapture, StoppedEffectSourceLease,
+};
 use super::*;
 use super::{
     generator_loaded_identity::LoadedGeneratorIdentity,
     stopped_bounce_capture::{LiveBinding, StoppedBounceCapture},
+};
+use crate::instrument_bounce::{CapturedInstrumentBounce, effect::EffectCapturePollError};
+use crate::plugins::plugin_runtime::{
+    BounceSourceSettlement, PluginControlIdentity, StoppedSourceWorkTicket,
 };
 use crate::{
     export_job::ExportControl,
@@ -96,6 +103,7 @@ fn write_whole_render_failure_diagnostic(
 enum WholeExportPhase {
     Stopping,
     Capturing,
+    CapturingEffects,
     RenderingDisposing,
     JoiningLostSource,
     Complete,
@@ -107,6 +115,7 @@ impl WholeExportPhase {
         match self {
             Self::Stopping => "Stopping",
             Self::Capturing => "Capturing",
+            Self::CapturingEffects => "CapturingEffects",
             Self::RenderingDisposing => "RenderingDisposing",
             Self::JoiningLostSource => "JoiningLostSource",
             Self::Complete => "Complete",
@@ -121,6 +130,7 @@ impl WholeExportPhase {
         match self {
             Self::Stopping => "Stopping and draining source",
             Self::Capturing => "Capturing stopped instrument",
+            Self::CapturingEffects => "Capturing ordered stopped Effects",
             Self::RenderingDisposing => "Rendering full master / disposing clone",
             Self::JoiningLostSource => "Waiting for lost source worker shutdown",
             Self::Complete => "Whole-song master exported; playback paused",
@@ -177,9 +187,12 @@ impl WholeExportCancellation {
 /// drop a private capture receiver or source guard and call that termination.
 struct WholeShutdownOwners {
     capture: Option<(InstrumentBounceCapture, BounceSourceIdentity)>,
+    effect_capture: Option<StoppedEffectChainCapture>,
+    effect_capture_failure: Option<EffectCapturePollError>,
     render: Option<MasterSongRenderReceipt>,
     admission: RenderAdmission,
     source: Option<RunningGeneratorChain>,
+    inserts: Vec<RunningInsertChain>,
     // An identity invariant failure retains the original actor indefinitely;
     // it never guesses a binding or releases a still-pending private receipt.
     unresolved_actor: Option<StoppedBounceCapture>,
@@ -194,18 +207,24 @@ impl Drop for WholeSongExportJob {
         );
         let mut actor = std::mem::replace(&mut self.actor, empty_actor);
         let capture = actor.take_cancelled_capture_for_shutdown();
+        let effect_capture = actor.take_cancelled_effect_capture_for_shutdown();
         let unresolved_actor = actor.owns_pending_capture().then_some(actor);
         let owners = WholeShutdownOwners {
             capture,
+            effect_capture,
+            effect_capture_failure: self.effect_capture_failure.take(),
             render: self.render.take(),
             admission: self.admission.clone(),
             source: self.retired_source.take(),
+            inserts: std::mem::take(&mut self.retired_inserts),
             unresolved_actor,
         };
         if owners.capture.is_none()
+            && owners.effect_capture.is_none()
             && owners.render.is_none()
             && !owners.admission.is_busy()
             && owners.source.is_none()
+            && owners.inserts.is_empty()
             && owners.unresolved_actor.is_none()
         {
             return;
@@ -229,6 +248,13 @@ impl Drop for WholeSongExportJob {
                     return;
                 };
                 loop {
+                    if let Some(capture) = &mut owners.effect_capture {
+                        let result = capture.poll_cancelled();
+                        if let Err(failure) = &result { owners.effect_capture_failure.get_or_insert_with(|| failure.clone()); }
+                        if capture.termination_acknowledged() && !matches!(result, Ok(false)) {
+                            owners.effect_capture = None;
+                        }
+                    }
                     if let Some((capture, identity)) = &mut owners.capture {
                         // Already cancelled. Default status denies readiness and
                         // is used only to consume the original terminal ACK.
@@ -253,6 +279,7 @@ impl Drop for WholeSongExportJob {
                         }
                     }
                     if owners.capture.is_none()
+                        && owners.effect_capture.is_none()
                         && owners.render.is_none()
                         && !owners.admission.is_busy()
                     {
@@ -265,7 +292,28 @@ impl Drop for WholeSongExportJob {
                             owners.source = None;
                         }
                         if owners.source.is_none() {
-                            return;
+                            owners.inserts.retain_mut(|source| {
+                                matches!(
+                                    source.guard.poll_shutdown_retained(),
+                                    RetainedShutdownPoll::Pending
+                                )
+                            });
+                            if owners.inserts.is_empty() {
+                                if let Some(failure) = &owners.effect_capture_failure
+                                    && std::env::var_os("CITRUS_STUDIO_PLUGIN_DIAGNOSTICS").is_some_and(|value| value == "1") {
+                                    use std::io::Write as _;
+                                    let kind = match failure {
+                                        EffectCapturePollError::Cancelled => "cancelled",
+                                        EffectCapturePollError::Deadline => "deadline",
+                                        EffectCapturePollError::Stale(_) => "stale",
+                                        EffectCapturePollError::Invalid(_) => "invalid",
+                                        EffectCapturePollError::Backend(_) => "backend",
+                                        EffectCapturePollError::Disconnected => "disconnected",
+                                    };
+                                    let _ = writeln!(std::io::stderr().lock(), "WHOLE_EXPORT_DROP_EFFECT_CAPTURE_TERMINATED kind={kind} all_retired_sources_joined=true");
+                                }
+                                return;
+                            }
                         }
                     }
                     std::thread::sleep(Duration::from_millis(10));
@@ -288,6 +336,23 @@ pub(super) struct WholeSongExportReview {
     loaded_identity: Option<LoadedGeneratorIdentity>,
     options: WavExportOptions,
     reviewed_fixed_tail: bool,
+    inserts: Vec<WholeInsertSourceBinding>,
+}
+
+struct WholeInsertSourceBinding {
+    track: usize,
+    session: u64,
+    endpoint_id: u64,
+    instance_ids: Vec<u64>,
+    owner: PluginControlIdentity,
+}
+impl WholeInsertSourceBinding {
+    fn matches(&self, source: &RunningInsertChain) -> bool {
+        source.project_session == self.session
+            && source.endpoint_id == self.endpoint_id
+            && source.instance_ids == self.instance_ids
+            && self.owner.matches(&source.control)
+    }
 }
 
 /// Retained for this App run independently of the transient notification and
@@ -363,10 +428,41 @@ pub(super) struct WholeSongExportJob {
     outcome: Option<MasterSongRenderOutcome>,
     publication_unknown: bool,
     retired_source: Option<RunningGeneratorChain>,
+    retired_inserts: Vec<RunningInsertChain>,
+    insert_sources: Vec<WholeInsertSourceBinding>,
+    captured_generator: Option<CapturedInstrumentBounce>,
+    captured_effects: Vec<CapturedStoppedEffectChain>,
+    effect_leases: Vec<StoppedEffectSourceLease>,
+    generator_ticket: Option<StoppedSourceWorkTicket>,
+    effect_capture_failure: Option<EffectCapturePollError>,
+    render_deadline: Option<Instant>,
     result_announced: bool,
     #[cfg(test)]
     render_starter: Option<TestWholeRenderStarter>,
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    serial_render_starter: Option<TestSerialWholeRenderStarter>,
 }
+#[cfg(all(
+    test,
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+type TestSerialWholeRenderStarter = Box<
+    dyn FnOnce(
+        &RenderAdmission,
+        Project,
+        CapturedInstrumentBounce,
+        Vec<crate::instrument_bounce::render::serial::CapturedSerialEffectChain>,
+        WavExportOptions,
+        PathBuf,
+        RenderControl,
+        bool,
+    ) -> Result<MasterSongRenderReceipt, String>,
+>;
 #[cfg(test)]
 type TestWholeRenderStarter = Box<
     dyn FnOnce(
@@ -386,6 +482,7 @@ impl WholeSongExportJob {
             || self.render.is_some()
             || self.admission.is_busy()
             || self.retired_source.is_some()
+            || !self.retired_inserts.is_empty()
     }
     pub(super) fn owns_source(&self, source: &RunningGeneratorChain) -> bool {
         let stamp = self.actor.binding.unwrap_or(self.actor.initial).stamp;
@@ -393,6 +490,13 @@ impl WholeSongExportJob {
             && source.project_session == stamp.project_session
             && source.endpoint_id == stamp.endpoint_id
             && source.instance_id == stamp.instance_id
+    }
+    pub(super) fn owns_insert_source(&self, source: &RunningInsertChain) -> bool {
+        self.pending()
+            && self
+                .insert_sources
+                .iter()
+                .any(|binding| binding.matches(source))
     }
     pub(super) fn observe_stop_activation_queued(
         &mut self,
@@ -475,7 +579,7 @@ impl WholeSongExportJob {
         if self.actor.owns_pending_capture() || self.render.is_some() || self.admission.is_busy() {
             return;
         }
-        if self.retired_source.is_some() {
+        if self.retired_source.is_some() || !self.retired_inserts.is_empty() {
             self.phase = WholeExportPhase::JoiningLostSource;
             return;
         }
@@ -487,6 +591,11 @@ impl WholeSongExportJob {
             WholeExportPhase::Failed
         };
         self.frozen_project = None;
+        self.captured_generator = None;
+        self.captured_effects.clear();
+        self.effect_leases.clear();
+        self.insert_sources.clear();
+        self.generator_ticket = None;
     }
 }
 
@@ -515,9 +624,6 @@ fn pure_master_plan_with_loaded_identity(
         return Err(format!(
             "Whole-song VST export requires the current source rate {initial_rate} Hz"
         ));
-    }
-    if !project.mixer_insert_slots.is_empty() {
-        return Err("Whole-song VST export supports no mixer insert slots, including disabled or bypassed slots".into());
     }
     let master = project
         .mixer_tracks
@@ -563,7 +669,11 @@ fn pure_master_plan_with_loaded_identity(
     }
     let frames = u32::try_from(options.tail_frames().map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
-    InstrumentBouncePlan::prepare_master_song(project, channel_id, initial_rate, frames)
+    if project.mixer_insert_slots.is_empty() {
+        InstrumentBouncePlan::prepare_master_song(project, channel_id, initial_rate, frames)
+    } else {
+        InstrumentBouncePlan::prepare_master_song_serial(project, channel_id, initial_rate, frames)
+    }
 }
 
 fn recheck_loaded_identity(
@@ -707,6 +817,38 @@ impl CitrusApp {
         if plan.instance_id() != initial.stamp.instance_id {
             return Err("The exact source instance binding changed".into());
         }
+        let mut inserts = Vec::new();
+        if plan.is_serial_master() {
+            let serial = crate::export::serial_master::StaticSerialMasterPlan::prepare(
+                &self.project,
+                channel_id,
+            )
+            .map_err(|e| e.to_string())?;
+            for node in serial.nodes.iter().filter(|n| !n.placements.is_empty()) {
+                let source = self
+                    .running_insert_chains
+                    .get(&node.runtime_track)
+                    .ok_or("Wait for the actual Insert endpoint to load")?;
+                if source.project_session != self.project_session
+                    || source
+                        .instance_ids
+                        .iter()
+                        .copied()
+                        .ne(node.placements.iter().map(|p| p.plugin_instance_id))
+                {
+                    return Err(
+                        "The actual ordered Insert source differs from the reviewed graph".into(),
+                    );
+                }
+                inserts.push(WholeInsertSourceBinding {
+                    track: node.runtime_track,
+                    session: source.project_session,
+                    endpoint_id: source.endpoint_id,
+                    instance_ids: source.instance_ids.clone(),
+                    owner: source.control.owner_identity(),
+                });
+            }
+        }
         Ok(WholeSongExportReview {
             project: self.project.clone(),
             snapshot,
@@ -714,6 +856,7 @@ impl CitrusApp {
             loaded_identity,
             options,
             reviewed_fixed_tail,
+            inserts,
         })
     }
     pub(super) fn begin_whole_song_export(
@@ -733,7 +876,15 @@ impl CitrusApp {
         let mut actor = StoppedBounceCapture::new(review.snapshot, review.initial, Instant::now());
         actor.begin_stop(self, |app| {
             Self::whole_song_export_operation_admission(app)?;
-            recheck_loaded_identity(app, loaded_identity.as_ref())
+            recheck_loaded_identity(app, loaded_identity.as_ref())?;
+            if review.inserts.iter().any(|binding| {
+                app.running_insert_chains
+                    .get(&binding.track)
+                    .is_none_or(|source| !binding.matches(source))
+            }) {
+                return Err("A reviewed Insert source changed before Stop".into());
+            }
+            Ok(())
         })?;
         self.whole_song_export_job = Some(WholeSongExportJob {
             actor,
@@ -761,9 +912,23 @@ impl CitrusApp {
             outcome: None,
             publication_unknown: false,
             retired_source: None,
+            retired_inserts: Vec::new(),
+            insert_sources: review.inserts,
+            captured_generator: None,
+            captured_effects: Vec::new(),
+            effect_leases: Vec::new(),
+            generator_ticket: None,
+            effect_capture_failure: None,
+            render_deadline: None,
             result_announced: false,
             #[cfg(test)]
             render_starter: None,
+            #[cfg(all(
+                test,
+                any(target_os = "linux", windows),
+                feature = "experimental-fresh-helper"
+            ))]
+            serial_render_starter: None,
         });
         Ok(())
     }
@@ -812,6 +977,26 @@ impl CitrusApp {
         }
         job.retired_source = Some(source);
         job.fail("Audio/session loss retained the exact source worker until capture, clone disposal and source join terminate");
+        Ok(())
+    }
+    #[allow(clippy::result_large_err)]
+    pub(super) fn retain_whole_song_insert_on_engine_loss(
+        &mut self,
+        source: RunningInsertChain,
+    ) -> Result<(), RunningInsertChain> {
+        let Some(job) = self.whole_song_export_job.as_mut() else {
+            return Err(source);
+        };
+        if !job.owns_insert_source(&source)
+            || job
+                .retired_inserts
+                .iter()
+                .any(|s| s.endpoint_id == source.endpoint_id)
+        {
+            return Err(source);
+        }
+        job.retired_inserts.push(source);
+        job.fail("Audio/session loss retained every participating Insert source until capture, clone cleanup and actual source join");
         Ok(())
     }
     pub(super) fn drive_whole_song_export(&mut self) {
@@ -886,6 +1071,48 @@ impl CitrusApp {
         {
             job.fail(reason);
         }
+        if job.failure.is_none()
+            && job.insert_sources.iter().any(|binding| {
+                self.running_insert_chains
+                    .get(&binding.track)
+                    .is_none_or(|source| !binding.matches(source))
+            })
+        {
+            job.fail("The reviewed actual Insert endpoint changed during Whole export");
+        }
+        if job.failure.is_none()
+            && matches!(
+                job.phase,
+                WholeExportPhase::CapturingEffects | WholeExportPhase::RenderingDisposing
+            )
+        {
+            let recheck = (|| {
+                if let Some(ticket) = job.generator_ticket {
+                    let source = self
+                        .running_generator_chains
+                        .get(&job.actor.initial.stamp.channel_id)
+                        .ok_or("Captured Generator disappeared")?;
+                    if source.control.stopped_source_work_settlement(ticket)
+                        != BounceSourceSettlement::Ready
+                    {
+                        return Err(
+                            "Captured Generator worker history changed during serial Whole"
+                                .to_owned(),
+                        );
+                    }
+                }
+                for captured in &job.captured_effects {
+                    captured.recheck(self, false)?;
+                }
+                for lease in &job.effect_leases {
+                    lease.recheck(self)?;
+                }
+                Ok::<_, String>(())
+            })();
+            if let Err(reason) = recheck {
+                job.fail(reason);
+            }
+        }
         match job.phase {
             WholeExportPhase::Stopping => {
                 // No private capture/render owner exists yet. An accepted
@@ -936,6 +1163,23 @@ impl CitrusApp {
                                 ),
                             }?;
                             job.actor.stop_intent_current(self)?;
+                            if plan.is_serial_master() {
+                                let source = self
+                                    .running_generator_chains
+                                    .get(&binding.stamp.channel_id)
+                                    .ok_or("Stopped Generator source is absent")?;
+                                job.generator_ticket = Some(
+                                    source
+                                        .control
+                                        .stopped_source_work_ticket(binding.stamp.epoch)
+                                        .and_then(
+                                            StoppedSourceWorkTicket::following_private_capture,
+                                        )
+                                        .ok_or(
+                                            "Wait for exact stopped Generator worker settlement",
+                                        )?,
+                                );
+                            }
                             job.actor.begin_capture(self, plan)
                         })();
                         match prepare {
@@ -985,6 +1229,12 @@ impl CitrusApp {
                         job.finish();
                         return;
                     }
+                    if captured.plan().is_serial_master() {
+                        job.render_deadline = Some(Instant::now() + RENDER_BUDGET);
+                        job.captured_generator = Some(captured);
+                        job.phase = WholeExportPhase::CapturingEffects;
+                        return;
+                    }
                     let project = job
                         .frozen_project
                         .take()
@@ -1006,6 +1256,114 @@ impl CitrusApp {
                     }
                 }
             },
+            WholeExportPhase::CapturingEffects => {
+                if job.actor.owns_pending_capture() {
+                    match job.actor.poll_effect_chain_capture(self) {
+                        Ok(None) => {
+                            if job
+                                .render_deadline
+                                .is_none_or(|deadline| Instant::now() >= deadline)
+                            {
+                                job.fail("Serial Whole original render deadline elapsed during pending source capture");
+                            }
+                            return;
+                        }
+                        Ok(Some(captured)) => {
+                            if captured.project_fingerprint
+                                != super::stopped_bounce_capture::project_snapshot_fingerprint(
+                                    &job.actor.snapshot,
+                                )
+                            {
+                                job.fail("Captured Effect belongs to another frozen project");
+                            } else {
+                                job.captured_effects.push(captured);
+                            }
+                        }
+                        Err(reason) => {
+                            if matches!(
+                                reason,
+                                EffectCapturePollError::Backend(_)
+                                    | EffectCapturePollError::Invalid(_)
+                            ) || job.failure.is_none()
+                                && (reason != EffectCapturePollError::Cancelled
+                                    || !job.cancel_requested)
+                            {
+                                job.failure = Some(reason.to_string());
+                            }
+                            job.effect_capture_failure = Some(reason);
+                        }
+                    }
+                }
+                if job.cancel_requested || job.failure.is_some() {
+                    job.finish();
+                    return;
+                }
+                if job
+                    .render_deadline
+                    .is_none_or(|deadline| Instant::now() >= deadline)
+                {
+                    job.fail("Serial Whole original render deadline elapsed during source capture");
+                    job.finish();
+                    return;
+                }
+                let recheck = job
+                    .captured_effects
+                    .iter()
+                    .try_fold(true, |ready, capture| {
+                        capture.recheck(self, true).map(|current| ready && current)
+                    });
+                match recheck {
+                    Err(reason) => {
+                        job.fail(reason);
+                        job.finish();
+                        return;
+                    }
+                    Ok(false) => return,
+                    Ok(true) => {}
+                }
+                if self
+                    .audio
+                    .as_ref()
+                    .and_then(AudioEngine::prepared_playback_token)
+                    .is_none()
+                {
+                    return;
+                }
+                if job.captured_effects.len() < job.insert_sources.len() {
+                    let track = job.insert_sources[job.captured_effects.len()].track;
+                    if let Err(reason) = job.actor.begin_effect_chain_capture_before(
+                        self,
+                        track,
+                        job.render_deadline.expect("One original render deadline"),
+                    ) {
+                        job.fail(reason);
+                        job.finish();
+                    }
+                    return;
+                }
+                let captured = job
+                    .captured_generator
+                    .take()
+                    .expect("Generator receipt retained before Effects");
+                let project = job
+                    .frozen_project
+                    .take()
+                    .expect("Original project retained before serial render");
+                let control = RenderControl {
+                    export: job.export.clone(),
+                    deadline: job.render_deadline.expect("One original deadline"),
+                };
+                match start_whole_song_renderer(job, project, captured, control) {
+                    Ok(receipt) => {
+                        job.render = Some(receipt);
+                        job.phase = WholeExportPhase::RenderingDisposing;
+                    }
+                    Err(reason) => {
+                        job.fail(reason);
+                        job.finish();
+                    }
+                }
+            }
             WholeExportPhase::RenderingDisposing => {
                 let Some(receipt) = &job.render else {
                     if job.admission.is_busy() {
@@ -1053,19 +1411,28 @@ impl CitrusApp {
                 job.finish();
             }
             WholeExportPhase::JoiningLostSource => {
-                let Some(source) = job.retired_source.as_mut() else {
-                    job.finish();
-                    return;
-                };
-                match source.guard.poll_shutdown_retained() {
-                    RetainedShutdownPoll::Pending => return,
-                    RetainedShutdownPoll::WorkerPanicked => {
-                        job.failure =
-                            Some("Exact source worker joined after a shutdown panic".into())
+                if let Some(source) = job.retired_source.as_mut() {
+                    match source.guard.poll_shutdown_retained() {
+                        RetainedShutdownPoll::Pending => return,
+                        RetainedShutdownPoll::WorkerPanicked => {
+                            job.failure =
+                                Some("Exact source worker joined after a shutdown panic".into())
+                        }
+                        RetainedShutdownPoll::Joined => {}
                     }
-                    RetainedShutdownPoll::Joined => {}
+                    job.retired_source = None;
                 }
-                job.retired_source = None;
+                job.retired_inserts.retain_mut(|source| {
+                    match source.guard.poll_shutdown_retained() {
+                        RetainedShutdownPoll::Pending => true,
+                        RetainedShutdownPoll::WorkerPanicked => {
+                            job.failure =
+                                Some("Exact Insert worker joined after a shutdown panic".into());
+                            false
+                        }
+                        RetainedShutdownPoll::Joined => false,
+                    }
+                });
                 job.finish();
             }
             _ => job.finish(),
@@ -1152,6 +1519,42 @@ fn start_whole_song_renderer(
     captured: crate::instrument_bounce::CapturedInstrumentBounce,
     control: RenderControl,
 ) -> Result<MasterSongRenderReceipt, String> {
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    if captured.plan().is_serial_master() {
+        let chains = std::mem::take(&mut job.captured_effects)
+            .into_iter()
+            .map(|captured| {
+                let (lease, chain) = captured.split_for_render();
+                job.effect_leases.push(lease);
+                chain
+            })
+            .collect();
+        #[cfg(test)]
+        if let Some(starter) = job.serial_render_starter.take() {
+            return starter(
+                &job.admission,
+                project,
+                captured,
+                chains,
+                job.options,
+                job.path.clone(),
+                control,
+                job.reviewed_fixed_tail,
+            );
+        }
+        return job.admission.start_master_song_serial(
+            project,
+            captured,
+            chains,
+            job.options,
+            job.path.clone(),
+            control,
+            job.reviewed_fixed_tail,
+        );
+    }
     #[cfg(test)]
     if let Some(starter) = job.render_starter.take() {
         return starter(
@@ -1212,7 +1615,7 @@ impl WholeSongExportJob {
         self.capture_failure.as_ref()
     }
     pub(in crate::app) fn genuine_whole_production_factory_selected(&self) -> bool {
-        self.render_starter.is_none()
+        self.render_starter.is_none() && self.serial_render_starter.is_none()
     }
     pub(in crate::app) fn genuine_whole_phase(&self) -> &'static str {
         self.phase.name()
@@ -1224,6 +1627,7 @@ impl WholeSongExportJob {
             && self.render.is_none()
             && !self.admission.is_busy()
             && self.retired_source.is_none()
+            && self.retired_inserts.is_empty()
     }
     pub(in crate::app) fn genuine_whole_path(&self) -> &std::path::Path {
         &self.path

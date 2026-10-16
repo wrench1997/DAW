@@ -213,6 +213,23 @@ impl CitrusApp {
         }
     }
     pub(super) fn retain_clip_source_before_engine_loss(&mut self) {
+        let insert_tracks: Vec<_> = self
+            .running_insert_chains
+            .iter()
+            .filter_map(|(&track, source)| {
+                self.whole_song_export_job
+                    .as_ref()
+                    .is_some_and(|job| job.owns_insert_source(source))
+                    .then_some(track)
+            })
+            .collect();
+        for track in insert_tracks {
+            if let Some(source) = self.running_insert_chains.remove(&track)
+                && let Err(source) = self.retain_whole_song_insert_on_engine_loss(source)
+            {
+                self.running_insert_chains.insert(track, source);
+            }
+        }
         // Transfer before any generic map clear. The job owns this exact guard
         // until a finished-only join, including an unknown queued-removal result.
         let channel = self

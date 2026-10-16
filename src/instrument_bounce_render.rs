@@ -1,7 +1,7 @@
 //! Experimental renderer-owned backend seam with a closed, typed contract.
 //! Dry, occurrence and single-source master paths share checked backend disposal.
-//! The App master Stop/capture controller and NI qualification of the whole-song
-//! master path are not yet integrated or validated.
+//! Instrument and occurrence crops stay separate from Whole's raw serial path.
+//! Every disposable stage retains typed cleanup and the caller's original budget.
 use super::{
     BOUNCE_QUANTUM, BouncePluginMetadata, BounceSourceIdentity, CapturedInstrumentBounce,
     MAX_BOUNCE_FRAMES,
@@ -29,6 +29,9 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+#[path = "whole_serial_render.rs"]
+pub(crate) mod serial;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FailureKind {
@@ -891,7 +894,26 @@ fn render_and_dispose<B: RenderBackend>(
     progress: &JobProgress,
     fixture_owner: impl FnOnce() -> B,
 ) -> Result<Vec<StereoFrame>, RenderFailure> {
-    let mut backend = match catch_unwind(AssertUnwindSafe(fixture_owner)) {
+    run_with_disposal(
+        control,
+        progress,
+        fixture_owner,
+        |backend| render_audio(capture, prepared, backend, control),
+        |backend, deadline| backend.dispose(deadline),
+    )
+}
+
+/// One actual owner survives work, failure, cancellation and every pending cleanup poll.
+/// A later stage cannot start until this returns after concrete termination and destruction.
+fn run_with_disposal<B, T>(
+    control: &RenderControl,
+    progress: &JobProgress,
+    factory: impl FnOnce() -> B,
+    work: impl FnOnce(&mut B) -> Result<T, RenderFailure>,
+    mut dispose: impl FnMut(&mut B, Instant) -> DisposalObservation,
+) -> Result<T, RenderFailure> {
+    progress.set(RenderStatus::Running);
+    let mut backend = match catch_unwind(AssertUnwindSafe(factory)) {
         Ok(backend) => backend,
         Err(_) => {
             return Err(RenderFailure::new(
@@ -901,10 +923,7 @@ fn render_and_dispose<B: RenderBackend>(
         }
     };
     // Backend stays outside the unwind scope so every rendering panic still enters disposal.
-    let rendered = catch_unwind(AssertUnwindSafe(|| {
-        render_audio(capture, prepared, &mut backend, control)
-    }))
-    .unwrap_or_else(|_| {
+    let rendered = catch_unwind(AssertUnwindSafe(|| work(&mut backend))).unwrap_or_else(|_| {
         Err(RenderFailure::new(
             FailureKind::Panic,
             "Instrument render panicked",
@@ -923,7 +942,8 @@ fn render_and_dispose<B: RenderBackend>(
     let cleanup_deadline = Instant::now() + Duration::from_secs(5);
     progress.set(RenderStatus::Disposing);
     loop {
-        let observation = catch_unwind(AssertUnwindSafe(|| backend.dispose(cleanup_deadline)));
+        let observation =
+            catch_unwind(AssertUnwindSafe(|| dispose(&mut backend, cleanup_deadline)));
         let terminated = match observation {
             Ok(observation) => {
                 if let Some(error) = observation.error {
@@ -1065,10 +1085,28 @@ fn render_audio<B: RenderBackend>(
     backend: &mut B,
     control: &RenderControl,
 ) -> Result<Vec<StereoFrame>, RenderFailure> {
+    render_audio_interval(
+        capture,
+        prepared,
+        backend,
+        control,
+        u64::from(prepared.metadata.latency_samples),
+        prepared.retained_frames,
+    )
+}
+
+fn render_audio_interval<B: RenderBackend>(
+    capture: &CapturedInstrumentBounce,
+    prepared: &PreparedRender,
+    backend: &mut B,
+    control: &RenderControl,
+    keep_start: u64,
+    retained_frames: usize,
+) -> Result<Vec<StereoFrame>, RenderFailure> {
     let invalid = |s: &str| RenderFailure::new(FailureKind::Invalid, s);
     let mut audio = Vec::new();
     audio
-        .try_reserve_exact(prepared.retained_frames)
+        .try_reserve_exact(retained_frames)
         .map_err(|e| invalid(&format!("Audio allocation failed: {e}")))?;
     control.call_checked(
         || backend.prepare(capture, control),
@@ -1080,8 +1118,10 @@ fn render_audio<B: RenderBackend>(
         },
     )?;
     let mut next = 0;
-    let keep_start = u64::from(prepared.metadata.latency_samples);
-    let keep_end = keep_start + prepared.retained_frames as u64;
+    let keep_end = keep_start
+        .checked_add(retained_frames as u64)
+        .filter(|end| *end <= prepared.generated_frames)
+        .ok_or_else(|| invalid("Retained interval exceeds the generated stream"))?;
     for start in (0..prepared.generated_frames).step_by(BOUNCE_QUANTUM) {
         control.call_checked(
             || backend.metadata(),
@@ -1164,7 +1204,7 @@ fn render_audio<B: RenderBackend>(
             }
         }
     }
-    if next != prepared.midi.len() || audio.len() != prepared.retained_frames {
+    if next != prepared.midi.len() || audio.len() != retained_frames {
         return Err(invalid(
             "Render did not consume its complete schedule/output interval",
         ));
@@ -1181,9 +1221,9 @@ mod tests;
 #[path = "export_vst_master_tests.rs"]
 mod master_song_tests;
 
-/// Dry source evidence and final master evidence intentionally remain distinct:
-/// native latency is trimmed once by the strict renderer; mixer/master controls
-/// and the requested encoding/level policy are applied before one publication.
+/// The retained pre-Master stage report and final encoded Master remain distinct.
+/// The legacy `dry_render` field is generator-only on the no-FX path; serial Whole
+/// reports all stages and their once-trimmed total DSP latency in that same field.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MasterSongRenderReport {
     pub dry_render: RenderReport,

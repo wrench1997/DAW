@@ -202,3 +202,110 @@ fn real_sdk_effect_pcm_state_transport_delay_tail_and_natural_reap() {
         Ok(())
     }).unwrap();
 }
+
+#[test]
+#[ignore = "requires explicit source-built fixture and matching production helper; no GUI/device or installed fallback"]
+fn real_sdk_instrument_midi_has_actual_q128_lookahead_tail_and_natural_reap() {
+    use citrus_vst3_effect_fixture::{INSTRUMENT_CATEGORY, INSTRUMENT_CLASS_ID, INSTRUMENT_NAME};
+    use vst3_host::{MidiChannel, MidiEvent};
+    let fixture =
+        PathBuf::from(std::env::var_os("CITRUS_EFFECT_FIXTURE").expect("explicit fixture"))
+            .canonicalize()
+            .unwrap();
+    let expected = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("target/bundles/CitrusStereoDelayFixture.vst3")
+        .canonicalize()
+        .unwrap();
+    assert_eq!(
+        fixture, expected,
+        "only the repository source-built bundle is admitted"
+    );
+    let helper =
+        PathBuf::from(std::env::var_os("CITRUS_EFFECT_HELPER").expect("explicit matching helper"))
+            .canonicalize()
+            .unwrap();
+    assert!(helper.is_file());
+    let saved = {
+        let mut host = Vst3Host::builder()
+            .sample_rate(48_000.0)
+            .block_size(2048)
+            .tempo(120.0)
+            .time_signature(4, 4)
+            .with_process_isolation(false)
+            .build()
+            .unwrap();
+        let mut source = host
+            .load_main_thread_plugin_class(&fixture, INSTRUMENT_CLASS_ID)
+            .unwrap();
+        assert_eq!(source.info().uid, INSTRUMENT_CLASS_ID);
+        assert_eq!(source.info().name, INSTRUMENT_NAME);
+        assert_eq!(source.info().category, INSTRUMENT_CATEGORY);
+        source.set_process_mode(ProcessMode::Offline).unwrap();
+        assert_eq!(source.get_parameter(0).unwrap(), 0.5);
+        assert_eq!(source.get_parameter(1000).unwrap(), 0.0);
+        source.save_state().unwrap()
+    };
+    assert_eq!(saved.len(), 40);
+    with_child(&helper,|client,deadline| {
+        let loaded = client.load_plugin(LoadSpec { path:fixture.to_str().unwrap(),sample_rate:48_000.0,
+            tempo:120.0,time_sig_numerator:4,time_sig_denominator:4,class_id:INSTRUMENT_CLASS_ID },deadline)
+            .map_err(|e|format!("Instrument Load: {e:?}"))?;
+        if loaded.uid != INSTRUMENT_CLASS_ID || loaded.name != INSTRUMENT_NAME
+            || loaded.category != INSTRUMENT_CATEGORY || !loaded.has_midi_input
+            || loaded.has_midi_output || loaded.has_gui || loaded.audio_inputs != 0
+        { return Err(format!("wrong actual Instrument class: {loaded:?}")); }
+        client.set_offline(deadline).map_err(|e|format!("Offline: {e:?}"))?;
+        client.load_state(&saved,deadline).map_err(|e|format!("opaque restore: {e:?}"))?;
+        if client.parameter(0,deadline).map_err(|e|format!("gain: {e:?}"))? != 0.5
+            || client.latency_samples(deadline).map_err(|e|format!("latency: {e:?}"))? != 32
+            || client.tail_samples(deadline).map_err(|e|format!("tail: {e:?}"))? != 32
+        { return Err("actual gain/latency/tail differs".into()); }
+        let audio = client.checked_audio_layout(deadline).map_err(|e|format!("audio: {e:?}"))?;
+        let events = client.event_layout(deadline).map_err(|e|format!("events: {e:?}"))?;
+        if !audio.inputs.is_empty() || audio.outputs.len() != 1
+            || events.inputs.len() != 1 || !events.outputs.is_empty()
+            || events.inputs[0].channel_count != 16 || !events.inputs[0].is_main
+        { return Err(format!("actual layouts differ: {audio:?}/{events:?}")); }
+        client.select_main_stereo_output(&audio,deadline).map_err(|e|format!("select: {e:?}"))?;
+        client.start_processing(deadline).map_err(|e|format!("Start: {e:?}"))?;
+        for block in 0..3 {
+            let changes: &[(i32,bool)] = match block {
+                0 => &[(0,true),(1,false),(127,true)],
+                1 => &[(1,false)], _ => &[],
+            };
+            for &(offset,on) in changes {
+                let event = if on { MidiEvent::NoteOn {channel:MidiChannel::Ch1,note:63,velocity:127} }
+                    else { MidiEvent::NoteOff {channel:MidiChannel::Ch1,note:63,velocity:0} };
+                client.send_note(event,offset,deadline).map_err(|e|format!("MIDI: {e:?}"))?;
+            }
+            let start = block * 128;
+            let transport = ProcessTransport { sample_position:start as i64,
+                quarter_note_position:start as f64 / 24_000.0,tempo:120.0,playing:false,
+                time_sig_numerator:4,time_sig_denominator:4 };
+            let audio = client.process_silent_generator(0,2,transport,deadline)
+                .map_err(|e|format!("actual MIDI DSP: {e:?}"))?;
+            if !audio.transport_applied || audio.output_event_count != 0 || audio.output_events_lost
+                || audio.outputs.len() != 2 || audio.outputs.iter().any(|c|c.len()!=128)
+            { return Err(format!("actual block refused: {audio:?}")); }
+            for (channel, samples) in audio.outputs.iter().enumerate() {
+                for (offset,&actual) in samples.iter().enumerate() {
+                    let raw = start + offset;
+                    let expected = if matches!(raw,32|159|160) {
+                        if channel==0 {0.25} else {-0.125}
+                    } else {0.0};
+                    if actual != expected {return Err(format!("channel{channel} rawframe{raw}: {actual} != {expected}"));}
+                }
+            }
+        }
+        if client.parameter(1000,deadline).map_err(|e|format!("count: {e:?}"))? != 3.0 / 65_536.0
+            || client.parameter(1001,deadline).map_err(|e|format!("position: {e:?}"))? != 256.0/16_777_216.0
+            || client.parameter(1005,deadline).map_err(|e|format!("mode: {e:?}"))? != 1.0
+            || client.parameter(1006,deadline).map_err(|e|format!("clear: {e:?}"))? != 1.0
+        {return Err("actual DSP probes differ".into());}
+        client.stop_processing(deadline).map_err(|e|format!("Stop: {e:?}"))?;
+        eprintln!("REAL_SDK_LOOKAHEAD_INSTRUMENT_PASS class={INSTRUMENT_CLASS_ID}; state_bytes=40; latency=32; tail=32; actual_nonzero_frames=32,159,160; exact_stereo_samples=768; calls=3; natural_cleanup_required=true");
+        Ok(())
+    }).unwrap();
+}

@@ -720,6 +720,20 @@ impl Fixture {
         any(target_os = "linux", windows),
         feature = "experimental-fresh-helper"
     ))]
+    pub(in crate::app) fn whole_exact_worker_join_count_for_test(&self, ids: &[usize]) -> usize {
+        WHOLE_DROP_OBSERVATION.with(|slot| {
+            slot.borrow().as_ref().expect("Actual observation owner retained").observer.with_snapshot(|snapshot| {
+                assert!(snapshot.failure.is_none(), "Actual join observation was incomplete");
+                snapshot.records.iter().filter(|record| matches!(record.kind,
+                    crate::genuine_app_observer::RecordKind::WorkerJoin { worker_id, outcome: crate::genuine_app_observer::WorkerJoinOutcome::Joined }
+                    if ids.contains(&worker_id))).count()
+            })
+        })
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
     pub(in crate::app) fn whole_drop_resources_retained_for_test(&self) -> bool {
         self.app.0.is_none()
             && self.callback.is_none()

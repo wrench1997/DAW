@@ -28,6 +28,10 @@ use vst3_host::{
     strict_offline::{self, CleanupState, Client, LoadedPlugin},
 };
 
+#[path = "whole_effect_strict_backend.rs"]
+mod effect;
+pub(crate) use effect::StrictEffectBackend;
+
 /// Closed deterministic owner-stage actions for mock qualification only.
 #[cfg(test)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -162,6 +166,47 @@ impl StrictBackend {
                 "Instrument clone job deadline elapsed",
             ));
         }
+        Ok(())
+    }
+    /// Same retained child/cancellation owner for either role; role admission remains separate.
+    fn spawn_owned_client(
+        &mut self,
+        helper: &std::path::Path,
+        control: &RenderControl,
+    ) -> Result<(), BackendFailure> {
+        Self::checkpoint(control)?;
+        let mut command = Command::new(helper);
+        #[cfg(all(test, windows))]
+        if self.python_mock {
+            command = Command::new(
+                std::env::var_os("CITRUS_STRICT_TEST_PYTHON").unwrap_or_else(|| "python".into()),
+            );
+            command.arg("-u").arg(helper);
+        }
+        match Client::spawn(&mut command, control.deadline) {
+            Ok(client) => {
+                #[cfg(test)]
+                {
+                    self.successful_client_spawns += 1;
+                }
+                self.client = Some(client);
+            }
+            Err(failure) => {
+                self.client = failure.cleanup.map(|client| *client);
+                self.terminal_exchange = true;
+                return Err(
+                    BackendFailure::from(failure.failure).with_strict_context("prepare.spawn")
+                );
+            }
+        }
+        #[cfg(test)]
+        self.test_stage(TestAction::CancelAfterSpawn);
+        let cancel = self
+            .client
+            .as_ref()
+            .expect("stored spawned client")
+            .cancellation();
+        self.registration = Some(control.export.register_strict_cancel(cancel));
         Ok(())
     }
     /// The canonical export CAS can win before its cancelling thread reaches
@@ -657,42 +702,7 @@ impl RenderBackend for StrictBackend {
                 .ok_or_else(|| Self::admission("Strict clone plugin path is not UTF-8"))?;
             let tempo = capture.plan().timeline().plugin_transport_tempo();
             Self::checkpoint(control)?;
-            let mut command = Command::new(helper);
-            #[cfg(all(test, windows))]
-            if self.python_mock {
-                // The actual direct child is Python, never a cmd/shebang wrapper.
-                // This test-only override cannot be selected in a shipped App.
-                command = Command::new(
-                    std::env::var_os("CITRUS_STRICT_TEST_PYTHON")
-                        .unwrap_or_else(|| "python".into()),
-                );
-                command.arg("-u").arg(helper);
-            }
-            match Client::spawn(&mut command, control.deadline) {
-                Ok(client) => {
-                    #[cfg(test)]
-                    {
-                        self.successful_client_spawns += 1;
-                    }
-                    self.client = Some(client);
-                }
-                Err(failure) => {
-                    // Retain a post-spawn setup-failed owner BEFORE any error conversion.
-                    self.client = failure.cleanup.map(|client| *client);
-                    self.terminal_exchange = true;
-                    return Err(
-                        BackendFailure::from(failure.failure).with_strict_context("prepare.spawn")
-                    );
-                }
-            }
-            #[cfg(test)]
-            self.test_stage(TestAction::CancelAfterSpawn);
-            let cancel = self
-                .client
-                .as_ref()
-                .expect("stored spawned client")
-                .cancellation();
-            self.registration = Some(control.export.register_strict_cancel(cancel));
+            self.spawn_owned_client(helper, control)?;
             // Registration rereads sticky cancellation; the client budget rejects
             // before LoadPlugin if cancellation/spawn consumed the original budget.
             let sample_rate = f64::from(self.sample_rate);

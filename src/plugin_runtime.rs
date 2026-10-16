@@ -34,9 +34,9 @@ use crate::instrument_bounce::effect::{
 use crate::instrument_bounce::{BounceCaptureError, BouncePluginState, BounceStateReceipt};
 
 #[path = "plugin_effect_capture.rs"]
-#[allow(dead_code)] // Private stopped-source foundation; no Whole FX admission yet.
+#[allow(dead_code)] // Private source capture is distinct from the bounded Whole consumer.
 mod effect_capture;
-pub(crate) use effect_capture::EffectChainStateReceiver;
+pub(crate) use effect_capture::{EffectChainStateReceiver, StoppedSourceWorkTicket};
 
 #[cfg(feature = "vst3")]
 use super::installed_vst3_helper_path;
@@ -77,6 +77,9 @@ pub(crate) mod effect_capture_tests;
 #[cfg(all(test, feature = "vst3"))]
 #[path = "plugin_effect_capture_sdk_tests.rs"]
 mod effect_capture_sdk_tests;
+#[cfg(all(test, feature = "vst3"))]
+#[path = "whole_serial_sdk_tests.rs"]
+mod whole_serial_sdk_tests;
 
 #[cfg(test)]
 #[path = "plugin_capture_settlement_tests.rs"]

@@ -2,6 +2,30 @@
 use super::*;
 use crate::instrument_bounce::effect::CapturedEffectSlot;
 
+/// Read-only stopped worker history for the serial Whole source lease. It does
+/// not change admission or receipt rules for existing Instrument callers.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StoppedSourceWorkTicket {
+    epoch: u64,
+    submitted: u64,
+    admin_revision: u64,
+    epoch_resets: u64,
+}
+impl StoppedSourceWorkTicket {
+    pub(crate) fn from_effect_receipt(receipt: &EffectChainStateReceipt) -> Self {
+        Self {
+            epoch: receipt.epoch,
+            submitted: receipt.submitted,
+            admin_revision: receipt.admin_revision,
+            epoch_resets: receipt.epoch_resets,
+        }
+    }
+    pub(crate) fn following_private_capture(mut self) -> Option<Self> {
+        self.admin_revision = self.admin_revision.checked_add(1)?;
+        Some(self)
+    }
+}
+
 pub(crate) struct EffectChainStateReceiver {
     receiver: Receiver<Result<EffectChainStateReceipt, BounceCaptureError>>,
     fence: Arc<BounceCaptureFence>,
@@ -29,6 +53,40 @@ impl Drop for EffectChainStateReceiver {
 }
 
 impl PluginChainControl {
+    pub(crate) fn stopped_source_work_ticket(&self, epoch: u64) -> Option<StoppedSourceWorkTicket> {
+        let ticket = StoppedSourceWorkTicket {
+            epoch,
+            submitted: self.metrics.submitted.load(Ordering::Acquire),
+            admin_revision: self.metrics.effect_admin_revision.load(Ordering::Acquire),
+            epoch_resets: self.metrics.epoch_resets.load(Ordering::Acquire),
+        };
+        (self.stopped_source_work_settlement(ticket) == BounceSourceSettlement::Ready)
+            .then_some(ticket)
+    }
+
+    pub(crate) fn stopped_source_work_settlement(
+        &self,
+        ticket: StoppedSourceWorkTicket,
+    ) -> BounceSourceSettlement {
+        if !effect_tickets_unchanged(
+            &self.metrics,
+            ticket.epoch,
+            ticket.submitted,
+            ticket.admin_revision,
+            ticket.epoch_resets,
+            &self.parameter_edit_admission,
+        ) {
+            return BounceSourceSettlement::Invalid;
+        }
+        if self.has_outstanding_admin_work()
+            || self.metrics.bounce_capture_busy.load(Ordering::Acquire)
+            || self.metrics.worker_settlement.busy.load(Ordering::Acquire) != 0
+        {
+            return BounceSourceSettlement::Waiting;
+        }
+        BounceSourceSettlement::Ready
+    }
+
     pub(crate) fn request_effect_chain_state(
         &self,
         expected_epoch: u64,

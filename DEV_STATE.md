@@ -15,13 +15,13 @@ Follow长度源码`b2e56dc`本机验收通过：新Draw/Paint默认Follow真实P
 
 后台`0c4872c`已补既有strict helper的真实双声道Q128 Effect输入：独立Fx身份/完整bus与event、私有admission、实际latency/tail/async/native revision复核，修改状态/参数/配置即失效，同一child保留到实际reap。独立审查发现通用reload可清角色绑定，已修成sticky并补真实子进程反例/旧入口正例。云quality38813369205实际SUCCESS：Win/Linux各27项Effect回归及真实SDK4+生产helper1均通过；1280样本/35探针、延迟32/末tap160/自然reap一致；根2481PASS/14ignored、严格Clippy/双bin及session2真实PrintWindow通过。preview38813369197实际SUCCESS：368Python=356PASS/12条件SKIP、27 Effect、同2481 root、静态CRT release8m18s/ZIP/提取helper通过，无上传。额外本机vendor全test-target严格Clippy仍为75条既有glue lint失败101，日志保留；未用根Clippy通过抹去它。
 
-当前源码候选已实现停止后的指定endpoint整条Effect链私有捕获：保留实际源backend、链顺序/slot及enabled/bypass/wet，取得真实身份、完整bus/event、opaque状态、目录、f64参数及DSP latency/tail。实际Stop/Timeline与worker settlement、callback epoch和admin fence共同约束捕获；审查发现的E→E+1→E重置ABA已用不可清除的`epoch_resets`历史ticket修复，溢出只拒绝新Effect捕获，不改变旧Instrument/epoch入口。
+已推送`b73b57a`的停止后Effect整链私有捕获与exact-f64恢复已通过云quality38824285643（2026-10-15T23:54:32Z实际SUCCESS）：2497 root/15ignored、真实near-MAX worker、Win/Linux各29 Effect与非f32 SDK4+helper1、Windows显式私有source SDK1、Root严格Clippy/双bin/no-default及session2真实PrintWindow全部通过。私有捕获绑定实际callback/epoch/admin fence，包含不可清除的`epoch_resets` ABA防护和Effect-only sticky溢出；旧Instrument/Save入口保留。源Gain0.12345678912345678精确恢复，源DSP0、原guard实际Join、state40、双声道3×Q128、latency32/末tap160及strict child自然reap均有实际证据。preview38824285597/job116727965422已实际SUCCESS（updated2026-10-16T00:04:46Z）；static-CRT source/archive单步及ZIP/提取后sanitized-PATH helper步骤均实际SUCCESS，upload请求false，因此upload步骤SKIPPED。
 
-该私有capture的本机前快照实际通过15项新测试/1项SDK默认忽略；随后显式SDK1PASS：源positive-frame DSP为0、原源guard实际Join、state40字节、Gain0.375、双声道3×Q128、latency32/末tap160、strict child自然exit0/reaped。旧Instrument29、stopped10、runtime/callback settlement19及Root严格Clippy/no-default/helper build均通过。原编译、夹具和Clippy失败日志保留；这些结果先于下一段f64精度增量。
+首个整链/f64云候选`689e0af`的quality38821625393与preview38821625349实际FAIL保留：Windows29 Effect、2496 root/15ignored通过后，新增`fetch_update`在Root严格Clippy报deprecated；Windows新source SDK/PrintWindow及preview release/ZIP未执行。`b73b57a`改用checked weak-CAS，保留旧工具链、原AcqRel/Acquire及旧Save/Instrument合同；新增near-MAX真实worker已在上述quality通过。未加allow或放宽失败门。前快照本机15新回归、Gain0.375 SDK及旧29/10/19组的证据不冒充新精度验证。
 
-现已补`Client::set_parameter_f64`，旧f32入口语义不变；新增2个真实child用例并扩展receipt失效检查，`effect_`预期29项。独立helper目标改用非f32 base0.75000004；私有source SDK目标改用真实源f64 Gain0.12345678912345678，opaque恢复后逐base精确回读再admit/start。新API/回归及这两个SDK精度断言本机未运行，由新云候选验收；Windows私有source SDK exact target已接入既有10分钟无GUI质量步骤。详`docs/WINDOWS_MELODY_WORKFLOW.md`及target内source119记录。Whole仍拒绝Insert；顺序PCM stage、wet/bypass/路由/FX自动化、通用PDC、尾音/裁剪及最终单发布仍待实现。用户仍测试03，本轮只改代码，主GUI、声卡和NI未操作；完整NOIRE验收仍未完成。
+本轮Whole静态单源集成候选已接通单Generator、唯一PostFader主串行路径到Master的有序FX；active仅全wet，inactive/bypass跳过DSP，分支/send/sidechain/offpath FX/其它source/FX路径active自动化/partial wet最早明确拒绝。保留原无FX Master自动化、Instrument和Occurrence合同；24M-frame有界双Vec保留原始前导、NoteOff、尾音与Q128 padding，逐strict stage实际reap后才开下一stage，累加DSP latency后只最终crop一次。strict raw保留finite超满幅；Whole按现有实时端点语义把PCM逐样本clamp到[-8,8]（含所有slot均inactive/bypassed的端点），再依序应用精确控件，最终只做一次Master tanh/最终CAS发布。健康Cancel只排空原typed ACK与clone清理，保留同一live源；engine loss/AppDrop等才接管原guards直至实际Join。源与各endpoint早前receipts持续重验；独立审查的P2预算续期已修为原300s与capture fence的较早deadline，并补held100ms真实边界回归。
 
-首个整链/f64云候选`689e0af`未验收：quality38821625393与preview38821625349实际FAIL。两套Windows的29 Effect及2496 root/15ignored通过；preview369Python=357PASS/12条件SKIP。Root严格Clippy均在新增`plugin_runtime.rs:2653`的`fetch_update`报deprecated，未执行Windows新source SDK/PrintWindow或preview release/ZIP。已改成checked weak-CAS保留旧工具链和原AcqRel/Acquire、Effect-only sticky溢出；新增真实worker near-MAX/旧Save与Instrument兼容回归，修补后仍待新云执行。未加allow、未换工具链或放宽失败门。原完整日志及实际终态见target内source119记录。
+Whole前lint快照`source-native-01`实际31新普通用例、显式Whole SDK1及150相邻兼容用例通过。SDK真实Generator+2 DelayFX的三个源均DSP0/state40/原guard Joined；三个strict stage自然exit0/reap且max live1，总latency96/tail352、raw1408→retained1280，非f32 bases与独立逐样本卷积、跨Q128、超满幅及一次crop/tanh通过。首次3编译错误、CLI配置错误及serial夹具初跑5PASS/1FAIL保留；合法Channel1修复后只精确重跑失败1项PASS，不称6项重跑。Root Clippy01实际101/13条本轮style已等价修补。最终21源码冻结；严格all-feature/all-target Clippy02、no-default02及生产双bin build01均actual0。no-default01虽exit0但有新test hook未读warning，随后仅收紧其type/field/init的target+feature cfg，all-feature编译内容不变；no-default02无App warning。Whole SDK02精确复核Q128迭代改动，实际1PASS/0.71s，三个原源guard Join、三个strict stage自然exit0/reap。31普通与150兼容复用未变的前快照证据，未全量重跑；本候选新云验收待执行。所有held handles实际终态/reap、guard=false，Root实际交回peer。新无GUI32-FIFO Instrument夹具本机6unit/严格fixture Clippy/release/helper/真实host2通过，WholeSDK不是NOIRE试听；通用路由、FX自动化/PDC和完整自然尾音仍待开发。详`docs/WINDOWS_MELODY_WORKFLOW.md`与target内source120记录。用户仍测03、只改代码，主GUI/声卡/NI未操作，完整NOIRE验收仍未完成。
 
 用户新增Playlist↔钢琴卷帘联动：共享Pattern数据/所有placement预览本来已有；现补Pattern双击自动打开对应Piano/Rack、主Pattern切换时一次性定位含notes通道、SONG位置按placement/offset映射本地游标，以及真实callback模式下Rack活动步。已有手动trim不自动拉长；Source114/81b2572实际225 UI/无设备callback全PASS（含新增9联动+1基线正反控制），严格Clippy/test artifact/匹配双bin exit0；9真实WGPU用例PASS，Root逐张检查4帧目标/共享预览/局部cursor/Rack活动步。Source115云quality38746810086与preview38746809594实际均SUCCESS：2391 App+52 helper+13协议=2456 root/14 ignored；factory33、367 Python=355PASS/12条件SKIP、Clippy、静态CRT release8分50秒、ZIP/提取后helper通过，云session2真实PrintWindow PASS。未上传附件。完整source115原始日志/终态保留。已独立交付03，主68,087,808B/helper5,054,464B，helper smoke exit0/reaped；未打开GUI/NI/声卡，格式仍13与02兼容。
 
@@ -172,11 +172,11 @@ Source76 只修测试隔离和失败诊断：两个 worker-identity 测试及 ca
 | --- | --- | --- |
 | 实时 Master 录音 | 录制实际播放经过的 Master 输出 | 已有 NOIRE Pure 录音及用户试听确认；不等于离线导出 |
 | 选中 MIDI 片段转音频 | Windows/Linux 实验 helper、状态捕获、无覆盖发布、取消和历史恢复 | NOIRE 实测仍被两次 opaque 捕获差异明确拒绝；原 MIDI 保留 |
-| 整曲离线 WAV | 普通内置音源；实验模式下单 VST 的完整编曲、静态路由及 Master 自动化 | 短工程及原 405 音符整曲的后台离线导出通过；效果器链和通用图 PDC 未验收 |
+| 整曲离线 WAV | 普通内置音源；已推b73实验单VST完整编曲/静态路由/Master自动化；本轮集成候选新增单Generator→唯一PostFader主路径→Master有序全wet FX | 旧短工程/405音符后台导出通过；新串行FX本机local gates通过（复用未变31普通/150兼容，SDK02精确重验、严格Clippy/no-default/双bin通过），本候选新云验收待执行；通用图PDC/真实NOIRE完整流程未验收 |
 
 普通构建不静默降级导出活动 VST 的错误声音；不支持的图和自动化明确拒绝。
-实验整曲路径要求 `experimental-fresh-helper`、单个活动 VST、无 insert 效果器。
-Master 音量/声像/静音自动化已接线；尾音须明确确认固定窗口。
+实验整曲路径要求 `experimental-fresh-helper`。已推b73仍要求单个活动VST、无Insert；本轮串行FX范围及拒绝条件见上文，不属于b73或03副本。
+原无FX路径的Master音量/声像/静音自动化保留；当前FX路径active自动化仍拒绝，尾音须明确确认固定窗口。
 未知或无限插件 tail 保留提示，不能把固定尾音窗口称为完整自然释放保证。
 
 ## 普通插件扫描的清理与失败恢复（本次提交）

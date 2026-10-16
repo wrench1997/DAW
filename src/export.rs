@@ -29,6 +29,8 @@ use crate::{
 const PROGRESS_FRAME_INTERVAL: usize = 4096;
 #[path = "export_master_controls.rs"]
 mod master_controls;
+#[path = "export_serial_master.rs"]
+pub(crate) mod serial_master;
 use master_controls::OfflineMasterControls;
 #[cfg(test)]
 #[path = "export_channel_controls_tests.rs"]

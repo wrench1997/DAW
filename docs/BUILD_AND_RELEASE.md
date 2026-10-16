@@ -5,8 +5,11 @@
 
 2026-10-16 Effect后台`0c4872c`已取得实际新云终态：quality38813369205与preview38813369197均SUCCESS。Win/Linux各27项Effect及真实无GUI SDK4+生产helper1通过；根2481PASS/14ignored、严格Clippy/双bin/no-default及eligible session2真实PrintWindow通过。preview的368Python=356PASS/12条件SKIP、27 Effect、同2481 root、静态CRT release8m18s、最终ZIP/PE/import/provenance及提取后helper通过，无上传；源码夹具/测试DLL不进入发布白名单。额外本机vendor全test-target Clippy实际101（75条既有glue lint）保留；新私有Insert capture开发不由该SHA验收。详[实现与验收边界](WINDOWS_MELODY_WORKFLOW.md#stereo-effect-helper-foundation-2026-10-16)。
 
-当前源码候选已实现真实停止/epoch/admin fence下的Effect整链私有捕获及reset ABA防护。本机前快照15项新回归、显式Gain0.375源→clone SDK、旧Instrument/停止/settlement组和Root严格Clippy/no-default/helper构建通过；随后补入的exact-f64 setter、2项新回归和非f32源/clone SDK断言尚未本机运行。新云端预期执行29项Effect；Windows App私有source SDK exact target加入同一既有10分钟无GUI质量步骤，Linux仍执行foundation helper目标。新候选云端结果待定，不能沿用上段成功；Whole Insert/通用PDC/路由/FX自动化/尾音仍未实现，03副本保持不变，用户测试期间只做代码工作。
-首个候选`689e0af`的quality38821625393/preview38821625349实际FAIL：Windows29 Effect、2496 root/15ignored通过后，Root严格Clippy因新增`fetch_update`的deprecated报错停止。Windows源SDK与PrintWindow、preview release/ZIP未执行。修补使用checked weak-CAS兼容旧工具链，并补near-MAX真实worker回归；新云结果待定，失败规则没有放宽。
+已推`b73b57a`的停止后Effect整链捕获、reset ABA/Effect-only sticky溢出及exact-f64恢复已由quality38824285643实际验收（2026-10-15T23:54:32Z SUCCESS）：2497 root/15ignored、新near-MAX真实worker、Win/Linux29 Effect与非f32 SDK4+helper1、Windows显式App source SDK1、Root严格Clippy/双bin/no-default和eligible session2真实PrintWindow全部通过。Windows源Gain0.12345678912345678精确恢复，源DSP0、原guard Joined、state40、3×Q128和自然reap通过。该quality不含本轮Whole集成候选/新Instrument夹具。b73 preview38824285597/job116727965422已实际SUCCESS（updated2026-10-16T00:04:46Z）：static-CRT source/archive单步及ZIP/提取后sanitized-PATH helper步骤均实际SUCCESS；upload请求false，因此upload步骤SKIPPED。
+
+前候选`689e0af`的quality38821625393/preview38821625349实际FAIL保留：Windows29 Effect、2496 root/15ignored及preview369Python=357PASS/12条件SKIP后，新增`fetch_update`在Root Clippy报deprecated；Windows源SDK/PrintWindow及preview release/ZIP未执行。b73 checked weak-CAS修补保留旧工具链和原AcqRel/Acquire，实际quality已通过，未放宽失败门。
+
+本轮Whole集成候选已实现单Generator→唯一PostFader主串行路径→Master有序FX，active全wet、inactive/bypass跳过DSP；strict raw保留finite超满幅，Whole按现有实时端点PCM[-8,8] clamp（含所有slot均inactive/bypassed的端点）后依序应用精确控件，最终只做一次Master tanh；不支持的分支/send/sidechain/offpath FX/多源/FX路径active自动化/partial wet明确拒绝。前lint快照`source-native-01`实际31新普通+Whole SDK1及150兼容用例通过；SDK真实Generator+2FX、每阶段自然exit0/reap、latency96/tail352/raw1408→retained1280及一次crop/tanh有独立逐样本证据。Root Clippy01实际101/13局部style失败保留，等价修补后21源码最终冻结；严格all-feature/all-target Clippy02、no-default02和生产all-feature双bin build01均actual0。no-default01 exit0但有新test hook未读warning，phase结束后收紧type/field/init的支持target+feature cfg（all-feature编译内容不变），no-default02无App warning。Whole SDK02对Q128迭代改动精确重验，实际1PASS/0.71s，三个原源guard实际Join、三个strict stage自然exit0/reap。31普通/150兼容继续复用未变输入的有效结果，不称全组重跑；本候选新云验收待执行。所有held handles实际终态/reap，guard=false。新32-FIFO Instrument夹具本机6unit/严格fixture Clippy/release/helper/host2通过，不等于新Whole/Linux云已验收。详[当前串行Whole范围与证据](WINDOWS_MELODY_WORKFLOW.md#serial-whole-fx-static-single-source-path-2026-10-16)。03不替换；用户测试期间只改代码，通用路由/FX自动化/PDC/自然尾音及完整NOIRE流程仍未完成。
 
 目标系统：Windows 10/11 x64  
 目标三元组：x86_64-pc-windows-gnullvm
@@ -39,7 +42,7 @@
 
 `.github/workflows/ci.yml` 增加 Windows MSVC stable 开发门禁：fmt、锁定依赖的 all-feature/all-target tests、Clippy `-D warnings`、all-bin build、独立的 helper harness 回归 / 实际 helper 协议 smoke 和 no-default-features check。独立分支 `ci/windows-reliability-20261009` 的 push 触发验证；含 helper 自动 smoke 的运行已在 Rust/Cargo 1.99.0、Python 3.12.10 上全部通过。后续源码候选分别在相同门禁验证，确切提交/结果见 GitHub Actions 和 WORK_LOG。开发 smoke 不替代下述历史固定 gnullvm 发布流程、Release helper smoke、干净 Windows 实机验收与打包校验。
 
-当前Effect质量步骤仅使用仓库源码构建的无GUI夹具与匹配生产helper；Windows还显式运行App私有source捕获目标。它不加载Kontakt/NOIRE，不占声卡，不将测试DLL放入发布白名单，也不替代真实插件或设备验收。f64精度增量等待新提交的实际Windows/Linux终态。
+Effect质量步骤只使用仓库源码构建的无GUI夹具和匹配生产helper，保留10分钟外层超时。b73的Win/Linux非f32 helper及Windows显式App私有source SDK已实际通过。本轮接线在同一步新增Windows Whole SDK exact和两平台32-FIFO Instrument host exact，6项CI合同通过；新增目标的云端执行仍未验收。它不加载Kontakt/NOIRE、不占声卡、不将测试DLL放入发布白名单，也不替代真实插件/设备验收；preview继续执行Effect回归、代码检查、构建和打包，不把SDK步骤搬成发布内容。
 
 独立的 [MSVC developer preview](WINDOWS_PREVIEW.md) 打包 Release 与配套 Cargo metadata 明确使用 `--no-default-features --features vst2,vst3`，其根 feature 清单必须与构建记录完全一致。preview 的测试/Clippy 及普通开发 CI 继续覆盖 all-features；下文历史 gnullvm 契约不因此改写。Linux 实验性 selected-clip 验收不构成 Windows 插件 runtime、GUI 或设备支持声明。
 

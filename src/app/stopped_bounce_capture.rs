@@ -22,10 +22,12 @@ use std::{
 };
 
 #[path = "stopped_effect_capture.rs"]
-#[allow(dead_code)] // Internal source interface; Whole Insert admission stays closed.
+#[allow(dead_code)] // Internal source APIs are unavailable in some feature configurations.
 mod effect;
 #[allow(unused_imports)]
-pub(in crate::app) use effect::CapturedStoppedEffectChain;
+pub(in crate::app) use effect::{
+    CapturedStoppedEffectChain, StoppedEffectChainCapture, StoppedEffectSourceLease,
+};
 
 pub(in crate::app) const STOP_BUDGET: Duration = Duration::from_secs(35);
 

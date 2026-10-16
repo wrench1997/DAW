@@ -27,6 +27,7 @@ struct CaptureProbe {
     failure: AtomicU32,
     drift_target: Mutex<Option<Arc<CaptureProbe>>>,
     captures: AtomicU64,
+    completed_capture_calls: AtomicU64,
     verifies: AtomicU64,
     prepared: AtomicU64,
     resets: AtomicU64,
@@ -53,6 +54,7 @@ impl CaptureProbe {
             failure: AtomicU32::new(0),
             drift_target: Mutex::new(None),
             captures: AtomicU64::new(0),
+            completed_capture_calls: AtomicU64::new(0),
             verifies: AtomicU64::new(0),
             prepared: AtomicU64::new(0),
             resets: AtomicU64::new(0),
@@ -192,6 +194,18 @@ impl EffectCaptureHandle {
     pub(crate) fn capture_count(&self, slot: usize) -> u64 {
         self.probes[slot].captures.load(Ordering::Acquire)
     }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn capture_completion_counts(&self, slot: usize) -> (u64, u64) {
+        (
+            self.probes[slot]
+                .completed_capture_calls
+                .load(Ordering::Acquire),
+            self.probes[slot].verifies.load(Ordering::Acquire),
+        )
+    }
     pub(crate) fn set_revision(&self, slot: usize, revision: u64) {
         self.probes[slot]
             .revision
@@ -204,6 +218,20 @@ impl EffectCaptureHandle {
     }
     pub(crate) fn set_latency(&self, slot: usize, latency: u32) {
         self.probes[slot].latency.store(latency, Ordering::Release);
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn source_operations(&self, slot: usize) -> (u64, u64, u64, u64, u64) {
+        let probe = &self.probes[slot];
+        (
+            probe.saves.load(Ordering::Acquire),
+            probe.loads.load(Ordering::Acquire),
+            probe.closes.load(Ordering::Acquire),
+            probe.processes.load(Ordering::Acquire),
+            probe.resets.load(Ordering::Acquire),
+        )
     }
 }
 
@@ -294,6 +322,9 @@ impl PluginBackend for CaptureBackend {
         if let Some(target) = self.0.drift_target.lock().unwrap().take() {
             target.revision.fetch_add(1, Ordering::Release);
         }
+        self.0
+            .completed_capture_calls
+            .fetch_add(1, Ordering::Release);
         Ok(self.0.state())
     }
     fn verify_effect_bounce_state(
@@ -317,6 +348,13 @@ fn identified_effect_chain(
     configs: Vec<SlotConfig>,
 ) -> Result<(PluginChain, EffectCaptureHandle), String> {
     let ids: Vec<_> = [91, 7, 42, 83].into_iter().take(configs.len()).collect();
+    identified_effect_chain_with_ids(configs, ids)
+}
+
+fn identified_effect_chain_with_ids(
+    configs: Vec<SlotConfig>,
+    ids: Vec<u64>,
+) -> Result<(PluginChain, EffectCaptureHandle), String> {
     let probes: Vec<_> = ids
         .iter()
         .enumerate()
@@ -343,6 +381,16 @@ fn identified_effect_chain(
         },
     )?;
     Ok((chain, EffectCaptureHandle { probes, configs }))
+}
+
+#[cfg(all(
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+pub(crate) fn identified_single_effect_chain(
+    instance_id: u64,
+) -> Result<(PluginChain, EffectCaptureHandle), String> {
+    identified_effect_chain_with_ids(vec![SlotConfig::default()], vec![instance_id])
 }
 
 /// App tests own retained shutdown of this returned real worker; releasing the handle is not ACK.

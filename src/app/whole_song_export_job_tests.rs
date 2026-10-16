@@ -5,6 +5,8 @@
 mod cancel_origin_tests;
 #[path = "whole_song_export_identity_tests.rs"]
 mod loaded_identity_tests;
+#[path = "whole_serial_app_tests.rs"]
+mod serial_effect_tests;
 
 use super::*;
 use crate::{
@@ -641,7 +643,8 @@ fn actual_whole_capture_cancel_retains_fence_and_private_owner_until_worker_ack(
 }
 
 #[test]
-fn actual_whole_preflight_rejects_rate_and_all_inactive_insert_slots_before_stop_or_destination() {
+fn actual_whole_preflight_rejects_rate_and_unbound_inactive_insert_endpoints_before_stop_or_destination()
+ {
     let mut fixture = Fixture::new();
     settle_initial_source(&mut fixture);
     let before = fixture.bytes();
@@ -677,9 +680,8 @@ fn actual_whole_preflight_rejects_rate_and_all_inactive_insert_slots_before_stop
                 options(&fixture).sample_rate,
                 options(&fixture)
             )
-            .err()
             .unwrap()
-            .contains("no mixer insert slots")
+            .is_serial_master()
         );
         fixture.app_mut().project = project;
         assert!(

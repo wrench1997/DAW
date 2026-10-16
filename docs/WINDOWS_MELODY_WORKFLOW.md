@@ -120,16 +120,17 @@ cleanup failure and the new onset difference remain open. Details follow below.
 | --- | --- | --- |
 | Real-time Master recording | Records the Master audio produced during live playback | Pure was heard and captured locally; not an offline export |
 | Selected MIDI occurrence to audio | Experimental Linux/Windows strict clone, capture validation, native publication and history fences | Actual recapture mismatch refuses replacement; original MIDI is retained |
-| Whole-song offline WAV | Built-in sources; experimental single-VST full arrangement/static routing/Master automation | Native05/06/07 ordinary GUI cold-open→10.5s PCM24 WAV completed; Native07 uses new event semantics and still has a first-note offset. Warm-path cleanup, listening and full state/automation remain open; earlier short/405-note evidence is separate |
+| Whole-song offline WAV | Built-in sources; published b73 experimental single-VST arrangement/Master automation; current integration candidate adds ordered fully-wet FX on one PostFader path | Native05/06/07 ordinary GUI cold-open→10.5s PCM24 WAV completed; Native07 uses new event semantics and still has a first-note offset. Warm-path cleanup, listening and full state/automation remain open; earlier short/405-note evidence is separate, and new serial fixtures are not NOIRE listening |
 
 These paths must retain their own receipts and must not be substituted for each other.
 The ordinary build explicitly refuses unsupported active-VST offline export.
 Experimental VST whole export requires `experimental-fresh-helper` on Linux or Windows.
-It currently admits one active VST source and no insert effect slots; additional sources,
-unsupported automation and unsupported graphs are rejected rather than silently omitted.
-Master volume/pan/mute automation is wired through the complete arrangement path.
-A fixed tail window requires explicit review; unknown/infinite tail retains its warning.
-Effects, arbitrary graph latency compensation and complete natural tail release are not qualified.
+Published b73 admits one active VST source without Insert slots. The integration
+candidate additionally processes one static serial FX path under the restrictions below;
+additional sources, unsupported automation/graphs are rejected rather than omitted.
+Original no-FX Master volume/pan/mute automation is retained; active automation on the
+new FX path is refused. A fixed tail window requires explicit review; unknown/infinite
+tail retains its warning. General FX routing, graph PDC and full natural release remain open.
 
 Windows conversion uses an actual overlapped named-pipe helper and native file identity/publication.
 It preserves MIDI until verified success, handles cancellation/failure and retains restoration owners.
@@ -197,62 +198,136 @@ smoke passed. Upload remained false. The real SDK target runs in quality with a
 10-minute outer limit; it is not a preview step. Full metadata/logs are saved under
 `target/backend-reliability-20261014/source118-{quality,preview}-*`.
 
-### Stopped Effect source capture and exact bases — current candidate
+### Stopped Effect source capture and exact bases — published b73
 
-The current source candidate now captures an entire ordered Effect chain for one
-stopped mixer endpoint through its actual source backend. The private receipt
-binds Project/session/endpoint and every slot's placement, enabled/bypass/wet,
-actual Fx identity, complete audio/event layout, opaque state, full bounded
-parameter catalog, writable f64 bases and DSP latency/tail. A refused slot refuses
-the chain. It does not substitute a disposable clone's admission for source capture.
+At `b73b57abb20bb0299bfb9526fa62cd834c8e4f24`, private capture obtains an entire
+ordered Effect chain for one stopped mixer endpoint through its actual source
+backend. The receipt binds Project/session/endpoint, each slot's placement and
+enabled/bypass/wet, actual Fx identity, full audio/event layout, opaque state,
+bounded catalog, writable f64 bases and DSP latency/tail. A refused slot refuses
+the chain; clone admission never substitutes for source capture.
 
-The existing stopped actor waits for actual Stop/Timeline and worker settlement.
-Callback consumed/terminal/submitted evidence and monotonic admin-intent/reset
-history bracket the source binding; a sampled playback token alone is not a
-capture lease. Review exposed public epoch reset E→E+1→E ABA. A non-clearable
-`epoch_resets` ticket now rejects that history, including two actual resets;
-counter exhaustion refuses new Effect capture only, preserving old Instrument
-and epoch entry points. Cancellation retains the original command/source fence
-until acknowledgment, with the original worker guard retained through shutdown.
+Actual Stop/Timeline and worker settlement, callback consumed/terminal/submitted
+evidence and admin-intent/reset history fence the source binding. A sampled
+playback token alone is not a lease. The non-clearable `epoch_resets` ticket
+rejects E→E+1→E reset ABA. Effect-only sticky counter exhaustion preserves legacy
+Save/Instrument and epoch entry points. `Client::set_parameter_f64` preserves
+transport precision while the old f32 entry retains `f64::from(f32)` semantics.
+Restore opaque state, apply every captured base, verify exact readback, then
+select/admit/start; either setter invalidates the prior Effect receipt.
 
-Before the f64 precision delta, local Windows tests actually passed 15 new cases
-with 1 explicit SDK ignore, then the separately selected source→clone SDK case
-passed. That SDK snapshot used exactly f32-representable Gain0.375: source
-positive-frame DSP count0, original source guard actually joined, opaque40 bytes,
-sample-exact stereo3×Q128 including zero drain, latency32/tap160 and natural strict
-child exit0/reap. Existing Instrument29, stopped actor10 and runtime/callback
-settlement19 passed; Root all-feature/all-target strict Clippy, no-default check
-and matching helper build exited0. Earlier compile, fixture-admission/provenance
-and three Clippy failures are retained with their corrected passes.
+[Quality38824285643](https://github.com/wrench1997/DAW/actions/runs/38824285643)
+actually completed **SUCCESS** at 2026-10-15T23:54:32Z. 2497 root tests/15 ignored, the
+real-worker near-MAX regression, strict Clippy, bins and no-default checks passed.
+Windows and Linux each passed 29 Effect cases, 4 source-built SDK tests and 1 real
+production-helper test. The helper controller base 0.75000004 was read back with
+exact f64 bits; its deliberately f32 DSP gain was modeled independently. All 1280
+stereo samples, 35 probes, latency32/tap160, silence from frame416 and natural reap matched.
+Windows also explicitly ran the ordinarily ignored App source SDK target: actual
+source Gain 0.12345678912345678 (bits `3fbf9add37c1215e`), source positive-frame DSP count0,
+original guard joined, opaque40 bytes, exact restored bases and stereo3×Q128, latency32/
+tap160 and natural strict child exit0/reap passed. Eligible session 2 performed real
+PrintWindow before/after/repaint and native lifecycle checks, all PASS, not SKIPPED.
+This accepts the f64 delta; the older Gain 0.375 local SDK snapshot is only earlier
+evidence. The separate vendor-wide 75-glue-lint failure above remains unresolved.
 
-The source now adds `Client::set_parameter_f64`, preserving the old f32 entry's
-exact `f64::from(f32)` semantics. Restore opaque state, apply captured f64 bases,
-check raw readback at that precision, then select/admit/start. Both setters
-invalidate the old Effect receipt. The independent helper target now uses
-non-f32 base0.75000004; the private-source target initializes its actual source
-to Gain0.12345678912345678, verifies exact source/opaque/base bits, perturbs the
-clone before restoring every base, and checks exact readback before DSP.
-Independent PCM expectations model the unchanged fixture's deliberate f32 DSP
-gain conversion after verifying f64 controller precision.
+The preceding `689e0af` quality38821625393/preview38821625349 failures remain:
+Windows 29 Effect and 2496 root/15 ignored passed, but new `fetch_update` deprecation
+failed Root Clippy before Windows source SDK/PrintWindow or preview release/ZIP.
+Preview had 369 Python = 357 passed/12 conditional skips. The b73 checked weak-CAS
+repair retains old toolchains, AcqRel/Acquire and legacy admin behavior; its new
+near-MAX case passed in quality without lint suppression.
+[b73 preview38824285597](https://github.com/wrench1997/DAW/actions/runs/38824285597)
+(job 116727965422) actually completed **SUCCESS**, updated2026-10-16T00:04:46Z.
+The static-CRT source/archive step and ZIP/extracted-helper sanitized-PATH step
+both actually succeeded. Upload was requested false, so its upload step was SKIPPED.
+Actual receipts are in `target/backend-reliability-20261014/source120-quality-acceptance.txt`
+and the source120 integration record. The b73 checkout excludes the following
+Whole integration candidate and new Instrument fixture.
 
-These new API/two child tests, the extended receipt/compiler contract and both
-revised SDK precision targets are **UNRUN locally**. The `effect_` gate now
-selects29; the new Windows App private-source SDK exact target is wired into the
-same existing 10-minute no-GUI quality step. Linux retains its real foundation
-helper target. New cloud acceptance is pending; the earlier `0c4872c` passes above
-belong to the earlier candidate. Current evidence is in
-`target/backend-reliability-20261014/source119-integration-progress-01.json` and
-the `private-effect-capture-source-candidate-01` / `strict-effect-f64-source-candidate-01`
-handoffs; the post-native source SDK delta is separately recorded in
-`target/private-effect-capture-source-candidate-01/post-native-f64-sdk-delta.json`.
+### Serial Whole FX: static single-source path (2026-10-16)
 
-The first combined candidate `689e0af` actually failed quality38821625393 and preview38821625349. Both Windows jobs passed29 Effect cases (including the two new f64 cases) and2496 root tests/15 ignored. Preview also passed its369 Python checks with12 conditional skips. Root strict Clippy then rejected the new `fetch_update` at `src/plugin_runtime.rs:2653` as deprecated. Windows source SDK, no-default and PrintWindow checks were not reached; preview release/ZIP checks were not reached. The repair uses a checked weak-CAS loop with the original AcqRel/Acquire ordering and Effect-only sticky overflow, preserving older toolchains and legacy admin commands. A new real-worker near-MAX/legacy Save/Instrument regression is locally UNRUN; corrected cloud acceptance remains pending. No lint or failure gate was disabled.
+The new consumer admits one Generator with a unique PostFader main serial path
+through Master and its ordered FX. Active FX must be fully wet; inactive/bypassed
+slots skip DSP. Branches, sends, sidechains, off-path FX, additional sources,
+active automation on the FX path and partial wet are rejected early. The original
+no-FX Master automation, Instrument and Occurrence contracts remain. This implements a
+narrow renderer path; general routing, FX automation and graph PDC remain open.
 
-Whole still rejects Insert slots. The later consumer must implement serial PCM
-stages and actual strict-child reap between them, wet/bypass/routing/FX automation,
-general DSP PDC, tail/crop handling and one final publication. Real NOIRE cold
-restore/export/listening and the original complete workflow remain open. The user
-is still testing03; this candidate has not operated the main GUI, soundcard or NI.
+The production renderer reuses two bounded Vecs (24M raw-frame cap), preserving
+Generator lead-in, exact NoteOff, tail and Q128 padding through every PCM stage.
+Strict raw PCM retains finite over-full-scale values. Whole follows existing
+realtime endpoint semantics: it clamps PCM samples to [-8,8] at Channel/Effect
+endpoints, including endpoints whose slots are all inactive/bypassed, then applies
+the exact sequential controls. It sums actual DSP latency, crops only once at the
+end, applies one final Master tanh and uses the original single final-CAS publication.
+No production spool or intermediate music WAVs are added. A strict stage must
+naturally exit and actually reap/destruct before the next stage acquires the
+process-wide reservation. Source Generator/endpoint captures and all earlier
+receipts stay revalidated while later captures are pending.
+
+Healthy user Cancel drains the same typed Effect acknowledgment and clone cleanup,
+retaining the same live sources and Project/history/MIDI. Engine loss/AppDrop or
+already-retired cancellation instead retains participating original guards until
+actual Join. Independent review found one P2: a pending Effect could renew the
+source budget. The repair uses the earlier of the original 300s deadline and capture
+fence, forbids subsequent dispatch after expiry, and drains pending cancel through
+the original receiver. An actual held 100ms App boundary case passed as Failed,
+not user Cancelled.
+
+The pre-lint `source-native-01` snapshot passed 31 new ordinary cases plus the
+explicit Whole SDK1, and 150 adjacent compatibility cases (Effect worker10/actor6,
+Instrument29, stopped10, runtime settlement19, renderer22, Master18, old Whole36).
+The initial three compile errors and one CLI configuration error remain recorded. Serial
+render initially passed5/failed1 because Channel1.5 was correctly refused by the
+existing Timeline. The fixture was corrected to legal Channel1 with a real 12→8
+endpoint-clamp assertion; only that exact case reran and passed. The unchanged 5
+results remain valid; the full 6 were not rerun.
+
+The real Whole SDK uses the source-built 32-sample FIFO Instrument plus two DelayFX.
+All three original sources had positive-frame DSP0, state40 and actual joined guards.
+Three production strict stages naturally exited0 and reaped/destructed before the
+next, with max live owner1. Non-f32 FX bases `3fe9febc5d7f36d1` and `3fed8cf54091bdc5`,
+total latency96, reported tail352, raw1408 and retained1280 (music256 + reviewed
+fixed tail1024) matched. Independent full-WAV convolution checked cross-Q128 taps,
+over-full-scale samples, exact endpoint controls and one final crop/tanh. This is
+actual serial-latency evidence, not NOIRE listening or a complete natural-tail claim.
+
+Root's new Instrument class `43545253454658440000000000000002` uses no audio input,
+stereo output, 16-channel main events and a physical 32-sample FIFO; default Effect
+class/DSP stays unchanged. Local fixture 6 unit tests, strict fixture Clippy, release,
+matching helper and 2 real host targets passed. Both host targets naturally reaped;
+the Instrument target checked 768 samples/state40/latency32/tail32. These asset checks
+are distinct from the Whole SDK oracle. New fixture/Whole Linux cloud acceptance
+is unrun. The same 10-minute no-GUI quality step now source-wires the Windows exact
+Whole SDK target and both-platform Instrument host target; 6 CI contracts passed.
+No test DLL enters the release payload and no installed NI/plugin/device is used.
+
+Root Clippy01 actually exited101 with 13 local style findings; equivalent repairs
+are preserved separately from the tested `source-native-01` snapshot. The final
+21-source candidate then passed strict all-feature/all-target Clippy02, no-default
+all-targets02 and production all-feature bins build01 (all actual exit0). No-default01
+had exited0 with an unused new test-hook warning; after that phase, its type/field/init
+cfg was narrowed to the implementation's supported target+feature. All-feature
+compilation stayed unchanged; no-default02 had no App warning.
+
+Exact Whole SDK02 actually passed 1 case in 0.71s, rechecking the Q128 iterator rewrite:
+three original source guards actually joined and all three strict stages naturally
+exited0/reaped, with the same latency/tail/PCM oracle above. The 31 ordinary and 150
+compatibility results reuse unchanged `source-native-01` inputs; those groups were
+not rerun. All held handles reached actual terminal/reap, guard=false. SDK02 peaked
+at 4.409GB private/26.380GB physical used; Root's fresh heavy-process check was empty
+at 2026-10-16T00:22:36Z and resources were actually handed back to the peer.
+
+This integration candidate's new cloud acceptance remains **UNRUN**; the published
+b73 quality/preview passes above do not include it. Records:
+`target/backend-reliability-20261014/whole-serial-effects-source-candidate-01/`
+(source-ready/review, actual App/Whole SDK logs, `cpu-handback-02.json` and final
+`cpu-handback-03.json`), plus `serial-lookahead-instrument-fixture-01/HANDOFF.json`
+under the same target directory.
+General routing/FX automation/PDC, complete natural tails and real NOIRE cold
+restore/export/listening remain required. The user is still testing03; this work
+has not operated the main GUI, soundcard or NI and has not replaced that copy.
 
 ## Ordinary scan reliability in this commit
 

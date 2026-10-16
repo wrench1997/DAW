@@ -3,7 +3,9 @@
 //! For each independent channel, y[n] = gain * (x[n-32] + x[n-160] * 0.5).
 //! Initial history is zero. The first response is delayed 32 samples; the last
 //! tap is at 160 samples (128 samples after the latency-aligned direct tap).
-//! There is no oscillator, MIDI input, audio device or native window.
+//! The first class has no oscillator or MIDI input. A separate Instrument class
+//! provides deterministic MIDI audio with a real 32-sample lookahead FIFO.
+//! Neither class uses an audio device or native window.
 
 #![allow(non_snake_case)]
 // Generated SDK enum constants differ in signedness across supported targets.
@@ -22,8 +24,12 @@ pub const VERSION: &str = "1.0.0";
 pub const CATEGORY: &str = "Fx|Delay";
 pub const LATENCY: usize = 32;
 pub const LAST_TAP: usize = 160;
+pub const INSTRUMENT_CLASS_ID: &str = "43545253454658440000000000000002";
+pub const INSTRUMENT_NAME: &str = "Citrus Lookahead MIDI Fixture";
+pub const INSTRUMENT_CATEGORY: &str = "Instrument|Synth";
 const RING: usize = LAST_TAP + 1;
 const CID: TUID = uid(0x43545253, 0x45465844, 0x00000000, 0x00000001);
+const INSTRUMENT_CID: TUID = uid(0x43545253, 0x45465844, 0x00000000, 0x00000002);
 const MAGIC: &[u8; 4] = b"CE01";
 const PROBE_SCALE: f64 = 65_536.0;
 const SAMPLE_POSITION_SCALE: f64 = 16_777_216.0;
@@ -37,7 +43,10 @@ const PROBES: &[(u32, &str)] = &[
     (1006, "Outputs Initially Clear"),
 ];
 
+mod lookahead_instrument;
+
 struct Engine {
+    voice: lookahead_instrument::VoiceState,
     gain: f64,
     history: [[f32; RING]; 2],
     cursor: usize,
@@ -59,6 +68,7 @@ struct Engine {
 impl Default for Engine {
     fn default() -> Self {
         Self {
+            voice: lookahead_instrument::VoiceState::default(),
             gain: 0.5,
             history: [[0.0; RING]; 2],
             cursor: 0,
@@ -83,6 +93,7 @@ impl Engine {
     fn reset_history(&mut self) {
         self.history = [[0.0; RING]; 2];
         self.cursor = 0;
+        self.voice = lookahead_instrument::VoiceState::default();
     }
 
     fn tick(&mut self, input: [f32; 2]) -> [f32; 2] {
@@ -122,6 +133,16 @@ impl Engine {
 #[derive(Default)]
 struct Effect {
     engine: Mutex<Engine>,
+    instrument: bool,
+}
+
+impl Effect {
+    fn instrument() -> Self {
+        Self {
+            instrument: true,
+            ..Self::default()
+        }
+    }
 }
 
 impl Class for Effect {
@@ -222,6 +243,14 @@ impl IComponentTrait for Effect {
         kResultOk
     }
     unsafe fn getBusCount(&self, media_type: MediaType, dir: BusDirection) -> i32 {
+        if self.instrument {
+            return i32::from(
+                (media_type as MediaTypes == MediaTypes_::kAudio
+                    && dir as BusDirections == BusDirections_::kOutput)
+                    || (media_type as MediaTypes == MediaTypes_::kEvent
+                        && dir as BusDirections == BusDirections_::kInput),
+            );
+        }
         i32::from(
             media_type as MediaTypes == MediaTypes_::kAudio
                 && matches!(
@@ -243,11 +272,14 @@ impl IComponentTrait for Effect {
         *info = std::mem::zeroed();
         (*info).mediaType = media_type;
         (*info).direction = dir;
-        (*info).channelCount = 2;
+        let event = self.instrument && media_type as MediaTypes == MediaTypes_::kEvent;
+        (*info).channelCount = if event { 16 } else { 2 };
         (*info).busType = BusTypes_::kMain as BusType;
         (*info).flags = BusInfo_::BusFlags_::kDefaultActive as u32;
         copy_utf16(
-            if dir as BusDirections == BusDirections_::kInput {
+            if event {
+                "MIDI In"
+            } else if dir as BusDirections == BusDirections_::kInput {
                 "Stereo In"
             } else {
                 "Stereo Out"
@@ -336,6 +368,17 @@ impl IAudioProcessorTrait for Effect {
         outputs: *mut SpeakerArrangement,
         num_outputs: i32,
     ) -> tresult {
+        if self.instrument {
+            return if num_inputs == 0
+                && num_outputs == 1
+                && !outputs.is_null()
+                && *outputs == SpeakerArr::kStereo
+            {
+                kResultOk
+            } else {
+                kResultFalse
+            };
+        }
         if num_inputs != 1
             || num_outputs != 1
             || inputs.is_null()
@@ -355,6 +398,7 @@ impl IAudioProcessorTrait for Effect {
     ) -> tresult {
         if arrangement.is_null()
             || index != 0
+            || (self.instrument && dir as BusDirections != BusDirections_::kOutput)
             || !matches!(
                 dir as BusDirections,
                 BusDirections_::kInput | BusDirections_::kOutput
@@ -376,7 +420,11 @@ impl IAudioProcessorTrait for Effect {
         LATENCY as u32
     }
     unsafe fn getTailSamples(&self) -> u32 {
-        LAST_TAP as u32
+        if self.instrument {
+            LATENCY as u32
+        } else {
+            LAST_TAP as u32
+        }
     }
     unsafe fn setupProcessing(&self, setup: *mut ProcessSetup) -> tresult {
         let Some(setup) = setup.as_ref() else {
@@ -409,6 +457,9 @@ impl IAudioProcessorTrait for Effect {
         kResultOk
     }
     unsafe fn process(&self, data: *mut ProcessData) -> tresult {
+        if self.instrument {
+            return lookahead_instrument::process(self, data);
+        }
         let Some(data) = data.as_mut() else {
             return kInvalidArgument;
         };
@@ -629,17 +680,20 @@ impl IPluginFactoryTrait for Factory {
         kResultOk
     }
     unsafe fn countClasses(&self) -> i32 {
-        1
+        2
     }
     unsafe fn getClassInfo(&self, index: i32, info: *mut PClassInfo) -> tresult {
-        if index != 0 || info.is_null() {
+        let Some((cid, name, _)) = factory_class(index) else {
+            return kInvalidArgument;
+        };
+        if info.is_null() {
             return kInvalidArgument;
         }
         *info = std::mem::zeroed();
-        (*info).cid = CID;
+        (*info).cid = cid;
         (*info).cardinality = PClassInfo_::ClassCardinality_::kManyInstances as i32;
         copy_cstr("Audio Module Class", &mut (*info).category);
-        copy_cstr(NAME, &mut (*info).name);
+        copy_cstr(name, &mut (*info).name);
         kResultOk
     }
     unsafe fn createInstance(
@@ -652,10 +706,12 @@ impl IPluginFactoryTrait for Factory {
             return kInvalidArgument;
         }
         *object = ptr::null_mut();
-        if *cid.cast::<TUID>() != CID {
-            return kInvalidArgument;
-        }
-        let instance = ComWrapper::new(Effect::default())
+        let effect = match *cid.cast::<TUID>() {
+            value if value == CID => Effect::default(),
+            value if value == INSTRUMENT_CID => Effect::instrument(),
+            _ => return kInvalidArgument,
+        };
+        let instance = ComWrapper::new(effect)
             .to_com_ptr::<FUnknown>()
             .expect("FUnknown");
         let pointer = instance.as_ptr();
@@ -665,19 +721,30 @@ impl IPluginFactoryTrait for Factory {
 
 impl IPluginFactory2Trait for Factory {
     unsafe fn getClassInfo2(&self, index: i32, info: *mut PClassInfo2) -> tresult {
-        if index != 0 || info.is_null() {
+        let Some((cid, name, category)) = factory_class(index) else {
+            return kInvalidArgument;
+        };
+        if info.is_null() {
             return kInvalidArgument;
         }
         *info = std::mem::zeroed();
-        (*info).cid = CID;
+        (*info).cid = cid;
         (*info).cardinality = PClassInfo_::ClassCardinality_::kManyInstances as i32;
         copy_cstr("Audio Module Class", &mut (*info).category);
-        copy_cstr(NAME, &mut (*info).name);
-        copy_cstr(CATEGORY, &mut (*info).subCategories);
+        copy_cstr(name, &mut (*info).name);
+        copy_cstr(category, &mut (*info).subCategories);
         copy_cstr(VENDOR, &mut (*info).vendor);
         copy_cstr(VERSION, &mut (*info).version);
         copy_cstr("VST 3.8.0", &mut (*info).sdkVersion);
         kResultOk
+    }
+}
+
+fn factory_class(index: i32) -> Option<(TUID, &'static str, &'static str)> {
+    match index {
+        0 => Some((CID, NAME, CATEGORY)),
+        1 => Some((INSTRUMENT_CID, INSTRUMENT_NAME, INSTRUMENT_CATEGORY)),
+        _ => None,
     }
 }
 
@@ -712,3 +779,6 @@ extern "system" fn ModuleExit() -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lookahead_instrument_tests;

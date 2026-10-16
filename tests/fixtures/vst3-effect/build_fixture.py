@@ -41,6 +41,10 @@ def main():
                "class_id": "43545253454658440000000000000001", "category": "Fx|Delay",
                "vendor": "Citrus Studio Test Fixtures", "version": "1.0.0",
                "name": "Citrus Stereo Delay Fixture", "latency_samples": 32, "last_tap_samples": 160}
+    # Preserve the first-class receipt keys for existing Effect consumers.
+    receipt["additional_classes"] = [{"class_id": "43545253454658440000000000000002",
+        "name": "Citrus Lookahead MIDI Fixture", "category": "Instrument|Synth",
+        "latency_samples": 32, "tail_samples": 32, "real_lookahead_fifo": True}]
     (bundle / "source-build.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
     print(f"Built no-GUI source Effect: {bundle}")
     return 0

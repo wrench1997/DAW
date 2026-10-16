@@ -1,6 +1,6 @@
 # Feed real stereo PCM through a source-built VST3 Effect
 
-Build this no-editor test Effect, then run the explicitly opted-in host test.
+Build this no-editor test module, then run the explicitly opted-in host tests.
 It uses the production helper and public `strict_offline::Client` API, not a
 second renderer or fabricated protocol reply. No audio device or interactive
 desktop is required. Windows x86_64 MSVC and Linux x86_64 are supported; helper
@@ -32,7 +32,7 @@ It is not included in the root test suite or release assets.
 
 ## The response has real latency and a finite tail
 
-Factory2 reports one audio class:
+Factory2 reports two audio classes. Index0 remains this default Effect:
 
 - Class: `43545253454658440000000000000001`
 - Name: `Citrus Stereo Delay Fixture`
@@ -58,11 +58,42 @@ state restore, processing setup or deactivation. Stopped zero-frame parameter
 flush is supported for normal host state capture. Only static, block-start Gain
 changes are supported; later sample offsets are rejected.
 
+## The second class generates MIDI audio through a real FIFO
+
+`43545253454658440000000000000002` is the independent
+`Citrus Lookahead MIDI Fixture`, category `Instrument|Synth`. It has no audio
+input, one main stereo output, one main 16-channel event input and no editor or
+event output. It uses the same vendor/version, Gain/state codec and read-only
+probes. Probe1005's input activation is the event bus for this class.
+
+At each sample, NoteOn/NoteOff is applied at its actual sample offset. Each
+channel/pitch holds at most one velocity; velocity0 is NoteOff. The fixed-order
+sum is `level = sum(velocity_f32 * ((pitch + 1) / 128))`. Undelayed left audio is
+`gain_f32 * level`; right is `-0.5 * left`. A real stereo32-sample FIFO delays
+this signal. Both reported latency and finite NoteOff tail are32 samples,
+including that FIFO. CC120/123 clears the addressed MIDI channel. State restore,
+setup and deactivation clear voices/FIFO; zero-frame parameter flush does not
+advance it. Realtime source processing and Offline clone processing are supported.
+
+For pitch63/velocity127/Gain0.5, NoteOn at raw frames0 and127, with NoteOff at1
+and129, yields left0.25/right−0.125 only at frames32,159,160. The exact production
+helper target checks all768 stereo samples, actual layouts/state/probes and
+natural helper cleanup:
+
+```powershell
+# Same explicit fixture/helper environment as above; no installed fallback.
+cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/host-check/Cargo.toml --target-dir target --test real_effect real_sdk_instrument_midi_has_actual_q128_lookahead_tail_and_natural_reap -- --ignored --exact --nocapture
+```
+
+This real signal is an input for Whole serial-stage/PDC validation. A reported
+latency alone, or this isolated fixture pass, does not establish Whole PDC.
+
 ## What the tests establish
 
-Four fixture tests exercise actual SDK Factory2/interface metadata, actual
+Six fixture tests exercise actual SDK Factory2/interface metadata, actual
 `IAudioProcessor::process` over Q128 boundaries, independent stereo channels,
-activation/processing prerequisites, output-clear detection and state validation.
+activation/processing prerequisites, output-clear detection and state validation,
+plus the Instrument's physical FIFO, MIDI offset boundaries and reset/refusal.
 
 The separate real-helper target captures opaque state through a real source SDK
 instance, drops it, cold-loads another source instance, checks exact state/readback,
@@ -98,22 +129,39 @@ Read-only probes never send dirty callbacks or modify persisted state:
 | 1005 | Active component + Process + both buses + Offline | 0 or 1 |
 | 1006 | Both output buffers initially all zero | 0 or 1 |
 
-This is focused backend evidence. Application Insert/Master routing, general FX
-chains, whole-song PDC, arbitrary plugin tails and NOIRE remain separate work.
+This is focused backend evidence. The static serial Whole consumer separately
+passed its real-Generator/two-Effect PCM/latency oracle and final local code gates.
+Its new exact-candidate cloud validation remains pending. General FX graphs,
+automation, arbitrary tails and real NOIRE acceptance remain separate from these
+fixture results.
 
 ## Verification status
 
-The f64 setter and the revised non-f32 base assertions are source-only changes
-awaiting Root's next Windows/Linux cloud run. The passes below cover the earlier
-f32-base target, not these new precision assertions. The fixture DSP is unchanged.
-The App private-source target previously passed locally with Gain 0.375, source
-DSP count 0, the original guard joined and natural clone reap; its new non-f32 source
-initialization/restoration assertion is locally UNRUN. The current `effect_`
-gate selects 29 cases (two new f64 cases), rather than the earlier 27.
+The current Whole fixture candidate passed all6 local Windows unit
+tests, strict all-target fixture Clippy, the release bundle and matching production
+helper build. Both explicit SDK host targets passed: the non-f32 Effect case
+checked1280 samples/35 probes, and the new Instrument case checked768 samples with
+real32-sample FIFO, state40, finite tail32 and natural helper exit/reap. All owned
+native phases ended0 without resource guards. Evidence is in
+`target/backend-reliability-20261014/serial-lookahead-instrument-fixture-01/`.
+The new second-class fixture/CI delta has not run in Linux/cloud. It is separate
+from the committed capture/CAS candidate and the later Whole consumer validation.
+At `b73b57a`, quality38824285643 actually passed: both platforms ran29 Effect
+cases and the real non-f32 helper SDK target. Windows additionally ran the App
+private-source exact target with Gain0.12345678912345678, sourceDSP0, original
+worker joined, opaque40, three exact stereo Q128 blocks and natural clone reap.
+Root2497/15 ignored, strict Clippy/build/no-default and eligible real PrintWindow
+also passed. Preview38824285597 also completed successfully: the static-CRT
+release build took7m32s; exact ZIP/integrity, AMD64 GUI images, OS-only imports and
+the extracted helper's sanitized-PATH protocol/natural-reap check all passed.
+Artifact upload was disabled, so that upload step was skipped.
+These results cover the first Fx class and capture/CAS source, not the new second
+Instrument class or current Whole consumer. The earlier local Gain0.375 pass
+is retained only as historical evidence.
 
-The first combined candidate `689e0af` ran all29 Effect cases successfully in both Windows jobs; the preview root suite also passed2496/15 ignored. It then failed Root strict Clippy on the newly added admin-counter `fetch_update` deprecation, so Windows SDK targets and release/ZIP acceptance were not reached. The checked-CAS repair and new overflow case await their own cloud run; the source/clone precision SDK evidence remains separately required.
+The first combined candidate `689e0af` ran all29 Effect cases successfully in both Windows jobs; the preview root suite also passed2496/15 ignored. It then failed Root strict Clippy on the new admin-counter `fetch_update` deprecation, before Windows SDK or release/ZIP acceptance. The checked-CAS repair, near-MAX real-worker regression and source/clone precision assertions passed the subsequent `b73b57a` quality run above; the original failure logs remain under `source119-*`.
 
-Local Windows: all four fixture tests passed; the x86_64 MSVC release bundle and
+Earlier Fx-only local Windows: all four fixture tests passed; the x86_64 MSVC release bundle and
 matching all-feature production helper built successfully. The first fixture
 test compile found ambiguous integer inference in the analytical expectation
 loop; its index is now explicitly `usize`, and the corrected run passed all four.
@@ -123,8 +171,8 @@ probe readbacks, opaque 40-byte host state round-trip, actual latency 32/last ta
 40-byte state wraps this plugin's 12-byte component payload. Strict fixture
 all-target Clippy passed after replacing an indexed analytical test loop with
 `iter().enumerate()`; all four tests passed again with unchanged expectations.
-The unchanged DSP retains that earlier f32-base evidence; the revised precision
-assertions still await execution.
+The unchanged first-class DSP retains that earlier f32-base evidence; the later
+non-f32 precision assertions passed at `b73b57a` as recorded above.
 Cloud quality run [38813369205](https://github.com/wrench1997/DAW/actions/runs/38813369205)
 at `0c4872c42516a1d6cf7be7f421b1dbb20d7a5589` actually passed on Windows and Linux:
 each ran all four SDK tests and the then-current real production-helper host target.

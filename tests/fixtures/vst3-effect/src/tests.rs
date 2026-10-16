@@ -74,12 +74,12 @@ unsafe fn block(
 }
 
 #[test]
-fn sdk_factory2_advertises_one_actual_fx_delay_class_not_instrument() {
+fn sdk_factory2_preserves_default_fx_and_separately_advertises_lookahead_instrument() {
     unsafe {
         let factory = ComWrapper::new(Factory)
             .to_com_ptr::<IPluginFactory2>()
             .unwrap();
-        assert_eq!(factory.countClasses(), 1);
+        assert_eq!(factory.countClasses(), 2);
         let mut info: PClassInfo2 = std::mem::zeroed();
         assert_eq!(factory.getClassInfo2(0, &mut info), kResultOk);
         let text = |value: &[c_char]| {
@@ -97,6 +97,11 @@ fn sdk_factory2_advertises_one_actual_fx_delay_class_not_instrument() {
         assert_eq!(text(&info.vendor), VENDOR);
         assert_eq!(text(&info.version), VERSION);
         assert_eq!(text(&info.name), NAME);
+        assert_eq!(factory.getClassInfo2(1, &mut info), kResultOk);
+        assert_eq!(info.cid, INSTRUMENT_CID);
+        assert_eq!(text(&info.name), INSTRUMENT_NAME);
+        assert_eq!(text(&info.subCategories), INSTRUMENT_CATEGORY);
+        assert_eq!(factory.getClassInfo2(2, &mut info), kInvalidArgument);
         let effect = ComWrapper::new(Effect::default())
             .to_com_ptr::<IComponent>()
             .unwrap();

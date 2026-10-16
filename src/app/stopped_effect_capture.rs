@@ -18,6 +18,7 @@ struct NativeBinding {
     completed_request: u64,
 }
 
+#[derive(Clone)]
 struct EffectBinding {
     project_session: u64,
     track: usize,
@@ -40,6 +41,86 @@ pub(in crate::app) struct CapturedStoppedEffectChain {
     pub(in crate::app) placements: Vec<MixerInsertSlotRef>,
     pub(in crate::app) token: PreparedPlaybackToken,
     pub(in crate::app) receipt: EffectChainStateReceipt,
+    binding: EffectBinding,
+}
+
+impl CapturedStoppedEffectChain {
+    /// Earlier endpoint receipts remain live source authority while a later
+    /// endpoint is capturing. A missing graph token is waiting, never success.
+    pub(in crate::app) fn recheck(
+        &self,
+        app: &CitrusApp,
+        require_graph_ready: bool,
+    ) -> Result<bool, String> {
+        self.binding.recheck(app)?;
+        let chain = app
+            .running_insert_chains
+            .get(&self.track)
+            .ok_or("Captured Insert endpoint disappeared")?;
+        match chain.control.effect_chain_receipt_settlement(&self.receipt) {
+            BounceSourceSettlement::Invalid => {
+                return Err("Earlier Effect receipt was invalidated by new source work".into());
+            }
+            BounceSourceSettlement::Waiting => return Ok(false),
+            BounceSourceSettlement::Ready => {}
+        }
+        let token = app
+            .audio
+            .as_ref()
+            .and_then(AudioEngine::prepared_playback_token);
+        if token.is_some_and(|token| token != self.token) {
+            return Err("Earlier Effect prepared graph identity changed".into());
+        }
+        Ok(!require_graph_ready || token.is_some())
+    }
+    pub(in crate::app) fn split_for_render(
+        self,
+    ) -> (
+        StoppedEffectSourceLease,
+        crate::instrument_bounce::render::serial::CapturedSerialEffectChain,
+    ) {
+        let lease = StoppedEffectSourceLease {
+            binding: self.binding,
+            ticket: crate::plugins::plugin_runtime::StoppedSourceWorkTicket::from_effect_receipt(
+                &self.receipt,
+            ),
+        };
+        (
+            lease,
+            crate::instrument_bounce::render::serial::CapturedSerialEffectChain {
+                runtime_track: self.track,
+                placements: self.placements,
+                receipt: self.receipt,
+            },
+        )
+    }
+}
+
+pub(in crate::app) struct StoppedEffectSourceLease {
+    binding: EffectBinding,
+    ticket: crate::plugins::plugin_runtime::StoppedSourceWorkTicket,
+}
+impl StoppedEffectSourceLease {
+    pub(in crate::app) fn recheck(&self, app: &CitrusApp) -> Result<(), String> {
+        self.binding.recheck(app)?;
+        let chain = app
+            .running_insert_chains
+            .get(&self.binding.track)
+            .ok_or("Captured Insert source disappeared")?;
+        if chain.control.stopped_source_work_settlement(self.ticket)
+            != BounceSourceSettlement::Ready
+            || app
+                .audio
+                .as_ref()
+                .and_then(AudioEngine::prepared_playback_token)
+                != Some(self.binding.token)
+        {
+            return Err(
+                "Captured Insert source work or graph witness changed during Whole render".into(),
+            );
+        }
+        Ok(())
+    }
 }
 
 pub(in crate::app) struct StoppedEffectChainCapture {
@@ -47,7 +128,7 @@ pub(in crate::app) struct StoppedEffectChainCapture {
     receiver: Option<EffectChainStateReceiver>,
     receipt: Option<EffectChainStateReceipt>,
     abort_reason: Option<CapturePollError>,
-    started_at: Instant,
+    deadline: Instant,
 }
 impl StoppedEffectChainCapture {
     pub(super) fn cancel(&mut self) {
@@ -102,7 +183,7 @@ impl StoppedEffectChainCapture {
         if let Err(reason) = source_valid.and_then(|()| self.binding.recheck(app)) {
             self.abort(CapturePollError::Stale(reason));
         }
-        if self.started_at.elapsed() >= crate::instrument_bounce::BOUNCE_CAPTURE_TIMEOUT {
+        if Instant::now() >= self.deadline {
             self.abort(CapturePollError::Deadline);
         }
         if self.receipt.is_none() {
@@ -189,6 +270,7 @@ impl StoppedEffectChainCapture {
             placements: self.binding.placements.clone(),
             token: self.binding.token,
             receipt: self.receipt.take().expect("checked complete chain"),
+            binding: self.binding.clone(),
         }))
     }
 }
@@ -348,6 +430,26 @@ impl StoppedBounceCapture {
         app: &CitrusApp,
         track: usize,
     ) -> Result<(), String> {
+        self.begin_effect_chain_capture_internal(app, track, None)
+    }
+
+    /// Whole shares its original render budget with every source capture. The
+    /// existing standalone entry retains its independent capture-timeout contract.
+    pub(in crate::app) fn begin_effect_chain_capture_before(
+        &mut self,
+        app: &CitrusApp,
+        track: usize,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        self.begin_effect_chain_capture_internal(app, track, Some(deadline))
+    }
+
+    fn begin_effect_chain_capture_internal(
+        &mut self,
+        app: &CitrusApp,
+        track: usize,
+        outer_deadline: Option<Instant>,
+    ) -> Result<(), String> {
         let source = self.live_recheck(app)?;
         self.stop_intent_current(app)?;
         if self.owns_pending_capture() || self.ready_binding != Some(source) {
@@ -370,20 +472,25 @@ impl StoppedBounceCapture {
         }
         let binding = EffectBinding::observe(app, track, token)?;
         binding.recheck(app)?;
+        let capture_deadline = Instant::now() + crate::instrument_bounce::BOUNCE_CAPTURE_TIMEOUT;
+        let deadline = outer_deadline.map_or(capture_deadline, |outer| outer.min(capture_deadline));
+        if Instant::now() >= deadline {
+            return Err("Effect source capture absolute deadline elapsed before dispatch".into());
+        }
         let receiver = app.running_insert_chains[&track]
             .control
             .request_effect_chain_state(
                 token.epoch,
                 binding.endpoint,
                 binding.requests.clone(),
-                Instant::now() + crate::instrument_bounce::BOUNCE_CAPTURE_TIMEOUT,
+                deadline,
             )?;
         self.effect_capture = Some(StoppedEffectChainCapture {
             binding,
             receiver: Some(receiver),
             receipt: None,
             abort_reason: None,
-            started_at: Instant::now(),
+            deadline,
         });
         self.stopping = false;
         Ok(())

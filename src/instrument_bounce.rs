@@ -14,7 +14,7 @@ pub(crate) mod occurrence;
 pub(crate) use occurrence::OccurrenceRenderProvenance;
 
 #[path = "effect_bounce.rs"]
-#[allow(dead_code)] // Private source foundation; Whole FX admission remains closed.
+#[allow(dead_code)] // Private capture interfaces are unavailable in some feature configurations.
 pub(crate) mod effect;
 
 use std::{
@@ -339,6 +339,7 @@ pub struct InstrumentBouncePlan {
     parameter_ids: Vec<u32>,
     occurrence: Option<Arc<crate::occurrence_request::OccurrenceRenderRequest>>,
     master_song: bool,
+    serial_master: bool,
 }
 
 impl InstrumentBouncePlan {
@@ -348,7 +349,15 @@ impl InstrumentBouncePlan {
         sample_rate: u32,
         tail_frames: u32,
     ) -> Result<Self, String> {
-        Self::prepare_internal(project, channel_id, sample_rate, tail_frames, None, false)
+        Self::prepare_internal(
+            project,
+            channel_id,
+            sample_rate,
+            tail_frames,
+            None,
+            false,
+            false,
+        )
     }
 
     /// Prepare a complete single-generator song for the master export owner.
@@ -361,7 +370,34 @@ impl InstrumentBouncePlan {
         sample_rate: u32,
         tail_frames: u32,
     ) -> Result<Self, String> {
-        Self::prepare_internal(project, channel_id, sample_rate, tail_frames, None, true)
+        Self::prepare_internal(
+            project,
+            channel_id,
+            sample_rate,
+            tail_frames,
+            None,
+            true,
+            false,
+        )
+    }
+
+    pub(crate) fn prepare_master_song_serial(
+        project: &Project,
+        channel_id: u32,
+        sample_rate: u32,
+        tail_frames: u32,
+    ) -> Result<Self, String> {
+        crate::export::serial_master::StaticSerialMasterPlan::prepare(project, channel_id)
+            .map_err(|e| e.to_string())?;
+        Self::prepare_internal(
+            project,
+            channel_id,
+            sample_rate,
+            tail_frames,
+            None,
+            true,
+            true,
+        )
     }
 
     #[allow(dead_code)] // Dormant Stop A entry; the App controller is separately gated.
@@ -377,6 +413,7 @@ impl InstrumentBouncePlan {
             request.tail_frames(),
             Some(request),
             false,
+            false,
         )
     }
 
@@ -387,6 +424,7 @@ impl InstrumentBouncePlan {
         tail_frames: u32,
         occurrence: Option<Arc<crate::occurrence_request::OccurrenceRenderRequest>>,
         master_song: bool,
+        serial_master: bool,
     ) -> Result<Self, String> {
         if !(8_000..=192_000).contains(&sample_rate)
             || tail_frames > sample_rate.saturating_mul(MAX_BOUNCE_TAIL_SECONDS)
@@ -409,7 +447,7 @@ impl InstrumentBouncePlan {
             .iter()
             .filter(|lane| lane.lane.is_enabled() && !lane.lane.points().is_empty())
         {
-            if !master_song || !master_song_automation_target(lane.lane.target()) {
+            if !master_song || serial_master || !master_song_automation_target(lane.lane.target()) {
                 return Err(format!(
                     "Instrument bounce does not support active automation, including Tempo (lane {}: {})",
                     lane.id, lane.name
@@ -464,7 +502,13 @@ impl InstrumentBouncePlan {
             ));
         }
         if master_song {
-            validate_master_song_timeline(project, &timeline, channel_id, instance_id)?;
+            validate_master_song_timeline(
+                project,
+                &timeline,
+                channel_id,
+                instance_id,
+                serial_master,
+            )?;
         }
         if let Some(request) = &occurrence {
             occurrence::check_compiled_request(request, &timeline, instance_id)?;
@@ -508,6 +552,7 @@ impl InstrumentBouncePlan {
             parameter_ids: instance.parameters.keys().copied().collect(),
             occurrence,
             master_song,
+            serial_master,
         })
     }
 
@@ -528,6 +573,9 @@ impl InstrumentBouncePlan {
     pub fn is_master_song(&self) -> bool {
         self.master_song
     }
+    pub(crate) fn is_serial_master(&self) -> bool {
+        self.serial_master
+    }
     pub fn instance_id(&self) -> u64 {
         self.instance_id
     }
@@ -542,6 +590,15 @@ impl InstrumentBouncePlan {
     }
     pub fn project_fingerprint(&self) -> u64 {
         self.project_fingerprint
+    }
+    /// Explicit repository-fixture acceptance never falls back to an installed helper.
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn set_strict_fixture_helper_for_test(&mut self, helper: std::path::PathBuf) {
+        self.spec.vst3_helper_path = Some(helper);
     }
 }
 
@@ -572,6 +629,7 @@ fn validate_master_song_timeline(
     timeline: &CompiledTimeline,
     channel_id: u32,
     instance_id: u64,
+    serial_master: bool,
 ) -> Result<(), String> {
     if !timeline.plugin_routes().iter().any(|route| {
         route.instance_id == instance_id
@@ -587,6 +645,18 @@ fn validate_master_song_timeline(
     }
     for route in timeline.plugin_routes() {
         if route.instance_id == instance_id {
+            continue;
+        }
+        if serial_master
+            && matches!(
+                route.destination,
+                PluginRouteDestination::MixerInsert { .. }
+            )
+            && project
+                .mixer_insert_slots
+                .iter()
+                .any(|p| p.plugin_instance_id == route.instance_id)
+        {
             continue;
         }
         let instance = project
