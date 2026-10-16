@@ -22,18 +22,44 @@ bases, actual captured bases and an actual writable/automatable source catalog;
 the clone must match that catalog and verify restored values. The compiled
 Timeline supplies each raw Q128 block-start value before MIDI and DSP. This is
 block-rate, not sample-accurate within 128 frames. The fixed tail holds the last
-actually sent musical-block values without a tail parameter write. Its new SDK
-lane is authored after cold Open, so that case does not verify saving/reopening
-the new lane.
+actually sent musical-block values without a tail parameter write. Separate SDK
+cases now distinguish a lane authored after cold Open from one persisted by
+ordinary Manual Save and consumed unchanged by a fresh App.
 
 **Current local validation:** the rebuilt test artifact and all 64 directed cases,
 including 19 new cases, passed. The genuine Q128 SDK run matched all 96,768 stereo
 frames against an independent Generator FIFO32/two-FX/single-96-frame-crop oracle;
 the retained genuine and audited SDK cases also passed. Fixture validation passed
 9 feature unit tests, the default-factory metadata negative control, strict fixture
-Clippy and the feature-bundle rebuild. Root strict Clippy/no-default/fmt also passed.
+Clippy and the feature-bundle rebuild. At `4cffe`, Root strict Clippy/no-default/fmt
+also passed.
 The changed Review's real two-size WGPU check passed1/5.54s and both frames were
-inspected; new-code cloud acceptance remains pending.
+inspected. At `4cffe`, quality38893797179 and preview38893797217 both passed,
+including the after-Open Q128 case, real eligible-session PrintWindow and preview
+release/ZIP/extracted helper. Those runs do not include the added saved-lane case below.
+
+**Saved-lane acceptance:** the separate
+`actual_sdk_generator_parameter_q128_manual_save_cold_open_genuine_whole_matches_full_pcm`
+passed locally in 11.81s. It authors the lane before ordinary Manual Save, proves
+the complete disk/fresh-App payload, three initialization ACKs, actual catalog
+Gain 0.625 and accepted opaque-state probes, then captures driven ID 0/catalog/base
+and renders through the genuine default Whole factory. All 96,768 stereo frames
+match the independent FIFO32/two-FX/single-96-frame-crop oracle; the original and
+cold App each join all three source workers. A beat-zero value of 0.625 preserves
+the acknowledged base during stopped legacy dispatch. No lane is added after cold
+Open. Its legal 0.0625-beat placement ends at frame 1500: raw Q128 values are 0.625
+at frame 0, 0.75 at 128, 0.5 at 256..1408 and restored base 0.625 from 1536. The
+retained after-Open case remains distinct (initial 0.25, end 385, restore 512) and passed again
+in 11.51s. The saved Project/WAV were retained. This is fresh-App SDK acceptance,
+not an OS restart or NOIRE/physical-output qualification.
+
+The saved-case first compile failed E0689 when the oracle lost its f32 type;
+its first disk-payload comparison also failed because normal Project loading
+expanded the 385-frame placement to the model's 0.0625-beat minimum. Only the new
+test was corrected to explicit f32 and a legal window; payload assertions and the
+model were not weakened. Production/UI are unchanged, so their 64-case/two-size
+WGPU evidence is reused. All four shared-flow SDK cases and this revision's
+strict Clippy/no-default/fmt passed; new saved-case cloud acceptance is pending.
 
 The first compile failed with E0046 for missing test-backend latency/tail methods;
 those methods were added before the successful rebuild. The first cursor group

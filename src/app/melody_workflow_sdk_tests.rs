@@ -39,6 +39,13 @@ enum WorkflowRenderer {
     GenuineProduction,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GeneratorAutomationMode {
+    None,
+    AfterColdOpen,
+    SavedAndReopened,
+}
+
 struct SourceOwner {
     control: PluginChainControl,
     guard: PluginWorkerGuard,
@@ -439,8 +446,15 @@ fn authored_project() -> Project {
     p
 }
 
-fn assert_persisted_melody(project: &Project) {
-    let authored = authored_project();
+fn assert_persisted_melody(
+    project: &Project,
+    generator_automation: GeneratorAutomationMode,
+    instance: u64,
+) {
+    let mut authored = authored_project();
+    if generator_automation == GeneratorAutomationMode::SavedAndReopened {
+        configure_generator_q128(&mut authored, instance, generator_automation);
+    }
     // Compare the complete authored musical payload, not just a fingerprint
     // or the plug-in state. Assignment adds instance IDs but cannot alter it.
     let musical_payload = |p: &Project| {
@@ -603,16 +617,25 @@ fn assert_default_loaded(f: &WorkflowApp, ids: [u64; 3]) {
     }
 }
 
-fn configure_generator_q128(project: &mut Project, instance: u64) {
+fn configure_generator_q128(project: &mut Project, instance: u64, mode: GeneratorAutomationMode) {
     use crate::automation::{AutomationCurve, AutomationLane, AutomationPoint, AutomationTarget};
+    let initial_value = match mode {
+        GeneratorAutomationMode::None => panic!("The no-lane workflow must not author automation"),
+        GeneratorAutomationMode::AfterColdOpen => 0.25,
+        // Legacy stopped automation applies beat zero to the source. Preserve
+        // the actual acknowledged .625 base and its independent opaque proof.
+        GeneratorAutomationMode::SavedAndReopened => f64::from(GAINS[0]),
+    };
     let mut lane = AutomationLane::new(AutomationTarget::PluginParameter {
         instance,
         parameter: 0,
     });
     lane.set_curve(AutomationCurve::Hold);
+    assert!(lane.is_enabled() && lane.loop_region().is_none());
+    assert_eq!((lane.value_range().min, lane.value_range().max), (0.0, 1.0));
     let beat = |frame: u64| frame as f64 / 24_000.0;
     lane.replace_points([
-        AutomationPoint::new(0.0, 0.25),
+        AutomationPoint::new(0.0, initial_value),
         AutomationPoint::new(beat(127), 0.75),
         AutomationPoint::new(beat(130), 0.5),
     ]);
@@ -628,12 +651,20 @@ fn configure_generator_q128(project: &mut Project, instance: u64) {
     clip.kind = ClipKind::Automation;
     clip.automation_id = Some(0xF101);
     clip.start = 0.0;
-    clip.length = beat(385) as f32;
+    clip.length = if mode == GeneratorAutomationMode::SavedAndReopened {
+        // The normal persisted Project contract clamps every clip to at least
+        // .0625 beat (1500 frames here). Author that legal value directly,
+        // rather than silently changing a 385-frame placement during load.
+        0.0625
+    } else {
+        beat(385) as f32
+    };
     clip.source_offset = 0.0;
+    clip.muted = false;
     project.clips.push(clip);
 }
 
-fn independent_pcm(generator_automation: bool) -> Vec<[f32; 2]> {
+fn independent_pcm(generator_automation: GeneratorAutomationMode) -> Vec<[f32; 2]> {
     // Notes at [0,N/4) and [N/2,N), true MIDI fixture32 FIFO,
     // two FIR32/160 Effects, actual callback control order, one final crop96.
     let generated = GENERATED;
@@ -649,17 +680,22 @@ fn independent_pcm(generator_automation: bool) -> Vec<[f32; 2]> {
         } else {
             0.0
         };
-        // Independent Q128 oracle: changes at 127/130 and placement end385
-        // become actual writes only at128/256/512, before the source FIFO.
-        let gain = if !generator_automation {
-            GAINS[0]
-        } else {
-            match j / 128 {
+        // Independent Q128 oracle: points127/130 apply at128/256 before the
+        // source FIFO. In-memory end385 restores at512; saved end1500 at1536.
+        let gain: f32 = match generator_automation {
+            GeneratorAutomationMode::None => 0.625,
+            GeneratorAutomationMode::AfterColdOpen => match j / 128 {
                 0 => 0.25,
                 1 => 0.75,
                 2 | 3 => 0.5,
-                _ => GAINS[0],
-            }
+                _ => 0.625,
+            },
+            GeneratorAutomationMode::SavedAndReopened => match j / 128 {
+                0 => 0.625,
+                1 => 0.75,
+                2..=11 => 0.5,
+                _ => 0.625,
+            },
         };
         let left = gain * level;
         *sample = [left, -0.5 * left];
@@ -693,22 +729,43 @@ fn independent_pcm(generator_automation: bool) -> Vec<[f32; 2]> {
 #[test]
 #[ignore = "explicit source-built Instrument-first + Effect bundle and matching sibling production helper; no device, GUI or installed fallback"]
 fn actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm() {
-    run_saved_melody_workflow(WorkflowRenderer::ClosedReadOnlyAudit, false);
+    run_saved_melody_workflow(
+        WorkflowRenderer::ClosedReadOnlyAudit,
+        GeneratorAutomationMode::None,
+    );
 }
 
 #[test]
 #[ignore = "explicit source-built Instrument-first + Effect bundle and matching sibling production helper; genuine default Whole factory, no device, GUI or installed fallback"]
 fn actual_sdk_catalog_play_stop_manual_save_cold_open_genuine_whole_factory_matches_pcm() {
-    run_saved_melody_workflow(WorkflowRenderer::GenuineProduction, false);
+    run_saved_melody_workflow(
+        WorkflowRenderer::GenuineProduction,
+        GeneratorAutomationMode::None,
+    );
 }
 
 #[test]
 #[ignore = "explicit source-built Instrument-first + Effect bundles and matching sibling helper; genuine Whole Generator Q128 automation DSP, no device/GUI/installed fallback"]
 fn actual_sdk_whole_generator_parameter_q128_automation_matches_full_pcm() {
-    run_saved_melody_workflow(WorkflowRenderer::GenuineProduction, true);
+    run_saved_melody_workflow(
+        WorkflowRenderer::GenuineProduction,
+        GeneratorAutomationMode::AfterColdOpen,
+    );
 }
 
-fn run_saved_melody_workflow(renderer: WorkflowRenderer, generator_automation: bool) {
+#[test]
+#[ignore = "explicit source-built Instrument-first + Effect bundles and matching sibling helper; saved Generator Q128 lane, actual cold Open and genuine Whole PCM, no device/GUI/installed fallback"]
+fn actual_sdk_generator_parameter_q128_manual_save_cold_open_genuine_whole_matches_full_pcm() {
+    run_saved_melody_workflow(
+        WorkflowRenderer::GenuineProduction,
+        GeneratorAutomationMode::SavedAndReopened,
+    );
+}
+
+fn run_saved_melody_workflow(
+    renderer: WorkflowRenderer,
+    generator_automation: GeneratorAutomationMode,
+) {
     let genuine_factory = matches!(renderer, WorkflowRenderer::GenuineProduction);
     let _helper_admission = plugins::helper_transport_test_lock();
     check_helper_sibling();
@@ -797,7 +854,7 @@ fn run_saved_melody_workflow(renderer: WorkflowRenderer, generator_automation: b
     // Default component/controller setup may legitimately accept default state.
     // Preserve its actual baseline instead of assuming zero initialization calls.
     let warm_generator_catalog = catalogue(&mut first, ids[0]);
-    if generator_automation {
+    if generator_automation != GeneratorAutomationMode::None {
         let gain = warm_generator_catalog.iter().find(|p| p.id == 0).unwrap();
         assert!(
             gain.automatable && !gain.read_only,
@@ -885,6 +942,14 @@ fn run_saved_melody_workflow(renderer: WorkflowRenderer, generator_automation: b
         }
         first.app_mut().plugin_parameter_editor = None;
     }
+    if generator_automation == GeneratorAutomationMode::SavedAndReopened {
+        // Author before the actual Manual Save. Bases were already established
+        // by acknowledged callback/worker edits; this helper only adds a lane
+        // and placement, and cannot repair or inject a Project parameter base.
+        configure_generator_q128(&mut first.app_mut().project, ids[0], generator_automation);
+        first.app_mut().request_immediate_timeline_compile();
+        first.until(WorkflowApp::ready);
+    }
     first
         .app_mut()
         .begin_project_save(ProjectSaveRequest::Manual {
@@ -900,7 +965,7 @@ fn run_saved_melody_workflow(renderer: WorkflowRenderer, generator_automation: b
     );
     let saved_bytes = std::fs::read(&saved_path).unwrap();
     let saved = Project::load(&saved_path).unwrap();
-    assert_persisted_melody(&saved);
+    assert_persisted_melody(&saved, generator_automation, ids[0]);
     let saved_project_bytes = serde_json::to_vec(&saved).unwrap();
     assert_eq!(
         serde_json::to_vec(&first.app().project).unwrap(),
@@ -963,6 +1028,11 @@ fn run_saved_melody_workflow(renderer: WorkflowRenderer, generator_automation: b
         assert!(request != 0 && count == 1);
     }
     let cold_generator_catalog = catalogue(&mut cold, ids[0]);
+    if generator_automation == GeneratorAutomationMode::SavedAndReopened {
+        let gain = cold_generator_catalog.iter().find(|p| p.id == 0).unwrap();
+        assert!(gain.automatable && !gain.read_only);
+        assert_eq!(gain.current_normalized.to_bits(), GAINS[0].to_bits());
+    }
     let cold_opaque = generator_opaque_restore_proof(&cold_generator_catalog);
     assert!(
         cold_opaque.0 > 0.0,
@@ -990,13 +1060,13 @@ fn run_saved_melody_workflow(renderer: WorkflowRenderer, generator_automation: b
         );
     }
     assert_eq!(project_fingerprint(&cold.app().project), saved_fingerprint);
-    assert_persisted_melody(&cold.app().project);
+    assert_persisted_melody(&cold.app().project, generator_automation, ids[0]);
     let mut render_project = saved.clone();
-    if generator_automation {
+    if generator_automation == GeneratorAutomationMode::AfterColdOpen {
         // Author this new capability on the actually opened cold Project. Save/Open
         // and its already-qualified opaque proof above retain their original inputs.
-        configure_generator_q128(&mut cold.app_mut().project, ids[0]);
-        configure_generator_q128(&mut render_project, ids[0]);
+        configure_generator_q128(&mut cold.app_mut().project, ids[0], generator_automation);
+        configure_generator_q128(&mut render_project, ids[0], generator_automation);
         cold.app_mut().request_immediate_timeline_compile();
         cold.until(WorkflowApp::ready);
     }
@@ -1074,13 +1144,21 @@ fn run_saved_melody_workflow(renderer: WorkflowRenderer, generator_automation: b
             // is consumed with take(), so its final absence cannot prove selection.
             assert!(job.render_starter.is_none() && job.serial_render_starter.is_none());
             if job.phase == WholeExportPhase::CapturingEffects {
-                assert!(
-                    job.captured_generator
-                        .as_ref()
-                        .unwrap()
+                let captured = job.captured_generator.as_ref().unwrap();
+                assert!(captured.plan().is_serial_master());
+                if generator_automation == GeneratorAutomationMode::SavedAndReopened {
+                    assert_eq!(captured.plan().generator_automation_ids(), &[0]);
+                    captured
                         .plan()
-                        .is_serial_master()
-                );
+                        .generator_automation_catalog()
+                        .expect("Actual stopped source catalog must accompany the saved driven ID")
+                        .validate(&[0])
+                        .unwrap();
+                    assert_eq!(
+                        captured.state.parameter_bases[&0].to_bits(),
+                        GAINS[0].to_bits()
+                    );
+                }
                 saw_serial_capture = true;
             }
         }
@@ -1194,7 +1272,13 @@ fn run_saved_melody_workflow(renderer: WorkflowRenderer, generator_automation: b
     for owner in &cold_owners {
         assert_joined(owner);
     }
-    if generator_automation {
+    if generator_automation == GeneratorAutomationMode::SavedAndReopened {
+        eprintln!(
+            "REAL_APP_GENERATOR_Q128_SAVE_COLD_OPEN_GENUINE_WHOLE_PASS automation_authored=before_ManualSave; lane_and_placement=exact_disk_and_actual_cold_Project; cold_lane_reconfigured=false; generic_base_contract=f32_ack; saved_base_and_cold_actual_gain=0.625; state=40_each; cold_generator_opaque=accepted_state_function_and_saved_gain_readonly_proof; captured_driven_ids=0; captured_actual_catalog=writable_automatable; captured_base=0.625; quantum=128; placement_end=1500; applied_restore=1536; raw_Q_gain=0.625_0.75_0.5_Q2_through_Q11_then_0.625; full_independent_SDK_PCM=true; render_factory=default_production; genuine_whole_production_factory_selected=true; completion=typed_Complete_after_termination_ACK_and_admission_drained; strict_child_pid_audit=false; old_source_joined=3; cold_init_exact_ack=3; cold_source_joined=3; source_class_selector=None_both; registry_reused=false; music={MUSIC}; tail={TAIL}; retained={}; generated={GENERATED}; native_latency=96; output={}",
+            MUSIC + TAIL,
+            directory.display()
+        );
+    } else if generator_automation == GeneratorAutomationMode::AfterColdOpen {
         eprintln!(
             "REAL_WHOLE_GENERATOR_Q128_AUTOMATION_PASS render_factory=default_production; actual_source_catalog=writable_automatable; project_and_captured_bases=f32_present; quantum=128; musical_parameter_sampling=raw_block_start_before_MIDI_Process; subquantum_points=127_130; placement_end=385; applied_boundaries=128_256_512; fixed_tail=hold_last_sent_music_quantum; Master_tail=N_minus_1_unchanged; setter_ACK_is_not_DSP_evidence; full_independent_SDK_PCM=true; strict_child_pid_audit=false; old_source_joined=3; cold_source_joined=3; music={MUSIC}; tail={TAIL}; retained={}; generated={GENERATED}; native_latency=96; output={}",
             MUSIC + TAIL,

@@ -70,10 +70,17 @@ musical block and sends no new tail parameter values. Recompilation, all 64
 directed cases (19 new), the genuine Q128 full-PCM SDK run and retained SDK cases
 passed locally. Initial test-backend compile and cursor-oracle failures were
 repaired in tests, not production behavior; details are in the
-[offline export workflow](OFFLINE_EXPORT_WORKFLOW.md). Root strict Clippy/no-default/
-fmt and actual two-size Review WGPU passed; both frames were inspected.
-New-code cloud acceptance remains pending. The new SDK
-lane is authored after cold Open; its persistence is not established by that test.
+[offline export workflow](OFFLINE_EXPORT_WORKFLOW.md). At `4cffe`, Root strict
+Clippy/no-default/fmt, inspected two-size Review WGPU and both cloud workflows
+(including Q128 SDK/real PrintWindow and preview packaging) passed. A separate added saved-lane SDK case now passed locally: the lane is
+authored before ordinary Manual Save, the disk/fresh-App payload and actual
+base/opaque restoration are exact, and genuine Whole matches all 96,768 stereo
+frames. The earlier after-Open lane case remains separate and passed again.
+The new test uses the legal 0.0625-beat placement; its initial compile/type and
+disk-normalization failures received test-only fixes, with full payload checks
+retained. All four shared-flow SDK cases and this revision's strict Clippy/
+no-default/fmt passed. New saved-case cloud acceptance is pending; unchanged
+production/WGPU evidence is reused.
 
 Branches, sends, sidechains, off-path Inserts (even disabled/bypassed), active
 partial-wet Inserts, additional sources, Effect/other-instance parameter

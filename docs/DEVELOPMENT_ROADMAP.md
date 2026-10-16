@@ -223,6 +223,16 @@ helper GUI/DSP concurrent processing remain separate work.
 
 **Current default-factory slice:** a separate genuine Whole exact now runs the entire catalog/Play/Stop/disk Save/new-App disk Open/Whole flow without either renderer starter override. Local first executions passed: genuine1/8.69s and retained audit1/8.47s; strict Clippy/no-default/fmt passed. Both checked all96,768 stereo frames and original/cold worker joins. Genuine completion is the production typed Complete after termination ACK/admission drain; strict child PID/reap/max-live1 and Offline1005 observations remain the separate audit case. Both exacts are explicit in the existing bounded CI step. First6050d36 cloud quality38872515281 and preview38872515243 actually failed old clip/identity/catalog tests before new SDK, PrintWindow or release/ZIP; Linux independently passed. The isolated four-file repair passed276 focused local cases plus strict Clippy/no-default/fmt: explicit test-installer control-thread scope excludes foreign workers, and catalog primary refusal is checked independently of real retirement. Successful metadata still requires healthy retirement; actual kill remains UncleanRetirement. The original clip5s only gains bounded phase diagnostics, not a proved cause fix. Code `820cddb098969b35c98a5d976220feff340e160d` then passed quality38880415806 and preview38880415815 on attempt1:2553 root/19 ignored, all five explicit App SDK cases, genuine12.64s/audit12.32s complete PCM, strict gates and real session2 PrintWindow. Preview passed Python372/12 conditional skips, static-CRT release8m25s/ZIP/extracted helper, upload=false. Original failures remain recorded; the clip re-pass does not prove its old timeout cause. No user03/NI/device operation.
 
+**Saved-lane local qualification:** the separate genuine Saved case now authors
+Generator automation before ordinary Manual Save, checks full disk/cold-App
+payload, three matched ACKs, actual catalog/current and opaque acceptance, then
+compares all96,768 stereo Whole frames. It passed1/11.81s; retained AfterColdOpen
+11.51s/genuine7.84s/audit7.88s and current strict Clippy/no-default/fmt passed.
+Saved placement1500/restore1536 respects the existing .0625-beat disk minimum;
+the old385/512 case remains separate. First compile/type and disk-normalization
+failures are preserved, repaired only in new test premises. New-code cloud
+qualification remains pending; see [scope and evidence](WINDOWS_MELODY_WORKFLOW.md#sdk-saved-generator-automation-lane-2026-10-16).
+
 **Previously accepted joint SDK:** code `bdf6901418f89fe5d0f4ac763a498c432156dacb` passed quality38863519248 and preview38863519233 on their first attempts: 2552 root cases/18 ignored, fixture8/9, builder11, four explicit Windows App SDK targets, strict Clippy/no-default/bins and real eligible-session PrintWindow. The new joint case passed in 12.64 s: normal default Instrument load, audible callback Play/Stop, disk Save, original worker joins, fresh App disk Open/generic ACKs/actual opaque gain acceptance, then all 96,768 stereo Whole frames. Preview passed Python372/12 conditional skips, static-CRT release7m53s, ZIP and extracted helper; upload was disabled. Initial document-link and receipt-current failures, their narrow corrections and valid local evidence remain in [the workflow record](WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16). NOIRE warm Save cleanup, OS program restart, seamless short loops and device listening remain separate work. User03 remains untouched while code-only work continues.
 
 **Baseline gap addressed in source:** failed/missing WAV loading previously had transient notifications and runtime diagnostics without a persistent project-media inventory or relink action.
@@ -240,7 +250,7 @@ helper GUI/DSP concurrent processing remain separate work.
 
 ## P1 / M3 — Export a usable deliverable from that song
 
-**Generator candidate, not yet accepted:** the new source supports only physical
+**Published Generator qualification (`4cffe0b`):** the new source supports only physical
 Generator slot0 parameter automation with an actual writable/automatable catalog,
 Q128 block-start delivery before MIDI and fixed-tail hold of the last submitted
 music value. Effect parameters, native Channel/Mixer targets, Tempo/Swing and
@@ -249,8 +259,11 @@ parent cases, rebuilt-feature9/default-metadata1, the genuine Q128 SDK in11.79s
 (all96,768 stereo frames), both retained SDK cases and Root strict Clippy/no-default/
 fmt passed. The first E0046 and two cursor-test prerequisite failures remain
 recorded; only the new test setup/oracle changed. Two-size genuine Review WGPU passed1/5.54s; Root inspected both actual frames.
-New-code cloud qualification remains pending. The SDK adds its new lane after cold Open;
-new-lane Save/Open persistence and real NOIRE remain unqualified. The later84
+Quality38893797179 and preview38893797217 both completed success:2574 root/20ignored,
+Quality SDK6 (new Q12810.29s/full96,768 frames), real session2 PrintWindow and
+preview release/ZIP/extracted helper passed, upload=false. The original Q128 SDK adds its lane after cold Open;
+the separate Saved-lane regression below now qualifies local disk persistence;
+real NOIRE remains unqualified. The later84
 quality succeeded but preview failed two old panic waits before release/ZIP;
 boundary diagnostics retain the old deadlines and actual failure rules. See
 [the current candidate and failures](WINDOWS_MELODY_WORKFLOW.md#generator-parameter-q128-candidate-2026-10-16-validation-pending).

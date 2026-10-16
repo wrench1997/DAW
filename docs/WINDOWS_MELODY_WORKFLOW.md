@@ -539,15 +539,16 @@ existing owners and deadlines.
 The new ignored SDK exact is
 `app::whole_song_export_job::melody_workflow_sdk_tests::actual_sdk_whole_generator_parameter_q128_automation_matches_full_pcm`.
 It first performs the ordinary catalog/Play/Stop/disk Save/fresh-App Open flow,
-then authors the new parameter lane. Thus the new lane's disk Save/Open recovery
-is not covered. Its independent96,768-frame stereo oracle applies Generator gain
+then authors the new parameter lane. That AfterColdOpen case does not cover
+lane persistence; the separate Saved regression below now does locally.
+Its independent96,768-frame stereo oracle applies Generator gain
 before the real32-frame FIFO, followed by two real FIR effects and one96-frame
 crop. Raw hold points127/130 and layer end385 discriminate Q128 sampling at
 128/256/512; separate255/256/257-frame traces check tail-write absence. It uses
 the genuine default Whole factory; detailed strict-child audit remains the
 retained separate audited exact.
 
-**Local software qualification passed; Git/cloud pending.** Independent review
+**Local software and published4cffe0b cloud qualification passed.** Independent review
 found the fixture Gain lacked `kCanAutomate`;
 only the instrument-first Instrument class now advertises it, with actual
 factory/controller and host-catalog assertions. The default Effect metadata and
@@ -578,9 +579,27 @@ produced1498×936/1123×707 pixels). Root inspected both real frames: changed
 text wraps, fixed-tail consent and actions remain readable/inside the window.
 PID68672 and its exec exited0/reaped; fresh heavy[]/reviewPID[] followed.
 This was display/surface-free Vulkan on RTX3060, not ordinary GUI/NI/device
-acceptance. New code's cloud execution remains pending.
+acceptance. Published4cffe0b cloud qualification follows; the added Saved test
+has its separate pending cloud gate below.
 Evidence is under `generator-q128-automation-source-candidate-01/` in
 `target/backend-reliability-20261014/`.
+
+**Published4cffe0b cloud acceptance:**
+[Quality38893797179](https://github.com/wrench1997/DAW/actions/runs/38893797179)
+and [preview38893797217](https://github.com/wrench1997/DAW/actions/runs/38893797217)
+both actually completed SUCCESS on attempt1. Windows passed2574 root/20ignored
+(App2509 +52+6+5+2), strict Clippy/bins/no-default, fixture8/9/builder11/host2 and
+all six explicit App SDK targets. New AfterColdOpen Q128 passed10.29s with all
+96,768 stereo frames; genuine7.22s/audit7.07s retained their separate observations.
+Visible Default/session2/WTSActive performed real PrintWindow before/after/repaint,
+interaction/state/lifecycle/cleanup, all PASS rather than SKIPPED. Independent
+Linux readiness passed. Preview passed372 Python cases (360 PASS/12 conditional
+skips: four Unix-only/eight absent private Saved13 inputs),2574 root/20ignored,
+static-CRT release, exact ZIP/AMD64 GUI PE/OS-import/provenance and extracted
+sanitized-PATH helper. Upload=false made only artifact upload SKIPPED; Artifacts
+API was empty. Old panic cases passed this execution without proving their
+historical timeout mechanism. Full raw logs/API are `source133-cloud-*` under
+the evidence parent. These runs precede the separate Saved test below.
 
 The later doc-only `84ca9f6` cloud result remains separate from accepted820cddb:
 [quality38884219131](https://github.com/wrench1997/DAW/actions/runs/38884219131)
@@ -599,6 +618,54 @@ isolated ordinary-hook parent/child passed locally. Both old panic cases passed
 with `RUST_BACKTRACE=1` in their own execution; the historical cloud stalled
 boundary remains unproved. Original logs
 and terminals remain `source132-*-actual-terminal-01.*`.
+
+### SDK saved Generator automation lane (2026-10-16)
+
+The separate ignored exact
+`app::whole_song_export_job::melody_workflow_sdk_tests::actual_sdk_generator_parameter_q128_manual_save_cold_open_genuine_whole_matches_full_pcm`
+has now passed locally in11.81s. It authors the Generator lane after actual
+audible callback Play/Stop but **before ordinary Manual Save**. The actual disk
+load and fresh App must retain the complete musical payload and lane/placement;
+the cold App never recreates the lane. Original3 worker Joins precede the fresh
+engine/empty registry, ordinary Open, three matched initialization ACKs and full
+saved/cold Project fingerprint equality. Each saved slot retains40 opaque bytes
+and only writable base0 (.625/.8125/.9375). The cold Generator's real catalog
+checks automatable/writable Gain/current.625 and read-only1007/1008 accepted
+opaque-state/gain evidence, independently of generic-base ACKs.
+
+The Saved lane starts at actual base.625 so stopped beat-zero legacy dispatch
+does not change the opaque-gain proof before Save. Hold points127/130 still use
+.75/.5. Its placement is the existing disk format's legal minimum.0625beat =
+1500 source frames. The independent raw-Q oracle is.625 at0, .75 at128,
+.5 at256..1408 and restored Project base.625 from1536. This differs deliberately
+from the preserved AfterColdOpen case's first.25 and385/512 placement/restore.
+The genuine Whole capture checks driven IDs[0], actual typed catalog and captured
+base.625; both renderer overrides stay absent. All96,768 stereo frames match the
+independent FIFO32/two-FIR/single-crop96/Master oracle, with768 fixed tail frames,
+typed Complete after ACK/admission drain and final cold3 Joins. Individual strict
+PID/max-live observations remain the separate retained audit's evidence.
+
+Two first failures are preserved. Compile01 failed E0689 because hardcoded oracle
+branches lost the old `GAINS[0]` f32 inference; explicit `let gain: f32` restores
+the actual DSP type. Saved SDK01 then failed its strict disk payload comparison:
+`Project::load` normalized the original385-frame placement to the existing
+.0625-beat minimum. Only Saved test authoring/expected payload/independent oracle
+changed to that legal1500-frame window; production/model and the strong comparison
+did not change. This is not a385-frame persistence pass.
+
+The repaired Saved exact11.81s, retained AfterColdOpen11.51s, no-lane genuine7.84s
+and audit7.88s each passed. Current Root strict Clippy/no-default/fmt exited0.
+All11 phase terminals and51 retained-handle observations were consumed, with all
+execs/processes actually exited/reaped and no guard. Unchanged production, fixture,
+helper and UI reuse valid64-case/fixture/two-size WGPU evidence. The actual
+16309-byte Saved Project and774202-byte WAV are retained in
+`generator-q128-save-cold-open-source-candidate-01/accepted-saved-sdk02-output/`
+under `target/backend-reliability-20261014/`;16314 bytes belongs to the first
+failed saved-input artifact, not this accepted Project. The original10-minute CI
+step adds this explicit exact with immediate nonzero failure propagation;7 CI
+contracts and actual4722-byte PowerShell parse passed. New-code cloud execution
+is pending. These are source-built SDK/new-App-instance checks; NOIRE warm Save,
+real program restart, vendor parameter/state recovery and hardware remain separate.
 
 ### Master automation and source-checked publication (2026-10-16)
 

@@ -1455,6 +1455,7 @@ class PreviewBuildContractTests(unittest.TestCase):
         for selector in (
             "actual_sdk_catalog_play_stop_manual_save_cold_open_genuine_whole_factory_matches_pcm",
             "actual_sdk_whole_generator_parameter_q128_automation_matches_full_pcm",
+            "actual_sdk_generator_parameter_q128_manual_save_cold_open_genuine_whole_matches_full_pcm",
             "actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm",
         ):
             self.assertIn(

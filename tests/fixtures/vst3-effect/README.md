@@ -169,14 +169,17 @@ $env:CITRUS_MELODY_HELPER = (Resolve-Path target/debug/vst3-host-helper.exe).Pat
 # Also keep CITRUS_EFFECT_FIXTURE set to the default Effect bundle above.
 ```
 
-The three App targets share the prefix
+The four App targets share the prefix
 `app::whole_song_export_job::melody_workflow_sdk_tests::`:
 - `actual_sdk_catalog_play_stop_manual_save_cold_open_genuine_whole_factory_matches_pcm`
 - `actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm`
 - `actual_sdk_whole_generator_parameter_q128_automation_matches_full_pcm`
+- `actual_sdk_generator_parameter_q128_manual_save_cold_open_genuine_whole_matches_full_pcm`
 
 The third target has passed local CPU qualification, separately from the prior
-two-target acceptance below; new code cloud qualification remains pending.
+two-target acceptance below. Published4cffe0b passed quality38893797179 and
+preview38893797217:2574 root/20ignored, Quality SDK6 including Q12810.29s/fullPCM,
+real PrintWindow and preview release/ZIP/extracted helper; upload=false.
 Rebuild the feature bundle before running it. It authors a
 Generator Gain lane after cold Open and compares all96,768 stereo output frames
 against gain-before-FIFO32 plus two FIR stages and one96-frame crop. Hold points
@@ -200,7 +203,21 @@ Set `CITRUS_MELODY_HELPER` to the staged helper. Do not overwrite the common
 `target/debug/deps` helper or a user preview. CI performs this staging explicitly;
 the production `current_exe`-sibling helper resolver is unchanged.
 
-All three tests require actual audible callback Play, manual Stop/Save, original worker
+The fourth target separately authors its lane before Manual Save and never
+recreates it after cold Open. Full disk/cold payload, three initialization ACKs,
+actual catalog/current.625 and accepted opaque.625 are checked before genuine
+Whole rendering. It passed1/11.81s locally with all96,768 stereo frames and
+original/cold3+3 joins. Its legal1500-frame placement restores base at Q1536;
+the third target retains385/512 and the .25 first point. The Saved case uses a
+.625 first point so stopped legacy dispatch preserves the acknowledged opaque
+base. First E0689 and disk-normalization failures remain recorded; only test
+type/minimum-window premises changed, not production/model/payload assertions.
+All four shared-flow SDK cases and current Root strict Clippy/no-default/fmt
+passed. Existing fixture/helper/UI inputs are unchanged; new cloud qualification
+is pending. The actual Saved Project16309B and WAV774202B are retained under
+`generator-q128-save-cold-open-source-candidate-01/accepted-saved-sdk02-output/`.
+
+All four tests require actual audible callback Play, manual Stop/Save, original worker
 Join, fresh App disk Open, accepted opaque-state and generic-ACK checks, then the
 complete independent one-bar Whole PCM oracle: 96,000 music +768 fixed-tail frames,
 96 native-latency frames cropped once, 96,768 final stereo frames. The genuine
