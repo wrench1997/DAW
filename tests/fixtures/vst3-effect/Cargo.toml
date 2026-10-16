@@ -12,5 +12,9 @@ crate-type = ["cdylib", "rlib"]
 # Not an application dependency or a root workspace member.
 [workspace]
 
+[features]
+default = []
+instrument-first = []
+
 [dependencies]
 vst3 = "=0.3.0"

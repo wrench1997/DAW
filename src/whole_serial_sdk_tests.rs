@@ -519,6 +519,7 @@ struct Audit {
     midi: Vec<(u64, [u8; 3])>,
     generator_peak: f32,
     effect_input_peak: f32,
+    offline_effect_probes: Vec<(u64, f64)>,
 }
 type Log = Arc<Mutex<Audit>>;
 
@@ -610,7 +611,7 @@ impl RenderBackend for ObservedGenerator {
             .lock()
             .unwrap()
             .transports
-            .push((GENERATOR, transport));
+            .push((self.witness.id, transport));
         let reply = self.backend.process(transport, frames)?;
         let peak = reply
             .channels
@@ -640,6 +641,8 @@ struct ObservedEffect {
     witness: Witness,
     position: u64,
     upstream: i64,
+    samples_per_quarter: f64,
+    tempo: f64,
 }
 impl EffectRenderBackend for ObservedEffect {
     fn prepare(
@@ -661,7 +664,7 @@ impl EffectRenderBackend for ObservedEffect {
         );
         assert_eq!(
             transport.quarter_note_position,
-            transport.sample_position as f64 / 4096.0
+            transport.sample_position as f64 / self.samples_per_quarter
         );
         assert_eq!(
             (
@@ -670,7 +673,7 @@ impl EffectRenderBackend for ObservedEffect {
                 transport.time_sig_denominator,
                 transport.playing
             ),
-            (120.0, 4, 4, true)
+            (self.tempo, 4, 4, true)
         );
         {
             let mut log = self.witness.log.lock().unwrap();
@@ -680,6 +683,19 @@ impl EffectRenderBackend for ObservedEffect {
                 .max(input.iter().flatten().map(|s| s.abs()).fold(0.0, f32::max));
         }
         let reply = self.backend.process(input, transport)?;
+        if self.position == 0 {
+            let offline = self.backend.test_parameter_readback(1005)?;
+            assert_eq!(
+                offline, 1.0,
+                "Actual strict Effect must be active stereo Offline, not matching Realtime"
+            );
+            self.witness
+                .log
+                .lock()
+                .unwrap()
+                .offline_effect_probes
+                .push((self.witness.id, offline));
+        }
         self.position += 128;
         Ok(reply)
     }
@@ -692,6 +708,97 @@ impl EffectRenderBackend for ObservedEffect {
 impl Drop for ObservedEffect {
     fn drop(&mut self) {
         self.witness.complete(self.backend.test_child_completion());
+    }
+}
+
+/// Reuses the original closed SDK wrappers for the App Save/Open workflow.
+/// These wrappers forward every operand/reply unchanged. They observe only
+/// the concrete backend's own retained child completion and owner destruction.
+#[derive(Clone, Default)]
+pub(crate) struct AppSerialSdkAudit(Log);
+impl AppSerialSdkAudit {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start(
+        &self,
+        admission: &RenderAdmission,
+        project: Project,
+        captured: CapturedInstrumentBounce,
+        chains: Vec<CapturedSerialEffectChain>,
+        options: WavExportOptions,
+        path: PathBuf,
+        control: RenderControl,
+        reviewed: bool,
+    ) -> Result<crate::instrument_bounce::render::MasterSongRenderReceipt, String> {
+        let generator_id = captured.identity().instance_id;
+        let mut prefix = i64::from(captured.metadata().latency_samples);
+        let stages: Vec<_> = chains
+            .iter()
+            .flat_map(|chain| &chain.receipt.slots)
+            .filter(|slot| slot.request.config.enabled && !slot.request.config.bypassed)
+            .map(|slot| {
+                let stage = (slot.request.instance_id, prefix);
+                prefix += i64::from(slot.state.metadata.latency_samples);
+                stage
+            })
+            .collect();
+        let tempo = f64::from(project.tempo);
+        let samples_per_quarter = f64::from(options.sample_rate) * 60.0 / tempo;
+        let deadline = control.deadline;
+        let generator_log = Arc::clone(&self.0);
+        let effect_log = Arc::clone(&self.0);
+        let mut index = 0;
+        admission.start_serial_with_backends(
+            project,
+            captured,
+            chains,
+            options,
+            path,
+            control,
+            reviewed,
+            move || ObservedGenerator {
+                backend: StrictBackend::new(),
+                witness: Witness::new(generator_id, generator_log, deadline),
+                position: 0,
+            },
+            move || {
+                let (id, upstream) = stages[index];
+                index += 1;
+                ObservedEffect {
+                    // Ordinary App resolution, not the old SDK explicit-helper override.
+                    backend: StrictEffectBackend::new(None),
+                    witness: Witness::new(id, Arc::clone(&effect_log), deadline),
+                    position: 0,
+                    upstream,
+                    samples_per_quarter,
+                    tempo,
+                }
+            },
+        )
+    }
+    pub(crate) fn assert_natural_serial_reaps(&self, ids: &[u64], deadline: Instant) {
+        let audit = self.0.lock().unwrap();
+        assert_eq!((audit.live, audit.max_live), (0, 1));
+        assert_eq!(audit.deadlines, vec![deadline; ids.len()]);
+        assert_eq!(
+            audit.lifecycle,
+            ids.iter()
+                .flat_map(|&id| [(id, "create"), (id, "terminated"), (id, "drop")])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(audit.completions.len(), ids.len());
+        assert_eq!(
+            audit.offline_effect_probes,
+            ids.iter().skip(1).map(|&id| (id, 1.0)).collect::<Vec<_>>()
+        );
+        for (completion, id) in audit.completions.iter().zip(ids) {
+            assert_eq!((completion.id, completion.spawns), (*id, 1));
+            assert!(
+                completion.reaped.is_some_and(|status| status.success()) && completion.clean,
+                "actual strict stage {id} did not naturally reap: {:?}, clean={}",
+                completion.reaped,
+                completion.clean
+            );
+        }
     }
 }
 
@@ -853,6 +960,8 @@ fn run_sdk_case(automated_master: bool) {
                     witness: Witness::new(id, Arc::clone(&effect_log), deadline),
                     position: 0,
                     upstream,
+                    samples_per_quarter: 4096.0,
+                    tempo: 120.0,
                 }
             },
         )
@@ -946,6 +1055,7 @@ fn run_sdk_case(automated_master: bool) {
             .collect::<Vec<_>>()
     );
     assert_eq!(audit.completions.len(), 3);
+    assert_eq!(audit.offline_effect_probes, EFFECTS.map(|id| (id, 1.0)));
     for completion in &audit.completions {
         let ChildCompletion {
             id,
@@ -979,7 +1089,7 @@ fn run_sdk_case(automated_master: bool) {
         );
     }
     eprintln!(
-        "REAL_SERIAL_WHOLE_SDK_PASS source_workers=3_original_joined; source_sdk_process_calls=0_each; source_opaque=40_each; effect_f64_bits={:016x},{:016x}; total_latency=96; reported_tail=352; music=256; fixed_tail=1024; generated=1408; retained=1280; strict_children=3_natural_exit_0_reaped; max_live_strict_owner=1; final_crop=once; final_tanh=once",
+        "REAL_SERIAL_WHOLE_SDK_PASS source_workers=3_original_joined; source_sdk_process_calls=0_each; source_opaque=40_each; effect_f64_bits={:016x},{:016x}; total_latency=96; reported_tail=352; music=256; fixed_tail=1024; generated=1408; retained=1280; strict_children=3_natural_exit_0_reaped; effect_offline_probe1005=1_each; max_live_strict_owner=1; final_crop=once; final_tanh=once",
         BASES[0].to_bits(),
         BASES[1].to_bits()
     );

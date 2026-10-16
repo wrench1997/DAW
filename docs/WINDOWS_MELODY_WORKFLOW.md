@@ -245,6 +245,124 @@ Actual receipts are in `target/backend-reliability-20261014/source120-quality-ac
 and the source120 integration record. The b73 checkout excludes the following
 Whole integration candidate and new Instrument fixture.
 
+### SDK melody: Play, disk Save, cold App Open and Whole WAV (2026-10-16)
+
+The new opt-in Windows regression connects previously separate checks through
+ordinary App catalog/default-class load, the actual no-device audio callback,
+Play/Stop, manual Save to a new disk project, original App destruction and source
+worker Join, then a fresh App's `Project::load`/`finish_open_project` and Whole
+export. Cold Open does not copy the old runtime registry, prepared chain or an
+explicit Instrument class override. It checks notes, placement, routing, Master
+automation, actual opaque restoration and acknowledged generic parameter replay.
+The joint exact first passed locally on attempt 05 in 7.94 s, actual exit 0; the
+earlier failed executions below remain failures. Local compatibility and strict
+gates passed. This candidate's cloud run is pending.
+
+The source-built fixture's optional `instrument-first` feature makes its existing
+Instrument the default class in a separate `CitrusLookaheadMIDIFixture.vst3`
+bundle. The old default Effect bundle, two class UIDs, CE01 state and DSP remain.
+Feature-only read-only probes 1007/1008 record accepted SDK `setState` calls and
+the last accepted gain. A warm baseline, generic Gain change to 0.625, and cold
+accepted state Gain 0.625 distinguish opaque disk restoration from successful
+generic replay alone. Generic setters cannot write these probes; they are not
+saved as writable bases. Project f32 bases and private exact-f64 capture retain
+their different precision contracts.
+
+The authored project is one ordinary 4-beat bar at 120 BPM/48 kHz: 96,000 music
+frames, 768 explicitly selected tail frames, and 96 cumulative native latency
+frames. The final WAV expectation is 96,768 stereo frames; Q128 render input is 96,896
+frames before the single latency crop. The independent complete PCM expectation
+includes relative Master ramps/mute, first onset, silent regions and finite tail.
+Audible actual callback output and still-playing transport are required before
+manual Stop. This is a source-built SDK/new-App-instance test, not an OS program
+restart, physical audio listening or NOIRE tone recovery.
+
+Whole rendering reuses the existing closed read-only audited backend wrappers
+and the same `RenderAdmission.start_serial_with_backends` owner. Receipts label
+`render_factory=closed_read_only_audit_wrapper` and
+`genuine_whole_production_factory_selected=false`; the real strict backends,
+source capture, PCM, original render deadline and cleanup are not substituted.
+Separate genuine-factory regressions remain in place. All three strict clones
+must naturally exit/reap in order with maximum live owner 1. The existing SDK
+consumers now also read actual probe 1005=1 after processing to explicitly prove
+Offline mode, since the fixture Effect now supports matching Realtime and
+Offline setup/data modes.
+
+**Failures and necessary test-fixture repairs:**
+
+- Exact 01 exited 101 at normal load: the old test callback queue of 64 could not
+  hold ordinary 32-track synchronization's 130 commands. Only the new workflow
+  selects the production's existing 1024 capacity through a test-only constructor;
+  old tests keep 64 and production capacity is unchanged.
+- Exact 02 exited 101 after 31.80 s: the Effect fixture rejected legitimate Realtime
+  source processing with `Plugin process() failed: 0x1`. Its former Offline-only
+  guard now admits both known modes only when setup/data agree. A real SDK unit
+  checks cross-Q128 FIR PCM and that both mismatch directions/unknown mode reject
+  without advancing history. Production processing is unchanged.
+- Exact 03 exited 101 after 1.13 s: transport stopped before the required audible
+  frames, without a plug-in processing fault. Source inspection shows that normal
+  SONG enables looping and a worker-backed loop wrap deliberately pauses playback
+  pending a prepared new epoch. The former 6000-frame music was also shorter than
+  the serial source path's adapter accumulation/lookahead plus native latency
+  (`3 × (18 + 1) × 128 + 96 = 7392`). The bare failed assertion does not distinguish
+  a transient restart wait from a cancelled restart. The fixture now authors a
+  normal one-bar melody. [Existing timing limits](PLUGIN_TIMING.md#retained-limits)
+  already allow short loops to remain silent during preroll; this is not evidence
+  of a new nonloop end/drain regression. Seamless short-loop playback remains
+  independent work. Intermediate half-beat artifact 04 was only compiled, never
+  executed.
+- Exact 04 exited 101 after 1.59 s: audible Play/still-playing, manual Stop/Save,
+  original App's three source joins, fresh disk Open, three matched generic ACKs
+  and actual accepted opaque Gain 0.625 passed before Whole refused
+  `Effect source catalog contains an invalid normalized value`. The failed
+  literal ID/value was not recorded. Source inspection establishes that valid
+  stopped Insert PDC can produce negative transport and the fixture previously
+  exposed unbounded ratios as normalized parameters. Scaled read-only probes
+  1000/1001/1002/1003/1007 now saturate to [0,1], retaining raw context/counters,
+  DSP/state and all old in-range positive values. The new actual-SDK boundary unit
+  passed in both fixture builds; it cannot reconstruct the earlier failure
+  literal. Production catalog validation remains strict. The one-bar artifact 05
+  also had a preserved E0308 usize/u64 compile failure; explicit report conversion
+  compiled successfully as artifact 06.
+
+All failed processes and held source helpers actually terminated/reaped; exact 02's
+secondary cleanup fault assertion is retained. The current source uses the same
+original 30-second source wait and the job's original 300-second render deadline,
+not an extended budget. The final normalized-probe fixture passed 8 default/9 feature tests,
+both strict Clippy modes and both rebuilt real bundles. `melody-exact-05` actually
+passed all 96,768 stereo PCM frames, first nonzero frame 1, mute/silence, 768-frame
+fixed tail and one 96-frame latency crop. All three original workers joined before
+cold Open; all three cold workers joined at final cleanup. All three strict children
+naturally exited 0/reaped, maximum live strict owner 1, and both Effect mode probes
+returned 1005=1. The actual saved project and WAV were copied from their owned
+temporary output into the evidence directory's `accepted-app-exact05-output/`.
+Both retained Whole SDK cases and private Effect SDK passed with the new actual
+Offline probe. Eight ordinary initialization cases, one manual Save case and one
+catalog Save/Open case also passed: 31 Rust test executions/23 distinct tests,
+plus 11 fixture-builder
+mock cases. Root all-feature/all-target strict Clippy and no-default all-target
+check passed. The first Root Clippy exit 101 on the new oracle's
+`needless_range_loop` is retained; only indexed iteration became
+`iter_mut().enumerate()`, preserving sizes, index order, arithmetic and assertions.
+The valid PCM run was reused, not rerun for reassurance. Production matching
+bins/helper reuse their actual successful build because later edits affect only
+test code or the independent fixture. All owned native phases actually
+terminated/reaped; Root fresh heavy=[] at 06:12:38Z, then returned resources to
+the peer. The candidate's new full-cloud qualification remains pending.
+
+The existing 10-minute no-GUI quality step retains every old target/failure gate,
+adds both feature units and 11 fixture-builder cases on Windows/Linux, and
+explicitly executes the new ignored App exact on Windows. It stages the actual
+Cargo JSON-reported test artifact and matching helper as private siblings;
+ordinary helper lookup is unchanged. Missing inputs and real test failures fail
+CI. See [fixture commands](../tests/fixtures/vst3-effect/README.md#disk-save-and-cold-app-open-with-the-default-instrument).
+Local full logs, frozen source and actual terminals are under
+`target/backend-reliability-20261014/melody-save-cold-open-source-candidate-01/`;
+Root integration record is `source127-first-flow-direction-01.json` in its parent.
+User test03 remains in use and unchanged; no main GUI, NI or audio device was
+operated for this slice. Native04's NOIRE warm Save cleanup failure, full NOIRE
+state recovery and hardware listening still require their own acceptance.
+
 ### Master automation and source-checked publication (2026-10-16)
 
 The current serial Whole source reuses the existing `OfflineMasterControls`

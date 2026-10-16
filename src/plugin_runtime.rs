@@ -79,7 +79,7 @@ pub(crate) mod effect_capture_tests;
 mod effect_capture_sdk_tests;
 #[cfg(all(test, feature = "vst3"))]
 #[path = "whole_serial_sdk_tests.rs"]
-mod whole_serial_sdk_tests;
+pub(crate) mod whole_serial_sdk_tests;
 
 #[cfg(test)]
 #[path = "plugin_capture_settlement_tests.rs"]

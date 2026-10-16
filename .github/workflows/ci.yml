@@ -77,6 +77,10 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $false
           cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/Cargo.toml
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/Cargo.toml --features instrument-first
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B -m unittest discover -s tests/fixtures/vst3-effect -p test_build_fixture.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -B tests/fixtures/vst3-effect/build_fixture.py --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:CITRUS_EFFECT_FIXTURE = (Resolve-Path tests/fixtures/vst3-effect/target/bundles/CitrusStereoDelayFixture.vst3).Path
@@ -92,6 +96,23 @@ jobs:
           cargo test --locked --all-features --jobs 1 --bin citrus-studio plugins::plugin_runtime::whole_serial_sdk_tests::actual_sdk_serial_generator_two_effects_preserves_raw_latency_tail_and_natural_reap -- --ignored --exact --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --all-features --jobs 1 --bin citrus-studio plugins::plugin_runtime::whole_serial_sdk_tests::actual_sdk_serial_generator_two_effects_master_automation_uses_retained_project_frames -- --ignored --exact --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B tests/fixtures/vst3-effect/build_fixture.py --target x86_64-pc-windows-msvc --variant instrument-first
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:CITRUS_MELODY_FIXTURE = (Resolve-Path tests/fixtures/vst3-effect/target/bundles/CitrusLookaheadMIDIFixture.vst3).Path
+          # Preserve the ordinary App resolver: its helper is beside its EXE.
+          # Stage the actual Cargo test artifact, not a second App implementation.
+          $testBuild = cargo test --locked --all-features --jobs 1 --bin citrus-studio --no-run --message-format=json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $testArtifact = @($testBuild | Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'citrus-studio' -and $_.profile.test -and $_.executable })
+          if ($testArtifact.Count -ne 1) { throw 'Expected one actual citrus-studio test executable' }
+          $sdkDir = Join-Path (Resolve-Path target).Path 'melody-sdk-ci'
+          New-Item -ItemType Directory -Path $sdkDir | Out-Null
+          $sdkExe = Join-Path $sdkDir 'citrus-melody-sdk-tests.exe'
+          Copy-Item -LiteralPath $testArtifact[0].executable -Destination $sdkExe
+          Copy-Item -LiteralPath $env:CITRUS_EFFECT_HELPER -Destination (Join-Path $sdkDir 'vst3-host-helper.exe')
+          $env:CITRUS_MELODY_HELPER = (Resolve-Path -LiteralPath (Join-Path $sdkDir 'vst3-host-helper.exe')).Path
+          & $sdkExe 'app::whole_song_export_job::melody_workflow_sdk_tests::actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm' --exact --ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Python is supplied by the hosted Windows runner and used only for QA.
@@ -205,6 +226,8 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/Cargo.toml
+          cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/Cargo.toml --features instrument-first
+          python3 -B -m unittest discover -s tests/fixtures/vst3-effect -p test_build_fixture.py -v
           python3 -B tests/fixtures/vst3-effect/build_fixture.py --target x86_64-unknown-linux-gnu
           cargo build --locked --jobs 1 --manifest-path vendor/vst3-host-0.9.0/Cargo.toml --no-default-features --features experimental-fresh-helper --bin vst3-host-helper --target-dir target
           export CITRUS_EFFECT_FIXTURE="$(realpath tests/fixtures/vst3-effect/target/bundles/CitrusStereoDelayFixture.vst3)"

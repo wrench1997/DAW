@@ -2,6 +2,8 @@
 
 当前源码候选：Citrus Studio 0.5.0-alpha.1；下文固定发布流程/示例继承自 0.4.0
 
+本轮在原10分钟无GUI质量步骤接入真实SDK的Play→ManualSave→新App磁盘Open→Whole联合exact：保留旧SDK/失败退出门，Win/Linux增加默认/Instrument-first fixture与builder11回归；Windows从真实Cargo JSON选择唯一test artifact，与匹配helper复制到新私有目录再执行。生产helper查找和发布白名单未变，夹具不入包。旧6项及新1项CI合同/PowerShell解析已过；本机联合exact05实际PASS/7.94s、96768帧完整PCM，fixture8/9、旧SDK3、compat10、strict Clippy/no-default/双bundle通过，新云终态待验证。四次真实失败及编译/lint修补见[流程实证](WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16)。不操作NI/声卡或替换用户03。
+
 代码`89ef2cb32a7b722c16c3672ef6f53a67305cf68f`给单源串行FX Whole加入Master Volume/Pan/Mute自动化及App最终源Ready复核；原writer/SDK入口、取消/超时/原guard收尾和白名单保持。新Master exact加入原10分钟Windows无GUI质量步骤，保留旧静态exact和失败退出规则。本机81定向/双尺寸Review/严格构建通过；quality38846965192与preview38846965091均首轮实际SUCCESS（2551 root/17ignored、Serial19/边界7、显式source SDK1/Whole SDK2、strictClippy/no-default/双bin；Linux新fixture6/host2及Windows真实session2 PrintWindow PASS）。preview371Python=359PASS/12条件SKIP、staticCRT release8m41s/精确ZIP/PE/import/provenance/提取helper通过，upload=false→仅上传SKIPPED。[当前资格记录](WINDOWS_MELODY_WORKFLOW.md#master-automation-and-source-checked-publication-2026-10-16)保留首个App失败和诊断重过的边界。没有替换用户03副本。
 当前源码写 **v14**（[Follow长度、Auto/Manual歌曲范围与编辑器联动](PLAYLIST_TRANSPORT.md)）。`b2e56dc`本机fmt/严格Clippy/no-default/匹配双bin、预览unit及8真实离屏用例通过，12定向输入和Saved13私有copy门已通过；云`f6678ae`quality38804721761与preview38804721840实际均SUCCESS（2481 root/14ignored，25新增全PASS，静态CRT release8m24s/ZIP/提取helper通过，session2真实PrintWindow PASS）。已交付独立测试03仍为v13，03/02不能读新14，请另存副本。03未替换；旧63d2f99云通过只属于此前联动里程碑，NOIRE实机完整流程仍未验收。
 

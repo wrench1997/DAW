@@ -1834,6 +1834,18 @@ impl AudioEngine {
         TestAudioCallback::new()
     }
 
+    /// Full App installation queues all 32 mixer strips before its endpoints.
+    /// Match the production queue for that transaction; existing bounded-queue
+    /// fixtures deliberately keep their original smaller capacity.
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn test_engine_with_production_callback_capacity() -> (Self, TestAudioCallback) {
+        TestAudioCallback::new_with_command_capacity(COMMAND_CAPACITY)
+    }
+
     #[cfg(test)]
     pub(crate) fn set_plugin_processing_test_snapshot(&self, snapshot: PluginProcessingSnapshot) {
         self.status.plugin_processing.publish(snapshot);
@@ -4009,13 +4021,17 @@ impl Drop for TestAudioCallback {
 #[cfg(test)]
 impl TestAudioCallback {
     fn new() -> (AudioEngine, Self) {
+        Self::new_with_command_capacity(64)
+    }
+
+    fn new_with_command_capacity(command_capacity: usize) -> (AudioEngine, Self) {
         let (controller, realtime) = create_timeline_runtime();
         let mut engine = tests::timeline_test_engine(controller);
         // No actual stream was started; fixture destruction is control-thread
         // resource destruction, not the live-device shutdown wait contract.
         engine.stream_lifecycle = DeviceStreamLifecycle::Prepared;
         engine.status.sample_rate.store(48_000, Ordering::Release);
-        let (producer, commands) = RingBuffer::new(64);
+        let (producer, commands) = RingBuffer::new(command_capacity);
         engine.producer = producer;
         let (retired_assets, retired) = RingBuffer::new(64);
         engine.retired_assets = retired;

@@ -1629,6 +1629,14 @@ fn start_whole_song_renderer(
 #[path = "whole_song_export_job_tests.rs"]
 mod tests;
 
+#[cfg(all(
+    test,
+    any(target_os = "linux", windows),
+    feature = "experimental-fresh-helper"
+))]
+#[path = "melody_workflow_sdk_tests.rs"]
+mod melody_workflow_sdk_tests;
+
 // Explicit Windows genuine Whole QA may only borrow actual retained evidence.
 // None of these accessors consumes a receipt, pumps an owner, changes a fence,
 // selects a factory, or manufactures stop/capture authority.

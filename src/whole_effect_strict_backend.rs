@@ -373,6 +373,20 @@ impl StrictEffectBackend {
     pub(crate) fn test_child_completion(&self) -> (usize, Option<std::process::ExitStatus>) {
         self.owner.test_child_completion()
     }
+
+    /// Read-only SDK evidence on this exact renderer owner, with the original
+    /// readiness, cancellation, deadline and terminal-exchange rules intact.
+    #[cfg(test)]
+    pub(crate) fn test_parameter_readback(&mut self, id: u32) -> Result<f64, BackendFailure> {
+        let result = (|| {
+            self.owner.ready()?;
+            self.owner
+                .exchange_at("effect.sdk_probe.parameter", |client, deadline| {
+                    client.parameter(id, deadline)
+                })
+        })();
+        self.seal_failure(result)
+    }
 }
 
 fn audio_buses(buses: &[vst3_host::plugin::CheckedAudioBusConfig]) -> Vec<BounceAudioBus> {

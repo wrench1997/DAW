@@ -5,6 +5,8 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
+本轮真实SDK后台联合exact05已实际PASS/7.94s：普通catalog/default加载→无设备callback实际发声/停止→磁盘ManualSave→原App/3worker Join→新App磁盘Open/3ACK/实际opaque.625→Whole完整96768帧独立PCM。96帧单次crop、768固定尾音、3strict自然exit0/reap/max1及Effect实际Offline探针均通过；fixture默认8/feature9、旧SDK3、初始化/Save/catalog10、strict Clippy/no-default/双bundle及builder11通过（31次Rust/23distinct），新云终态待验证。四次原始失败、编译类型和oracle迭代lint修补保留，详[联合流程记录](docs/WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16)。这是源码SDK/新App实例证据，NOIRE暖态Save/真实程序重启及监听仍待验收；不占GUI/NI/声卡，不替换用户03。
+
 已推`89ef2cb32a7b722c16c3672ef6f53a67305cf68f`：单源串行FX Whole已接入既有Master音量/声像/静音自动化，按最终PDC裁剪后的输出帧计时，尾音保持N−1值；其它自动化/路由边界不变。修复正常metadata查询误报源变化，以App在原最终CAS前核验完整源Ready，Waiting只等待，保留原取消/超时/Drop及发布合同。本机81定向/双尺寸实帧/严格构建通过；云quality38846965192及preview38846965091均首轮实际SUCCESS：2551 root/17ignored、Serial19/边界7、显式旧静态+新Master SDK、strictClippy/no-default/双bin通过；Linux新执行fixture6/host2，Windows真实session2 PrintWindow PASS。preview371Python=359PASS/12条件SKIP、staticCRT release8m41s/ZIP/提取helper通过，upload=false→仅上传SKIPPED。详[当前范围与完整实证](docs/WINDOWS_MELODY_WORKFLOW.md#master-automation-and-source-checked-publication-2026-10-16)。
 
 当前可用副本：桌面“Citrus Studio 新版测试03”，`D:\DAW-Preview\Citrus-Studio-20261015-03\Start-Citrus.cmd`。PAT/SONG、拖播放头、AUTO范围及Playlist/Piano/Rack联动已通过本机定向回归/真实离屏/Clippy；新v13工程请另存副本，旧01/02保留。见`docs/PLAYLIST_TRANSPORT.md`；此前联动63d2f99云quality和preview均实际SUCCESS。
@@ -176,11 +178,11 @@ Source76 只修测试隔离和失败诊断：两个 worker-identity 测试及 ca
 | --- | --- | --- |
 | 实时 Master 录音 | 录制实际播放经过的 Master 输出 | 已有 NOIRE Pure 录音及用户试听确认；不等于离线导出 |
 | 选中 MIDI 片段转音频 | Windows/Linux 实验 helper、状态捕获、无覆盖发布、取消和历史恢复 | NOIRE 实测仍被两次 opaque 捕获差异明确拒绝；原 MIDI 保留 |
-| 整曲离线 WAV | 普通内置音源；已推b73实验单VST完整编曲/静态路由/Master自动化；已验收b9新增单Generator→唯一PostFader主路径→Master有序全wet FX | 旧短工程/405音符后台导出通过；b9 quality attempt2/preview双PASS，显式Whole SDK/真实PrintWindow/发布包检查通过；首factory失败及8d/eae失败保留，通用图PDC/真实NOIRE完整流程未验收 |
+| 整曲离线 WAV | 普通内置音源；实验单VST；单Generator→唯一PostFader主路径→Master有序全wet FX及Master音量/声像/静音自动化 | 89ef代码quality/preview首轮双PASS；新磁盘Save/Open联合SDK本机完整PCM/严格门通过，新云门待验证；通用图PDC/真实NOIRE完整流程未验收 |
 
 普通构建不静默降级导出活动 VST 的错误声音；不支持的图和自动化明确拒绝。
 实验整曲路径要求 `experimental-fresh-helper`。已推b73仍要求单个活动VST、无Insert；本轮串行FX范围及拒绝条件见上文，不属于b73或03副本。
-原无FX路径的Master音量/声像/静音自动化保留；当前FX路径active自动化仍拒绝，尾音须明确确认固定窗口。
+原无FX及当前串行FX路径均支持Master音量/声像/静音自动化；FX参数、其它非Master自动化和Tempo变化仍拒绝，尾音须明确确认固定窗口。
 未知或无限插件 tail 保留提示，不能把固定尾音窗口称为完整自然释放保证。
 
 ## 普通插件扫描的清理与失败恢复（本次提交）

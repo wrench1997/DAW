@@ -357,6 +357,13 @@ fn clone_body(
     {
         return Err("real clone did not process exactly three positive Q128 blocks".into());
     }
+    if checked(
+        "actual clone active stereo Offline probe",
+        client.parameter(1005, deadline),
+    )? != 1.0
+    {
+        return Err("real strict clone was not active stereo Offline".into());
+    }
     checked("stop clone", client.stop_processing(deadline))?;
     Ok(())
 }
@@ -583,7 +590,7 @@ fn actual_sdk_private_effect_source_capture_restores_strict_clone_pcm_and_natura
     drop(source);
     exercise_clone(&helper, state).unwrap();
     eprintln!(
-        "REAL_PRIVATE_EFFECT_CAPTURE_PASS source_sdk_process_calls=0; source_original_worker=joined; opaque_state_bytes=40; restored_gain={GAIN:.17}; restored_gain_bits={:016x}; non_f32_source_base=true; clone_q128_blocks=3; latency=32; last_tap=160; strict_child=natural_exit_0_and_reaped",
+        "REAL_PRIVATE_EFFECT_CAPTURE_PASS source_sdk_process_calls=0; source_original_worker=joined; opaque_state_bytes=40; restored_gain={GAIN:.17}; restored_gain_bits={:016x}; non_f32_source_base=true; clone_q128_blocks=3; latency=32; last_tap=160; strict_child=natural_exit_0_and_reaped; offline_probe1005=1",
         GAIN.to_bits()
     );
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build only this checked-in no-GUI Effect; never load an installed plugin."""
+"""Build only the checked-in no-GUI fixture classes; never load an installed plugin."""
 
 import argparse
 import json
@@ -20,6 +20,7 @@ TARGETS = {
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", choices=TARGETS, default="x86_64-pc-windows-msvc" if os.name == "nt" else "x86_64-unknown-linux-gnu")
+    parser.add_argument("--variant", choices=("effect", "instrument-first"), default="effect")
     parser.add_argument("--timeout", type=float, default=180.0, help="Cargo deadline in seconds")
     args = parser.parse_args()
     platform, architecture, binary_name, module_name = TARGETS[args.target]
@@ -27,12 +28,19 @@ def main():
         parser.error("build on the requested platform with its installed Rust toolchain")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("timeout must be finite and positive")
+    instrument_first = args.variant == "instrument-first"
+    build_dir = ROOT / ("target/build-instrument-first" if instrument_first else "target/build")
+    bundle_stem = "CitrusLookaheadMIDIFixture" if instrument_first else "CitrusStereoDelayFixture"
+    if instrument_first:
+        module_name = bundle_stem + Path(module_name).suffix
     command = ["cargo", "build", "--locked", "--jobs", "1", "--release", "--manifest-path", str(ROOT / "Cargo.toml"),
-               "--target", args.target, "--target-dir", str(ROOT / "target/build")]
+               "--target", args.target, "--target-dir", str(build_dir)]
+    if instrument_first:
+        command.extend(("--features", "instrument-first"))
     # No native window, audio device, plugin loading, installer or binary download.
     subprocess.run(command, check=True, timeout=args.timeout)
-    binary = ROOT / "target/build" / args.target / "release" / binary_name
-    bundle = ROOT / "target/bundles/CitrusStereoDelayFixture.vst3"
+    binary = build_dir / args.target / "release" / binary_name
+    bundle = ROOT / "target/bundles" / f"{bundle_stem}.vst3"
     destination = bundle / "Contents" / architecture / module_name
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(binary, destination)
@@ -45,8 +53,14 @@ def main():
     receipt["additional_classes"] = [{"class_id": "43545253454658440000000000000002",
         "name": "Citrus Lookahead MIDI Fixture", "category": "Instrument|Synth",
         "latency_samples": 32, "tail_samples": 32, "real_lookahead_fifo": True}]
+    if instrument_first:
+        effect = {key: receipt[key] for key in ("class_id", "name", "category", "latency_samples", "last_tap_samples")}
+        receipt.update(receipt["additional_classes"][0])
+        del receipt["last_tap_samples"]
+        receipt["additional_classes"] = [effect]
+        receipt["variant"] = args.variant
     (bundle / "source-build.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
-    print(f"Built no-GUI source Effect: {bundle}")
+    print(f"Built no-GUI source {'Instrument' if instrument_first else 'Effect'}: {bundle}")
     return 0
 
 

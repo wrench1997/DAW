@@ -1363,6 +1363,8 @@ class PreviewBuildContractTests(unittest.TestCase):
             self.assertIn("timeout-minutes: 10", sdk)
             self.assertIn("tests/fixtures/vst3-effect/build_fixture.py --target ", sdk)
             self.assertIn("cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/Cargo.toml", sdk)
+            self.assertIn("cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/Cargo.toml --features instrument-first", sdk)
+            self.assertIn("-B -m unittest discover -s tests/fixtures/vst3-effect -p test_build_fixture.py -v", sdk)
             self.assertIn("CITRUS_EFFECT_FIXTURE", sdk)
             self.assertIn("CITRUS_EFFECT_HELPER", sdk)
             self.assertIn(
@@ -1428,6 +1430,33 @@ class PreviewBuildContractTests(unittest.TestCase):
                 "-- --ignored --exact --nocapture --test-threads=1"
             )
             self.assertIn(command + "\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", sdk)
+        self.assertNotIn("continue-on-error", sdk)
+
+
+    def test_melody_cold_open_sdk_uses_actual_test_artifact_and_sibling_helper(self):
+        workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        windows = workflow.split("\n  linux-helper-readiness:", 1)[0]
+        sdk = windows.split("      - name: Verify real no-GUI stereo Effect", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("timeout-minutes: 10", sdk)
+        self.assertIn(
+            "python -B tests/fixtures/vst3-effect/build_fixture.py --target x86_64-pc-windows-msvc --variant instrument-first\n"
+            "          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", sdk)
+        self.assertIn(
+            "$env:CITRUS_MELODY_FIXTURE = (Resolve-Path tests/fixtures/vst3-effect/target/bundles/CitrusLookaheadMIDIFixture.vst3).Path", sdk)
+        self.assertIn(
+            "$testBuild = cargo test --locked --all-features --jobs 1 --bin citrus-studio --no-run --message-format=json | ConvertFrom-Json\n"
+            "          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", sdk)
+        self.assertIn("if ($testArtifact.Count -ne 1) { throw", sdk)
+        self.assertIn("Copy-Item -LiteralPath $testArtifact[0].executable -Destination $sdkExe", sdk)
+        self.assertIn(
+            "Copy-Item -LiteralPath $env:CITRUS_EFFECT_HELPER -Destination (Join-Path $sdkDir 'vst3-host-helper.exe')", sdk)
+        self.assertIn(
+            "$env:CITRUS_MELODY_HELPER = (Resolve-Path -LiteralPath (Join-Path $sdkDir 'vst3-host-helper.exe')).Path", sdk)
+        self.assertIn(
+            "& $sdkExe 'app::whole_song_export_job::melody_workflow_sdk_tests::"
+            "actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm' "
+            "--exact --ignored --nocapture --test-threads=1\n"
+            "          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", sdk)
         self.assertNotIn("continue-on-error", sdk)
 
 

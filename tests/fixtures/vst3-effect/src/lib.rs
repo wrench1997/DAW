@@ -3,8 +3,10 @@
 //! For each independent channel, y[n] = gain * (x[n-32] + x[n-160] * 0.5).
 //! Initial history is zero. The first response is delayed 32 samples; the last
 //! tap is at 160 samples (128 samples after the latency-aligned direct tap).
-//! The first class has no oscillator or MIDI input. A separate Instrument class
-//! provides deterministic MIDI audio with a real 32-sample lookahead FIFO.
+//! The default first class has no oscillator or MIDI input. A separate Instrument
+//! class provides deterministic MIDI audio with a real 32-sample lookahead FIFO.
+//! The `instrument-first` feature declares the Instrument first and adds
+//! read-only probes for accepted state loads.
 //! Neither class uses an audio device or native window.
 
 #![allow(non_snake_case)]
@@ -41,6 +43,12 @@ const PROBES: &[(u32, &str)] = &[
     (1004, "Last Playing"),
     (1005, "Active Stereo Offline"),
     (1006, "Outputs Initially Clear"),
+    // These record accepted CE01 loads and their gain. setComponentState delegates
+    // to setState, so the count includes both caller paths; it does not prove NI timbre.
+    #[cfg(feature = "instrument-first")]
+    (1007, "Accepted State Loads"),
+    #[cfg(feature = "instrument-first")]
+    (1008, "Last Accepted State Gain"),
 ];
 
 mod lookahead_instrument;
@@ -63,6 +71,10 @@ struct Engine {
     last_tempo: f64,
     last_playing: bool,
     outputs_initially_clear: bool,
+    #[cfg(feature = "instrument-first")]
+    accepted_state_loads: u32,
+    #[cfg(feature = "instrument-first")]
+    last_accepted_state_gain: f64,
 }
 
 impl Default for Engine {
@@ -85,6 +97,10 @@ impl Default for Engine {
             last_tempo: 0.0,
             last_playing: false,
             outputs_initially_clear: false,
+            #[cfg(feature = "instrument-first")]
+            accepted_state_loads: 0,
+            #[cfg(feature = "instrument-first")]
+            last_accepted_state_gain: 0.0,
         }
     }
 }
@@ -112,10 +128,13 @@ impl Engine {
     fn probe(&self, id: u32) -> f64 {
         match id {
             0 => self.gain,
-            1000 => f64::from(self.process_calls) / PROBE_SCALE,
-            1001 => self.last_sample as f64 / SAMPLE_POSITION_SCALE,
-            1002 => self.last_quarter / PROBE_SCALE,
-            1003 => self.last_tempo / 1024.0,
+            // SDK parameter values are normalized even when the retained raw
+            // transport is negative (PDC lead-in) or exceeds a probe's scale.
+            // Saturation affects observation only, never DSP or raw context.
+            1000 => (f64::from(self.process_calls) / PROBE_SCALE).clamp(0.0, 1.0),
+            1001 => (self.last_sample as f64 / SAMPLE_POSITION_SCALE).clamp(0.0, 1.0),
+            1002 => (self.last_quarter / PROBE_SCALE).clamp(0.0, 1.0),
+            1003 => (self.last_tempo / 1024.0).clamp(0.0, 1.0),
             1004 => f64::from(u8::from(self.last_playing)),
             1005 => f64::from(u8::from(
                 self.active
@@ -125,6 +144,10 @@ impl Engine {
                     && self.mode == ProcessModes_::kOffline as i32,
             )),
             1006 => f64::from(u8::from(self.outputs_initially_clear)),
+            #[cfg(feature = "instrument-first")]
+            1007 => (f64::from(self.accepted_state_loads) / PROBE_SCALE).clamp(0.0, 1.0),
+            #[cfg(feature = "instrument-first")]
+            1008 => self.last_accepted_state_gain,
             _ => 0.0,
         }
     }
@@ -335,6 +358,11 @@ impl IComponentTrait for Effect {
         };
         engine.gain = gain;
         engine.reset_history();
+        #[cfg(feature = "instrument-first")]
+        {
+            engine.accepted_state_loads += 1;
+            engine.last_accepted_state_gain = gain;
+        }
         kResultOk
     }
     unsafe fn getState(&self, stream: *mut IBStream) -> tresult {
@@ -475,7 +503,7 @@ impl IAudioProcessorTrait for Effect {
             || !engine.processing
             || !engine.input_active
             || !engine.output_active
-            || data.processMode != ProcessModes_::kOffline as i32
+            || !matches!(data.processMode, mode if mode == ProcessModes_::kRealtime as i32 || mode == ProcessModes_::kOffline as i32)
             || engine.mode != data.processMode
             || data.symbolicSampleSize != SymbolicSampleSizes_::kSample32 as i32
             || !(1..=engine.max_frames).contains(&data.numSamples)
@@ -741,6 +769,12 @@ impl IPluginFactory2Trait for Factory {
 }
 
 fn factory_class(index: i32) -> Option<(TUID, &'static str, &'static str)> {
+    #[cfg(feature = "instrument-first")]
+    let index = match index {
+        0 => 1,
+        1 => 0,
+        _ => return None,
+    };
     match index {
         0 => Some((CID, NAME, CATEGORY)),
         1 => Some((INSTRUMENT_CID, INSTRUMENT_NAME, INSTRUMENT_CATEGORY)),

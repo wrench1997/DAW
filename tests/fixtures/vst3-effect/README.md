@@ -32,7 +32,7 @@ It is not included in the root test suite or release assets.
 
 ## The response has real latency and a finite tail
 
-Factory2 reports two audio classes. Index0 remains this default Effect:
+Factory2 reports two audio classes. In the default build index0 remains this Effect:
 
 - Class: `43545253454658440000000000000001`
 - Name: `Citrus Stereo Delay Fixture`
@@ -90,10 +90,13 @@ latency alone, or this isolated fixture pass, does not establish Whole PDC.
 
 ## What the tests establish
 
-Six fixture tests exercise actual SDK Factory2/interface metadata, actual
+Eight default-build fixture tests exercise actual SDK Factory2/interface metadata, actual
 `IAudioProcessor::process` over Q128 boundaries, independent stereo channels,
 activation/processing prerequisites, output-clear detection and state validation,
 plus the Instrument's physical FIFO, MIDI offset boundaries and reset/refusal.
+The Effect accepts Realtime and Offline only when setup/data modes match. The
+additional mode unit checks the full stereo FIR across Q128 boundaries and that
+unknown/mismatched modes cannot advance its output, history or probes.
 
 The separate real-helper target captures opaque state through a real source SDK
 instance, drops it, cold-loads another source instance, checks exact state/readback,
@@ -121,13 +124,22 @@ Read-only probes never send dirty callbacks or modify persisted state:
 
 | ID | Actual SDK observation | Encoding |
 | --- | --- | --- |
-| 1000 | Nonempty Process calls | count / 65536 |
-| 1001 | Last project sample position | samples / 16777216 |
-| 1002 | Last project quarter-note position | quarters / 65536 |
-| 1003 | Last tempo | BPM / 1024 |
+| 1000 | Nonempty Process calls | clamp(count / 65536, 0, 1) |
+| 1001 | Last project sample position | clamp(samples / 16777216, 0, 1) |
+| 1002 | Last project quarter-note position | clamp(quarters / 65536, 0, 1) |
+| 1003 | Last tempo | clamp(BPM / 1024, 0, 1) |
 | 1004 | Last playing flag | 0 or 1 |
 | 1005 | Active component + Process + both buses + Offline | 0 or 1 |
 | 1006 | Both output buffers initially all zero | 0 or 1 |
+
+The optional `instrument-first` build additionally exposes read-only 1007
+(clamped accepted SDK state loads /65536) and 1008 (last accepted state gain). Only actual
+successful `IComponent::setState` updates these observations; generic replay,
+parameter flush and history reset cannot. They do not enter writable bases or
+change CE01/state bytes. Its additional feature-only actual-SDK unit checks this
+distinction. A separate unit checks negative/ordinary/beyond-scale real Process
+contexts and unchanged raw observations. Private seeded counters only exercise
+normalization boundaries, not executed Process or state-load receipts.
 
 This is focused backend evidence. The static serial Whole consumer separately
 passed its real-Generator/two-Effect PCM/latency oracle and final local code gates.
@@ -137,6 +149,48 @@ non-Master/plug-in automation, arbitrary tails and real NOIRE acceptance remain 
 fixture results.
 
 ## Verification status
+
+### Disk Save and cold App Open with the default Instrument
+
+The optional `instrument-first` feature reverses only the two existing Factory
+class entries for a separately built bundle. The normal App can therefore load
+and reopen the Instrument as its default class without a test-only class override
+or a copied old runtime identity. The default Effect build/path is unchanged.
+
+```powershell
+python -B tests/fixtures/vst3-effect/build_fixture.py --target x86_64-pc-windows-msvc --variant instrument-first
+cargo test --locked --jobs 1 --manifest-path tests/fixtures/vst3-effect/Cargo.toml --features instrument-first
+python -B -m unittest discover -s tests/fixtures/vst3-effect -p test_build_fixture.py -v
+$env:CITRUS_MELODY_FIXTURE = (Resolve-Path tests/fixtures/vst3-effect/target/bundles/CitrusLookaheadMIDIFixture.vst3).Path
+$env:CITRUS_MELODY_HELPER = (Resolve-Path target/debug/vst3-host-helper.exe).Path
+# Also keep CITRUS_EFFECT_FIXTURE set to the default Effect bundle above.
+```
+
+The exact App target is
+`app::whole_song_export_job::melody_workflow_sdk_tests::actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm`.
+Stage the actual `cargo test --no-run --message-format=json` App test executable
+and that matching helper into a new private directory as siblings, then run the
+executable with this selector and `--exact --ignored --nocapture --test-threads=1`.
+Set `CITRUS_MELODY_HELPER` to the staged helper. Do not overwrite the common
+`target/debug/deps` helper or a user preview. CI performs this staging explicitly;
+the production `current_exe`-sibling helper resolver is unchanged.
+
+The test requires actual audible callback Play, manual Stop/Save, original worker
+Join, fresh App disk Open, accepted opaque-state and generic-ACK checks, then the
+complete independent one-bar Whole PCM oracle: 96,000 music +768 fixed-tail frames,
+96 native-latency frames cropped once, 96,768 final stereo frames. The renderer uses
+the existing closed audited wrappers over real strict backends, not the genuine
+Whole production factory. This is device-free SDK evidence, separate from NI,
+OS program restart, realtime/offline PDC equivalence and hardware listening.
+
+Current local status: 8 default/9 feature fixture tests, both strict fixture Clippy
+modes, both rebuilt bundles and joint App exact 05 passed. The App exact completed
+in 7.94 s with complete 96,768-frame PCM, source joins and three naturally reaped
+strict children; both Effects actually reported Offline 1005=1. Three retained SDK
+cases, initialization8/Save1/catalog1, Root strict Clippy/no-default and builder11 passed.
+This candidate's cloud run is pending. Its four original failed
+attempts and queue/mode/one-bar/invalid-probe fixture repairs are retained in the
+[workflow record](../../../docs/WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16).
 
 ### Current Whole Master-automation consumer
 

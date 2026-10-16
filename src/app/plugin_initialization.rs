@@ -104,6 +104,38 @@ impl PendingPluginInitialization {
 }
 
 impl CitrusApp {
+    /// Copy the retained result of the ordinary matched-ACK reducer, never a
+    /// new initialization request or a fabricated Loaded status.
+    #[cfg(all(
+        test,
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(in crate::app) fn completed_initialization_ack_for_sdk_test(
+        &self,
+        instance_id: u64,
+    ) -> Option<(u64, u64, u64, usize)> {
+        self.plugin_initializations
+            .iter()
+            .find_map(|(key, pending)| {
+                (key.instance_id == instance_id
+                    && pending.ready
+                    && pending.error.is_none()
+                    && pending.waiting.is_none()
+                    && pending.request_id != 0
+                    && pending.next != 0
+                    && self
+                        .plugin_initialization_control(*key)
+                        .is_some_and(|control| pending.owner.matches(control)))
+                .then_some((
+                    key.project_session,
+                    key.endpoint.id,
+                    pending.request_id,
+                    pending.next,
+                ))
+            })
+    }
+
     fn plugin_initialization_control(
         &self,
         key: PluginInitializationKey,
