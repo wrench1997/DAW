@@ -247,7 +247,7 @@ Whole integration candidate and new Instrument fixture.
 
 ### SDK melody: Play, disk Save, cold App Open and Whole WAV (2026-10-16)
 
-The new opt-in Windows regression connects previously separate checks through
+Two opt-in Windows regressions now connect previously separate checks through
 ordinary App catalog/default-class load, the actual no-device audio callback,
 Play/Stop, manual Save to a new disk project, original App destruction and source
 worker Join, then a fresh App's `Project::load`/`finish_open_project` and Whole
@@ -278,16 +278,39 @@ Audible actual callback output and still-playing transport are required before
 manual Stop. This is a source-built SDK/new-App-instance test, not an OS program
 restart, physical audio listening or NOIRE tone recovery.
 
-Whole rendering reuses the existing closed read-only audited backend wrappers
-and the same `RenderAdmission.start_serial_with_backends` owner. Receipts label
-`render_factory=closed_read_only_audit_wrapper` and
-`genuine_whole_production_factory_selected=false`; the real strict backends,
-source capture, PCM, original render deadline and cleanup are not substituted.
-Separate genuine-factory regressions remain in place. All three strict clones
-must naturally exit/reap in order with maximum live owner 1. The existing SDK
-consumers now also read actual probe 1005=1 after processing to explicitly prove
-Offline mode, since the fixture Effect now supports matching Realtime and
-Offline setup/data modes.
+The two exacts share the full authored workflow but select different render paths:
+
+- `actual_sdk_catalog_play_stop_manual_save_cold_open_genuine_whole_factory_matches_pcm`
+  installs neither renderer starter nor a backend factory override. Before every
+  Whole tick it asserts both starters are None, covering their actual selection
+  before `take()`, and observes real CapturingEffects with the retained serial
+  Generator plan. Normal production dispatch selects `start_master_song_serial`
+  with real `StrictBackend::new` / `StrictEffectBackend::new(None)`. Typed Complete
+  follows renderer termination ACK and admission drain. Its marker labels
+  `render_factory=default_production`,
+  `genuine_whole_production_factory_selected=true`, `strict_child_pid_audit=false`.
+- The retained `actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm`
+  uses the closed read-only audit wrappers and the same
+  `RenderAdmission.start_serial_with_backends` owner. Its marker remains
+  `render_factory=closed_read_only_audit_wrapper` and
+  `genuine_whole_production_factory_selected=false`. This case directly observes
+  all three strict clones naturally exit0/reap in order with maximum live owner1
+  and both actual Effect Offline probes1005=1. Those detailed child observations
+  are not independently collected by the genuine case.
+
+Both cases require the same complete independent96,768-frame PCM, unchanged
+project/saved-file bytes, original three source joins before cold Open and three
+healthy cold joins at final cleanup. In the new slice, first local executions
+passed: genuine1/8.69s and retained audit1/8.47s. Actual Cargo artifact, strict
+all-feature/all-target Clippy, no-default all-target check and fmt all exited0;
+all six phases actually terminated/reaped without a resource guard. No production
+code, protocol, fixture or deadline changed. The existing CI step explicitly runs
+both staged exacts with immediate failure propagation and its original10-minute
+limit. Existing CI-contract7 tests and the actual PowerShell step parse passed.
+New-candidate cloud acceptance is pending. Full logs/terminals and both actual
+WAV/project copies are under
+`target/backend-reliability-20261014/melody-genuine-whole-source-candidate-01/`;
+Root record: `source130-genuine-factory-direction-01.json`.
 
 **Failures and necessary test-fixture repairs:**
 
@@ -353,7 +376,7 @@ recorded below.
 
 The existing 10-minute no-GUI quality step retains every old target/failure gate,
 adds both feature units and 11 fixture-builder cases on Windows/Linux, and
-explicitly executes the new ignored App exact on Windows. It stages the actual
+explicitly executes both joint ignored App exacts on Windows. It stages the actual
 Cargo JSON-reported test artifact and matching helper as private siblings;
 ordinary helper lookup is unchanged. Missing inputs and real test failures fail
 CI. See the [source-only fixture commands](https://github.com/wrench1997/DAW/blob/3b79f14250ef4900e7d50599d998003f00f91942/tests/fixtures/vst3-effect/README.md#disk-save-and-cold-app-open-with-the-default-instrument).

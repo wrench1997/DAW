@@ -166,24 +166,42 @@ $env:CITRUS_MELODY_HELPER = (Resolve-Path target/debug/vst3-host-helper.exe).Pat
 # Also keep CITRUS_EFFECT_FIXTURE set to the default Effect bundle above.
 ```
 
-The exact App target is
-`app::whole_song_export_job::melody_workflow_sdk_tests::actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm`.
+The two App targets share the prefix
+`app::whole_song_export_job::melody_workflow_sdk_tests::`:
+- `actual_sdk_catalog_play_stop_manual_save_cold_open_genuine_whole_factory_matches_pcm`
+- `actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm`
+
 Stage the actual `cargo test --no-run --message-format=json` App test executable
 and that matching helper into a new private directory as siblings, then run the
-executable with this selector and `--exact --ignored --nocapture --test-threads=1`.
+executable separately with each selector and
+`--exact --ignored --nocapture --test-threads=1`.
 Set `CITRUS_MELODY_HELPER` to the staged helper. Do not overwrite the common
 `target/debug/deps` helper or a user preview. CI performs this staging explicitly;
 the production `current_exe`-sibling helper resolver is unchanged.
 
-The test requires actual audible callback Play, manual Stop/Save, original worker
+Both tests require actual audible callback Play, manual Stop/Save, original worker
 Join, fresh App disk Open, accepted opaque-state and generic-ACK checks, then the
 complete independent one-bar Whole PCM oracle: 96,000 music +768 fixed-tail frames,
-96 native-latency frames cropped once, 96,768 final stereo frames. The renderer uses
-the existing closed audited wrappers over real strict backends, not the genuine
-Whole production factory. This is device-free SDK evidence, separate from NI,
+96 native-latency frames cropped once, 96,768 final stereo frames. The genuine
+selector uses the unoverridden default Whole production factory, checking both
+starters None before every Whole tick and typed Complete after termination ACK
+and admission drain. It does not independently audit strict child PIDs. The
+retained audit selector keeps its closed real-backend wrappers and false genuine
+factory marker; strict3 natural exit0/reap/order/max-live1 and Effect1005=1 remain
+that separate case's direct observations. This is device-free SDK evidence, separate from NI,
 OS program restart, realtime/offline PDC equivalence and hardware listening.
 
-Current local status: 8 default/9 feature fixture tests, both strict fixture Clippy
+Current default-factory slice: first local genuine exact1/8.69s and retained audit
+exact1/8.47s passed; actual Cargo artifact, strict Root Clippy/no-default and fmt
+all exited0 with all phases terminated/reaped and no resource guard. Both actual
+WAVs/projects are retained. Production/helper/fixture inputs were unchanged, so
+their accepted binaries and fixture evidence were reused. Both exacts now run
+explicitly in the existing10-minute Windows CI step with immediate failure
+propagation; CI-contract7/actual PowerShell parse passed. New-candidate cloud
+acceptance is pending. Evidence: `melody-genuine-whole-source-candidate-01/`
+under the workflow record's target directory.
+
+Previous audited acceptance: 8 default/9 feature fixture tests, both strict fixture Clippy
 modes, both rebuilt bundles and joint App exact 05 passed. The App exact completed
 in 7.94 s with complete 96,768-frame PCM, source joins and three naturally reaped
 strict children; both Effects actually reported Offline 1005=1. Three retained SDK

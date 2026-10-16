@@ -1,6 +1,8 @@
 //! Explicit no-device creation workflow: ordinary catalog/default load, live
 //! Play, acknowledged generic edits, Manual Save, actual old joins, cold disk
 //! Open, exact initialization ACKs, then the existing Whole strict owner.
+//! The closed-audit and genuine-default factory cases share the complete workflow
+//! and PCM oracle; only the audited case installs a renderer override.
 use super::*;
 use crate::{
     export::serial_master::automation_test_support::{self as master_automation, Mode},
@@ -30,6 +32,12 @@ const WAIT: Duration = Duration::from_secs(30);
 const GEN_CLASS: &str = "43545253454658440000000000000002";
 const FX_CLASS: &str = "43545253454658440000000000000001";
 static CLEANUP_FAILED: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy)]
+enum WorkflowRenderer {
+    ClosedReadOnlyAudit,
+    GenuineProduction,
+}
 
 struct SourceOwner {
     control: PluginChainControl,
@@ -643,6 +651,17 @@ fn independent_pcm() -> Vec<[f32; 2]> {
 #[test]
 #[ignore = "explicit source-built Instrument-first + Effect bundle and matching sibling production helper; no device, GUI or installed fallback"]
 fn actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm() {
+    run_saved_melody_workflow(WorkflowRenderer::ClosedReadOnlyAudit);
+}
+
+#[test]
+#[ignore = "explicit source-built Instrument-first + Effect bundle and matching sibling production helper; genuine default Whole factory, no device, GUI or installed fallback"]
+fn actual_sdk_catalog_play_stop_manual_save_cold_open_genuine_whole_factory_matches_pcm() {
+    run_saved_melody_workflow(WorkflowRenderer::GenuineProduction);
+}
+
+fn run_saved_melody_workflow(renderer: WorkflowRenderer) {
+    let genuine_factory = matches!(renderer, WorkflowRenderer::GenuineProduction);
     let _helper_admission = plugins::helper_transport_test_lock();
     check_helper_sibling();
     let generator_bundle =
@@ -918,60 +937,76 @@ fn actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm()
     cold.app_mut()
         .begin_whole_song_export(review, wav_path.clone())
         .unwrap();
-    let audit = AppSerialSdkAudit::default();
-    let worker_audit = audit.clone();
-    cold.app_mut()
-        .whole_song_export_job
-        .as_mut()
-        .unwrap()
-        .serial_render_starter = Some(Box::new(
-        move |admission, project, captured, chains, options, path, control, reviewed| {
-            assert_eq!(
-                project_fingerprint(&project),
-                captured.identity().project_fingerprint
-            );
-            assert!(captured.strict_load_inputs().0.class_uid.is_none());
-            assert_eq!(captured.state.opaque_state.len(), 40);
-            assert_eq!(
-                captured.state.parameter_bases[&0].to_bits(),
-                GAINS[0].to_bits()
-            );
-            assert_eq!(chains.len(), 2);
-            for (index, chain) in chains.iter().enumerate() {
-                let slot = &chain.receipt.slots[0];
-                assert!(slot.request.requested_class_uid.is_none());
-                assert_eq!(slot.state.metadata.identity.class_uid, FX_CLASS);
-                assert_eq!(slot.state.opaque_state.len(), 40);
-                assert_eq!(
-                    slot.state.parameter_bases[&0].to_bits(),
-                    f64::from(GAINS[index + 1]).to_bits()
-                );
-            }
-            worker_audit.start(
-                admission, project, captured, chains, options, path, control, reviewed,
-            )
-        },
-    ));
-    assert!(
-        cold.app()
+    let audit = if genuine_factory {
+        None
+    } else {
+        let audit = AppSerialSdkAudit::default();
+        let worker_audit = audit.clone();
+        cold.app_mut()
             .whole_song_export_job
-            .as_ref()
+            .as_mut()
             .unwrap()
-            .serial_render_starter
-            .is_some()
-    );
+            .serial_render_starter = Some(Box::new(
+            move |admission, project, captured, chains, options, path, control, reviewed| {
+                assert_eq!(
+                    project_fingerprint(&project),
+                    captured.identity().project_fingerprint
+                );
+                assert!(captured.strict_load_inputs().0.class_uid.is_none());
+                assert_eq!(captured.state.opaque_state.len(), 40);
+                assert_eq!(
+                    captured.state.parameter_bases[&0].to_bits(),
+                    GAINS[0].to_bits()
+                );
+                assert_eq!(chains.len(), 2);
+                for (index, chain) in chains.iter().enumerate() {
+                    let slot = &chain.receipt.slots[0];
+                    assert!(slot.request.requested_class_uid.is_none());
+                    assert_eq!(slot.state.metadata.identity.class_uid, FX_CLASS);
+                    assert_eq!(slot.state.opaque_state.len(), 40);
+                    assert_eq!(
+                        slot.state.parameter_bases[&0].to_bits(),
+                        f64::from(GAINS[index + 1]).to_bits()
+                    );
+                }
+                worker_audit.start(
+                    admission, project, captured, chains, options, path, control, reviewed,
+                )
+            },
+        ));
+        assert!(
+            cold.app()
+                .whole_song_export_job
+                .as_ref()
+                .unwrap()
+                .serial_render_starter
+                .is_some()
+        );
+        Some(audit)
+    };
     // Source preparation keeps its existing bounded wait. Once the Whole owner
     // establishes its original render deadline, wait against that exact value,
     // never a new budget per clone or an arbitrary shorter source-phase timer.
     let source_deadline = Instant::now() + WAIT;
+    let mut saw_serial_capture = false;
     while cold.app().whole_song_export_fence_active() {
-        let deadline = cold
-            .app()
-            .whole_song_export_job
-            .as_ref()
-            .unwrap()
-            .render_deadline
-            .unwrap_or(source_deadline);
+        let job = cold.app().whole_song_export_job.as_ref().unwrap();
+        if genuine_factory {
+            // Check before EVERY drive, not merely after completion: an override
+            // is consumed with take(), so its final absence cannot prove selection.
+            assert!(job.render_starter.is_none() && job.serial_render_starter.is_none());
+            if job.phase == WholeExportPhase::CapturingEffects {
+                assert!(
+                    job.captured_generator
+                        .as_ref()
+                        .unwrap()
+                        .plan()
+                        .is_serial_master()
+                );
+                saw_serial_capture = true;
+            }
+        }
+        let deadline = job.render_deadline.unwrap_or(source_deadline);
         assert!(
             Instant::now() < deadline,
             "Actual Whole owner exceeded its original deadline: {}",
@@ -981,6 +1016,19 @@ fn actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm()
     }
     let job = cold.app().whole_song_export_job.as_ref().unwrap();
     assert_eq!(job.phase, WholeExportPhase::Complete, "{:?}", job.failure);
+    if genuine_factory {
+        assert!(
+            saw_serial_capture,
+            "The actual serial capture path must run"
+        );
+        assert!(job.render_starter.is_none() && job.serial_render_starter.is_none());
+        assert!(
+            job.failure.is_none()
+                && job.capture_failure.is_none()
+                && job.effect_capture_failure.is_none()
+        );
+        assert!(!job.pending() && job.render.is_none() && !job.admission.is_busy());
+    }
     let Some(MasterSongRenderOutcome::Complete(report)) = &job.outcome else {
         panic!("No complete actual Whole WAV: {:?}", job.outcome)
     };
@@ -1002,7 +1050,9 @@ fn actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm()
     );
     assert_eq!(report.master_output.applied_gain, 1.0);
     assert!(!report.master_output.tail_limit_reached);
-    audit.assert_natural_serial_reaps(&ids, job.render_deadline.unwrap());
+    if let Some(audit) = audit {
+        audit.assert_natural_serial_reaps(&ids, job.render_deadline.unwrap());
+    }
     let wav = crate::wav::read_wav(&wav_path).unwrap();
     let expected = independent_pcm();
     assert_eq!(
@@ -1066,9 +1116,17 @@ fn actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm()
     for owner in &cold_owners {
         assert_joined(owner);
     }
-    eprintln!(
-        "REAL_APP_MELODY_SAVE_COLD_OPEN_WHOLE_PASS live_source_sdk_process_calls=positive_each; generic_base_contract=f32_ack; state=40_each; cold_generator_opaque=accepted_state_function_and_saved_gain_readonly_proof; old_app_dropped=true; old_source_joined=3; cold_init_exact_ack=3; cold_source_joined=3; source_class_selector=None_both; registry_reused=false; render_factory=closed_read_only_audit_wrapper; genuine_whole_production_factory_selected=false; strict_children=3_natural_exit0_reaped; effect_offline_probe1005=1_each; max_live_strict_owner=1; music={MUSIC}; tail={TAIL}; retained={}; generated={GENERATED}; native_latency=96; full_independent_pcm=true; output={}",
-        MUSIC + TAIL,
-        directory.display()
-    );
+    if genuine_factory {
+        eprintln!(
+            "REAL_APP_MELODY_SAVE_COLD_OPEN_GENUINE_WHOLE_FACTORY_PASS live_source_sdk_process_calls=positive_each; generic_base_contract=f32_ack; state=40_each; cold_generator_opaque=accepted_state_function_and_saved_gain_readonly_proof; old_app_dropped=true; old_source_joined=3; cold_init_exact_ack=3; cold_source_joined=3; source_class_selector=None_both; registry_reused=false; render_factory=default_production; genuine_whole_production_factory_selected=true; completion=typed_Complete_after_termination_ACK_and_admission_drained; strict_child_pid_audit=false; music={MUSIC}; tail={TAIL}; retained={}; generated={GENERATED}; native_latency=96; full_independent_pcm=true; output={}",
+            MUSIC + TAIL,
+            directory.display()
+        );
+    } else {
+        eprintln!(
+            "REAL_APP_MELODY_SAVE_COLD_OPEN_WHOLE_PASS live_source_sdk_process_calls=positive_each; generic_base_contract=f32_ack; state=40_each; cold_generator_opaque=accepted_state_function_and_saved_gain_readonly_proof; old_app_dropped=true; old_source_joined=3; cold_init_exact_ack=3; cold_source_joined=3; source_class_selector=None_both; registry_reused=false; render_factory=closed_read_only_audit_wrapper; genuine_whole_production_factory_selected=false; strict_children=3_natural_exit0_reaped; effect_offline_probe1005=1_each; max_live_strict_owner=1; music={MUSIC}; tail={TAIL}; retained={}; generated={GENERATED}; native_latency=96; full_independent_pcm=true; output={}",
+            MUSIC + TAIL,
+            directory.display()
+        );
+    }
 }

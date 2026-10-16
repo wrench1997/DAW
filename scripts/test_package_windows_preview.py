@@ -1452,11 +1452,14 @@ class PreviewBuildContractTests(unittest.TestCase):
             "Copy-Item -LiteralPath $env:CITRUS_EFFECT_HELPER -Destination (Join-Path $sdkDir 'vst3-host-helper.exe')", sdk)
         self.assertIn(
             "$env:CITRUS_MELODY_HELPER = (Resolve-Path -LiteralPath (Join-Path $sdkDir 'vst3-host-helper.exe')).Path", sdk)
-        self.assertIn(
-            "& $sdkExe 'app::whole_song_export_job::melody_workflow_sdk_tests::"
-            "actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm' "
-            "--exact --ignored --nocapture --test-threads=1\n"
-            "          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", sdk)
+        for selector in (
+            "actual_sdk_catalog_play_stop_manual_save_cold_open_genuine_whole_factory_matches_pcm",
+            "actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm",
+        ):
+            self.assertIn(
+                "& $sdkExe 'app::whole_song_export_job::melody_workflow_sdk_tests::"
+                f"{selector}' --exact --ignored --nocapture --test-threads=1\n"
+                "          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", sdk)
         self.assertNotIn("continue-on-error", sdk)
 
 

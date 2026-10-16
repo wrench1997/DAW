@@ -112,6 +112,8 @@ jobs:
           Copy-Item -LiteralPath $testArtifact[0].executable -Destination $sdkExe
           Copy-Item -LiteralPath $env:CITRUS_EFFECT_HELPER -Destination (Join-Path $sdkDir 'vst3-host-helper.exe')
           $env:CITRUS_MELODY_HELPER = (Resolve-Path -LiteralPath (Join-Path $sdkDir 'vst3-host-helper.exe')).Path
+          & $sdkExe 'app::whole_song_export_job::melody_workflow_sdk_tests::actual_sdk_catalog_play_stop_manual_save_cold_open_genuine_whole_factory_matches_pcm' --exact --ignored --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & $sdkExe 'app::whole_song_export_job::melody_workflow_sdk_tests::actual_sdk_catalog_play_stop_manual_save_cold_open_whole_master_matches_pcm' --exact --ignored --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

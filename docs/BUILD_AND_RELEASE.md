@@ -2,6 +2,8 @@
 
 当前源码候选：Citrus Studio 0.5.0-alpha.1；下文固定发布流程/示例继承自 0.4.0
 
+本轮新增独立genuine Whole exact，通过未覆盖的默认生产工厂完成同一Play/磁盘Save/新App冷Open/完整96768帧WAV，本机1PASS/8.69s；旧audit1PASS/8.47s保持，strict Clippy/no-default/fmt全0。两exact使用同一真实Cargo artifact/匹配helper私有同级目录，原10分钟步骤逐项非零即失败；CI合同7PASS、实际PowerShell解析通过。新候选云端待验收，原发布白名单/超时/检查门均不变，不替换03。[工厂与证据区别](WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16)。
+
 代码`bdf6901418f89fe5d0f4ac763a498c432156dacb`已通过quality38863519248与preview38863519233首轮实际SUCCESS：2552 root/18ignored、fixture8/9/builder11、Windows显式App SDK4及strict Clippy/no-default/双bin通过。新增Play→磁盘Save→新App冷Open→Whole完整96768帧云12.64s通过；原10分钟无GUI步骤、真实Cargo artifact/匹配helper私有同级接线保持。Windows session2真实PrintWindow PASS；preview文档闭环及372Python=360PASS/12条件SKIP、staticCRT release7m53s、精确ZIP/PE/import/provenance及提取helper通过，upload=false→仅上传SKIPPED。首推3b79文档链接及旧near-MAX前提失败已窄修，原期限/Ready/发布白名单不变；[完整实证及失败历史](WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16)保留。夹具不入包；不操作NI/声卡或替换用户03。
 
 代码`89ef2cb32a7b722c16c3672ef6f53a67305cf68f`给单源串行FX Whole加入Master Volume/Pan/Mute自动化及App最终源Ready复核；原writer/SDK入口、取消/超时/原guard收尾和白名单保持。新Master exact加入原10分钟Windows无GUI质量步骤，保留旧静态exact和失败退出规则。本机81定向/双尺寸Review/严格构建通过；quality38846965192与preview38846965091均首轮实际SUCCESS（2551 root/17ignored、Serial19/边界7、显式source SDK1/Whole SDK2、strictClippy/no-default/双bin；Linux新fixture6/host2及Windows真实session2 PrintWindow PASS）。preview371Python=359PASS/12条件SKIP、staticCRT release8m41s/精确ZIP/PE/import/provenance/提取helper通过，upload=false→仅上传SKIPPED。[当前资格记录](WINDOWS_MELODY_WORKFLOW.md#master-automation-and-source-checked-publication-2026-10-16)保留首个App失败和诊断重过的边界。没有替换用户03副本。

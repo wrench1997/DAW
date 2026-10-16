@@ -5,6 +5,8 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
+默认生产Whole工厂的独立联合回归已本机首次通过：真实catalog/default加载→callback播放/停止→磁盘保存→原App销毁/3worker Join→新App磁盘Open/3ACK/opaque.625→默认工厂导出，完整96768帧独立PCM一致。新genuine exact8.69s通过，旧audit exact8.47s通过；strict Clippy/no-default/fmt均0。genuine逐tick确认两starter未覆盖，实际typed Complete/termination ACK/admission drained；严格子进程3次自然reap/max1/1005直接观测仍归旧audit，不混为新路径独立观测。原10分钟CI步骤新增显式exact及失败退出，云端新候选待跑；用户03/NI/声卡不动。
+
 后台联合测试已由代码`bdf6901418f89fe5d0f4ac763a498c432156dacb`实际云验收：普通catalog/default加载→无设备callback实际发声/停止→磁盘ManualSave→原App/3worker Join→新App磁盘Open/3ACK/实际opaque.625→Whole完整96768帧独立PCM。quality38863519248与preview38863519233均首轮SUCCESS：2552 root/18ignored、fixture8/9、builder11、显式App SDK4及strict门通过；新联合SDK云12.64s通过，96帧单次crop/768固定尾音/3strict自然reap/Effect实际Offline保持。Windows真实session2 PrintWindow PASS，非SKIP；preview372Python=360PASS/12条件SKIP、staticCRT release7m53s/ZIP/提取helper通过，upload=false。
 
 首推3b79的文档闭环和旧near-MAX单测失败已窄修：精确源码链接保留发布白名单；测试只在原5s期限等待Waiting→Ready，Invalid仍失败，新增真实heldmetadata反例。原始四次联合失败、编译/lint与云失败均保留，详[完整流程实证](docs/WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16)。本轮是源码SDK/新App实例证据；NOIRE暖态Save、真实程序重启及监听仍待验收。不占GUI/NI/声卡，不替换用户03。
