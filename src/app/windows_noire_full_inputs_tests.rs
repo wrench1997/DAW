@@ -39,6 +39,180 @@ mod tests {
         project
     }
 
+    /// Use the production Project serializer, with only fields absent from the
+    /// original v12 schema omitted. No expected-model normalization is allowed.
+    fn synthetic_legacy_document() -> Value {
+        let mut project = synthetic_project();
+        project.format_version = SAVED13_FORMAT_VERSION;
+        project.audio_assets.push(crate::model::AudioAsset {
+            id: 9201,
+            name: "Synthetic dormant asset".into(),
+            path: std::env::temp_dir().join("unopened-synthetic.wav"),
+            sample_rate: 48_000,
+            channels: 2,
+            bits_per_sample: 32,
+            frames: 19,
+            waveform_peaks: Vec::new(),
+        });
+        let mut document = serde_json::to_value(&project).unwrap();
+        document.as_object_mut().unwrap().remove("auto_song_length");
+        assert!(document["clips"].as_array().unwrap().iter().all(|clip| {
+            !clip
+                .as_object()
+                .unwrap()
+                .contains_key("pattern_length_policy")
+        }));
+        // This legacy mirror is read but not written by the production model.
+        // v12 must retain it, including its separately snapshotted selection.
+        document["piano_notes"] = serde_json::to_value(&project.patterns[0].notes).unwrap();
+        document
+    }
+
+    struct SyntheticLegacyFile {
+        directory: PathBuf,
+        path: PathBuf,
+    }
+
+    impl SyntheticLegacyFile {
+        fn new(document: &Value) -> Self {
+            static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let directory = std::env::temp_dir().join(format!(
+                "citrus-noire-full-inputs-{}-{timestamp}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&directory).unwrap();
+            let file = Self {
+                path: directory.join("synthetic-v12.citrus"),
+                directory,
+            };
+            fs::write(&file.path, serde_json::to_vec_pretty(document).unwrap()).unwrap();
+            file
+        }
+
+        fn load(&self) -> (Project, Project) {
+            let bytes = fs::read(&self.path).unwrap();
+            let decoded = serde_json::from_slice(&bytes).unwrap();
+            let loaded = Project::load(&self.path).expect("production legacy disk load");
+            assert_eq!(fs::read(&self.path).unwrap(), bytes);
+            (decoded, loaded)
+        }
+    }
+
+    impl Drop for SyntheticLegacyFile {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+            let _ = fs::remove_dir(&self.directory);
+        }
+    }
+
+    #[test]
+    fn full_saved13_inputs_disk_load_allows_only_v12_version_upgrade_with_legacy_defaults() {
+        let file = SyntheticLegacyFile::new(&synthetic_legacy_document());
+        let (decoded, loaded) = file.load();
+        assert_eq!(decoded.format_version, SAVED13_FORMAT_VERSION);
+        assert_eq!(loaded.format_version, CURRENT_PROJECT_FORMAT_VERSION);
+        // This is the old preflight's false failure, using an actual disk load.
+        assert!(model_snapshot(&decoded).unwrap() != model_snapshot(&loaded).unwrap());
+        require_unchanged_saved13_load(&decoded, &loaded).unwrap();
+        for project in [&decoded, &loaded] {
+            assert!(!project.auto_song_length);
+            assert!(
+                project
+                    .clips
+                    .iter()
+                    .all(|clip| clip.pattern_length_policy.is_none())
+            );
+            assert!(!project.piano_notes.is_empty());
+        }
+    }
+
+    #[test]
+    fn full_saved13_inputs_version_allowance_rejects_other_source_or_loaded_versions() {
+        let file = SyntheticLegacyFile::new(&synthetic_legacy_document());
+        let (decoded, loaded) = file.load();
+        for version in [1, 11, 13, CURRENT_PROJECT_FORMAT_VERSION, 15] {
+            let mut wrong_source = decoded.clone();
+            wrong_source.format_version = version;
+            assert!(require_unchanged_saved13_load(&wrong_source, &loaded).is_err());
+        }
+        for version in [
+            SAVED13_FORMAT_VERSION,
+            13,
+            CURRENT_PROJECT_FORMAT_VERSION + 1,
+        ] {
+            let mut wrong_loaded = loaded.clone();
+            wrong_loaded.format_version = version;
+            assert!(require_unchanged_saved13_load(&decoded, &wrong_loaded).is_err());
+        }
+    }
+
+    #[test]
+    fn full_saved13_inputs_version_allowance_rejects_all_other_model_changes() {
+        let file = SyntheticLegacyFile::new(&synthetic_legacy_document());
+        let (decoded, loaded) = file.load();
+        type ModelChange = (&'static str, fn(&mut Project));
+        let changes: [ModelChange; 13] = [
+            ("notes", |project| project.patterns[0].notes[0].note += 1),
+            ("opaque state", |project| {
+                project.plugin_instances[0].opaque_state[28] ^= 1
+            }),
+            ("parameter base", |project| {
+                project.plugin_instances[0].parameters.insert(7, 0.32);
+            }),
+            ("channel base", |project| project.channels[2].volume = 0.56),
+            ("routing", |project| project.mixer_routes[0].gain = 0.43),
+            ("AUTO default", |project| project.auto_song_length = true),
+            ("placement policy", |project| {
+                project.clips[0].pattern_length_policy =
+                    Some(crate::model::PatternLengthPolicy::Manual)
+            }),
+            ("pattern selection", |project| {
+                project.patterns[0].notes[0].selected = true
+            }),
+            ("legacy mirror", |project| {
+                project.piano_notes[0].start += 0.25
+            }),
+            ("legacy selection", |project| {
+                project.piano_notes[0].selected = true
+            }),
+            ("runtime status", |project| {
+                project.plugin_instances[0].runtime_status = PluginRuntimeStatus::Loaded
+            }),
+            ("waveform", |project| {
+                project.audio_assets[0].waveform_peaks.push(-0.0)
+            }),
+            ("migration diagnostics", |project| {
+                project
+                    .migration_diagnostics
+                    .push(ProjectMigrationDiagnostic::LegacyPianoMirrorIgnored { note_count: 91 })
+            }),
+        ];
+        for (label, change) in changes {
+            let mut changed = loaded.clone();
+            change(&mut changed);
+            assert!(
+                require_unchanged_saved13_load(&decoded, &changed).is_err(),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_saved13_inputs_version_allowance_rejects_finite_value_repaired_by_disk_load() {
+        let mut document = synthetic_legacy_document();
+        document["channels"][2]["volume"] = json!(1.25);
+        let file = SyntheticLegacyFile::new(&document);
+        let (decoded, loaded) = file.load();
+        assert_eq!(decoded.channels[2].volume, 1.25);
+        assert_eq!(loaded.channels[2].volume, 1.0);
+        assert!(require_unchanged_saved13_load(&decoded, &loaded).is_err());
+    }
+
     #[test]
     fn full_saved13_inputs_retains_complete_synthetic_model_and_skipped_session_fields() {
         let mut project = synthetic_project();
@@ -299,6 +473,18 @@ mod tests {
             405
         );
         assert_eq!(inputs.project.clips.len(), 5);
+        assert_eq!(
+            inputs.project.format_version,
+            CURRENT_PROJECT_FORMAT_VERSION
+        );
+        assert!(!inputs.project.auto_song_length);
+        assert!(
+            inputs
+                .project
+                .clips
+                .iter()
+                .all(|clip| clip.pattern_length_policy.is_none())
+        );
         assert_eq!(inputs.project.song_length_beats, 160.0);
         assert_eq!(inputs.source.channel_id, 1);
         assert_eq!(inputs.source.plugin_instance_id, 1);

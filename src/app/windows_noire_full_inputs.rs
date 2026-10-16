@@ -5,10 +5,11 @@ use super::*;
 use crate::{
     automation::{AutomationCurve, AutomationTarget},
     mixer_graph::MASTER_MIXER_TRACK_ID,
-    model::{PluginInstance, ProjectMigrationDiagnostic},
+    model::{CURRENT_PROJECT_FORMAT_VERSION, PluginInstance, ProjectMigrationDiagnostic},
 };
 
 const FULL_INPUT_OPT_IN: &str = "actual-noire-complete-saved13-input-v1";
+const SAVED13_FORMAT_VERSION: u32 = 12;
 const SAVED13_BYTES: usize = 1_298_729;
 const SAVED13_STATE_BYTES: usize = 591_772;
 const SAVED13_STATE_SHA256: &str =
@@ -91,6 +92,22 @@ fn model_snapshot(project: &Project) -> Check<ModelSnapshot> {
             .collect(),
         migration_diagnostics: project.migration_diagnostics.clone(),
     })
+}
+
+fn require_unchanged_saved13_load(decoded: &Project, loaded: &Project) -> Check {
+    require(
+        decoded.format_version == SAVED13_FORMAT_VERSION,
+        "pinned full input has an unexpected original project format",
+    )?;
+    // Project::load advances this pinned v12 file to the current schema. Allow
+    // that one field only: normalizing the expected model would hide repairs
+    // to notes, state, bases, routing or legacy defaults (AUTO false/no policy).
+    let mut expected = decoded.clone();
+    expected.format_version = CURRENT_PROJECT_FORMAT_VERSION;
+    require(
+        model_snapshot(loaded)? == model_snapshot(&expected)?,
+        "production Project::load repaired or changed the pinned full model",
+    )
 }
 
 /// General source-model checks are intentionally separate from Saved13 pins.
@@ -337,12 +354,8 @@ impl FullInputs {
         let before = read_bounded(&project_path, PROJECT_BYTE_LIMIT)?;
         let project_sha256 = require_saved13_file(&before)?;
         let decoded: Project = serde_json::from_slice(&before).map_err(error)?;
-        let snapshot = model_snapshot(&decoded)?;
         let project = Project::load(&project_path).map_err(error)?;
-        require(
-            model_snapshot(&project)? == snapshot,
-            "production Project::load repaired or changed the pinned full model",
-        )?;
+        require_unchanged_saved13_load(&decoded, &project)?;
         let after = read_bounded(&project_path, PROJECT_BYTE_LIMIT)?;
         require(
             before == after,

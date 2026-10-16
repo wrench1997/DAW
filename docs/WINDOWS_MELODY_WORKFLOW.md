@@ -1671,6 +1671,42 @@ was skipped. Preserve
 `ci-1687ec5-{windows-quality,windows-preview,linux-helper-readiness}-01.log`
 and Source96 actual-terminal run/jobs JSON.
 
+### Saved13 v12 preflight with the current v14 loader (2026-10-16)
+
+The next NOIRE run's input preflight had a deterministic failure before creating
+any native owner. The pinned Saved13 is format 12; production `Project::load`
+advances it to current format 14. Comparing its unmodified decoded snapshot with
+the loaded snapshot therefore rejected the version bump as
+`production Project::load repaired or changed the pinned full model`.
+The retained Source134 private executable actually reproduced that error in the
+load-only exact: 1 FAILED in 0.67s, exit 101.
+
+The comparison now permits only `format_version: 12 -> CURRENT_PROJECT_FORMAT_VERSION`
+in the expected decoded clone. It never normalizes the expected model. Complete
+persisted/skipped-field comparison, original file/state pins and before/after
+source-byte equality remain. AUTO stays false and all five placement policies
+stay None; the old Manual 160-beat arrangement is unchanged.
+
+Actual local checks passed: 16 ordinary cases / 1 private-input ignored (1.20s),
+then the real pinned Saved13 load-only exact: 1 PASS (0.46s). The four new ordinary
+regressions cover production disk loading, version-only acceptance, 13 other
+field-mutation refusals and refusal when the loader repairs finite volume 1.25
+to 1.0. The source remains 1,298,729B with 591772 opaque bytes. No helper, Kontakt,
+audio device or GUI is created by these load-only checks.
+
+The first new strict Clippy run failed on the test tuple's `type_complexity`;
+only an equivalent local type alias changed. Final strict all-feature/all-target
+Clippy, no-default all-target check and format check exited 0. Runtime bodies and
+assertions were unchanged, so their passed evidence was reused. All 8 phases and
+28 held exit observations terminated/reaped; both exit-101 logs remain in
+`noire-legacy-input-v14-candidate-01/` under the local backend evidence directory.
+
+Next real acceptance remains Play -> Stop -> Save -> Whole using existing
+Shutdown/slot-clear/ExitDll/OS-reap diagnostics. Native04's warm-Save cleanup
+failure and NOIRE onset variation remain open; the 3-second graceful-exit policy
+already predates Native04. The user is still testing03, so native execution is
+deferred and the protected source file is not rewritten.
+
 ### SDK-B short source qualification candidate (2026-10-15)
 
 A separately named backend-short-source-load entry is prepared. It reads pinned
@@ -2356,7 +2392,7 @@ This is not a measured speed-up; source regressions, current quality and package
 The separate legacy helper explicitly refuses the new request rather than silently handling it.
 Vendor replay/provenance and packaging pins are refreshed independently of native acceptance.
 
-The additive full-input loader preserves the complete pinned Saved13 through production Project::load and refuses normalization changes; the short scratch path stays separate.
+The additive full-input loader preserves the complete pinned Saved13 through production Project::load. Its expected snapshot permits only the pinned format12-to-current version bump; every other normalization change still rejects. The short scratch path stays separate.
 Original 405 notes, five placements and 160 beats including coda remain intact.
 The source routes directly to stable MASTER, channel `.55`, Master base `.7`, global `.7 → .56`.
 The driven Master value replaces its base; it must not be multiplied by a second `.7`.

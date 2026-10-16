@@ -5,6 +5,8 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
+Saved13预检现允许唯一合法格式升级12→当前14，仍严格拒绝其余内容修复；AUTO=false、五个policy=None、原文件/state pins保持。旧私有exe实际复现原拒绝101；新16项普通回归及真实受保护工程只读加载1项通过，未建立helper/NI/声卡/GUI。首Clippy101仅因测试类型复杂度，等价别名修补后strict all-feature/all-target Clippy、no-default all-target与fmt均0；8阶段/28 held退出及exec全部实际回收，原失败保留。详[预检修补与下一步](docs/WINDOWS_MELODY_WORKFLOW.md#saved13-v12-preflight-with-the-current-v14-loader-2026-10-16)。Native04暖态Save清理失败仍未定位；用户03继续保留、这里只改代码。
+
 默认生产Whole工厂的独立联合回归已本机首次通过：真实catalog/default加载→callback播放/停止→磁盘保存→原App销毁/3worker Join→新App磁盘Open/3ACK/opaque.625→默认工厂导出，完整96768帧独立PCM一致。新genuine exact8.69s通过，旧audit exact8.47s通过；strict Clippy/no-default/fmt均0。genuine逐tick确认两starter未覆盖，实际typed Complete/termination ACK/admission drained；严格子进程3次自然reap/max1/1005直接观测仍归旧audit，不混为新路径独立观测。原10分钟CI步骤新增显式exact及失败退出。6050d36首云quality38872515281/preview38872515243实际FAIL：旧clip等待和identity观察失败、旧catalog退出检查失败；新SDK/Clippy/PrintWindow和release/ZIP未到达。Linux fixture8/9+host2等独立通过，原日志保留；用户03/NI/声卡不动。
 
 代码`820cddb098969b35c98a5d976220feff340e160d`现已首轮实际双SUCCESS：quality38880415806、preview38880415815。2553 root/19ignored、strict Clippy/no-default/双bin与显式App SDK5通过；新默认工厂exact12.64s及旧audit12.32s均完整96768帧一致。真实Default/session2 PrintWindow PASS；preview372Python=360PASS/12条件SKIP、staticCRT release8m25s、精确ZIP/PE/import/provenance及提取helper通过，upload=false→仅上传SKIPPED。四文件窄修的276本机回归和全部收尾已通过；原6050失败仍保留，clip原5s只增加阶段诊断，重过不证明旧超时根因。默认工厂与审计的独立观测、实际EOF阶段证据不混用。
