@@ -307,7 +307,44 @@ all six phases actually terminated/reaped without a resource guard. No productio
 code, protocol, fixture or deadline changed. The existing CI step explicitly runs
 both staged exacts with immediate failure propagation and its original10-minute
 limit. Existing CI-contract7 tests and the actual PowerShell step parse passed.
-New-candidate cloud acceptance is pending. Full logs/terminals and both actual
+The first6050d36 cloud executions actually failed before this new SDK gate.
+Quality38872515281/job116879711237 ended08:32:34Z: App2485 passed,2 failed,
+19 ignored in512.98s. The old muted-target projection case failed in its shared
+conversion setup after5.009s, final phase ReadyToCommit/errorNone/source not yet
+joined; the original log has no phase timing to establish the cause. The old
+worker-identity observer received another worker's Joined pointer.
+Preview38872515243/job116879710804 ended08:30:01Z: App2486 passed,1 failed,
+19 ignored in426.74s; catalog scenario0 retained OperationRejected but the
+child required kill/reap(exit1), failing its unconditional healthy-retirement
+assertion. The original EOF/exit cause is unobserved. Windows new SDK, strict
+Clippy/build and PrintWindow, plus preview release/ZIP/helper did not run.
+Linux independently passed async15/Effect29/Unix1, fixture8/9/builder11/helper2.
+Full original raw logs/API terminals are retained as `source130-*-actual-terminal-01.*`.
+The narrow repair changes only four test/observer files. Identity fixtures now
+explicitly install control-thread-only collection; foreign real registrations
+and retained joins cannot consume their run. Default genuine/SDK installation
+remains globally collected with the same sole reservation, caps and lazy builders.
+A channel-controlled foreign-worker regression retains original exact-once local
+Join/zero-detach assertions. Catalog rejection scenarios require exact original
+refusal text and either actual clean exit0 or fully consistent forced-reap
+UncleanRetirement; successful metadata still requires healthy Shutdown. No
+production retirement/deadline rule changes. The clip wait keeps its original
+five-second absolute deadline and assertions, adding first16 phase timestamps,
+latest transition and longest tick; its original cause remains unproved.
+
+An immutable6050 Git archive plus those four files excluded concurrent Generator
+automation work. The actual Cargo artifact passed identity3/0.42s, catalog5/7.14s,
+observer258/2.15s and clip playback10/2.03s (276 total). The controlled terminal
+child146748 emitted its actual PID-bound `eof-without-followup` line before the
+matching refusal/kill/reap/exit1 receipt, so this execution reached the intended
+post-EOF block. Missing that raw line in another run leaves its stage unknown;
+test success alone does not prove it. All eight phases, including strict
+all-feature/all-target Clippy/no-default/fmt, exited0 and were actually reaped;
+no resource guard fired. Clip re-passing does not establish its old timeout cause.
+The new repair still requires exact cloud qualification. Local full raw/terminal
+evidence is under `source130-narrow-cloud-repair-candidate-01/` in the same parent.
+
+Full local logs/terminals and both actual
 WAV/project copies are under
 `target/backend-reliability-20261014/melody-genuine-whole-source-candidate-01/`;
 Root record: `source130-genuine-factory-direction-01.json`.

@@ -3,9 +3,9 @@ use super::*;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-// These mock children own no plug-in state. Once their actual request/EOF
-// assertions and stream flushes finish, interpreter finalization is not part of
-// the protocol contract being tested under the terminal 100 ms exit window.
+// These mock children own no plug-in state. Direct exit avoids interpreter
+// finalization, but cannot guarantee that a child will run again after host EOF
+// before the production terminal path's 100 ms natural-exit limit.
 const PROTOCOL_COMPLETE_EXIT: &str = "sys.stdout.flush()\nsys.stderr.flush()\nos._exit(0)";
 
 fn protocol_child(script: &str) -> Command {
@@ -29,7 +29,7 @@ fn factory_script(response: serde_json::Value, expect_shutdown: bool, ending: &s
         ""
     };
     format!(
-        "import json,os,sys,time\nassert json.loads(sys.stdin.readline())=={{'ProbeFactory':{{'path':'fixture-catalog.vst3'}}}}\nprint({response:?},flush=True)\n{shutdown}assert sys.stdin.read()==''\n{ending}\n"
+        "import json,os,sys,time\nassert json.loads(sys.stdin.readline())=={{'ProbeFactory':{{'path':'fixture-catalog.vst3'}}}}\nprint('catalog-fixture request-validated pid='+str(os.getpid()),file=sys.stderr,flush=True)\nprint({response:?},flush=True)\n{shutdown}assert sys.stdin.read()==''\nprint('catalog-fixture eof-without-followup pid='+str(os.getpid()),file=sys.stderr,flush=True)\n{ending}\n"
     )
 }
 
@@ -38,6 +38,56 @@ fn factory_response() -> serde_json::Value {
     serde_json::json!({"FactoryMetadata":{"metadata":{
         "path":"fixture-catalog.vst3", "factory":catalog.factory, "classes":catalog.classes,
     }}})
+}
+
+fn assert_terminal_refusal_retirement(
+    failure: &ProbeFailure,
+    original_refusal: &str,
+    evidence: &serde_json::Value,
+) {
+    let receipt = failure
+        .lifecycle
+        .as_ref()
+        .unwrap_or_else(|| panic!("catalog refusal lost its actual lifecycle: {evidence}"));
+    assert_eq!(
+        receipt.load_failure.as_deref(),
+        Some(original_refusal),
+        "{evidence}"
+    );
+    assert!(receipt.helper_pid.is_some(), "{evidence}");
+    assert!(receipt.reaped, "{evidence}");
+    assert!(receipt.shutdown_failure.is_none(), "{evidence}");
+    assert!(receipt.kill_error.is_none(), "{evidence}");
+    assert!(receipt.wait_error.is_none(), "{evidence}");
+    assert!(receipt.pipe_error.is_none(), "{evidence}");
+    if receipt.kill_requested {
+        // Terminal replies cannot receive the healthy Shutdown exit grace. A
+        // real bounded kill is a safe refusal, never a healthy metadata result.
+        assert!(!receipt.healthy_retirement(), "{evidence}");
+        assert!(!receipt.exit_success, "{evidence}");
+        #[cfg(windows)]
+        assert_eq!(receipt.exit_code, Some(1), "{evidence}");
+        #[cfg(target_os = "linux")]
+        assert_eq!(receipt.exit_code, None, "{evidence}");
+        let stopped = failure
+            .stopped
+            .as_ref()
+            .unwrap_or_else(|| panic!("actual forced retirement lost its stop kind: {evidence}"));
+        assert!(
+            matches!(stopped.kind, ScanStopKind::UncleanRetirement),
+            "{evidence}"
+        );
+        let detail = format!("{original_refusal}; helper did not retire cleanly");
+        assert_eq!(stopped.detail, detail, "{evidence}");
+        assert_eq!(failure.message, detail, "{evidence}");
+    } else {
+        // Without an actual kill, only the original healthy exit-zero case is
+        // accepted. Spontaneous failures or pipe/wait errors do not pass here.
+        assert!(receipt.healthy_retirement(), "{evidence}");
+        assert_eq!(receipt.exit_code, Some(0), "{evidence}");
+        assert!(failure.stopped.is_none(), "{evidence}");
+        assert_eq!(failure.message, original_refusal, "{evidence}");
+    }
 }
 
 #[test]
@@ -133,9 +183,19 @@ fn production_catalog_rejects_wrong_reply_failure_exit_and_forced_kill_without_l
                 "{evidence}"
             );
             assert!(!receipt.healthy_retirement(), "{evidence}");
+            assert!(receipt.load_failure.is_none(), "{evidence}");
         } else {
-            assert!(receipt.healthy_retirement(), "{evidence}");
-            assert!(receipt.load_failure.is_some(), "{evidence}");
+            let original_refusal = match scenario {
+                0 => "OperationRejected: factory refused",
+                1 => "MalformedReply",
+                4 => "WrongReply",
+                _ => unreachable!(),
+            };
+            assert_terminal_refusal_retirement(&failure, original_refusal, &evidence);
+        }
+        if scenario == 2 {
+            assert!(!receipt.kill_requested, "{evidence}");
+            assert_eq!(receipt.exit_code, Some(9), "{evidence}");
         }
         if scenario == 3 {
             assert!(receipt.kill_requested, "{evidence}");
@@ -144,69 +204,41 @@ fn production_catalog_rejects_wrong_reply_failure_exit_and_forced_kill_without_l
 }
 
 #[test]
-fn production_catalog_terminal_reply_distinguishes_protocol_exit_from_interpreter_teardown() {
+fn production_catalog_terminal_refusal_with_eof_exit_blocked_requires_actual_kill_and_reap() {
     let _guard = super::super::helper_transport_test_lock();
-    for direct_exit in [true, false] {
-        // Register the same slow interpreter finalizer only after the fixture's
-        // real request and EOF assertions. Direct exit deliberately omits that
-        // unrelated work; normal Python exit must still hit actual kill/reap.
-        let ending = format!(
-            "import atexit\ndef delayed_finalizer():\n print('catalog-fixture interpreter-finalizer-entered after EOF',file=sys.stderr,flush=True)\n time.sleep(30)\natexit.register(delayed_finalizer)\n{}",
-            if direct_exit {
-                PROTOCOL_COMPLETE_EXIT
-            } else {
-                ""
-            },
-        );
-        let mut command = protocol_child(&factory_script(
-            serde_json::json!({"Error":{"message":"factory refused before interpreter exit"}}),
-            false,
-            &ending,
-        ));
-        let started = Instant::now();
-        let failure = match probe_command(
-            Path::new("fixture-catalog.vst3"),
-            &mut command,
-            Duration::from_secs(3),
-            &ScanControl::new(),
-            ScanRequest::FactoryCatalog,
-        ) {
-            Err(failure) => failure,
-            Ok(_) => panic!("terminal reply admitted a catalog; direct_exit={direct_exit}"),
-        };
-        let evidence = serde_json::json!({
-            "scenario": "reported-factory-error-interpreter-finalizer",
-            "direct_exit": direct_exit,
-            "elapsed_ms": started.elapsed().as_millis(),
-            "failure": failure.message,
-            "stopped": failure.stopped,
-            "lifecycle": failure.lifecycle,
-        });
-        eprintln!("catalog-retirement-attempt {evidence}");
-        if direct_exit {
-            assert!(failure.stopped.is_none(), "{evidence}");
-        } else {
-            assert!(
-                matches!(
-                    failure.stopped.as_ref().map(|stopped| &stopped.kind),
-                    Some(ScanStopKind::UncleanRetirement)
-                ),
-                "{evidence}"
-            );
-        }
-        let receipt = failure
-            .lifecycle
-            .as_ref()
-            .unwrap_or_else(|| panic!("terminal failure lost its actual lifecycle: {evidence}"));
-        assert!(receipt.reaped, "{evidence}");
-        assert_eq!(receipt.kill_requested, !direct_exit, "{evidence}");
-        assert_eq!(receipt.healthy_retirement(), direct_exit, "{evidence}");
-        assert_eq!(
-            receipt.load_failure.as_deref(),
-            Some("OperationRejected: factory refused before interpreter exit"),
-            "{evidence}"
-        );
-    }
+    // The fixture first validates its one factory request and requires EOF with
+    // no second command, then blocks exit. Its phase log is new-run evidence;
+    // missing EOF observation must not be inferred from a later forced reap.
+    let mut command = protocol_child(&factory_script(
+        serde_json::json!({"Error":{"message":"factory refused before blocked EOF exit"}}),
+        false,
+        "time.sleep(30)",
+    ));
+    let started = Instant::now();
+    let failure = match probe_command(
+        Path::new("fixture-catalog.vst3"),
+        &mut command,
+        Duration::from_secs(3),
+        &ScanControl::new(),
+        ScanRequest::FactoryCatalog,
+    ) {
+        Err(failure) => failure,
+        Ok(_) => panic!("terminal reply followed by blocked EOF exit admitted a catalog"),
+    };
+    let evidence = serde_json::json!({
+        "scenario": "reported-factory-error-blocked-eof-exit",
+        "elapsed_ms": started.elapsed().as_millis(),
+        "failure": failure.message,
+        "stopped": failure.stopped,
+        "lifecycle": failure.lifecycle,
+    });
+    eprintln!("catalog-retirement-attempt {evidence}");
+    assert_terminal_refusal_retirement(
+        &failure,
+        "OperationRejected: factory refused before blocked EOF exit",
+        &evidence,
+    );
+    assert!(failure.lifecycle.unwrap().kill_requested, "{evidence}");
 }
 
 #[test]

@@ -985,20 +985,39 @@ impl Fixture {
         let started_at = Instant::now();
         let deadline = started_at + Duration::from_secs(5);
         let mut condition_checks = 0;
+        // Keep bounded phase timing from this actual wait. A final ReadyToCommit
+        // sample alone cannot show whether verification/recapture just finished
+        // at the deadline or whether commit itself stalled. No extra tick, retry,
+        // backend observation or renewed deadline is allowed for diagnostics.
+        let mut phase_trace = [None; 16];
+        let mut phase_changes = 0;
+        let mut last_phase_change = None;
+        let mut longest_tick = Duration::ZERO;
         let satisfied = loop {
+            let phase = self.app.clip_render_job.as_ref().map(|job| job.phase);
+            if last_phase_change.is_none_or(|(_, previous)| previous != phase) {
+                let change = (started_at.elapsed(), phase);
+                if phase_changes < phase_trace.len() {
+                    phase_trace[phase_changes] = Some(change);
+                }
+                phase_changes += 1;
+                last_phase_change = Some(change);
+            }
             condition_checks += 1;
             let observed = condition(self);
             if observed || Instant::now() >= deadline {
                 break observed;
             }
+            let tick_started = Instant::now();
             self.tick();
+            longest_tick = longest_tick.max(tick_started.elapsed());
         };
         // Settlement Ready is a momentary observation, not a lease: a worker
         // admin/feedback publication can already be Waiting on the next read.
         // Assert the observation that ended this wait, not a second sample.
         assert!(
             satisfied,
-            "bounded mock App condition failed; elapsed={:?}, condition_checks={condition_checks}; {}",
+            "bounded mock App condition failed; elapsed={:?}, condition_checks={condition_checks}, phase_changes={phase_changes}, phase_trace={phase_trace:?}, last_phase_change={last_phase_change:?}, longest_tick={longest_tick:?}; {}",
             started_at.elapsed(),
             self.timeout_metadata()
         );

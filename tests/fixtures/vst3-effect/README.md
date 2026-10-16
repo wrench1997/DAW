@@ -197,8 +197,13 @@ all exited0 with all phases terminated/reaped and no resource guard. Both actual
 WAVs/projects are retained. Production/helper/fixture inputs were unchanged, so
 their accepted binaries and fixture evidence were reused. Both exacts now run
 explicitly in the existing10-minute Windows CI step with immediate failure
-propagation; CI-contract7/actual PowerShell parse passed. New-candidate cloud
-acceptance is pending. Evidence: `melody-genuine-whole-source-candidate-01/`
+propagation; CI-contract7/actual PowerShell parse passed. First6050d36 cloud
+quality38872515281/preview38872515243 failed old clip/identity/catalog cases
+before this new SDK gate or release/ZIP. Linux independently passed
+fixture8/9/builder11/helper2. Original failures remain recorded. The isolated four-file repair passed276
+focused local tests and strict Clippy/no-default/fmt, retaining real failure and
+healthy-retirement rules. Clip timing has bounded diagnostics but no proved cause
+fix. Repair cloud acceptance is pending; unchanged local SDK PCM is reused. Evidence: `melody-genuine-whole-source-candidate-01/`
 under the workflow record's target directory.
 
 Previous audited acceptance: 8 default/9 feature fixture tests, both strict fixture Clippy

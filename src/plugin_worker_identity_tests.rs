@@ -1,5 +1,5 @@
 //! Plugin-free proofs for the test-only allocation witness and run-owned collector.
-//! Global-observer cases share App fixture admission for their complete lifetime.
+//! Control-thread observers share App fixture admission for their complete lifetime.
 
 use super::*;
 use crate::genuine_app_observer::{
@@ -99,6 +99,9 @@ struct SpawnFixture {
 }
 impl SpawnFixture {
     fn new(observer: ObservationRun) -> Result<Self, String> {
+        Self::spawn(Some(observer))
+    }
+    fn spawn(observer: Option<ObservationRun>) -> Result<Self, String> {
         assert!(!CLEANUP_FAILED.load(Ordering::Acquire));
         QUARANTINE.with(|slot| assert!(slot.borrow().is_none()));
         let evidence = Arc::new(BackendEvidence::default());
@@ -119,7 +122,7 @@ impl SpawnFixture {
         )?;
         Ok(Self {
             chain: Some(chain),
-            observer: Some(observer),
+            observer,
             release: Some(release),
             evidence,
             cleanup: None,
@@ -164,6 +167,20 @@ impl SpawnFixture {
         outcome
     }
     fn assert_joined_once(&mut self, worker_id: usize) {
+        self.assert_actual_joined_once(worker_id);
+        self.observer.as_ref().unwrap().with_snapshot(|snapshot| {
+            let mut joins = snapshot
+                .records
+                .iter()
+                .filter_map(|record| match record.kind {
+                    RecordKind::WorkerJoin { worker_id, outcome } => Some((worker_id, outcome)),
+                    _ => None,
+                });
+            assert_eq!(joins.next(), Some((worker_id, WorkerJoinOutcome::Joined)));
+            assert_eq!(joins.next(), None);
+        });
+    }
+    fn assert_actual_joined_once(&mut self, worker_id: usize) {
         assert_eq!(self.finish(), RetainedShutdownPoll::Joined);
         let chain = self.chain.as_mut().unwrap();
         for _ in 0..8 {
@@ -179,17 +196,6 @@ impl SpawnFixture {
         assert_eq!(self.evidence.loaded.load(Ordering::Acquire), 1);
         assert_eq!(self.evidence.prepared.load(Ordering::Acquire), 1);
         assert_eq!(self.evidence.destroyed.load(Ordering::Acquire), 1);
-        self.observer.as_ref().unwrap().with_snapshot(|snapshot| {
-            let mut joins = snapshot
-                .records
-                .iter()
-                .filter_map(|record| match record.kind {
-                    RecordKind::WorkerJoin { worker_id, outcome } => Some((worker_id, outcome)),
-                    _ => None,
-                });
-            assert_eq!(joins.next(), Some((worker_id, WorkerJoinOutcome::Joined)));
-            assert_eq!(joins.next(), None);
-        });
     }
 }
 impl Drop for SpawnFixture {
@@ -229,7 +235,7 @@ fn worker_identity_witness_preserves_allocation_under_admission() {
     assert_eq!(witness.0.as_ptr() as usize, original_id);
     drop(witness);
 
-    let observer = ObservationRun::install().unwrap();
+    let observer = ObservationRun::install_control_thread_for_test().unwrap();
     let mut fixture = SpawnFixture::new(observer).unwrap();
     fixture.wait_loaded();
     let chain = fixture.chain.as_mut().unwrap();
@@ -279,6 +285,61 @@ fn worker_identity_witness_preserves_allocation_under_admission() {
 }
 
 #[test]
+fn worker_identity_control_thread_observer_excludes_foreign_registration_and_actual_joins() {
+    crate::app::CitrusApp::with_observer_fixture_admission_for_test(|| {
+        let _admission = admission();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (continue_tx, continue_rx) = mpsc::channel();
+        thread::scope(|scope| {
+            let foreign = scope.spawn(move || {
+                // This worker predates installation but actually joins while
+                // the other test's collector is active, as in the CI failure.
+                let mut earlier = SpawnFixture::spawn(None).unwrap();
+                earlier.wait_loaded();
+                let earlier_id = earlier.chain.as_ref().unwrap().guard.genuine_worker_id();
+                ready_tx.send(()).unwrap();
+                continue_rx.recv_timeout(WAIT).unwrap();
+                assert!(ObservationRun::install().is_err());
+                assert!(ObservationRun::install_control_thread_for_test().is_err());
+                earlier.assert_actual_joined_once(earlier_id);
+                observe::retain_worker_identity(|| panic!("foreign builder must stay lazy"));
+
+                // A later foreign spawn must not consume any of the four
+                // witness slots or enter a record builder in the active run.
+                let mut later = SpawnFixture::spawn(None).unwrap();
+                later.wait_loaded();
+                let later_chain = later.chain.as_ref().unwrap();
+                let later_id = later_chain.guard.genuine_worker_id();
+                assert_eq!(Arc::weak_count(&later_chain.guard.metrics), 0);
+                later.assert_actual_joined_once(later_id);
+            });
+            ready_rx.recv_timeout(WAIT).unwrap();
+            let observer = ObservationRun::install_control_thread_for_test().unwrap();
+            continue_tx.send(()).unwrap();
+            // This joins only the finite coordination thread. Each actual
+            // worker still proves retirement through its bounded retained poll.
+            foreign.join().unwrap();
+            observer.with_snapshot(|snapshot| {
+                assert!(snapshot.records.is_empty());
+                assert_eq!(snapshot.failure, None);
+            });
+
+            let mut fixture = SpawnFixture::new(observer).unwrap();
+            fixture.wait_loaded();
+            let chain = fixture.chain.as_ref().unwrap();
+            let worker_id = chain.guard.genuine_worker_id();
+            assert_eq!(Arc::weak_count(&chain.guard.metrics), 1);
+            fixture.assert_joined_once(worker_id);
+            fixture
+                .observer
+                .as_ref()
+                .unwrap()
+                .with_snapshot(|snapshot| assert_eq!(snapshot.failure, None));
+        });
+    });
+}
+
+#[test]
 fn worker_identity_observer_retention_is_bounded_lazy_and_run_local() {
     crate::app::CitrusApp::with_observer_fixture_admission_for_test(
         worker_identity_observer_retention_under_admission,
@@ -298,7 +359,7 @@ fn worker_identity_observer_retention_under_admission() {
     assert_eq!(built.get(), 0, "inactive builder must stay lazy");
     assert_eq!(Arc::weak_count(&fifth), 0);
 
-    let observer = ObservationRun::install().unwrap();
+    let observer = ObservationRun::install_control_thread_for_test().unwrap();
     for owner in &metrics {
         observe::retain_worker_identity(|| {
             built.set(built.get() + 1);
@@ -368,7 +429,7 @@ fn worker_identity_observer_retention_under_admission() {
     drop(copies);
 
     // Independent record exhaustion does not consume or recycle identity slots.
-    let observer = ObservationRun::install().unwrap();
+    let observer = ObservationRun::install_control_thread_for_test().unwrap();
     observer.with_snapshot(|snapshot| {
         assert!(snapshot.records.is_empty());
         assert_eq!(snapshot.failure, None);
@@ -405,7 +466,7 @@ fn worker_identity_observer_retention_under_admission() {
     );
 
     // A fresh poison must be latched, yet its free slot still performs bounded retention.
-    let observer = ObservationRun::install().unwrap();
+    let observer = ObservationRun::install_control_thread_for_test().unwrap();
     let poisoned = panic::catch_unwind(AssertUnwindSafe(|| {
         observer.with_snapshot(|_| panic!("intentional fresh observation mutex poison"));
     }));
@@ -423,7 +484,7 @@ fn worker_identity_observer_retention_under_admission() {
     drop(snapshot);
     assert_eq!(Arc::weak_count(&fifth), 0);
 
-    let observer = ObservationRun::install().unwrap();
+    let observer = ObservationRun::install_control_thread_for_test().unwrap();
     observer.with_snapshot(|snapshot| {
         assert!(snapshot.records.is_empty());
         assert_eq!(snapshot.failure, None);

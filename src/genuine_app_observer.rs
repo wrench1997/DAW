@@ -991,13 +991,24 @@ impl ObservationSnapshot {
     }
 }
 
-static ACTIVE: Mutex<Option<Weak<Mutex<ObservationSnapshot>>>> = Mutex::new(None);
+struct ActiveRun {
+    state: Weak<Mutex<ObservationSnapshot>>,
+    // Identity-unit fixtures need only synchronous registration and actual
+    // control-side joins. Ordinary parallel workers must not consume their
+    // slots or records; the genuine App installer leaves this unscoped.
+    control_thread: Option<std::thread::ThreadId>,
+}
+static ACTIVE: Mutex<Option<ActiveRun>> = Mutex::new(None);
 fn active() -> Option<Arc<Mutex<ObservationSnapshot>>> {
     ACTIVE
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .as_ref()
-        .and_then(Weak::upgrade)
+        .filter(|run| {
+            run.control_thread
+                .is_none_or(|owner| owner == std::thread::current().id())
+        })
+        .and_then(|run| run.state.upgrade())
 }
 fn with_active(f: impl FnOnce(&mut ObservationSnapshot)) {
     if let Some(run) = active() {
@@ -1053,6 +1064,14 @@ impl ObservationRun {
         Self::install_configured(|_| Ok(()))
     }
 
+    /// Collect only this test's synchronous control-thread taps. This still
+    /// reserves the sole run, with unchanged caps and retirement semantics, but
+    /// deliberately excludes worker-thread records. The genuine App driver
+    /// continues to use the unscoped `install` entry point.
+    pub(crate) fn install_control_thread_for_test() -> Result<Self, &'static str> {
+        Self::install_scoped(Some(std::thread::current().id()), |_| Ok(()))
+    }
+
     /// Explicit test-driver storage budget for a longer genuine render. This
     /// changes only copied observations; SDK/process and other collector caps
     /// remain unchanged and overflow still rejects the qualification run.
@@ -1071,16 +1090,26 @@ impl ObservationRun {
     fn install_configured(
         configure: impl FnOnce(&mut ObservationSnapshot) -> Result<(), &'static str>,
     ) -> Result<Self, &'static str> {
+        Self::install_scoped(None, configure)
+    }
+
+    fn install_scoped(
+        control_thread: Option<std::thread::ThreadId>,
+        configure: impl FnOnce(&mut ObservationSnapshot) -> Result<(), &'static str>,
+    ) -> Result<Self, &'static str> {
         let mut slot = ACTIVE
             .lock()
             .map_err(|_| "observer activation mutex poisoned")?;
-        if slot.as_ref().and_then(Weak::upgrade).is_some() {
+        if slot.as_ref().and_then(|run| run.state.upgrade()).is_some() {
             return Err("an observation run is already active");
         }
         let mut snapshot = ObservationSnapshot::new(MAX_RECORDS, MAX_PRIVATE_BYTES)?;
         configure(&mut snapshot)?;
         let state = Arc::new(Mutex::new(snapshot));
-        *slot = Some(Arc::downgrade(&state));
+        *slot = Some(ActiveRun {
+            state: Arc::downgrade(&state),
+            control_thread,
+        });
         Ok(Self { state })
     }
     pub(crate) fn set_stage(&self, next: Stage) -> Result<(), &'static str> {
@@ -1222,7 +1251,7 @@ impl ObservationRun {
         let mut slot = ACTIVE.lock().unwrap_or_else(|p| p.into_inner());
         if slot
             .as_ref()
-            .and_then(Weak::upgrade)
+            .and_then(|run| run.state.upgrade())
             .is_some_and(|state| Arc::ptr_eq(&state, &self.state))
         {
             *slot = None;

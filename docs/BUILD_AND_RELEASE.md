@@ -2,7 +2,7 @@
 
 当前源码候选：Citrus Studio 0.5.0-alpha.1；下文固定发布流程/示例继承自 0.4.0
 
-本轮新增独立genuine Whole exact，通过未覆盖的默认生产工厂完成同一Play/磁盘Save/新App冷Open/完整96768帧WAV，本机1PASS/8.69s；旧audit1PASS/8.47s保持，strict Clippy/no-default/fmt全0。两exact使用同一真实Cargo artifact/匹配helper私有同级目录，原10分钟步骤逐项非零即失败；CI合同7PASS、实际PowerShell解析通过。新候选云端待验收，原发布白名单/超时/检查门均不变，不替换03。[工厂与证据区别](WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16)。
+本轮新增独立genuine Whole exact，通过未覆盖的默认生产工厂完成同一Play/磁盘Save/新App冷Open/完整96768帧WAV，本机1PASS/8.69s；旧audit1PASS/8.47s保持，strict Clippy/no-default/fmt全0。两exact使用同一真实Cargo artifact/匹配helper私有同级目录，原10分钟步骤逐项非零即失败；CI合同7PASS、实际PowerShell解析通过。6050d36首轮quality38872515281/preview38872515243实际FAIL：旧clip/identity/catalog单测挡住，新增SDK、PrintWindow及release/ZIP未运行；原始失败保留，Linux独立通过。四文件隔离候选276定向/strict Clippy/no-default/fmt已本机通过：observer限定仅test installer、扫描原拒绝与实际退休分开，真实强杀仍失败健康门；clip原5s仅加阶段诊断、不称根因修好。新修补云待跑。原发布白名单/超时/检查门均不变，不替换03。[工厂与证据区别](WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16)。
 
 代码`bdf6901418f89fe5d0f4ac763a498c432156dacb`已通过quality38863519248与preview38863519233首轮实际SUCCESS：2552 root/18ignored、fixture8/9/builder11、Windows显式App SDK4及strict Clippy/no-default/双bin通过。新增Play→磁盘Save→新App冷Open→Whole完整96768帧云12.64s通过；原10分钟无GUI步骤、真实Cargo artifact/匹配helper私有同级接线保持。Windows session2真实PrintWindow PASS；preview文档闭环及372Python=360PASS/12条件SKIP、staticCRT release7m53s、精确ZIP/PE/import/provenance及提取helper通过，upload=false→仅上传SKIPPED。首推3b79文档链接及旧near-MAX前提失败已窄修，原期限/Ready/发布白名单不变；[完整实证及失败历史](WINDOWS_MELODY_WORKFLOW.md#sdk-melody-play-disk-save-cold-app-open-and-whole-wav-2026-10-16)保留。夹具不入包；不操作NI/声卡或替换用户03。
 
