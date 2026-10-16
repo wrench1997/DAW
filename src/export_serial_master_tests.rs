@@ -313,15 +313,11 @@ fn serial_master_plan_rejects_active_sidechain_routes() {
 }
 
 #[test]
-fn serial_master_plan_rejects_active_automation_but_allows_empty_or_disabled_lanes() {
+fn serial_master_plan_rejects_nonmaster_automation_but_allows_empty_or_disabled_lanes() {
     for target in [
         AutomationTarget::Tempo,
-        AutomationTarget::MasterVolume,
-        AutomationTarget::MasterPan,
-        AutomationTarget::MixerMute {
-            track: MASTER_MIXER_TRACK_ID,
-        },
         AutomationTarget::MixerVolume { track: BUS },
+        AutomationTarget::MixerMute { track: BUS },
         AutomationTarget::ChannelPan { channel: CHANNEL },
         AutomationTarget::PluginParameter {
             instance: SOURCE_FIRST,
@@ -336,7 +332,7 @@ fn serial_master_plan_rejects_active_automation_but_allows_empty_or_disabled_lan
             name: "Active static-slice refusal".into(),
             lane,
         });
-        assert_refused(&project, "does not yet support active automation");
+        assert_refused(&project, "only Master Volume/Pan/Mute automation");
         project.automation_lanes[0].lane.set_enabled(false);
         assert_eq!(
             placements(&StaticSerialMasterPlan::prepare(&project, CHANNEL).unwrap()),
@@ -348,6 +344,37 @@ fn serial_master_plan_rejects_active_automation_but_allows_empty_or_disabled_lan
             placements(&StaticSerialMasterPlan::prepare(&project, CHANNEL).unwrap()),
             expected_placements()
         );
+    }
+}
+
+#[test]
+fn serial_master_plan_accepts_canonical_master_controls_without_rewriting_authored_aliases() {
+    for target in [
+        AutomationTarget::MasterVolume,
+        AutomationTarget::MasterPan,
+        AutomationTarget::MixerVolume {
+            track: MASTER_MIXER_TRACK_ID,
+        },
+        AutomationTarget::MixerPan {
+            track: MASTER_MIXER_TRACK_ID,
+        },
+        AutomationTarget::MixerMute {
+            track: MASTER_MIXER_TRACK_ID,
+        },
+    ] {
+        let mut project = project();
+        let mut lane = AutomationLane::new(target.clone());
+        lane.replace_points([AutomationPoint::new(0.0, 0.5)]);
+        project.automation_lanes.push(ProjectAutomation {
+            id: 1,
+            name: "Master control".into(),
+            lane,
+        });
+        let before = serde_json::to_vec(&project).unwrap();
+        let plan = StaticSerialMasterPlan::prepare(&project, CHANNEL).unwrap();
+        assert_eq!(placements(&plan), expected_placements());
+        assert_eq!(project.automation_lanes[0].lane.target(), &target);
+        assert_eq!(serde_json::to_vec(&project).unwrap(), before);
     }
 }
 

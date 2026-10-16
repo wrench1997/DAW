@@ -133,10 +133,34 @@ This is focused backend evidence. The static serial Whole consumer separately
 passed its real-Generator/two-Effect PCM/latency oracle and final local code gates.
 Its final Windows cloud suite and real serial SDK target passed at b9 below.
 General FX graphs,
-automation, arbitrary tails and real NOIRE acceptance remain separate from these
+non-Master/plug-in automation, arbitrary tails and real NOIRE acceptance remain separate from these
 fixture results.
 
 ## Verification status
+
+### Current Whole Master-automation consumer
+
+The new Whole consumer uses the same real Instrument FIFO and two Effect stages,
+without adding fixture DSP or sample-offset plug-in automation. Run both the
+retained static oracle and the new Master oracle with the explicit inputs above:
+
+```powershell
+cargo test --locked --all-features --jobs 1 --bin citrus-studio plugins::plugin_runtime::whole_serial_sdk_tests::actual_sdk_serial_generator_two_effects_preserves_raw_latency_tail_and_natural_reap -- --ignored --exact --nocapture --test-threads=1
+cargo test --locked --all-features --jobs 1 --bin citrus-studio plugins::plugin_runtime::whole_serial_sdk_tests::actual_sdk_serial_generator_two_effects_master_automation_uses_retained_project_frames -- --ignored --exact --nocapture --test-threads=1
+```
+
+Both exact targets actually passed locally. The new target checks all1280 retained
+stereo frames after96 samples of cumulative native latency, including Master
+Volume/Pan aliases, a saved-muted/zero Master becoming audible, a later mute
+interval and tail hold at music frame255. Three original sources have DSP0,
+state40 and actual guard joins; three strict clones naturally exit0/reap with
+max live owner1. Exact f64 Effect bases, one latency crop and one final tanh remain
+part of the independent PCM expectation. The same existing10-minute Windows
+no-GUI quality step now explicitly runs both targets; final current cloud
+acceptance is pending. Source/publication and test receipts are under
+`target/backend-reliability-20261014/whole-serial-master-automation-source-candidate-01/`.
+
+### Previously accepted static consumer
 
 Code candidate `b9f27091fbf5dd91e70ee318dcd897434fb5f6cf` passed
 quality38834734658 attempt2 and preview38834734476. Windows passed2529 root

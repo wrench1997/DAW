@@ -5,6 +5,8 @@
 当前重点是 Windows 上可复现的“写旋律 → 播放 → 保存重开 → 导出”。
 完整流程尚未验收；源码、单元测试、短工程实测和声卡监听分别记录。
 
+当前增量：单源串行FX的Whole导出已接入既有Master音量/声像/静音自动化，按最终PDC裁剪后的输出帧计时，尾音保持N−1值；其它自动化/路由边界不变。回归暴露正常metadata查询被误报源变化，现用App在原最终CAS前重新核验完整源Ready，Waiting只等待，保留原取消/超时/Drop及目标发布合同。本机plan12/render8、新提交边界7/受影响App19、静态与Master真实SDK各1、旧Master14/noFX18、双尺寸Whole Review实帧、严格Clippy/no-default/双bin全部通过；新云验收仍待完成。详[当前范围与实证](docs/WINDOWS_MELODY_WORKFLOW.md#master-automation-and-source-checked-publication-2026-10-16)。
+
 当前可用副本：桌面“Citrus Studio 新版测试03”，`D:\DAW-Preview\Citrus-Studio-20261015-03\Start-Citrus.cmd`。PAT/SONG、拖播放头、AUTO范围及Playlist/Piano/Rack联动已通过本机定向回归/真实离屏/Clippy；新v13工程请另存副本，旧01/02保留。见`docs/PLAYLIST_TRANSPORT.md`；此前联动63d2f99云quality和preview均实际SUCCESS。
 
 Follow长度源码`b2e56dc`本机验收通过：新Draw/Paint默认Follow真实Pattern周期；实际resize/Length编辑转固定窗口，Inspector可恢复Follow。Project只读extent统一驱动几何、AUTO终点、Timeline及支持导出；复制/移动/Slip保留policy，split固定两片；旧工程/旧Rust调用和精确MIDI Take窗口保留。格式14写入、旧文件读取；03/02不能读新14，另存副本。用户仍测试03、这里只改代码；没有替换副本或启动主GUI/声卡/NI。

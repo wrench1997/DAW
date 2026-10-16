@@ -1,5 +1,6 @@
 //! Real Whole stop actor and two real source endpoints; no clone or device is needed.
 use super::*;
+use crate::export::serial_master::automation_test_support::{self as master_automation, Mode};
 use crate::instrument_bounce::{
     effect::{CapturedEffectSlot, EffectSourceMetadata},
     render::serial::EffectRenderBackend,
@@ -367,12 +368,85 @@ fn actual_whole_serial_original_deadline_cancels_held_source_and_prevents_later_
 
 #[test]
 fn actual_whole_serial_complete_captures_flow_into_one_owned_renderer_and_one_final_wav() {
+    run_actual_complete_serial(false);
+}
+
+#[test]
+fn actual_whole_serial_master_automation_is_accepted_and_renders_without_changing_sources() {
+    run_actual_complete_serial(true);
+}
+
+fn configure_actual_master_automation(this: &mut SerialApp) {
+    let rate = this
+        .fixture
+        .app()
+        .audio
+        .as_ref()
+        .unwrap()
+        .snapshot()
+        .sample_rate;
+    let music = crate::tempo_map::TempoMap::from_project(&this.fixture.app().project, rate)
+        .unwrap()
+        .duration_frames();
+    master_automation::configure(&mut this.fixture.app_mut().project, music, rate, Mode::All);
+    this.fixture.app_mut().request_immediate_timeline_compile();
+    this.until(|this| {
+        this.fixture.app().timeline_audio_matches_desired()
+            && this
+                .fixture
+                .app()
+                .audio
+                .as_ref()
+                .unwrap()
+                .prepared_playback_token()
+                .is_some()
+    });
+}
+
+fn run_actual_complete_serial(automated_master: bool) {
     let mut this = SerialApp::new();
+    if automated_master {
+        configure_actual_master_automation(&mut this);
+    }
     let before = this.fixture.bytes();
     let ids = this.ids();
     let path = this.begin_held_second();
     let consumed = Arc::new(AtomicBool::new(false));
-    let observed = Arc::clone(&consumed);
+    install_app_serial_renderer(&mut this, Arc::clone(&consumed), || {});
+    this.effects[1].release_all();
+    this.until(|this| !this.fixture.app().whole_song_export_fence_active());
+    let job = this.fixture.app().whole_song_export_job.as_ref().unwrap();
+    assert_eq!(job.phase, WholeExportPhase::Complete, "{:?}", job.failure);
+    assert!(consumed.load(Ordering::Acquire));
+    assert!(matches!(
+        job.outcome,
+        Some(MasterSongRenderOutcome::Complete(_))
+    ));
+    let wav = crate::wav::read_wav(&path).unwrap();
+    assert!(wav.samples.iter().any(|sample| *sample != 0.0));
+    if automated_master {
+        assert_eq!(&wav.samples[..2], &[0.0, 0.0]);
+        let music = match job.outcome.as_ref().unwrap() {
+            MasterSongRenderOutcome::Complete(report) => report.master_output.music_frames,
+            other => panic!("Actual automated Whole failed: {other:?}"),
+        };
+        assert!(
+            wav.samples[music / 4 * 2..music / 2 * 2]
+                .iter()
+                .all(|&s| s == 0.0)
+        );
+        assert!(wav.samples[music * 2..].iter().any(|&s| s != 0.0));
+    }
+    assert_eq!(this.fixture.bytes(), before);
+    assert_eq!(this.ids(), ids);
+    assert_eq!(this.fixture.whole_exact_worker_join_count_for_test(&ids), 0);
+}
+
+fn install_app_serial_renderer(
+    this: &mut SerialApp,
+    observed: Arc<AtomicBool>,
+    before_generator: impl FnOnce() + Send + 'static,
+) {
     this.fixture
         .app_mut()
         .whole_song_export_job
@@ -381,6 +455,10 @@ fn actual_whole_serial_complete_captures_flow_into_one_owned_renderer_and_one_fi
         .serial_render_starter = Some(Box::new(
         move |admission, project, captured, chains, options, path, control, reviewed| {
             assert!(reviewed && captured.plan().is_serial_master());
+            assert_eq!(
+                captured.identity().project_fingerprint,
+                project_fingerprint(&project)
+            );
             assert_eq!(
                 chains
                     .iter()
@@ -402,32 +480,104 @@ fn actual_whole_serial_complete_captures_flow_into_one_owned_renderer_and_one_fi
                 path,
                 control,
                 reviewed,
-                move || WholeMockBackend {
-                    metadata,
-                    disposed: false,
-                    next: 0,
-                    midi: Arc::new(std::sync::Mutex::new(Vec::new())),
-                    prepare_failure: None,
-                    disposal_failure: None,
+                move || {
+                    before_generator();
+                    WholeMockBackend {
+                        metadata,
+                        disposed: false,
+                        next: 0,
+                        midi: Arc::new(std::sync::Mutex::new(Vec::new())),
+                        prepare_failure: None,
+                        disposal_failure: None,
+                    }
                 },
                 || AppEffectClone { disposed: false },
             )
         },
     ));
+}
+
+#[test]
+fn actual_whole_serial_automation_edit_invalidates_original_project_capture_authority() {
+    let mut this = SerialApp::new();
+    configure_actual_master_automation(&mut this);
+    let ids = this.ids();
+    let path = this.begin_held_second();
+    this.fixture.app_mut().project.automation_lanes[0]
+        .lane
+        .replace_points([crate::automation::AutomationPoint::new(0.0, 0.625)]);
+    let edited = this.fixture.bytes();
+    this.tick();
+    let job = this.fixture.app().whole_song_export_job.as_ref().unwrap();
+    assert!(job.failure.is_some() && job.actor.owns_pending_capture());
     this.effects[1].release_all();
     this.until(|this| !this.fixture.app().whole_song_export_fence_active());
-    let job = this.fixture.app().whole_song_export_job.as_ref().unwrap();
-    assert_eq!(job.phase, WholeExportPhase::Complete, "{:?}", job.failure);
-    assert!(consumed.load(Ordering::Acquire));
-    assert!(matches!(
-        job.outcome,
-        Some(MasterSongRenderOutcome::Complete(_))
-    ));
-    let wav = crate::wav::read_wav(&path).unwrap();
-    assert!(wav.samples.iter().any(|sample| *sample != 0.0));
+    assert_eq!(this.fixture.bytes(), edited);
+    assert_eq!(this.ids(), ids);
+    this.fixture
+        .assert_whole_exact_source_guards_unpolled_for_test();
+    assert_eq!(this.fixture.whole_exact_worker_join_count_for_test(&ids), 0);
+    assert!(!path.exists());
+}
+
+#[test]
+fn actual_whole_serial_other_automation_refuses_review_without_capture_or_model_changes() {
+    let mut this = SerialApp::new();
+    let mut lane = crate::automation::AutomationLane::new(
+        crate::automation::AutomationTarget::ChannelVolume {
+            channel: this.fixture.app().project.channels[0].id,
+        },
+    );
+    lane.replace_points([crate::automation::AutomationPoint::new(0.0, 0.5)]);
+    this.fixture
+        .app_mut()
+        .project
+        .automation_lanes
+        .push(crate::model::ProjectAutomation {
+            id: 0xF004,
+            name: "Unsupported channel control".into(),
+            lane,
+        });
+    this.fixture.app_mut().request_immediate_timeline_compile();
+    this.until(|this| {
+        this.fixture.app().timeline_audio_matches_desired()
+            && this
+                .fixture
+                .app()
+                .audio
+                .as_ref()
+                .unwrap()
+                .prepared_playback_token()
+                .is_some()
+    });
+    let before = this.fixture.bytes();
+    let ids = this.ids();
+    let captures = this.fixture.source_handle().capture_count();
+    let error = this
+        .fixture
+        .app()
+        .prepare_whole_song_export_review(options(&this.fixture), true)
+        .err()
+        .expect("non-Master automation remains unsupported");
+    assert!(
+        error.contains("only Master Volume/Pan/Mute automation"),
+        "{error}"
+    );
+    assert_eq!(this.fixture.source_handle().capture_count(), captures);
+    assert!(
+        this.effects
+            .iter()
+            .all(|effect| effect.capture_count(0) == 0)
+    );
     assert_eq!(this.fixture.bytes(), before);
     assert_eq!(this.ids(), ids);
-    assert_eq!(this.fixture.whole_exact_worker_join_count_for_test(&ids), 0);
+    assert!(this.fixture.app().whole_song_export_job.is_none());
+    assert_eq!(
+        std::fs::read_dir(this.fixture.directory()).unwrap().count(),
+        0
+    );
+    this.fixture
+        .assert_whole_exact_source_guards_unpolled_for_test();
 }
 
 #[test]
@@ -637,3 +787,6 @@ fn actual_whole_serial_app_drop_keeps_all_source_guards_until_effect_ack_and_act
     }
     assert!(!path.exists());
 }
+
+#[path = "whole_serial_commit_tests.rs"]
+mod source_commit_tests;

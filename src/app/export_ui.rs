@@ -138,6 +138,12 @@ impl ExportDialog {
     }
 
     #[cfg(test)]
+    pub(in crate::app) fn test_is_whole_review(&self) -> bool {
+        self.draft
+            .is_some_and(|draft| draft.whole_song && draft.step == ExportStep::Review)
+    }
+
+    #[cfg(test)]
     pub(in crate::app) fn test_set_options(&mut self, options: WavExportOptions) {
         let draft = self
             .draft
@@ -286,7 +292,8 @@ fn settings_body(
     if draft.whole_song {
         ui.label(whole_fixed_window_review_text(draft.options));
         ui.label("Master Volume/Pan/Mute automation is rendered. The selected fixed tail holds the final master controls and starts no new notes. This export does not measure acoustic silence.");
-        ui.label("Offline limits: the experimental single VST master path requires one Instrument at the current sample rate, no mixer insert slots, no other music/audio source, and only Master Volume/Pan/Mute automation. Other plug-in projects remain unavailable; use Realtime Master Capture for their live result.");
+        ui.label("Offline limits: one VST3 Instrument at the current sample rate, with optional fully wet VST3 Inserts in one static, ordered post-fader chain to Master. Only Master Volume/Pan/Mute automation is supported.");
+        ui.label("Unavailable: branches, sends, sidechains, active partial-wet Inserts, off-path Inserts, other music/audio sources, and Tempo, non-Master or plug-in parameter automation. Use Realtime Master Capture for those projects.");
         if draft.step == ExportStep::Review {
             let response = ui.checkbox(
                 &mut draft.fixed_tail_confirmed,

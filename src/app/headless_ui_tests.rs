@@ -271,6 +271,97 @@ fn full_app_export_review_back_close_and_escape_preserve_project() {
 }
 
 #[test]
+fn full_app_whole_export_review_serial_limits_and_fixed_tail_consent_at_both_sizes() {
+    for (size, capture) in [
+        (egui::vec2(1440.0, 900.0), "whole-export-review"),
+        (
+            egui::vec2(1080.0, 680.0),
+            "whole-export-review-minimum-window",
+        ),
+    ] {
+        let mut ui = UiHarness::new();
+        ui.size = size;
+        ui.settle();
+        let original = project_fingerprint(&ui.app.project);
+        let project_session = ui.app.project_session;
+        // Review itself is a presentation transition; only destination admission
+        // needs a live source. Use the real Whole state and actual Review button.
+        ui.app
+            .export_dialog
+            .open_whole_song(project_session, 48_000, false);
+        ui.settle();
+        assert!(!ui.app.export_dialog.test_is_whole_review());
+        ui.click("Review…");
+        assert!(ui.app.export_dialog.test_is_whole_review());
+        assert!(!ui.app.export_dialog.confirmed_whole_fixed_tail());
+        assert!(ui.button("Choose destination and export…").is_disabled());
+
+        let text = ui
+            .nodes
+            .iter()
+            .filter_map(|node| node.value().or_else(|| node.label()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "one VST3 Instrument at the current sample rate",
+            "fully wet VST3 Inserts",
+            "static, ordered post-fader chain to Master",
+            "Only Master Volume/Pan/Mute automation is supported",
+            "branches, sends, sidechains",
+            "active partial-wet Inserts, off-path Inserts",
+            "other music/audio sources",
+            "Tempo, non-Master or plug-in parameter automation",
+            "Fixed VST render window: 0 ms of tail",
+            "Unknown or longer reported plug-in tails may be truncated",
+        ] {
+            assert!(text.contains(expected), "Whole review at {size:?}: {text}");
+        }
+        assert!(!text.contains("no mixer insert slots"));
+        let consent = ui
+            .nodes
+            .iter()
+            .find(|node| {
+                node.role() == Role::CheckBox
+                    && node.label()
+                        == Some("I accept this fixed window, including possible truncation")
+            })
+            .expect("actual Whole fixed-tail checkbox");
+        assert_eq!(consent.toggled(), Some(egui::accesskit::Toggled::False));
+        let consent_rect = node_rect(consent);
+        assert!(ui.ctx.content_rect().contains_rect(consent_rect));
+        for label in ["Back", "Close", "Choose destination and export…"] {
+            assert!(
+                ui.ctx
+                    .content_rect()
+                    .contains_rect(node_rect(ui.button(label)))
+            );
+        }
+        ui.capture(capture);
+
+        ui.click_pos(consent_rect.center());
+        assert!(ui.app.export_dialog.test_is_whole_review());
+        assert!(ui.app.export_dialog.confirmed_whole_fixed_tail());
+        assert!(!ui.button("Choose destination and export…").is_disabled());
+        // Do not invoke destination selection or instantiate any source.
+        assert!(ui.app.audio.is_none());
+        assert!(ui.app.running_generator_chains.is_empty());
+        assert!(ui.app.running_insert_chains.is_empty());
+        assert!(ui.app.whole_song_export_job.is_none());
+        assert!(!ui.app.export_job.is_running());
+        ui.click("Back");
+        assert!(!ui.app.export_dialog.test_is_whole_review());
+        assert!(!ui.app.export_dialog.confirmed_whole_fixed_tail());
+        ui.click("Review…");
+        assert!(ui.app.export_dialog.test_is_whole_review());
+        assert!(!ui.app.export_dialog.confirmed_whole_fixed_tail());
+        assert!(ui.button("Choose destination and export…").is_disabled());
+        ui.click("Close");
+        assert!(!ui.app.export_dialog.is_open());
+        assert_eq!(project_fingerprint(&ui.app.project), original);
+    }
+}
+
+#[test]
 fn full_app_media_modal_close_escape_and_reopen() {
     let mut ui = UiHarness::new();
     let original = project_fingerprint(&ui.app.project);

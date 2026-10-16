@@ -101,25 +101,28 @@ pub(in crate::app) struct StoppedEffectSourceLease {
     ticket: crate::plugins::plugin_runtime::StoppedSourceWorkTicket,
 }
 impl StoppedEffectSourceLease {
-    pub(in crate::app) fn recheck(&self, app: &CitrusApp) -> Result<(), String> {
+    /// Unchanged history can be temporarily busy during a native/metadata poll.
+    /// That is waiting, not publication authority and not permanent source drift.
+    pub(in crate::app) fn recheck(&self, app: &CitrusApp) -> Result<bool, String> {
         self.binding.recheck(app)?;
         let chain = app
             .running_insert_chains
             .get(&self.binding.track)
             .ok_or("Captured Insert source disappeared")?;
-        if chain.control.stopped_source_work_settlement(self.ticket)
-            != BounceSourceSettlement::Ready
-            || app
-                .audio
-                .as_ref()
-                .and_then(AudioEngine::prepared_playback_token)
-                != Some(self.binding.token)
+        let settlement = chain.control.stopped_source_work_settlement(self.ticket);
+        let token = app
+            .audio
+            .as_ref()
+            .and_then(AudioEngine::prepared_playback_token);
+        if settlement == BounceSourceSettlement::Invalid
+            || token.is_some_and(|token| token != self.binding.token)
         {
-            return Err(
-                "Captured Insert source work or graph witness changed during Whole render".into(),
-            );
+            return Err(format!(
+                "Captured Insert source work or graph witness changed during Whole render: track={}, settlement={settlement:?}, expected_graph={:?}, observed_graph={token:?}, expected_work={:?}",
+                self.binding.track, self.binding.token, self.ticket
+            ));
         }
-        Ok(())
+        Ok(settlement == BounceSourceSettlement::Ready && token == Some(self.binding.token))
     }
 }
 

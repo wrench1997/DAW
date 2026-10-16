@@ -15,7 +15,7 @@ use crate::plugins::plugin_runtime::{
     BounceSourceSettlement, PluginControlIdentity, StoppedSourceWorkTicket,
 };
 use crate::{
-    export_job::ExportControl,
+    export_job::{ExportControl, SourceCommitOwner},
     export_options::WavExportOptions,
     instrument_bounce::{
         BounceSourceIdentity, BounceSourceStatus, CapturePollError, InstrumentBounceCapture,
@@ -436,6 +436,7 @@ pub(super) struct WholeSongExportJob {
     generator_ticket: Option<StoppedSourceWorkTicket>,
     effect_capture_failure: Option<EffectCapturePollError>,
     render_deadline: Option<Instant>,
+    source_commit: Option<SourceCommitOwner>,
     result_announced: bool,
     #[cfg(test)]
     render_starter: Option<TestWholeRenderStarter>,
@@ -596,6 +597,7 @@ impl WholeSongExportJob {
         self.effect_leases.clear();
         self.insert_sources.clear();
         self.generator_ticket = None;
+        self.source_commit = None;
     }
 }
 
@@ -918,6 +920,7 @@ impl CitrusApp {
             captured_effects: Vec::new(),
             effect_leases: Vec::new(),
             generator_ticket: None,
+            source_commit: None,
             effect_capture_failure: None,
             render_deadline: None,
             result_announced: false,
@@ -1071,6 +1074,7 @@ impl CitrusApp {
         {
             job.fail(reason);
         }
+        let mut serial_sources_ready = true;
         if job.failure.is_none()
             && job.insert_sources.iter().any(|binding| {
                 self.running_insert_chains
@@ -1092,20 +1096,22 @@ impl CitrusApp {
                         .running_generator_chains
                         .get(&job.actor.initial.stamp.channel_id)
                         .ok_or("Captured Generator disappeared")?;
-                    if source.control.stopped_source_work_settlement(ticket)
-                        != BounceSourceSettlement::Ready
-                    {
-                        return Err(
-                            "Captured Generator worker history changed during serial Whole"
-                                .to_owned(),
-                        );
+                    match source.control.stopped_source_work_settlement(ticket) {
+                        BounceSourceSettlement::Invalid => {
+                            return Err(
+                                "Captured Generator worker history changed during serial Whole"
+                                    .to_owned(),
+                            );
+                        }
+                        BounceSourceSettlement::Waiting => serial_sources_ready = false,
+                        BounceSourceSettlement::Ready => {}
                     }
                 }
                 for captured in &job.captured_effects {
-                    captured.recheck(self, false)?;
+                    serial_sources_ready &= captured.recheck(self, true)?;
                 }
                 for lease in &job.effect_leases {
-                    lease.recheck(self)?;
+                    serial_sources_ready &= lease.recheck(self)?;
                 }
                 Ok::<_, String>(())
             })();
@@ -1306,6 +1312,9 @@ impl CitrusApp {
                     job.finish();
                     return;
                 }
+                if !serial_sources_ready {
+                    return;
+                }
                 let recheck = job
                     .captured_effects
                     .iter()
@@ -1365,6 +1374,21 @@ impl CitrusApp {
                 }
             }
             WholeExportPhase::RenderingDisposing => {
+                // The checked writer requests only at its original final CAS,
+                // after every clone was reaped and the staged WAV was synced.
+                // All original App/source/native/graph checks above must be
+                // Ready now; a missing token or metadata in flight never grants
+                // permission. The App executes CAS, not a cached Ready reply.
+                if job.failure.is_none()
+                    && !job.cancel_requested
+                    && serial_sources_ready
+                    && let Some(commit) = &job.source_commit
+                    && commit.requested()
+                    && let Err(reason) = commit
+                        .commit_before(job.render_deadline.expect("One original serial deadline"))
+                {
+                    job.fail(reason.to_string());
+                }
                 let Some(receipt) = &job.render else {
                     if job.admission.is_busy() {
                         return;
@@ -1524,6 +1548,11 @@ fn start_whole_song_renderer(
         feature = "experimental-fresh-helper"
     ))]
     if captured.plan().is_serial_master() {
+        job.source_commit = Some(
+            job.export
+                .require_source_checked_commit()
+                .map_err(|e| e.to_string())?,
+        );
         let chains = std::mem::take(&mut job.captured_effects)
             .into_iter()
             .map(|captured| {

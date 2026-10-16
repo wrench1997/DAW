@@ -5,6 +5,7 @@
 ))]
 
 use super::*;
+use crate::export::serial_master::automation_test_support::{self as master_automation, Mode};
 use crate::{
     export_job::ExportControl,
     export_options::{WavExportOptions, WavLevelPolicy, WavSampleFormat},
@@ -724,7 +725,7 @@ impl Drop for Directory {
 
 // Independent four-path convolution of the known musical rectangle. The real
 // fixture runs sample-by-sample rings; this oracle scatters each input sample.
-fn oracle() -> Vec<[f32; 2]> {
+fn pre_master_oracle() -> Vec<[f32; 2]> {
     let mut intermediate = vec![[0.0_f32; 2]; 1408];
     let level = (61.0 + 73.0 + 85.0 + 97.0) / 128.0;
     for frame in 0..MUSIC {
@@ -752,7 +753,7 @@ fn oracle() -> Vec<[f32; 2]> {
         .map(|sample| {
             let left = sample[0] * 1.5 * 0.5;
             let right = sample[1] * 1.5 * 1.0;
-            [(left * 0.875 * 1.0).tanh(), (right * 0.875 * 0.75).tanh()]
+            [left, right]
         })
         .collect()
 }
@@ -760,6 +761,16 @@ fn oracle() -> Vec<[f32; 2]> {
 #[test]
 #[ignore = "requires explicit source-built two-class CITRUS_EFFECT_FIXTURE and matching production CITRUS_EFFECT_HELPER; no installed fallback"]
 fn actual_sdk_serial_generator_two_effects_preserves_raw_latency_tail_and_natural_reap() {
+    run_sdk_case(false);
+}
+
+#[test]
+#[ignore = "requires explicit source-built two-class CITRUS_EFFECT_FIXTURE and matching production CITRUS_EFFECT_HELPER; no installed fallback"]
+fn actual_sdk_serial_generator_two_effects_master_automation_uses_retained_project_frames() {
+    run_sdk_case(true);
+}
+
+fn run_sdk_case(automated_master: bool) {
     let _transport_lock = crate::plugins::helper_transport_test_lock();
     let bundle = PathBuf::from(
         std::env::var_os("CITRUS_EFFECT_FIXTURE").expect("set CITRUS_EFFECT_FIXTURE explicitly"),
@@ -781,7 +792,10 @@ fn actual_sdk_serial_generator_two_effects_preserves_raw_latency_tail_and_natura
     .canonicalize()
     .unwrap();
     assert!(helper.is_file());
-    let p = project(&bundle);
+    let mut p = project(&bundle);
+    if automated_master {
+        master_automation::configure(&mut p, MUSIC as u64, RATE, Mode::All);
+    }
     let opts = WavExportOptions {
         sample_rate: RATE,
         sample_format: WavSampleFormat::Float32,
@@ -875,7 +889,28 @@ fn actual_sdk_serial_generator_two_effects_preserves_raw_latency_tail_and_natura
     assert!(!report.master_output.tail_limit_reached);
     assert!(report.dry_render.sample_peak > 1.0);
     let wav = crate::wav::read_wav(directory.output()).unwrap();
-    let expected = oracle();
+    let expected: Vec<_> = pre_master_oracle()
+        .into_iter()
+        .enumerate()
+        .map(|(frame, sample)| {
+            if automated_master {
+                master_automation::expected(sample, frame, MUSIC, Mode::All)
+            } else {
+                [
+                    (sample[0] * 0.875 * 1.0).tanh(),
+                    (sample[1] * 0.875 * 0.75).tanh(),
+                ]
+            }
+        })
+        .collect();
+    if automated_master {
+        assert_eq!(&wav.samples[..2], &[0.0, 0.0]);
+        assert!(wav.samples[64 * 2..128 * 2].iter().all(|&s| s == 0.0));
+        assert!(
+            wav.samples[MUSIC * 2..].iter().any(|&s| s != 0.0),
+            "Tail holds N-1 unmuted, not N's mute point"
+        );
+    }
     assert_eq!(
         (
             wav.metadata.sample_rate,
@@ -948,4 +983,9 @@ fn actual_sdk_serial_generator_two_effects_preserves_raw_latency_tail_and_natura
         BASES[0].to_bits(),
         BASES[1].to_bits()
     );
+    if automated_master {
+        eprintln!(
+            "REAL_SERIAL_MASTER_AUTOMATION_SDK_PASS total_latency=96; output_control_origin=0; aliases=volume,pan; initially_zero_volume_and_muted_master=unmuted; tail_control_sample=255; crop=once; tanh=once; full_pcm=1280_stereo_samples_compared"
+        );
+    }
 }

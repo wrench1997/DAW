@@ -1,6 +1,7 @@
 //! Device-free serial-owner tests. Receipts below are renderer fixtures, not App capture authority.
 
 use super::*;
+use crate::export::serial_master::automation_test_support::{self as master_automation, Mode};
 use crate::{
     export_options::WavLevelPolicy,
     instrument_bounce::{
@@ -703,7 +704,7 @@ fn convolve(input: &[[f32; 2]], spec: Fir) -> Vec<[f32; 2]> {
     output
 }
 
-fn oracle(specs: [Fir; 2], latency: u32, tail: usize) -> (Vec<[f32; 2]>, u64, f32) {
+fn pre_master_oracle(specs: [Fir; 2], latency: u32, tail: usize) -> (Vec<[f32; 2]>, u64, f32) {
     let total_latency = latency as usize + specs.iter().map(|s| s.latency).sum::<usize>();
     let needed = (MUSIC + tail + total_latency).max(MUSIC + 1);
     let generated = needed.div_ceil(128) * 128;
@@ -728,13 +729,114 @@ fn oracle(specs: [Fir; 2], latency: u32, tail: usize) -> (Vec<[f32; 2]>, u64, f3
         .iter()
         .map(|sample| {
             peak = peak.max(sample[0].abs()).max(sample[1].abs());
-            [
-                (sample[0] * 0.875 * 1.0).tanh(),
-                (sample[1] * 0.875 * 0.75).tanh(),
-            ]
+            *sample
         })
         .collect();
     (retained, generated as u64, peak)
+}
+
+fn oracle(specs: [Fir; 2], latency: u32, tail: usize) -> (Vec<[f32; 2]>, u64, f32) {
+    let (raw, generated, peak) = pre_master_oracle(specs, latency, tail);
+    (
+        raw.into_iter()
+            .map(|s| [(s[0] * 0.875 * 1.0).tanh(), (s[1] * 0.875 * 0.75).tanh()])
+            .collect(),
+        generated,
+        peak,
+    )
+}
+
+#[test]
+fn serial_owned_master_automation_after_positive_latency_matches_every_retained_sample() {
+    for mode in [Mode::All, Mode::Volume, Mode::Pan, Mode::Mute] {
+        let directory = Directory::new();
+        let mut p = project();
+        master_automation::configure(&mut p, MUSIC as u64, RATE, mode);
+        let original = serde_json::to_vec(&p).unwrap();
+        let opts = options(125);
+        let specs = firs();
+        let ctl = control();
+        let log = Log::default();
+        let generator_log = Arc::clone(&log);
+        let captured = capture(&p, opts, 29);
+        assert_eq!(
+            captured.identity().project_fingerprint,
+            captured.plan().project_fingerprint()
+        );
+        let result = report(run_serial_owned(
+            p.clone(),
+            captured,
+            chains(&p, specs),
+            opts,
+            directory.output(),
+            &ctl,
+            &JobProgress::new(),
+            true,
+            || DelayedGenerator::new(29, generator_log, ctl.deadline),
+            effect_factory(specs, 29, Arc::clone(&log), ctl.clone(), Fault::None),
+        ));
+        let tail = opts.tail_frames().unwrap();
+        let (raw, generated, _) = pre_master_oracle(specs, 29, tail);
+        let wav = crate::wav::read_wav(directory.output()).unwrap();
+        assert_eq!(result.dry_render.native_latency, 159);
+        assert_eq!(result.dry_render.generated_frames, generated);
+        assert_eq!(result.master_output.frames, MUSIC + tail);
+        for (frame, (actual, raw)) in wav.samples.as_chunks::<2>().0.iter().zip(raw).enumerate() {
+            let expected = master_automation::expected(raw, frame, MUSIC, mode);
+            for (channel, (&actual, expected)) in actual.iter().zip(expected).enumerate() {
+                assert!(
+                    (actual - expected).abs() <= 3.0e-6,
+                    "{mode:?} retained j={frame}, channel={channel}: {actual} != {expected}"
+                );
+            }
+        }
+        assert!(
+            wav.samples[MUSIC * 2..].iter().any(|&s| s != 0.0),
+            "hold N-1, not N's mute point"
+        );
+        assert_eq!(serde_json::to_vec(&p).unwrap(), original);
+        check_lifetimes(&log, ctl.deadline, &[GENERATOR, FIRST, SECOND]);
+    }
+}
+
+#[test]
+fn serial_master_automated_unmute_does_not_reopen_channel_track_or_solo_gates() {
+    for gate in 0..4 {
+        let directory = Directory::new();
+        let mut p = project();
+        master_automation::configure(&mut p, MUSIC as u64, RATE, Mode::All);
+        match gate {
+            0 => p.channels[0].muted = true,
+            1 => p.mixer_tracks[1].muted = true,
+            2 => p.mixer_tracks[2].muted = true,
+            _ => p.mixer_tracks[3].solo = true,
+        }
+        let opts = options(125);
+        let ctl = control();
+        let log = Log::default();
+        let generator_log = Arc::clone(&log);
+        report(run_serial_owned(
+            p.clone(),
+            capture(&p, opts, 29),
+            chains(&p, firs()),
+            opts,
+            directory.output(),
+            &ctl,
+            &JobProgress::new(),
+            true,
+            || DelayedGenerator::new(29, generator_log, ctl.deadline),
+            effect_factory(firs(), 29, Arc::clone(&log), ctl.clone(), Fault::None),
+        ));
+        assert!(
+            crate::wav::read_wav(directory.output())
+                .unwrap()
+                .samples
+                .iter()
+                .all(|&s| s == 0.0),
+            "gate {gate}"
+        );
+        check_lifetimes(&log, ctl.deadline, &[GENERATOR, FIRST, SECOND]);
+    }
 }
 
 fn check_lifetimes(log: &Log, deadline: Instant, stages: &[u64]) {

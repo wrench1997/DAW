@@ -120,17 +120,17 @@ cleanup failure and the new onset difference remain open. Details follow below.
 | --- | --- | --- |
 | Real-time Master recording | Records the Master audio produced during live playback | Pure was heard and captured locally; not an offline export |
 | Selected MIDI occurrence to audio | Experimental Linux/Windows strict clone, capture validation, native publication and history fences | Actual recapture mismatch refuses replacement; original MIDI is retained |
-| Whole-song offline WAV | Built-in sources; published b73 experimental single-VST arrangement/Master automation; accepted b9 code adds ordered fully-wet FX on one PostFader path | Native05/06/07 ordinary GUI cold-open→10.5s PCM24 WAV completed; Native07 uses new event semantics and still has a first-note offset. Warm-path cleanup, listening and full state/automation remain open; earlier short/405-note evidence is separate, and new serial fixtures are not NOIRE listening |
+| Whole-song offline WAV | Built-in sources; experimental single-VST arrangement, ordered fully-wet FX on one PostFader path, and Master Volume/Pan/Mute automation; current qualification below | Native05/06/07 ordinary GUI cold-open→10.5s PCM24 WAV completed; Native07 uses new event semantics and still has a first-note offset. Warm-path cleanup, listening and full state/automation remain open; earlier short/405-note evidence is separate, and serial fixtures are not NOIRE listening |
 
 These paths must retain their own receipts and must not be substituted for each other.
 The ordinary build explicitly refuses unsupported active-VST offline export.
 Experimental VST whole export requires `experimental-fresh-helper` on Linux or Windows.
-Published b73 admits one active VST source without Insert slots. Accepted b9
-additionally processes one static serial FX path under the restrictions below;
-additional sources, unsupported automation/graphs are rejected rather than omitted.
-Original no-FX Master volume/pan/mute automation is retained; active automation on the
-new FX path is refused. A fixed tail window requires explicit review; unknown/infinite
-tail retains its warning. General FX routing, graph PDC and full natural release remain open.
+The supported VST path is one active source, optionally followed by one static,
+ordered serial FX chain. Master Volume/Pan/Mute automation also works on this path;
+additional sources, Tempo, non-Master and plug-in parameter automation, unsupported
+graphs and active partial-wet Inserts are rejected rather than omitted.
+A fixed tail window requires explicit review; unknown/infinite tail retains its
+warning. General FX routing, graph PDC and full natural release remain open.
 
 Windows conversion uses an actual overlapped named-pipe helper and native file identity/publication.
 It preserves MIDI until verified success, handles cancellation/failure and retains restoration owners.
@@ -244,6 +244,73 @@ both actually succeeded. Upload was requested false, so its upload step was SKIP
 Actual receipts are in `target/backend-reliability-20261014/source120-quality-acceptance.txt`
 and the source120 integration record. The b73 checkout excludes the following
 Whole integration candidate and new Instrument fixture.
+
+### Master automation and source-checked publication (2026-10-16)
+
+The current serial Whole source reuses the existing `OfflineMasterControls`
+evaluator for Master Volume, Pan and Mute, including canonical aliases, placement
+and slip, chase at frame0 and overlapping automation. After the single cumulative
+DSP-latency crop, retained output frame0 is the automation clock. The reviewed
+tail holds the controls at the last music frame, N−1; an event at N does not
+start a new tail value. Driven controls replace their saved base, rather than
+multiplying it twice. Master mute automation can unmute a saved-muted Master;
+Channel/non-Master mute and solo/path gates remain effective. Undriven volume,
+driven controls and undriven pan preserve the existing sample×volume×pan order,
+followed by one Master tanh and the selected export level policy.
+
+The full original Project remains capture/publication authority. This does not
+enable plug-in parameter or non-Master automation, Tempo changes, parallel routes,
+partial wet or arbitrary sources. The original 300s deadline, 24M raw-frame cap,
+600s music/30s selected-tail limits, one strict child at a time and natural-reap
+requirements remain.
+
+A new regression exposed a real false-stale condition: normal empty admin polling
+and read-only metadata work can temporarily make an unchanged source `Waiting`
+and its Prepared token absent. The first affected App run passed10/failed1 with
+`Captured Insert source work or graph witness changed during Whole render`.
+The exact diagnostic rerun passed1 before the repair; that rerun is not a fix,
+and the original failure did not identify its precise settlement enum.
+
+Generator and Insert checks now distinguish transient Waiting from actual
+invalidation. At the existing checked writer's final commit boundary, only App
+serial Whole requests one fresh source check. App must see the complete current
+Project/session/native/identity/ticket/endpoint/placement authority and the exact
+Prepared token Ready, then immediately perform the original RUNNING→COMMITTING
+CAS. Waiting grants nothing; changed authority fails. Writer timeout/unwind retires
+the one-use request under the same lock as the host CAS. Cancel/AppDrop wakes it
+without another App tick. If CAS already won, its canonical state survives a lost
+notification or host unwind and the original rename finishes. The default ungated
+writer, direct SDK, Instrument and Occurrence entries retain their old contracts.
+
+**Local qualification passed:** plan12/render8, the new boundary7 and the
+complete affected App19 have actually passed. Both real Whole SDK targets passed:
+the retained static oracle and the new Master-automation oracle. The latter checks
+all1280 retained stereo frames against an independent Generator/two-Effect
+convolution, total latency96, initial muted/zero Master→unmute, aliases, mute
+interval and tail hold at music frame255. All three originals have source DSP0,
+state40 and actually joined guards; all three strict stages naturally exit0/reap,
+with max live owner1 and exact non-f32 Effect bases. Existing Master14/no-FX18
+compatibility cases passed. Root inspected the actual Whole Review at logical
+1440×900 and1080×680: support/limits, fixed-tail warning, consent and all action
+buttons are readable and unclipped. This uses the actual no-window Vulkan App
+renderer, not a native PrintWindow substitute. Strict all-feature/all-target
+Clippy, clean no-default all-target check and production all-feature dual-bin
+build actually exited0. No-default01 had passed with a new unused installer
+warning; the installer cfg was narrowed to test or the existing strict
+platform/feature caller, preserving identical effective all-feature code.
+No-default02 then passed without that warning. Every phase actually exited and
+its held processes were reaped, with no resource guard triggered. Root consumed
+the actual handback and a fresh empty heavy-process inventory at03:41:35Z, then
+returned resources to the other project. Cloud acceptance is still pending.
+
+Independent implementation review found no reachable P1/P2. A nonblocking
+diagnostic race remains: host deadline refusal followed by App cancellation can
+report writer `kind=Deadline` or `Cancelled`; App keeps the original deadline text
+and Failed terminal state, with unchanged abort/destination/Join semantics.
+Receipts, full original failure and later executions are retained under
+`target/backend-reliability-20261014/whole-serial-master-automation-source-candidate-01/`
+and `source125-master-integration-progress-01.json`. No ordinary GUI, soundcard or
+NI was operated; user test03 and its projects were not replaced.
 
 ### Serial Whole FX: static single-source path (2026-10-16)
 

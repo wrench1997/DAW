@@ -1,6 +1,8 @@
 # Windows x64 构建与发布
 
 当前源码候选：Citrus Studio 0.5.0-alpha.1；下文固定发布流程/示例继承自 0.4.0
+
+本轮源码给单源串行FX Whole加入Master Volume/Pan/Mute自动化，并仅为App串行路径在原文件发布CAS前复核当前源Ready；原writer/SDK入口、取消/超时/原guard收尾和打包白名单保持。新Master真实SDK exact已加入原10分钟Windows无GUI质量步骤，保留旧静态exact及原失败退出规则。本机定向App/边界/SDK、双尺寸Review实帧、严格all-feature/all-target Clippy、clean no-default及生产双bin均实际通过；新云质量/preview仍待完成。[当前资格记录](WINDOWS_MELODY_WORKFLOW.md#master-automation-and-source-checked-publication-2026-10-16)不由下面b9历史验收代替。没有替换用户03副本。
 当前源码写 **v14**（[Follow长度、Auto/Manual歌曲范围与编辑器联动](PLAYLIST_TRANSPORT.md)）。`b2e56dc`本机fmt/严格Clippy/no-default/匹配双bin、预览unit及8真实离屏用例通过，12定向输入和Saved13私有copy门已通过；云`f6678ae`quality38804721761与preview38804721840实际均SUCCESS（2481 root/14ignored，25新增全PASS，静态CRT release8m24s/ZIP/提取helper通过，session2真实PrintWindow PASS）。已交付独立测试03仍为v13，03/02不能读新14，请另存副本。03未替换；旧63d2f99云通过只属于此前联动里程碑，NOIRE实机完整流程仍未验收。
 
 2026-10-16 Effect后台`0c4872c`已取得实际新云终态：quality38813369205与preview38813369197均SUCCESS。Win/Linux各27项Effect及真实无GUI SDK4+生产helper1通过；根2481PASS/14ignored、严格Clippy/双bin/no-default及eligible session2真实PrintWindow通过。preview的368Python=356PASS/12条件SKIP、27 Effect、同2481 root、静态CRT release8m18s、最终ZIP/PE/import/provenance及提取后helper通过，无上传；源码夹具/测试DLL不进入发布白名单。额外本机vendor全test-target Clippy实际101（75条既有glue lint）保留；新私有Insert capture开发不由该SHA验收。详[实现与验收边界](WINDOWS_MELODY_WORKFLOW.md#stereo-effect-helper-foundation-2026-10-16)。

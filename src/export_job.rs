@@ -7,7 +7,7 @@
 use std::{
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU8, AtomicU32, Ordering},
         mpsc::{self, Receiver},
     },
@@ -18,7 +18,7 @@ use std::{
     any(target_os = "linux", windows),
     feature = "experimental-fresh-helper"
 ))]
-use std::sync::{Mutex, Weak};
+use std::sync::Weak;
 #[cfg(all(
     test,
     any(target_os = "linux", windows),
@@ -36,6 +36,10 @@ const CANCELLED: u8 = 1;
 const COMMITTING: u8 = 2;
 const COMPLETE: u8 = 3;
 
+#[path = "export_source_commit.rs"]
+mod source_commit;
+pub(crate) use source_commit::SourceCommitOwner;
+
 #[derive(Debug, thiserror::Error)]
 #[error("WAV export cancelled; the destination was not changed")]
 pub struct ExportCancelled;
@@ -48,6 +52,8 @@ pub(crate) struct ExportDeadlineExceeded;
 struct ControlState {
     state: AtomicU8,
     progress: AtomicU32,
+    // None preserves all existing non-App and direct-renderer publication contracts.
+    source_commit: Mutex<Option<Arc<source_commit::SourceCommitFence>>>,
     #[cfg(all(
         any(target_os = "linux", windows),
         feature = "experimental-fresh-helper"
@@ -193,6 +199,9 @@ impl ExportControl {
             Ok(_) | Err(CANCELLED) => true,
             Err(_) => false,
         };
+        if accepted {
+            source_commit::wake(self);
+        }
         #[cfg(all(
             test,
             any(target_os = "linux", windows),
@@ -336,6 +345,16 @@ impl ExportControl {
     }
 
     pub(crate) fn begin_commit(&self) -> Result<(), ExportCancelled> {
+        // A source-checked owner must never fall back to the unbounded legacy CAS.
+        if self
+            .0
+            .source_commit
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+        {
+            return Err(ExportCancelled);
+        }
         self.checkpoint(9900)?;
         self.0
             .state
@@ -364,6 +383,10 @@ impl ExportControl {
     /// CAS wins, publication may finish even if the OS rename outlasts the
     /// deadline; reporting a deadline error after publication would be false.
     pub(crate) fn begin_commit_before(&self, deadline: Instant) -> anyhow::Result<()> {
+        source_commit::begin_or_defer(self, deadline)
+    }
+
+    fn begin_commit_before_unfenced(&self, deadline: Instant) -> anyhow::Result<()> {
         self.checkpoint(9900)?;
         self.check_deadline(deadline)?;
         self.0

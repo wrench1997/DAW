@@ -447,7 +447,7 @@ impl InstrumentBouncePlan {
             .iter()
             .filter(|lane| lane.lane.is_enabled() && !lane.lane.points().is_empty())
         {
-            if !master_song || serial_master || !master_song_automation_target(lane.lane.target()) {
+            if !master_song || !master_song_automation_target(lane.lane.target()) {
                 return Err(format!(
                     "Instrument bounce does not support active automation, including Tempo (lane {}: {})",
                     lane.id, lane.name
@@ -602,7 +602,7 @@ impl InstrumentBouncePlan {
     }
 }
 
-fn master_song_automation_target(target: &AutomationTarget) -> bool {
+pub(crate) fn master_song_automation_target(target: &AutomationTarget) -> bool {
     matches!(
         canonicalize_automation_target(target.clone()),
         AutomationTarget::MasterVolume

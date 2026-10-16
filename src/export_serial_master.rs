@@ -1,7 +1,10 @@
-//! The first nonlinear Whole path: one static post-fader route to Master.
+//! One static post-fader Whole path, with sample-exact Master controls.
 //! A slot endpoint remains a real stage even when all its slots are bypassed.
 use super::*;
 use crate::model::{MixerInsertSlotRef, PluginFormat};
+#[cfg(test)]
+#[path = "whole_serial_master_automation_test_support.rs"]
+pub(crate) mod automation_test_support;
 #[cfg(test)]
 #[path = "export_serial_master_tests.rs"]
 mod tests;
@@ -17,6 +20,7 @@ pub(crate) struct SerialMasterNode {
     pub pan_left: f32,
     pub pan_right: f32,
     pub audible: bool,
+    pub solo_audible: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -38,8 +42,10 @@ impl StaticSerialMasterPlan {
             project
                 .automation_lanes
                 .iter()
-                .all(|lane| !lane.lane.is_enabled() || lane.lane.points().is_empty()),
-            "Static serial Whole does not yet support active automation"
+                .all(|lane| !lane.lane.is_enabled()
+                    || lane.lane.points().is_empty()
+                    || crate::instrument_bounce::master_song_automation_target(lane.lane.target())),
+            "Serial Whole supports only Master Volume/Pan/Mute automation"
         );
         let graph = compile_mixer_graph(project)?;
         let mut channels = project.channels.iter().filter(|c| c.id == channel_id);
@@ -120,10 +126,10 @@ impl StaticSerialMasterPlan {
                 is_master || (0.0..=1.5).contains(&track.volume),
                 "Serial Whole track volume must match the realtime range 0..1.5"
             );
-            let gate = !track.muted
-                && (!any_solo
-                    || ancestors[usize::from(node.runtime_slot)]
-                    || descendants[usize::from(node.runtime_slot)]);
+            let solo_audible = !any_solo
+                || ancestors[usize::from(node.runtime_slot)]
+                || descendants[usize::from(node.runtime_slot)];
+            let gate = !track.muted && solo_audible;
             let (l, r) = pan_balance(track.pan);
             let mut placements: Vec<_> = project
                 .mixer_insert_slots
@@ -198,6 +204,7 @@ impl StaticSerialMasterPlan {
                 pan_left: l,
                 pan_right: r,
                 audible: gate,
+                solo_audible,
             });
             match next {
                 Some(next) => id = next,
@@ -229,12 +236,14 @@ impl StaticSerialMasterPlan {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn publish(
         self,
         mut stereo: Vec<StereoFrame>,
         options: WavExportOptions,
         path: &Path,
         reported_tail: u32,
+        mut master_controls: OfflineMasterControls,
         control: &ExportControl,
         deadline: Instant,
     ) -> Result<WavExportReport> {
@@ -250,29 +259,47 @@ impl StaticSerialMasterPlan {
             .filter(|n| n.is_master)
             .context("Serial Whole Master stage is absent")?;
         let mut peak = 0.0_f32;
+        let audible = if master_controls.drives_mute() {
+            master.solo_audible
+        } else {
+            master.audible
+        };
+        let volume = if master_controls.drives_volume() {
+            1.0
+        } else {
+            master.volume
+        };
+        let (left_pan, right_pan) = if master_controls.drives_pan() {
+            (1.0, 1.0)
+        } else {
+            (master.pan_left, master.pan_right)
+        };
         for (block, samples) in stereo.chunks_mut(PROGRESS_FRAME_INTERVAL).enumerate() {
             control.check_deadline(deadline)?;
+            let start = block
+                .checked_mul(PROGRESS_FRAME_INTERVAL)
+                .context("Serial Whole master block offset overflow")?;
             control.work_progress(
                 block * PROGRESS_FRAME_INTERVAL,
                 music_frames + tail_frames,
                 6_000,
                 7_000,
             )?;
-            for sample in samples {
+            for sample in samples.iter_mut() {
                 ensure!(
                     sample.left.is_finite() && sample.right.is_finite(),
                     "Serial Whole contains non-finite PCM"
                 );
-                let left = if master.audible {
-                    sample.left * master.volume * master.pan_left
-                } else {
-                    0.0
-                };
-                let right = if master.audible {
-                    sample.right * master.volume * master.pan_right
-                } else {
-                    0.0
-                };
+                sample.left = if audible { sample.left * volume } else { 0.0 };
+                sample.right = if audible { sample.right * volume } else { 0.0 };
+            }
+            // Coordinates are retained output j, after the one total-latency
+            // crop. Preserve sample*volume*pan even when only volume is driven:
+            // undriven static volume precedes the kernel, static pan follows it.
+            master_controls.apply_block(u64::try_from(start)?, samples)?;
+            for sample in samples {
+                let left = sample.left * left_pan;
+                let right = sample.right * right_pan;
                 ensure!(
                     left.is_finite() && right.is_finite(),
                     "Serial Whole controls overflow"
@@ -281,6 +308,7 @@ impl StaticSerialMasterPlan {
                 sample.right = right.tanh();
                 peak = peak.max(sample.left.abs()).max(sample.right.abs());
             }
+            control.check_deadline(deadline)?;
         }
         let gain = options.gain_for_peak(peak)?;
         write_stereo_wav_core(

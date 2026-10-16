@@ -91,6 +91,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --all-features --jobs 1 --bin citrus-studio plugins::plugin_runtime::whole_serial_sdk_tests::actual_sdk_serial_generator_two_effects_preserves_raw_latency_tail_and_natural_reap -- --ignored --exact --nocapture --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --all-features --jobs 1 --bin citrus-studio plugins::plugin_runtime::whole_serial_sdk_tests::actual_sdk_serial_generator_two_effects_master_automation_uses_retained_project_frames -- --ignored --exact --nocapture --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # Python is supplied by the hosted Windows runner and used only for QA.
       - name: Record smoke harness interpreter

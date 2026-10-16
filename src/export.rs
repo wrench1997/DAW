@@ -31,7 +31,7 @@ const PROGRESS_FRAME_INTERVAL: usize = 4096;
 mod master_controls;
 #[path = "export_serial_master.rs"]
 pub(crate) mod serial_master;
-use master_controls::OfflineMasterControls;
+pub(crate) use master_controls::OfflineMasterControls;
 #[cfg(test)]
 #[path = "export_channel_controls_tests.rs"]
 mod channel_controls_tests;

@@ -218,6 +218,10 @@ fn run_serial_owned<G: RenderBackend, E: EffectRenderBackend>(
                 "Serial Whole frozen project differs from the captured source",
             ));
         }
+        let tempo_map = crate::tempo_map::TempoMap::from_project(&project, prepared.sample_rate)
+            .map_err(|e| invalid(&e.to_string()))?;
+        let master_controls = crate::export::OfflineMasterControls::prepare(&project, &tempo_map)
+            .map_err(|e| invalid(&e.to_string()))?;
         let mix = StaticSerialMasterPlan::prepare(&project, capture.plan().channel_id())
             .map_err(|e| invalid(&e.to_string()))?;
         let endpoints: Vec<_> = mix
@@ -409,6 +413,7 @@ fn run_serial_owned<G: RenderBackend, E: EffectRenderBackend>(
                 options,
                 &path,
                 reported_tail,
+                master_controls,
                 &control.export,
                 control.deadline,
             )

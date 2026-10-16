@@ -1415,16 +1415,19 @@ class PreviewBuildContractTests(unittest.TestCase):
         workflow = (Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         windows = workflow.split("\n  linux-helper-readiness:", 1)[0]
         sdk = windows.split("      - name: Verify real no-GUI stereo Effect", 1)[1].split("\n      - name:", 1)[0]
-        command = (
-            "cargo test --locked --all-features --jobs 1 --bin citrus-studio "
-            "plugins::plugin_runtime::whole_serial_sdk_tests::"
-            "actual_sdk_serial_generator_two_effects_preserves_raw_latency_tail_and_natural_reap "
-            "-- --ignored --exact --nocapture --test-threads=1"
-        )
         self.assertIn("timeout-minutes: 10", sdk)
         self.assertIn("$env:CITRUS_EFFECT_FIXTURE = (Resolve-Path tests/fixtures/vst3-effect/target/bundles/CitrusStereoDelayFixture.vst3).Path", sdk)
         self.assertIn("$env:CITRUS_EFFECT_HELPER = (Resolve-Path target/debug/vst3-host-helper.exe).Path", sdk)
-        self.assertIn(command + "\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", sdk)
+        for target in (
+            "actual_sdk_serial_generator_two_effects_preserves_raw_latency_tail_and_natural_reap",
+            "actual_sdk_serial_generator_two_effects_master_automation_uses_retained_project_frames",
+        ):
+            command = (
+                "cargo test --locked --all-features --jobs 1 --bin citrus-studio "
+                f"plugins::plugin_runtime::whole_serial_sdk_tests::{target} "
+                "-- --ignored --exact --nocapture --test-threads=1"
+            )
+            self.assertIn(command + "\n          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }", sdk)
         self.assertNotIn("continue-on-error", sdk)
 
 

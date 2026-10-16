@@ -23,6 +23,7 @@ struct Shared {
     prepare_resume: Condvar,
     reset: ProcessingGate,
     process: ProcessingGate,
+    metadata: ProcessingGate,
     fail_process_after_gate: AtomicBool,
     loaded_identity: Option<LoadedVst3Identity>,
 }
@@ -33,6 +34,7 @@ struct Shared {
 #[derive(Default)]
 struct ProcessingGate {
     entries: AtomicU64,
+    waiting: AtomicBool,
     paused: Mutex<bool>,
     resume: Condvar,
 }
@@ -40,10 +42,12 @@ impl ProcessingGate {
     fn enter(&self) -> Result<(), String> {
         self.entries.fetch_add(1, Ordering::AcqRel);
         let paused = self.paused.lock().unwrap();
+        self.waiting.store(*paused, Ordering::Release);
         let (paused, timeout) = self
             .resume
             .wait_timeout_while(paused, CAPTURE_GATE_BUDGET, |paused| *paused)
             .unwrap();
+        self.waiting.store(false, Ordering::Release);
         if timeout.timed_out() && *paused {
             return Err("Capture fixture processing gate exceeded its bounded test budget".into());
         }
@@ -129,6 +133,7 @@ impl TestCaptureSource {
             prepare_resume: Condvar::new(),
             reset: ProcessingGate::default(),
             process: ProcessingGate::default(),
+            metadata: ProcessingGate::default(),
             fail_process_after_gate: AtomicBool::new(false),
             loaded_identity,
         });
@@ -218,9 +223,32 @@ impl TestCaptureSource {
             .store(true, Ordering::Release);
     }
 
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn pause_metadata(&self) {
+        self.shared.metadata.pause();
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn metadata_waiting(&self) -> bool {
+        self.shared.metadata.waiting.load(Ordering::Acquire)
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn release_metadata(&self) {
+        self.shared.metadata.release();
+    }
+
     pub(crate) fn release_gates(&self) {
         self.release_reset();
         self.release_process();
+        self.shared.metadata.release();
         self.release_prepare();
         *self
             .shared
@@ -437,6 +465,7 @@ impl PluginBackend for CaptureBackend {
     }
 
     fn processing_metadata(&self) -> Result<(u32, u32), String> {
+        self.shared.metadata.enter()?;
         let state = self.shared.state.lock().unwrap();
         Ok((state.metadata.latency_samples, state.metadata.tail_samples))
     }

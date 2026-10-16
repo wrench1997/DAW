@@ -24,6 +24,9 @@ struct CaptureProbe {
     revision: AtomicU64,
     parameter_bits: AtomicU64,
     latency: AtomicU32,
+    metadata_held: AtomicBool,
+    metadata_entered: AtomicBool,
+    metadata_release: AtomicBool,
     failure: AtomicU32,
     drift_target: Mutex<Option<Arc<CaptureProbe>>>,
     captures: AtomicU64,
@@ -51,6 +54,9 @@ impl CaptureProbe {
                 (0.123_456_789_012_345 + f64::from(marker) / 100.0).to_bits(),
             ),
             latency: AtomicU32::new(0),
+            metadata_held: AtomicBool::new(false),
+            metadata_entered: AtomicBool::new(false),
+            metadata_release: AtomicBool::new(false),
             failure: AtomicU32::new(0),
             drift_target: Mutex::new(None),
             captures: AtomicU64::new(0),
@@ -189,7 +195,34 @@ impl EffectCaptureHandle {
     pub(crate) fn release_all(&self) {
         for probe in &self.probes {
             probe.release.store(true, Ordering::Release);
+            probe.metadata_release.store(true, Ordering::Release);
         }
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn hold_next_metadata(&self, slot: usize) {
+        let probe = &self.probes[slot];
+        probe.metadata_entered.store(false, Ordering::Release);
+        probe.metadata_release.store(false, Ordering::Release);
+        probe.metadata_held.store(true, Ordering::Release);
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn metadata_entered(&self, slot: usize) -> bool {
+        self.probes[slot].metadata_entered.load(Ordering::Acquire)
+    }
+    #[cfg(all(
+        any(target_os = "linux", windows),
+        feature = "experimental-fresh-helper"
+    ))]
+    pub(crate) fn release_metadata(&self, slot: usize) {
+        self.probes[slot]
+            .metadata_release
+            .store(true, Ordering::Release);
     }
     pub(crate) fn capture_count(&self, slot: usize) -> u64 {
         self.probes[slot].captures.load(Ordering::Acquire)
@@ -289,6 +322,17 @@ impl PluginBackend for CaptureBackend {
         Ok(())
     }
     fn latency_samples(&self) -> u32 {
+        if self.0.metadata_held.swap(false, Ordering::AcqRel) {
+            self.0.metadata_entered.store(true, Ordering::Release);
+            let deadline = Instant::now() + WAIT;
+            while !self.0.metadata_release.load(Ordering::Acquire) {
+                assert!(
+                    Instant::now() < deadline,
+                    "fixture metadata call was never released"
+                );
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
         self.0.latency.load(Ordering::Acquire)
     }
     fn tail_samples(&self) -> u32 {
