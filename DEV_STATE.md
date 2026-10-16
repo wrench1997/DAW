@@ -7,7 +7,9 @@
 
 默认生产Whole工厂的独立联合回归已本机首次通过：真实catalog/default加载→callback播放/停止→磁盘保存→原App销毁/3worker Join→新App磁盘Open/3ACK/opaque.625→默认工厂导出，完整96768帧独立PCM一致。新genuine exact8.69s通过，旧audit exact8.47s通过；strict Clippy/no-default/fmt均0。genuine逐tick确认两starter未覆盖，实际typed Complete/termination ACK/admission drained；严格子进程3次自然reap/max1/1005直接观测仍归旧audit，不混为新路径独立观测。原10分钟CI步骤新增显式exact及失败退出。6050d36首云quality38872515281/preview38872515243实际FAIL：旧clip等待和identity观察失败、旧catalog退出检查失败；新SDK/Clippy/PrintWindow和release/ZIP未到达。Linux fixture8/9+host2等独立通过，原日志保留；用户03/NI/声卡不动。
 
-四文件窄修本机已通过276项定向（identity3/catalog5/observer258/clip10）及strict Clippy/no-default/fmt，独立6050源码候选不含正在开发的Generator自动化。身份测试显式按控制线程收集，默认全局observer不变；扫描精确保留原拒绝，实际强杀仍为UncleanRetirement，成功metadata健康门不变。受控child146748实际EOF原始行、强杀/reap/exit1均已消费；clip只补原5s阶段诊断，根因仍未证明。新修补云验收待跑。
+代码`820cddb098969b35c98a5d976220feff340e160d`现已首轮实际双SUCCESS：quality38880415806、preview38880415815。2553 root/19ignored、strict Clippy/no-default/双bin与显式App SDK5通过；新默认工厂exact12.64s及旧audit12.32s均完整96768帧一致。真实Default/session2 PrintWindow PASS；preview372Python=360PASS/12条件SKIP、staticCRT release8m25s、精确ZIP/PE/import/provenance及提取helper通过，upload=false→仅上传SKIPPED。四文件窄修的276本机回归和全部收尾已通过；原6050失败仍保留，clip原5s只增加阶段诊断，重过不证明旧超时根因。默认工厂与审计的独立观测、实际EOF阶段证据不混用。
+
+后续Generator Q128自动化仍为独立未验收源码，不包含在820cddb中；用户03/NI/声卡继续不操作。
 
 后台联合测试已由代码`bdf6901418f89fe5d0f4ac763a498c432156dacb`实际云验收：普通catalog/default加载→无设备callback实际发声/停止→磁盘ManualSave→原App/3worker Join→新App磁盘Open/3ACK/实际opaque.625→Whole完整96768帧独立PCM。quality38863519248与preview38863519233均首轮SUCCESS：2552 root/18ignored、fixture8/9、builder11、显式App SDK4及strict门通过；新联合SDK云12.64s通过，96帧单次crop/768固定尾音/3strict自然reap/Effect实际Offline保持。Windows真实session2 PrintWindow PASS，非SKIP；preview372Python=360PASS/12条件SKIP、staticCRT release7m53s/ZIP/提取helper通过，upload=false。
 

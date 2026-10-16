@@ -341,8 +341,37 @@ post-EOF block. Missing that raw line in another run leaves its stage unknown;
 test success alone does not prove it. All eight phases, including strict
 all-feature/all-target Clippy/no-default/fmt, exited0 and were actually reaped;
 no resource guard fired. Clip re-passing does not establish its old timeout cause.
-The new repair still requires exact cloud qualification. Local full raw/terminal
-evidence is under `source130-narrow-cloud-repair-candidate-01/` in the same parent.
+**Cloud acceptance passed for `820cddb098969b35c98a5d976220feff340e160d`.**
+[Quality38880415806](https://github.com/wrench1997/DAW/actions/runs/38880415806)
+completed SUCCESS on attempt1, updated2026-10-16T09:48:13Z. Windows
+job116905531847 passed2553 root cases/19 ignored (App2488 in540.36s +52+6+5+2),
+including all three previously failed selectors and the new controlled foreign
+worker case. Strict Clippy/bins/no-default, fixture8/9/builder11/helper2 and all
+five explicit App SDK targets passed. Genuine default Whole passed in12.64s,
+audit in12.32s: both checked the full96,768 stereo frames, actual cold opaque
+acceptance/generic ACKs and original/cold source joins. The genuine marker reports
+the default production factory and typed Complete after ACK/admission drain, not
+an independent strict-child audit. The retained audit still directly verifies
+strict3 natural0/reap/max1 and both Effect Offline1005 probes. Windows had usable
+visible Default/session2/WTSActive; actual PrintWindow before/after/repaint,
+native interaction/state/lifecycle and Shutdown/EOF/crash cleanup all passed,
+not environment SKIPPED. Linux job116905532142 passed async15/Effect29/Unix1,
+fixture8/9/builder11 and both real helper targets.
+
+[Preview38880415815](https://github.com/wrench1997/DAW/actions/runs/38880415815),
+job116905528963, completed SUCCESS on attempt1, updated09:54:36Z. Python372
+in23.070s:360 passed/12 conditional skips (four Unix-only/eight private Saved13
+inputs unavailable). Root2553/19 ignored, strict Clippy/no-default passed.
+Static-CRT release took8m25s; exact ZIP/PE/import/provenance and extracted
+sanitized-PATH helper passed, including three JSON replies, invalid-command
+recovery, Shutdown with stdin open and actual natural0/reap. Upload=false made
+only artifact upload SKIPPED; no new user copy was installed. The old clip
+timeout cause remains unproved despite passing; this does not turn its bounded
+diagnostic into a production fix. Original6050 failures remain separate.
+
+Full raw cloud logs/API terminals are retained as `source131-*-actual-terminal-01.*`.
+Local full raw/terminal evidence is under
+`source130-narrow-cloud-repair-candidate-01/` in the same parent.
 
 Full local logs/terminals and both actual
 WAV/project copies are under
@@ -416,7 +445,7 @@ adds both feature units and 11 fixture-builder cases on Windows/Linux, and
 explicitly executes both joint ignored App exacts on Windows. It stages the actual
 Cargo JSON-reported test artifact and matching helper as private siblings;
 ordinary helper lookup is unchanged. Missing inputs and real test failures fail
-CI. See the [source-only fixture commands](https://github.com/wrench1997/DAW/blob/3b79f14250ef4900e7d50599d998003f00f91942/tests/fixtures/vst3-effect/README.md#disk-save-and-cold-app-open-with-the-default-instrument).
+CI. See the [source-only fixture commands](https://github.com/wrench1997/DAW/blob/820cddb098969b35c98a5d976220feff340e160d/tests/fixtures/vst3-effect/README.md#disk-save-and-cold-app-open-with-the-default-instrument).
 Local full logs, frozen source and actual terminals are under
 `target/backend-reliability-20261014/melody-save-cold-open-source-candidate-01/`;
 Root integration record is `source127-first-flow-direction-01.json` in its parent.

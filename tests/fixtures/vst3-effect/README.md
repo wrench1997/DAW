@@ -203,7 +203,13 @@ before this new SDK gate or release/ZIP. Linux independently passed
 fixture8/9/builder11/helper2. Original failures remain recorded. The isolated four-file repair passed276
 focused local tests and strict Clippy/no-default/fmt, retaining real failure and
 healthy-retirement rules. Clip timing has bounded diagnostics but no proved cause
-fix. Repair cloud acceptance is pending; unchanged local SDK PCM is reused. Evidence: `melody-genuine-whole-source-candidate-01/`
+fix. Repair code `820cddb098969b35c98a5d976220feff340e160d` passed
+quality38880415806/preview38880415815 on attempt1:2553 root/19 ignored,
+all five explicit Windows App SDK targets, genuine12.64s and audit12.32s each
+with complete96,768-frame PCM; strict gates and real eligible PrintWindow passed.
+Linux again passed fixture8/9/builder11/helper2. Preview passed372 Python/12
+conditional skips, static-CRT release8m25s/ZIP/extracted helper, upload=false.
+Local SDK PCM was reused; these are separate actual cloud executions. Evidence: `melody-genuine-whole-source-candidate-01/`
 under the workflow record's target directory.
 
 Previous audited acceptance: 8 default/9 feature fixture tests, both strict fixture Clippy
